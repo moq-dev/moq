@@ -31,8 +31,7 @@ pub struct Subscribe<'a> {
 	pub fill: Option<Fill>,
 	/// Whether the subscriber wants Track Properties on the response (draft-20).
 	pub properties_wanted: bool,
-	/// Whether Objects are forwarded (FORWARD). We only serve forwarding subscriptions,
-	/// so a subscriber that asks for none is refused.
+	/// Whether Objects are forwarded (FORWARD); a paused subscription forwards none until resumed.
 	pub forward: bool,
 	/// Whether RENDEZVOUS_TIMEOUT asks to wait for a missing publisher; never sent.
 	pub rendezvous: bool,
@@ -148,7 +147,7 @@ impl Message for Subscribe<'_> {
 				// A zero cap still distinguishes a requested wait from an immediate miss.
 				let rendezvous = rendezvous_timeout.is_some_and(|millis| millis > 0);
 
-				let subscriber_priority = subscriber_priority.unwrap_or(128);
+				let subscriber_priority = subscriber_priority.unwrap_or(super::priority::ABSENT_WIRE);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 				// An absent LOCATION_FILTER means the subscription is unfiltered.
 				let filter = filter.unwrap_or(Filter::Unfiltered);
@@ -434,6 +433,9 @@ pub struct SubscribeUpdate {
 	pub new_group: Option<u64>,
 	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
 	pub max_age: Option<u64>,
+	/// FILL_PARAMETERS (0x23, draft-20+): the backfill a paused PUBLISH subscription takes as
+	/// it resumes (draft-20 section 3.6.2).
+	pub fill: Option<Fill>,
 }
 
 impl Message for SubscribeUpdate {
@@ -448,7 +450,7 @@ impl Message for SubscribeUpdate {
 					.encode(w, version)?;
 				self.start_location.encode(w, version)?;
 				w.varint(self.end_group)?;
-				w.u8(self.subscriber_priority.unwrap_or(128));
+				w.u8(self.subscriber_priority.unwrap_or(super::priority::ABSENT_WIRE));
 				w.bool(self.forward.unwrap_or(true));
 				encode_params!(w, version,
 					0x03 => self.authorization_token.clone(),
@@ -484,6 +486,7 @@ impl Message for SubscribeUpdate {
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
+					0x23 => self.fill.filter(|_| Filter::is_draft20(version)),
 					0x32 => self.new_group,
 					super::max_age::PARAMETER => self.max_age,
 				);
@@ -519,6 +522,7 @@ impl Message for SubscribeUpdate {
 					authorization_token,
 					new_group: None,
 					max_age: super::max_age::validate(max_age)?,
+					fill: None,
 				})
 			}
 			Version::Draft15 | Version::Draft16 => {
@@ -545,6 +549,7 @@ impl Message for SubscribeUpdate {
 					authorization_token: super::token::single(authorization_token)?,
 					new_group,
 					max_age: super::max_age::validate(max_age)?,
+					fill: None,
 				})
 			}
 			_ => {
@@ -553,7 +558,7 @@ impl Message for SubscribeUpdate {
 				if matches!(version, Version::Draft17) {
 					let _required_request_id_delta = r.varint()?;
 				}
-				// Nothing reads an update's FILL_PARAMETERS or Range Filters yet; they are
+				// Nothing reads an update's Range Filters yet; they are
 				// consumed so a legal update does not fail the session.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
@@ -562,7 +567,7 @@ impl Message for SubscribeUpdate {
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter: Option<Filter>,
-					0x23 => _fill: Option<Fill> where Filter::is_draft20(version),
+					0x23 => fill: Option<Fill> where Filter::is_draft20(version),
 					0x25 => _subgroup_filter: Vec<Opaque> where has_range_filters(version),
 					0x26 => _object_id_filter: Vec<Opaque> where has_range_filters(version),
 					0x27 => _priority_filter: Vec<Opaque> where has_range_filters(version),
@@ -583,6 +588,7 @@ impl Message for SubscribeUpdate {
 					authorization_token: super::token::single(authorization_token)?,
 					new_group,
 					max_age: super::max_age::validate(max_age)?,
+					fill,
 				})
 			}
 		}
@@ -650,6 +656,7 @@ mod tests {
 					filter: None,
 					authorization_token: None,
 					new_group: None,
+					fill: None,
 				};
 				let decoded: SubscribeUpdate = decode_message(&encode_message(&update, version), version).unwrap();
 				assert_eq!(decoded.max_age, max_age, "{version}");
@@ -766,6 +773,7 @@ mod tests {
 				forward: None,
 				filter: None,
 				authorization_token: None,
+				fill: None,
 			};
 			let decoded: SubscribeUpdate = decode_message(&encode_message(&update, version), version).unwrap();
 			assert_eq!(decoded.new_group, expected, "{version}: REQUEST_UPDATE");
@@ -1144,6 +1152,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -1168,6 +1177,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -1281,6 +1291,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -1533,6 +1544,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -1560,6 +1572,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 		let v18_msg = SubscribeUpdate { ..v17_msg.clone() };
 
@@ -1675,8 +1688,7 @@ mod tests {
 		assert_eq!(encode_message(&msg, Version::Draft22), body);
 	}
 
-	/// FORWARD=0 is legal on every draft. It decodes so the request can be refused,
-	/// rather than closing the session.
+	/// FORWARD=0 is legal on every draft, a paused request rather than a session error.
 	#[test]
 	fn subscribe_decodes_forward_zero() {
 		for version in [

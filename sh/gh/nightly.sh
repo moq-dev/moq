@@ -58,6 +58,7 @@ case "$1" in
             --run-ignored only --success-output immediate
         run just rs bench-feed-fetch
         run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
+        run just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
         run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
             -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_reference_handoff_fanout)' \
@@ -92,7 +93,7 @@ case "$1" in
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux \
             --bench protect --bench codec --bench table --bench allocations --bench window \
-            --bench writer --bench play_buffer --bench jitter
+            --bench producer --bench play_buffer --bench jitter
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
@@ -102,10 +103,11 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track resume interests priority subscribe-drop refresh observed; do
+        for benchmark in broadcasts request-ids requests forward reader frames drift varint lite-varint track resume interests priority subscribe-drop subscribe-tracks refresh observed compression; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
+        javascript cmaf just js cmaf-bench
         javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench
         javascript e2ee just js e2ee-bench
@@ -114,6 +116,7 @@ case "$1" in
         javascript json-codec just js json-codec-bench
         javascript json-parse just js json-parse-bench
         javascript slow-group just js slow-group-bench
+        javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
         javascript clock just js clock-bench
         ;;

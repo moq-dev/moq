@@ -332,7 +332,7 @@ impl Kind {
 	}
 
 	/// The publisher priority for this kind of media.
-	fn priority(self) -> u8 {
+	fn priority(self) -> i8 {
 		match self {
 			Self::Video => hang::catalog::PRIORITY.video,
 			Self::Audio => hang::catalog::PRIORITY.audio,
@@ -613,12 +613,7 @@ fn encode(group: &mut moq_net::group::Producer, frames: &[Frame], info: Fragment
 	let timestamp = Timestamp::new(timestamp_ticks(earliest, info.timescale)?, info.timescale)?;
 
 	let bytes = encode_fragment(info, frames)?;
-	let mut writer = group.create_frame(moq_net::frame::Info {
-		size: bytes.len() as u64,
-		timestamp: Some(timestamp),
-	})?;
-	writer.write(bytes)?;
-	writer.finish()?;
+	group.write_frame(timestamp, bytes)?;
 
 	Ok(())
 }

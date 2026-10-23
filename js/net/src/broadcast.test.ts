@@ -1,7 +1,7 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { GroupTooLarge, NotFound, TimestampMismatch } from "./error.ts";
+import { GroupTooLarge, NotFound, ProtocolViolation, TimestampMismatch } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { TrackSequences } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -58,6 +58,48 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	expect((await pendingRequest(consumer))?.name).toBe("video");
 });
 
+test("a staged track resolves its subscribers at commit, with what was written", async () => {
+	const consumer = new TestConsumer();
+	const track = consumer.track("video");
+	const reader = track.subscribe().ordered();
+	const request = await pendingRequest(consumer);
+	if (!request) throw new Error("expected request");
+
+	const staged = request.stage({ timescale: Timescale.MILLI });
+	staged.producer.writeFrame(textFrame("hello"));
+	const pending = Symbol("pending");
+	expect(await Promise.race([track.info(), Promise.resolve(pending)])).toBe(pending);
+
+	staged.commit();
+	expect((await track.info()).timescale).toBe(Timescale.MILLI);
+	expect(await reader.readString()).toBe("hello");
+});
+
+test("disposing an uncommitted staged track rejects the request", async () => {
+	const consumer = new TestConsumer();
+	const info = consumer.track("video").info();
+	const request = await pendingRequest(consumer);
+	if (!request) throw new Error("expected request");
+
+	{
+		using staged = request.stage({ timescale: Timescale.MILLI });
+		staged.producer.writeFrame(textFrame("hello"));
+	}
+	await expect(info).rejects.toThrow();
+});
+
+test("a disposed staged track refuses a later commit", async () => {
+	const consumer = new TestConsumer();
+	const info = consumer.track("video").info();
+	const request = await pendingRequest(consumer);
+	if (!request) throw new Error("expected request");
+
+	const staged = request.stage({ timescale: Timescale.MILLI });
+	staged[Symbol.dispose]();
+	expect(() => staged.commit()).toThrow("staged track already committed or dropped");
+	await expect(info).rejects.toThrow("staged track dropped");
+});
+
 // A replacement continues the name's timeline, so its groups can't start before the highest one an
 // earlier producer checked, while a new broadcast starts over.
 test("a replacement producer refuses a rewind past its predecessor", () => {
@@ -79,6 +121,55 @@ test("a replacement producer refuses a rewind past its predecessor", () => {
 	second.close();
 	broadcast.close();
 	next.close();
+});
+
+// A replacement that closes before writing anything still ends past its predecessor's groups:
+// an end below them would contradict the ones subscribers already received.
+test("an empty replacement ends past its predecessor's groups", async () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	first.appendGroup().close();
+	first.close();
+
+	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	const subscriber = second.subscribe();
+	expect(() => second.finishAt({ group: 0, frame: 0 })).toThrow(ProtocolViolation);
+	expect(() => second.finishAt({ group: 0, frame: 1 })).toThrow(ProtocolViolation);
+	second.close();
+	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
+	broadcast.close();
+});
+
+test("a removed producer writes nothing once its replacement claims the name", async () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	first.appendGroup().close();
+	broadcast.removeTrack("media");
+
+	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	const subscriber = second.subscribe();
+	second.close();
+	expect(() => first.appendGroup()).toThrow("replaced");
+	expect(() => first.writeGroup(new GroupProducer(1))).toThrow("replaced");
+	expect(() => first.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow("replaced");
+	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
+	first.close();
+	broadcast.close();
+});
+
+test("a removed producer's abort ignores its replacement's groups", async () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	first.finishAt({ group: 2, frame: 0 });
+	broadcast.removeTrack("media");
+
+	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	for (let i = 0; i < 3; i++) second.appendGroup().close();
+	const abort = new Error("cut off");
+	first.close(abort);
+	expect(first.closed.peek()).toBe(abort);
+	second.close();
+	broadcast.close();
 });
 
 // A name keeps one sequence namespace across producer replacements. The application owns where a

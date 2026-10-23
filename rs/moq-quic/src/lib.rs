@@ -13,12 +13,10 @@
 //! managing a single connection and all the related state (such as streams).
 
 #![warn(missing_docs)]
-#![cfg_attr(test, allow(dead_code))]
-// Fixes welcome:
-#![warn(unreachable_pub)]
-#![allow(clippy::cognitive_complexity)]
-#![allow(clippy::too_many_arguments)]
-#![warn(clippy::use_self)]
+#![cfg_attr(
+    test,
+    allow(dead_code, reason = "test builds compile helpers only some tests call")
+)]
 
 use std::{
     fmt,
@@ -40,7 +38,10 @@ mod entropy;
 pub mod fuzz;
 mod range_set;
 #[cfg(all(test, any(feature = "rustls-aws-lc-rs", feature = "rustls-ring")))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests read the host clock directly"
+)]
 mod tests;
 pub mod transport_parameters;
 mod varint;
@@ -54,10 +55,10 @@ pub use bloom_token_log::BloomTokenLog;
 
 mod connection;
 pub use crate::connection::{
-    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Credit, CreditStats,
-    Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream,
-    RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
-    ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
+    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, CreditStats,
+    Datagrams, Event, FinishError, FrameStats, LeaseError, Leased, PathStats, ReadError,
+    ReadableError, RecvStream, RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions,
+    SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "mux")]
 pub use connection::mux;

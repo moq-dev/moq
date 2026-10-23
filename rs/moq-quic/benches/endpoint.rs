@@ -9,7 +9,10 @@ use bytes::{BufMut, BytesMut};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_quic::DatagramEvent;
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "a harness shared by several benches, each using only part of it"
+)]
 mod common;
 
 use common::{Pair, Setup, ThreadCpu};
@@ -58,6 +61,7 @@ fn route(connections: usize, cids: usize) -> (Pair, Vec<BytesMut>) {
     let pair = Pair::new(Setup {
         clients: connections,
         client_cid_len: if cids == 2 { 0 } else { 8 },
+        ..Default::default()
     });
     let issued = pair.server_cids.lock().unwrap().clone();
     assert_eq!(

@@ -145,7 +145,7 @@ class SmokeTest {
     /** A settings UI reads its defaults and menus from the library rather than repeating them. */
     @Test
     fun `client defaults and versions come from the library`() {
-        val defaults = clientDefaults()
+        val defaults = uniffi.moq.moqClientDefaults()
         assertNotNull(defaults.quic.maxStreams)
         assertNotNull(defaults.quic.idleTimeout)
         assertNotNull(defaults.timeout)
@@ -178,7 +178,7 @@ class SmokeTest {
             framerate = 60.0,
             optimizeForLatency = true,
         )
-        val snapshot: SnapshotConfig = SnapshotConfig(deltaRatio = 8u, compression = false)
+        val snapshot: SnapshotConfig = SnapshotConfig(deltas = true, compression = false)
         val stream: StreamConfig = StreamConfig(compression = false)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
         val backoff: Backoff = Backoff(
@@ -198,7 +198,7 @@ class SmokeTest {
         assertEquals(listOf("localhost"), server.tls.generate)
         val status: ConnectionStatus = ConnectionStatus.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
-        assertEquals(8u, snapshot.deltaRatio)
+        assertEquals(true, snapshot.deltas)
         assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
@@ -265,7 +265,7 @@ class SmokeTest {
             val fetched = broadcast.consume().fetchGroup(
                 "events",
                 0uL,
-                FetchGroupOptions(priority = 3u),
+                FetchGroupOptions(priority = 3),
             )
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
@@ -372,7 +372,7 @@ class SmokeTest {
 
             // Fetch while the track is still published: finishing the media producer
             // unpublishes it, and the fetch would then miss with NotFound.
-            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3u)))
+            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3)))
 
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()
@@ -429,7 +429,7 @@ class SmokeTest {
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 8u, compression = false)
+            val config = SnapshotConfig(deltas = true, compression = false)
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
             val producer = SnapshotProducer(broadcast, track, config)
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
@@ -445,7 +445,7 @@ class SmokeTest {
     @Test
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = SnapshotConfig(deltas = false, compression = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
@@ -461,7 +461,7 @@ class SmokeTest {
     @Test
     fun `cancelling a flow collection cancels its native handle`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = SnapshotConfig(deltas = false, compression = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             producer.update(Status(state = "live"))
@@ -482,7 +482,7 @@ class SmokeTest {
     @Test
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = SnapshotConfig(deltas = false, compression = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update("""{"state":"raw"}""")
 
@@ -501,7 +501,7 @@ class SmokeTest {
             assertEquals(64, fingerprints[0].length)
 
             server.createBroadcast("live").use { broadcast ->
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
                 broadcast.unannounce()
             }
         }
@@ -527,7 +527,7 @@ class SmokeTest {
                 val consumer = origin.consume()
                 assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
                 val announced = consumer.announced(AnnounceConfig())
                 val first = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("live", first.announce.prefix)
@@ -537,7 +537,7 @@ class SmokeTest {
                 assertEquals("live", retracted.announce.prefix)
                 assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
                 assertIs<AnnounceEventStart>(announced.nextRoute())
                 consumer.requestBroadcast("live")
             }
@@ -551,12 +551,12 @@ class SmokeTest {
             origin.createBroadcast("epoch").use { broadcast ->
                 val first = mintEpoch()
                 assertEquals(Instant.fromEpochMilliseconds(1_700_000_000_000), epochTime("018bcfe5-6800-7000-8000-000000000000"))
-                broadcast.announce(Route(epoch = first))
+                broadcast.announce(AnnounceRoute(epoch = first))
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals(first, start.announce.route.epoch)
 
                 val second = mintEpoch()
-                broadcast.announce(Route(epoch = second))
+                broadcast.announce(AnnounceRoute(epoch = second))
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
                 assertEquals(second, restart.announce.route.epoch)
 
@@ -570,7 +570,7 @@ class SmokeTest {
         OriginProducer(OriginConfig()).use { origin ->
             val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
             origin.createBroadcast("room/alice/chat").use { broadcast ->
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
                 val update = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("room/alice/chat", update.announce.prefix)
                 assertEquals(listOf("alice"), update.announce.captures)
@@ -697,7 +697,7 @@ class SmokeTest {
                     AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
                     AudioEncoderOutput(codec = AudioCodec.opus(), track = "mic"),
                 )
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
 
                 val consumer = origin.consume().requestBroadcast("audio-delay")
                 val catalog = CatalogConsumer.subscribe(consumer).next()!!
@@ -738,7 +738,7 @@ class SmokeTest {
                     VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
                     null,
                 )
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
 
                 // Seed the track so a subscriber joining below lands on encoded media.
                 val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }

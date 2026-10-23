@@ -5,8 +5,10 @@ use std::sync::Arc;
 /// Dependency errors are stored as messages so their crates stay out of this crate's public
 /// API. Several of them (reqwest above all) keep the useful detail in `source()`, which a
 /// plain `to_string()` would drop.
-// A build with no transport feature compiles no backend module, so nothing calls this.
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
+)]
 pub(crate) fn message(err: impl std::error::Error) -> String {
 	use std::fmt::Write;
 
@@ -21,7 +23,10 @@ pub(crate) fn message(err: impl std::error::Error) -> String {
 
 /// Generates `From` conversions into message-carrying variants of the enclosing module's `Error`,
 /// so `?` still works on a dependency's error without that dependency reaching our public API.
-#[allow(unused_macros)]
+#[allow(
+	unused_macros,
+	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
+)]
 macro_rules! from_message {
 	($($ty:ty => $variant:ident),* $(,)?) => {
 		$(
@@ -34,7 +39,10 @@ macro_rules! from_message {
 	};
 }
 
-#[allow(unused_imports)]
+#[allow(
+	unused_imports,
+	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
+)]
 pub(crate) use from_message;
 
 /// Whether an HTTP response status means "ask again later".
@@ -114,6 +122,11 @@ pub enum Error {
 	/// A QUIC stream limit is zero or past the 2^60 a peer accepts.
 	#[error("quic max_streams must be between 1 and 2^60")]
 	StreamsRange,
+
+	/// The QUIC connection receive window can't fit the largest message a session
+	/// assembles. The payload is the minimum, in bytes.
+	#[error("quic receive_window must be at least {0} bytes to fit the largest message")]
+	ReceiveWindowTooSmall(u64),
 
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
@@ -268,6 +281,7 @@ impl Error {
 			| Self::Deprecated(_)
 			| Self::IdleTimeoutRange
 			| Self::WindowRange(_)
+			| Self::ReceiveWindowTooSmall(_)
 			| Self::StreamsRange
 			| Self::QlogUnsupported
 			| Self::KeylogUnset

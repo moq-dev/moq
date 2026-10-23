@@ -4,8 +4,14 @@
 //!
 //! Specification: [<https://github.com/moq-dev/drafts>]
 
-// Private codec entry points remain testable when their session callers are absent.
-#![cfg_attr(not(feature = "async"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+	not(feature = "async"),
+	allow(
+		dead_code,
+		unused_imports,
+		reason = "private codec entry points remain testable when their session callers are absent"
+	)
+)]
 
 mod announce;
 mod auth;
@@ -20,6 +26,7 @@ pub(crate) mod ietf;
 mod info;
 pub mod message;
 mod parameters;
+pub(crate) mod priority;
 mod probe;
 #[cfg(feature = "async")]
 mod publisher;

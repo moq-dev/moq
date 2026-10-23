@@ -41,3 +41,34 @@ for (const current of [false, true]) {
 		}
 	});
 }
+
+test("runtime defaults resolve from each variant even when types come first", async () => {
+	const root = await mkdtemp(join(tmpdir(), "moq-bench-conditional-"));
+	try {
+		const entry = join(root, "entry.ts");
+		await writeFile(entry, 'export { variant } from "@moq/libav";');
+		for (const variant of ["base", "current"]) {
+			const checkout = join(root, variant);
+			const dir = join(checkout, "js/libav");
+			await mkdir(dir, { recursive: true });
+			await writeFile(
+				join(dir, "package.json"),
+				JSON.stringify({
+					name: "@moq/libav",
+					exports: { ".": { types: "./index.d.ts", default: "./runtime.js" } },
+				}),
+			);
+			await writeFile(join(dir, "index.d.ts"), "export declare const variant: string;");
+			await writeFile(join(dir, "runtime.js"), `export const variant = ${JSON.stringify(variant)};`);
+			const result = await Bun.build({
+				entrypoints: [entry],
+				outdir: join(root, "dist", variant),
+				plugins: [workspace(checkout)],
+			});
+			expect(result.success).toBe(true);
+			expect((await import(result.outputs[0].path)).variant).toBe(variant);
+		}
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});

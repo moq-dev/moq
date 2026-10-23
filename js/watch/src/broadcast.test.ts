@@ -102,7 +102,7 @@ describe("unsupported catalog", () => {
 			const track = published.createTrack(format === "hang" ? Catalog.TRACK : Catalog.TRACK_COMPRESSED);
 			const producer = new Json.Snapshot.Producer<Catalog.Root>({
 				track,
-				deltaRatio: 0,
+				deltas: false,
 				compression: format === "hangz" ? "deflate" : "none",
 			});
 			const enabled = new Signal(true);
@@ -144,7 +144,7 @@ it("keeps playing a finished catalog until the broadcast ends", async () => {
 	const published = publish(owner, name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
 		track: published.createTrack(Catalog.TRACK),
-		deltaRatio: 0,
+		deltas: false,
 	});
 	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
 	try {
@@ -175,7 +175,7 @@ it("reports a catalog that ends empty as offline", async () => {
 	const published = publish(owner, name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
 		track: published.createTrack(Catalog.TRACK),
-		deltaRatio: 0,
+		deltas: false,
 	});
 	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
 	try {
@@ -403,6 +403,37 @@ describe("relativeBroadcast", () => {
 			replacement.close();
 		} finally {
 			effect.close();
+			source.close();
+			old.close();
+			main.close();
+			owner.close();
+		}
+	});
+
+	it("drops a rendition from the catalog while its broadcast proves another epoch", async () => {
+		const owner = new Origin.Producer();
+		const main = publish(owner, Path.from("a/b"));
+		const [oldEpoch, newEpoch] = [Moq.Epoch.mint(), Moq.Epoch.mint()];
+		const old = owner.createBroadcast(Path.from("a/source"));
+		old.announce({ epoch: oldEpoch });
+		const named = { ...video("avc1.64001f", "./source"), epoch: oldEpoch } as Catalog.VideoConfig;
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("a/b"),
+			enabled: true,
+			catalogFormat: "manual",
+			catalog: { video: { renditions: { plain: video("avc1.64001f", "./source"), named } } } as Catalog.Root,
+		});
+		try {
+			await settle();
+			expect(videoRenditions(source)).toEqual(["named", "plain"]);
+
+			const replacement = owner.createBroadcast(Path.from("a/source"));
+			replacement.announce({ epoch: newEpoch });
+			await withoutWarnings(settle);
+			expect(videoRenditions(source)).toEqual(["plain"]);
+			replacement.close();
+		} finally {
 			source.close();
 			old.close();
 			main.close();

@@ -25,7 +25,10 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 
 // Both schedulers compile straight from source, so neither widens its crate's API for this.
 #[path = "../src/priority.rs"]
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 mod priority;
 
 // The queue names `crate::track::Order`, which is public.
@@ -36,7 +39,7 @@ mod track {
 // Keeps moq-quic's own formatting.
 #[rustfmt::skip]
 #[path = "../../moq-quic/src/connection/streams/schedule.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "the bench compiles the private module from source and uses only part of it")]
 mod schedule;
 
 use priority::{Priority, PriorityHandle, PriorityQueue};
@@ -49,7 +52,7 @@ const PACKET: usize = 1200;
 /// `cadence` ticks, numbered from `first` in steps of `step`.
 #[derive(Clone, Copy)]
 struct Track {
-	priority: u8,
+	priority: i8,
 	rate: usize,
 	cadence: u64,
 	first: u64,
@@ -57,7 +60,7 @@ struct Track {
 }
 
 impl Track {
-	const fn new(priority: u8, rate: usize, cadence: u64) -> Self {
+	const fn new(priority: i8, rate: usize, cadence: u64) -> Self {
 		Self {
 			priority,
 			rate,
@@ -349,7 +352,7 @@ impl Sim {
 	}
 
 	fn report(&self, workload: &str) {
-		let priorities: Vec<u8> = {
+		let priorities: Vec<i8> = {
 			let mut p: Vec<_> = self.tracks.iter().map(|t| t.priority).collect();
 			p.sort();
 			p.dedup();

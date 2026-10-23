@@ -692,7 +692,7 @@ mod tests {
 		let decoded = read(&list(limit), Version::Draft22, milli).unwrap();
 		assert_eq!(decoded.properties.heap(), limit as u64);
 		assert!(check_frame(&decoded.properties, milli).is_ok());
-		let latest = Timestamp::new((1 << 62) - 1, Timescale::MILLI).unwrap();
+		let latest = Timestamp::new((1 << 61) - 1, Timescale::MILLI).unwrap();
 		let written = write(
 			&decoded.properties,
 			Some(Version::Draft22),
@@ -884,10 +884,7 @@ mod compression_tests {
 			fields: None,
 			inflated: inflated(Some(crate::group::MAX_CACHE_BYTES + 1), true).unwrap(),
 		};
-		assert!(matches!(
-			group.create_frame_owned(header, &crate::frame::Budget::default()),
-			Err(Error::FrameTooLarge)
-		));
+		assert!(matches!(group.create_object(header), Err(Error::FrameTooLarge)));
 	}
 
 	fn property(id: u64, value: u64) -> Property {

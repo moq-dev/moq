@@ -17,12 +17,12 @@ recall pictures a subscriber has already displayed using the old value.
 
 Decided 2026-10-22 (maintainer): precision is settled; the hang draft rounds a
 fractional-millisecond `warmup` up
-([#5212](https://github.com/moq-dev/moq/pull/5212)). This quest amends the
-draft's `warmup` rule so a consumer running a parallel max-delay decoder MAY
-present min-delay pictures before the group start plus `warmup`, which keeps
-the merged dual decoder in `decode::Consumer`
-([#5842](https://github.com/moq-dev/moq/pull/5842)). Publication ordering for
-a later, longer sweep remains to settle.
+([#5212](https://github.com/moq-dev/moq/pull/5212)). The draft's `warmup` rule
+is amended so a consumer running a parallel max-delay decoder MAY present
+min-delay pictures before the group start plus `warmup`, which keeps the
+merged dual decoder in `decode::Consumer`
+([#5842](https://github.com/moq-dev/moq/pull/5842)), and the draft now says
+so. Publication ordering for a later, longer sweep remains to settle.
 
 Ask the maintainer to choose between an exact per-group boundary and a safe
 bound known and published before the affected content, including the latency

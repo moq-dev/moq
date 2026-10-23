@@ -209,6 +209,8 @@ export interface TrackSequence {
 	next: number;
 	/** Open producers writing through this namespace. */
 	holders: number;
+	/** The open producer the name's newest claim went to; a later claim supersedes it. */
+	owner?: Producer;
 	/**
 	 * The highest-sequence checked group start any producer of the name wrote, which bounds a
 	 * replacement's groups the way the eviction watermark bounds a track's own.
@@ -351,7 +353,7 @@ export interface ResumeSource {
 	latest(): number | undefined;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
 	start(): number | "pending" | undefined;
-	/** The serving copy's declared exclusive end. */
+	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Location | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
 	finished(): Promise<Location>;
@@ -400,9 +402,16 @@ export const hooks: {
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
 	 * any other second end. Readers then hold at a hole below it until the hole fills, folds
 	 * past the grace, or the track closes, since QUIC may deliver a lower group's stream after
-	 * a higher one. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
+	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
+	// pending: /quest/m1/public-model/deferred.md
+	/**
+	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
+	 * locally: a dead route, not finished content, so a resumed reader's replacement route
+	 * continues past it. Mirrors the Rust `close` on a `received()` copy; assigned by `track.ts`.
+	 */
+	releaseTrack: (producer: Producer) => void;
 	// private: capability gap
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Location | undefined>;
@@ -424,9 +433,6 @@ export const hooks: {
 	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
-	// pending: /quest/m1/public-model/ingest.md
-	/** Access the existing producer while a request awaits immutable wire metadata. */
-	pendingTrackProducer: (request: Request) => Producer;
 	/** Have a producer write through a broadcast's sequence namespace for its name. */
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
@@ -453,12 +459,6 @@ export const hooks: {
 	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
-	// pending: /quest/m1/public-model/ingest.md
-	/**
-	 * Record sequences `[start, end)` an upstream publisher explicitly gave up with `error`,
-	 * ending the groups still arriving in them with it.
-	 */
-	dropTrackGroups: (producer: Producer, start: number, end: number, error: Error) => void;
 	// pending: /quest/m1/public-model/serve.md
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
@@ -478,6 +478,11 @@ export const hooks: {
 	tryRecvDatagram: (subscriber: Subscriber) => RecvDatagram;
 	/** Whether a buffered group in `[start, end)` that `delivered` lacks still waits to be read. */
 	hasUnreadGroup: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
+	/**
+	 * Whether a subscriber's track ended and it holds nothing left to read: no datagram within its
+	 * cursor, and no group in `[start, end)` that `delivered` lacks.
+	 */
+	spent: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
@@ -553,6 +558,8 @@ export const hooks: {
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Return when a group joined its track at this hop, on the installed clock. */
 	groupArrived: (group: GroupConsumer) => Instant;
+	/** Whether a group counts as content: its first frame landed, or it ended. */
+	groupStarted: (group: GroupConsumer) => boolean;
 	/** Record when a track's mirror of a group joined that track at this hop. */
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
@@ -580,8 +587,13 @@ export const hooks: {
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
+	/** Mark a broadcast handle served through a route claiming a shorter prefix: it lists nothing. */
+	stampUnlisted: (target: BroadcastConsumer) => void;
 } = {
 	endTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	releaseTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	producerLargest: () => {
@@ -597,9 +609,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {
-		throw new Error("track.ts not loaded");
-	},
-	pendingTrackProducer: () => {
 		throw new Error("track.ts not loaded");
 	},
 	bindSequence: () => {
@@ -626,9 +635,6 @@ export const hooks: {
 	groupProgress: () => {
 		throw new Error("group.ts not loaded");
 	},
-	dropTrackGroups: () => {
-		throw new Error("track.ts not loaded");
-	},
 	tryRecvGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -651,6 +657,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	hasUnreadGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	spent: () => {
 		throw new Error("track.ts not loaded");
 	},
 	staleAt: () => {
@@ -728,6 +737,9 @@ export const hooks: {
 	groupArrived: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupStarted: () => {
+		throw new Error("group.ts not loaded");
+	},
 	expireGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -753,6 +765,9 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 	stampEpoch: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	stampUnlisted: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 };
@@ -805,10 +820,16 @@ export function compareRoutes(a: Route, b: Route): number {
 	);
 }
 
-/** Order same-prefix routes by preference, hop count, and the origin's stable spread hash. */
-export function compareRouteCandidates(path: Path.Valid, a: Route, b: Route): number {
+/**
+ * Order routes at `prefix` resolving `path` by preference, hop count, and the stable spread
+ * hash. The hash only spreads a prefix's paths: at the prefix itself a tie is left for the
+ * newest to win, so a publisher that reconnects under a new hop takes over from its lingering
+ * session at once, matching `route_order` in rs/moq-net for routes a node did not get from a
+ * cluster peer, which is every route here.
+ */
+export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: Route, b: Route): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
-	if (order !== 0) return order;
+	if (order !== 0 || path === prefix) return order;
 	const ha = spreadHash(path, a.hops);
 	const hb = spreadHash(path, b.hops);
 	return ha < hb ? -1 : ha > hb ? 1 : 0;

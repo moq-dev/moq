@@ -17,6 +17,12 @@
 		"remark-preset-lint-recommended": "^7.0.1",
 		"remark-stringify": "^11.0.0"
 	},
+	"//overrides": "Drop these when upstream stops pinning vulnerable build dependencies.",
+	"overrides": {
+		"chokidar@3": "^4.0.3",
+		"postcss-selector-parser@6": "^7.1.7",
+		"vite@5": "^6.4.5"
+	},
 	"private": true,
 	"scripts": {
 		"check": "bun run --filter='*' check",
@@ -54,6 +60,7 @@
 		"test/interop/clients/js",
 		"test/interop/clients/js-native",
 		"test/drain",
+		"test/receive-credit",
 		"test/video",
 		"test/p2p",
 		"test/qmux",

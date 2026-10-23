@@ -7,9 +7,9 @@
 //! connection's timeout, and wakes stream waiters. The returned
 //! [`Connection`] implements [`web_transport_trait::poll`], so
 //! wrapping it with `crate::transport::Session::new` and
-//! [`moq_net::transport::Binding::InBand`] lets
-//! `moq_net::Client::connect_lite` / `Server::accept_lite` run real moq-lite
-//! sessions on the worker; everything is `Rc`-shared and `!Send` by design.
+//! [`moq_net::transport::Binding::InBand`], then `crate::transport::Local`, lets
+//! `moq_net::Client::connect` / `Server::accept` run real MoQ sessions on the
+//! worker; everything is `Rc`-shared and `!Send` by design.
 //!
 //! An [`Endpoint`] serves many connections on one socket, demuxed by
 //! connection id; [`client::connect`] and [`server::accept`] are its
@@ -30,7 +30,7 @@ pub mod web;
 
 mod driver;
 
-pub use driver::{Connection, Credit, RecvStream, SendGroup, SendOptions, SendStream};
+pub use driver::{Connection, Lease, RecvStream, SendGroup, SendOptions, SendStream};
 pub use endpoint::Endpoint;
 /// The flow-control limits a live connection can change; see [`Connection::set_limits`].
 pub use moq_quic::{Limits, LimitsError};
@@ -117,14 +117,17 @@ pub struct Transport {
 	/// may have open at once. MoQ opens a stream per group, so busy endpoints
 	/// want this high.
 	pub max_streams: u64,
-	/// How much unread data one peer may have in flight across every stream,
-	/// in bytes. `None` leaves the 16 MiB default.
+	/// How much unread data and incomplete messages one peer may have in flight
+	/// across every stream, in bytes. `None` leaves the 128 MiB default. A moq
+	/// session needs it to fit the largest message it assembles,
+	/// [`MIN_RECEIVE_WINDOW`](moq_net::transport::MIN_RECEIVE_WINDOW), or a
+	/// partial one can stall the connection.
 	pub receive_window: Option<u64>,
 	/// How much unread data one peer may have in flight on a single stream,
 	/// in bytes. `None` leaves the 4 MiB default.
 	///
-	/// Keep it under [`receive_window`](Self::receive_window) so one stream
-	/// cannot fill the connection.
+	/// Stream credit returns as bytes are read, whether or not their message is
+	/// complete, so this only paces one stream.
 	pub stream_receive_window: Option<u64>,
 	/// How much unacknowledged outgoing data to buffer, in bytes, whatever
 	/// the peer allows. `None` leaves the 16 MiB default.
@@ -217,6 +220,15 @@ pub enum Error {
 	/// The peer told us to stop sending with this code.
 	#[error("stream stopped: {0}")]
 	Stop(u64),
+	/// The connection window was stuck and this stream was discarded to free
+	/// it. See [`RecvStream::poll_lease`]. The peer hears of it once the
+	/// stream is stopped, so call `stop` with your own code: dropping the
+	/// stream sends code 0.
+	#[error("stream evicted")]
+	Evicted,
+	/// A lease wanted more than the connection receive window can hold.
+	#[error("want exceeds the receive window")]
+	TooLarge,
 	/// The TLS material a connection needs could not be loaded.
 	#[error("tls error: {0}")]
 	Tls(String),

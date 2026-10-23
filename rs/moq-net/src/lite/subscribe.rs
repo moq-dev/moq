@@ -21,7 +21,7 @@ pub struct Subscribe<'a> {
 	/// Lite07+ only.
 	pub epoch: Option<crate::Epoch>,
 	pub track: Cow<'a, str>,
-	pub priority: u8,
+	pub priority: i8,
 	pub max_delay: std::time::Duration,
 	/// The minimum group to deliver (a floor). On lite-06 the wire carries the raw
 	/// sequence and `None` is interchangeable with `Some(0)`: a floor of 0 constrains
@@ -53,12 +53,13 @@ impl Version {
 }
 
 impl Message for Subscribe<'_> {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
 		let epoch = super::epoch::decode_epoch(r, version)?;
 		let track = Cow::Owned(r.string()?);
-		let priority = r.u8()?;
+		let priority = super::priority::from_wire(r.u8()?);
 
 		let (order, max_delay, start_group, end_group) = match version {
 			Version::Lite01 | Version::Lite02 => (Order::Descending, std::time::Duration::ZERO, None, None),
@@ -94,7 +95,7 @@ impl Message for Subscribe<'_> {
 		self.broadcast.encode(w, version)?;
 		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
 		w.string(&self.track)?;
-		w.u8(self.priority);
+		w.u8(super::priority::to_wire(self.priority));
 
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
@@ -261,23 +262,24 @@ fn encode_frame_bounds(
 /// to [`super::TrackInfo`].
 #[derive(Clone, Debug)]
 pub struct SubscribeOk {
-	pub priority: u8,
+	pub priority: i8,
 	pub max_delay: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
 }
 
 impl Message for SubscribeOk {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 => {
-				w.u8(self.priority);
+				w.u8(super::priority::to_wire(self.priority));
 			}
 			Version::Lite02 => {}
 			// Lite05+ never sends SUBSCRIBE_OK, but keep the field layout matching
 			// Lite03/04 so a stray future use stays well-formed.
 			_ => {
-				w.u8(self.priority);
+				w.u8(super::priority::to_wire(self.priority));
 				pad_group_order(w, version)?;
 				w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 				w.varint_opt(self.start_group)?;
@@ -291,7 +293,7 @@ impl Message for SubscribeOk {
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 => Ok(Self {
-				priority: r.u8()?,
+				priority: super::priority::from_wire(r.u8()?),
 				max_delay: std::time::Duration::ZERO,
 				start_group: None,
 				end_group: None,
@@ -303,7 +305,7 @@ impl Message for SubscribeOk {
 				end_group: None,
 			}),
 			_ => {
-				let priority = r.u8()?;
+				let priority = super::priority::from_wire(r.u8()?);
 				skip_group_order(r, version)?;
 				let max_delay = std::time::Duration::from_millis(r.varint()?);
 				let start_group = r.varint_opt()?;
@@ -337,6 +339,7 @@ pub struct SubscribeStart {
 }
 
 impl Message for SubscribeStart {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
@@ -381,6 +384,7 @@ pub struct SubscribeEnd {
 }
 
 impl Message for SubscribeEnd {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
@@ -405,7 +409,7 @@ impl Message for SubscribeEnd {
 pub struct SubscribeUpdate {
 	/// A join requesting this group or later, judged against the local refresh ratio.
 	pub wanted_group: Option<u64>,
-	pub priority: u8,
+	pub priority: i8,
 	pub max_delay: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
@@ -418,6 +422,7 @@ pub struct SubscribeUpdate {
 }
 
 impl Message for SubscribeUpdate {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {
@@ -426,7 +431,7 @@ impl Message for SubscribeUpdate {
 			_ => {}
 		}
 
-		let priority = r.u8()?;
+		let priority = super::priority::from_wire(r.u8()?);
 		let order = decode_order(r, version)?;
 		let max_delay = std::time::Duration::from_millis(r.varint()?);
 		let start_group = decode_start_group(r, version)?;
@@ -463,7 +468,7 @@ impl Message for SubscribeUpdate {
 			_ => {}
 		}
 
-		w.u8(self.priority);
+		w.u8(super::priority::to_wire(self.priority));
 		encode_order(w, version, self.order)?;
 		w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 
@@ -534,6 +539,7 @@ impl SubscribeDrop {
 }
 
 impl Message for SubscribeDrop {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {

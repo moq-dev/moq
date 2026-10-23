@@ -46,7 +46,7 @@ pub mod web;
 pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
 
 impl ServerId {
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "only the QUIC backend reads it")]
 	pub(crate) fn len(&self) -> usize {
 		self.0.len()
 	}
@@ -110,16 +110,21 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 
 /// Default connection-wide receive window, used when [`Config::receive_window`] is unset.
 ///
-/// Bounds how much unread data one peer can make us buffer across all of its streams,
-/// which the backends otherwise leave unlimited. Sized so a relay-to-relay session, which
-/// shares one connection, can still sustain several Gbps at intercontinental RTTs.
-pub const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
+/// Bounds how much unread data and incomplete messages one peer can make us buffer across
+/// all of its streams, which the backends otherwise leave unlimited. On iroh, which returns
+/// credit as it reads, it bounds only the unread data. It has to be at least
+/// moq-net's `transport::MIN_RECEIVE_WINDOW`, the 64 MiB announcement
+/// cap plus framing, so 64 MiB would be refused; 128 MiB also holds two maximum-size frames
+/// at once, and lets a relay-to-relay session sustain several Gbps at intercontinental RTTs.
+pub const DEFAULT_RECEIVE_WINDOW: u64 = 128 << 20;
+#[cfg(feature = "_transport")]
+const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 
 /// Default per-stream receive window, used when [`Config::stream_receive_window`] is unset.
 ///
-/// A quarter of [`DEFAULT_RECEIVE_WINDOW`], so one slow group can't take the whole
-/// connection, and enough for a single group stream to reach a few hundred Mbps at a
-/// 100 ms RTT.
+/// Stream credit returns as bytes are read, whether or not their message is complete,
+/// so this only paces one stream: enough for a single group stream to reach a few
+/// hundred Mbps at a 100 ms RTT.
 pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 4 << 20;
 
 /// Default cap on unacknowledged outgoing data, used when [`Config::send_window`] is unset.
@@ -244,7 +249,11 @@ pub struct Config {
 	pub congestion_control: Option<CongestionControl>,
 
 	/// Connection-wide receive window, in bytes: how much data the peer may have
-	/// in flight across every stream at once. Defaults to 64 MiB.
+	/// in flight or in incomplete messages across every stream at once. Defaults to
+	/// 128 MiB, and must fit the largest message a session assembles, just over 64 MiB.
+	///
+	/// When incomplete messages fill it, the least urgent stream is cancelled. iroh
+	/// returns credit as it reads, so there it bounds only unread data.
 	///
 	/// Raise it when a fat, long path is idling below the link rate: the window
 	/// has to cover the bandwidth-delay product or the peer stalls waiting for
@@ -260,8 +269,9 @@ pub struct Config {
 
 	/// Per-stream receive window, in bytes. Defaults to 4 MiB.
 	///
-	/// Keep it below [`receive_window`](Self::receive_window) so one slow group
-	/// can't starve the rest of the connection.
+	/// Stream credit returns as bytes are read, whether or not their message is
+	/// complete, so a smaller window only adds round trips to a large frame. The
+	/// connection window bounds what incomplete messages hold.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-stream-receive-window",
@@ -572,10 +582,7 @@ impl Config {
 			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
 			_ => Ok(()),
 		}?;
-		// rustls logs nothing without a path, which would hide the mistake the same way.
-		if self.keylog == Some(true) && std::env::var_os("SSLKEYLOGFILE").is_none_or(|path| path.is_empty()) {
-			return Err(crate::Error::KeylogUnset);
-		}
+		validate_keylog(self.keylog, std::env::var_os("SSLKEYLOGFILE").as_deref())?;
 		validate_idle_timeout(Some(self.resolve().idle_timeout))?;
 		validate_streams(self.max_streams)?;
 		validate_windows(self)
@@ -615,6 +622,18 @@ impl Config {
 			keylog: self.keylog.unwrap_or(false),
 		}
 	}
+}
+
+/// Reject a key log with no file to write to, given the file `SSLKEYLOGFILE` names.
+///
+/// rustls logs nothing without a path, which would hide the mistake the way an
+/// ignored qlog directory would.
+#[cfg(feature = "_transport")]
+fn validate_keylog(keylog: Option<bool>, file: Option<&std::ffi::OsStr>) -> crate::Result<()> {
+	if keylog == Some(true) && file.is_none_or(std::ffi::OsStr::is_empty) {
+		return Err(crate::Error::KeylogUnset);
+	}
+	Ok(())
 }
 
 /// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
@@ -660,7 +679,8 @@ fn validate_streams(max_streams: Option<u64>) -> crate::Result<()> {
 /// Zero is rejected everywhere: a window of zero credits nothing, so it would wedge
 /// the connection rather than tighten it. The receive windows additionally have to
 /// fit a varint, since they are sent as transport parameters; the send window is
-/// local bookkeeping and only has to be non-zero.
+/// local bookkeeping and only has to be non-zero. The connection receive window has
+/// to fit the largest message, which holds its credit until it is complete.
 #[cfg(feature = "_transport")]
 fn validate_windows(quic: &Config) -> crate::Result<()> {
 	for (name, window, wire) in [
@@ -674,7 +694,12 @@ fn validate_windows(quic: &Config) -> crate::Result<()> {
 			_ => {}
 		}
 	}
-	Ok(())
+	match quic.receive_window {
+		Some(window) if window < moq_net::transport::MIN_RECEIVE_WINDOW => Err(crate::Error::ReceiveWindowTooSmall(
+			moq_net::transport::MIN_RECEIVE_WINDOW,
+		)),
+		_ => Ok(()),
+	}
 }
 
 /// Every knob at its default, which is what an untouched [`Config`] resolves to.
@@ -730,7 +755,10 @@ impl Resolved {
 	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
 	/// send rate steady enough for a live encoder to track, which is what this stack
 	/// carries.
-	#[cfg_attr(not(any(feature = "quic", feature = "iroh")), allow(dead_code))]
+	#[cfg_attr(
+		not(any(feature = "quic", feature = "iroh")),
+		allow(dead_code, reason = "only the QUIC backends use it")
+	)]
 	pub(crate) fn congestion(&self) -> CongestionControl {
 		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}
@@ -739,7 +767,7 @@ impl Resolved {
 	///
 	/// Only meaningful once [`Config::validate`] has passed; a build without the
 	/// `qlog` feature never gets here with a directory set.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
 	}
@@ -748,7 +776,7 @@ impl Resolved {
 	///
 	/// Only the iroh backend consults this, to reject a GSO-off request it can't
 	/// satisfy; the other backends toggle GSO directly.
-	#[cfg_attr(not(feature = "iroh"), allow(dead_code))]
+	#[cfg_attr(not(feature = "iroh"), allow(dead_code, reason = "only the `iroh` feature uses it"))]
 	pub(crate) fn gso_disabled(&self) -> bool {
 		self.gso == Some(false)
 	}
@@ -947,19 +975,18 @@ mod tests {
 	#[cfg(feature = "_transport")]
 	#[test]
 	fn keylog_requires_a_path() {
-		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
-		assert!(Config::default().validate().is_ok());
-
-		let set = Config {
-			keylog: Some(true),
-			..Default::default()
-		};
-		assert!(matches!(set.validate(), Err(crate::Error::KeylogUnset)));
-
-		// SAFETY: as above.
-		unsafe { std::env::set_var("SSLKEYLOGFILE", "/tmp/keys.log") };
-		assert!(set.validate().is_ok());
+		let file = Some(std::ffi::OsStr::new("/tmp/keys.log"));
+		let empty = Some(std::ffi::OsStr::new(""));
+		for keylog in [None, Some(false)] {
+			assert!(validate_keylog(keylog, None).is_ok());
+		}
+		for unset in [None, empty] {
+			assert!(matches!(
+				validate_keylog(Some(true), unset),
+				Err(crate::Error::KeylogUnset)
+			));
+		}
+		assert!(validate_keylog(Some(true), file).is_ok());
 	}
 
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the
@@ -1037,6 +1064,23 @@ mod tests {
 			let err = config.validate().expect_err("a zero window must be refused");
 			assert!(matches!(err, crate::Error::WindowRange(knob) if knob == name), "{err}");
 		}
+	}
+
+	/// Incomplete messages hold connection credit, so a connection window that can't fit
+	/// the largest one could stall it forever, so `[quic]` refuses it.
+	#[cfg(feature = "_transport")]
+	#[test]
+	fn the_receive_window_fits_the_largest_message() {
+		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
+		let config = |window| Config {
+			receive_window: Some(window),
+			..Default::default()
+		};
+		assert!(matches!(
+			config(min - 1).validate(),
+			Err(crate::Error::ReceiveWindowTooSmall(got)) if got == min
+		));
+		assert!(config(min).validate().is_ok());
 	}
 
 	/// The receive windows go on the wire as transport parameters, so they have to fit

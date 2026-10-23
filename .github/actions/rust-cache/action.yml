@@ -75,12 +75,37 @@ runs:
     # The namespace splits it per runner platform anyway, so a platform's
     # usage and misses can be read off its own prefix. The remote mode comes
     # from MBX_REMOTE_MODE above.
+    #
+    # Held at 1.25: under 1.26 the persistent runner's target directory ends
+    # up with zero-byte `.rmeta` files for fresh dependencies, which Cargo
+    # trusts and rustc rejects as `can't find crate`. Move past it only to a
+    # release that fixes that.
     - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+      id: mbx
       with:
         version: 1.25.0
         backend: ${{ runner.environment != 'self-hosted' && inputs.access-key-id != '' && inputs.secret-access-key != '' && 'remote' || 'local' }}
         remote-url: s3://mbx-moq-dev
         namespace: ${{ runner.os }}-${{ runner.arch }}
+
+    # A runner VM keeps managed targets and learned incremental state across
+    # jobs, and Cargo trusts whatever outputs it finds there. State another mbx
+    # version left is not trusted, since 1.26's was corrupt, so it goes before
+    # the first build on a new version. The shared store stays, so that build
+    # restores what it needs rather than compiling it.
+    - name: Drop another mbx version's private state
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      env:
+        VERSION: ${{ steps.mbx.outputs.mbx-version }}
+      run: |
+        : "${VERSION:?the mbx action reported no version}"
+        stamp="$HOME/.cache/moq-mbx-version"
+        if [ "$(cat "$stamp" 2>/dev/null)" != "$VERSION" ]; then
+          mbx clean --under "$RUNNER_WORKSPACE"
+          mkdir -p "${stamp%/*}"
+          printf '%s\n' "$VERSION" > "$stamp"
+        fi
 
     # The action only warns when it cannot reach the remote, which is how a
     # revoked or mistyped key would look. A cache that silently never hits

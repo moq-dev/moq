@@ -146,6 +146,8 @@ chrono = "0.4"
 # be driven with synthetic daemon events.
 flume = "0.12"
 moq-clock = { path = "../moq-clock", features = ["sim"] }
+# A bufferbloated path for the receive-credit tests and benchmark.
+moq-shaper = { path = "../moq-shaper" }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 # rustls without a provider, as iroh builds it, so the default test build covers an
 # `http://` dial's certificate fetch with no process default installed.
@@ -157,6 +159,8 @@ socket2 = { workspace = true, features = ["all"] }
 # A fake STUN server for the WebRTC server-reflexive candidate test.
 stun-types = { workspace = true }
 tempfile = "3"
+# Runs the key log tests with `SSLKEYLOGFILE` set, in a child process.
+test-env = { path = "../test-env" }
 # test-util adds tokio::time::pause/auto-advance for the time-dependent tests.
 tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls = { workspace = true }
@@ -176,3 +180,5 @@ required-features = ["net"]
 name = "integration"
 path = "tests/integration/main.rs"
 required-features = ["net"]
+[lints]
+workspace = true

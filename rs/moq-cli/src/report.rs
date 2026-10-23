@@ -1,5 +1,5 @@
-//! Media reports: the stats track `import --stats` names in its catalog, the feedback
-//! `export --echo` publishes where a catalog solicits it, and the `export stats` and
+//! Media reports: the track `import --report` names in its catalog's `stats` section, the feedback
+//! `export --echo` publishes where a catalog solicits it, and the `export report` and
 //! `export echo` sinks that print them.
 //!
 //! Each report is one snapshot track and its compressed `.z` sibling, written about once a
@@ -38,7 +38,7 @@ const MAX_REPORT: usize = 1024 * 1024;
 const DRAIN: Duration = Duration::from_secs(5);
 
 /// Below every media track, so a report never delays the media it describes.
-const PRIORITY: u8 = 0;
+const PRIORITY: i8 = i8::MIN;
 
 /// A snapshot track and its compressed `.z` sibling, written together. Either is `None` once a
 /// write failed and closed it.
@@ -52,13 +52,15 @@ impl<T: serde::Serialize> Pair<T> {
 	fn create(broadcast: &mut moq_net::broadcast::Producer, name: &str) -> anyhow::Result<Self> {
 		let info = moq_net::track::Info::default().with_priority(PRIORITY);
 		let plain = broadcast.create_track(name, info.clone())?;
-		let compressed = broadcast.create_track(format!("{name}{COMPRESSED}").as_str(), info)?;
+		// The compressed flavor keeps deltas, so a joiner asks for a fresh group once they outweigh
+		// eight snapshots.
+		let compressed = broadcast.create_track(format!("{name}{COMPRESSED}").as_str(), info.with_refresh(8))?;
 		let mut deflate = moq_json::snapshot::Config::default();
 		deflate.compression = moq_json::Compression::Deflate;
 		Ok(Self {
 			plain: Some(moq_json::snapshot::Producer::new(
 				plain,
-				moq_json::snapshot::Config::default().with_delta_ratio(0),
+				moq_json::snapshot::Config::default().with_deltas(false),
 			)),
 			compressed: Some(moq_json::snapshot::Producer::new(compressed, deflate)),
 		})
@@ -77,12 +79,19 @@ impl<T: serde::Serialize> Pair<T> {
 
 	/// Publish `value` on both tracks. A track that refuses a write would refuse every later one,
 	/// so it is closed with the cause, which its subscribers then read, and reported once.
+	///
+	/// Also restates the value in a fresh group when a joiner wants one. Reports are written every
+	/// interval, so checking here answers a joiner within one without a task of its own.
 	fn write(&mut self, value: &T) {
 		for slot in [&mut self.plain, &mut self.compressed] {
 			let Some(track) = slot else {
 				continue;
 			};
-			if let Err(err) = track.update(value) {
+			let refreshed = match track.poll_refresh(&moq_net::kio::Waiter::noop()) {
+				std::task::Poll::Ready(Err(err)) => Err(err),
+				_ => Ok(()),
+			};
+			if let Err(err) = refreshed.and_then(|()| track.update(value)) {
 				tracing::warn!(%err, "a report track failed; closing it");
 				if let Some(track) = slot.take() {
 					let _ = track.abort(moq_net::Error::Transport(err.to_string()));
@@ -406,9 +415,9 @@ async fn snapshot(
 	}
 }
 
-/// `export stats`: write the broadcast's stats snapshots to stdout as JSON lines, following the
+/// `export report`: write the broadcast's media reports to stdout as JSON lines, following the
 /// track its catalog's `stats` section names, until the catalog and that track have both ended.
-pub async fn print_stats(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
+pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
 	let mut stdout = tokio::io::stdout();
 	origin
 		.routed(&path)
@@ -594,7 +603,7 @@ async fn read_echo(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use tokio::io::{AsyncBufReadExt, BufReader};
@@ -612,6 +621,24 @@ mod tests {
 			.update(&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }))
 			.unwrap();
 		assert!(matches!(read.next().await, Err(moq_json::Error::TooLarge(MAX_REPORT))));
+	}
+
+	/// A joiner once the compressed track's deltas outweigh its refresh ratio gets the report
+	/// restated in a fresh group on the next write.
+	#[tokio::test]
+	async fn a_late_joiner_gets_a_fresh_report_group() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut pair = Pair::<serde_json::Value>::create(&mut broadcast, STATS_TRACK).unwrap();
+		let compressed = pair.compressed.clone().unwrap();
+		let _early = compressed.consume();
+		for n in 0..100 {
+			pair.write(&serde_json::json!({ "n": n }));
+		}
+
+		let mut late = compressed.consume();
+		assert_eq!(compressed.demand().wanted(), Some(1), "the join asks for a fresh group");
+		pair.write(&serde_json::json!({ "n": 100 }));
+		assert_eq!(late.largest().await.map(|position| position.group), Some(1));
 	}
 
 	/// A feedback track can outlive its route, so a reader left to drain stops after `DRAIN`.

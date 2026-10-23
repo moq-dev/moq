@@ -208,7 +208,11 @@ fn local_ufrag(data: &[u8]) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 	use std::time::Duration;

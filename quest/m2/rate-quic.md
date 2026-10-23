@@ -9,6 +9,14 @@ refused.
 
 ## Plan
 
+Token claims and HTTP grants carry path patterns only; object roles, including
+bitrate caps, are refused during parsing. The first transport-enforcement quest
+reintroduces optional caps with a type moq-auth owns (or a lower shared units
+crate), converted at the relay boundary so moq-auth never depends on moq-net.
+Its parsers and refusal rules must prevent any transport without enforcement
+from silently discarding a cap. This quest reuses only caps that admission
+actually enforces.
+
 Decided in the 2026-10-04 plan: enforce in the QUIC stack, through
 backpressure the peer cannot ignore, rather than metering and closing.
 
@@ -19,7 +27,7 @@ backpressure the peer cannot ignore, rather than metering and closing.
   flow-control limited (its congestion controller does not back off) and
   queues until [the grant](/quest/m2/rate-grant.md) clamps its encoder.
   Keep rate pacing separate from the connection memory allowance in
-  [message assembly](/quest/m1/quic/receive-memory.md). The memory allowance
+  message assembly (receive leases, [#5878](https://github.com/moq-dev/moq/pull/5878)). The memory allowance
   must fit the largest supported encoded unit even when it takes many rate
   intervals to receive. Limit each grant by both rate allowance and available
   memory backing; do not wait for a whole-message credit release to grant
@@ -68,8 +76,7 @@ backpressure the peer cannot ignore, rather than metering and closing.
   uncapped grant lifts it, matching the union's permissive meaning. Decided
   in the 2026-10-04 plan; `moq-auth` and `js/auth` carry no union helper
   until this quest needs one.
-- Lands in `moq-quic`. The relay drops its refusal for QUIC sessions in
-  the same PR.
+- Lands in `moq-quic`. QUIC admission accepts capped roles only once the stack enforces them.
 
 Tests, on a simulated clock: a peer sending flat out is held to the cap
 within the burst; a peer that ignores credit is closed with a flow-control
@@ -88,7 +95,3 @@ pacing alone does not trigger pressure cancellation.
 Decided in the 2026-10-10 receive-memory interview: memory allowance and
 rate pacing are independent bounds. This replaces the earlier assumption
 that a one-second rate window can also be the complete assembly allowance.
-
-## Required
-
-- [Bound message assembly](/quest/m1/quic/receive-memory.md) - separate retained memory from paced outstanding credit

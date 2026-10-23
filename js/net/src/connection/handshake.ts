@@ -1,6 +1,7 @@
 import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
+import * as Message from "../ietf/message.ts";
 import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
 import * as Extensions from "./extensions.ts";
 
@@ -82,8 +83,7 @@ async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, set
 	// Via Writer.open for its deadline: a peer can advertise a stream limit of zero and
 	// never raise it, which would otherwise hang the handshake rather than failing it.
 	const writer = await Writer.open(transport, { version });
-	await writer.u53(Ietf.Setup.id); // 0x2F00 stream type
-	await setupMsg.encode(writer, version);
+	await Message.write(writer, Ietf.Setup.id, setupMsg, version); // 0x2F00 stream type
 	return writer;
 }
 

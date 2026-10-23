@@ -66,7 +66,7 @@ moq.AnnounceEventStart = AnnounceEventStart
 moq.AnnounceEventUpdate = AnnounceEventUpdate
 moq.AnnounceEventEnd = AnnounceEventEnd
 moq.AnnounceEventRestart = AnnounceEventRestart
-moq.Route = lambda **kwargs: SimpleNamespace(**kwargs)
+moq.AnnounceRoute = lambda **kwargs: SimpleNamespace(**kwargs)
 moq.mint_epoch = lambda: str(uuid.uuid4())
 
 moq_json = ModuleType("moq.json")

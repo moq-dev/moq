@@ -373,6 +373,68 @@ fn lite_auth_unsupported_interop() {
 	assert!(reader.is_empty());
 }
 
+/// moq-lite-07 TRACKS across the Rust/JS boundary: the JS publisher answers a Rust TRACKS request
+/// with a listing Rust decodes, and JS decodes Rust's listing events and re-encodes them byte for
+/// byte.
+#[test]
+#[ignore = "requires Bun; run by just test interop"]
+fn lite_tracks_interop() {
+	use crate::coding::Decode;
+
+	let version = lite::Version::Lite07;
+	let request = lite::Tracks {
+		broadcast: crate::Path::new("room"),
+		epoch: None,
+	}
+	.encode_bytes(version)
+	.unwrap();
+	let input = serde_json::json!({ "mode": "answer", "bytes": request.to_vec() });
+	let answer: Vec<u8> = serde_json::from_slice(&bun("tracks.ts", input)).expect("JS returned its listing");
+	let mut r = Decoder::new(&answer, version.into());
+	let mut events = Vec::new();
+	while !r.is_empty() {
+		events.push(match lite::TracksEvent::decode(&mut r, version).unwrap() {
+			lite::TracksEvent::Added { name, info } => {
+				if name == "a" {
+					assert_eq!(info.timescale, Some(crate::Timescale::MILLI));
+					assert_eq!(info.max_age, Some(std::time::Duration::from_secs(3)));
+					assert_eq!(info.priority, 9);
+					assert_eq!(info.refresh, Some(4));
+				}
+				format!("+{name}")
+			}
+			lite::TracksEvent::Removed { name } => format!("-{name}"),
+			lite::TracksEvent::Finished { name } => format!("~{name}"),
+			lite::TracksEvent::Synced => "synced".to_string(),
+		});
+	}
+	// The broadcast's end is the JS publisher's FIN, after the last event.
+	assert_eq!(events, ["+a", "+b", "synced", "-a"]);
+
+	let info = lite::TrackInfo {
+		refresh: Some(4),
+		priority: 3,
+		max_age: Some(std::time::Duration::from_secs(2)),
+		timescale: Some(crate::Timescale::MICRO),
+		compress: true,
+	};
+	let mut bytes = Vec::new();
+	let mut w = Encoder::new(&mut bytes, version.into());
+	for event in [
+		lite::TracksEvent::Added {
+			name: "video".into(),
+			info,
+		},
+		lite::TracksEvent::Removed { name: "video".into() },
+		lite::TracksEvent::Synced,
+	] {
+		event.encode(&mut w, version).unwrap();
+	}
+	let input = serde_json::json!({ "mode": "echo", "bytes": bytes });
+	let echo: Vec<u8> = serde_json::from_slice(&bun("tracks.ts", input)).expect("JS echoed the events");
+	assert_eq!(echo, bytes);
+}
+
 /// TRACK_STATUS on every draft: the JS publisher decodes what Rust encodes and answers with a
 /// TRACK_STATUS_OK the Rust subscriber reads, carrying what a SUBSCRIBE_OK would as far as the
 /// draft has room, or refuses a missing broadcast DOES_NOT_EXIST.
@@ -442,8 +504,8 @@ fn ietf_track_status_interop() {
 					compress: false,
 					max_cache_duration: Some(std::time::Duration::from_millis(5000)),
 					timescale: Some(crate::Timescale::MILLI),
-					// The JS track's priority 2, lower-first on the wire.
-					priority: Some(u8::MAX - 2),
+					// The JS track's priority 2, lower-first on the wire as `127 - 2`.
+					priority: Some(125),
 					group_order: Some(ietf::GroupOrder::Descending),
 				},
 			};

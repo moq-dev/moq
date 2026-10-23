@@ -237,6 +237,7 @@ where
 		loop {
 			match Stream::poll_accept(&mut self.accept, self.shared.version, &mut cx) {
 				Poll::Ready(Ok(stream)) => {
+					let stream = stream.with_stats(self.shared.origin.stats());
 					self.children.push(Control {
 						shared: self.shared.clone(),
 						runtime: self.runtime.clone(),
@@ -291,9 +292,10 @@ struct Control<S: crate::transport::poll::Session> {
 	state: ControlState<S>,
 }
 
-// A state machine's enum is its storage: one transient instance per stream, so the
-// big variant is the working state, not padding held in bulk.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
+)]
 enum ControlState<S: crate::transport::poll::Session> {
 	/// Reading the stream's type.
 	Start {
@@ -843,9 +845,10 @@ struct AnnounceServe<S: crate::transport::poll::Session> {
 	state: AnnounceState,
 }
 
-// A state machine's enum is its storage: one transient instance per stream, so the
-// big variant is the working state, not padding held in bulk.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
+)]
 enum AnnounceState {
 	/// Reading the ANNOUNCE_REQUEST.
 	Decode,
@@ -954,6 +957,12 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
 		let origin = origin.excluding(Hop::new(exclude_hop).unwrap_or(Hop::UNKNOWN));
+		// Lite03 and later carry the hop path, so only routes with room for our hop
+		// under the origin's cap are advertised; Lite01/02 hide the depth entirely.
+		let origin = match self.shared.version {
+			Version::Lite01 | Version::Lite02 => origin,
+			_ => origin.forwardable(),
+		};
 		// Hidden routes are left out unless the peer opted in. A publish origin that
 		// already opted in (the caller's choice for this peer) keeps them either way.
 		let origin = match hidden {
@@ -1959,7 +1968,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
-		writer.buffer(&lite::TrackInfo::serve(&info, shared.version))?;
+		writer.buffer(&lite::TrackInfo::serve(&info, shared.version, ietf))?;
 		if ietf {
 			writer.buffer(&lite::ietf::TrackProperties(info.properties.clone()))?;
 		}
@@ -2016,9 +2025,14 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 		let event = match ready!(self.tracks.poll_next(waiter))? {
 			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
 				name: name.to_string().into(),
-				info: lite::TrackInfo::serve(&info, shared.version),
+				// Untimed even to an extension peer: TRACKS_ADD has no TRACK_PROPERTIES to
+				// carry the unchecked provenance, so a relay would re-list it as native lite.
+				info: lite::TrackInfo::serve(&info, shared.version, false),
 			},
 			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
+				name: name.to_string().into(),
+			},
+			Some(crate::broadcast::TracksEvent::Finished { name }) => lite::TracksEvent::Finished {
 				name: name.to_string().into(),
 			},
 			Some(crate::broadcast::TracksEvent::Synced) => lite::TracksEvent::Synced,
@@ -2130,7 +2144,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					// `None` omits the per-frame timestamp prefix: an untimed track on
 					// Lite07+, or any track before Lite05 (whose frames still carry
 					// timestamps in the model, just not on this wire).
-					let stamp = Stamp::new(shared.version, track.info().lite_timescale());
+					let stamp = Stamp::new(shared.version, track.info().lite_timescale(ietf));
 
 					// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
 					// live in TRACK_INFO, and the resolved range arrives as
@@ -2157,12 +2171,14 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					let steer_tx = kio::Producer::new(steer);
 
 					let mut session = shared.session.clone();
-					let group = session.send_group(msg.priority.into());
+					let publisher = track.info().priority;
+					let group = session.send_group(crate::priority::group(msg.priority, publisher));
 					let sub = Subscription {
 						session,
 						id: msg.id,
 						track_name: Arc::from(track.name()),
 						priority: shared.priority.clone(),
+						publisher,
 						group,
 						steer: steer_tx.consume(),
 						steer_seen: steer,
@@ -2213,9 +2229,10 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 }
 
 /// Answers a FETCH stream: a single cached group, streamed in order.
-// A state machine's enum is its storage: one transient instance per stream, so the
-// big variant is the working state, not padding held in bulk.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk; an allow, since the size gap varies by target"
+)]
 enum FetchServe {
 	/// Waiting for the fetched group.
 	Fetch {
@@ -2304,7 +2321,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					group.end_at(msg.end_frame.map_or(Bound::Unbounded, Bound::Included));
 
 					// Matches the timescale TRACK_INFO declared for the track.
-					let stamp = Stamp::new(shared.version, group.lite_timescale());
+					let stamp = Stamp::new(shared.version, group.lite_timescale(ietf));
 					// And its compression, which a lite-07 peer receives as stored.
 					if shared.version.has_compression() {
 						group = group.compressed();
@@ -3131,7 +3148,7 @@ mod announce_test {
 		for version in [Version::Lite06, Version::Lite07] {
 			let mut h = harness_on(version).await;
 			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
-			let peer = h.origin.clone().peer().announce("cam", route.clone()).unwrap();
+			let newer = h.origin.announce("cam", route.clone()).unwrap();
 			// A restart waits out the update hold like an update.
 			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 			settle().await;
@@ -3162,7 +3179,7 @@ mod announce_test {
 			};
 			restarted(h.wire.take_announces());
 
-			drop(peer);
+			drop(newer);
 			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 			settle().await;
 			restarted(h.wire.take_announces());
@@ -3222,11 +3239,11 @@ mod announce_test {
 			// Same chain and cost, so only the instance changed. Both land before the loop polls.
 			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
 			let epoch = (!anonymous).then(crate::Epoch::mint);
-			let _newer = match &epoch {
-				Some(epoch) => h.origin.announce("cam", route.with_epoch(epoch.clone())),
-				None => h.origin.clone().peer().announce("cam", route),
-			}
-			.unwrap();
+			let route = match &epoch {
+				Some(epoch) => route.with_epoch(epoch.clone()),
+				None => route,
+			};
+			let _newer = h.origin.announce("cam", route).unwrap();
 			auth.authorize(&grant(&["cam", "other"]));
 			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 			settle().await;
@@ -3416,10 +3433,6 @@ fn buffer_zigzag_delta<W: crate::transport::poll::SendStream>(
 /// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
 /// best-effort datagram to forward, the track declaring its exclusive final sequence, or
 /// the track finishing (the live edge having reached that boundary).
-// A `group::Consumer` carries an inline frame prefetch, so the `Group` variant dwarfs the
-// others. This is a transient, one-at-a-time return value, so the padding is never held in
-// bulk; boxing would only add a per-group allocation.
-#[allow(clippy::large_enum_variant)]
 enum Recv {
 	Group(group::Consumer),
 	Datagram(crate::model::datagram::Stored),
@@ -3597,7 +3610,7 @@ impl From<&lite::SubscribeUpdate> for Bounds {
 /// The part of each group's rank a SUBSCRIBE_UPDATE can move.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Steer {
-	priority: u8,
+	priority: i8,
 	order: Order,
 }
 
@@ -3611,6 +3624,8 @@ struct Subscription<S: crate::transport::poll::Session> {
 	id: u64,
 	track_name: Arc<str>,
 	priority: PriorityQueue,
+	/// The publisher's priority for the track, which breaks subscriber priority ties.
+	publisher: i8,
 	/// The subscription's send group, ranking it against the session's others, or `None`
 	/// on a transport without groups, where `priority` ranks every group stream instead.
 	group: Option<GroupOf<S>>,
@@ -3859,7 +3874,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		}
 		// One move for the whole subscription; its streams keep their order within it.
 		if let Some(group) = &mut self.ctx.group {
-			group.set_priority(upd.priority.into());
+			group.set_priority(crate::priority::group(upd.priority, self.ctx.publisher));
 		}
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
@@ -4244,9 +4259,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			// subscription on the session, and only groups of the same one may be
 			// ranked against each other by sequence, in that subscription's order.
 			None => Rank::Queue(
-				self.ctx
-					.priority
-					.insert(Priority::new(steer.priority, self.ctx.id, sequence).with_order(steer.order)),
+				self.ctx.priority.insert(
+					Priority::new(steer.priority, self.ctx.id, sequence)
+						.with_publisher(self.ctx.publisher)
+						.with_order(steer.order),
+				),
 			),
 		};
 		debug_assert!(self.opening.is_none(), "one group waits for stream credit at a time");
@@ -4288,9 +4305,13 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	budget: kio::coop::Budget,
 }
 
-// A state machine's enum is its storage: one transient instance per stream, so the
-// big variant is the working state, not padding held in bulk.
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+	target_pointer_width = "64",
+	expect(
+		clippy::large_enum_variant,
+		reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
+	)
+)]
 enum GroupState<S: crate::transport::poll::Session> {
 	/// Waiting for stream credit on this machine's own session handle.
 	Open,
@@ -4827,15 +4848,20 @@ mod serve_group_test {
 		let sent = Timestamp::from(runtime.now()).value();
 		let checked = track::Info::timed();
 		let unchecked = track::Info {
-			unchecked: true,
+			properties: Some(std::sync::Arc::new(crate::model::object::TrackProperties {
+				version: crate::ietf::Version::Draft22,
+				values: Vec::new(),
+			})),
 			..track::Info::timed()
 		};
 
-		let stamp = Stamp::new(Version::Lite06, checked.lite_timescale()).unwrap();
+		let stamp = Stamp::new(Version::Lite06, checked.lite_timescale(false)).unwrap();
 		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), stamped.value());
-		let stamp = Stamp::new(Version::Lite06, unchecked.lite_timescale()).unwrap();
+		let stamp = Stamp::new(Version::Lite06, unchecked.lite_timescale(false)).unwrap();
 		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), sent);
-		assert!(Stamp::new(Version::Lite07, unchecked.lite_timescale()).is_none());
+		assert!(Stamp::new(Version::Lite07, unchecked.lite_timescale(false)).is_none());
+		let stamp = Stamp::new(Version::Lite07, unchecked.lite_timescale(true)).unwrap();
+		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), stamped.value());
 	}
 
 	#[moq_clock::test]
@@ -4849,6 +4875,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
@@ -4895,6 +4922,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
@@ -4945,6 +4973,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
@@ -4995,6 +5024,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
@@ -5011,7 +5041,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut old = track.append_group().unwrap();
+		let old = track.append_group().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
 				timestamp: Some(Timestamp::ZERO),
@@ -5034,8 +5064,7 @@ mod serve_group_test {
 		*open = false;
 		drop(open);
 		frame.write(b"b".as_slice()).unwrap();
-		frame.finish().unwrap();
-		old.finish().unwrap();
+		frame.finish().unwrap().finish().unwrap();
 		assert!(
 			futures::poll!(serve.as_mut()).is_pending(),
 			"the final byte is transport-blocked"
@@ -5063,6 +5092,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
@@ -5236,6 +5266,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
@@ -5311,6 +5342,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
@@ -5360,6 +5392,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
@@ -5408,6 +5441,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
@@ -5468,6 +5502,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
@@ -5577,7 +5612,11 @@ mod serve_group_test {
 			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
 			assert!(futures::poll!(poll.as_mut()).is_pending());
 		}
-		assert_eq!(log.groups(), [(0, 3), (0, 7)], "one move for the subscription");
+		assert_eq!(
+			log.groups(),
+			[(0, 3), (0, crate::priority::group(7, 0))],
+			"one move for the subscription"
+		);
 		let mut flipped = log.orders()[2..].to_vec();
 		flipped.sort();
 		assert_eq!(flipped, [(0, 1), (1, -1)], "older groups first");
@@ -6600,6 +6639,7 @@ mod serve_group_test {
 				id: 0,
 				track_name: "test".into(),
 				priority: PriorityQueue::default(),
+				publisher: 0,
 				group: None,
 				steer: steer.consume(),
 				steer_seen: Steer::default(),
@@ -6882,6 +6922,7 @@ mod tests {
 	use super::*;
 	use crate::lite::test_transport::{Close, ScriptedSession, SinkSend, SinkSession};
 	use crate::model::ProduceTest;
+	use crate::{broadcast, coding::Encode};
 	use futures::FutureExt;
 
 	/// A peer that declares no origin in its SETUP is split-horizoned by the identity
@@ -8374,5 +8415,106 @@ mod tests {
 				assert!(log.closes().is_empty(), "{version}: {end:?} became a violation");
 			}
 		}
+	}
+
+	/// A publisher on a session with send groups.
+	fn grouped_publisher(origin: origin::Consumer) -> Publisher<ScriptedSession> {
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		Publisher::new(PublisherConfig {
+			runtime: crate::time::sim(),
+			session: ScriptedSession::new(Vec::new()).with_groups(),
+			origin,
+			version: Version::Lite07,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			auth: crate::auth::Handle::new(false),
+			peer_grant: Default::default(),
+			client: false,
+			subscriptions: Default::default(),
+			fetches: Default::default(),
+			estimate: kio::Producer::default().weak(),
+		})
+	}
+
+	/// Subscribe to `broadcast`'s `track` at the subscriber `priority`, resolving the track
+	/// with `info`, until the subscription runs.
+	async fn subscribe_at(
+		publisher: &Publisher<ScriptedSession>,
+		dynamic: &mut broadcast::Dynamic,
+		broadcast: &'static str,
+		track: &'static str,
+		priority: i8,
+		info: track::Info,
+	) -> (
+		RequestServe<ScriptedSession, SubscribeServe<ScriptedSession>>,
+		track::Producer,
+	) {
+		let version = Version::Lite07;
+		let msg = lite::Subscribe {
+			order: crate::track::Order::Descending,
+			epoch: None,
+			id: 0,
+			broadcast: crate::Path::new(broadcast),
+			track: track.into(),
+			priority,
+			max_delay: Duration::ZERO,
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		};
+		let mut script = Vec::new();
+		msg.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+			.unwrap();
+		let mut session = ScriptedSession::new(script);
+		let (send, recv) = futures::future::poll_fn(|cx| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<ScriptedSession, Version> {
+			writer: Writer::new(send, version),
+			reader: crate::coding::Reader::new(recv, version),
+		};
+		let mut serve = RequestServe::<_, SubscribeServe<_>>::new(publisher.shared.clone(), stream);
+		assert!(!drive(&mut serve).await);
+		let track = dynamic
+			.requested_track()
+			.now_or_never()
+			.expect("track requested")
+			.unwrap()
+			.accept(info);
+		assert!(!drive(&mut serve).await, "the subscription ended");
+		assert!(
+			matches!(serve.state, RequestState::Serve(SubscribeServe::Run(_))),
+			"the subscription is not running"
+		);
+		(serve, track)
+	}
+
+	/// A subscription's send group ranks by the peer's subscriber priority first, and the
+	/// publisher's track priority breaks a tie between two at one subscriber priority.
+	#[moq_clock::test]
+	async fn send_group_ranks_by_the_subscriber_then_the_publisher() {
+		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("a").unwrap();
+		let mut dynamic = broadcast.dynamic();
+		broadcast.announce(Default::default()).unwrap();
+		let publisher = grouped_publisher(origin.consume());
+		let log = publisher.shared.session.log.clone();
+
+		let video = track::Info::timed().with_priority(60);
+		let audio = track::Info::timed().with_priority(80);
+		let _video = subscribe_at(&publisher, &mut dynamic, "a", "video", 0, video).await;
+		let _audio = subscribe_at(&publisher, &mut dynamic, "a", "audio", 0, audio).await;
+		let _urgent = subscribe_at(&publisher, &mut dynamic, "a", "chat", 1, track::Info::timed()).await;
+
+		let groups = log.groups();
+		assert_eq!(groups.len(), 3);
+		assert!(groups[1].1 > groups[0].1, "the publisher's priority breaks the tie");
+		assert!(groups[2].1 > groups[1].1, "the subscriber's priority dominates");
 	}
 }

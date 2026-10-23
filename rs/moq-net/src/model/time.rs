@@ -2,19 +2,21 @@ use std::num::NonZero;
 
 use crate::coding::varint::MAX_QUIC;
 
-/// `value`, or `None` past the QUIC varint limit (`2^62 - 1`), so every timestamp stays
-/// encodable on moq-lite.
-const fn quic(value: u128) -> Option<u64> {
-	if value <= MAX_QUIC as u128 {
-		Some(value as u64)
-	} else {
-		None
-	}
+/// The largest [`Timestamp`] value, `2^61 - 1`.
+///
+/// lite-05/06 zigzag a group's first timestamp from zero into a QUIC varint, which halves
+/// its positive range. Bounding every timestamp here keeps each one encodable on every
+/// version, including after a relay forwards it from lite-07 or moq-transport.
+const MAX_TIMESTAMP: u64 = (1 << 61) - 1;
+
+/// `value`, or `None` past `max`.
+const fn bounded(value: u128, max: u64) -> Option<u64> {
+	if value <= max as u128 { Some(value as u64) } else { None }
 }
 
-/// Returned when a [`Timestamp`] operation would exceed the QUIC varint range
-/// (`2^62 - 1`), overflow during scale conversion or arithmetic, or attempt
-/// arithmetic between timestamps with mismatched scales.
+/// Returned when a [`Timestamp`] operation would exceed its range (`2^61 - 1`), a
+/// [`Timescale`] would exceed the QUIC varint range (`2^62 - 1`), scale conversion or
+/// arithmetic would overflow, or arithmetic mixes timestamps with mismatched scales.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("time overflow")]
 pub struct TimeOverflow;
@@ -60,7 +62,7 @@ impl Timescale {
 	pub const fn new(units_per_second: u64) -> Result<Self, TimeOverflow> {
 		// Reject values that wouldn't fit in a QUIC varint, keeping the constraint
 		// symmetric with Timestamp's raw value.
-		if quic(units_per_second as u128).is_none() {
+		if bounded(units_per_second as u128, MAX_QUIC).is_none() {
 			return Err(TimeOverflow);
 		}
 		match NonZero::new(units_per_second) {
@@ -126,8 +128,8 @@ impl std::fmt::Display for Timescale {
 /// A timestamp in a track's timescale (units per second).
 ///
 /// All timestamps within a track are relative, so zero for one track is not zero for another.
-/// The underlying value is constrained to fit within a QUIC varint (`2^62 - 1`) so it can be
-/// encoded and decoded easily; the scale is carried alongside so frames from different
+/// The underlying value is at most `2^61 - 1`, the most every moq-lite version can encode as
+/// a group's first frame; the scale is carried alongside so frames from different
 /// sources can be compared and converted without lossy detours through a single fixed scale.
 ///
 /// The scale is a [`Timescale`] (always non-zero), so unit conversions (`as_secs`, `as_millis`,
@@ -172,9 +174,9 @@ impl Timestamp {
 	pub const ZERO: Self = Self::new_const(0, Timescale::SECOND);
 
 	/// Construct a timestamp directly from a raw value at the given scale.
-	/// Returns [`TimeOverflow`] if `value` exceeds `2^62 - 1`.
+	/// Returns [`TimeOverflow`] if `value` exceeds `2^61 - 1`.
 	pub const fn new(value: u64, scale: Timescale) -> Result<Self, TimeOverflow> {
-		match quic(value as u128) {
+		match bounded(value as u128, MAX_TIMESTAMP) {
 			Some(value) => Ok(Self { value, scale }),
 			None => Err(TimeOverflow),
 		}
@@ -184,7 +186,7 @@ impl Timestamp {
 	const fn new_const(value: u64, scale: Timescale) -> Self {
 		match Self::new(value, scale) {
 			Ok(time) => time,
-			Err(_) => panic!("timestamp value exceeds 2^62 - 1"),
+			Err(_) => panic!("timestamp value exceeds 2^61 - 1"),
 		}
 	}
 
@@ -230,13 +232,13 @@ impl Timestamp {
 	}
 
 	/// Re-express this timestamp at a new scale. Returns [`TimeOverflow`] if the new
-	/// value would exceed `2^62 - 1`.
+	/// value would exceed `2^61 - 1`.
 	pub const fn convert(self, new_scale: Timescale) -> Result<Self, TimeOverflow> {
 		if self.scale.0.get() == new_scale.0.get() {
 			return Ok(self);
 		}
 		match (self.value as u128).checked_mul(new_scale.0.get() as u128) {
-			Some(scaled) => match quic(scaled / self.scale.0.get() as u128) {
+			Some(scaled) => match bounded(scaled / self.scale.0.get() as u128, MAX_TIMESTAMP) {
 				Some(value) => Ok(Self {
 					value,
 					scale: new_scale,
@@ -272,7 +274,7 @@ impl Timestamp {
 		self.as_scale(Timescale::NANO)
 	}
 
-	/// Add two timestamps. Returns [`TimeOverflow`] if the sum exceeds `2^62 - 1` or
+	/// Add two timestamps. Returns [`TimeOverflow`] if the sum exceeds `2^61 - 1` or
 	/// if the scales differ.
 	pub const fn checked_add(self, rhs: Self) -> Result<Self, TimeOverflow> {
 		if self.scale.0.get() != rhs.scale.0.get() {
@@ -312,7 +314,7 @@ impl TryFrom<std::time::Duration> for Timestamp {
 
 	/// Convert a [`std::time::Duration`] into a nanosecond-scale timestamp.
 	fn try_from(duration: std::time::Duration) -> Result<Self, Self::Error> {
-		match quic(duration.as_nanos()) {
+		match bounded(duration.as_nanos(), MAX_TIMESTAMP) {
 			Some(value) => Ok(Self {
 				value,
 				scale: Timescale::NANO,
@@ -330,16 +332,15 @@ impl From<Timestamp> for std::time::Duration {
 }
 
 impl std::fmt::Debug for Timestamp {
-	#[allow(clippy::manual_is_multiple_of)] // is_multiple_of is unstable in Rust 1.85
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let nanos = self.as_nanos();
 
 		// Choose the largest unit where we don't need decimal places.
-		if nanos % 1_000_000_000 == 0 {
+		if nanos.is_multiple_of(1_000_000_000) {
 			write!(f, "{}s", nanos / 1_000_000_000)
-		} else if nanos % 1_000_000 == 0 {
+		} else if nanos.is_multiple_of(1_000_000) {
 			write!(f, "{}ms", nanos / 1_000_000)
-		} else if nanos % 1_000 == 0 {
+		} else if nanos.is_multiple_of(1_000) {
 			write!(f, "{}µs", nanos / 1_000)
 		} else {
 			write!(f, "{}ns", nanos)
@@ -438,6 +439,21 @@ mod tests {
 		assert!(Timescale::new(1u64 << 62).is_err());
 		// Right at the top of the varint range is still valid.
 		assert!(Timescale::new((1u64 << 62) - 1).is_ok());
+	}
+
+	/// A timestamp is refused where any version could not carry it as a group's first frame,
+	/// which lite-05/06 zigzag from zero into a QUIC varint.
+	#[test]
+	fn test_timestamp_fits_a_lite06_first_frame() {
+		let max = Timestamp::new(MAX_TIMESTAMP, Timescale::MICRO).unwrap();
+		assert!(crate::coding::varint::zigzag(max.value() as i64) <= MAX_QUIC);
+
+		for value in [MAX_TIMESTAMP + 1, MAX_QUIC] {
+			assert!(Timestamp::from_micros(value).is_err(), "{value}");
+		}
+		assert!(max.checked_add(Timestamp::from_micros(1).unwrap()).is_err());
+		assert!(max.convert(Timescale::NANO).is_err());
+		assert!(Timestamp::try_from(std::time::Duration::from_nanos(MAX_TIMESTAMP + 1)).is_err());
 	}
 
 	#[test]

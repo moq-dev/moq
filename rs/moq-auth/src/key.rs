@@ -7,7 +7,7 @@ use p256::elliptic_curve::SecretKey;
 use p256::elliptic_curve::pkcs8::EncodePrivateKey;
 use rsa::BigUint;
 use rsa::pkcs1::EncodeRsaPrivateKey;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
 
@@ -323,7 +323,10 @@ impl Key {
 	}
 
 	/// Parse a key from a string, auto-detecting JSON or base64url encoding.
-	#[allow(clippy::should_implement_trait)]
+	#[expect(
+		clippy::should_implement_trait,
+		reason = "public inherent parser; switching to `FromStr` is a breaking change"
+	)]
 	pub fn from_str(s: &str) -> crate::Result<Self> {
 		let s = s.trim();
 		if s.starts_with('{') {
@@ -550,11 +553,19 @@ impl Key {
 		Ok(self.encode.get_or_init(|| encoding_key))
 	}
 
-	/// Decode a signed token into any payload, checking only signature, algorithm, and key ID.
+	/// Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope.
 	///
-	/// The caller validates payload fields and expiry. Use [`verify`](Self::verify) for
-	/// this crate's strict [`Claims`] contract.
-	pub fn decode<C: DeserializeOwned>(&self, token: &str) -> crate::Result<C> {
+	/// Scoping the claims to a connection path is a separate step; see
+	/// [`Claims::authorize`].
+	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
+		let claims = self.verify_claims(token)?;
+		validate_times(&claims, moq_clock::wall().into())?;
+		Ok(claims)
+	}
+
+	/// Verify the signature, claims, and key scope but not the times, so an expired
+	/// token's root is still known to be genuine.
+	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
 		if !self.operations.contains(&KeyOperation::Verify) {
 			return Err(KeyError::VerifyUnsupported.into());
 		}
@@ -571,23 +582,7 @@ impl Key {
 		validation.validate_exp = false;
 		validation.validate_nbf = false;
 		validation.validate_aud = false;
-		Ok(jsonwebtoken::decode::<C>(token, self.to_decoding_key()?, &validation)?.claims)
-	}
-
-	/// Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope.
-	///
-	/// Scoping the claims to a connection path is a separate step; see
-	/// [`Claims::authorize`].
-	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
-		let claims = self.verify_claims(token)?;
-		validate_times(&claims, moq_clock::wall().into())?;
-		Ok(claims)
-	}
-
-	/// Verify the signature, claims, and key scope but not the times, so an expired
-	/// token's root is still known to be genuine.
-	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
-		let claims: Claims = self.decode(token)?;
+		let claims: Claims = jsonwebtoken::decode(token, self.to_decoding_key()?, &validation)?.claims;
 		claims.validate()?;
 		self.validate_scope(&claims)?;
 		Ok(claims)
@@ -707,7 +702,7 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -730,8 +725,8 @@ mod tests {
 	fn create_test_claims() -> Claims {
 		Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]).into(),
-			subscribe: patterns(&["test-sub/**"]).into(),
+			publish: patterns(&["test-pub/**"]),
+			subscribe: patterns(&["test-sub/**"]),
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
 			not_before: None,
@@ -739,27 +734,25 @@ mod tests {
 	}
 
 	#[test]
-	fn decode_accepts_other_payloads_but_checks_kid_and_algorithm() {
+	fn verify_refuses_custom_payloads_and_checks_kid_and_algorithm() {
 		let key = create_test_key();
 		let mut header = Header::new(Algorithm::HS256.into());
 		header.kid = key.kid.as_ref().map(ToString::to_string);
 		let payload = serde_json::json!({"custom": "accepted", "exp": 1, "aud": "other-service"});
 		let token = jsonwebtoken::encode(&header, &payload, key.to_encoding_key().unwrap()).unwrap();
-		let decoded: serde_json::Value = key.decode(&token).unwrap();
-		assert_eq!(decoded, payload);
 		assert!(key.verify(&token).is_err(), "strict claims reject the custom payload");
 
 		header.kid = Some("someone-else".into());
 		let wrong_kid = jsonwebtoken::encode(&header, &payload, key.to_encoding_key().unwrap()).unwrap();
 		assert!(matches!(
-			key.decode::<serde_json::Value>(&wrong_kid),
+			key.verify(&wrong_kid),
 			Err(crate::Error::Key(KeyError::KeyNotFound(_)))
 		));
 
 		header.kid = key.kid.as_ref().map(ToString::to_string);
 		header.alg = jsonwebtoken::Algorithm::HS384;
 		let wrong_algorithm = jsonwebtoken::encode(&header, &payload, key.to_encoding_key().unwrap()).unwrap();
-		assert!(key.decode::<serde_json::Value>(&wrong_algorithm).is_err());
+		assert!(key.verify(&wrong_algorithm).is_err());
 	}
 
 	#[test]
@@ -892,12 +885,12 @@ mod tests {
 			.unwrap();
 		let allowed = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["allowed/room/**"]).into(),
+			publish: patterns(&["allowed/room/**"]),
 			..Default::default()
 		};
 		let denied = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["other/**"]).into(),
+			publish: patterns(&["other/**"]),
 			..Default::default()
 		};
 
@@ -914,7 +907,7 @@ mod tests {
 	fn test_key_derived_material_never_stale() {
 		let claims = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["test-pub/**"]).into(),
+			publish: patterns(&["test-pub/**"]),
 			..Default::default()
 		};
 
@@ -977,8 +970,8 @@ mod tests {
 		let key = create_test_key();
 		let invalid_claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&[]).into(),
-			subscribe: patterns(&[]).into(),
+			publish: patterns(&[]),
+			subscribe: patterns(&[]),
 			expires: None,
 			issued: None,
 			not_before: None,
@@ -1155,8 +1148,8 @@ mod tests {
 		let key = create_test_key();
 		let claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["**"]).into(),
-			subscribe: patterns(&["**"]).into(),
+			publish: patterns(&["**"]),
+			subscribe: patterns(&["**"]),
 			expires: None,
 			issued: None,
 			not_before: None,
@@ -1175,8 +1168,8 @@ mod tests {
 		let key = create_test_key();
 		let original_claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]).into(),
-			subscribe: patterns(&["test-sub/**"]).into(),
+			publish: patterns(&["test-pub/**"]),
+			subscribe: patterns(&["test-sub/**"]),
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
 			not_before: None,
@@ -1693,8 +1686,8 @@ mod tests {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
 		let claims = key.verify(JS_HS256_TOKEN).unwrap();
 		assert_eq!(claims.root, "live");
-		assert_eq!(claims.publish, patterns(&["camera1"]).into());
-		assert_eq!(claims.subscribe, patterns(&["camera1", "camera2"]).into());
+		assert_eq!(claims.publish, patterns(&["camera1"]));
+		assert_eq!(claims.subscribe, patterns(&["camera1", "camera2"]));
 	}
 
 	#[test]
@@ -1702,8 +1695,8 @@ mod tests {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
 		let claims = key.verify(JS_HS256_LEGACY_TOKEN).unwrap();
 		assert_eq!(claims.root, "live");
-		assert_eq!(claims.publish, patterns(&["camera1/**"]).into());
-		assert_eq!(claims.subscribe, patterns(&["camera1/**", "camera2/**"]).into());
+		assert_eq!(claims.publish, patterns(&["camera1/**"]));
+		assert_eq!(claims.subscribe, patterns(&["camera1/**", "camera2/**"]));
 	}
 
 	#[test]
@@ -1715,12 +1708,12 @@ mod tests {
 
 		let inside = Claims {
 			root: "demo/room".into(),
-			publish: patterns(&["alice"]).into(),
+			publish: patterns(&["alice"]),
 			..Default::default()
 		};
 		let outside = Claims {
 			root: "demo".into(),
-			publish: patterns(&["lobby/**"]).into(),
+			publish: patterns(&["lobby/**"]),
 			..Default::default()
 		};
 		assert!(key.verify(&key.sign(&inside).unwrap()).is_ok());
@@ -1739,14 +1732,14 @@ mod tests {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
 		let claims = Claims {
 			root: "rust-test".to_string(),
-			publish: patterns(&["pub1/**"]).into(),
-			subscribe: patterns(&["sub1/**"]).into(),
+			publish: patterns(&["pub1/**"]),
+			subscribe: patterns(&["sub1/**"]),
 			..Default::default()
 		};
 		let token = key.sign(&claims).unwrap();
 		let verified = key.verify(&token).unwrap();
 		assert_eq!(verified.root, "rust-test");
-		assert_eq!(verified.publish, patterns(&["pub1/**"]).into());
+		assert_eq!(verified.publish, patterns(&["pub1/**"]));
 	}
 
 	#[test]
@@ -1764,7 +1757,7 @@ mod tests {
 		let key = Key::from_str(JS_EDDSA_PRIVATE_KEY).unwrap();
 		let claims = key.verify(JS_EDDSA_TOKEN).unwrap();
 		assert_eq!(claims.root, "stream");
-		assert_eq!(claims.publish, patterns(&["video/**"]).into());
+		assert_eq!(claims.publish, patterns(&["video/**"]));
 	}
 
 	#[test]
@@ -1772,7 +1765,7 @@ mod tests {
 		let key = Key::from_str(JS_EDDSA_PUBLIC_KEY).unwrap();
 		let claims = key.verify(JS_EDDSA_TOKEN).unwrap();
 		assert_eq!(claims.root, "stream");
-		assert_eq!(claims.publish, patterns(&["video/**"]).into());
+		assert_eq!(claims.publish, patterns(&["video/**"]));
 	}
 
 	#[test]

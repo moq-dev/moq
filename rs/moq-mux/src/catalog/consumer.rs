@@ -28,9 +28,10 @@ pub struct Consumer<E: CatalogExt = ()> {
 	inner: State<E>,
 }
 
-// One per catalog subscription, and the live variant is the working state, so boxing
-// it would only add an allocation.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per catalog subscription, and the live variant is the working state; it is only large when a workspace build unifies extra features"
+)]
 enum State<E: CatalogExt> {
 	Hang(super::hang::Consumer<E>),
 	Msf(super::msf::Consumer<E>),

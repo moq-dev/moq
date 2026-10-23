@@ -290,21 +290,21 @@ export function bufferBars(parent: Signals.Effect, watch: MoqWatch): HTMLElement
 					: 0;
 		if (delta === 0) return;
 		e.preventDefault();
-		setDelay((watch.sync.out.jitter.peek() as unknown as number) + delta);
+		setDelay(watch.sync.out.delay.peek() + delta);
 	});
 
-	// Position the target line from the live jitter (actual measured buffer in ms).
+	// Position the target line from the resolved delay (the live buffer in ms).
 	parent.run((effect) => {
-		const jitter = effect.get(watch.sync.out.jitter) as unknown as number;
-		const pct = Math.max(0, Math.min(1, jitter / BUFFER_MAX)) * 100;
+		const delay = effect.get(watch.sync.out.delay);
+		const pct = Math.max(0, Math.min(1, delay / BUFFER_MAX)) * 100;
 		target.style.left = `${pct}%`;
-		targetLabel.textContent = `${Math.round(jitter)}ms`;
-		viz.setAttribute("aria-valuenow", String(Math.round(jitter)));
+		targetLabel.textContent = `${Math.round(delay)}ms`;
+		viz.setAttribute("aria-valuenow", String(Math.round(delay)));
 	});
 
 	// Repaint the bars every animation frame; cleaned up when the effect closes.
 	const draw = () => {
-		const timestamp = watch.sync.now() as number | undefined;
+		const timestamp = watch.sync.now();
 		const stalled = watch.video.out.stalled.peek();
 		drawRanges(video.canvas, watch.video.out.buffered.peek(), timestamp, stalled);
 		drawRanges(audio.canvas, watch.audio.out.buffered.peek(), timestamp, watch.audio.out.stalled.peek());
