@@ -36,10 +36,12 @@ jobs:
         id: diff
         run: |
           mode=(--deny)
-          [[ "$HEAD_REF" != main ]] || mode=()
+          # Only this repository's own `main` is the cut; a fork's `main` is a backport.
+          [[ "$HEAD_REF" != main || "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]] || mode=()
           nix develop --command just api-diff "${mode[@]}"
         env:
           HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           # Lists and downloads the moq-c and moq-ffi release assets.
           GH_TOKEN: ${{ github.token }}
       - name: Keep the report
