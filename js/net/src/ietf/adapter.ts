@@ -6,6 +6,7 @@ import { type OpenOptions, Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
+import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { MaxRequestId } from "./request.ts";
 import { refuseUpdate } from "./request_stream.ts";
@@ -759,8 +760,8 @@ export class ControlStreamAdapter implements Session {
 				const max = this.#peerMax;
 				await this.#writeMutex.runExclusive(async () => {
 					if (this.#closed) return;
-					await this.#writer.u53(MaxRequestId.id);
-					await new MaxRequestId({ requestId: max }).encode(this.#writer, this.version);
+					const grant = new MaxRequestId({ requestId: max });
+					await Message.write(this.#writer, MaxRequestId.id, grant, this.version);
 				});
 			}
 		} catch {

@@ -742,6 +742,10 @@ export class Producer {
 	// `max_sequence`, and where the next append lands. The namespace above can run ahead of
 	// it: earlier producers of the same broadcast track advanced it too.
 	#received = 0;
+	// Where the namespace stood when a replacement claimed the name. From then on it is this
+	// producer's inherited edge, so the replacement's groups never count as its progress, and
+	// it writes nothing more, so it can't land a group past the replacement's end.
+	#handoff?: number;
 
 	// Recently written source groups, retained for replay to late subscribers and
 	// pruned once idle for longer than the cache window. Each entry tracks the mirror
@@ -819,6 +823,11 @@ export class Producer {
 		bindProducerSequence = (producer, sequence) => {
 			const own = producer.#sequence;
 			if (own === sequence) return;
+			if (producer.#state.closed.peek() === undefined) {
+				const owner = sequence.owner;
+				if (owner && owner.#state.closed.peek() === undefined) owner.#handoff = sequence.next;
+				sequence.owner = producer;
+			}
 			sequence.next = Math.max(sequence.next, producer.#received);
 			// What earlier producers of the name wrote is gone from this track's cache, so their
 			// highest checked start is its eviction watermark.
@@ -1428,6 +1437,7 @@ export class Producer {
 	// Refuse a write once the track is closed, or at or past its declared end.
 	#writable(sequence: number): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
+		if (this.#handoff !== undefined) throw new Error(`track ${this.name} was replaced`);
 		const end = this.#state.end.peek();
 		if (end !== undefined && sequence >= finalSequence(end)) {
 			throw new Error(`sequence ${sequence} is at or past the track's end ${end.group}/${end.frame}`);
@@ -1579,9 +1589,20 @@ export class Producer {
 	 * at or past it is refused. Unlike {@link close} it is not terminal: call `close()` once
 	 * the remaining groups are written. Readers end once the live edge reaches the end's
 	 * group, independently of closure. Throws if the track is closed, already has an end, or
-	 * `end` would orphan a group or frame already produced.
+	 * `end` falls before or inside a group already produced, including one an earlier producer
+	 * of the name wrote, which a replacement continues.
 	 */
 	finishAt(end: Location): void {
+		// A replacement continues its name's timeline, so it can't end before or inside a group
+		// an earlier producer wrote; only its own last group can be cut mid-way.
+		const ownLast = end.frame !== 0 && this.#received === end.group + 1;
+		if (end.group < this.#inherited() && !ownLast) {
+			throw new ProtocolViolation(`track end ${end.group}/${end.frame} is inside the name's earlier groups`);
+		}
+		this.#finishAt(end);
+	}
+
+	#finishAt(end: Location): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 		const declared = this.#state.end.peek();
 		if (declared !== undefined) throw new Error(`track already ends at ${declared.group}/${declared.frame}`);
@@ -1589,11 +1610,12 @@ export class Producer {
 	}
 
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
-	// boundary it falls just before. Mirrors the Rust `finish_at` on a `received()` copy.
+	// boundary it falls just before. Mirrors the Rust `finish_at` on a `received()` copy,
+	// which answers to its publisher's end rather than the name's local writes.
 	#endPending(end: Location): void {
 		const declared = this.#state.end.peek();
 		if (declared === undefined) {
-			this.finishAt(end);
+			this.#finishAt(end);
 		} else if (declared.group !== end.group || declared.frame !== end.frame) {
 			if (declared.frame !== 0 || end.frame === 0 || finalSequence(end) !== declared.group) {
 				throw new ProtocolViolation(`conflicting track end: ${end.group}/${end.frame}`);
@@ -1652,6 +1674,18 @@ export class Producer {
 		return !this.#arrivals.covers(Math.min(floor, final), final);
 	}
 
+	// One past the highest sequence produced: where the live edge stands against the end. A
+	// replacement starts at its name's, since what earlier producers wrote never arrives here.
+	// Mirrors the Rust `edge`.
+	#liveEdge(): number {
+		return Math.max(this.#received, this.#inherited());
+	}
+
+	// One past what the name's producers wrote, up to the replacement that superseded this one.
+	#inherited(): number {
+		return this.#handoff ?? this.#sequence.next;
+	}
+
 	#declareEnd(end: Location): void {
 		const { group, frame } = end;
 		if (!Number.isSafeInteger(group) || group < 0 || !Number.isSafeInteger(frame) || frame < 0) {
@@ -1683,7 +1717,7 @@ export class Producer {
 	#endLargest(): void {
 		if (this.#state.largestEnded.peek() || this.#largestOpen) return;
 		const end = this.#state.end.peek();
-		if (end === undefined || this.#received < finalSequence(end)) return;
+		if (end === undefined || this.#liveEdge() < finalSequence(end)) return;
 		for (const state of [this.#state, ...this.#sinks]) state.largestEnded.set(true);
 	}
 
@@ -1708,14 +1742,17 @@ export class Producer {
 		// A gap past the grace was lost before the abort rather than cut off by it.
 		if (abort && this.#tailPending) this.#arrivals.expire(now(), this.#grace());
 		if (abort && this.#settled()) abort = undefined;
+		// A replacement continues its name's timeline: ending below an earlier producer's
+		// groups would contradict the ones subscribers already received.
 		if (declare && abort === undefined && this.#state.end.peek() === undefined) {
-			this.#declareEnd({ group: this.#received, frame: 0 });
+			this.#declareEnd({ group: this.#liveEdge(), frame: 0 });
 		}
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
 		closeTrackState(this.#state, abort);
 		this.#sequence.holders--;
+		if (this.#sequence.owner === this) this.#sequence.owner = undefined;
 		for (const { group } of this.#cache) group.close(abort);
 		for (const entry of open) {
 			this.#unlink(entry);
@@ -1738,7 +1775,7 @@ export class Producer {
 		const end = this.#state.end.peek();
 		if (end === undefined) return false;
 		const final = finalSequence(end);
-		if (this.#received < final || this.#owes(final)) return false;
+		if (this.#liveEdge() < final || this.#owes(final)) return false;
 		return this.#cache.every(({ group }) => group.sequence >= final || group.closed.peek() === null);
 	}
 

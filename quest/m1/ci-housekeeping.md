@@ -17,4 +17,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [CI workflow audit](/quest/m1/audit-ci.md) - the broader per-job review
+- [CI workflow audit](/quest/m2/audit-ci.md) - the broader per-job review
