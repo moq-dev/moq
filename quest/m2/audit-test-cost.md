@@ -4,7 +4,7 @@
 
 The slowest, flakiest, and least valuable tests are sped up, fixed, deleted,
 or planned, so the suite costs what it earns. Workflows and jobs belong to the
-[CI workflow audit](/quest/m1/audit-ci.md).
+[CI workflow audit](/quest/m2/audit-ci.md).
 
 ## Plan
 

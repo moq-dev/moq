@@ -182,11 +182,13 @@ A Group Stream normally starts at frame 0, but MAY start later when the publishe
 
 Each frame of a timed Track carries a presentation timestamp expressed in the Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
 A Track without a `Timescale` is untimed: its frames and datagrams carry no timestamp.
-A publisher MUST NOT start a timed Group's frame 0 earlier than that of any lower-sequence Group it publishes.
+A timestamp MUST be less than 2^61: lite-05 and lite-06 zigzag a Group's first [Timestamp Delta](#frame) into a QUIC varint, which carries no more, and the bound lets a relay forward any timestamp to any version.
+A receiver treats a larger timestamp as a malformed Track, even one it discards.
+Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a timed Group's frame 0 earlier than that of any lower-sequence Group it publishes.
 lite-05 and lite-06 cannot encode an untimed Track, so a publisher on those versions declares a `Timescale` of 1000 for it and stamps every frame and datagram with its send time in milliseconds.
 A receiver cannot tell such send times from presentation timestamps, and they need not rise with sequence, so it discards every timestamp received on those versions and treats the Track as untimed.
 On later versions a receiver MAY check a received Group against this rule, refusing a violating Group's stream (STOP_SENDING) with TIMESTAMP_MISMATCH.
-A relay that cannot vouch for a Track's timestamps, such as ones received over another protocol, MUST serve the Track untimed.
+A relay that cannot vouch for a Track's timestamps, such as ones received over another protocol, MUST serve the Track untimed unless a negotiated extension identifies their unchecked provenance.
 
 ## Positions {#positions}
 A Position is a (Group Sequence, Frame Index) pair identifying one frame within a Track.
@@ -486,6 +488,7 @@ When resolving a path covered by several routes (across any number of streams), 
 The Spread Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by each Hop ID of the route's path, oldest first, as 8 little-endian bytes.
 It is keyed on the requested path rather than the route's prefix, so equal-cost advertisers of one prefix share its paths instead of the first one taking them all, while one path resolves to the same advertiser on every relay that holds the same routes.
 When choosing which route to advertise for a prefix, the requested path is the prefix itself.
+A relay skips the Spread Hash for a route a publisher announced to it directly at the requested path, which no other relay ranks, so a publisher reconnecting under a new Hop ID wins at once.
 
 Routes with the same Epoch serve the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 A relay MUST NOT move a subscription to a route with a different Epoch, or between routes without one: it stays on its route and ends with it.
@@ -1368,6 +1371,7 @@ Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (
 An optional unsigned 32-bit byte ratio, encoded as the ratio plus one; `0` disables refresh.
 On a live-edge join, a publisher asks for a group beyond every sequence already produced when the newest group's bytes after its first frame exceed the ratio times that first frame's bytes.
 Joins coalesce until the requested group arrives.
+The request does not hold back delivery: the joiner still receives the newest cached group while it is pending.
 A relay preserves the ratio and evaluates joins against its own cache, forwarding demand in SUBSCRIBE_UPDATE.
 Versions before lite-07 omit Refresh and Wanted Group; a Track received on those versions never refreshes.
 
@@ -1766,6 +1770,8 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Allow a negotiated extension to preserve timestamps with explicitly unchecked provenance.
+
 - Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
 
 - Named 128 the midpoint priority for an unset Subscriber or Publisher Priority.
@@ -1776,7 +1782,10 @@ The `Message Length` describes the payload size on the wire.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 
-- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A receiver discards the timestamps it receives over lite-05/06, which may be send times, and a relay serves a Track whose timestamps it cannot vouch for untimed.
+- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A receiver discards the timestamps it receives over lite-05/06, which may be send times, and a relay serves a Track whose timestamps it cannot vouch for untimed unless a negotiated extension identifies their unchecked provenance.
+
+- Bounded every timestamp below 2^61, since a lite-05/06 Group's first Timestamp Delta carries no more, so a relay never holds one it cannot forward. A larger one is a malformed Track.
+
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1). A relay requests descending upstream unless every subscription it serves is ascending.
@@ -1813,6 +1822,7 @@ The `Message Length` describes the payload size on the wire.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving. In lite-05 and lite-06 it is application-specific, so a subscriber there reads every drop as NOT_FOUND.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight; the Subscribe Stream FIN follows once every Group Stream has finished or been reset.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
+- Skipped the Spread Hash for a route a publisher announced directly at the requested path.
 - Added a local link preference to route selection, after the newest Epoch and before the 0 Hop ID check: the higher preference a subscriber assigns to the arriving link wins, and an unassigned link is neutral. Not carried on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.

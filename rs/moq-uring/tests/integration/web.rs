@@ -13,6 +13,7 @@ use std::net::UdpSocket;
 
 use moq_net::origin;
 use moq_uring::{Config, Error, Worker, quic, udp};
+use web_transport_trait::Stats as _;
 use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 
 fn worker() -> Option<Worker> {
@@ -283,12 +284,12 @@ fn lite_session_over_webtransport() {
 
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
-				.connect_lite(
+				.connect(
 					moq_net::time::now(),
 					moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
 				)
 				.await
-				.expect("connect_lite");
+				.expect("connect");
 			tokio::spawn(moq_net::time::run(session_driver));
 
 			let bc = {
@@ -334,12 +335,15 @@ fn lite_session_over_webtransport() {
 
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
-				.accept_lite(
+				.accept(
 					moq_net::time::now(),
-					moq_uring::transport::Session::new(session, moq_net::transport::Binding::Uri),
+					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
+						session,
+						moq_net::transport::Binding::Uri,
+					)),
 				)
 				.await
-				.expect("accept_lite");
+				.expect("accept");
 			let task_handle = handle.clone();
 			handle.spawn(async move {
 				let _ = task_handle.run(driver).await;
@@ -946,7 +950,9 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 			let mut watch = conn.clone();
 			let mut control = None;
 			if send_settings {
-				let before = watch.stats().udp_rx.bytes;
+				let before = web_transport_trait::poll::Session::stats(&watch)
+					.bytes_received()
+					.expect("counted");
 				let mut stream = std::future::poll_fn(|cx| peer.poll_open_uni(cx))
 					.await
 					.expect("control stream");
@@ -964,7 +970,10 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 				control = Some(stream);
 				within(&handle, "peer SETTINGS to arrive", async {
 					loop {
-						if watch.stats().udp_rx.bytes > before {
+						if web_transport_trait::poll::Session::stats(&watch)
+							.bytes_received()
+							.expect("counted") > before
+						{
 							break;
 						}
 						let mut tick = moq_uring::Timer::after(&handle, std::time::Duration::from_millis(10));

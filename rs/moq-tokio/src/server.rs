@@ -741,7 +741,7 @@ impl Server {
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
-							Ok(Request { transport, url, identity, authority, link, kind: RequestKind::Quic(Box::new(request)), quic, deadline, active })
+							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, deadline, active })
 						}.boxed());
 					}
 				}
@@ -765,7 +765,7 @@ impl Server {
 								identity,
 								authority,
 								link,
-								kind: RequestKind::Iroh(Box::new(request)),
+								handshake: Box::new(request),
 								#[cfg(feature = "quic")]
 								quic: None,
 								deadline,
@@ -935,7 +935,7 @@ impl Listener {
 				alpn: Some(protocol),
 				..Default::default()
 			},
-			kind: RequestKind::Qmux(Box::new(request)),
+			handshake: Box::new(request),
 			#[cfg(feature = "quic")]
 			quic: None,
 			deadline,
@@ -1053,11 +1053,9 @@ async fn accept_request<S>(
 	server: &moq_net::Server,
 	session: S,
 	deadline: Option<moq_clock::Instant>,
-) -> crate::Result<(PendingRequest<S>, Option<Deadline>)>
+) -> crate::Result<(moq_net::server::Handshake, Option<Deadline>)>
 where
 	S: moq_net::transport::poll::Boxable + Send + Sync,
-	S::SendStream: moq_net::transport::MaybeSync,
-	S::RecvStream: moq_net::transport::MaybeSync,
 {
 	let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
 	let accept = async { Ok(server.accept_request(moq_net::time::now(), session).await?) };
@@ -1079,7 +1077,7 @@ pub(crate) async fn accept_websocket(
 		authority,
 		identity: options.identity,
 		link: options.link,
-		kind: RequestKind::Qmux(Box::new(request)),
+		handshake: Box::new(request),
 		#[cfg(feature = "quic")]
 		quic: None,
 		deadline,
@@ -1572,7 +1570,7 @@ async fn stream_request(
 				authority: None,
 				identity: None,
 				link,
-				kind: RequestKind::Qmux(Box::new(request)),
+				handshake: Box::new(request),
 				#[cfg(feature = "quic")]
 				quic: None,
 				deadline,
@@ -1582,29 +1580,6 @@ async fn stream_request(
 		}
 		Err(err) => tracing::debug!(%err, "stream SETUP handshake failed"),
 	}
-}
-
-/// An accepted connection whose MoQ SETUP has already been exchanged.
-///
-/// Every backend drives the transport connect *and* the MoQ handshake up front, so the
-/// [`path`](Request::path)/[`role`](Request::role) a client advertised are available on
-/// every transport before the caller authorizes. The variant only distinguishes the
-/// underlying session type; all of them delegate identically.
-/// A pending moq-net request over transport `S`, driven by our tokio runtime.
-type PendingRequest<S> = moq_net::server::Handshake<S>;
-
-pub(crate) enum RequestKind {
-	#[cfg(feature = "quic")]
-	Quic(Box<PendingRequest<crate::transport::Session<crate::quic::web::Session>>>),
-	#[cfg(feature = "iroh")]
-	Iroh(Box<PendingRequest<crate::transport::Session<web_transport_iroh::Session>>>),
-	#[cfg(any(
-		feature = "tcp",
-		all(feature = "uds", unix),
-		feature = "websocket",
-		feature = "webrtc"
-	))]
-	Qmux(Box<PendingRequest<qmux::Session>>),
 }
 
 /// The transport-level facts a backend captures while accepting a connection, before the
@@ -1658,7 +1633,8 @@ pub struct Request {
 	identity: Option<crate::tls::PeerIdentity>,
 	/// The link facts the transport could see.
 	link: Link,
-	kind: RequestKind,
+	/// The paused moq-net handshake; the same type whatever the transport.
+	handshake: Box<moq_net::server::Handshake>,
 	/// The connection under a QUIC or WebTransport request, for [`Request::quic`].
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Connection>,
@@ -1678,63 +1654,6 @@ pub enum Reject {
 	App(u16),
 }
 
-/// Delegate a read-only call to the inner [`moq_net::server::Handshake`], whatever the transport.
-macro_rules! request_ref {
-	($self:expr, $r:ident => $body:expr) => {
-		match &$self.kind {
-			#[cfg(feature = "quic")]
-			RequestKind::Quic($r) => $body,
-			#[cfg(feature = "iroh")]
-			RequestKind::Iroh($r) => $body,
-			#[cfg(any(
-				feature = "tcp",
-				all(feature = "uds", unix),
-				feature = "websocket",
-				feature = "webrtc"
-			))]
-			RequestKind::Qmux($r) => $body,
-		}
-	};
-}
-
-/// Delegate a consuming call whose arms all yield the same type (e.g. `ok`, `close`).
-macro_rules! request_into {
-	($kind:expr, $r:ident => $body:expr) => {
-		match $kind {
-			#[cfg(feature = "quic")]
-			RequestKind::Quic($r) => $body,
-			#[cfg(feature = "iroh")]
-			RequestKind::Iroh($r) => $body,
-			#[cfg(any(
-				feature = "tcp",
-				all(feature = "uds", unix),
-				feature = "websocket",
-				feature = "webrtc"
-			))]
-			RequestKind::Qmux($r) => $body,
-		}
-	};
-}
-
-/// Delegate a consuming builder call, rebuilding the same variant from the returned request.
-macro_rules! request_map {
-	($kind:expr, $r:ident => $body:expr) => {
-		match $kind {
-			#[cfg(feature = "quic")]
-			RequestKind::Quic($r) => RequestKind::Quic(Box::new($body)),
-			#[cfg(feature = "iroh")]
-			RequestKind::Iroh($r) => RequestKind::Iroh(Box::new($body)),
-			#[cfg(any(
-				feature = "tcp",
-				all(feature = "uds", unix),
-				feature = "websocket",
-				feature = "webrtc"
-			))]
-			RequestKind::Qmux($r) => RequestKind::Qmux(Box::new($body)),
-		}
-	};
-}
-
 impl Request {
 	/// Reject the session. The transport is already accepted, so this closes the
 	/// just-established MoQ session rather than answering the transport handshake:
@@ -1744,19 +1663,19 @@ impl Request {
 			Reject::Unauthorized | Reject::Forbidden => moq_net::Error::Unauthorized,
 			Reject::App(code) => moq_net::Error::App(code),
 		};
-		request_into!(self.kind, request => request.close(err));
+		self.handshake.close(err);
 		Ok(())
 	}
 
 	/// Publish the given origin to the session.
 	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
-		self.kind = request_map!(self.kind, request => request.with_publisher(publish));
+		*self.handshake = (*self.handshake).with_publisher(publish);
 		self
 	}
 
 	/// Subscribe to the given origin from the session.
 	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
-		self.kind = request_map!(self.kind, request => request.with_subscriber(subscribe));
+		*self.handshake = (*self.handshake).with_subscriber(subscribe);
 		self
 	}
 
@@ -1764,19 +1683,19 @@ impl Request {
 	/// [`moq_net::server::Handshake::with_peer_hop`]. Derive it from [`Self::peer_identity`],
 	/// never from something coarser.
 	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
-		self.kind = request_map!(self.kind, request => request.with_peer_hop(hop));
+		*self.handshake = (*self.handshake).with_peer_hop(hop);
 		self
 	}
 
 	/// Attach a per-connection [`moq_net::stats::Session`] context to this session.
 	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
-		self.kind = request_map!(self.kind, request => request.with_stats(stats));
+		*self.handshake = (*self.handshake).with_stats(stats);
 		self
 	}
 
 	/// Set request caps after authorizing the peer and before answering SETUP.
 	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
-		self.kind = request_map!(self.kind, request => request.with_limits(limits));
+		*self.handshake = (*self.handshake).with_limits(limits);
 		self
 	}
 
@@ -1807,21 +1726,27 @@ impl Request {
 	/// otherwise hold open.
 	pub async fn ok(self) -> crate::Result<(Session, tokio::task::JoinHandle<crate::Result<()>>)> {
 		let Request {
-			kind, deadline, active, ..
+			handshake,
+			deadline,
+			active,
+			..
 		} = self;
 		let ok = async {
-			Ok(request_into!(kind, request => {
-				let (session, driver) = request.ok().await?;
-				use tracing::Instrument;
-				let driver = tokio::spawn(async move {
+			let (session, driver) = handshake.ok().await?;
+			use tracing::Instrument;
+			let driver = tokio::spawn(
+				async move {
 					crate::panic::isolate(async move {
 						let _active = active;
 						moq_net::time::run(driver).await;
 						Ok(())
-					}).await.unwrap_or(Err(Error::Panic))
-				}.instrument(tracing::Span::current()));
-				(session, driver)
-			}))
+					})
+					.await
+					.unwrap_or(Err(Error::Panic))
+				}
+				.instrument(tracing::Span::current()),
+			);
+			Ok((session, driver))
 		};
 		Deadline::bound(deadline.as_ref(), ok).await
 	}
@@ -1861,7 +1786,7 @@ impl Request {
 		// An empty SETUP path means the client advertised none, so fall back to the
 		// request URL. URL-carrying bindings are the ones that must not send a path at
 		// all, so this never discards a path the client meant us to use.
-		let setup = request_ref!(self, r => r.path());
+		let setup = self.handshake.path();
 		let path = if setup.is_empty() {
 			self.url.as_ref().map(Url::path).unwrap_or("")
 		} else {
@@ -1874,7 +1799,7 @@ impl Request {
 	///
 	/// Query values can contain credentials. Avoid logging this value.
 	pub fn query(&self) -> Option<&str> {
-		let setup = request_ref!(self, r => r.path());
+		let setup = self.handshake.path();
 		if setup.is_empty() {
 			self.url.as_ref().and_then(Url::query)
 		} else {
@@ -1908,12 +1833,12 @@ impl Request {
 	/// Available on every transport. Use it to reject a token that lacks the scope for
 	/// the client's intended direction.
 	pub fn role(&self) -> Option<moq_net::Role> {
-		request_ref!(self, r => r.role())
+		self.handshake.role()
 	}
 
 	/// Answer the peer's tokens before accepting and starting its protocol driver.
 	pub fn auth(&self) -> moq_net::auth::Handle {
-		request_ref!(self, r => r.auth())
+		self.handshake.auth()
 	}
 
 	/// The Hop ID the peer declared in its SETUP (moq-lite-05+).
@@ -1924,7 +1849,7 @@ impl Request {
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
 	pub fn peer_hop(&self) -> Option<moq_net::Hop> {
-		request_ref!(self, r => r.peer_hop())
+		self.handshake.peer_hop()
 	}
 
 	/// The credential a moq-transport client presented in its SETUP's `AUTHORIZATION
@@ -1932,7 +1857,7 @@ impl Request {
 	///
 	/// Like [`query`](Self::query), it can hold a credential. Avoid logging it.
 	pub fn token(&self) -> Option<&moq_net::setup::Token> {
-		request_ref!(self, r => r.token())
+		self.handshake.token()
 	}
 
 	/// The client certificate chain the peer presented, if any, validated
@@ -2333,7 +2258,13 @@ mod tests {
 	}
 
 	#[cfg(feature = "websocket")]
-	impl crate::transport::Grouped for Scripted {}
+	impl crate::transport::Grouped for Scripted {
+		type Recv = moq_net::transport::poll::Buffered<crate::transport::RecvStream<ScriptedRecv>>;
+
+		fn recv(stream: crate::transport::RecvStream<ScriptedRecv>) -> Self::Recv {
+			moq_net::transport::poll::Buffered::new(stream)
+		}
+	}
 
 	/// Delivers `data` once, then nothing more.
 	#[cfg(feature = "websocket")]

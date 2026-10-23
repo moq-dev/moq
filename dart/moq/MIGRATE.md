@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Cancelling a stream cancels its pending read
+
+`await subscription.cancel()` on announcements, authorization grants, and server requests now waits for the pending native operation to release, even when no event arrives.
+Announcement subscriptions still own and release their cursor; cancelling a grant or request subscription keeps its shared `Auth` or `Server` usable.
+The generated async methods now return `UniffiRustFuture<T>`, a `Future<T>` with `cancel()`; existing `await` and `Future<T>` assignments work unchanged.
+Custom implementations of generated interfaces must return `UniffiRustFuture<T>` instead of a plain `Future<T>`.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: add a `.timeout` to the future.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio` is replaced by `bool deltas` (default `true`).
@@ -33,6 +45,12 @@ Pass the new `ContainerFormat.cmaf` to keep publishing CMAF.
 `Video` and `Audio` renditions gain `epoch`, the publisher instance their `broadcast` reference names.
 `BroadcastConsumer.resolve(reference:)` requires `epoch:` too; pass the rendition's `epoch` alongside its `broadcast`, or `null` to resolve whichever instance answers.
 Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another epoch.
+
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Writing a frame, or any other call that takes a timestamp, fails with `TimeOverflow` past `2^61 - 1` microseconds instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 

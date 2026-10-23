@@ -428,6 +428,15 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		"qlog capture requires a build with the 'qlog' feature; drop quic.qlog"
 	);
 
+	// Mirrors `moq_tokio::Error::ReceiveWindowTooSmall`: incomplete messages hold
+	// connection credit, so a window that cannot fit the largest one stalls.
+	anyhow::ensure!(
+		quic.receive_window >= moq_net::transport::MIN_RECEIVE_WINDOW,
+		"quic.receive_window {} cannot fit the largest message, {} bytes",
+		quic.receive_window,
+		moq_net::transport::MIN_RECEIVE_WINDOW
+	);
+
 	let mut transport = moq_uring::quic::Transport::default();
 	#[cfg(feature = "qlog")]
 	if let Some(dir) = quic.qlog.as_deref() {
@@ -716,16 +725,10 @@ async fn serve_connection(
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,
 	};
-	let session = moq_uring::transport::Session::new(transport, binding);
+	// moq-net boxes the transport with a native `Send` bound, which only a `Local`
+	// session meets; it still never leaves this worker.
+	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, binding));
 	let now = moq_net::time::now();
-	// moq-lite on its own ALPN runs unboxed on this worker. Everything else
-	// (moq-transport, and the versions that negotiate in a bidi SETUP, which a
-	// browser offering no subprotocol falls back to) boxes its futures with a
-	// native `Send` bound, which only a `Local` session meets.
-	let unboxed = alpn
-		.as_deref()
-		.and_then(moq_net::Version::from_alpn)
-		.is_some_and(|version| version.is_lite());
 	let mut accepted = Accepted {
 		handle,
 		conn,
@@ -737,24 +740,12 @@ async fn serve_connection(
 		alpn,
 		url,
 	};
-	match unboxed {
-		true => {
-			let request = accepted
-				.deadline
-				.bound(server.accept_request_lite(now, session))
-				.await
-				.context("moq handshake failed")?;
-			serve_request(accepted, request, lifecycle).await
-		}
-		false => {
-			let request = accepted
-				.deadline
-				.bound(server.accept_request(now, moq_uring::transport::Local::new(session)))
-				.await
-				.context("moq handshake failed")?;
-			serve_request(accepted, request, lifecycle).await
-		}
-	}
+	let request = accepted
+		.deadline
+		.bound(server.accept_request(now, session))
+		.await
+		.context("moq handshake failed")?;
+	serve_request(accepted, request, lifecycle).await
 }
 
 /// A connection past its transport handshake, with the facts read off it
@@ -771,14 +762,14 @@ struct Accepted {
 	url: Option<moq_uring::url::Url>,
 }
 
-/// A started session's supervision, boxed so both handshake paths return one type.
+/// A started session's supervision.
 type Supervision = futures::future::BoxFuture<'static, anyhow::Result<()>>;
 
 /// Authenticate on the shared runtime, then start the session on the worker.
 /// Returns the session's supervision, which runs on the shared runtime too.
-async fn serve_request<S: moq_net::transport::poll::Session>(
+async fn serve_request(
 	accepted: Accepted,
-	request: moq_net::server::Handshake<S>,
+	request: moq_net::server::Handshake,
 	lifecycle: &Lifecycle,
 ) -> anyhow::Result<Supervision> {
 	let Accepted {
@@ -911,14 +902,31 @@ mod tests {
 	#[allow(clippy::field_reassign_with_default)]
 	fn windows_are_applied() {
 		let mut quic = moq_tokio::quic::Config::default();
-		quic.receive_window = Some(64 << 20);
+		quic.receive_window = Some(128 << 20);
 		quic.stream_receive_window = Some(8 << 20);
 		quic.send_window = Some(32 << 20);
 
 		let transport = transport(&quic.resolve()).expect("windows must be accepted");
-		assert_eq!(transport.receive_window, Some(64 << 20));
+		assert_eq!(transport.receive_window, Some(128 << 20));
 		assert_eq!(transport.stream_receive_window, Some(8 << 20));
 		assert_eq!(transport.send_window, Some(32 << 20));
+	}
+
+	/// Incomplete messages hold connection credit, so the window has to fit the largest.
+	#[test]
+	#[allow(clippy::field_reassign_with_default)]
+	fn a_receive_window_below_the_largest_message_is_refused() {
+		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.receive_window = Some(min - 1);
+		let err = transport(&quic.resolve()).expect_err("below the largest message");
+		assert!(err.to_string().contains("largest message"), "{err}");
+
+		quic.receive_window = Some(min);
+		assert_eq!(
+			transport(&quic.resolve()).expect("the minimum").receive_window,
+			Some(min)
+		);
 	}
 
 	/// The same `[quic]` section runs the same windows on both runtimes, set or
@@ -928,13 +936,13 @@ mod tests {
 	#[allow(clippy::field_reassign_with_default)]
 	fn windows_match_the_tokio_runtime() {
 		let mut set = moq_tokio::quic::Config::default();
-		set.receive_window = Some(128 << 20);
+		set.receive_window = Some(256 << 20);
 		set.stream_receive_window = Some(8 << 20);
 		set.send_window = Some(32 << 20);
 
 		for (quic, expected) in [
-			(moq_tokio::quic::Config::default(), (64 << 20, 4 << 20, 16 << 20)),
-			(set, (128 << 20, 8 << 20, 32 << 20)),
+			(moq_tokio::quic::Config::default(), (128 << 20, 4 << 20, 16 << 20)),
+			(set, (256 << 20, 8 << 20, 32 << 20)),
 		] {
 			let resolved = quic.resolve();
 			let tokio = (
@@ -959,8 +967,9 @@ mod tests {
 	#[test]
 	#[allow(clippy::field_reassign_with_default)]
 	fn bind_refuses_a_keylog_without_sslkeylogfile() {
-		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
+			return;
+		}
 		let mut server = moq_tokio::server::Config::default();
 		server.quic.keylog = Some(true);
 		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))

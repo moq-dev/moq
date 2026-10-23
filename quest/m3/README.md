@@ -30,6 +30,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [A physical-NIC peer for the zero-copy sweep](/quest/m3/zero-copy-peer.md) - the rig the zero-copy sweep runs on
 - [#3201: moq-uring: use SENDMSG_ZC for large UDP GSO trains](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - complete the prerequisite issue first
 - [#3204](/quest/m3/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
+- [Cluster dials on the ring](/quest/m3/uring-cluster-dial.md) - measure whether an io_uring relay's outbound cluster links belong on its workers
 - [#3202](/quest/m3/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: fixed-file slots for worker UDP sockets, if its own benchmark measures a win
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement, if the ECN measurement says marks survive
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a Rust redial starts at the previous connection's rate
@@ -59,7 +60,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [ID3 catalog section](/quest/m3/id3.md) - timed ID3 as a first-class container-neutral catalog section
 - [FLV script tags](/quest/m3/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [Half and quarter rate AC-3](/quest/m3/ac3-low-rate.md) - bsid 9 and 10 AC-3 parse through TS and FLV instead of being refused
-- [MSF feedback tracks](/quest/m3/msf-publish-tracks.md) - `--stats` and `--echo` work under `--catalog-format msf` through `publishTracks`, once a consumer asks
+- [MSF feedback tracks](/quest/m3/msf-publish-tracks.md) - `--report` and `--echo` work under `--catalog-format msf` through `publishTracks`, once a consumer asks
 - [MSFTS convergence](/quest/m3/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where they differ, once an MSFTS implementer engages
 - [#2279](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [CEA-608/708](/quest/m3/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
@@ -70,3 +71,4 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Interop runner withdraws before disconnecting](/quest/m3/interop-runner-approval.md) - condition: a released moq-tokio and @moq/net carry close() withdrawals; then the runner's moq.dev clients switch to close()
 - [Safari ships the WebKit 319818 fix](/quest/m3/webkit-319818.md) - the Safari release the gate admits
 - [Safari WebTransport](/quest/m3/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
+- [Studio](/quest/m3/studio/README.md) - a native and wasm streaming studio on moq-scene, moq-video, and moq-audio for creators and teams who rely on OBS today

@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it or race it against a timeout.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `MoqJsonSnapshotConfig::delta_ratio` is replaced by `deltas: bool` (default `true`).
@@ -34,6 +39,12 @@ Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
 `MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `epoch: None`.
 `MoqBroadcastConsumer::resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `None` to resolve whichever instance answers.
 Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
+
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Every `timestamp_us` input, such as `MoqTrackProducer::write_frame` or `MoqAnchor::Time`, fails with `MoqError::TimeOverflow` past `2^61 - 1` instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
