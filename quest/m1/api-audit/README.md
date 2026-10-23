@@ -83,7 +83,6 @@ Rejected in planning:
 - [Session limits only where needed](/quest/m1/api-audit/session-limits.md) - `session::Limits` keeps only bounds that nothing else enforces, and its documented example compiles
 - [Ranges refuse what the wire drops](/quest/m1/api-audit/ranges-wire.md) - relative and time anchors fail loud where a wire cannot carry them, `floor()` honors the subscription, and bindings take an optional max delay
 - [Derived origins borrow](/quest/m1/api-audit/derived-origin-close.md) - closing a JS `scope()` or `withPreference()` handle releases only that handle
-- [Binding surface trim](/quest/m1/api-audit/binding-trim.md) - route input is separate from route observation, watch verbs are uniform, and unused binding objects are gone
 - [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - Python, Go, and Dart client options use the FFI's names and nesting
 - [One decode read](/quest/m1/api-audit/decode-read.md) - audio and video decoders yield the same `Frame`, `Gap`, `End` read as moq-mux containers
 - [Watch and publish trim](/quest/m1/api-audit/watch-trim.md) - the clock is re-exported, unused watch outputs are gone, and derived publish state is read-only

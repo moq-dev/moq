@@ -217,12 +217,12 @@ func (s *Session) RecvBandwidth() *BandwidthConsumer {
 // BandwidthConsumer owns a bandwidth estimate, in bits per second.
 type BandwidthConsumer struct{ inner *ffi.MoqBandwidthConsumer }
 
-// Peek reads the current estimate, or nil while unavailable.
-func (b *BandwidthConsumer) Peek() *uint64 { return b.inner.Peek() }
+// Rate is the current estimate, or nil while unavailable.
+func (b *BandwidthConsumer) Rate() *uint64 { return b.inner.Rate() }
 
-// Changed waits for the estimate to change, or its producer to close.
-func (b *BandwidthConsumer) Changed(ctx context.Context) (*uint64, error) {
-	return bridge.Call(ctx, b.inner.Cancel, b.inner.Changed)
+// RateChanged waits for the estimate to change and returns the new Rate, or fails once its producer closes.
+func (b *BandwidthConsumer) RateChanged(ctx context.Context) (*uint64, error) {
+	return bridge.Call(ctx, b.inner.Cancel, b.inner.RateChanged)
 }
 
 // Close releases this consumer's demand, including a pending wait.

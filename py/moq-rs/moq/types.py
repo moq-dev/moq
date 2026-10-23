@@ -40,6 +40,9 @@ from moq_ffi import (
     MoqRange as Range,
 )
 from moq_ffi import (
+    MoqAnnounceRoute as AnnounceRoute,
+)
+from moq_ffi import (
     MoqRoute as Route,
 )
 from moq_ffi import (
@@ -67,6 +70,7 @@ from moq_ffi import (
 from ._records import Backoff, ConnectionStats, Datagram, Frame, Grant, Subscription, TrackInfo
 
 __all__ = [
+    "AnnounceRoute",
     "Anchor",
     "AudioCodec",
     "AudioEncoderInput",
