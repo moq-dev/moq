@@ -57,8 +57,7 @@ wall time without the jitter of subtracting two live reads. On the host it is
 the realm's performance time origin; on a `Manual` it follows `stepWall()`.
 
 Installation is scoped to the current JS realm. Close the handle `install()`
-returns in `finally`, or hold it with `using`, and keep tests sharing that
-realm serial. Timers remain bound to the clock on
+returns in `finally`, and keep tests sharing that realm serial. Timers remain bound to the clock on
 which they were created, even after restoration. Host timers used by a test
 runner or RPC framework keep running in real time.
 

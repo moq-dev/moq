@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### `Manual.install()` returns an `Installed` handle (#6510)
 
 `install()` returns an `Installed` handle instead of a restore function, matching Rust's `Manual::install`.
-Call `installed.close()` where you called `restore()`, or hold it with `using`:
+Call `installed.close()` where you called `restore()`:
 
 ```ts
 // Before
@@ -17,8 +17,6 @@ restore();
 // After
 const installed = clock.install();
 installed.close();
-// or
-using _installed = clock.install();
 ```
 
 ### Manual time steps through timer deadlines
