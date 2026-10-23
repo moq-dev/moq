@@ -45,6 +45,20 @@ describe("resolveSubprotocols", () => {
 		expect(resolveSubprotocols(["qmux-00.moq-transport-17"], {}, true)).toEqual(["qmux-00.moq-transport-17"]);
 	});
 
+	test("unsupported mapped versions are refused before negotiating", () => {
+		for (const version of ["webtransport", "qmux-99", 42, false, {}]) {
+			for (const mapped of [version, ["qmux-01", version]]) {
+				expect(() =>
+					resolveSubprotocols(
+						["app"],
+						{ app: mapped } as unknown as Parameters<typeof resolveSubprotocols>[1],
+						true,
+					),
+				).toThrow();
+			}
+		}
+	});
+
 	test("a bare entry with no versions mapping throws", () => {
 		expect(() => resolveSubprotocols(["moq-lite-04"], {}, true)).toThrow();
 	});

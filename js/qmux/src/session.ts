@@ -369,6 +369,8 @@ function versionPrefix(version: Version): string {
 			return "qmux-01.";
 		case "qmux-00":
 			return "qmux-00.";
+		default:
+			throw new Error(`Unsupported QMux version: ${JSON.stringify(version)}`);
 	}
 }
 

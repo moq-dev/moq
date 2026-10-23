@@ -252,14 +252,8 @@ export type Any =
 	| PingResponse
 	| Datagram;
 
-export function encode(frame: Any, version: WireFormat): Uint8Array {
-	if (!isQmux(version)) throw new Error(`Unsupported QMux version: ${version}`);
+export function encode(frame: Any, _version: WireFormat): Uint8Array {
 	return encodeQMux(frame);
-}
-
-/** Returns true if the version uses QMux framing (draft-00 or later). */
-export function isQmux(version: WireFormat): boolean {
-	return version === "qmux-00" || version === "qmux-01" || version === "qmux-02";
 }
 
 /** Returns true if the version uses the QMux Record framing layer and the
@@ -617,12 +611,11 @@ function decodeTransportParams(buffer: Uint8Array): TransportParams {
 	return params;
 }
 
-export function decode(buffer: Uint8Array, version: WireFormat): Any | null {
+export function decode(buffer: Uint8Array, _version: WireFormat): Any | null {
 	if (buffer.length === 0) {
 		throw new Error("Invalid frame: empty buffer");
 	}
 
-	if (!isQmux(version)) throw new Error(`Unsupported QMux version: ${version}`);
 	return decodeQMux(buffer);
 }
 

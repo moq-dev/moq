@@ -5,6 +5,8 @@
 //! to need credit updates each way, a bidirectional echo, a reset code each way, a datagram
 //! each way where records carry them, and an application close.
 
+#![cfg(any(feature = "tcp", all(unix, feature = "uds")))]
+
 use bytes::{Bytes, BytesMut};
 use moq_net::transport::poll::{RecvStream as _, SendOptions, SendStream as _, Session as _};
 use qmux::{Protocol, Session, Version};
