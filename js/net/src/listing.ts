@@ -34,11 +34,16 @@ export type TracksEvent =
 	| { kind: "removed"; name: string }
 	| { kind: "finished"; name: string };
 
+/** Whether `own` closed cleanly, so its track leaves the listing as finished. */
+function finished(own: track.Producer): boolean {
+	return own.closed.peek() === null;
+}
+
 /** One listed track and who lists it. */
 interface Entry {
 	info: track.Info;
 	/** The producer whose track lists it, so a stale unlist never removes a later track of the name. */
-	own?: object;
+	own?: track.Producer;
 	/** Whether the lister's answer lists it. */
 	answered: boolean;
 }
@@ -234,14 +239,14 @@ export class Listing {
 	}
 
 	/** List a track `own` created. */
-	listOwn(name: string, own: object, info: track.Info) {
+	listOwn(name: string, own: track.Producer, info: track.Info) {
 		const entry = this.#live.get(name);
 		if (!entry) {
 			this.#insert(name, { info, own, answered: false });
 		} else if (entry.own && !entry.answered) {
 			// The earlier track of the name has not unlisted yet, but it left the table for this
-			// one: readers see it go and the new one arrive.
-			this.#remove(name, false);
+			// one: readers see it go, as it ended, and the new one arrive.
+			this.#remove(name, finished(entry.own));
 			this.#insert(name, { info, own, answered: false });
 		} else {
 			// Listed already by the answer, and it never stopped being listed: only the owner moves.
@@ -249,12 +254,12 @@ export class Listing {
 		}
 	}
 
-	/** Unlist a track `own` created, as one that `finished` or not, unless a later one took its name. */
-	unlistOwn(name: string, own: object, finished: boolean) {
+	/** Unlist a track `own` created, as it ended, unless a later one took its name. */
+	unlistOwn(name: string, own: track.Producer) {
 		const entry = this.#live.get(name);
 		if (entry?.own !== own) return;
 		entry.own = undefined;
-		if (!entry.answered) this.#remove(name, finished);
+		if (!entry.answered) this.#remove(name, finished(own));
 	}
 
 	/** Lister support; see {@link Lister}. */

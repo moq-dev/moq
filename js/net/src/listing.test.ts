@@ -106,14 +106,14 @@ test("a lister finishes or removes a track", async () => {
 	expect(() => lister.finish("up")).toThrow();
 });
 
-test("a recreated track is removed before it is added again", async () => {
+test("a recreated track leaves as it ended before it is added again", async () => {
 	const broadcast = new BroadcastProducer();
 	broadcast.createTrack("a").close();
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "synced"]);
 	// The finished track still holds the name; its replacement takes it over.
 	broadcast.createTrack("a");
-	expect(await tracks.drain()).toEqual(["-a", "+a"]);
+	expect(await tracks.drain()).toEqual(["~a", "+a"]);
 });
 
 test("a track served on request is never listed", async () => {
