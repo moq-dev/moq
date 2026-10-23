@@ -327,6 +327,33 @@ Put together, a conference might use:
 Under light congestion video drops the tail of a group; under heavy congestion
 video stops and audio lags by at most 500 ms. No protocol change, just knobs.
 
+### Refresh
+
+A publisher can opt a track into refresh by setting its byte ratio. A new
+subscriber asks for a fresh group only when the current group's bytes after
+its first frame exceed that ratio times the first frame's size. A ratio of 2,
+for example, permits two snapshots' worth of deltas before a join asks for a
+new snapshot. Equality does not trigger it, and neither elapsed time nor more
+deltas trigger it without a join.
+
+The request does not hold back cached groups: a joiner may receive the old
+group before the publisher answers. The ratio is a refresh trigger, not a cap
+on the bytes that joiner downloads.
+
+The publisher drives the track's `Demand::wanted`: when it passes the largest
+group written, open a new group with a keyframe or complete snapshot. A Rust
+moq-json snapshot producer answers this by driving its `refresh()` alongside
+updates. It restates the current value at its newest source timestamp, with a
+new group number. Existing readers continue into that group too.
+
+Each relay judges a join from its own cache and forwards fresh-group demand
+upstream when needed, all the way to the publisher. Preserving the ratio across
+sessions requires opt-in moq-lite 07 (`moq-lite-07-wip`) at every hop. Older
+moq-lite versions do not carry refresh; moq-transport's dynamic-groups feature
+carries it with a ratio of zero, so any join after a delta asks for a new group.
+Tracks without a ratio, JSON append streams, and importers that cannot force
+keyframes do not use this mechanism.
+
 ## Datagrams
 
 Since moq-lite 05, a publisher can send a tiny single-frame group as a QUIC
