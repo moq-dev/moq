@@ -209,6 +209,8 @@ export interface TrackSequence {
 	next: number;
 	/** Open producers writing through this namespace. */
 	holders: number;
+	/** The open producer the name's newest claim went to; a later claim supersedes it. */
+	owner?: Producer;
 	/**
 	 * The highest-sequence checked group start any producer of the name wrote, which bounds a
 	 * replacement's groups the way the eviction watermark bounds a track's own.
@@ -808,10 +810,16 @@ export function compareRoutes(a: Route, b: Route): number {
 	);
 }
 
-/** Order same-prefix routes by preference, hop count, and the origin's stable spread hash. */
-export function compareRouteCandidates(path: Path.Valid, a: Route, b: Route): number {
+/**
+ * Order routes at `prefix` resolving `path` by preference, hop count, and the stable spread
+ * hash. The hash only spreads a prefix's paths: at the prefix itself a tie is left for the
+ * newest to win, so a publisher that reconnects under a new hop takes over from its lingering
+ * session at once, matching `route_order` in rs/moq-net for routes a node did not get from a
+ * cluster peer, which is every route here.
+ */
+export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: Route, b: Route): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
-	if (order !== 0) return order;
+	if (order !== 0 || path === prefix) return order;
 	const ha = spreadHash(path, a.hops);
 	const hb = spreadHash(path, b.hops);
 	return ha < hb ? -1 : ha > hb ? 1 : 0;

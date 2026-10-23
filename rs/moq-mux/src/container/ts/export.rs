@@ -496,8 +496,20 @@ impl Track {
 					}
 					self.queue(name, pending, input.jitter)?;
 				}
-				// Under sync the frames read settle each DTS, not when this leg found the source
-				// empty, and [`Self::queue`] drops what a cut group left held.
+				// A cut takes a start group it left short now, not with the next group, which may
+				// arrive after that start was due, or with the stream's end. Under sync the frames
+				// read settle each DTS, not when this leg found the source empty, so what the cut
+				// group left held goes, as on a leg that never read it.
+				Poll::Ready(Some(Event::Cut)) if !input.waiting_for_header => {
+					match self.sync {
+						None => {
+							self.settle = false;
+							self.release(name, input.jitter, true)?;
+						}
+						Some(_) => self.clock.discard(),
+					}
+					input.jitter.cut(&self.pid, self.base.2 + self.source.cuts());
+				}
 				Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => self.settle = self.sync.is_none(),
 				Poll::Ready(Some(Event::FrameEnd { .. })) => {}
 				Poll::Ready(None) => {

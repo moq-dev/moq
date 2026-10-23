@@ -80,9 +80,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 ## Required
 
-- [Every queued PR passes its own group](/quest/m0/ci/queue-allgreen.md) - the main queue switches from HEADGREEN to ALLGREEN, so a failed entry never merges behind a green one
 - [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
-- [One test filter per line](/quest/m0/ci/interop-filter-lines.md) - parallel interop filter additions to `test/justfile` rarely conflict
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - condition: the maintainer bootstrap; then measure the hosted Nightly jobs' hits, restore time, and expiry
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
