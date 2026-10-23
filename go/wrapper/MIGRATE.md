@@ -4,6 +4,25 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Dial` takes a `ClientConfig`
+
+The functional client options are replaced by a `ClientConfig` struct whose names and nesting mirror moq-ffi's `MoqClientConfig`.
+Pass `moq.ClientConfig{}` where you passed no options.
+Optional knobs are pointers, so nil keeps the native default and a zero duration keeps its native meaning (such as waiting forever).
+
+| Before | After |
+|---|---|
+| `Dial(ctx, url, opts...)` | `Dial(ctx, url, moq.ClientConfig{...})` |
+| `WithTLSVerify(false)` | `TLS: moq.ClientTLS{Insecure: true}` |
+| `WithTLSRoots`, `WithTLSSystemRoots`, `WithTLSFingerprints`, `WithClientTLSCert`, `WithClientTLSKey`, `WithTLSHostName` | `TLS.Roots`, `TLS.SystemRoots`, `TLS.Fingerprints`, `TLS.Cert`, `TLS.Key`, `TLS.HostName` |
+| `WithBind`, `WithVersions` | `Bind`, `Versions` |
+| `WithConnectTimeout`, `WithRace`, `WithResolutionDelay` | `Timeout`, `Race`, `ResolutionDelay` |
+| `WithQUICMaxStreams`, `WithQUICIdleTimeout`, `WithQUICKeepAlive`, `WithQUICGSO`, `WithQUICMTUDiscovery`, `WithQUICCongestionControl`, `WithQUICQlog`, `WithQUICKeylog` | `QUIC: moq.QUICConfig{MaxStreams, IdleTimeout, KeepAlive, GSO, MTUDiscovery, CongestionControl, Qlog, Keylog}` |
+| `WithWebSocketEnabled`, `WithWebSocketDelay` | `WebSocket: moq.WebSocketConfig{Enabled, Delay}` |
+| `WithReconnect(false)` | `Once: true` |
+| `WithBackoff(b)` | `Backoff: b` |
+| `WithPublishOrigin`, `WithConsumeOrigin` | `Publish`, `Consume` |
+
 ### JSON snapshot `DeltaRatio` is `Deltas`
 
 `json.SnapshotOptions.DeltaRatio *uint32` and `json.DefaultDeltaRatio` are replaced by `Deltas *bool` (nil enables deltas).

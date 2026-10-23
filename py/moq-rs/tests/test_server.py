@@ -57,7 +57,7 @@ async def test_server_client_roundtrip():
             # Connect a client and consume the broadcast.
             async with moq.Client(
                 f"https://{server.local_addr}",
-                tls_verify=False,
+                tls=moq.ClientTls(insecure=True),
                 bind="127.0.0.1:0",
             ) as client:
                 async for announcement in routes(client.announced()):
@@ -113,7 +113,7 @@ async def test_client_reconnects_and_resumes_announcements():
         try:
             async with moq.Client(
                 f"https://{server.local_addr}",
-                tls_verify=False,
+                tls=moq.ClientTls(insecure=True),
                 bind="127.0.0.1:0",
                 # Fast retries so the test doesn't wait out the default 1s backoff.
                 backoff=moq.Backoff(
@@ -172,10 +172,10 @@ async def test_client_failure_names_a_failing_first_dial():
         host, port = silent.getsockname()
         client = moq.Client(
             f"https://{host}:{port}",
-            tls_verify=False,
+            tls=moq.ClientTls(insecure=True),
             bind="127.0.0.1:0",
             timeout=timedelta(milliseconds=100),
-            websocket_enabled=False,
+            websocket=moq.WebSocketConfig(enabled=False),
             backoff=moq.Backoff(
                 initial=timedelta(milliseconds=50),
                 multiplier=2,
@@ -265,10 +265,9 @@ async def test_client_websocket_fallback_options():
         try:
             async with moq.Client(
                 f"https://{server.local_addr}",
-                tls_verify=False,
+                tls=moq.ClientTls(insecure=True),
                 bind="127.0.0.1:0",
-                websocket_enabled=False,
-                websocket_delay=timedelta(0),
+                websocket=moq.WebSocketConfig(enabled=False, delay=timedelta(0)),
             ) as client:
                 assert client.session is not None
         finally:
@@ -279,7 +278,7 @@ async def test_client_websocket_fallback_options():
                 pass
 
     with pytest.raises(ValueError):
-        moq.Client("https://localhost", websocket_delay=timedelta(milliseconds=-1))
+        moq.Client("https://localhost", websocket=moq.WebSocketConfig(delay=timedelta(milliseconds=-1)))
 
 
 async def test_client_connection_knobs():
@@ -296,20 +295,21 @@ async def test_client_connection_knobs():
         try:
             async with moq.Client(
                 f"https://{server.local_addr}",
-                tls_fingerprints=server.cert_fingerprints(),
-                tls_host_name="localhost",
+                tls=moq.ClientTls(fingerprints=server.cert_fingerprints(), host_name="localhost"),
                 bind="127.0.0.1:0",
                 versions=moq.versions(),
                 timeout=timedelta(seconds=5),
                 race=timedelta(0),
                 resolution_delay=timedelta(0),
-                idle_timeout=timedelta(seconds=5),
-                keep_alive=timedelta(0),
-                gso=False,
-                mtu_discovery=True,
-                congestion_control=moq.CongestionControl.LOSS,
-                keylog=False,
-                websocket_enabled=False,
+                quic=moq.QuicConfig(
+                    idle_timeout=timedelta(seconds=5),
+                    keep_alive=timedelta(0),
+                    gso=False,
+                    mtu_discovery=True,
+                    congestion_control=moq.CongestionControl.LOSS,
+                    keylog=False,
+                ),
+                websocket=moq.WebSocketConfig(enabled=False),
             ) as client:
                 assert client.session is not None
         finally:
@@ -320,7 +320,7 @@ async def test_client_connection_knobs():
                 pass
 
     with pytest.raises(ValueError):
-        moq.Client("https://localhost", idle_timeout=timedelta(milliseconds=-1))
+        moq.Client("https://localhost", quic=moq.QuicConfig(idle_timeout=timedelta(milliseconds=-1)))
 
 
 async def test_invalid_config_fails_on_enter():
@@ -372,7 +372,7 @@ async def test_request_double_accept_returns_already_responded():
         try:
             async with moq.Client(
                 f"https://{server.local_addr}",
-                tls_verify=False,
+                tls=moq.ClientTls(insecure=True),
                 bind="127.0.0.1:0",
             ):
                 await asyncio.wait_for(accept_task, timeout=5.0)
@@ -395,7 +395,7 @@ async def test_serve_helper_accepts_clients():
         try:
             async with moq.Client(
                 f"https://{server.local_addr}",
-                tls_verify=False,
+                tls=moq.ClientTls(insecure=True),
                 bind="127.0.0.1:0",
             ) as client:
                 async for announcement in routes(client.announced()):
@@ -420,7 +420,7 @@ async def test_broadcast_route_over_wire():
         try:
             async with moq.Client(
                 f"https://{server.local_addr}",
-                tls_verify=False,
+                tls=moq.ClientTls(insecure=True),
                 bind="127.0.0.1:0",
             ) as client:
                 async for announcement in routes(client.announced()):
@@ -454,7 +454,7 @@ async def test_route_update_observes_restart():
         try:
             async with moq.Client(
                 f"https://{server.local_addr}",
-                tls_verify=False,
+                tls=moq.ClientTls(insecure=True),
                 bind="127.0.0.1:0",
             ) as client:
                 announced = client.announced()
@@ -509,7 +509,7 @@ async def test_client_context_keeps_the_body_error():
             with pytest.raises(ZeroDivisionError):
                 async with moq.Client(
                     f"https://{server.local_addr}",
-                    tls_verify=False,
+                    tls=moq.ClientTls(insecure=True),
                     bind="127.0.0.1:0",
                 ) as client:
                     # Held past the context manager, so the exit has to cancel it
@@ -575,7 +575,7 @@ async def test_session_auth_reads_the_grant():
         accept_task = asyncio.create_task(accept_loop())
         try:
             async with moq.Client(
-                f"https://{server.local_addr}", tls_verify=False, bind="127.0.0.1:0", versions=version
+                f"https://{server.local_addr}", tls=moq.ClientTls(insecure=True), bind="127.0.0.1:0", versions=version
             ) as client:
                 session = client.session
                 assert session is not None

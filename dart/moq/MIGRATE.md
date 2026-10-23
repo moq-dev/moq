@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `ConnectOptions` nests like moq-ffi's client config
+
+`ConnectOptions` takes moq-ffi's names and nesting: TLS, QUIC, and WebSocket knobs move into `ClientTls`, `QuicConfig`, and `WebSocketConfig`, and `reconnect` becomes `once`.
+`ClientTls` is the generated `MoqClientTls`, which has no `const` constructor, so drop `const` from a `ConnectOptions` that sets `tls`.
+
+| Before | After |
+|---|---|
+| `tlsVerify: false` | `tls: ClientTls(insecure: true)` |
+| `tlsRoots`, `tlsSystemRoots`, `tlsFingerprints`, `tlsCert`, `tlsKey`, `tlsHostName` | `tls: ClientTls(roots: ..., systemRoots: ..., fingerprints: ..., cert: ..., key: ..., hostName: ...)` |
+| `maxStreams`, `idleTimeout`, `keepAlive`, `gso`, `mtuDiscovery`, `congestionControl`, `qlog`, `keylog` | `quic: QuicConfig(...)` with the same names |
+| `websocketEnabled`, `websocketDelay` | `websocket: WebSocketConfig(enabled: ..., delay: ...)` |
+| `reconnect: false` | `once: true` |
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio` is replaced by `bool deltas` (default `true`).

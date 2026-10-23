@@ -64,7 +64,18 @@ from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
 )
 
-from ._records import Backoff, ConnectionStats, Datagram, Frame, Grant, Subscription, TrackInfo
+from ._records import (
+    Backoff,
+    ClientTls,
+    ConnectionStats,
+    Datagram,
+    Frame,
+    Grant,
+    QuicConfig,
+    Subscription,
+    TrackInfo,
+    WebSocketConfig,
+)
 
 __all__ = [
     "Anchor",
@@ -73,6 +84,7 @@ __all__ = [
     "AudioPreset",
     "AudioSampleFormat",
     "Backoff",
+    "ClientTls",
     "ConnectionStats",
     "ConnectionStatus",
     "Datagram",
@@ -83,6 +95,7 @@ __all__ = [
     "Order",
     "ProtocolError",
     "ProtocolKind",
+    "QuicConfig",
     "Range",
     "Route",
     "Subscription",
@@ -94,4 +107,5 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoPixelFormat",
+    "WebSocketConfig",
 ]

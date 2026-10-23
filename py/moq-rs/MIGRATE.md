@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Client options nest like moq-ffi's
+
+`Client` and `connect` take moq-ffi's names and nesting: TLS, QUIC, and WebSocket knobs move into `ClientTls`, `QuicConfig`, and `WebSocketConfig` records, and `reconnect` becomes `once`.
+
+| Before | After |
+|---|---|
+| `tls_verify=False` | `tls=ClientTls(insecure=True)` |
+| `tls_roots`, `tls_system_roots`, `tls_fingerprints`, `tls_cert`, `tls_key`, `tls_host_name` | `tls=ClientTls(roots=..., system_roots=..., fingerprints=..., cert=..., key=..., host_name=...)` |
+| `max_streams`, `idle_timeout`, `keep_alive`, `gso`, `mtu_discovery`, `congestion_control`, `qlog`, `keylog` | `quic=QuicConfig(...)` with the same names |
+| `websocket_enabled`, `websocket_delay` | `websocket=WebSocketConfig(enabled=..., delay=...)` |
+| `reconnect=False` | `once=True` |
+
+`bind`, `versions`, `timeout`, `race`, `resolution_delay`, `backoff`, `publish`, and `consume` are unchanged.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `SnapshotProducer(delta_ratio=...)` is replaced by `deltas: bool = True`.

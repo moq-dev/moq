@@ -15,6 +15,8 @@ import (
 // even a slow CI machine reconnects well inside this.
 const reconnectTimeout = 30 * time.Second
 
+func ptr[T any](v T) *T { return &v }
+
 // relay is a local MoQ server plus the sessions it accepted, so a test can drop
 // both the way a fleet deploy does and bring a replacement up on the same port.
 type relay struct {
@@ -77,14 +79,14 @@ func (r *relay) restart(t *testing.T, ctx context.Context) *relay {
 func dialWorker(t *testing.T, ctx context.Context, url string) *moq.Client {
 	t.Helper()
 
-	client, err := moq.Dial(ctx, url,
-		moq.WithTLSVerify(false),
-		moq.WithBackoff(moq.Backoff{
+	client, err := moq.Dial(ctx, url, moq.ClientConfig{
+		TLS: moq.ClientTLS{Insecure: true},
+		Backoff: moq.Backoff{
 			Initial: 50 * time.Millisecond,
 			Max:     time.Second,
 			Timeout: moq.RetryForever,
-		}),
-	)
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,17 +293,16 @@ func TestDialWebSocketOptions(t *testing.T) {
 	defer r.server.Close()
 
 	url := "https://" + r.addr
-	client, err := moq.Dial(ctx, url,
-		moq.WithTLSVerify(false),
-		moq.WithWebSocketEnabled(false),
-		moq.WithWebSocketDelay(0),
-	)
+	client, err := moq.Dial(ctx, url, moq.ClientConfig{
+		TLS:       moq.ClientTLS{Insecure: true},
+		WebSocket: moq.WebSocketConfig{Enabled: ptr(false), Delay: ptr(time.Duration(0))},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = client.Close()
 
-	if _, err := moq.Dial(ctx, url, moq.WithWebSocketDelay(-time.Millisecond)); err == nil {
+	if _, err := moq.Dial(ctx, url, moq.ClientConfig{WebSocket: moq.WebSocketConfig{Delay: ptr(-time.Millisecond)}}); err == nil {
 		t.Fatal("negative websocket delay dialed")
 	}
 }
@@ -320,27 +321,27 @@ func TestDialConnectionOptions(t *testing.T) {
 	}
 
 	url := "https://" + r.addr
-	client, err := moq.Dial(ctx, url,
-		moq.WithTLSVerify(false),
-		moq.WithTLSHostName("localhost"),
-		moq.WithVersions(moq.Versions()...),
-		moq.WithConnectTimeout(5*time.Second),
-		moq.WithRace(0),
-		moq.WithResolutionDelay(0),
-		moq.WithQUICIdleTimeout(5*time.Second),
-		moq.WithQUICKeepAlive(0),
-		moq.WithQUICGSO(false),
-		moq.WithQUICMTUDiscovery(true),
-		moq.WithQUICCongestionControl(moq.CongestionControlLoss),
-		moq.WithQUICKeylog(false),
-		moq.WithWebSocketEnabled(false),
-	)
+	client, err := moq.Dial(ctx, url, moq.ClientConfig{
+		TLS:             moq.ClientTLS{Insecure: true, HostName: "localhost"},
+		Versions:        moq.Versions(),
+		Timeout:         ptr(5 * time.Second),
+		Race:            ptr(time.Duration(0)),
+		ResolutionDelay: ptr(time.Duration(0)),
+		QUIC: moq.QUICConfig{
+			IdleTimeout:       ptr(5 * time.Second),
+			KeepAlive:         ptr(time.Duration(0)),
+			GSO:               ptr(false),
+			MTUDiscovery:      ptr(true),
+			CongestionControl: ptr(moq.CongestionControlLoss),
+		},
+		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = client.Close()
 
-	if _, err := moq.Dial(ctx, url, moq.WithQUICIdleTimeout(-time.Millisecond)); err == nil {
+	if _, err := moq.Dial(ctx, url, moq.ClientConfig{QUIC: moq.QUICConfig{IdleTimeout: ptr(-time.Millisecond)}}); err == nil {
 		t.Fatal("negative idle timeout dialed")
 	}
 }

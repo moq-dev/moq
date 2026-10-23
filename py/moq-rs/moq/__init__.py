@@ -55,6 +55,7 @@ from .types import (
     AudioEncoderInput,
     AudioSampleFormat,
     Backoff,
+    ClientTls,
     ConnectionStats,
     ConnectionStatus,
     Datagram,
@@ -65,6 +66,7 @@ from .types import (
     Order,
     ProtocolError,
     ProtocolKind,
+    QuicConfig,
     Range,
     Route,
     Subscription,
@@ -75,6 +77,7 @@ from .types import (
     VideoEncoderKind,
     VideoEncoderOutput,
     VideoPixelFormat,
+    WebSocketConfig,
 )
 
 __all__ = [
@@ -101,6 +104,7 @@ __all__ = [
     "BroadcastProducer",
     "BroadcastRequest",
     "Client",
+    "ClientTls",
     "CongestionControl",
     "ConnectionStats",
     "ConnectionStatus",
@@ -110,6 +114,7 @@ __all__ = [
     "Frame",
     "ProtocolError",
     "ProtocolKind",
+    "QuicConfig",
     "FetchGroupOptions",
     "Grant",
     "GroupConsumer",
@@ -140,6 +145,7 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoPixelFormat",
+    "WebSocketConfig",
     "connect",
     "epoch_time",
     "is_auth",

@@ -28,6 +28,9 @@ typedef Transport = MoqTransport;
 /// The congestion control family for a QUIC connection.
 typedef CongestionControl = MoqCongestionControl;
 
+/// Certificate trust and the mTLS identity for `ConnectOptions.tls`.
+typedef ClientTls = MoqClientTls;
+
 /// The publish side of an origin: create broadcasts so subscribers can discover them.
 typedef OriginProducer = MoqOriginProducer;
 

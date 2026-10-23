@@ -51,8 +51,11 @@ func TestSessionAuthReadsTheGrant(t *testing.T) {
 		accepted <- session
 	}()
 
-	client, err := moq.Dial(ctx, "https://"+server.LocalAddr(),
-		moq.WithTLSVerify(false), moq.WithVersions(version), moq.WithReconnect(false))
+	client, err := moq.Dial(ctx, "https://"+server.LocalAddr(), moq.ClientConfig{
+		TLS:      moq.ClientTLS{Insecure: true},
+		Versions: []string{version},
+		Once:     true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
