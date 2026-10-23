@@ -419,13 +419,13 @@ impl TrackState {
 
 	/// Where in `playlist.segments` this track resumes, re-anchoring (and warning) if the
 	/// upstream window moved out from under us.
-	fn anchor(&mut self, playlist_seq: u64, last_playlist_seq: u64, total_segments: usize) -> usize {
-		// Joining a live window: start near its edge rather than replaying the whole thing.
-		let live_edge = total_segments.saturating_sub(ANCHOR_SEGMENTS);
+	fn anchor(&mut self, playlist: &MediaPlaylist) -> Result<usize> {
+		let playlist_seq = playlist.media_sequence;
+		let last_playlist_seq = playlist_seq + playlist.segments.len() as u64;
 
 		// First step: starting mid-window is normal, so no warning.
 		let Some(next) = self.next_sequence else {
-			return live_edge;
+			return join(playlist);
 		};
 
 		if next > last_playlist_seq {
@@ -437,7 +437,7 @@ impl TrackState {
 				"imported ahead of playlist (upstream sequence reset?), re-anchoring near the live edge"
 			);
 			self.reanchor();
-			return live_edge;
+			return join(playlist);
 		}
 
 		if next < playlist_seq {
@@ -448,10 +448,10 @@ impl TrackState {
 				"fell behind the playlist window, resuming from its oldest segment"
 			);
 			self.reanchor();
-			return 0;
+			return Ok(0);
 		}
 
-		(next - playlist_seq) as usize
+		Ok((next - playlist_seq) as usize)
 	}
 
 	/// Forget where we were, so the next pushed segment re-bases the MoQ group sequence.
@@ -464,9 +464,8 @@ impl TrackState {
 	async fn consume_segments(&mut self, fetcher: &Fetcher, playlist: &MediaPlaylist) -> Result<usize> {
 		let playlist_seq = playlist.media_sequence;
 		let total_segments = playlist.segments.len();
-		let last_playlist_seq = playlist_seq + total_segments as u64;
 
-		let skip = self.anchor(playlist_seq, last_playlist_seq, total_segments);
+		let skip = self.anchor(playlist)?;
 		let to_process = total_segments.saturating_sub(skip);
 
 		debug!(
@@ -661,12 +660,15 @@ impl Import {
 	///
 	/// The playlist ends cleanly once every rendition's playlist carries `EXT-X-ENDLIST` and its
 	/// last segment is imported; this then returns `Ok`, and [`finish`](Self::finish) ends the
-	/// broadcast. A playlist that never ends runs until cancelled.
+	/// broadcast. A playlist that never ends runs until cancelled. Import follows live playlists
+	/// only: one that already carries `EXT-X-ENDLIST` when a rendition joins it fails with
+	/// [`Error::PlaylistEnded`], rather than importing its tail and ending as if it were whole.
 	///
 	/// A failed step is logged and retried with escalating backoff, and the import ends with the
 	/// last error once the backoff budget is spent, so a broken source surfaces within seconds
-	/// instead of looping forever. The one shortcut is an HTTP status the origin actually sent: a
-	/// `404` playlist ends the import immediately, since no amount of waiting turns it into a `200`.
+	/// instead of looping forever. A settled answer ends the import immediately: an HTTP status
+	/// the origin actually sent, such as a `404` playlist, or [`Error::PlaylistEnded`], since no
+	/// amount of waiting changes either.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
 		let mut deadline = moq_clock::now() + STEP_RETRY_BUDGET;
@@ -696,9 +698,9 @@ impl Import {
 					deadline = moq_clock::now() + STEP_RETRY_BUDGET;
 					outcome
 				}
-				// A status the origin actually sent is its answer: a 404 playlist is not going to
-				// become a 200 on the next pass. Everything else rides the backoff budget.
-				Err(err) if err.status().is_some_and(|status| !crate::status_retryable(status)) => {
+				// A settled answer, such as a 404 playlist, is not going to become a 200 on the next
+				// pass. Everything else rides the backoff budget.
+				Err(err) if err.settled() => {
 					return Err(err);
 				}
 				Err(err) => {
@@ -821,8 +823,7 @@ impl Import {
 						// permanently-dead variant doesn't end an import the others could still
 						// serve. Keeping whichever error came last instead would make the outcome
 						// depend on rendition order.
-						let recoverable = err.status().is_none_or(crate::status_retryable);
-						if recoverable || failed.is_none() {
+						if !err.settled() || failed.is_none() {
 							failed = Some(err);
 						}
 					}
@@ -902,6 +903,19 @@ impl Import {
 
 		Ok(())
 	}
+}
+
+/// Where a rendition joins `playlist` when it has no position in it yet.
+///
+/// A live window is joined near its edge (see [`ANCHOR_SEGMENTS`]). A playlist that has already
+/// ended is refused: joining its tail would end the import cleanly having published an arbitrary
+/// suffix of the recording, and replaying it whole would burst it out faster than real time,
+/// withholding the catalog until the last segment downloads.
+fn join(playlist: &MediaPlaylist) -> Result<usize> {
+	if playlist.end_list {
+		return Err(Error::PlaylistEnded);
+	}
+	Ok(playlist.segments.len().saturating_sub(ANCHOR_SEGMENTS))
 }
 
 /// Compute the delay before the next import step should run.
@@ -1239,28 +1253,56 @@ mod tests {
 		assert_eq!(uris, ["large.m3u8", "medium.m3u8", "small.m3u8"]);
 	}
 
+	/// A `len`-segment window starting at `media_sequence`, ended with `EXT-X-ENDLIST` or not.
+	fn window(media_sequence: u64, len: usize, end_list: bool) -> MediaPlaylist {
+		MediaPlaylist {
+			media_sequence,
+			segments: vec![MediaSegment::default(); len],
+			end_list,
+			..Default::default()
+		}
+	}
+
 	/// Joining a live window must start near its edge, not replay the whole thing.
 	#[test]
 	fn first_anchor_joins_near_the_live_edge() {
 		let mut track = track_state();
-		// A 10-segment window starting at media sequence 100.
-		assert_eq!(track.anchor(100, 110, 10), 10 - ANCHOR_SEGMENTS);
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 10 - ANCHOR_SEGMENTS);
 	}
 
 	/// A window shorter than the rewind is consumed whole rather than skipped.
 	#[test]
 	fn first_anchor_takes_a_short_window_whole() {
 		let mut track = track_state();
-		assert_eq!(track.anchor(0, 2, 2), 0);
+		assert_eq!(track.anchor(&window(0, 2, false)).unwrap(), 0);
+	}
+
+	/// A playlist that has already ended is refused however short, since importing any part of
+	/// it would end cleanly on a recording the import never followed.
+	#[test]
+	fn first_anchor_refuses_an_ended_playlist() {
+		for len in [2, 10] {
+			let mut track = track_state();
+			let err = track.anchor(&window(100, len, true)).unwrap_err();
+			assert!(matches!(err, Error::PlaylistEnded), "{err:?}");
+		}
 	}
 
 	#[test]
 	fn contiguous_anchor_resumes_where_it_left_off() {
 		let mut track = track_state();
 		track.next_sequence = Some(105);
-		assert_eq!(track.anchor(100, 110, 10), 5);
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 5);
 		// Still anchored: no re-base.
 		assert_eq!(track.next_sequence, Some(105));
+	}
+
+	/// A followed playlist that ends keeps importing from where it left off, through its end.
+	#[test]
+	fn contiguous_anchor_follows_a_playlist_into_its_end() {
+		let mut track = track_state();
+		track.next_sequence = Some(105);
+		assert_eq!(track.anchor(&window(100, 10, true)).unwrap(), 5);
 	}
 
 	/// An upstream sequence reset leaves us "ahead"; rejoin near the live edge.
@@ -1268,8 +1310,17 @@ mod tests {
 	fn anchor_ahead_of_playlist_rejoins_near_the_live_edge() {
 		let mut track = track_state();
 		track.next_sequence = Some(500);
-		assert_eq!(track.anchor(100, 110, 10), 10 - ANCHOR_SEGMENTS);
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 10 - ANCHOR_SEGMENTS);
 		assert!(track.next_sequence.is_none());
+	}
+
+	/// Rejoining after a reset is a join too, so an ended playlist is refused there as well.
+	#[test]
+	fn anchor_ahead_of_an_ended_playlist_is_refused() {
+		let mut track = track_state();
+		track.next_sequence = Some(500);
+		let err = track.anchor(&window(100, 10, true)).unwrap_err();
+		assert!(matches!(err, Error::PlaylistEnded), "{err:?}");
 	}
 
 	/// Falling out of the window loses media either way; take everything still there.
@@ -1277,7 +1328,7 @@ mod tests {
 	fn anchor_behind_playlist_resumes_from_the_oldest_segment() {
 		let mut track = track_state();
 		track.next_sequence = Some(5);
-		assert_eq!(track.anchor(100, 110, 10), 0);
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 0);
 		assert!(track.next_sequence.is_none());
 	}
 
@@ -1440,21 +1491,57 @@ mod tests {
 		assert_eq!(import.video[0].next_sequence, Some(2));
 	}
 
-	/// A playlist that ends (`EXT-X-ENDLIST`) ends the import once its last segment is in, and the
-	/// finished broadcast keeps serving it, catalog included, for the retention.
-	#[tokio::test]
-	async fn an_ended_playlist_finishes_the_import() {
-		let (init, fragments) = fmp4_parts(2);
+	/// One file holding the fixture's init and four segments that each open a group, and a playlist
+	/// listing the first `count` of them, ended with `EXT-X-ENDLIST` or not. The file is the same
+	/// whatever `count`, so rewriting the playlist models a live window growing.
+	fn recording(count: usize, end_list: bool) -> (Vec<u8>, String) {
+		// The fixture interleaves per-track moofs, so only fragments 0, 1, 2 and 4 open a group.
+		let (init, fragments) = fmp4_parts(5);
+		let segments: Vec<&Vec<u8>> = [0, 1, 2, 4].iter().map(|&k| &fragments[k]).collect();
+		assert!(count <= segments.len());
+
 		let mut resource = init.clone();
-		resource.extend_from_slice(&fragments[0]);
-		resource.extend_from_slice(&fragments[1]);
-		let playlist = format!(
-			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}\nmedia.mp4\n#EXT-X-ENDLIST\n",
-			init.len(),
-			fragments[0].len(),
-			init.len(),
-			fragments[1].len()
+		let mut playlist = format!(
+			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n",
+			init.len()
 		);
+		for (index, segment) in segments.iter().enumerate() {
+			if index < count {
+				let range = format!("{}@{}", segment.len(), resource.len());
+				playlist.push_str(&format!("#EXTINF:1,\n#EXT-X-BYTERANGE:{range}\nmedia.mp4\n"));
+			}
+			resource.extend_from_slice(segment);
+		}
+		if end_list {
+			playlist.push_str("#EXT-X-ENDLIST\n");
+		}
+		(resource, playlist)
+	}
+
+	/// A playlist that has already ended when the import joins it is refused before anything is
+	/// published, rather than importing its last few segments and ending as if they were the whole
+	/// recording. The refusal is settled, so `run` reports it without spending the retry budget.
+	#[tokio::test]
+	async fn an_initially_ended_playlist_is_refused() {
+		let (resource, playlist) = recording(4, true);
+		let (mut import, catalog) = write_import(&temp_dir(), &resource, &playlist);
+
+		assert!(matches!(import.init().await, Err(Error::PlaylistEnded)));
+		assert!(import.video[0].importer.is_none(), "nothing was imported");
+		assert!(catalog.snapshot().video.renditions.is_empty());
+
+		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+			.await
+			.expect("a settled refusal skips the retry budget");
+		assert!(matches!(run, Err(Error::PlaylistEnded)));
+	}
+
+	/// A followed playlist that gains `EXT-X-ENDLIST` ends the import once its last segment is in,
+	/// including one published alongside the end, and the finished broadcast keeps serving it,
+	/// catalog included, for the retention.
+	#[tokio::test]
+	async fn a_playlist_that_ends_later_finishes_the_import() {
+		let (resource, playlist) = recording(3, false);
 		let dir = temp_dir();
 		std::fs::write(dir.join("media.mp4"), &resource).unwrap();
 		std::fs::write(dir.join("media.m3u8"), playlist).unwrap();
@@ -1467,10 +1554,21 @@ mod tests {
 		let playlist = Url::from_file_path(dir.join("media.m3u8")).unwrap();
 		let mut import = Import::new(broadcast, catalog, Config::new(playlist)).unwrap();
 
+		import.init().await.unwrap();
+		assert_eq!(
+			import.video[0].next_sequence,
+			Some(3),
+			"the live window was joined whole"
+		);
+		assert!(!import.video[0].ended);
+
+		let (_, ended) = recording(4, true);
+		std::fs::write(dir.join("media.m3u8"), ended).unwrap();
 		tokio::time::timeout(Duration::from_secs(10), import.run())
 			.await
 			.expect("an ended playlist ends the import")
 			.unwrap();
+		assert_eq!(import.video[0].next_sequence, Some(4), "the final segment was imported");
 		let finish = import.finish().unwrap();
 		assert_eq!(finish.linger(), max_age);
 		let mut listed = consumer.track("catalog.json").unwrap().subscribe(None).await.unwrap();
@@ -1520,21 +1618,14 @@ mod tests {
 	/// are still running cannot evict the finished rendition.
 	#[tokio::test]
 	async fn an_ended_rendition_is_not_evicted() {
-		let (init, fragments) = fmp4_parts(2);
-		let mut resource = init.clone();
-		resource.extend_from_slice(&fragments[0]);
-		resource.extend_from_slice(&fragments[1]);
-		let playlist = format!(
-			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}\nmedia.mp4\n#EXT-X-ENDLIST\n",
-			init.len(),
-			fragments[0].len(),
-			init.len(),
-			fragments[1].len()
-		);
+		let (resource, playlist) = recording(2, false);
 		let dir = temp_dir();
 		let (mut import, _catalog) = write_import(&dir, &resource, &playlist);
 
 		import.init().await.unwrap();
+		let (_, ended) = recording(2, true);
+		std::fs::write(dir.join("media.m3u8"), ended).unwrap();
+		assert!(import.step(OnError::Warn).await.unwrap().ended);
 		assert!(import.video[0].ended, "the rendition imported its last segment");
 
 		std::fs::remove_file(dir.join("media.m3u8")).unwrap();

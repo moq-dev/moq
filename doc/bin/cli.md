@@ -17,7 +17,7 @@ Docker; see [Install](/setup/install).
 | --- | --- | --- |
 | `import` | `ts`, `fmp4`, `flv`, `avc3` | Read a container from stdin (usually FFmpeg). |
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
-| `import` | `hls <url>` | Pull a remote HLS playlist. |
+| `import` | `hls <url>` | Follow a remote live HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |

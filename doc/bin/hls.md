@@ -20,9 +20,11 @@ moq --connect https://relay.example.com/anon --broadcast my-stream.hang import h
 The CLI serves the one `--broadcast` it was given, at
 `/{broadcast}/master.m3u8` and `/{broadcast}/manifest.mpd`.
 
-Import follows a live playlist until every rendition's playlist ends with
-`EXT-X-ENDLIST`, then keeps the finished broadcast up until its media is stale
-(see [retention](/bin/cli#retention-and-latency)).
+Import follows a live playlist, joining a few segments behind its live edge,
+until every rendition's playlist ends with `EXT-X-ENDLIST`. It then keeps the
+finished broadcast up until its media is stale
+(see [retention](/bin/cli#retention-and-latency)). A playlist that has already
+ended, such as a VOD recording, is refused with an error rather than imported.
 
 ## How export works
 

@@ -23,7 +23,3 @@ is consumed before deciding that completion was empty. Cover initial ENDLIST,
 completion after publication, and genuinely empty input with deterministic
 regression tests. Do not add a retry or delay. No public API or wire change
 is expected.
-
-## Related
-
-- [Finite HLS start position](/quest/m1/release-audit/hls-finite.md) - a separate contract for which segments to import
