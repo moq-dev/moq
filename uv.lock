@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -8,7 +8,6 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "moq",
     "moq-ffi",
     "moq-rs",
 ]
@@ -469,9 +468,8 @@ wheels = [
 ]
 
 [[package]]
-name = "moq"
-version = "0.0.0"
-source = { virtual = "." }
+name = "moq-ffi"
+source = { editable = "." }
 
 [package.dev-dependencies]
 dev = [
@@ -486,6 +484,9 @@ docs = [
     { name = "myst-parser", marker = "python_full_version >= '3.12'" },
     { name = "sphinx", marker = "python_full_version >= '3.12'" },
 ]
+
+[package.group-requires-python]
+docs = ">=3.12"
 
 [package.metadata]
 
@@ -504,10 +505,6 @@ docs = [
 ]
 
 [[package]]
-name = "moq-ffi"
-source = { editable = "py/moq-ffi" }
-
-[[package]]
 name = "moq-rs"
 version = "0.6.0"
 source = { editable = "py/moq-rs" }
@@ -516,7 +513,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "moq-ffi", editable = "py/moq-ffi" }]
+requires-dist = [{ name = "moq-ffi", editable = "." }]
 
 [[package]]
 name = "myst-parser"
