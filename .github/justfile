@@ -1,5 +1,9 @@
 set working-directory := '..'
 
+# Build and publish the development environment to nix.moq.dev.
+cache:
+    bash sh/gh/cache.sh
+
 # Build the runner image with a temporary policy on a disposable hosted runner.
 runner-vm-ci:
     #!/usr/bin/env bash
