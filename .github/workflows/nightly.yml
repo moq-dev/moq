@@ -176,6 +176,11 @@ jobs:
           - name: OBS
             recipe: obs ci
             shell: .#obs
+          # The OBS unit tests under ThreadSanitizer, against stubbed libobs, so
+          # the plain shell suffices. A loaded run of moq-output-test can take
+          # 60 to 90 s instead of about 8; the suite took 2 to 4.5 min locally.
+          - name: OBS TSan
+            recipe: obs test
           - name: moq-c C fixtures
             recipe: rs c-tests
 
