@@ -143,6 +143,7 @@ humantime-serde = "1.1.1"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 # Interface addresses for WebRTC host candidates (moq-tokio's `webrtc` feature).
 if-addrs = "0.15"
+indexmap = "2.14.2"
 io-uring = "0.7.15"
 jsonwebtoken = "11"
 kio = { version = "0.6.2", path = "rs/kio" }
