@@ -476,8 +476,9 @@ one leg missed, and a unit of a sparse track (such as SCTE-35) lost with no
 later jump in it, still go out as stuffing where the other leg has them. The
 SSRC follows the publisher [epoch](/concept/moq-lite#publisher-epochs), so
 every hop must carry it: moq-transport draft 17 or later, or the opt-in
-moq-lite 07 (see [Publisher runs](#publisher-runs)). A multicast destination
-gets the system's default TTL.
+moq-lite 07 (see [Publisher runs](#publisher-runs)). The datagrams go out at
+the multiplex rate on the `--delay` clock, so `--rtp` refuses `--delay 0s`. A
+multicast destination gets the system's default TTL.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same

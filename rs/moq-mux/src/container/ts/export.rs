@@ -1433,8 +1433,12 @@ where
 	/// one that arrives. Two limits remain: SI a leg missed, and a unit of a sparse track lost
 	/// with no later jump in its track, go out as stuffing where another leg has them.
 	///
-	/// Needs [`Self::with_sync`], and a route with an epoch: the SSRC must change with the
-	/// publisher instance, and an epochless route names none. Each fails at the program tables.
+	/// Each datagram goes out on the jitter buffer's clock at its place in the slot after the one
+	/// it is laid in, at the multiplex's pace rather than in one burst a send queue may not hold.
+	///
+	/// Needs [`Self::with_sync`], a [delay](Self::with_delay) for that clock, and a route with an
+	/// epoch: the SSRC must change with the publisher instance, and an epochless route names
+	/// none. Each fails at the program tables.
 	/// Only moq-transport draft 17 and later, and moq-lite 07, carry the epoch across a hop.
 	pub fn with_rtp(mut self) -> Self {
 		self.rtp = true;
@@ -1639,6 +1643,11 @@ where
 					self.held = Some(ready);
 					continue;
 				}
+				if !self.queue.is_empty() {
+					// That tail includes the datagrams still paced out ([`Self::pace`]).
+					self.held = Some(ready);
+					break;
+				}
 				self.rewind();
 				self.generation = ready.generation;
 			}
@@ -1770,11 +1779,8 @@ where
 
 	/// When the datagrams of slot `index` go out: spread across the slot after the one it is laid
 	/// in ([`Self::slot_due`]), from its start, at the multiplex's pace rather than in one burst a
-	/// send queue may not hold. `None` without a delay, where no clock lays the slots.
+	/// send queue may not hold.
 	fn pace(&self, index: u128) -> Option<(moq_clock::Instant, Duration)> {
-		if self.delay.is_zero() {
-			return None;
-		}
 		let at = |slot: u128| {
 			let key = slot * PCR_INTERVAL.as_nanos() + self.max_drain().as_nanos() + self.delay.as_nanos();
 			let key = Timestamp::from_micros(u64::try_from(key / 1_000).ok()?).ok()?;
@@ -2321,7 +2327,7 @@ where
 		if let Some(flagged) = &mut self.flagged {
 			flagged.clear();
 		}
-		self.queue.clear();
+		debug_assert!(self.queue.is_empty(), "the old generation's output went out first");
 		self.last_psi = None;
 		for si in self.si.values_mut() {
 			si.last_emit = None;
@@ -2390,6 +2396,10 @@ where
 		anyhow::ensure!(
 			self.sync || !self.rtp,
 			"MPEG-TS over RTP needs --sync: only a synced multiplex lays each packet where every leg does"
+		);
+		anyhow::ensure!(
+			!self.rtp || !self.delay.is_zero(),
+			"MPEG-TS over RTP needs a --delay: without one no clock paces the datagrams"
 		);
 		// A measured rate would give each leg a grid of its own.
 		let sync = match self.sync {

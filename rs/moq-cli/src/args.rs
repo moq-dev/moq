@@ -374,6 +374,10 @@ impl Invocation {
 					stdout.rtp.is_none_or(|addr| addr.port() != 0),
 					"--rtp needs a destination port other than 0"
 				);
+				anyhow::ensure!(
+					stdout.rtp.is_none() || !stdout.max_delay.is_zero(),
+					"--rtp needs a --delay: without one no clock paces the datagrams"
+				);
 				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
 					anyhow::ensure!(
 						!export.select.no_video,
@@ -1268,8 +1272,9 @@ pub struct Transport {
 	/// Send the output as RTP (RFC 2250) over UDP to `ADDR` (`IP:PORT`) instead of stdout, seven
 	/// TS packets a datagram, with headers that follow from the packets' place on the multiplex
 	/// and from the broadcast, so the legs of a 1+1 pair send the same datagrams for an SMPTE
-	/// ST 2022-7 receiver to merge. Needs `--sync`, and a route carrying the publisher's epoch:
-	/// moq-transport draft 17 or later, or moq-lite 07, on every hop.
+	/// ST 2022-7 receiver to merge, paced at the multiplex rate on the `--delay` clock. Needs
+	/// `--sync`, a nonzero `--delay`, and a route carrying the publisher's epoch: moq-transport
+	/// draft 17 or later, or moq-lite 07, on every hop.
 	#[usage(long, value_name = "ADDR", conflicts("--stitch", "--passthrough"))]
 	pub rtp: Option<std::net::SocketAddr>,
 
@@ -1416,8 +1421,8 @@ mod tests {
 	}
 
 	/// `export ts --rtp` sends what `--sync` renders, so it needs it and refuses what it
-	/// refuses, takes a destination with a port, refused before anything dials, and leaves
-	/// stdout to another stage.
+	/// refuses, takes a destination with a port and a delay to pace by, refused before anything
+	/// dials, and leaves stdout to another stage.
 	#[test]
 	fn export_ts_rtp_needs_sync_and_leaves_stdout() {
 		let parse = |rtp: &str, args: &[&str]| {
@@ -1443,6 +1448,11 @@ mod tests {
 		assert!(parse("127.0.0.1", &["--sync"]).is_err(), "a destination without a port");
 		let err = parse("[::1]:0", &["--sync"]).unwrap().validate().unwrap_err();
 		assert!(err.to_string().contains("port other than 0"), "{err}");
+		let err = parse("127.0.0.1:5004", &["--sync", "--delay", "0s"])
+			.unwrap()
+			.validate()
+			.unwrap_err();
+		assert!(err.to_string().contains("--rtp needs a --delay"), "{err}");
 	}
 
 	fn export(flags: &[&str]) -> Result<Invocation, ParseError> {

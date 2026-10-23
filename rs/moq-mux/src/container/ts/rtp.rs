@@ -9,7 +9,9 @@
 //! only the runs it is sure of: past the slot it joined or last jumped at, whose clock and
 //! tables flag the break where a leg laying it in turn does not, and holding no lane position
 //! another leg may fill ([`Laid::unsure`](super::lane::Laid::unsure)). The rest are withheld,
-//! so another leg's copy is the one that arrives.
+//! so another leg's copy is the one that arrives. That includes a run the export ends inside:
+//! a leg still receiving the broadcast, or this one once its publisher returns, fills the rest
+//! of it, so a short or padded copy would put a second datagram under its sequence number.
 
 use std::sync::Arc;
 

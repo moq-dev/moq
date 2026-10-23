@@ -125,6 +125,8 @@ struct Live {
 	start: Instant,
 	tick: u64,
 	audio_index: u64,
+	/// The next audio frame opens a group: the first after a [restart](Self::restart_audio).
+	audio_opens: bool,
 }
 
 impl Live {
@@ -199,6 +201,7 @@ impl Live {
 			start: moq_clock::now(),
 			tick: 0,
 			audio_index: 0,
+			audio_opens: false,
 		}
 	}
 
@@ -323,6 +326,22 @@ impl Live {
 			group.abort(moq_net::Error::Old).unwrap();
 		}
 		self.stalling = true;
+	}
+
+	/// End the video, as a broadcast whose video has stopped: its lane carries nothing more.
+	fn end_video(&mut self) {
+		if let Some(mut group) = self.group.take() {
+			group.finish().unwrap();
+		}
+		self.video.finish().unwrap();
+	}
+
+	/// Declare a marker on the audio and move the timeline `by` µs ahead from there, as a
+	/// source that restarted it.
+	fn restart_audio(&mut self, by: u64) {
+		self.audio.discontinuity().unwrap();
+		self.audio_opens = true;
+		self.origin += by;
 	}
 
 	/// Send nothing for `gap`, as a publisher that died, then resume at the live edge on the
@@ -480,7 +499,7 @@ impl Live {
 				timestamp: Timestamp::from_micros(self.origin + index * AUDIO_US).unwrap(),
 				duration: None,
 				payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
-				keyframe: index.is_multiple_of(AUDIO_GROUP),
+				keyframe: std::mem::take(&mut self.audio_opens) || index.is_multiple_of(AUDIO_GROUP),
 			})
 			.unwrap();
 		self.audio_index += 1;
@@ -1690,6 +1709,53 @@ async fn rtp_refuses_an_epochless_route() {
 	live.rtp = true;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(2 * GOP, &mut [&mut leg], |_| false).await;
+}
+
+/// Without a delay no clock paces the datagrams, so RTP refuses it rather than send each slot
+/// in one burst.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "needs a --delay")]
+async fn rtp_refuses_a_zero_delay() {
+	let mut live = Live::new(1.0, 0).await;
+	live.rtp(&moq_net::Epoch::mint()).await;
+	let mut leg = live.join(Duration::ZERO).await;
+	leg.export = leg.export.with_delay(Duration::ZERO);
+	live.run(2 * GOP, &mut [&mut leg], |_| false).await;
+}
+
+/// A restart that opens a new generation while the old one's last datagrams are still paced out
+/// sends them before adopting it. With the video ended, the old timeline's last slots hold runs
+/// the leg is sure of beside the audio lane the restart leaves unknown, paced across the slot
+/// after each.
+#[tokio::test(start_paused = true)]
+async fn an_rtp_leg_sends_its_paced_tail_before_a_restart() {
+	let epoch = moq_net::Epoch::mint();
+	let restart = 4_000_000;
+	for lag in LAGS {
+		let mut live = Live::new(1.0, lag).await;
+		live.rtp(&epoch).await;
+		let mut leg = live.join(Duration::ZERO).await;
+		live.run(4 * GOP, &mut [&mut leg], |_| false).await;
+		live.end_video();
+		live.run_audio(restart, &mut [&mut leg]).await;
+		live.restart_audio(10_000_000);
+		live.run_audio(restart + 2_000_000, &mut [&mut leg]).await;
+		assert_eq!(
+			leg.export.discontinuity(),
+			1,
+			"lag {lag}: the restart opened no generation"
+		);
+		let last = datagrams(&leg, 0)
+			.into_keys()
+			.map(|(at, _)| at)
+			.filter(|at| *at < 10_000_000)
+			.max();
+		let slot = PCR_INTERVAL.as_micros() as u64;
+		assert!(
+			last >= Some(restart - slot),
+			"lag {lag}: the old timeline's datagrams stop at {last:?} µs, short of {restart} µs"
+		);
+	}
 }
 
 /// A group ending in a burst still fills its lane at the next group's release, so a leg holding
