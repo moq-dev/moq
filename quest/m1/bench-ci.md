@@ -29,6 +29,20 @@ lands; agents never dispatch Nightly.
   on the mbx cache for the previous night's artifacts, and a cold one roughly
   doubles each leg's build time.
 
+Decided 2026-10-23 (maintainer), when the paired mode landed:
+
+- The gate fails Nightly from day one rather than reporting only until A/A
+  runs: Nightly already alerts for unrelated legs, so a false paired alarm adds
+  no new channel, and this quest tunes it.
+- Start at a 10% threshold, 20 confirmations per group, and 3 rounds; 10%
+  matches the trend table's floor, and three-round sign agreement filters
+  bimodal cases.
+- `rust-shared` splits out of `rust-bench`, restarting the `rust/shared/*`
+  trend history (three nights lost), since `rust-bench` paired would exceed
+  its hour unsplit.
+- A target the base cannot build or run fails the gate rather than passing
+  uncompared; it clears by itself the next night.
+
 Rejected hosts (decided 2026-10-22, maintainer): the merge queue runner, the
 moq.pro load nodes, and a dedicated bare-metal host; revisit the last only if
 A/A runs show the hosted noise floor hides regressions worth catching.
