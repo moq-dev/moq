@@ -192,5 +192,9 @@ name = "interop-goaway-client"
 path = "../../test/interop/clients/rust/goaway-client.rs"
 
 [[example]]
+name = "interop-finish"
+path = "../../test/interop/clients/rust/finish.rs"
+
+[[example]]
 name = "interop-audio"
 path = "../../test/interop/clients/rust/audio.rs"
