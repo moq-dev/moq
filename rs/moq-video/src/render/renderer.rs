@@ -524,7 +524,7 @@ impl Pipelines {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use moq_net::Timestamp;
 
@@ -578,7 +578,9 @@ mod tests {
 		let mut renderer = Renderer::new(&device, &queue, Config::new()).expect("a renderer");
 
 		let capture = crate::capture::Config {
-			source: crate::capture::Source::Display(None),
+			source: crate::capture::Source::Portal(crate::capture::portal::Selection::new(
+				crate::capture::portal::Kind::Screen,
+			)),
 			..Default::default()
 		};
 		let mut stream = crate::capture::open(&capture).await.expect("portal screen capture");

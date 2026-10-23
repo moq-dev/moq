@@ -18,8 +18,9 @@
 //!
 //! A group of deltas grows until a joiner wants a fresh one. A track created with a
 //! [`refresh`](moq_net::track::Info::refresh) ratio asks for one when a subscriber joins while the
-//! open group's deltas outweigh that ratio times its snapshot, so the joiner never downloads much
-//! more than the value itself. [`Producer::refresh`] answers by restating the value as a snapshot in
+//! open group's deltas outweigh that ratio times its snapshot. The joiner still reads the cached
+//! group meanwhile: the ratio limits how often groups roll, not what a joiner downloads.
+//! [`Producer::refresh`] answers by restating the value as a snapshot in
 //! a new group; [`Encoder::snapshot`] does the same for a caller that owns the track. Without a ratio,
 //! or behind a relay that cannot forward the ask, a group runs to the encoder's frame and byte caps.
 //!
@@ -1255,12 +1256,12 @@ mod test {
 	#[test]
 	fn rejected_field_names_its_path() {
 		#[derive(serde::Deserialize)]
-		#[allow(dead_code)]
+		#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 		struct Inner {
 			count: u8,
 		}
 		#[derive(serde::Deserialize)]
-		#[allow(dead_code)]
+		#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 		struct Outer {
 			inner: Inner,
 		}

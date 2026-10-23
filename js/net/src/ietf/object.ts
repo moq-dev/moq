@@ -59,7 +59,9 @@ async function encodeObjectTime(
 	timescale: Timescale,
 	version: IetfVersion,
 ): Promise<void> {
-	const value = Math.round((timestamp.value * timescale) / timestamp.scale);
+	// The shared conversion: exact at the same scale, and refused before anything is written when
+	// the result leaves the range a Timestamp, and so the receiver, can hold.
+	const value = Math.round(timestamp.as(timescale));
 	await encodeObjectPropertyType(w, PROP_TIMESTAMP, 0n, version);
 	await w.u62(BigInt(value));
 }
@@ -159,7 +161,15 @@ export class Group {
 		this.publisherPriority = publisherPriority;
 	}
 
+	/**
+	 * Write the header, stream type first, in one write: a peer that classifies a stream from
+	 * its first read (imquic) drops a header split across several.
+	 */
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		await w.write(await Writer.collect(version, (h) => this.#encode(h, version)));
+	}
+
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		if (!this.flags.hasSubgroup && this.subGroupId !== 0) {
 			throw new Error(`Subgroup ID must be 0 if hasSubgroup is false: ${this.subGroupId}`);
 		}

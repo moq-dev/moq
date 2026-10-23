@@ -80,6 +80,11 @@ impl Delivered {
 		}
 	}
 
+	/// The last run starting below `sequence`.
+	pub fn last_before(&self, sequence: u64) -> Option<u64> {
+		self.runs.range(..sequence).next_back().map(|(start, _)| *start)
+	}
+
 	/// How many runs it holds: one per gap, plus the floor.
 	#[cfg(test)]
 	pub fn runs(&self) -> usize {
@@ -133,6 +138,11 @@ mod test {
 			delivered.insert(sequence);
 		}
 		assert_eq!(delivered.above_gap(), Some(3));
+		assert_eq!(delivered.last_before(0), None);
+		assert_eq!(delivered.last_before(3), None);
+		assert_eq!(delivered.last_before(5), Some(3));
+		assert_eq!(delivered.last_before(9), Some(5));
+		assert_eq!(delivered.last_before(13), Some(12));
 		delivered.forget_below(0);
 		assert_eq!(delivered.runs(), 4);
 

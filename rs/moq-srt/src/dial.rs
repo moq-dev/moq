@@ -41,7 +41,7 @@ pub struct Client {
 
 	/// SRT receive latency, negotiated at handshake time: the buffer that trades delay
 	/// for loss recovery. It doubles as [`publish`]'s egress skip threshold.
-	latency: Duration,
+	max_delay: Duration,
 
 	/// How long relays keep a non-latest group of an ingested media track fetchable, or
 	/// `None` for hang's own default.
@@ -77,7 +77,7 @@ impl Client {
 		Self {
 			addr,
 			resource: resource.into(),
-			latency: DEFAULT_LATENCY,
+			max_delay: DEFAULT_LATENCY,
 			max_age: None,
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			program: None,
@@ -86,19 +86,28 @@ impl Client {
 		}
 	}
 
-	/// Override the SRT receive latency negotiated at handshake time.
-	pub fn with_latency(mut self, latency: Duration) -> Self {
-		self.latency = latency;
+	/// Set the SRT receive latency negotiated at handshake time (500 ms by default): the
+	/// buffer that trades delay for loss recovery.
+	///
+	/// Both directions; [`publish`](Self::publish) also uses it as the MPEG-TS release
+	/// delay, but no less than a second.
+	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
 	/// Set how long non-latest groups created by [`pull`](Self::pull) remain fetchable.
-	pub fn with_max_age(mut self, max_age: Option<Duration>) -> Self {
-		self.max_age = max_age;
+	///
+	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
+	/// someone else declared.
+	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
+		self.max_age = max_age.into();
 		self
 	}
 
 	/// Claim each track ingested by [`pull`](Self::pull) on `bandwidth`.
+	///
+	/// The pull (ingest) direction only.
 	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
 		self.bandwidth = bandwidth;
 		self
@@ -133,7 +142,7 @@ impl Client {
 		let path = path.as_path();
 		let socket = self.call(Mode::Publish).await?;
 		let options = crate::ts::Options {
-			latency: self.latency,
+			latency: self.max_delay,
 			linger: self.linger,
 			stitch: self.stitch,
 		};
@@ -159,7 +168,7 @@ impl Client {
 		}
 		let stream_id = format!("#!::r={},m={}", self.resource, mode.as_str());
 		let socket = SrtSocket::builder()
-			.latency(self.latency)
+			.latency(self.max_delay)
 			.set(configure_buffers)
 			.call(self.addr, Some(&stream_id))
 			.await?;
@@ -187,7 +196,7 @@ impl Mode {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {

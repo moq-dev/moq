@@ -1,10 +1,10 @@
 use crate::sys::*;
 
 #[cfg(not(target_env = "musl"))]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "mirrors the kernel's `_IOC_TYPE`")]
 pub type _IOC_TYPE = std::os::raw::c_ulong;
 #[cfg(target_env = "musl")]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "mirrors the kernel's `_IOC_TYPE`")]
 pub type _IOC_TYPE = std::os::raw::c_int;
 
 // linux ioctl.h
