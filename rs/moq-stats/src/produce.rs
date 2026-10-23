@@ -1950,7 +1950,7 @@ mod tests {
 
 	/// Kept-alive handles from [`feed`]: dropping them closes the subscription and the
 	/// announce (bumping the `_closed` counters).
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
 		announced: announce::Consumer,
 		source: broadcast::Producer,

@@ -575,12 +575,15 @@ The subscriber sends a [TRACKS](#tracks) message naming the broadcast path and E
 The publisher replies with listing events, then FINs the stream once the Broadcast ends, or resets it on error:
 
 - [TRACKS_ADD](#tracks-add): a Track is listed, with its TRACK_INFO.
-- [TRACKS_REMOVE](#tracks-remove): a listed Track no longer is.
+- [TRACKS_REMOVE](#tracks-remove): a listed Track no longer is, without having finished.
+- [TRACKS_FINISH](#tracks-finish): a listed Track no longer is because it finished.
 - [SYNCED](#synced): every Track this hop listed when the stream opened, and still lists, has been sent.
 
 A Broadcast lists the Tracks its publisher produces.
 A Track the publisher serves only on request, such as any name a transcoder answers for, is never listed, and listing never creates one.
-A removal promises only that the Track is no longer listed; a SUBSCRIBE for its name MAY still succeed.
+A removal, either TRACKS_REMOVE or TRACKS_FINISH, promises only that the Track is no longer listed; a SUBSCRIBE for its name MAY still succeed.
+TRACKS_FINISH says the Track's publisher declared its end, so its Groups are all the Track will hold; TRACKS_REMOVE says it left unfinished, such as a publisher that went away or a route that was withdrawn, so it may go on elsewhere.
+A relay forwards each removal as its upstream reported it, never as its own cache would suggest.
 A Track listed again under a removed name is the same Track: within one Broadcast a name always means the same content.
 
 The listing is relative to this hop: a relay answers with the Tracks it currently holds and never waits on its upstream, so a relay without a listing of its own sends SYNCED at once and its upstream's Tracks follow as live TRACKS_ADD.
@@ -590,10 +593,11 @@ A publisher keeps only the newest Tracks Stream per Broadcast on a session and r
 
 The publisher keeps a pending queue per stream, keyed by Track name in the order the changes happened.
 A removal of a Track the subscriber has not been sent cancels its add, and a removal followed by an add of a name it was sent collapses in place into that removal then that add, so a stalled subscriber costs the names it was sent plus the listed set.
+A collapsed removal is sent as the last one: TRACKS_FINISH if that Track finished, TRACKS_REMOVE otherwise.
 The publisher MUST send SYNCED exactly once: the first time that queue drains, or after it has sent N events, whichever comes first, where N is the queue's length when the stream opened.
 A removal of a Track already sent MAY precede SYNCED.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION on a TRACKS_ADD for a name already listed on the stream, a TRACKS_REMOVE for a name not listed, a second SYNCED, or an unknown event type.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION on a TRACKS_ADD for a name already listed on the stream, a TRACKS_REMOVE or TRACKS_FINISH for a name not listed, a second SYNCED, or an unknown event type.
 A FIN before SYNCED means the Broadcast ended.
 On a FIN, a relay ends the listings it answers from that stream, even before the Broadcast's retraction arrives.
 A publisher MUST reset a Tracks Stream with NOT_FOUND when the route it would serve the path from covers it by a shorter prefix: a route claims capability, not inventory, so it names no Broadcast to list.
@@ -1433,6 +1437,20 @@ TRACKS_REMOVE Message {
 **Track Name**:
 The name a TRACKS_ADD on the stream listed.
 
+## TRACKS_FINISH {#tracks-finish}
+A publisher sends TRACKS_FINISH on a Tracks Stream when a listed Track is no longer listed because it finished: its publisher declared its end.
+
+~~~
+TRACKS_FINISH Message {
+  Type (i) = 0x2
+  Message Length (i)
+  Track Name (s)
+}
+~~~
+
+**Track Name**:
+The name a TRACKS_ADD on the stream listed.
+
 ## SUBSCRIBE_OK {#subscribe-ok}
 A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.
 It is the first message the publisher sends on the Subscribe Stream, once the start position is known.
@@ -1775,7 +1793,7 @@ The `Message Length` describes the payload size on the wire.
 - Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
 
 - Named 128 the midpoint priority for an unset Subscriber or Publisher Priority.
-- Added the Tracks Stream (0x8) with TRACKS, TRACKS_ADD, TRACKS_REMOVE, and SYNCED: a subscriber lists one Broadcast's Tracks, each with its TRACK_INFO, then SUBSCRIBEs to those it wants. A relay answers at once with what it holds. Older versions reset the stream type.
+- Added the Tracks Stream (0x8) with TRACKS, TRACKS_ADD, TRACKS_REMOVE, TRACKS_FINISH, and SYNCED: a subscriber lists one Broadcast's Tracks, each with its TRACK_INFO, then SUBSCRIBEs to those it wants, and learns whether each removed Track finished. A relay answers at once with what it holds. Older versions reset the stream type.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none. Earlier versions receive the Track inflated.

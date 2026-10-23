@@ -16,6 +16,11 @@ Ask for absolute groups over those wires, or resolve the anchor where the track 
 Both now return at least the start set by `Subscriber::set_groups`, so a reader waiting on each group in sequence no longer waits on groups the local floor withholds.
 Drop any `max` against your own `set_groups` start.
 
+### A listing says whether a removed track finished (#6399)
+
+`broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
+`broadcast::Lister::finish()`, which ended every reader as if the broadcast ended, is `Lister::end()`. `Lister::finish(name)` now unlists a track as finished, beside `remove(name)` for one that left unfinished.
+
 ### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
 Match the version yourself: lite-01, lite-02, and moq-transport draft 14 negotiate the version in SETUP; every other version negotiates it through ALPN.

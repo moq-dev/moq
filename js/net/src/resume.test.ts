@@ -2455,7 +2455,7 @@ test("a group past the declared end on another copy is refused", async () => {
 
 test.each([
 	["fails", (answer: Lister) => answer.abort(new Error("old route failed"))],
-	["ends", (answer: Lister) => answer.finish()],
+	["ends", (answer: Lister) => answer.end()],
 	["changes", (answer: Lister) => answer.add("gone", { priority: 0 })],
 ])("a listing follows the source that took over as the old one's listing %s", async (_, end) => {
 	const front = new Front();

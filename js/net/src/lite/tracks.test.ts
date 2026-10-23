@@ -61,7 +61,7 @@ async function next(tracks: Tracks): Promise<string> {
 test("SYNCED is an empty type four, and an unknown event is refused", async () => {
 	expect(await bytes((w) => encodeTracksEvent(w, { kind: "synced" }, version))).toEqual(new Uint8Array([4, 0]));
 	await expect(
-		decodeTracksEventMaybe(new Reader(undefined, new Uint8Array([2, 0]), version), version),
+		decodeTracksEventMaybe(new Reader(undefined, new Uint8Array([3, 0]), version), version),
 	).rejects.toThrow("unknown tracks event");
 	await expect(
 		decodeTracksEventMaybe(new Reader(undefined, new Uint8Array([4, 1, 0]), version), version),
@@ -76,6 +76,7 @@ test("events and the request round-trip", async () => {
 			info: new TrackInfo({ priority: 3, refresh: 4, maxAge: 2000, timescale: 1_000_000 }),
 		},
 		{ kind: "removed", name: "video" },
+		{ kind: "finished", name: "audio" },
 		{ kind: "synced" },
 	];
 	const encoded = await bytes(async (w) => {
@@ -86,6 +87,7 @@ test("events and the request round-trip", async () => {
 	expect(added).toMatchObject({ kind: "added", name: "video", info: { priority: 3, refresh: 4, maxAge: 2000 } });
 	expect(added?.kind === "added" && added.info.timescale).toBe(Timescale(1_000_000));
 	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "removed", name: "video" });
+	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "finished", name: "audio" });
 	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "synced" });
 	expect(await decodeTracksEventMaybe(reader, version)).toBeUndefined();
 

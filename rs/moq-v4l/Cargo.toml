@@ -15,3 +15,6 @@ categories = ["multimedia::video", "os::linux-apis"]
 [dependencies]
 bitflags = { workspace = true }
 libc = { workspace = true }
+
+[lints]
+workspace = true
