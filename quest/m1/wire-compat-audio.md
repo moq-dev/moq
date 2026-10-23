@@ -25,9 +25,9 @@ Things to look out for:
   when it converts interleaved PCM to planar (fixed alongside the interop audio
   checks). Until a release carries that fix, a released JS reader fails a stereo
   tone: decide between a planned break and starting mono.
+- The in-tree Rust CLI publishes the tone as both Opus and AAC, and every
+  in-tree subscriber decodes each rendition to `<prefix>.<codec>`; the lanes
+  should check both renditions the same way.
 
 Public API: none. Wire: none.
 
-## Related
-
-- [Interop AAC](/quest/m1/interop-aac.md) - adds an AAC track to the in-tree matrix; these lanes would follow
