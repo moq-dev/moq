@@ -415,7 +415,7 @@ impl Track {
 				.describe(stream_type, self.source.description(), name, self.sync.is_some());
 		}
 		let pts = to_ticks(pending.frame.timestamp);
-		self.clock.push((pending, self.source.description().cloned()), pts);
+		self.clock.push((pending, self.source.description().cloned()), pts)?;
 		self.release(name, jitter, false)
 	}
 
@@ -812,7 +812,7 @@ impl Track {
 		let counted = self.sync.as_ref().and(self.timing.depth());
 		while let Some(((mut pending, description), dts)) = match counted {
 			Some(depth) => self.clock.pop_counted(depth, delay, flush),
-			None => self.clock.pop(lookahead, delay, flush),
+			None => self.clock.settled(lookahead, delay, flush),
 		} {
 			if !self.finished {
 				pending.arrived = pending.arrived.max(self.latest);
@@ -875,7 +875,7 @@ impl Track {
 		let arrival = Arrival {
 			arrived: arrived - ahead,
 			read: read - ahead,
-			decode: key,
+			decode: key.into(),
 			restart,
 			skip,
 			cut,
@@ -4273,12 +4273,12 @@ mod tests {
 		let mut clock = DecodeClock::default();
 		let mut dts = vec![0; pts.len()];
 		for (i, &p) in pts.iter().enumerate() {
-			clock.push(i, p);
-			while let Some((i, d)) = clock.pop(jitter, floor, false) {
+			clock.push(i, p).unwrap();
+			while let Some((i, d)) = clock.settled(jitter, floor, false) {
 				dts[i] = d;
 			}
 		}
-		while let Some((i, d)) = clock.pop(jitter, floor, true) {
+		while let Some((i, d)) = clock.settled(jitter, floor, true) {
 			dts[i] = d;
 		}
 		dts

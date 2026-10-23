@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### MKV schedules declared progressive AVC by presentation slots
+
+A progressive AVC SPS that declares a reorder depth now fixes MKV export's decode
+clock for each group. Its first decode slots can precede timestamp zero; block
+presentation timestamps remain unchanged. Catalog `jitter` and `framerate` no
+longer change that rendition's decode slots. A source that exceeds its declared
+depth or cannot produce increasing decode slots now ends the export instead of
+moving its timestamps. Correct the source timestamps or declare a new rendition
+with the actual reorder depth.
+
 ### JSON `delta_ratio` is `deltas`
 
 `json::Config::delta_ratio` and `with_delta_ratio` are replaced by `deltas: bool` and `with_deltas` (default `true`).

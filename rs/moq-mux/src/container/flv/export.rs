@@ -359,7 +359,7 @@ impl<S: Stream> Export<S> {
 						crate::jitter::Arrival {
 							arrived: track.empty,
 							read: moq_clock::now(),
-							decode: frame.timestamp,
+							decode: frame.timestamp.into(),
 							restart: track.source.markers(),
 							skip: track.source.skips(),
 							cut: track.source.cuts(),
@@ -392,7 +392,7 @@ impl<S: Stream> Export<S> {
 						crate::jitter::Arrival {
 							arrived,
 							read,
-							decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?,
+							decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?.into(),
 							restart,
 							skip,
 							cut,

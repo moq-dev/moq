@@ -12,6 +12,43 @@ presentation-time only: no decode time on the wire.
 
 ## Plan
 
+### Checkpoint
+
+The Goal remains incomplete. This branch adds signed jitter admission and a
+fixed-depth mode to the existing `DecodeClock`, consumed by MKV export when a
+progressive AVC SPS declares the depth. It keeps at most that many payloads
+after each drain, shifts by presentation slots, and resets at actual group
+boundaries. Tests cover timeline zero, audio interleaving, independent groups,
+a cut in an earlier group, distant references, zero depth, and malformed
+flat/backward PTS swept over frame count and payload size. The exporter benchmark
+sweeps those axes through the same MKV consumer.
+
+TS and FLV still use their existing clock authors, as do MKV's undeclared,
+field-coded AVC and HEVC paths. Signed jitter admission reaches all three
+exporters, but only MKV's declared progressive AVC path currently authors signed
+slots. No new catalog field, producer declaration, JS behavior or wire format is
+implemented. The remaining rollout includes codec-level depth validation,
+TS/MKV/FLV parity, every producer/importer, Rust/JS catalogs, matching drafts and
+migrations, and the full join/loss and T-STD controls described below.
+
+### Decision needed: published absence
+
+The decided `absent = 0` rule conflicts with the published-wire compatibility
+rule. Published `hang-v0.21.16` has no `reorder` field, and the existing fMP4
+import control `unwrapped_samples_present_at_their_composition_time` publishes
+decode-order PTS 1,041,666; 1,125,000; 1,083,333 microseconds without one. Treating
+that absence as zero makes a new exporter refuse supported published media.
+The current catalog version cannot distinguish that legacy absence from an
+intentional zero declaration.
+
+Recommend a versioned or explicit-declaration contract that preserves published
+catalog behavior, then complete the fixed-depth producer/export rollout. The
+alternative is deliberate migration/refusal of legacy reordering catalogs,
+which changes the published compatibility requirement and needs approval.
+Do not silently choose either contract or remove this Goal while unresolved.
+
+### Settled design
+
 Why: a DTS that depends on what the exporter read before has been patched
 six times ([moq-dev/moq#1843](https://github.com/moq-dev/moq/pull/1843),
 [#2967](https://github.com/moq-dev/moq/pull/2967),
@@ -19,7 +56,7 @@ six times ([moq-dev/moq#1843](https://github.com/moq-dev/moq/pull/1843),
 [#4574](https://github.com/moq-dev/moq/pull/4574),
 [#4645](https://github.com/moq-dev/moq/pull/4645),
 [#5949](https://github.com/moq-dev/moq/pull/5949)). Today there are three
-authors: `DecodeClock::pop` (`rs/moq-mux/src/container/decode.rs`, TS without
+authors: timestamp-settled `DecodeClock::settled` (`rs/moq-mux/src/container/decode.rs`, TS without
 `--sync` and MKV) settles a slot by the highest PTS read and a delay that only
 grows; `pop_counted` (TS `--sync`) depends on the held frames alone; FLV
 export authors `PTS - jitter` bumped past the last DTS, which passes the PTS

@@ -83,34 +83,57 @@ struct MkvTrack {
 }
 
 impl MkvTrack {
-	fn release(&mut self, name: &str, jitter: &mut crate::jitter::Buffer<String, Frame>, flush: bool) -> Result<()> {
+	fn configure_clock(&mut self) -> Result<()> {
+		if self.reorder.is_some() {
+			return Ok(());
+		}
 		let Some(config) = &self.config else { return Ok(()) };
-		let (floor, lookahead) = *self.reorder.get_or_insert_with(|| {
-			let declared = self.source.description().and_then(|description| match config.codec {
-				VideoCodec::H264(_) => {
-					crate::codec::h264::sps_reorder(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?)
-				}
-				VideoCodec::H265(_) => {
-					crate::codec::h265::sps_reorder(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?)
-				}
-				_ => None,
-			});
-			let (floor, lookahead) = declared.map_or((0, 0), |reorder| reorder.timing(config.framerate));
-			let limit = crate::container::decode::MAX_REORDER;
-			let lookahead = lookahead
-				.max(
-					config
-						.jitter
-						.map_or(0, |jitter| (jitter.as_nanos() * 90_000 / 1_000_000_000) as u64),
-				)
-				.min(limit);
-			(floor.min(limit), lookahead)
+		let declared = self.source.description().and_then(|description| match config.codec {
+			VideoCodec::H264(_) => {
+				crate::codec::h264::sps_reorder(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?)
+			}
+			VideoCodec::H265(_) => {
+				crate::codec::h265::sps_reorder(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?)
+			}
+			_ => None,
 		});
-		while let Some((mut arrival, dts)) = self.clock.pop(lookahead, floor, flush) {
+		// A progressive AVC SPS already declares the fixed frame-count contract. Legacy
+		// catalogs lacking that declaration keep their existing timing interpretation.
+		if matches!(config.codec, VideoCodec::H264(_))
+			&& let Some(declared) = declared.filter(|declared| !declared.fields)
+		{
+			self.clock = crate::container::decode::DecodeClock::new(declared.pictures())?;
+		}
+		let (floor, lookahead) = declared.map_or((0, 0), |reorder| reorder.timing(config.framerate));
+		let limit = crate::container::decode::MAX_REORDER;
+		let lookahead = lookahead
+			.max(
+				config
+					.jitter
+					.map_or(0, |jitter| (jitter.as_nanos() * 90_000 / 1_000_000_000) as u64),
+			)
+			.min(limit);
+		self.reorder = Some((floor.min(limit), lookahead));
+		Ok(())
+	}
+
+	fn release(&mut self, name: &str, jitter: &mut crate::jitter::Buffer<String, Frame>, flush: bool) -> Result<()> {
+		let Some((floor, lookahead)) = self.reorder else {
+			return Ok(());
+		};
+		loop {
+			let next = match self.clock.is_fixed() {
+				true => self.clock.pop(flush)?,
+				false => self
+					.clock
+					.settled(lookahead, floor, flush)
+					.map(|(frame, dts)| (frame, i128::from(dts))),
+			};
+			let Some((mut arrival, dts)) = next else { break };
 			if !self.finished && !flush {
 				arrival.arrived = arrival.arrived.max(self.latest);
 			}
-			arrival.decode = moq_net::Timestamp::from_scale(dts, 90_000)?;
+			arrival.decode = crate::jitter::Decode::from_nanos((dts * 1_000_000_000).div_euclid(90_000));
 			jitter.push(name.to_owned(), arrival)?;
 		}
 		Ok(())
@@ -336,6 +359,11 @@ impl<S: Stream> Export<S> {
 	#[cfg(test)]
 	pub(super) fn buffered(&self) -> usize {
 		self.jitter.len()
+			+ self
+				.tracks
+				.values()
+				.map(|track| track.clock.len() + usize::from(track.pending.is_some()))
+				.sum::<usize>()
 	}
 
 	#[cfg(test)]
@@ -362,7 +390,19 @@ impl<S: Stream> Export<S> {
 					}
 					let (frame, arrived) = match track.source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame { frame, arrived })) => (frame, arrived.max(track.subscribed)),
-						Poll::Ready(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut)) => continue,
+						Poll::Ready(Some(Event::GroupEnd)) => {
+							if track.clock.is_fixed() {
+								track.release(name, &mut self.jitter, true)?;
+							}
+							continue;
+						}
+						Poll::Ready(Some(Event::Cut)) => {
+							if track.clock.is_fixed() {
+								track.clock.discard();
+							}
+							continue;
+						}
+						Poll::Ready(Some(Event::FrameEnd { .. })) => continue,
 						Poll::Ready(None) => {
 							track.finished = true;
 							break;
@@ -382,7 +422,7 @@ impl<S: Stream> Export<S> {
 					crate::jitter::Arrival {
 						arrived,
 						read: moq_clock::now(),
-						decode: frame.timestamp,
+						decode: frame.timestamp.into(),
 						restart: track.source.markers(),
 						skip: track.source.skips(),
 						cut: track.source.cuts(),
@@ -395,14 +435,25 @@ impl<S: Stream> Export<S> {
 					track.pending = Some(arrival);
 					break;
 				}
-				if track.kind == TrackKind::Video && !self.delay.is_zero() {
+				if track.kind == TrackKind::Video {
+					track.configure_clock()?;
+				}
+				if track.kind == TrackKind::Video && (!self.delay.is_zero() || track.clock.is_fixed()) {
 					if arrival.restart != track.restart {
 						track.release(name, &mut self.jitter, true)?;
-						track.clock = Default::default();
+						if track.clock.is_fixed() {
+							track.clock.discard();
+						} else {
+							track.clock = Default::default();
+						}
 						track.restart = arrival.restart;
 					}
+					if arrival.item.keyframe && track.clock.is_fixed() {
+						track.release(name, &mut self.jitter, true)?;
+						track.clock.discard();
+					}
 					let pts = (arrival.item.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64;
-					track.clock.push(arrival, pts);
+					track.clock.push(arrival, pts)?;
 					track.release(name, &mut self.jitter, false)?;
 				} else {
 					self.jitter.push(name.clone(), arrival)?;
@@ -440,10 +491,11 @@ impl<S: Stream> Export<S> {
 			}
 			for (name, config) in &catalog.video.renditions {
 				if let Some(track) = self.tracks.get_mut(name) {
-					if track
-						.config
-						.as_ref()
-						.is_some_and(|old| old.jitter != config.jitter || old.framerate != config.framerate)
+					if !track.clock.is_fixed()
+						&& track
+							.config
+							.as_ref()
+							.is_some_and(|old| old.jitter != config.jitter || old.framerate != config.framerate)
 					{
 						track.reorder = None;
 					}
