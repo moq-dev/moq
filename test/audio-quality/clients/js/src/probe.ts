@@ -174,7 +174,6 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			// One rendition is published per broadcast here, so the first is the one playing.
 			const config = Object.values(catalog.audio?.renditions ?? {})[0];
 			return {
-				crossOriginIsolated: globalThis.crossOriginIsolated === true,
 				transport: watch.connection.transport.peek(),
 				codec: config?.codec,
 				rate: config?.sampleRate,

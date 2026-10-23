@@ -650,9 +650,8 @@ describe("decoded rate must match the ring (#2352)", () => {
 });
 
 describe("live anchoring", () => {
-	// The SharedArrayBuffer ring anchors in both modes; this keeps the postMessage fallback
-	// in step. Without anchoring, a first frame at a large timestamp gap-filled the whole ring
-	// with zeros, un-stalled on that overflow, and left the playhead a floor before the frame.
+	// Without anchoring, a first frame at a large timestamp gap-filled the whole ring with zeros,
+	// un-stalled on that overflow, and left the playhead a floor before the frame.
 	it("anchors a live ring to the first frame instead of gap-filling from zero", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Milli });
 		expect(buffer.capacity).toBe(200);

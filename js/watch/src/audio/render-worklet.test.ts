@@ -40,7 +40,7 @@ try {
 function renderer() {
 	const render = new Render();
 	const send = (data: Message) => render.port.onmessage?.({ data } as MessageEvent<Message>);
-	send({ type: "init-post", channels: 1, rate: 1000, latency: Milli(100), buffered: true });
+	send({ type: "init", channels: 1, rate: 1000, latency: Milli(100), buffered: true });
 	return {
 		send,
 		sent: render.sent,
@@ -52,7 +52,7 @@ function renderer() {
 	};
 }
 
-describe("postMessage render dispatch", () => {
+describe("render dispatch", () => {
 	it("truncates the old track's tail without flushing the due prefix", () => {
 		const { send, read } = renderer();
 		send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(1)] });

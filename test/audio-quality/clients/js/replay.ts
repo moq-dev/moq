@@ -1,14 +1,14 @@
 /**
- * Replays the recorded traces through the player's consumer and rings, and writes each row the way
+ * Replays the recorded traces through the player's consumer and ring, and writes each row the way
  * `driver.ts` writes a browser row, so `analyze.ts` reduces both alike.
  *
- * The player half is `js/watch/src/audio/replay.ts`: the real container consumer and rings on a
+ * The player half is `js/watch/src/audio/replay.ts`: the real container consumer and ring on a
  * simulated clock, at the delay a real `Sync` resolves from the playout target it measures. This half
  * reads its quanta through the same classifier the page's output tap runs, and samples the ring
  * every 250 ms of simulated time, as the probe samples a page. Every profile is the trace's name at
  * the "auto" delay a viewer gets by default.
  *
- *     bun replay.ts --traces ../../traces --profiles relay-bbb --rings plain --codecs aac --list
+ *     bun replay.ts --traces ../../traces --profiles relay-bbb --codecs aac --list
  *     bun replay.ts --traces ../../traces --out <run dir>
  *
  * `--list` prints the row tags; otherwise it writes `<tag>.ndjson` and `<tag>.page.json` per row.
@@ -22,7 +22,6 @@ import type * as Catalog from "@moq/hang/catalog";
 import { classify, Ledger } from "./src/quantum.ts";
 import {
 	type Environment,
-	type Ring,
 	type Row,
 	rowKey,
 	SAMPLE_INTERVAL_MS,
@@ -37,14 +36,13 @@ const { values } = parseArgs({
 	options: {
 		traces: { type: "string" },
 		profiles: { type: "string" },
-		rings: { type: "string", default: "isolated,plain" },
 		codecs: { type: "string", default: "opus,aac" },
 		out: { type: "string" },
 		list: { type: "boolean", default: false },
 	},
 });
 if (!values.traces || (!values.list && !values.out)) {
-	console.error("usage: replay.ts --traces DIR [--profiles a,b] [--rings r] [--codecs c] (--list | --out DIR)");
+	console.error("usage: replay.ts --traces DIR [--profiles a,b] [--codecs c] (--list | --out DIR)");
 	process.exit(2);
 }
 const dir = values.traces;
@@ -55,11 +53,9 @@ const traces = readdirSync(dir)
 	.sort()
 	.map((f) => ({ profile: basename(f, ".json"), trace: JSON.parse(readFileSync(join(dir, f), "utf8")) as Trace }));
 const profiles = values.profiles === undefined ? undefined : split(values.profiles);
-const rings = split(values.rings);
 const codecs = split(values.codecs);
 const selectors: [string, string[], string[]][] = [
 	["profile", profiles ?? [], traces.map((t) => t.profile)],
-	["ring", rings, ["isolated", "plain"]],
 	["codec", codecs, ["opus", "aac"]],
 ];
 for (const [name, list, known] of selectors) {
@@ -76,9 +72,7 @@ for (const { profile, trace } of traces) {
 	const codec = traceCodec(trace);
 	if (profiles && !profiles.includes(profile)) continue;
 	if (!codecs.includes(codec)) continue;
-	for (const ring of rings as Ring[]) {
-		rows.push({ row: { runtime: "replay", codec, rate: trace.config.sampleRate, profile, ring }, trace });
-	}
+	rows.push({ row: { runtime: "replay", codec, rate: trace.config.sampleRate, profile }, trace });
 }
 
 if (values.list) {
@@ -126,7 +120,6 @@ for (const { row, trace } of rows) {
 	};
 
 	const quanta = replay(arrivals, {
-		ring: row.ring === "isolated" ? "shared" : "post",
 		rate,
 		delay: "auto",
 		config: trace.config as unknown as Catalog.AudioConfig,
@@ -154,7 +147,6 @@ for (const { row, trace } of rows) {
 	console.warn = warn;
 
 	const environment: Environment = {
-		crossOriginIsolated: row.ring === "isolated",
 		transport: trace.transport,
 		codec: trace.config.codec,
 		rate,
