@@ -679,7 +679,6 @@ async fn audio_raw_publish_from_many_threads() {
 	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let output = MoqAudioEncoderOutput {
-		track: Some("tone".into()),
 		codec: MoqAudioCodec::opus(),
 		sample_rate: None,
 		channels: None,
@@ -689,13 +688,16 @@ async fn audio_raw_publish_from_many_threads() {
 	};
 	let audio = MoqAudioProducer::new(
 		&catalog,
-		MoqAudioEncoderInput {
-			format: MoqAudioSampleFormat::F32,
-			sample_rate: 48_000,
-			channels: 2,
+		MoqAudioProducerOptions {
+			input: MoqAudioEncoderInput {
+				format: MoqAudioSampleFormat::F32,
+				sample_rate: 48_000,
+				channels: 2,
+			},
+			output,
+			track: Some("tone".into()),
+			bandwidth: None,
 		},
-		output,
-		None,
 	)
 	.unwrap();
 	let snapshot = catalogs.next().await.unwrap().unwrap();
@@ -758,21 +760,23 @@ async fn audio_raw_publish_rejects_bad_frames() {
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let audio = MoqAudioProducer::new(
 		&catalog,
-		MoqAudioEncoderInput {
-			format: MoqAudioSampleFormat::F32,
-			sample_rate: 48_000,
-			channels: 2,
-		},
-		MoqAudioEncoderOutput {
+		MoqAudioProducerOptions {
+			input: MoqAudioEncoderInput {
+				format: MoqAudioSampleFormat::F32,
+				sample_rate: 48_000,
+				channels: 2,
+			},
+			output: MoqAudioEncoderOutput {
+				codec: MoqAudioCodec::opus(),
+				sample_rate: None,
+				channels: None,
+				bitrate: None,
+				frame_duration_us: 20_000,
+				preset: None,
+			},
 			track: None,
-			codec: MoqAudioCodec::opus(),
-			sample_rate: None,
-			channels: None,
-			bitrate: None,
-			frame_duration_us: 20_000,
-			preset: None,
+			bandwidth: None,
 		},
-		None,
 	)
 	.unwrap();
 	for size in [1, 4, 7] {
