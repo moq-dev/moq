@@ -118,7 +118,9 @@ pub(super) fn windows() -> Result<Vec<Window>, Error> {
 
 pub(super) async fn open_display(config: &Config, selector: Option<&str>) -> Result<Stream, Error> {
 	if !selected(selector) {
-		let display = selector.map_or("the main display".to_string(), |selector| format!("display {selector:?}"));
+		let display = selector.map_or("the main display".to_string(), |selector| {
+			format!("display {selector:?}")
+		});
 		return Err(Error::Unsupported(format!(
 			"{display} on Wayland; only XWayland `x11:` displays are capturable by id, and the system portal picker chooses Wayland screens"
 		)));
