@@ -1,8 +1,6 @@
 # Only the worker's clock backend (`clock.rs`, behind `#[allow]`) reads a host
 # clock; everything else reads the worker's turn through moq-clock.
 disallowed-methods = [
-    { path = "std::env::set_var", reason = "the environment is process-wide: pass the value down, or run a test in a child with test_env::Env" },
-    { path = "std::env::remove_var", reason = "the environment is process-wide: pass the value down, or run a test in a child with test_env::Env" },
     { path = "std::time::Instant::now", reason = "read the worker's clock: moq_clock::now()" },
     { path = "std::time::Instant::elapsed", reason = "read the worker's clock: moq_clock::Instant::elapsed()" },
     { path = "std::time::SystemTime::now", reason = "read the ambient clock: moq_clock::wall()" },

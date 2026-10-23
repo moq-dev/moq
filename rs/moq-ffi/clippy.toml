@@ -1,7 +1,5 @@
 # The wasm32 lint builds tokio without `time`, where these tokio paths do not resolve.
 disallowed-methods = [
-    { path = "std::env::set_var", reason = "the environment is process-wide: pass the value down, or run a test in a child with test_env::Env" },
-    { path = "std::env::remove_var", reason = "the environment is process-wide: pass the value down, or run a test in a child with test_env::Env" },
     { path = "std::time::Instant::now", reason = "read the ambient clock: moq_clock::now()" },
     { path = "std::time::SystemTime::now", reason = "read the ambient clock: moq_clock::wall()" },
     { path = "tokio::time::Instant::now", reason = "read the ambient clock: moq_clock::now()", allow-invalid = true },

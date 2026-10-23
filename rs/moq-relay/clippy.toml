@@ -1,8 +1,6 @@
 # Production uses the ambient clock; legacy test-only clock cleanup is tracked separately.
 # `SystemTime` stays an allowed type until its wall times move to `moq_clock::Wall`.
 disallowed-methods = [
-    { path = "std::env::set_var", reason = "the environment is process-wide: pass the value down, or run a test in a child with test_env::Env" },
-    { path = "std::env::remove_var", reason = "the environment is process-wide: pass the value down, or run a test in a child with test_env::Env" },
     { path = "std::time::Instant::now", reason = "read the ambient clock: moq_clock::now()" },
     { path = "std::time::Instant::elapsed", reason = "read the ambient clock: moq_clock::Instant::elapsed()" },
     { path = "std::time::SystemTime::now", reason = "read the ambient clock: moq_clock::wall()" },

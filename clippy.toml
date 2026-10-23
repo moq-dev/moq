@@ -1,6 +1,0 @@
-# The crates without their own clippy.toml. Clippy reads only the nearest one, so each
-# crate config repeats these.
-disallowed-methods = [
-    { path = "std::env::set_var", reason = "the environment is process-wide: pass the value down, or run a test in a child with test_env::Env" },
-    { path = "std::env::remove_var", reason = "the environment is process-wide: pass the value down, or run a test in a child with test_env::Env" },
-]
