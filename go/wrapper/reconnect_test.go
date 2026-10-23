@@ -193,7 +193,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer track.Finish()
-	if err := broadcast.Announce(moq.Route{}); err != nil {
+	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 

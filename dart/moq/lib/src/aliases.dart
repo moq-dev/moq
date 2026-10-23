@@ -58,6 +58,9 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// A pending wait for a route to cover a specific path.
 typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
 
+/// How a broadcast advertises its exact path: its static production cost and publisher epoch.
+typedef AnnounceRoute = MoqAnnounceRoute;
+
 /// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
 typedef Announce = MoqAnnounce;
 
@@ -108,9 +111,6 @@ typedef TrackConsumer = MoqTrackConsumer;
 
 /// A request to produce one uncached group for a fetch consumer.
 typedef GroupRequest = MoqGroupRequest;
-
-/// A watch-only handle to whether any caller still wants a requested group; holding it keeps nothing open.
-typedef GroupDemand = MoqGroupDemand;
 
 /// The write side of a single group: append frames to it.
 typedef GroupProducer = MoqGroupProducer;

@@ -107,7 +107,8 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		if (notify === true) this.#forceNotify = true;
 
 		// If there are no subscribers, don't queue a microtask.
-		// Reset all pending state since no flush will occur to clear it.
+		// Drop the capture since no listener saw the old value; a flush already queued finds
+		// nothing to deliver.
 		if (this.#subscribers.size === 0 && this.#changed.size === 0) {
 			this.#hasCapturedOldValue = false;
 			this.#oldValue = undefined;
@@ -124,6 +125,10 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	#flush(): void {
 		this.#pending = false;
+
+		// A write while nobody listened dropped the capture, so any listener since then saw the
+		// current value when it subscribed and there is no change to deliver.
+		if (!this.#hasCapturedOldValue) return;
 		this.#hasCapturedOldValue = false;
 		const old = this.#oldValue;
 		this.#oldValue = undefined;
@@ -132,7 +137,6 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		this.#forceNotify = false;
 
 		// Check if the net change is zero (value returned to what it was before).
-		// Use === for class instances, dequal for plain objects/primitives.
 		if (!force && isEqual(old as T, this.#value)) return;
 
 		const value = this.#value;
@@ -1269,10 +1273,10 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 	}
 }
 
-// Deep equality for plain objects/arrays, === for class instances and primitives.
+// Deep equality for plain objects/arrays, SameValueZero for everything else.
 // Class instances have identity semantics (e.g. two different Broadcast instances are never equal).
 function isEqual(a: unknown, b: unknown): boolean {
-	if (a === b) return true;
+	if (a === b || (Number.isNaN(a) && Number.isNaN(b))) return true;
 	if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
 
 	const protoA = Object.getPrototypeOf(a);
@@ -1282,11 +1286,15 @@ function isEqual(a: unknown, b: unknown): boolean {
 	if (protoA !== protoB) return false;
 	if (protoA !== Object.prototype && protoA !== Array.prototype) return false;
 
-	const keysA = Object.keys(a as Record<string, unknown>);
-	const keysB = Object.keys(b as Record<string, unknown>);
-	if (keysA.length !== keysB.length) return false;
+	// Holes are not keys, so a sparse array's length is only visible here.
+	if (protoA === Array.prototype && (a as unknown[]).length !== (b as unknown[]).length) return false;
+
+	const keysA = Object.keys(a);
+	if (keysA.length !== Object.keys(b).length) return false;
 
 	for (const key of keysA) {
+		// Membership matters on its own: `{ a: undefined }` is not `{ b: undefined }`.
+		if (!Object.hasOwn(b, key)) return false;
 		if (!isEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false;
 	}
 

@@ -67,7 +67,6 @@ asyncio.run(main())
    TrackRequest
    GroupProducer
    GroupRequest
-   GroupDemand
 ```
 
 ## Subscribing
@@ -225,6 +224,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    Subscription
    TrackInfo
    FetchGroupOptions
+   AnnounceRoute
    Route
    ConnectionStats
 ```

@@ -106,6 +106,7 @@ fn check_resolvable<E>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use std::str::FromStr;
 
 	#[test]
 	fn echo_prefix_cannot_escape_the_catalog_root() {
