@@ -131,7 +131,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Subscribe update camera check](/quest/m1/subscribe-update-churn.md) - a person checks a physical-camera publish for SUBSCRIBE_UPDATE chatter; bbb and the fake camera measured quiet
 - [Unprefixed C++ free functions](/quest/m1/cpp-free-function-prefix.md) - generated free functions drop `moq_`, and `moq.hpp` deletes its five pass-through wrappers before C++ first publishes
 - [Error cleanups](/quest/m1/error-cleanups.md) - delete the unused `Error::SessionClosed`; raw transport failures already map to `Unroutable`
-- [API-diff check](/quest/m1/api-diff.md) - a recipe diffs every published package's API against its last release, run on PRs into release and against main before the cut
 - [API Extractor checks](/quest/m1/api-extractor-checks.md) - API Extractor fails a PR on a forgotten export, an unresolved declaration, or an undocumented export, replacing the hand-rolled `.d.ts` checkers
 - [Generated JS API reference](/quest/m1/js-api-reference.md) - the doc site renders an API reference for every `@moq/*` package from API Extractor's doc model
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - moq-transport sessions ask for announcements only under watched prefixes, starting with UNSUBSCRIBE_NAMESPACE on d14/15

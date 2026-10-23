@@ -398,6 +398,7 @@ export class Lister {
 	#listing: Listing;
 	#closed = false;
 
+	/** @internal */
 	constructor(listing: Listing) {
 		listing.attach();
 		this.#listing = listing;

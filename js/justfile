@@ -38,10 +38,12 @@ workers:
 audit:
     bash ../sh/js/audit.sh
 
-# Auto-fix lint and formatting issues in workspaces, harnesses, docs and demos.
-fix:
+# Auto-fix lint and formatting issues in workspaces, harnesses, docs and demos, then rebuild
+# the changed packages (or `--all`) to regenerate their committed API reports.
+fix list="--all":
     bun install
     bun biome check --write . ../bench/browser ../test ../doc ../demo
+    MOQ_API_REPORT=update python3 ../sh/js/workspace.py build '{{ list }}'
 
 # Run all unit tests.
 test:

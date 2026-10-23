@@ -109,6 +109,12 @@ ci $BASE="":
 gate:
     just ci --all
 
+# Diff every published API against its last release: `just api-diff [--deny] [rust|js|ffi]...`.
+# `--deny` fails on any break, as backports into `release` must.
+[positional-arguments]
+api-diff *args:
+    sh/api-diff/run.sh "$@"
+
 # Report what CI selects before installing the dev shell or build caches.
 ci-select $BASE="":
     sh/dispatch.sh ci "$BASE" --query
