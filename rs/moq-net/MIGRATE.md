@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Error::SessionClosed` is removed
+
+Nothing produces it any more.
+`track::Producer::close` aborts its open groups with `Error::Stream(StreamError::Session(SessionError::Cancel))`, which encodes as the same `SESSION_CLOSED` stream code.
+Match that, or any `StreamError::Session(_)`, where you matched `Error::SessionClosed`.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
@@ -80,7 +86,7 @@ A group followed by a frameless one is judged against the next group that has a 
 ### Ending a track aborts its open groups (#6111)
 
 Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
-Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::SessionClosed`.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::Stream(StreamError::Session(SessionError::Cancel))`.
 `track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
 
 ### Priorities are signed, with 0 unset (#6142)

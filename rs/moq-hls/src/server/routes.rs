@@ -914,7 +914,9 @@ mod tests {
 		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
 
 		drop(timeline);
-		track.abort(moq_net::Error::SessionClosed).unwrap();
+		track
+			.abort(moq_net::Error::Transport("connection lost".into()))
+			.unwrap();
 		for uri in [
 			"/live/video/video0/media.m3u8",
 			"/live/video/video0/media.m3u8?start=0&end=2",
