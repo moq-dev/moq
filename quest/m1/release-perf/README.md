@@ -11,7 +11,7 @@ This epic's own work: once every child has landed, run the full main against
 release comparison again with `just bench origin/release`, plus the JS frame
 path in Chromium with `bench/browser/micro.ts`, and confirm nothing new
 regressed. Then add a release-baseline step to the recurring
-[performance audit](/quest/m1/audit-perf.md), so every later cut
+[performance audit](/quest/m2/audit-perf.md), so every later cut
 repeats this comparison.
 
 ## Plan
@@ -108,6 +108,9 @@ and 12% less on fanout, with the same delivery.
   scan, and [#6479](https://github.com/moq-dev/moq/pull/6479) stopped
   releasing a finished stream's reader lock, which built a `TypeError` per
   group stream. Every row then sits within the A/A spread of release.
+  The group write/read microbench stays 3 to 12% above release against an
+  A/A of 3 to 8% on the same host. Decided 2026-10-23 (maintainer): browser
+  parity accepted on this evidence; the final re-run above checks it again.
 
 The raw report lived in a scratch directory that has since been removed.
 `just bench <base>` now pairs full Criterion IDs; point `MOQ_BENCH_ARTIFACTS`
@@ -120,5 +123,5 @@ outside the worktree to keep the next one.
 
 ## Related
 
-- [Performance audit](/quest/m1/audit-perf.md) - compares nightly to nightly; this epic compares main to release
+- [Performance audit](/quest/m2/audit-perf.md) - compares nightly to nightly; this epic compares main to release
 - [Nightly benchmark regressions](/quest/m1/bench-ci.md) - paired nightly-to-nightly comparison on one runner

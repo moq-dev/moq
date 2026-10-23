@@ -20,7 +20,7 @@ merge, and main PRs skip cloud CI since #6038. This drops the per-PR sticky
 comment design and its `workflow_run` follow-up.
 
 Decided 2026-10-22 (maintainer): the paired run stays on the hosted ARM
-runners. Moved from m2 to m1 so the m1 [performance audit](/quest/m1/audit-perf.md)
+runners. Moved from m2 to m1 so the [performance audit](/quest/m2/audit-perf.md)
 reads paired flags instead of raw history. Rejected hosts:
 
 - The merge queue runner (`nixos-moq-ci`) is an nspawn container on a

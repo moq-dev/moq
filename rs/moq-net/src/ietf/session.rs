@@ -19,6 +19,9 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
 	pub runtime: crate::time::Deadlines,
 
+	/// Where the session's control traffic is counted, even with neither origin set.
+	pub stats: crate::stats::Session,
+
 	pub session: S,
 
 	/// The bidi SETUP stream (draft-14 through draft-16 only). Draft-17+ passes `None`
@@ -115,6 +118,7 @@ where
 {
 	let Config {
 		runtime,
+		stats,
 		mut session,
 		setup,
 		request_id_max,
@@ -206,8 +210,12 @@ where
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
-		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
-		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+		let publish = publish.unwrap_or_else(|| {
+			origin::Producer::empty(Hop::random())
+				.consume()
+				.with_stats(stats.clone())
+		});
+		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
 		let subscriptions = crate::session::Slots::new(limits.subscriptions)
 			.with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 		let announces =
@@ -224,7 +232,7 @@ where
 					return Err(err);
 				};
 				let control = Control::new(request_id_max, client).with_window(limits.requests(), client, version);
-				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
+				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version).with_stats(&stats);
 
 				// No AUTH on these drafts, but a limit still reaches both halves.
 				let mut publisher = Publisher::new(
@@ -407,6 +415,7 @@ where
 					},
 					goaway.clone(),
 					control.clone(),
+					stats.clone(),
 				));
 
 				let mut publisher = Publisher::new(
@@ -465,6 +474,7 @@ where
 					peer_setup.clone(),
 					version,
 					goaway.going_away.clone(),
+					stats.clone(),
 				);
 				// Only a side that offered MoQ Auth answers the peer's Auth requests: one that
 				// arrives otherwise falls through to the protocol violation in `run_dispatch`.
@@ -483,9 +493,13 @@ where
 				// arrives on the wire.
 				let goaway_recv = {
 					let goaway = goaway.clone();
+					let stats = stats.clone();
 					async move {
 						match peer_setup_stream {
-							Some(reader) => run_goaway(reader.with_version(version), version, client, goaway).await,
+							Some(reader) => {
+								run_goaway(reader.with_stats(&stats).with_version(version), version, client, goaway)
+									.await
+							}
 							None => std::future::pending().await,
 						}
 					}
@@ -652,6 +666,9 @@ pub struct PeerSetup<S: crate::transport::poll::Session> {
 	/// The SETUP stream, which becomes the GOAWAY channel.
 	pub stream: Reader<S::RecvStream, crate::Version>,
 
+	/// The SETUP's encoded size, counted once the session's stats are known.
+	pub size: usize,
+
 	/// The request path the peer advertised, for URL-less transports.
 	pub path: Option<String>,
 
@@ -712,7 +729,7 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 		}
 
 		reader.set_priority(crate::priority::RECV_CONTROL);
-		let setup: setup::Setup = reader.decode().await?;
+		let (setup, size) = reader.decode_sized::<setup::Setup>().await?;
 		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, version)?;
 		let path = match params.get_bytes(ietf::ParameterBytes::Path) {
 			Some(bytes) => Some(
@@ -727,6 +744,7 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 
 		return Ok(PeerSetup {
 			stream: reader,
+			size,
 			path,
 			token,
 			declared,
@@ -785,6 +803,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	extensions: crate::setup::Extensions,
 	goaway: crate::goaway::Protocol,
 	control: Control,
+	stats: crate::stats::Session,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
@@ -792,7 +811,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		.open_uni(Default::default())
 		.await
 		.map_err(Error::from_transport)?;
-	let mut writer: Writer<S::SendStream, crate::Version> = Writer::new(send, outer_version);
+	let mut writer: Writer<S::SendStream, crate::Version> = Writer::new(send, outer_version).with_stats(&stats);
 
 	let mut parameters = ietf::Parameters::default();
 	parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
@@ -1041,6 +1060,7 @@ struct Uni<S: crate::transport::poll::Session> {
 impl<S: crate::transport::poll::Boxable> Uni<S> {
 	/// Read the stream's type and serve it, failing only when the stream breaks the session.
 	async fn serve(self, mut reader: Reader<S::RecvStream, crate::Version>) -> Result<(), Error> {
+		reader = reader.with_stats(self.subscriber.stats());
 		let Self {
 			mut subscriber,
 			peer_setup,
@@ -1286,6 +1306,7 @@ struct Bidi<S: crate::transport::poll::Session> {
 impl<S: crate::transport::poll::Boxable> Bidi<S> {
 	/// Read and serve a request, failing only when it breaks the session.
 	async fn serve(self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		stream = super::request_stream::with_stats(stream, self.publisher.stats(), self.version);
 		let Self {
 			publisher,
 			mut subscriber,
@@ -1315,6 +1336,14 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			}
 			Err(err) => return Err(err),
 		};
+		let native = !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+			|| (version == Version::Draft16 && id == ietf::SubscribeNamespaceLegacy::ID);
+		if native {
+			stream.reader = stream.reader.with_stats(publisher.stats());
+			publisher
+				.stats()
+				.control(super::message::control(id, version), data.0.len() + 2, true);
+		}
 		if !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 			&& matches!(
 				id,
@@ -1450,6 +1479,9 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 		}
 
 		let msg: ietf::GoAway = body.message(version)?;
+		reader
+			.stats()
+			.control(crate::stats::Control::Goaway, body.0.len() + 2, true);
 		tracing::info!(message = ?msg, "received GOAWAY");
 
 		// Draft-18 names the first of our own Request IDs it did not process: even for a
@@ -1577,6 +1609,7 @@ mod tests {
 					let log = session.log.clone();
 					let (driver, _) = start(Config {
 						runtime: crate::time::sim(),
+						stats: Default::default(),
 						session,
 						setup: None,
 						request_id_max: None,
@@ -1632,6 +1665,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -1678,6 +1712,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -1773,6 +1808,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1836,6 +1872,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1909,6 +1946,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: Some(setup),
 			request_id_max: None,
@@ -1997,6 +2035,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2100,6 +2139,7 @@ mod tests {
 		let handle = crate::auth::Handle::ietf(true);
 		let (driver, goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2184,6 +2224,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2280,6 +2321,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2369,6 +2411,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2412,6 +2455,7 @@ mod tests {
 
 			let (driver, _goaway) = start(Config {
 				runtime: crate::time::sim(),
+				stats: Default::default(),
 				session,
 				setup: None,
 				request_id_max: None,
@@ -2678,6 +2722,7 @@ mod tests {
 	fn bidi_driver(session: crate::lite::test_transport::ScriptedSession, publish: Option<origin::Consumer>) -> Driver {
 		start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2821,6 +2866,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -2889,6 +2935,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -2991,6 +3038,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: Some(setup),
 			request_id_max: None,
@@ -3113,6 +3161,7 @@ mod tests {
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup,
 					request_id_max: None,
@@ -3344,6 +3393,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -3423,6 +3473,7 @@ mod tests {
 				Default::default(),
 				goaway_protocol,
 				control.clone(),
+				Default::default(),
 			));
 			handle.producer().send(crate::goaway::Goaway::new()).unwrap();
 			assert!(futures::poll!(setup.as_mut()).is_pending());
@@ -3445,6 +3496,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
