@@ -19,7 +19,6 @@ mod datagram;
 mod dial_split_horizon;
 mod drained_claim;
 mod empty_group;
-mod empty_replacement;
 mod extensions;
 mod fetch_cancel;
 mod fetch_caps;

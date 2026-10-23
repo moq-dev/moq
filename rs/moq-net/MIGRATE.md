@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A replacement track starts over (#6428)
+
+A broadcast no longer remembers the sequences an ended track of a name wrote, so its state stays bounded by its live tracks.
+A track that replaces an ended one, created or requested, appends from 0 instead of returning `Error::Duplicate`, `finish()` ends at its own writes, and `finish_at()` and its first frames are no longer checked against the predecessor.
+A publisher that recreates a name continues past the groups it already wrote with `create_group` at an explicit sequence, such as a timestamp.
+
 ### Sessions box their transport (#6176)
 
 `Driver` and `server::Handshake` lose their transport type parameter: write `moq_net::Driver` and `moq_net::server::Handshake`.

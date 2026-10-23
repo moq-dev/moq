@@ -1054,12 +1054,7 @@ async fn producer_replaced(version: &str) {
 		.expect("the track was not requested again")
 		.unwrap();
 
-	// The application owns where the replacement starts: an append would reuse the first
-	// producer's sequences, so it is refused, and the replacement continues explicitly.
-	assert!(
-		matches!(second.append_group(), Err(Error::Duplicate)),
-		"{version}: the replacement restarted its sequences"
-	);
+	// The application owns where the replacement starts, so it continues explicitly.
 	let mut group = second.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
