@@ -152,7 +152,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Unprefixed C++ free functions](/quest/m1/cpp-free-function-prefix.md) - generated free functions drop `moq_`, and `moq.hpp` deletes its five pass-through wrappers before C++ first publishes
 - [Error cleanups](/quest/m1/error-cleanups.md) - delete the unused `Error::SessionClosed`; raw transport failures already map to `Unroutable`
 - [FromStr parsers](/quest/m1/from-str-trait.md) - hang, moq-auth, and moq-msf implement `FromStr` instead of inherent `from_str`
-- [Drop dead items](/quest/m1/drop-dead-items.md) - the audit's uncalled public items and test helpers are removed
 - [Warmup in the hang draft](/quest/m1/warmup-draft.md) - the draft lets a dual-decoder consumer present before `warmup`, matching the shipping `decode::Consumer`
 - [API-diff check](/quest/m1/api-diff.md) - a recipe diffs every published package's API against its last release, run on PRs into release and against main before the cut
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - moq-transport sessions ask for announcements only under watched prefixes, starting with UNSUBSCRIBE_NAMESPACE on d14/15

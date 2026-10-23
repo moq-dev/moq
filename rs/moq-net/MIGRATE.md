@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
+
+Match the version yourself: lite-01, lite-02, and moq-transport draft 14 negotiate the version in SETUP; every other version negotiates it through ALPN.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
