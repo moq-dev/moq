@@ -1372,8 +1372,9 @@ export class Producer {
 	/**
 	 * Append a new group with the next sequence number: one past this producer's own writes.
 	 *
-	 * Throws if an earlier producer of the name in this broadcast already wrote that sequence.
-	 * A replacement picks where it starts by writing its first group with {@link writeGroup}.
+	 * The broadcast remembers nothing of an earlier producer of the name, so a replacement
+	 * starts at 0. Since a name always means the same content, a replacement continues past
+	 * its predecessor's groups with {@link writeGroup}.
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a timestamp on every frame of
 	 * a timed track and none on an untimed one, or the write throws {@link TimestampMismatch}.
@@ -1450,8 +1451,7 @@ export class Producer {
 	 * keep datagram payloads small (e.g. a single audio frame). Datagrams are never delivered
 	 * over stream-only transports (the WebSocket fallback). A payload over
 	 * 65535 bytes (the QUIC datagram frame ceiling) throws. An origin publisher uses this; a
-	 * relay preserving upstream numbering uses {@link insertDatagram}. Like {@link appendGroup},
-	 * throws if an earlier producer of the name already wrote that sequence.
+	 * relay preserving upstream numbering uses {@link insertDatagram}.
 	 *
 	 * Pass `undefined` for the timestamp on an untimed track; a timestamp whose presence
 	 * disagrees with the track's {@link Info.timescale} throws {@link TimestampMismatch}.

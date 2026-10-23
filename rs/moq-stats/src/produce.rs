@@ -2881,7 +2881,7 @@ mod tests {
 		);
 
 		// A return after the linger is a new epoch counted from zero, with group
-		// numbers starting over.
+		// numbers continuing past the old epoch's.
 		let _third = feed(registry, Tier::default(), "acme/live", true, 1, 25).await;
 		drive_tick().await;
 		let mut restarted = take_epochs(&mut events);
