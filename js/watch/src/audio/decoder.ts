@@ -21,11 +21,15 @@ import { type AudioBuffer, createAudioBuffer } from "./buffer";
 import { type DecoderConfig, decoderConfig, type PlaybackIdentity, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 import { ringSamples } from "./latency";
+import { Order } from "./order";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { type DecodedSpan, Terminal } from "./terminal";
 import { Warmup } from "./warmup";
+
+type Next = NonNullable<Awaited<ReturnType<Container.Consumer["next"]>>>;
+type FrameNext = Next & { frame: NonNullable<Next["frame"]> };
 
 const LEGACY_WARMUP_CALLBACKS = 3;
 
@@ -345,22 +349,21 @@ export class Decoder {
 			};
 			decoder.configure(decoderConfig);
 
-			// The newest frame sent to the decoder since it was last reset.
-			let newest: Time.Micro | undefined;
+			const order = this.#order();
 			for (;;) {
 				const next = await nextMedia(consumer);
-				if (!next) break;
-				if (this.#onNext(next)) {
-					decoder.reset();
-					decoder.configure(decoderConfig);
-					newest = undefined;
-				}
-				if (next.end !== undefined) {
+				if (next?.frame === undefined || next.end !== undefined) {
+					// The track ending, or a marker, cuts a held head short.
+					if (!(await this.#play(effect, decoder, decoderConfig, order, order.flush()))) return;
+					if (!next) break;
+					if (this.#onNext(next)) {
+						decoder.reset();
+						decoder.configure(decoderConfig);
+						order.reset();
+					}
 					continue;
 				}
-
 				const { frame } = next;
-				if (!frame) continue;
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
@@ -370,27 +373,7 @@ export class Decoder {
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
-				// Decode in timestamp order. A subscription's head groups arrive after the live edge served
-				// alongside them, and the ring, anchored at the first decoded frame, cannot place audio
-				// before it. Chrome's AudioDecoder would also stamp every later output from its first
-				// input, shifting the rest of the track by the reorder and overflowing a buffered ring.
-				if (newest !== undefined && (frame.timestamp as Time.Micro) < newest) continue;
-				newest = frame.timestamp as Time.Micro;
-
-				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
-				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await this.#ring?.wait(frame.timestamp as Time.Micro, effect.abort);
-
-				const chunk = new EncodedAudioChunk({
-					type: frame.keyframe ? "key" : "delta",
-					data: frame.payload,
-					timestamp: frame.timestamp,
-				});
-
-				// A fatal decode error closes the decoder, so decoding again throws InvalidStateError out
-				// of this loop. Stop instead: the error callback already reported the real failure.
-				if (decoder.state === "closed") break;
-				decoder.decode(chunk);
+				if (!(await this.#play(effect, decoder, decoderConfig, order, order.push({ ...next, frame })))) return;
 			}
 		});
 	}
@@ -446,21 +429,23 @@ export class Decoder {
 			};
 			decoder.configure(decoderConfig);
 
-			// The newest frame sent to the decoder since it was last reset.
-			let newest: Time.Micro | undefined;
+			const order = this.#order();
 			for (;;) {
 				const next = await nextMedia(consumer);
-				if (!next) break;
+				if (next?.frame === undefined) {
+					// The track ending, or a marker, cuts a held head short.
+					if (!(await this.#play(effect, decoder, decoderConfig, order, order.flush()))) return;
+					if (!next) break;
 
-				// Reset and re-anchor before decoding the first frame of a new codec epoch.
-				if (this.#onNext(next)) {
-					decoder.reset();
-					decoder.configure(decoderConfig);
-					newest = undefined;
+					// Reset and re-anchor before decoding the first frame of a new codec epoch.
+					if (this.#onNext(next)) {
+						decoder.reset();
+						decoder.configure(decoderConfig);
+						order.reset();
+					}
+					continue;
 				}
-
 				const { frame } = next;
-				if (!frame) continue;
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
 				this.sync.received(timestamp, "audio");
@@ -469,27 +454,50 @@ export class Decoder {
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
-				// Decode in timestamp order. A subscription's head groups arrive after the live edge served
-				// alongside them, and the ring, anchored at the first decoded frame, cannot place audio
-				// before it. Chrome's AudioDecoder would also stamp every later output from its first
-				// input, shifting the rest of the track by the reorder and overflowing a buffered ring.
-				if (newest !== undefined && frame.timestamp < newest) continue;
-				newest = frame.timestamp;
-
-				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
-				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await this.#ring?.wait(frame.timestamp, effect.abort);
-
-				if (decoder.state === "closed") break;
-				decoder.decode(
-					new EncodedAudioChunk({
-						type: frame.keyframe ? "key" : "delta",
-						data: frame.payload,
-						timestamp: frame.timestamp,
-					}),
-				);
+				if (!(await this.#play(effect, decoder, decoderConfig, order, order.push({ ...next, frame })))) return;
 			}
 		});
+	}
+
+	// A buffered subscription holds its head until it spans the floor, which playback waits for anyway.
+	#order(): Order<FrameNext> {
+		if (!this.sync.out.buffered.peek()) return new Order(undefined);
+		return new Order({ floor: Time.Micro.fromMilli(this.sync.out.delay.peek()) });
+	}
+
+	// Decode released frames in order, resetting the decoder before the first frame of a new codec
+	// epoch. The terminal sees them in decode order, so it anchors on the oldest. Reports whether to keep going.
+	async #play(
+		effect: Effect,
+		decoder: AudioDecoder,
+		config: AudioDecoderConfig,
+		order: Order<FrameNext>,
+		reads: FrameNext[],
+	): Promise<boolean> {
+		for (const next of reads) {
+			if (this.#onNext(next)) {
+				decoder.reset();
+				decoder.configure(config);
+				order.reset();
+			}
+			const { frame } = next;
+
+			// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
+			// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
+			await this.#ring?.wait(frame.timestamp as Time.Micro, effect.abort);
+
+			// A fatal decode error closes the decoder, so decoding again throws InvalidStateError out
+			// of the loop. Stop instead: the error callback already reported the real failure.
+			if (decoder.state === "closed") return false;
+			decoder.decode(
+				new EncodedAudioChunk({
+					type: frame.keyframe ? "key" : "delta",
+					data: frame.payload,
+					timestamp: frame.timestamp,
+				}),
+			);
+		}
+		return true;
 	}
 
 	#emit(sample: AudioData, decoded: DecodedSpan = this.#terminal.span(sample)) {
