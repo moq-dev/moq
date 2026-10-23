@@ -70,8 +70,8 @@ Start by comparing the live tree against these baselines:
   fields are hidden deprecated spellings that fail with migration guidance.
   Trace a flag through the config merge, not through prose or examples.
 
-No public removal landed in this run. Propose any public removals
-separately with their migration and consumer evidence. The public model and
+No public removal landed in this run itself; the items marked removed above
+went in a follow-up PR. Propose any public removals separately with their migration and consumer evidence. The public model and
 performance audits own their API and benchmark decisions.
 
 ## Required
