@@ -1,12 +1,13 @@
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
+import { IMPLEMENTATION } from "../implementation.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { exchangeSetup } from "./handshake.ts";
+import { exchangeSetup, legacyPeerImplementation } from "./handshake.ts";
 
 /** Options for {@link accept}. */
 export interface AcceptProps {
@@ -32,6 +33,9 @@ export interface AcceptProps {
 
 	/** The moq-transport extensions to offer, each on unless set to `false`. */
 	extensions?: Extensions.Extensions;
+
+	/** The implementation this side advertises in SETUP; see the `implementation` connect option. */
+	implementation?: string;
 }
 
 /** The per-session wiring shared by every negotiated protocol path. */
@@ -41,6 +45,8 @@ type SessionProps = {
 	client: boolean;
 	/** The moq-transport extensions this side offers. */
 	extensions: Extensions.Offered;
+	/** The implementation this side advertises in SETUP; empty sends nothing. */
+	implementation: string;
 };
 
 /**
@@ -71,6 +77,7 @@ async function acceptInner(
 		publish: props.publish,
 		client: false,
 		extensions: Extensions.offered(props.extensions),
+		implementation: props.implementation ?? IMPLEMENTATION,
 	};
 
 	if (protocol === Ietf.ALPN.DRAFT_22) {
@@ -123,7 +130,7 @@ async function acceptAlpn(
 	// The IETF session code loads on demand, since most sessions negotiate lite; the ALPN already
 	// committed to IETF, so fetch it alongside SETUP.
 	const [setup, { Connection }] = await Promise.all([
-		exchangeSetup(transport, version, "moq-lite-js", wiring),
+		exchangeSetup(transport, version, wiring.implementation, wiring),
 		import("../ietf/connection.ts"),
 	]);
 
@@ -159,11 +166,11 @@ async function acceptSetup(
 	}
 
 	const client = await Ietf.ClientSetup.decode(stream.reader, version);
+	const peerImplementation = legacyPeerImplementation(transport, client.parameters);
 
-	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(true));
-	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
+	Ietf.implementationIntoSetup(params, wiring.implementation);
 	Extensions.intoSetup(params, wiring.extensions, version);
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
@@ -188,6 +195,7 @@ async function acceptSetup(
 		hidden: Ietf.hiddenFromSetup(client.parameters),
 		maxAge: Ietf.maxAgeFromSetup(client.parameters),
 		activeCount: Ietf.activeCountFromSetup(client.parameters, version),
+		peerImplementation,
 	});
 }
 
@@ -224,10 +232,9 @@ async function acceptNegotiated(
 		selectedVersion = match;
 	}
 
-	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(true));
-	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
+	Ietf.implementationIntoSetup(params, wiring.implementation);
 	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
@@ -260,6 +267,7 @@ async function acceptNegotiated(
 			hidden: Ietf.hiddenFromSetup(client.parameters),
 			maxAge: Ietf.maxAgeFromSetup(client.parameters),
 			activeCount: Ietf.activeCountFromSetup(client.parameters, selectedVersion as Ietf.IetfVersion),
+			peerImplementation: legacyPeerImplementation(transport, client.parameters),
 		});
 	} else {
 		throw new Error(`unsupported version: ${selectedVersion.toString(16)}`);

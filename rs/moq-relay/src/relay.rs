@@ -127,6 +127,14 @@ impl Relay {
 		// another relay. Only negotiated when both sides offer it, so other peers never see it.
 		config.listen.extensions.ietf = true;
 		config.connect.extensions.ietf = true;
+		// Name the relay ahead of its core unless the operator overrides it (empty omits it),
+		// and dial cluster peers under the same name.
+		let implementation = config
+			.listen
+			.implementation
+			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
+			.clone();
+		config.connect.implementation = Some(implementation.clone());
 		// Every TLS listener serves the ACME certificate, so install it before any is built.
 		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
 		if let Some(acme) = &acme {
@@ -312,6 +320,7 @@ impl Relay {
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions)
 			.with_extensions(server_extensions)
+			.with_implementation(implementation)
 			.with_timeout(handshake_timeout)
 			.with_sessions(sessions.clone())
 			.bind()?;

@@ -70,6 +70,7 @@ pub struct Server {
 	versions: Versions,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
+	implementation: Option<String>,
 }
 
 impl Server {
@@ -128,6 +129,19 @@ impl Server {
 		self
 	}
 
+	/// Set the implementation to advertise in SETUP, as space-separated `name/version`
+	/// product tokens, outermost first. Defaults to [`IMPLEMENTATION`](crate::IMPLEMENTATION);
+	/// an empty string advertises nothing.
+	pub fn with_implementation(mut self, implementation: impl Into<String>) -> Self {
+		self.implementation = Some(implementation.into());
+		self
+	}
+
+	/// The Implementation our SETUP carries, or `None` to omit it.
+	fn implementation(&self) -> Option<String> {
+		setup::implementation(self.implementation.as_deref().unwrap_or(crate::IMPLEMENTATION))
+	}
+
 	/// The configured origin pair, each tagged with the stats context so the
 	/// model attributes reads (egress) and writes (ingress) for this session.
 	/// One shared context across both halves keeps presence and viewer counts
@@ -169,6 +183,7 @@ impl Server {
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
+				implementation: self.implementation(),
 			}
 		} else {
 			lite::Setup::default()
@@ -202,6 +217,7 @@ impl Server {
 				auth: start.auth,
 				estimate: Some(start.estimate),
 				bandwidth: crate::bandwidth::Allocator::default(),
+				peer_implementation: start.peer_implementation,
 			},
 		))
 	}
@@ -241,7 +257,7 @@ impl Server {
 		S: crate::transport::poll::Session,
 	{
 		let runtime = Deadlines::new(now);
-		let (path, role, origin, handshake) = match session.protocol() {
+		let (path, role, origin, peer_implementation, handshake) = match session.protocol() {
 			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07_WIP)) => {
 				let version = match alpn {
 					ALPN_LITE_07_WIP => lite::Version::Lite07,
@@ -258,6 +274,7 @@ impl Server {
 					client_setup.setup.path.clone(),
 					client_setup.setup.role,
 					client_setup.setup.hop,
+					client_setup.setup.implementation.clone(),
 					PausedHandshake::LiteSetup {
 						session,
 						version,
@@ -273,6 +290,7 @@ impl Server {
 					None,
 					None,
 					None,
+					None,
 					PausedHandshake::LiteBare {
 						session,
 						version: lite::Version::Lite04,
@@ -284,6 +302,7 @@ impl Server {
 					.select(Version::Lite(lite::Version::Lite03))
 					.ok_or(Error::Version)?;
 				(
+					None,
 					None,
 					None,
 					None,
@@ -308,6 +327,7 @@ impl Server {
 			origin,
 			// moq-lite carries no SETUP token.
 			token: None,
+			peer_implementation,
 			assigned_hop: crate::Hop::random(),
 			auth,
 			inner: Some(RequestInner {
@@ -429,7 +449,7 @@ impl Server {
 		// Pull the request path and max request ID out now (IETF only) so `ok()`
 		// doesn't re-decode the consumed parameters. moq-transport carries the path
 		// in its SETUP just like lite-05.
-		let (path, token, request_id_max, peer_declared) = match version {
+		let (path, token, request_id_max, peer_declared, peer_implementation) = match version {
 			Version::Ietf(v) => {
 				let (params, _) = ietf::Parameters::decode_slice(&client.parameters, v)?;
 				let path = match params.get_bytes(ietf::ParameterBytes::Path) {
@@ -452,9 +472,11 @@ impl Server {
 					flate: ietf::flate::from_setup(&params, v)?,
 					..Default::default()
 				};
-				(path, token, request_id_max, peer_declared)
+				let implementation =
+					setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
+				(path, token, request_id_max, peer_declared, implementation)
 			}
-			Version::Lite(_) => (None, None, None, ietf::peer::Peer::default()),
+			Version::Lite(_) => (None, None, None, ietf::peer::Peer::default(), None),
 		};
 
 		Ok(Handshake {
@@ -462,6 +484,7 @@ impl Server {
 			role: None,
 			origin: None,
 			token,
+			peer_implementation: peer_implementation.clone(),
 			assigned_hop: crate::Hop::random(),
 			// Lite 01/02 and moq-transport 14-16 carry no AUTH, though a moq-transport request
 			// still carries a token.
@@ -478,6 +501,7 @@ impl Server {
 					version,
 					request_id_max,
 					peer_declared,
+					peer_implementation,
 					client_setup_size,
 				})),
 			}),
@@ -505,6 +529,7 @@ impl Server {
 			// Cluster extension and declared a non-zero Hop ID.
 			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
 			token: peer_setup.token.clone(),
+			peer_implementation: peer_setup.implementation.clone(),
 			assigned_hop: crate::Hop::random(),
 			// The client's SETUP already settled whether it offered MoQ Auth, so it is
 			// negotiated exactly when we offer it too.
@@ -534,6 +559,7 @@ pub struct Handshake<S: crate::transport::poll::Session> {
 	role: Option<Role>,
 	origin: Option<crate::Hop>,
 	token: Option<setup::Token>,
+	peer_implementation: Option<String>,
 	/// The identity this session's routes are attributed to for split horizon when the
 	/// peer declares none on the wire; it never enters a hop chain. Fresh per request unless the caller overrides it
 	/// ([`Handshake::with_peer_hop`]).
@@ -627,6 +653,7 @@ where
 			} = *self;
 			server.stats.control(stats::Control::Session, peer_setup.size, true);
 			let (publish, subscribe) = server.stat_tagged_origins();
+			let peer_implementation = setup::PeerImplementation::known(peer_setup.implementation);
 
 			// The client's SETUP was read at the pause; hand the stream back
 			// for GOAWAY. A server never advertises a path, hence `None`.
@@ -651,6 +678,8 @@ where
 				auth: auth.clone(),
 				early_unis: peer_setup.early,
 				extensions: server.extensions,
+				implementation: server.implementation(),
+				peer_implementation: peer_implementation.clone(),
 			})?;
 			tracing::debug!(?version, "connected");
 			Ok(Session::new(
@@ -665,6 +694,7 @@ where
 					auth,
 					estimate: None,
 					bandwidth: crate::bandwidth::Allocator::default(),
+					peer_implementation,
 				},
 			))
 		}
@@ -686,6 +716,8 @@ struct PausedLegacy<S: crate::transport::poll::Session> {
 	request_id_max: Option<ietf::RequestId>,
 	/// What the client's SETUP declared, for the options `ok` acts on.
 	peer_declared: ietf::peer::Peer,
+	/// The implementation the client's SETUP advertised.
+	peer_implementation: Option<String>,
 	/// The client SETUP's encoded size, counted under the final stats.
 	client_setup_size: usize,
 }
@@ -711,6 +743,7 @@ where
 				version,
 				request_id_max,
 				peer_declared,
+				peer_implementation,
 				client_setup_size,
 			} = *self;
 			let mut stream = stream.with_stats(&server.stats);
@@ -726,7 +759,9 @@ where
 						ietf::ParameterVarInt::MaxRequestId,
 						ietf::initial_max_request_id(server.limits.requests(), true),
 					);
-					parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+					if let Some(implementation) = server.implementation() {
+						parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
+					}
 					if server.extensions.solicit {
 						ietf::solicit::into_setup(&mut parameters, v);
 					}
@@ -745,7 +780,7 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway, auth, estimate) = match version {
+			let (recv_bw, protocol, goaway, auth, estimate, peer_implementation) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -770,10 +805,12 @@ where
 						start.goaway,
 						start.auth,
 						Some(start.estimate),
+						start.peer_implementation,
 					)
 				}
 				Version::Ietf(v) => {
 					let stream = stream.with_version(v);
+					let peer_implementation = setup::PeerImplementation::known(peer_implementation);
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
 					let (protocol, goaway) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
@@ -795,8 +832,18 @@ where
 						auth: auth.clone(),
 						early_unis: Vec::new(),
 						extensions: server.extensions,
+						// Already sent on the bidi SETUP above.
+						implementation: None,
+						peer_implementation: peer_implementation.clone(),
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, None)
+					(
+						None,
+						crate::driver::Protocol::Ietf(protocol),
+						goaway,
+						auth,
+						None,
+						peer_implementation,
+					)
 				}
 			};
 
@@ -812,6 +859,7 @@ where
 					auth,
 					estimate,
 					bandwidth: crate::bandwidth::Allocator::default(),
+					peer_implementation,
 				},
 			))
 		}
@@ -859,6 +907,15 @@ where
 	/// authenticated identity: authorize on the token or client certificate.
 	pub fn peer_hop(&self) -> Option<crate::Hop> {
 		self.origin
+	}
+
+	/// The implementation the client advertised in its SETUP, such as `moq-net-rs/0.3.10`.
+	///
+	/// `None` when it advertised none or its version carries no SETUP (moq-lite 01-04),
+	/// which in practice means it predates the parameter. Peer-controlled: use it for
+	/// logs and rollout counts, never to authorize.
+	pub fn peer_implementation(&self) -> Option<&str> {
+		self.peer_implementation.as_deref()
 	}
 
 	/// The session's auth handle, the same one [`Session::auth`] returns once accepted.
@@ -1203,6 +1260,7 @@ mod tests {
 			cost: None,
 			hop,
 			ietf: false,
+			implementation: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();
@@ -1527,6 +1585,7 @@ mod tests {
 			role: None,
 			origin: None,
 			token: None,
+			peer_implementation: None,
 			assigned_hop: Hop::random(),
 			auth: crate::auth::Handle::ietf(false),
 			inner: Some(RequestInner {
@@ -1543,6 +1602,7 @@ mod tests {
 						size: 0,
 						path: None,
 						token: None,
+						implementation: None,
 						declared: ietf::peer::Peer::default(),
 						early: Vec::new(),
 					},

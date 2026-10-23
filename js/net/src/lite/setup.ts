@@ -26,6 +26,8 @@ const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
 /** Setup Parameter id for the endpoint's Hop ID. */
 const PARAM_HOP = 0x5n;
+/** Setup Parameter id for the endpoint's implementation name and version. */
+const PARAM_IMPLEMENTATION = 0x6n;
 
 /** Cap on the number of parameters in a bag, matching the Rust decoder. */
 const MAX_PARAMS = 64;
@@ -182,6 +184,8 @@ export interface SetupProps {
 	role?: Role;
 	/** See {@link Setup.hop}. Omitted by default. */
 	hop?: Hop;
+	/** See {@link Setup.implementation}. Omitted by default. */
+	implementation?: string;
 }
 
 /**
@@ -219,11 +223,18 @@ export class Setup {
 	 */
 	hop?: Hop;
 
-	constructor({ probe, path, role, hop }: SetupProps = {}) {
+	/**
+	 * This endpoint's implementation and version, such as `moq-net-js/0.4.2`. Opaque and
+	 * peer-controlled, so only for logs and rollout counts. `undefined` or empty sends nothing.
+	 */
+	implementation?: string;
+
+	constructor({ probe, path, role, hop, implementation }: SetupProps = {}) {
 		this.probe = probe ?? ProbeLevel.None;
 		this.path = path;
 		this.role = role ?? Role.Both;
 		this.hop = hop;
+		this.implementation = implementation;
 	}
 
 	static #guard(version: Version) {
@@ -248,6 +259,9 @@ export class Setup {
 		if (this.hop !== undefined && this.hop !== 0n) {
 			params.setVarint(PARAM_HOP, this.hop, version);
 		}
+		if (this.implementation) {
+			params.setBytes(PARAM_IMPLEMENTATION, new TextEncoder().encode(this.implementation));
+		}
 		await params.encode(w);
 	}
 
@@ -269,7 +283,10 @@ export class Setup {
 		const hopRaw = await params.getVarint(PARAM_HOP, version);
 		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
 
-		const setup = new Setup({ probe, path, role, hop });
+		const implementationBytes = params.getBytes(PARAM_IMPLEMENTATION);
+		const implementation = implementationBytes === undefined ? undefined : decodeUtf8(implementationBytes);
+
+		const setup = new Setup({ probe, path, role, hop, implementation });
 		if (pathBytes !== undefined || roleCode !== undefined) clientParameters.add(setup);
 		return setup;
 	}

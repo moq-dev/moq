@@ -25,6 +25,53 @@ const SERVER_SETUP: u8 = 0x21;
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) const SETUP_V17: u64 = 0x2F00;
 
+/// Decode a SETUP Implementation value, refusing one that is not UTF-8.
+pub(crate) fn decode_implementation(bytes: Option<&[u8]>) -> Result<Option<String>, crate::DecodeError> {
+	bytes
+		.map(|bytes| {
+			std::str::from_utf8(bytes)
+				.map(str::to_owned)
+				.map_err(|_| crate::DecodeError::InvalidValue)
+		})
+		.transpose()
+}
+
+/// The implementation the peer advertised in SETUP, published once that SETUP is read.
+///
+/// `None` until then. The protocol holds a clone for the life of its driver, so a
+/// session that ends before the SETUP arrives closes the channel instead of leaving
+/// `Session::peer_implementation` waiting.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[derive(Clone, Default)]
+pub(crate) struct PeerImplementation(kio::Producer<Option<Option<String>>>);
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl PeerImplementation {
+	/// A slot for a SETUP read before the session started, or a version that carries none.
+	pub fn known(value: Option<String>) -> Self {
+		Self(kio::Producer::new(Some(value)))
+	}
+
+	/// Record what the peer's SETUP advertised. The first SETUP wins.
+	pub fn set(&self, value: Option<String>) {
+		if let Ok(mut slot) = self.0.write()
+			&& slot.is_none()
+		{
+			*slot = Some(value);
+		}
+	}
+
+	pub(crate) fn consume(&self) -> kio::Consumer<Option<Option<String>>> {
+		self.0.consume()
+	}
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+/// Our Implementation value to send, or `None` when the caller configured it empty.
+pub(crate) fn implementation(value: &str) -> Option<String> {
+	(!value.is_empty()).then(|| value.to_owned())
+}
+
 /// The SETUP extensions this side offers.
 ///
 /// Turning one off connects as a peer that does not speak that extension. moq-lite carries

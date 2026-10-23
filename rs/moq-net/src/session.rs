@@ -122,6 +122,8 @@ pub struct Session {
 	closed: kio::Consumer<Option<Ended>>,
 	stats: kio::Shared<StatsState>,
 	version: Version,
+	/// What the peer's SETUP advertised, once it arrives.
+	peer_implementation: kio::Consumer<Option<Option<String>>>,
 	// Weak, so the sampler runs only while a caller holds a consumer.
 	send_bandwidth: Option<bandwidth::Weak>,
 	recv_bandwidth: Option<bandwidth::Weak>,
@@ -137,6 +139,22 @@ impl Session {
 	/// Returns the negotiated protocol version.
 	pub fn version(&self) -> Version {
 		self.version
+	}
+
+	/// The implementation the peer advertised in its SETUP, such as `moq-net-rs/0.3.10`.
+	///
+	/// Waits for the peer's SETUP, which a dialing client may not have read yet.
+	/// `None` when the peer advertised none, its version carries no SETUP (moq-lite
+	/// 01-04), or the session ended first. Peer-controlled: use it for logs and
+	/// rollout counts, never to authorize.
+	pub async fn peer_implementation(&self) -> Option<String> {
+		self.peer_implementation
+			.wait(|slot| match &**slot {
+				Some(value) => Poll::Ready(value.clone()),
+				None => Poll::Pending,
+			})
+			.await
+			.unwrap_or_default()
 	}
 
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
@@ -312,6 +330,8 @@ pub(super) struct Handles {
 	pub estimate: Option<kio::Producer<Estimate>>,
 	/// The reservations the session probes for.
 	pub bandwidth: bandwidth::Allocator,
+	/// What the peer's SETUP advertised as its implementation.
+	pub peer_implementation: crate::setup::PeerImplementation,
 }
 
 impl Session {
@@ -332,6 +352,7 @@ impl Session {
 			estimate,
 			stats: context,
 			bandwidth,
+			peer_implementation,
 		} = handles;
 		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
@@ -384,6 +405,7 @@ impl Session {
 			closed: closed_consumer,
 			stats,
 			version,
+			peer_implementation: peer_implementation.consume(),
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,

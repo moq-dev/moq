@@ -212,6 +212,11 @@ pub struct MoqBackoff {
 /// (`tls.system_roots`, `quic.gso`, `quic.mtu_discovery`, `quic.congestion_control`) stay null,
 /// as do the ones that are off by default. A wasm build honors none of the tuning, so it
 /// reports none.
+/// What sessions opened through this crate advertise in SETUP: moq-ffi ahead of its core.
+pub(crate) fn implementation() -> String {
+	format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION)
+}
+
 #[uniffi::export]
 pub fn moq_client_defaults() -> MoqClientConfig {
 	#[cfg(not(target_arch = "wasm32"))]
@@ -312,6 +317,7 @@ impl Client {
 		let _guard = crate::ffi::enter();
 
 		let mut connect = moq_tokio::connect::Config::default();
+		connect.implementation = Some(implementation());
 		if let Some(bind) = config.bind {
 			let bind = bind.parse().map_err(|err| MoqError::Config {
 				reason: format!("invalid bind address {bind}: {err}"),
@@ -691,6 +697,7 @@ impl Client {
 		// transport and ends that task.
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(self.versions.clone())
+			.with_implementation(implementation())
 			.with_publisher(&publish.inner)
 			.with_subscriber(subscribe.inner.clone())
 			.connect(moq_clock::now(), transport)
