@@ -4,13 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Request opens refuse missing stream credit
+### Native request opens refuse missing stream credit
 
 Implement `transport::poll::Session::poll_open_request(cx, options)` separately from the waiting `poll_open_bi`.
 Return `Ready(Ok(None))` when QUIC stream credit is exhausted, before retaining an open operation; return `Pending` only while completing an already admitted stream's transport header.
 A refused request returns `Error::NoStreamCredit` locally and maps to `StreamError::Internal` when relayed.
-Iroh retains its waiting behavior because upstream noq cannot expose a nonwaiting open.
-
+Native QUIC/WebTransport on tokio and io\_uring, and qmux, implement nonwaiting admission.
+Iroh retains its waiting behavior because upstream noq cannot expose a nonwaiting open; browser-backed Rust retains its backend behavior.
+Announcement interest refuses internally and releases its discovery snapshot, while the aggregate listing keeps its existing event/sync API without a per-source error result.
 
 ### Receive streams are read through leases (#5878)
 

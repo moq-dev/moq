@@ -281,7 +281,7 @@ struct Watched {
 	/// could not get a stream to make it on. Nothing about that clears on its own, so the
 	/// loop comes back to it on a timer.
 	deferred: bool,
-	/// What the peer's refusal said about coming back, which outranks that timer.
+	/// Whether a local or peer refusal permits another offer, which outranks that timer.
 	refused: Refused,
 	/// How long to stay away the next time the peer ends this advertisement while idle.
 	lapse: Duration,
@@ -300,7 +300,7 @@ enum Refused {
 	No,
 	/// Refused with a minimum wait before re-offering.
 	Until(crate::time::Instant),
-	/// Refused with an interval of 0: the peer does not want this offered again.
+	/// Refused locally without stream credit, or by the peer with a retry interval of 0.
 	Never,
 }
 

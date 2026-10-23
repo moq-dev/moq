@@ -276,7 +276,8 @@ pub mod poll {
 		///
 		/// `None` refuses the request before opening a stream. `Pending` means the stream
 		/// already has credit but its transport header is waiting for send capacity.
-		/// Iroh cannot inspect credit and retains its waiting open behavior.
+		/// Native QUIC and qmux implement this admission check. Iroh retains its waiting
+		/// open behavior, and browser-backed sessions retain their browser's behavior.
 		fn poll_open_request(
 			&mut self,
 			cx: &mut Context<'_>,
