@@ -1135,9 +1135,13 @@ impl Follower {
 						break;
 					}
 				},
-				// The catalog's broadcast ended after its catalog, and nothing reads this sibling
-				// any more.
-				_ = catalog.closed(), if following && !listening => following = false,
+				// The catalog's broadcast ended after its catalog: the run is offline, so its
+				// sibling renditions idle with it.
+				_ = catalog.closed(), if following && !listening => {
+					following = false;
+					self.current = None;
+					self.idle();
+				}
 			}
 		}
 
@@ -3420,7 +3424,7 @@ mod session_tests {
 	}
 
 	/// A catalog finished while its broadcast stays up still follows its siblings: the next
-	/// instance plays on the same pad.
+	/// instance plays on the same pad, until the catalog's broadcast ends.
 	#[test]
 	fn a_sibling_is_followed_past_its_catalogs_close() {
 		let _pad_ids = pad_ids();
@@ -3440,6 +3444,18 @@ mod session_tests {
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
+
+		// The catalog's broadcast ending lets go of the sibling it read.
+		let mut demand = second.video.demand();
+		drop(room);
+		let unwanted = async {
+			while demand.wanted_changed().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
+		super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), unwanted).await })
+			.expect("the sibling outlived its catalog's broadcast")
+			.expect("the sibling track closed");
 		stop(session);
 		recorder.assert_one_pad_held();
 	}
