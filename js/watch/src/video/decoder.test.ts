@@ -489,7 +489,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.outputs).toEqual(stage === "queued" ? [] : [picture]);
 			const before = playback.decoder.out.frame.peek();
 
-			playback.sync.received(Milli(skipTo), "audio", Milli(5000));
+			playback.sync.received(Milli(skipTo), Milli(5000));
 			playback.release();
 			await microtasks();
 			const due = playback.decoder.out.frame.peek();
@@ -524,7 +524,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.outputs).toEqual([]);
 
 			// "instant" has no cap, so every newer frame skips the playhead without passing over anything.
-			playback.sync.received(Milli(10_000), "video", Nano.toMilli(Nano(now())));
+			playback.sync.received(Milli(10_000), Nano.toMilli(Nano(now())));
 			playback.release();
 			await microtasks();
 
@@ -733,11 +733,11 @@ it("a shared audio clock reset cannot present a parked video frame", async () =>
 	}
 });
 
-it("closing the track releases a video wait parked across a reset", async () => {
+it("closing the track releases a parked video wait", async () => {
 	const clock = manualAt(1000);
 	const reads: Read[] = [];
 	const playback = await guardedPlayback("legacy", reads);
-	const waits: Promise<void>[] = [];
+	const waits: Promise<boolean>[] = [];
 	const original = playback.sync.wait.bind(playback.sync);
 	const wait = spyOn(playback.sync, "wait").mockImplementation((timestamp, signal) => {
 		const waiting = original(timestamp, signal);
@@ -752,10 +752,8 @@ it("closing the track releases a video wait parked across a reset", async () => 
 		playback.enabled.set(true);
 		await microtasks();
 		expect(playback.submitted).toEqual([0, 100_000]);
-		playback.sync.reset();
-		await microtasks();
 		expect(waits.map((waiting) => Bun.peek.status(waiting))).toContain("pending");
-		// No frame re-anchors the shared clock, but the closed track must not leave its wait behind.
+		// Nothing moves the shared clock, but the closed track must not leave its wait behind.
 		playback.enabled.set(false);
 		await microtasks();
 		expect(waits.map((waiting) => Bun.peek.status(waiting))).not.toContain("pending");

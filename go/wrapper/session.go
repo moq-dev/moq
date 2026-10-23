@@ -144,8 +144,9 @@ type Bandwidth struct {
 
 // Reserve claims up to maxBps for the track demand watches; every track
 // producer hands out its Demand. maxBps is a ceiling, not a measurement:
-// reserve the most the track can ever send. Drop the reservation to hand the
-// room back.
+// reserve the most the track can ever send. Reuse Reservation.Update to change
+// the ceiling, or call Update(0) before abandoning or replacing the reservation
+// to hand the room back without waiting for garbage collection.
 func (b *Bandwidth) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
 	return &Reservation{inner: b.inner.Reserve(demand.inner, maxBps)}
 }
@@ -162,6 +163,8 @@ func (b *Bandwidth) SetTarget(targetBps *uint64) {
 //
 // Grant is a snapshot: nil means no estimate or no demand, so hold the current
 // rate, and 0 is a real zero grant.
+// Update(0) relinquishes the allocation while the track stays subscribed; the
+// handle remains usable and a later Update can claim bandwidth again.
 type Reservation struct {
 	inner *ffi.MoqReservation
 }
@@ -171,7 +174,9 @@ func (r *Reservation) Grant() *uint64 {
 	return r.inner.Grant()
 }
 
-// Update changes the ceiling, keeping the same claim.
+// Update changes the ceiling, keeping the same claim. Zero immediately gives
+// its share to siblings and removes its contribution to the automatic probe
+// target; it does not close the track or destroy the native handle.
 func (r *Reservation) Update(maxBps uint64) {
 	r.inner.Update(maxBps)
 }

@@ -379,7 +379,7 @@ async fn expired_verified_tokens_count_under_the_token_root_and_auth_tier() {
 	key.to_file(&key_path).unwrap();
 	let mut claims = moq_auth::Claims::default()
 		.with_root("verified/tenant")
-		.with_subscribe(moq_auth::Pattern::all());
+		.with_subscribe([moq_auth::Pattern::all()]);
 	claims.expires = Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1));
 	let token = key.sign(&claims).unwrap();
 	for tier in [None, Some("edge")] {

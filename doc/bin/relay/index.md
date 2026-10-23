@@ -75,6 +75,9 @@ relay.with_web(web).run().await?;
 - `run` consumes the relay, so clone the handles your tasks need first.
 - Build on `web().routes()`: `with_web` replaces the router, so `Router::new()`
   drops the built-in routes.
+- A route reads the connection's peer address with axum's
+  `ConnectInfo<SocketAddr>` extractor. It is the accepted socket, never a
+  forwarding header, so behind a proxy it is the proxy.
 - `run` drains on SIGTERM or SIGINT from the moment it serves. Before that they
   keep their default action, and still do after a startup error. With ACME, they
   are caught from the first issuance on instead, which they end, so a container
