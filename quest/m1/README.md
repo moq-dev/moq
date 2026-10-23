@@ -156,7 +156,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Refuse unknown MOQ_* environment variables](/quest/m1/env-unknown.md) - every binary exits at startup naming a `MOQ_*` variable it does not read
 - [HLS cursors error on every incomplete recording](/quest/m1/hls-teardown.md) - the recorder cursors return `Ok(None)` only for a complete recording
 - [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - `export hls --output <dir>` records playlists and segments to a directory
-- [RTMP server refuses plaintext only alongside TLS](/quest/m1/rtmp-tls-config.md) - one `with_tls(tls::Config)` makes refusing plaintext without TLS unrepresentable
 
 ## Related
 

@@ -1,4 +1,4 @@
-# [S] HLS cursors error on every incomplete recording
+# [M] HLS cursors error on every incomplete recording
 
 ## Goal
 
@@ -21,11 +21,14 @@ failing returning `Ok(None)`:
 - Audit every path that closes a window and decide each as either a clean
   finish or an error; a recorder must never mistake a truncated recording
   for a complete one.
-- Raised in review, not the interview: a slow cursor misses media silently
-  today. `segments::State::next_after` resumes at the oldest row still in the
-  window, and `Consumer::next` skips a segment whose groups left the relay
-  cache. Both become errors, with a slow-consumer test; a segment that is a
-  gap for the rendition stays a skip.
+- Raised in review, scope accepted by the maintainer: a slow cursor misses
+  media silently today. `segments::State::next_after` resumes at the oldest
+  row still in the window, and `Consumer::next` skips a segment whose groups
+  left the relay cache. Both become errors, with a slow-consumer test; a
+  segment that is a gap for the rendition stays a skip.
+- Kept for static VOD export, 2026-10-23 (maintainer): a directory that plays
+  from a plain CDN with no moq server. Recording-then-serving is already
+  covered by moq-archive.
 - The cursors get a real consumer in
   [the CLI recorder](/quest/m1/hls-record-cli.md).
 - Update `rs/moq-hls/MIGRATE.md` for the changed end semantics.
