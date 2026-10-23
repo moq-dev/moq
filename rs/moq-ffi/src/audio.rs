@@ -689,7 +689,6 @@ mod tests {
 					channels: None,
 					bitrate: None,
 					frame_duration_us: 0,
-					preset: None,
 				},
 				None,
 			)

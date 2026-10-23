@@ -663,7 +663,7 @@ mod tests {
 			};
 			let options = Options {
 				track: Some(format!("audio-{index}")),
-				settings: Settings::from_input(crate::encode::Codec::Aac, &Input::new(48_000, Layout::Mono)),
+				config: Config::from_input(crate::encode::Codec::Aac, &Input::new(48_000, Layout::Mono)),
 				..Options::default()
 			};
 			let mut producer = Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
