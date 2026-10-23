@@ -23,29 +23,29 @@ error.
 - Mirror the shape in `@moq/net` if its producer has the same trap, and in
   moq-ffi where the binding exposes announce on the broadcast.
 
-The draft proposes an `origin::Publication` owner that combines the fill
-broadcast and its real announcement capability. `create_broadcast`, `publish`,
+Decided 2026-10-23 (maintainer, on
+[moq-dev/moq#6464](https://github.com/moq-dev/moq/pull/6464)): ✅ the
+announcement handle is `origin::Publication`, an origin-owned record holding the
+fill broadcast and its announcement capability. `create_broadcast`, `publish`,
 and an admitted `Prepared::publish` return it; `Prepared::broadcast` and
-standalone producers remain fill-only. The proposed record forwards fill
-operations and exposes the borrowed producer through `broadcast()`.
+standalone producers stay fill-only. It borrows its fill through `broadcast()`,
+forwards immutable fill operations (no `DerefMut`, so a caller cannot swap in an
+unrelated producer), and `finish()` hands off to the existing `Finish`. Clones,
+fill clones, and a `Finish` keep the existing broadcast lifetime; the last
+`Publication` dropping does not retract on its own. Reason: it keeps today's
+linger and fill retention without a second route mechanism, while a literal
+producer/announcer pair would make every media holder and finish path carry both.
+Do not export an optional capability on a fill producer to avoid the migration.
 
-The return/lifetime shape still needs review. The current proposal preserves
-last-fill and `Finish` retention rather than making the last announcement
-capability clone retract independently. A literal producer/announcement pair
-would make that transfer explicit but requires media holders and finish/linger
-paths to retain both. Settle this choice before mirroring the record in JS,
-moq-ffi, C, and every wrapper; do not export an optional capability on a fill
-producer to avoid the migration.
-
-The native proposal migrates current Rust holders, examples, benchmarks, and
-private C/UniFFI adapters. Remaining work is accepting the return/lifetime shape,
-mirroring the public role in JS and all bindings, regenerating outputs from
-source, and updating those consumers and package migrations. Exercise clone/drop,
-explicit unannounce, finished tails, Prepared admission, and stale owners
-against a replacement publication. A finished-but-open Prepared answer remains
-publishable and serveable through its retained `Finish`; a missing binding fill
-registry/state after finish does not mean the native broadcast is closed. Keep
-deferred validity and request role redesigns separate.
+The native side (moq-net, its Rust holders, examples, benchmarks, and private
+C/UniFFI adapters) is migrated. Remaining: mirror `Publication` in `@moq/net`,
+moq-ffi, the C ABI, and every wrapper (py, swift, kt, dart, go, cpp, obs),
+regenerate outputs, and update their consumers, docs, and `MIGRATE.md` entries.
+Exercise clone/drop, explicit unannounce, finished tails, Prepared admission, and
+stale owners against a replacement publication in each. A finished-but-open
+Prepared answer remains publishable and serveable through its retained `Finish`;
+a missing binding fill registry/state after finish does not mean the native
+broadcast is closed. Keep deferred validity and request role redesigns separate.
 
 Public API: breaking in moq-net (and `@moq/net`/moq-ffi if they mirror the
 trap). Wire: none.
