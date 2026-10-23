@@ -25,8 +25,12 @@ pub struct Options {
 /// Advertise every version `moq-net` supports, so the peer picks one via ALPN.
 /// Without this the browser negotiates no subprotocol and the session has no
 /// version to start from.
+///
+/// Draft-14 predates WebTransport subprotocols: `moq-00` is only its QUIC ALPN, and a
+/// peer that accepts it here picks draft-14 over a newer draft both support. It rides
+/// `moql` (also offered) and negotiates in SETUP instead, as `js/net` does.
 fn builder() -> ClientBuilder {
-	ClientBuilder::new().with_protocols(moq_net::ALPNS.iter().copied())
+	ClientBuilder::new().with_protocols(moq_net::ALPNS.iter().copied().filter(|alpn| *alpn != "moq-00"))
 }
 
 /// Open a browser WebTransport connection to `url`.
