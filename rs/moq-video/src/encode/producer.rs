@@ -370,8 +370,10 @@ impl Control {
 	/// reopens updates it, since a reopen can land on a different backend. Before the probe
 	/// finishes nothing is known, and the request is accepted because it is served anyway: no
 	/// frame has been published yet, and the first one out of any encoder is a keyframe.
-	// Only tests ask for a keyframe until a publisher needs to.
-	#[cfg_attr(not(all(test, feature = "openh264")), allow(dead_code))]
+	#[cfg_attr(
+		not(all(test, feature = "openh264")),
+		allow(dead_code, reason = "only tests ask for a keyframe until a publisher needs to")
+	)]
 	pub(crate) fn cut(&self) -> Result<(), Error> {
 		// Only a `close` fails the write, and nothing closes it; the last handle dropping does.
 		let Ok(mut requests) = self.requests.write() else {

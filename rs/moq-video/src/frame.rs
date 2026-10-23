@@ -284,8 +284,10 @@ impl DmaBuf {
 	///
 	/// Clones share the descriptor and guard; exports duplicate the FD as needed.
 	/// External buffers refuse CPU download, including linear allocations.
-	// Only tests build one until an external producer needs it.
-	#[cfg_attr(not(test), allow(dead_code))]
+	#[cfg_attr(
+		not(test),
+		allow(dead_code, reason = "only tests build one until an external producer needs it")
+	)]
 	pub(crate) fn new<T: Send + Sync + 'static>(fd: OwnedFd, layout: DmaBufLayout, owner: T) -> Result<Self, Error> {
 		Self::adopt(layout, Arc::new(ExternalDmaBuf { fd, _owner: owner }))
 	}
