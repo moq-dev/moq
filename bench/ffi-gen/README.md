@@ -216,7 +216,7 @@ and do not translate to BoltFFI's IR.
 | Bulk byte copies | M: [Payload bytes](/quest/m2/ffi-bytes.md) | done |
 | Call overhead | M: JNI or JNA direct mapping for Kotlin ([Kotlin calls](/quest/m2/kt-ffi-calls.md)); L: a C-extension Python backend, not yet planned | done |
 | Zero-copy byte returns | M: [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md) | M: bytes cross its wire buffer, with no borrowed return |
-| Namespaced types | M: [Namespaced external types](/quest/m2/uniffi-namespaces.md) | M: same-name types collide (RFC #700, open) |
+| Namespaced types | M: [Namespaced external types](https://github.com/kixelated/rust2/blob/main/quest/m2/uniffi-namespaces.md) | M: same-name types collide (RFC #700, open) |
 | Poll-native async | M: [Poll-native async](/quest/m2/ffi-poll-migrate.md) | M: the same poll-plus-continuation model, with per-method poll exports |
 | Binding moq-ffi as written | none | M: drop `Arc` returns, rework wasm gating, and fix the gaps above |
 

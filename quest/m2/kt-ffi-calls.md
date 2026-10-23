@@ -35,4 +35,4 @@ Public API: none expected. Wire: none.
 
 ## Required
 
-- [Hard fork](/quest/m2/uniffi-fork.md) - the generator this patches
+- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - moq builds from the fork whose generator this patches

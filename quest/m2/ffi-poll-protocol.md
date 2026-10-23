@@ -73,7 +73,7 @@ terminal to per-read. Wire: none.
 
 ## Required
 
-- [Hard-fork the binding generator](/quest/m2/uniffi-fork.md) - the generators that emit the protocol
+- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - the generators that emit the protocol
 - [Poll-native async](/quest/m2/ffi-poll-migrate.md) - the kio poll each export wraps, with `ffi::Task` gone
 
 ## Related
