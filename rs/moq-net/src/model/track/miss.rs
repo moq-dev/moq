@@ -26,11 +26,12 @@ use rangemap::{RangeInclusiveSet, RangeSet};
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
 use crate::Error;
+use crate::model::subscription::Window;
 
 /// What one reader asks its fills with.
-pub(super) struct Asking {
-	/// Where the reader's own start falls, for the frame of a run beginning at its group.
-	pub start: Option<Position>,
+pub(super) struct Asking<'a> {
+	/// The reader's resolved ranges, for the frame each run's first group starts from.
+	pub window: &'a Window,
 	pub priority: i8,
 	pub max_delay: Option<Duration>,
 	pub order: Order,
@@ -383,7 +384,7 @@ impl Misses {
 		state: &kio::Consumer<TrackState>,
 		fills: &kio::Shared<FillState>,
 		runs: &RangeSet<u64>,
-		asking: &Asking,
+		asking: &Asking<'_>,
 		given_up: &mut GivenUp,
 	) {
 		let mut runs: Vec<ops::Range<u64>> = runs.iter().cloned().collect();
@@ -391,10 +392,7 @@ impl Misses {
 			runs.reverse();
 		}
 		for run in runs {
-			let frame = asking
-				.start
-				.filter(|start| start.group == run.start)
-				.map_or(0, |start| start.frame);
+			let (frame, _) = asking.window.frames(run.start);
 			let ask = Ask {
 				start: Position {
 					group: run.start,

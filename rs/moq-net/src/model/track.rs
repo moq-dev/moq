@@ -5943,17 +5943,17 @@ impl Cursor {
 	/// Ask fills for what this cursor misses from `from`, and take in what they answered,
 	/// parking `waiter` on the fills still out. Whatever it gives up goes to the drop cursor.
 	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
+		let (window, cap, revision) = (&self.filter.window, self.end_sequence, self.filter.revision);
 		let asking = {
 			let subscription = self.subscription.read();
 			miss::Asking {
-				start: subscription.start(),
+				window,
 				priority: subscription.priority,
 				max_delay: subscription.max_delay,
 				order: subscription.order,
 			}
 		};
 		let fills = self.state.read().fills.clone();
-		let (window, cap, revision) = (&self.filter.window, self.end_sequence, self.filter.revision);
 		let misses = self.misses.get_or_insert_with(Box::default);
 		let mut given_up = Vec::new();
 		if misses.lowest().is_some() {
@@ -16542,6 +16542,41 @@ mod test {
 			panic!("the miss below the start is asked");
 		};
 		assert_eq!((fill.start(), fill.end()), (Position { group: 1, frame: 0 }, 4));
+	}
+
+	/// Each fill starts at the frame its own range starts from, not the lowest start of
+	/// the reader's ranges.
+	#[test]
+	fn a_fill_starts_at_its_own_ranges_frame() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let at = |group, frame| Anchor::Absolute(Position { group, frame });
+		let mut reader = producer.subscribe(replay().with_ranges([
+			Range {
+				start: at(0, 0),
+				end: Some(at(1, 0)),
+			},
+			Range {
+				start: at(5, 7),
+				end: None,
+			},
+		]));
+		producer.start_at(8).unwrap();
+		write_group(&producer, 8);
+		let _ = reader.poll_recv_group(&kio::Waiter::noop());
+
+		let mut asked = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) {
+			asked.push((fill.start(), fill.end()));
+		}
+		asked.sort();
+		assert_eq!(
+			asked,
+			[
+				(Position { group: 0, frame: 0 }, 1),
+				(Position { group: 5, frame: 7 }, 8)
+			]
+		);
 	}
 
 	/// A descending reader joining a queued fill makes it newest first, as any descending
