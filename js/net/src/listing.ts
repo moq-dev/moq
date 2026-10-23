@@ -386,7 +386,6 @@ export class Tracks {
 	}
 }
 
-// pending: /quest/m1/public-model/answer.md
 /**
  * Answers a broadcast's listings for a handler that knows the tracks it would serve, as a
  * session lists its peer's. A broadcast has at most one.
