@@ -140,8 +140,9 @@ returns within the linger keeps its broadcast and epoch, so viewer churn
 doesn't unannounce and re-announce it across the mesh, and its totals
 continue. Once the linger elapses with the group still empty, the broadcast is
 unannounced and its counters dropped; a group that returns later announces a
-new epoch counted from zero. Within one epoch, group numbers keep increasing
-across recreated tracks and may have gaps.
+new epoch counted from zero. Group numbers count publish intervals (see
+[Frames](#frames)), so they keep increasing across recreated tracks and have
+gaps.
 
 ## Tracks
 
@@ -198,8 +199,8 @@ is empty or refused; a reader that knows a group's name can still subscribe to
 it while it is listed, and is refused otherwise.
 
 A group that returns after its linger is a new instance of its track: its
-frames carry a new `epoch` and count from zero, and its group numbers continue
-past the old instance's. A frame too large to cache ends only that group's
+frames carry a new `epoch` and count from zero, and its group numbers, which
+count publish intervals, continue past the old instance's. A frame too large to cache ends only that group's
 track.
 
 ## Frames
@@ -215,6 +216,12 @@ unlisted; the group may return later as a new broadcast or track instance. A
 frame too large to cache (32 MB) ends its track with a `FRAME_TOO_LARGE` error.
 The `.z` flavor meets the same limit by its
 uncompressed size, since a reader inflates the whole group.
+
+A group's number is the time it opened divided by the interval, so the
+interval is its timescale, and a track opens at most one group per interval: a
+snapshot due in an interval that already has one, such as a joiner's refresh,
+waits for the next. A track recreated later numbers its groups past every
+group its earlier instance wrote.
 
 ### Totals
 
@@ -279,9 +286,9 @@ anyone holds the track. A track held again starts over.
 Wire bytes start at zero on every hold, including the first. Other presence
 fields seed from the root's current live-session counters; they do not recover
 closed roots from before the hold. Node totals keep the full group epoch's
-history. Each recreated track starts a fresh snapshot group using the
-broadcast's shared, increasing group sequence, so relay caches can distinguish
-it from an earlier hold. Plain and compressed tracks share that allocator.
+history. Each recreated track starts a fresh snapshot group numbered by its
+publish interval, past any group of an earlier hold, so relay caches can
+distinguish the two.
 
 ### Prefix
 

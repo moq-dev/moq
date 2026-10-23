@@ -1,7 +1,6 @@
 //! The publishing half: drain a [`Registry`] on an interval into stats tracks.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -44,7 +43,9 @@ pub struct Config {
 	/// nest under a shared region key. An empty path is treated as unset.
 	/// Default none.
 	pub node: Option<PathOwned>,
-	/// How long the publish task waits between drains. Default 1s.
+	/// How long the publish task waits between drains. Default 1s. Non-zero:
+	/// it is the timescale of every track's group numbers, so a track opens at
+	/// most one group per interval.
 	pub interval: Duration,
 	/// How many leading broadcast-path segments to use as a grouping key.
 	///
@@ -500,32 +501,34 @@ impl<V: Serialize> Serialize for Frame<V> {
 	}
 }
 
-/// Writes encoded snapshots with group numbers from its group broadcast's
-/// allocator. The allocator outlives on-demand tracks, so a recreated track
-/// resumes past any group a subscriber has cached, without retaining a
-/// tombstone per requested name. A new group broadcast is a new epoch, so its
-/// allocator starts over.
+/// Writes encoded snapshots, numbering each group by the publish interval it
+/// opens in: its timestamp divided by the interval. A recreated track (an
+/// on-demand track asked for again, or a group returning after its linger)
+/// opens in a later interval than its predecessor's last group, so it resumes
+/// past any group a subscriber has cached, with nothing kept for names that
+/// left. A track opens at most one group per interval: a snapshot due in an
+/// interval that already has one waits for the next.
 ///
-/// The shared allocator is why this wraps the encoder rather than a
+/// The numbering is why this wraps the encoder rather than a
 /// `moq_json::snapshot::Producer`, which numbers its own groups.
 struct Snapshot<T> {
 	track: track::Producer,
 	encoder: moq_json::snapshot::Encoder<T>,
 	group: Option<moq_net::group::Producer>,
-	sequence: Arc<AtomicU64>,
+	interval: Duration,
 	/// The sequence of the newest group written, which a refresh has to pass.
 	largest: Option<u64>,
 	deltas: bool,
 }
 
 impl<T: Serialize> Snapshot<T> {
-	fn new(track: track::Producer, config: moq_json::snapshot::Config, sequence: Arc<AtomicU64>) -> Self {
+	fn new(track: track::Producer, config: moq_json::snapshot::Config, interval: Duration) -> Self {
 		Self {
 			track,
 			deltas: config.deltas,
 			encoder: moq_json::snapshot::Encoder::new(config),
 			group: None,
-			sequence,
+			interval,
 			largest: None,
 		}
 	}
@@ -567,16 +570,21 @@ impl<T: Serialize> Snapshot<T> {
 			Err(err) => return Err(err),
 		};
 		let len = frame.payload.len();
+		let timestamp = moq_net::Timestamp::now();
 		if frame.keyframe {
+			let sequence = (std::time::Duration::from(timestamp).as_nanos() / self.interval.as_nanos()) as u64;
+			// The interval already has its group: the uncommitted frame is encoded again next tick.
+			if self.largest.is_some_and(|largest| sequence <= largest) {
+				return Ok(None);
+			}
 			if let Some(mut group) = self.group.take() {
 				group.finish()?;
 			}
-			let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
 			self.group = Some(self.track.create_group(moq_net::group::Info { sequence })?);
 			self.largest = Some(sequence);
 		}
 		let group = self.group.as_mut().expect("a delta follows a snapshot");
-		if let Err(err) = group.write_frame(moq_net::Timestamp::now(), frame.payload.clone()) {
+		if let Err(err) = group.write_frame(timestamp, frame.payload.clone()) {
 			let _ = self.group.take().unwrap().finish();
 			return Err(err.into());
 		}
@@ -628,21 +636,21 @@ fn compressed_info() -> track::Info {
 }
 
 impl<V: Serialize> TrackPair<V> {
-	fn create(broadcast: &broadcast::Producer, name: &str, sequence: Arc<AtomicU64>) -> Result<Self, moq_net::Error> {
+	fn create(broadcast: &broadcast::Producer, name: &str, interval: Duration) -> Result<Self, moq_net::Error> {
 		let plain_track = broadcast.create_track(name, info())?;
 		let compressed_track =
 			broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), compressed_info())?;
-		Ok(Self::from_tracks(plain_track, compressed_track, sequence))
+		Ok(Self::from_tracks(plain_track, compressed_track, interval))
 	}
 
-	fn from_tracks(plain_track: track::Producer, compressed_track: track::Producer, sequence: Arc<AtomicU64>) -> Self {
+	fn from_tracks(plain_track: track::Producer, compressed_track: track::Producer, interval: Duration) -> Self {
 		let plain_config = moq_json::snapshot::Config::default().with_deltas(false);
 		let mut compressed_config = moq_json::snapshot::Config::default();
 		compressed_config.compression = moq_json::Compression::Deflate;
 
 		Self {
-			plain: Snapshot::new(plain_track, plain_config, sequence.clone()),
-			compressed: Snapshot::new(compressed_track, compressed_config, sequence),
+			plain: Snapshot::new(plain_track, plain_config, interval),
+			compressed: Snapshot::new(compressed_track, compressed_config, interval),
 			frame: Frame::default(),
 			#[cfg(feature = "bench")]
 			held: 0,
@@ -731,7 +739,7 @@ impl PendingPair {
 		self,
 		broadcast: &broadcast::Producer,
 		name: &str,
-		sequence: Arc<AtomicU64>,
+		interval: Duration,
 	) -> Result<TrackPair<V>, moq_net::Error> {
 		let PendingPair { plain, compressed } = self;
 		let plain_track = match plain {
@@ -742,7 +750,7 @@ impl PendingPair {
 			Some(request) => request.accept(compressed_info()),
 			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), compressed_info())?,
 		};
-		Ok(TrackPair::from_tracks(plain_track, compressed_track, sequence))
+		Ok(TrackPair::from_tracks(plain_track, compressed_track, interval))
 	}
 
 	fn reject(self, err: moq_net::Error) {
@@ -771,7 +779,7 @@ impl PendingPair {
 /// One frame type's live per-tier pairs and the requests parked for them; the
 /// traffic tracks and the sessions tracks each form one family.
 struct TrackFamily<V> {
-	sequence: Arc<AtomicU64>,
+	interval: Duration,
 	tracks: HashMap<String, TrackPair<V>>,
 	/// Valid-shaped requests awaiting quota, keyed by plain name and bounded by
 	/// [`MAX_PARKED_REQUESTS`] across both families. Adopted as the quota
@@ -780,9 +788,9 @@ struct TrackFamily<V> {
 }
 
 impl<V: Serialize> TrackFamily<V> {
-	fn new(sequence: Arc<AtomicU64>) -> Self {
+	fn new(interval: Duration) -> Self {
 		Self {
-			sequence,
+			interval,
 			tracks: HashMap::new(),
 			parked: HashMap::new(),
 		}
@@ -807,8 +815,8 @@ impl<V: Serialize> TrackFamily<V> {
 	) {
 		if !self.tracks.contains_key(name) {
 			let result = match self.parked.remove(name) {
-				Some(pending) => pending.adopt(broadcast, name, self.sequence.clone()),
-				None => TrackPair::create(broadcast, name, self.sequence.clone()),
+				Some(pending) => pending.adopt(broadcast, name, self.interval),
+				None => TrackPair::create(broadcast, name, self.interval),
 			};
 			match result {
 				Ok(pair) => {
@@ -913,7 +921,7 @@ impl<V: Serialize> TrackFamily<V> {
 			pending.reject(moq_net::Error::NotFound);
 			return;
 		}
-		match pending.adopt(broadcast, &plain, self.sequence.clone()) {
+		match pending.adopt(broadcast, &plain, self.interval) {
 			Ok(mut pair) => {
 				// Hold the subscription open with zeros until the tier records.
 				pair.publish(&plain);
@@ -1219,12 +1227,12 @@ fn group_info() -> track::Info {
 }
 
 impl GroupTrack {
-	fn create(broadcast: &broadcast::Producer, group: &str, sequence: Arc<AtomicU64>) -> Result<Self, moq_net::Error> {
+	fn create(broadcast: &broadcast::Producer, group: &str, interval: Duration) -> Result<Self, moq_net::Error> {
 		let name = crate::group_track(group);
 		let track = broadcast.create_track(name.as_str(), group_info())?;
 		Ok(Self {
 			name,
-			snapshot: Snapshot::new(track, moq_json::snapshot::Config::default(), sequence),
+			snapshot: Snapshot::new(track, moq_json::snapshot::Config::default(), interval),
 			body: GroupBody {
 				// A new instance of the name: readers keep its counters apart from
 				// an earlier instance's.
@@ -1354,9 +1362,9 @@ impl GroupPublisher {
 		};
 		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
 
-		let sequence = Arc::new(AtomicU64::new(0));
-		let mut traffic = TrackFamily::new(sequence.clone());
-		let mut sessions = TrackFamily::new(sequence.clone());
+		let interval = task.interval;
+		let mut traffic = TrackFamily::new(interval);
+		let mut sessions = TrackFamily::new(interval);
 		let tiers = task.layout == Layout::Broadcast;
 
 		// The totals and, outside the track layout, the default tier's tracks
@@ -1365,7 +1373,7 @@ impl GroupPublisher {
 			let tier = Tier::default();
 			for role in [Role::Publisher, Role::Subscriber] {
 				let name = traffic_track(&tier, role, Encoding::Plain);
-				match TrackPair::create(&broadcast, &name, sequence.clone()) {
+				match TrackPair::create(&broadcast, &name, interval) {
 					Ok(pair) => {
 						traffic.tracks.insert(name, pair);
 					}
@@ -1376,7 +1384,7 @@ impl GroupPublisher {
 				}
 			}
 			let name = sessions_track(&tier, Encoding::Plain);
-			match TrackPair::create(&broadcast, &name, sequence.clone()) {
+			match TrackPair::create(&broadcast, &name, interval) {
 				Ok(pair) => {
 					sessions.tracks.insert(name, pair);
 				}
@@ -1387,7 +1395,7 @@ impl GroupPublisher {
 			}
 		}
 		let name = totals_track(Encoding::Plain);
-		let totals = match TrackPair::create(&broadcast, &name, sequence) {
+		let totals = match TrackPair::create(&broadcast, &name, interval) {
 			Ok(pair) => TotalsTrack {
 				pair,
 				sums: Cumulative::new(),
@@ -1522,7 +1530,7 @@ impl GroupPublisher {
 			});
 			if let Some(depth) = *track_depth {
 				let key = group_key(entry.path.as_str(), depth);
-				if let Some(track) = Self::group_track(broadcast, group_tracks, &traffic.sequence, key) {
+				if let Some(track) = Self::group_track(broadcast, group_tracks, traffic.interval, key) {
 					track.add_traffic(entry, slots.publisher.moved || slots.subscriber.moved);
 				}
 			}
@@ -1547,7 +1555,7 @@ impl GroupPublisher {
 			}
 			if let Some(depth) = *track_depth {
 				let key = group_key(entry.label.as_str(), depth);
-				if let Some(track) = Self::group_track(broadcast, group_tracks, &traffic.sequence, key) {
+				if let Some(track) = Self::group_track(broadcast, group_tracks, traffic.interval, key) {
 					track.add_sessions(&entry.label, &entry.tier, entry.presence, entry.closed);
 				}
 			}
@@ -1558,11 +1566,11 @@ impl GroupPublisher {
 	fn group_track<'a>(
 		broadcast: &broadcast::Producer,
 		tracks: &'a mut HashMap<String, GroupTrack>,
-		sequence: &Arc<AtomicU64>,
+		interval: Duration,
 		key: &str,
 	) -> Option<&'a mut GroupTrack> {
 		if !tracks.contains_key(key) {
-			match GroupTrack::create(broadcast, key, sequence.clone()) {
+			match GroupTrack::create(broadcast, key, interval) {
 				Ok(track) => {
 					tracks.insert(key.to_string(), track);
 				}
@@ -1698,7 +1706,7 @@ impl GroupPublisher {
 			return;
 		}
 		let name = presence_track(&label, Encoding::Plain);
-		let pair = match pending.adopt(&self.broadcast, &name, self.traffic.sequence.clone()) {
+		let pair = match pending.adopt(&self.broadcast, &name, self.traffic.interval) {
 			Ok(pair) => pair,
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to adopt presence track");
@@ -1733,7 +1741,7 @@ impl GroupPublisher {
 			return;
 		}
 		let name = prefix_track(&path, Encoding::Plain);
-		let pair = match pending.adopt(&self.broadcast, &name, self.traffic.sequence.clone()) {
+		let pair = match pending.adopt(&self.broadcast, &name, self.traffic.interval) {
 			Ok(pair) => pair,
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to adopt prefix track");
@@ -1885,17 +1893,15 @@ mod tests {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
-	/// A joiner once the deltas outweigh the compressed track's ratio gets a fresh snapshot group on
-	/// the next tick, even of an unchanged value, and deltas resume in it.
-	#[test]
-	fn a_joiner_over_the_ratio_gets_a_snapshot_next_tick() {
+	/// A joiner once the deltas outweigh the compressed track's ratio gets a fresh snapshot group in
+	/// the next interval, even of an unchanged value, and deltas resume in it.
+	#[tokio::test(start_paused = true)]
+	async fn a_joiner_over_the_ratio_gets_a_snapshot_next_interval() {
+		let interval = Duration::from_secs(1);
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("t.json.z", compressed_info()).unwrap();
-		let mut snapshot = Snapshot::<Frame<u64>>::new(
-			track.clone(),
-			moq_json::snapshot::Config::default(),
-			Arc::new(AtomicU64::new(0)),
-		);
+		let mut snapshot =
+			Snapshot::<Frame<u64>>::new(track.clone(), moq_json::snapshot::Config::default(), interval);
 		let frame = |n| Frame {
 			entries: vec![(PathOwned::from("a"), n)],
 		};
@@ -1905,17 +1911,22 @@ mod tests {
 		for n in 0..10 {
 			snapshot.update(&frame(n)).unwrap();
 		}
-		assert_eq!(snapshot.largest, Some(0));
+		let first = snapshot.largest.unwrap();
 		let _late = track.subscribe(None);
-		assert_eq!(wanted(&track), Some(1), "the join asks for a fresh group");
+		assert_eq!(wanted(&track), Some(first + 1), "the join asks for a fresh group");
 
+		// The interval already has its group, so the snapshot waits for the next one.
+		assert!(snapshot.update(&frame(9)).unwrap().is_none());
+		assert_eq!(snapshot.largest, Some(first));
+
+		tokio::time::advance(interval).await;
 		assert!(
 			snapshot.update(&frame(9)).unwrap().is_some(),
 			"restated though unchanged"
 		);
-		assert_eq!(snapshot.largest, Some(1));
+		assert_eq!(snapshot.largest, Some(first + 1), "numbered by its interval");
 		assert!(snapshot.update(&frame(10)).unwrap().is_some());
-		assert_eq!(snapshot.largest, Some(1), "the next change is a delta");
+		assert_eq!(snapshot.largest, Some(first + 1), "the next change is a delta");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1925,7 +1936,7 @@ mod tests {
 			let broadcast = moq_net::broadcast::Info::new().produce();
 			let _dynamic = broadcast.dynamic();
 			let consumer = broadcast.consume();
-			let mut family = TrackFamily::<Traffic>::new(Arc::new(AtomicU64::new(0)));
+			let mut family = TrackFamily::<Traffic>::new(Duration::from_secs(1));
 			let mut requested = HashSet::new();
 			let subscribing = consumer.track(name).unwrap().subscribe(None);
 			family.adopt_pair(
@@ -1939,6 +1950,8 @@ mod tests {
 			let floor = group.sequence + 1;
 			drop(group);
 			drop(subscriber);
+			// A drain reclaims before it adopts, so a pair it reclaims last wrote in an earlier one.
+			tokio::time::advance(Duration::from_secs(1)).await;
 			family.reclaim(&mut requested);
 			assert!(family.tracks.is_empty());
 
@@ -1977,7 +1990,8 @@ mod tests {
 		pumping_at(drain, Instant::now(), future).await
 	}
 
-	/// Drive `drain` at `now` until `future` resolves.
+	/// Drive `drain` at `now` until `future` resolves, one interval of frame time
+	/// per drain, as the publish task would.
 	async fn pumping_at<T>(drain: &mut Drain, now: Instant, future: impl std::future::Future<Output = T>) -> T {
 		let mut future = std::pin::pin!(future);
 		for _ in 0..1000 {
@@ -1986,7 +2000,7 @@ mod tests {
 			if let Some(result) = futures::FutureExt::now_or_never(future.as_mut()) {
 				return result;
 			}
-			tokio::task::yield_now().await;
+			tokio::time::advance(drain.task.interval).await;
 		}
 		panic!("protocol request did not settle while pumping the stats producer");
 	}
@@ -2036,7 +2050,8 @@ mod tests {
 					depth: 0,
 					layout: Layout::Broadcast,
 					linger: DEFAULT_LINGER,
-					interval: Duration::from_secs(1),
+					// Hundreds of drains, each an interval apart, stay inside the relays' cache.
+					interval: Duration::from_millis(10),
 				})
 				.unwrap();
 				let (middle, middle_cache) = relay();
@@ -2159,7 +2174,7 @@ mod tests {
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut pair = TrackPair::<u64>::create(&broadcast, "t.json", Arc::new(AtomicU64::new(0))).unwrap();
+		let mut pair = TrackPair::<u64>::create(&broadcast, "t.json", Duration::from_secs(1)).unwrap();
 		let mut publish = |key: &str, value: u64| {
 			pair.frame.entries.push((PathOwned::from(key.to_string()), value));
 			pair.publish("t.json");
@@ -2791,8 +2806,6 @@ mod tests {
 		assert_eq!(read_last_frame(&acme, "publisher.json").await["acme/live"].bytes, 50);
 		assert_eq!(default_totals(&acme).await.publisher.bytes, 150, "totals continue");
 		assert_eq!(default_totals(&sessions).await.sessions.sessions_started, 2);
-		let mut track = subscribe(&acme, "publisher.json").await;
-		let old_sequence = track.next_group().await.expect("ok").expect("group").sequence;
 
 		// The return re-armed the linger: it unannounces only once it elapses
 		// again with the group still empty.
@@ -2834,12 +2847,6 @@ mod tests {
 			default_totals(&acme).await.publisher.bytes,
 			25,
 			"a new epoch's totals count from zero"
-		);
-		let mut track = subscribe(&acme, "publisher.json").await;
-		let group = track.next_group().await.expect("ok").expect("group");
-		assert!(
-			group.sequence < old_sequence,
-			"a new epoch numbers its groups from zero"
 		);
 	}
 
@@ -3062,6 +3069,7 @@ mod tests {
 
 		// The label records while held: the same subscription carries it.
 		let _session = registry.tier(Tier::default()).session("");
+		tokio::time::advance(Duration::from_secs(1)).await;
 		tick();
 		assert_eq!(try_presence(&mut track).expect("recorded")[""].active(), 1);
 
@@ -3331,6 +3339,7 @@ mod tests {
 		assert_eq!(last_prefix(&mut track), Some(PrefixFrame::new()), "held at zero");
 
 		let _feed = feed(&registry, Tier::default(), "acme/live", true, 1, 7).await;
+		tokio::time::advance(Duration::from_secs(1)).await;
 		tick();
 		let frame = last_prefix(&mut track).expect("recorded");
 		assert_eq!(frame[""].children["live"].publisher.bytes, 7);
