@@ -8,7 +8,8 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 ### `sessions_failed` counts how the session ended
 
 `sessions_failed` now comes from how each session itself ended.
-A grant revoked or expiring after its session already closed no longer counts, and neither does a SETUP reply abandoned at the handshake deadline.
+A grant revoked or expiring after its session already closed no longer counts.
+A SETUP reply the peer has not taken by the handshake deadline counts as `application`, where it was `transport`.
 A cluster link fails only if the last session it dialed did, rather than when its reconnect loop gives up.
 A grant the decider revokes with `shutdown` closes its session cleanly instead of as unauthorized, and a grant that fails its re-check at SETUP is rejected as unauthorized instead of closed cleanly.
 
