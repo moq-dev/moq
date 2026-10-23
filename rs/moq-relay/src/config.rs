@@ -498,7 +498,11 @@ mod tests {
 	fn loader_keeps_toml_extension_settings() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("relay.toml");
-		std::fs::write(&path, "[listen.extensions]\nauth = false\n\n[connect.extensions]\nsolicit = false\n").unwrap();
+		std::fs::write(
+			&path,
+			"[listen.extensions]\nauth = false\n\n[connect.extensions]\nsolicit = false\n",
+		)
+		.unwrap();
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).unwrap();
 		assert!(!config.listen.extensions.auth);
 		assert!(config.listen.extensions.solicit);
