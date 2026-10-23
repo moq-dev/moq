@@ -428,7 +428,7 @@ pub struct View {
 	pub remote: Option<SocketAddr>,
 	/// The relay's socket address the session arrived on.
 	pub local: Option<SocketAddr>,
-	/// The SNI the client presented.
+	/// The SNI that selected the relay's certificate.
 	pub server_name: Option<String>,
 	/// The negotiated application protocol.
 	pub alpn: Option<String>,
