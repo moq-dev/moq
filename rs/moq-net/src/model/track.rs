@@ -169,14 +169,6 @@ pub struct Info {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
-	/// Whether this timed track's timestamps arrived over moq-transport, whose peers may
-	/// stamp arrival times, so no group is checked for a rewind.
-	///
-	/// They stay on moq-transport: a moq-lite hop serves the track untimed, since its
-	/// receivers check every timestamp. Never set on an untimed track.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: passthrough
-	pub(crate) unchecked: bool,
 }
 
 impl Default for Info {
@@ -188,7 +180,6 @@ impl Default for Info {
 			compress: false,
 			refresh: None,
 			properties: None,
-			unchecked: false,
 		}
 	}
 }
@@ -228,15 +219,16 @@ impl Info {
 		self
 	}
 
-	/// The timescale a moq-lite hop serves this track at: none for an
-	/// [unchecked](Self::unchecked) one.
+	/// The timescale served on a moq-lite hop, preserving moq-transport timestamps only
+	/// when the hop negotiated the `ietf` extension.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
-	pub(crate) fn lite_timescale(&self) -> Option<Timescale> {
-		self.timescale.filter(|_| !self.unchecked)
+	pub(crate) fn lite_timescale(&self, ietf: bool) -> Option<Timescale> {
+		self.timescale.filter(|_| self.ietf().is_none() || ietf)
 	}
 
-	/// The draft the track's moq-transport publisher spoke, `None` for a moq-lite one.
+	/// The original moq-transport publisher's draft, whose timestamps may rewind, or
+	/// `None` for a native moq-lite track.
 	// private: passthrough
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
 		self.properties.as_ref().map(|properties| properties.version)
@@ -848,9 +840,9 @@ impl TrackState {
 	/// so the watermark caps it instead.
 	///
 	/// Usually one group lookup each way; only unstarted or partial neighbors are skipped.
-	/// `None` on an [unchecked](Info::unchecked) track, whose timestamps may rewind.
+	/// `None` on a track with moq-transport provenance, whose timestamps may rewind.
 	pub(super) fn neighbors(&self, sequence: u64) -> Option<Neighbors> {
-		if self.info.as_ref().is_some_and(|info| info.unchecked) {
+		if self.info.as_ref().is_some_and(|info| info.ietf().is_some()) {
 			return None;
 		}
 		let bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
@@ -4458,6 +4450,32 @@ impl Consumer {
 		})
 	}
 
+	/// The group a front's parked copy would serve for `sequence` from `frame_start`, when it
+	/// is whole: finished from frame 0 on a copy still open. Anything less (open, headless,
+	/// aborted, or on a failed copy) needs the route. The fetch joins the copy's demand, so
+	/// a copy kept busy only by fetches stays cached at its session.
+	fn parked_whole(&self, sequence: u64, frame_start: u64) -> Option<(kio::Consumer<TrackState>, group::Consumer)> {
+		let copy = self.with_state(|state| state?.read().routes.as_ref()?.parked())?;
+		copy.with_state(|state| {
+			let state = state?;
+			let group = {
+				let track = state.read();
+				let group = track.covering_group(sequence, frame_start)?;
+				let whole = !track.is_closed()
+					&& track.abort.is_none()
+					&& group.live_first_frame() == Some(0)
+					&& group.is_finished();
+				if !whole {
+					return None;
+				}
+				let consumer = group.try_consume()?;
+				group.cache_refresh();
+				consumer
+			};
+			Some((state.consume(), group))
+		})
+	}
+
 	/// The serving route's copy, for a front's logical track; see [`super::resume`].
 	fn serving(&self) -> Option<Consumer> {
 		let routes = self.with_state(|state| state?.read().routes.clone())?;
@@ -4509,14 +4527,32 @@ impl Consumer {
 	/// handler request.
 	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
 		let options = options.into().unwrap_or_default();
-		let state = self.resolve(None).0;
-		let resume = state.read().routes.clone();
 
 		// One fetch per calling context, counted here (coalesced upstream work is
 		// still one request served). Independent of `subscriptions` and the viewer
 		// refcount.
 		self.stats.fetch();
 
+		// Nothing more feeds a whole group, so no route needs to stay up for it: the copy a
+		// front parked serves it without reviving the logical track for one read.
+		if let Some((state, group)) = self.parked_whole(sequence, options.frame_start) {
+			let fetch = state.read().fetch.clone();
+			return kio::Pending::new(Fetching {
+				state,
+				fetch,
+				sequence,
+				frame_start: options.frame_start,
+				priority: options.priority,
+				max_delay: options.max_delay,
+				result: None,
+				hit: Some(Box::new(group)),
+				stats: self.stats.clone(),
+				resume: None,
+			});
+		}
+
+		let state = self.resolve(None).0;
+		let resume = state.read().routes.clone();
 		let mut result = None;
 
 		// A front's logical track caches nothing: the serving route answers.

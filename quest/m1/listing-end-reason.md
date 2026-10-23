@@ -38,4 +38,3 @@ Decided 2026-10-22 (maintainer), public API and wire:
 ## Related
 
 - [Broadcast archives](/quest/m1/archive/README.md) - lists an IETF peer's tracks through SUBSCRIBE_TRACKS
-- [Pause an IETF SUBSCRIBE](/quest/m1/ietf-subscribe-pause.md) - the other gap in a clean Rust-to-Rust IETF listing
