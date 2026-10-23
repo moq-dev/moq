@@ -638,7 +638,8 @@ mod tests {
 		}
 		.encode(&mut Encoder::new(&mut wire, version.into()), version)
 		.unwrap();
-		let decode = |wire: &[u8], budget| AnnounceInit::decode_within(&mut Decoder::new(wire, version.into()), version, budget);
+		let decode =
+			|wire: &[u8], budget| AnnounceInit::decode_within(&mut Decoder::new(wire, version.into()), version, budget);
 
 		assert_eq!(decode(&wire, 3).unwrap().suffixes.len(), 3);
 		assert!(matches!(decode(&wire, 2), Err(DecodeError::TooMany)));

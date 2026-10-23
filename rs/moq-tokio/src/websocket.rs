@@ -524,10 +524,11 @@ async fn connect_tls_override(
 	);
 
 	let connector = tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()));
-	let (websocket, response) = tokio_tungstenite::client_async_tls_with_config(request, stream, Some(socket_config()), Some(connector))
-		.await
-		.map_err(qmux::Error::from)
-		.map_err(Error::connect)?;
+	let (websocket, response) =
+		tokio_tungstenite::client_async_tls_with_config(request, stream, Some(socket_config()), Some(connector))
+			.await
+			.map_err(qmux::Error::from)
+			.map_err(Error::connect)?;
 
 	let negotiated = response
 		.headers()

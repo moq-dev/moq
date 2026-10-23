@@ -1375,16 +1375,18 @@ where
 						// down merely because an update arrived, and another epoch restarts
 						// the route without it ever going absent.
 						Some(id) => self.update_announce(path, id, advert)?,
-						None => match self.start_announce(path.clone(), advert, Admit::Session(Some(held.slot.clone()))) {
-							Ok(id) => held.id = Some(id),
-							// The interest names a pattern's literal head, so the peer
-							// legitimately advertises namespaces beneath it that the
-							// scope excludes; those are filtered here, not fatal.
-							Err(Error::Unauthorized) => {
-								tracing::debug!(%path, "namespace outside the subscribe scope; ignoring");
+						None => {
+							match self.start_announce(path.clone(), advert, Admit::Session(Some(held.slot.clone()))) {
+								Ok(id) => held.id = Some(id),
+								// The interest names a pattern's literal head, so the peer
+								// legitimately advertises namespaces beneath it that the
+								// scope excludes; those are filtered here, not fatal.
+								Err(Error::Unauthorized) => {
+									tracing::debug!(%path, "namespace outside the subscribe scope; ignoring");
+								}
+								Err(err) => return Err(err),
 							}
-							Err(err) => return Err(err),
-						},
+						}
 					}
 				}
 				// Only NAMESPACE may come before the counted set is in.
@@ -8683,8 +8685,12 @@ mod tests {
 			advert(&subscriber),
 			advert(&subscriber),
 		);
-		let first = subscriber.start_announce(a.clone(), first, Admit::Session(None)).unwrap();
-		let repeat = subscriber.start_announce(a.clone(), repeat, Admit::Session(None)).unwrap();
+		let first = subscriber
+			.start_announce(a.clone(), first, Admit::Session(None))
+			.unwrap();
+		let repeat = subscriber
+			.start_announce(a.clone(), repeat, Admit::Session(None))
+			.unwrap();
 		assert!(matches!(
 			subscriber.start_announce(b.clone(), over, Admit::Session(None)),
 			Err(Error::TooManyRequests)
@@ -8922,7 +8928,11 @@ mod tests {
 
 		let mut subscriber = subscriber;
 		subscriber
-			.start_announce(crate::Path::new("room/host").to_owned(), advertised, Admit::Session(None))
+			.start_announce(
+				crate::Path::new("room/host").to_owned(),
+				advertised,
+				Admit::Session(None),
+			)
 			.unwrap();
 
 		let route = routed_now(&consumer, "room/host").expect("routed");
@@ -9131,7 +9141,9 @@ mod tests {
 
 		let path = crate::Path::new("room/host").to_owned();
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
-		let id = subscriber.start_announce(path.clone(), advert, Admit::Session(None)).unwrap();
+		let id = subscriber
+			.start_announce(path.clone(), advert, Admit::Session(None))
+			.unwrap();
 		settle().await;
 
 		subscriber.stop_announce(path, id, false).unwrap();
@@ -9399,7 +9411,11 @@ mod tests {
 		let mut ids = Vec::new();
 		for _ in 0..2 {
 			let advert = subscriber.route(None, &peer).expect("route");
-			ids.push(subscriber.start_announce(path.clone(), advert, Admit::Session(None)).unwrap());
+			ids.push(
+				subscriber
+					.start_announce(path.clone(), advert, Admit::Session(None))
+					.unwrap(),
+			);
 		}
 		settle().await;
 
@@ -9493,7 +9509,9 @@ mod tests {
 				.with_hops(hop_path(&[7, 9]).hops().clone())
 				.with_cost(4),
 		};
-		let id = subscriber.start_announce(path.clone(), first, Admit::Session(None)).unwrap();
+		let id = subscriber
+			.start_announce(path.clone(), first, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// A new chain and cost: the route updates in place.
@@ -9587,12 +9605,16 @@ mod tests {
 		let epoch_now = || routed_now(&consumer, "room/host").and_then(|route| route.epoch);
 
 		let first = advert(&subscriber, &old);
-		let first = subscriber.start_announce(path.clone(), first, Admit::Session(None)).unwrap();
+		let first = subscriber
+			.start_announce(path.clone(), first, Admit::Session(None))
+			.unwrap();
 		assert_eq!(epoch_now(), Some(old.clone()));
 
 		// The replacement's PUBLISH_NAMESPACE beats the old one's PUBLISH_NAMESPACE_DONE.
 		let second = advert(&subscriber, &new);
-		let second = subscriber.start_announce(path.clone(), second, Admit::Session(None)).unwrap();
+		let second = subscriber
+			.start_announce(path.clone(), second, Admit::Session(None))
+			.unwrap();
 		assert_eq!(epoch_now(), Some(new.clone()));
 
 		// A late update to the old advertisement changes nothing.
@@ -9631,7 +9653,9 @@ mod tests {
 		let epoch_now = || routed_now(&consumer, "room/host").and_then(|route| route.epoch);
 
 		let inline = advert(&subscriber, &old);
-		let inline = subscriber.start_announce(path.clone(), inline, Admit::Session(None)).unwrap();
+		let inline = subscriber
+			.start_announce(path.clone(), inline, Admit::Session(None))
+			.unwrap();
 		let request = advert(&subscriber, &old);
 		let request = subscriber
 			.start_announce(path.clone(), request, Admit::Session(None))
@@ -9670,11 +9694,15 @@ mod tests {
 		let advert = cluster::Advert { hops, cost: 0 };
 
 		let first = subscriber.route(Some(&advert), &peer).expect("route");
-		let first = subscriber.start_announce(path.clone(), first, Admit::Session(None)).unwrap();
+		let first = subscriber
+			.start_announce(path.clone(), first, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		let second = subscriber.route(Some(&advert), &peer).expect("route");
-		let second = subscriber.start_announce(path.clone(), second, Admit::Session(None)).unwrap();
+		let second = subscriber
+			.start_announce(path.clone(), second, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
@@ -9698,12 +9726,16 @@ mod tests {
 
 		// What a PUBLISH_NAMESPACE with no cluster parameters resolves to.
 		let first = subscriber.route(None, &peer).expect("route");
-		let first = subscriber.start_announce(path.clone(), first, Admit::Session(None)).unwrap();
+		let first = subscriber
+			.start_announce(path.clone(), first, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The NAMESPACE for the same namespace arrives second.
 		let second = subscriber.route(None, &peer).expect("route");
-		let second = subscriber.start_announce(path.clone(), second, Admit::Session(None)).unwrap();
+		let second = subscriber
+			.start_announce(path.clone(), second, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
@@ -9732,7 +9764,9 @@ mod tests {
 			cost: 0,
 		};
 		let advert = subscriber.route(Some(&clean), &peer).expect("route");
-		let id = subscriber.start_announce(path.clone(), advert, Admit::Session(None)).unwrap();
+		let id = subscriber
+			.start_announce(path.clone(), advert, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The peer re-advertises the namespace over a path that now flows through us.
@@ -10350,7 +10384,9 @@ mod tests {
 		for path in ["room/a", "room/b"] {
 			let path = crate::Path::new(path).to_owned();
 			let advert = subscriber.route(None, &peer).expect("route");
-			let id = subscriber.start_announce(path.clone(), advert, Admit::Session(None)).unwrap();
+			let id = subscriber
+				.start_announce(path.clone(), advert, Admit::Session(None))
+				.unwrap();
 			live.insert(path, id);
 		}
 		assert!(routed_now(&consumer, "room/a").is_some());

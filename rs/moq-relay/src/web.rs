@@ -2025,7 +2025,9 @@ mod tests {
 		let mut payload = vec![0; len];
 		tcp.read_exact(&mut payload).await.unwrap();
 		let streams = payload
-			.chunks_exact(6)
+			.as_chunks::<6>()
+			.0
+			.iter()
 			.find(|setting| setting[..2] == [0, 0x3])
 			.map(|setting| u32::from_be_bytes(setting[2..].try_into().unwrap()));
 		assert_eq!(streams, Some(7));

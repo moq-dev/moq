@@ -36,7 +36,10 @@ pub fn max_message_size(config: &Config) -> usize {
 }
 
 /// `config` with its message and frame sizes held to [`max_message_size`] of `session`.
-fn capped(config: Option<tungstenite::protocol::WebSocketConfig>, session: &Config) -> tungstenite::protocol::WebSocketConfig {
+fn capped(
+	config: Option<tungstenite::protocol::WebSocketConfig>,
+	session: &Config,
+) -> tungstenite::protocol::WebSocketConfig {
 	let max = max_message_size(session);
 	let mut config = config.unwrap_or_default();
 	config.max_message_size = Some(config.max_message_size.map_or(max, |size| size.min(max)));
@@ -463,7 +466,8 @@ impl Server {
 				.unwrap())
 		};
 
-		let ws = tokio_tungstenite::accept_hdr_async_with_config(socket, callback, Some(capped(None, &self.session))).await?;
+		let ws = tokio_tungstenite::accept_hdr_async_with_config(socket, callback, Some(capped(None, &self.session)))
+			.await?;
 
 		let (version, protocol) = negotiated
 			.lock()
