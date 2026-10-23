@@ -308,6 +308,12 @@ impl WaiterList {
 		self.entries.iter().all(|entry| entry.strong_count() == 0)
 	}
 
+	/// Drop every entry without waking it.
+	pub(crate) fn clear(&mut self) {
+		self.drained();
+		self.entries.clear();
+	}
+
 	/// Wake all live waiters, draining the list.
 	pub fn wake(&mut self) {
 		self.drained();
@@ -770,7 +776,7 @@ mod tests {
 
 	#[test]
 	fn wait_output_need_not_be_unpin() {
-		struct NotUnpin(#[allow(dead_code)] std::marker::PhantomPinned);
+		struct NotUnpin(#[allow(dead_code, reason = "only makes the type `!Unpin`")] std::marker::PhantomPinned);
 
 		let mut fut = std::pin::pin!(crate::wait(|_| Poll::Ready(NotUnpin(std::marker::PhantomPinned))));
 		let mut cx = Context::from_waker(Waker::noop());

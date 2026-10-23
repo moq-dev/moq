@@ -39,7 +39,7 @@ pub fn from_setup(params: &Parameters, version: Version) -> Result<Option<Token>
 }
 
 /// Present `token` in our SETUP, by value.
-#[cfg_attr(not(test), expect(dead_code))]
+#[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
 pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> Result<(), EncodeError> {
 	params.set_bytes(ParameterBytes::AuthorizationToken, encode(token, version)?);
 	Ok(())
