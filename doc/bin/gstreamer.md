@@ -136,8 +136,8 @@ base for every pad. Audio and video keep their relative broadcast timing, even
 when their tracks use different timescales or arrive at different times. Frames
 before that reference keep an earlier PTS for downstream to clip. Opus packets
 covering the OpusHead pre-skip carry `GstAudioClippingMeta` for it, and each
-Opus PTS marks where its first kept sample plays, so `opusdec` drops the
-priming samples and the audio lines up with video. A new broadcast
+Opus packet that keeps samples is stamped where the first one plays, so `opusdec`
+drops the priming samples and the audio lines up with video. A new broadcast
 chooses a fresh reference on the same pads; playback does not require a wall clock.
 A rendition that leaves the catalog
 gets EOS once its track ends. A broadcast that ends or loses its publisher holds
