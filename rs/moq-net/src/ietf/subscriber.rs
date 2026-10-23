@@ -3472,16 +3472,21 @@ where
 							&& largest_group(&track, largest).is_some_and(|largest| value > largest)
 							&& requested.is_none_or(|requested| value > requested)
 					});
-					let update = Update {
+					let mut update = Update {
 						start_location,
 						priority: (priority != sent_priority).then_some(priority),
 						max_age: wanted_max_age.filter(|_| wanted_max_age != sent_max_age),
 						new_group,
 					};
-					match update.priority.is_some() || update.max_age.is_some() || update.new_group.is_some() {
-						true => Poll::Ready(End::Update(update)),
-						false => Poll::Pending,
+					if update.priority.is_none() && update.max_age.is_none() && update.new_group.is_none() {
+						return Poll::Pending;
 					}
+					// Draft-14's SUBSCRIBE_UPDATE cannot omit the priority, so it restates the one
+					// in force rather than resetting it to the omission default.
+					if self.version == Version::Draft14 {
+						update.priority = Some(priority);
+					}
+					Poll::Ready(End::Update(update))
 				})
 				.await;
 
@@ -8063,6 +8068,78 @@ mod tests {
 		assert_eq!(update.end_group, 0, "still open ended");
 		assert_eq!(update.subscriber_priority, Some(super::super::priority::to_wire(72)));
 		assert_eq!(update.forward, Some(true));
+	}
+
+	/// Draft-14's SUBSCRIBE_UPDATE cannot omit the priority, so an update for the max age
+	/// alone restates the unset priority in force instead of the omission default 128.
+	#[moq_clock::test]
+	async fn a_draft14_max_age_update_restates_the_priority() {
+		const VERSION: Version = Version::Draft14;
+
+		let subscribe_ok = message(
+			ietf::SubscribeOk::ID,
+			&ietf::SubscribeOk {
+				request_id: Some(RequestId(0)),
+				track_alias: 7,
+				largest: None,
+				properties: Default::default(),
+			},
+			VERSION,
+		);
+		let session = crate::lite::test_transport::ScriptedSession::new(subscribe_ok);
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::declared(peer::Peer {
+				max_age: true,
+				..Default::default()
+			}),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let _short = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let _serving = moq_clock::sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
+		});
+		settle().await;
+
+		let _long = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(5)));
+		settle().await;
+
+		let writes = log.writes.lock().unwrap().clone();
+		let mut buf = Decoder::new(&writes, VERSION.into());
+		let mut updates = Vec::new();
+		while !buf.is_empty() {
+			let type_id = buf.varint().unwrap();
+			let size = buf.u16().unwrap() as usize;
+			let mut body = Decoder::new(buf.slice(size).unwrap(), VERSION.into());
+			if type_id == ietf::SubscribeUpdate::ID {
+				updates.push(ietf::SubscribeUpdate::decode_msg(&mut body, VERSION).unwrap());
+			}
+		}
+
+		let [update] = updates.as_slice() else {
+			panic!("one update, not {updates:?}");
+		};
+		assert_eq!(update.max_age, Some(5_000));
+		assert_eq!(update.subscriber_priority, Some(super::super::priority::to_wire(0)));
 	}
 
 	/// Establish a subscription on `version`, then drop its last consumer, and hand back
