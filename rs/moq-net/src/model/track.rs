@@ -2344,6 +2344,8 @@ impl TrackState {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn set_idle(&mut self) {
 		self.feed = Feed::Idle;
+		// The ended feed's answer: an idle copy that ends counts from what it cached.
+		self.live_edge = None;
 		self.idle_newest = self
 			.lookup
 			.iter()
@@ -8388,6 +8390,24 @@ mod test {
 
 		framed(&producer, 5, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut reader), vec![5]);
+	}
+
+	/// An idle copy forgets the edge its previous feed answered with, which only a datagram
+	/// it dropped showed: when it ends without going live, a relative start counts back
+	/// from its newest cached group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_idle_copy_that_ends_forgets_an_earlier_datagram_edge() {
+		let mut producer = idle_copy();
+		producer
+			.insert_datagram(4, None, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		producer.set_live(Some(Position::group(4)), None);
+		producer.set_idle();
+		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
+		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the copy is idle");
+		producer.finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![3]);
 	}
 
 	#[test]
