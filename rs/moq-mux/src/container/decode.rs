@@ -407,7 +407,10 @@ mod tests {
 						assert!(clock.len() <= 2);
 						refused
 					});
-					assert!(refused.is_some_and(|index| index <= 3), "backwards={backwards} count={count}");
+					assert!(
+						refused.is_some_and(|index| index <= 3),
+						"backwards={backwards} count={count}"
+					);
 				}
 			}
 		}

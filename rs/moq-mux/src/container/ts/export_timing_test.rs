@@ -1106,7 +1106,11 @@ async fn synced_legs_render_reordered_video_the_same_way() {
 
 /// Each video frame's DTS (else PTS) by its PTS, in 90 kHz ticks, as a leg rendered it.
 fn decode_times(leg: &Leg) -> std::collections::BTreeMap<u64, u64> {
-	let bytes: Vec<u8> = leg.out.iter().flat_map(|(_, frame)| frame.payload.iter().copied()).collect();
+	let bytes: Vec<u8> = leg
+		.out
+		.iter()
+		.flat_map(|(_, frame)| frame.payload.iter().copied())
+		.collect();
 	let mut reader = TsPacketReader::new(Cursor::new(bytes));
 	let mut out = std::collections::BTreeMap::new();
 	while let Some(packet) = reader.read_ts_packet().unwrap() {
@@ -1137,7 +1141,11 @@ async fn declared_legs_author_the_same_dts() {
 		live.finish(&mut [&mut a, &mut b]).await;
 		let (a, b) = (decode_times(&a), decode_times(&b));
 		let shared: Vec<_> = b.iter().filter(|(pts, _)| a.contains_key(pts)).collect();
-		assert!(shared.len() > 6 * GOP as usize, "join {join}: {} shared frames", shared.len());
+		assert!(
+			shared.len() > 6 * GOP as usize,
+			"join {join}: {} shared frames",
+			shared.len()
+		);
 		for (pts, dts) in shared {
 			assert_eq!(a[pts], *dts, "join {join}: the frame presented at {pts}");
 		}

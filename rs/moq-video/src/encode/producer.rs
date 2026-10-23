@@ -59,6 +59,7 @@ fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::Vi
 	hint.display_aspect_height = rendition.display_aspect_height;
 	hint.color = rendition.color;
 	hint.framerate = rendition.framerate;
+	hint.reorder = rendition.reorder;
 	hint.bitrate = rendition.bitrate;
 	hint.optimize_for_latency = rendition.optimize_for_latency;
 	// Authoritative for both the catalog entry and the wire, so dropping it would silently

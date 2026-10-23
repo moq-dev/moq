@@ -422,7 +422,11 @@ mod tests {
 
 		assert_eq!(keyframe(&mut deep, "deep", 0, SPS_PYRAMID).unwrap(), Some(2));
 		assert_eq!(keyframe(&mut deep, "deep", 40, SPS_IPB).unwrap(), Some(2));
-		assert_eq!(keyframe(&mut deep, "deep", 80, SPS_FIELD).unwrap(), Some(2), "fields declare none");
+		assert_eq!(
+			keyframe(&mut deep, "deep", 80, SPS_FIELD).unwrap(),
+			Some(2),
+			"fields declare none"
+		);
 		assert_eq!(keyframe(&mut shallow, "shallow", 0, SPS_IPB).unwrap(), Some(1));
 		assert!(keyframe(&mut shallow, "shallow", 40, SPS_PYRAMID).is_err());
 	}

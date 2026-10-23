@@ -1152,10 +1152,7 @@ async fn export_decodes_where_the_source_did() {
 /// A broadcast of one H.264 rendition declaring `reorder`, with a group of `stamps` (ms, in
 /// decode order) for each entry, exported as a recording.
 /// The producers stay alive with the export, so it reads the retained tracks.
-async fn export_declared(
-	reorder: u8,
-	groups: &[&[u64]],
-) -> (Export<crate::catalog::Consumer>, impl Sized) {
+async fn export_declared(reorder: u8, groups: &[&[u64]]) -> (Export<crate::catalog::Consumer>, impl Sized) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -1169,7 +1166,12 @@ async fn export_declared(
 		inline: true,
 	});
 	config.reorder = Some(reorder);
-	catalog.modify().unwrap().video.renditions.insert("video".into(), config);
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert("video".into(), config);
 	let format = HangContainer::Legacy(Kind::Video);
 	for (sequence, stamps) in groups.iter().enumerate() {
 		let mut group = track
