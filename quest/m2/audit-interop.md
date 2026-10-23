@@ -116,6 +116,9 @@ Theirs, reported or waiting on others:
 - [meetecho/imquic#42](https://github.com/meetecho/imquic/issues/42) is
   fixed upstream; imquic's cells against `cdn.moq.dev` wait for the runner
   to rebuild its image.
+  [meetecho/imquic#43](https://github.com/meetecho/imquic/issues/43)
+  (drops a data stream whose header spans reads) is owned by
+  [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md).
   [Eyevinn/moqlivemock#157](https://github.com/Eyevinn/moqlivemock/issues/157)
   is fixed and green.
 - Drafted in this run, posted only if the maintainer approved: Cloudflare's

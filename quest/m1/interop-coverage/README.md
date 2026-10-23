@@ -41,7 +41,7 @@ coverage on `main` at `3ab6cbf81d`.
 ## Required
 
 - [JS namespace lifecycle](/quest/m1/interop-coverage/js-namespace-done.md) - moq-dev-js subscribe-namespace-lifecycle sees NAMESPACE_DONE with publisher and subscriber in one process
-- [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md) - moq-dev-js data-subgroup-basic receives objects from imquic over WebTransport
+- [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md) - moq-dev-js data-subgroup-basic passes against imquic, or the cell is classified with imquic's split-header bug reported upstream
 - [Late join and FETCH](/quest/m1/interop-coverage/late-join.md) - a late subscriber gets the current group from object 0, and a standalone FETCH returns a past group exactly
 
 ## Related
