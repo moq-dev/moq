@@ -3,9 +3,10 @@
 
 use std::time::Duration;
 
+use moq_clock::Instant;
 use moq_net::{PathOwned, origin, stats::Registry, track};
 
-use super::{Drain, PendingPair, Task};
+use super::{Drain, Layout, PendingPair, Task};
 
 /// Plain and compressed publisher-frame sizes from one tick, in bytes.
 ///
@@ -26,6 +27,8 @@ pub struct FrameBytes {
 /// A depth-0 stats publisher, driven one drain at a time.
 pub struct Driver {
 	drain: Drain,
+	/// The last drain's instant. Each tick is one interval later, so it may open a group.
+	now: Instant,
 }
 
 impl Driver {
@@ -33,24 +36,37 @@ impl Driver {
 	/// [`crate::Producer::new`] does at depth 0. `None` if the origin refuses
 	/// the broadcast.
 	pub fn new(registry: Registry, origin: origin::Producer) -> Option<Self> {
+		Self::build(registry, origin, 0, Layout::Broadcast)
+	}
+
+	/// [`Self::new`] in the track layout at depth 1: each first path segment
+	/// is a group track of `.stats/node`.
+	pub fn tracks(registry: Registry, origin: origin::Producer) -> Option<Self> {
+		Self::build(registry, origin, 1, Layout::Track)
+	}
+
+	fn build(registry: Registry, origin: origin::Producer, depth: usize, layout: Layout) -> Option<Self> {
 		let task = Task {
 			registry,
 			origin,
 			prefix: PathOwned::from(".stats"),
 			node: None,
-			depth: 0,
+			depth,
+			layout,
 			linger: Duration::from_secs(300),
 			interval: Duration::from_secs(1),
 		};
 		Some(Self {
 			drain: Drain::new(task)?,
+			now: moq_clock::now(),
 		})
 	}
 
-	/// Drain the registry and encode every track once.
+	/// Drain the registry and encode every track once, one interval after the last tick.
 	pub fn tick(&mut self) -> FrameBytes {
+		self.now += self.drain.task.interval;
 		self.drain.collect();
-		self.drain.publish(moq_clock::now());
+		self.drain.publish(self.now);
 		self.drain.publisher_frame_bytes()
 	}
 
@@ -60,7 +76,7 @@ impl Driver {
 	pub fn hold_presence(&mut self, label: &str) -> track::Subscriber {
 		let group = self.drain.groups.get_mut("").expect("the depth 0 broadcast");
 		let label = PathOwned::from(label.to_string());
-		group.adopt_presence(&self.drain.report, label.clone(), PendingPair::default());
+		group.adopt_presence(&self.drain.report, label.clone(), PendingPair::default(), self.now);
 		group.presence[&label].pair.plain.track.subscribe(None)
 	}
 
@@ -74,6 +90,7 @@ impl Driver {
 			PathOwned::from(path.to_string()),
 			PendingPair::default(),
 			tick,
+			self.now,
 		);
 		group.prefixes[path].pair.plain.track.subscribe(None)
 	}

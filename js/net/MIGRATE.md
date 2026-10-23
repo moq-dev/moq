@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A replacement track starts over
+
+A broadcast no longer remembers the sequences an ended track of a name wrote, so its state stays bounded by its live tracks.
+A track that replaces an ended one, created or requested, appends from 0 instead of throwing `duplicate sequence`, `close()` ends at its own writes, and `finishAt()` and its first frames are no longer checked against the predecessor.
+A producer removed with `removeTrack` stays writable after a replacement claims the name; its writes reach only its own subscribers.
+A publisher that recreates a name continues past the groups it already wrote with `writeGroup` at an explicit sequence, such as a timestamp.
+
 ### A listing says whether a removed track finished (#6399)
 
 `Broadcast.TracksEvent` gains `{ kind: "finished", name }`: the track left the listing because it finished. `{ kind: "removed", name }` now means it left unfinished. Handle both where you matched `"removed"`.

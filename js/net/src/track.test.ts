@@ -1,6 +1,5 @@
 import { expect, setSystemTime, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
-import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
@@ -186,19 +185,6 @@ test("a fixed start is no join", () => {
 	const subscriber = producer.subscribe({ groups: { start: { included: 0 } } });
 	expect(producer.demand().wanted.peek()).toBe(0);
 	subscriber.close();
-});
-
-test("a replacement wants the group past its predecessor", () => {
-	const broadcast = new BroadcastProducer();
-	const first = broadcast.createTrack("test");
-	first.writeGroup(new GroupProducer(7));
-	first.close();
-
-	const second = broadcast.createTrack("test");
-	const subscriber = second.subscribe();
-	expect(second.demand().wanted.peek()).toBe(8);
-	subscriber.close();
-	broadcast.close();
 });
 
 test("refresh must be a u32 ratio", () => {

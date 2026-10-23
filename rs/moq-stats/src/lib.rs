@@ -20,7 +20,7 @@
 //! (default prefix `.stats`), or one per group of leading broadcast-path
 //! segments at `<prefix>/<group>/node/<node>`; parse announce paths back with
 //! [`parse_node_path`]. Each announcement carries a fresh
-//! [`Epoch`](moq_net::Epoch) on its route, so a restarted node or a group
+//! [`Epoch`] on its route, so a restarted node or a group
 //! returning from idle is a new broadcast at the same path; a reader tells
 //! them apart by the announced route's epoch. Every broadcast carries a
 //! `totals.json` track of each [`Tier`]'s [`Totals`] for the epoch, each tier
@@ -30,8 +30,14 @@
 //! broadcast prefix's `<path>/prefix.json` track of [`Prefix`] counters. Every
 //! track has a `.z` sibling encoded with [`moq_json::snapshot`]; compute names
 //! with [`totals_track`], [`traffic_track`], [`sessions_track`],
-//! [`presence_track`], and [`prefix_track`], picking one by [`Encoding`]. The full
-//! contract (paths, tracks, both encodings, and counter semantics) is at
+//! [`presence_track`], and [`prefix_track`], picking one by [`Encoding`].
+//!
+//! The [track layout](produce::Layout::Track) instead keeps the one
+//! `<prefix>/node/<node>` broadcast and carries each group as a compressed
+//! `<group>/group.json` track of [`GroupFrame`]s, listed through the
+//! broadcast's track listing while the group is live; compute and parse names
+//! with [`group_track`] and [`parse_group_track`]. The full contract (paths,
+//! tracks, both encodings, and counter semantics) is at
 //! <https://doc.moq.dev/concept/stats>.
 
 pub mod aggregate;
@@ -47,7 +53,7 @@ use std::collections::BTreeMap;
 /// can depend on this crate alone.
 pub use moq_net::stats::{Failure, Failures, Handle, Presence, Refusal, Refusals, Registry, Role, Tier, Traffic};
 
-use moq_net::{AsPath, Path, PathOwned};
+use moq_net::{AsPath, Epoch, Path, PathOwned};
 
 /// One frame off a traffic track: cumulative counters keyed by broadcast path.
 pub type TrafficFrame = BTreeMap<String, Traffic>;
@@ -128,6 +134,43 @@ pub struct Prefix {
 	pub children: BTreeMap<String, Usage>,
 }
 
+/// One frame off a group track: one instance of the track, and its counters.
+#[serde_with::serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct GroupFrame {
+	/// Minted each time the group's track is created. Every counter in a frame
+	/// with a new epoch starts from zero, so a reader keeps each epoch's counters
+	/// apart rather than diffing across them.
+	#[serde_as(as = "serde_with::DisplayFromStr")]
+	pub epoch: Epoch,
+	/// Each tier's [`Group`] counters, keyed by tier label (`""` for the default
+	/// tier).
+	#[serde(default)]
+	pub tiers: BTreeMap<String, Group>,
+}
+
+/// One tier's counters on a group track: the group's totals for the track's
+/// epoch, then its live per-path traffic and per-label sessions. The totals sit
+/// at the top level, so a [`Totals`] reader parses them unchanged.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct Group {
+	/// Egress: everything the group's paths sent this epoch.
+	pub publisher: Traffic,
+	/// Ingress: everything the group's paths received this epoch.
+	pub subscriber: Traffic,
+	/// Sessions connected under the group's stats labels this epoch.
+	pub sessions: Presence,
+	/// Each live broadcast path's [`Usage`], as the per-tier traffic tracks
+	/// carry it.
+	pub paths: BTreeMap<String, Usage>,
+	/// Each live stats label's [`Presence`], as the per-tier sessions track
+	/// carries it.
+	pub labels: BTreeMap<String, Presence>,
+}
+
 /// Suffix appended to a plain track name for its compressed sibling.
 pub const COMPRESSED_SUFFIX: &str = ".z";
 
@@ -177,6 +220,9 @@ const PRESENCE: &str = "presence.json";
 /// The last segment of a prefix track's plain name.
 const PREFIX: &str = "prefix.json";
 
+/// The last segment of a group track's name.
+const GROUP: &str = "group.json";
+
 /// The traffic track name for a tier and role: `<role>.json` at the prefix root
 /// on the default tier (`publisher.json` / `subscriber.json`), `<tier>/<role>.json`
 /// on a named one, plus [`COMPRESSED_SUFFIX`] for [`Encoding::Compressed`].
@@ -209,6 +255,22 @@ pub fn presence_track(label: impl AsPath, encoding: Encoding) -> String {
 /// [`Encoding::Compressed`]. Served only while requested.
 pub fn prefix_track(path: impl AsPath, encoding: Encoding) -> String {
 	keyed_track(path.as_path(), PREFIX, encoding)
+}
+
+/// The group track name for a group: `<group>/group.json`, or `group.json` for
+/// the empty group. One name, compressed by the track itself, with no `.z`
+/// sibling. Published only in the [track layout](produce::Layout::Track).
+pub fn group_track(group: impl AsPath) -> String {
+	keyed_track(group.as_path(), GROUP, Encoding::Plain)
+}
+
+/// The group a group track name carries; `None` for any other name. The
+/// inverse of [`group_track`], for reading a stats broadcast's track listing.
+pub fn parse_group_track(name: &str) -> Option<PathOwned> {
+	match parse_keyed_track(name, GROUP)? {
+		(group, Encoding::Plain) => Some(group),
+		(_, Encoding::Compressed) => None,
+	}
 }
 
 /// `<key>/<kind>`, or `<kind>` for the empty key, plus the encoding's suffix.

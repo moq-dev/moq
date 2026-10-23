@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A replacement track starts over (#6428)
+
+A broadcast no longer remembers the sequences an ended track of a name wrote, so its state stays bounded by its live tracks.
+A track that replaces an ended one, created or requested, appends from 0 instead of returning `Error::Duplicate`, `finish()` ends at its own writes, and `finish_at()` and its first frames are no longer checked against the predecessor.
+A publisher that recreates a name continues past the groups it already wrote with `create_group` at an explicit sequence, such as a timestamp.
+
 ### A listing says whether a removed track finished (#6399)
 
 `broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.

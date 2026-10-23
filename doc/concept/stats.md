@@ -109,6 +109,8 @@ generate more stats.
 ```text
 <prefix>/node/<node>               depth 0: one broadcast per node
 <prefix>/<group>/node/<node>       depth N: one broadcast per group per node
+<prefix>/node/<node>               depth N, track layout: one broadcast per node,
+                                   with a <group>/group.json track per group
 ```
 
 - `<node>` tells relays sharing a cluster apart. It may span several segments
@@ -138,8 +140,9 @@ returns within the linger keeps its broadcast and epoch, so viewer churn
 doesn't unannounce and re-announce it across the mesh, and its totals
 continue. Once the linger elapses with the group still empty, the broadcast is
 unannounced and its counters dropped; a group that returns later announces a
-new epoch counted from zero. Within one epoch, group numbers keep increasing
-across recreated tracks and may have gaps.
+new epoch counted from zero. Group numbers count publish intervals (see
+[Frames](#frames)), so they keep increasing across recreated tracks and have
+gaps.
 
 ## Tracks
 
@@ -162,7 +165,8 @@ name with its label and a slash: tier `region/sjc` publishes
 `region/sjc/publisher.json`. Appending `.z` selects the
 [compressed](#compressed) encoding of the same track: `publisher.json.z`.
 
-`totals.json` and the default tier's six per-tier tracks always exist. A named
+`totals.json` and, outside the [track layout](#group-tracks), the default
+tier's six per-tier tracks always exist. A named
 tier's are created on its first recorded traffic, but a subscriber may ask for
 them earlier: any name of the shape
 `[<tier>/]{publisher,subscriber,sessions}.json[.z]` is accepted and held open
@@ -176,18 +180,48 @@ leaves. A prefix track works the same way for any broadcast prefix in the
 group: ask for `<path>/prefix.json` (`prefix.json` for the empty prefix). A
 label or prefix outside the group, or any other name, is refused.
 
+### Group tracks
+
+The track layout (`layout = "track"` on the relay) publishes every group of a
+node on its one broadcast. Each group is a `<group>/group.json` track
+(`group.json` for the empty group) carrying all of the group's tiers, both
+directions, and its sessions, so a reader holds one subscription per group.
+The broadcast also carries `totals.json` for the whole node and serves presence
+and prefix tracks for any label or prefix, but has no per-tier tracks.
+
+A reader discovers the live groups from the broadcast's track listing (TRACKS
+in moq-lite 07, `SUBSCRIBE_TRACKS` in moq-transport draft 18 and later): a
+group's track is listed from its first entry until it has lingered empty, then
+unlisted and ended. The node's announcement never changes, so group churn
+costs no announce traffic across a cluster. Over a hop that cannot carry a
+listing (moq-lite 06 and older, or moq-transport before draft 18) the listing
+is empty or refused; a reader that knows a group's name can still subscribe to
+it while it is listed, and is refused otherwise.
+
+A group that returns after its linger is a new instance of its track: its
+frames carry a new `epoch` and count from zero, and its group numbers, which
+count publish intervals, continue past the old instance's. A frame too large to cache ends only that group's
+track.
+
 ## Frames
 
-Every frame is a JSON object mapping a key to an entry. A track with no
-entries holds `{}`.
+Every frame is a JSON object mapping a key to an entry, except a
+[group](#group) track's. A track with no entries holds `{}`.
 
 The producer drains its counters every interval (one second by default) and
 writes only when a track's frame changed, so silence means nothing moved, not
 that the producer is gone. The track ends when the producer does, or at
-depth 1 or more when its group's broadcast is unannounced; the group may
-return later as a new broadcast. A frame too large to cache (32 MB) ends its
-track with a `FRAME_TOO_LARGE` error. The `.z` flavor meets the same limit by its
+depth 1 or more when its group's broadcast is unannounced or its group track
+unlisted; the group may return later as a new broadcast or track instance. A
+frame too large to cache (32 MB) ends its track with a `FRAME_TOO_LARGE` error.
+The `.z` flavor meets the same limit by its
 uncompressed size, since a reader inflates the whole group.
+
+A group's number is its publish's scheduled time divided by the interval, so
+the interval is its timescale. Publishes are scheduled at least an interval
+apart, even after a late one, so each opens its groups in an interval of its
+own, and a track recreated later numbers its groups past every group its
+earlier instance wrote.
 
 ### Totals
 
@@ -210,6 +244,29 @@ A lingering group's frames repeat its final totals. A reader that misses every
 frame from the group's last change until it unannounces loses that epoch's
 tail, so a meter that only reads totals under-counts by it.
 
+### Group
+
+```json
+{
+  "epoch": "0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f",
+  "tiers": {
+    "": {
+      "publisher": { ... }, "subscriber": { ... }, "sessions": { ... },
+      "paths": { "acme/live": { "publisher": { ... }, "subscriber": { ... } } },
+      "labels": { "acme": { ... } }
+    }
+  }
+}
+```
+
+`epoch` is a UUIDv7 minted for each instance of the group's track. `tiers`
+maps each tier the group recorded on since then: its top-level `publisher`,
+`subscriber`, and `sessions` are the group's [totals](#totals), so a totals
+reader parses them unchanged; `paths` holds each broadcast path's
+[Traffic](#traffic) and `labels` each stats label's [Presence](#presence), with
+the same lifetimes as the [per-tier tracks](#per-tier-tracks). A reader keeps
+each epoch's counters apart, as it does for a broadcast's epochs.
+
 ### Per-tier tracks
 
 A traffic entry appears from its first nonzero counter until the relay drops
@@ -229,9 +286,9 @@ anyone holds the track. A track held again starts over.
 Wire bytes start at zero on every hold, including the first. Other presence
 fields seed from the root's current live-session counters; they do not recover
 closed roots from before the hold. Node totals keep the full group epoch's
-history. Each recreated track starts a fresh snapshot group using the
-broadcast's shared, increasing group sequence, so relay caches can distinguish
-it from an earlier hold. Plain and compressed tracks share that allocator.
+history. Each recreated track starts a fresh snapshot group numbered by its
+publish interval, past any group of an earlier hold, so relay caches can
+distinguish the two.
 
 ### Prefix
 
@@ -397,7 +454,12 @@ defaults a missing field to zero, so it can read an older relay.
 ## Encodings
 
 Both encodings carry identical frames; pick by bandwidth. Only the track name
-says which one a track uses: the payload has no marker.
+says which one a track uses: the payload has no marker. A group track has one
+name and no `.z` sibling: it sets the track's
+[compressed](/concept/moq-lite#subscriptions) flag, so a session that can
+signal compression carries it DEFLATEd and every other reads an inflated copy.
+Its frames read like the compressed encoding's after inflating: a snapshot
+opening each group, then merge patches.
 
 ### Plain
 

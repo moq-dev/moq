@@ -222,6 +222,9 @@ struct Stats {
 	#[usage(env = "MOQ_STATS_DEPTH", cli("--stats-depth"))]
 	depth: Option<u64>,
 
+	#[usage(env = "MOQ_STATS_LAYOUT", cli("--stats-layout"))]
+	layout: Option<String>,
+
 	#[usage(env = "MOQ_STATS_LINGER", cli("--stats-linger"))]
 	linger: Option<String>,
 }

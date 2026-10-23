@@ -339,6 +339,7 @@ prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<no
 interval = "1s"                      # Time between snapshots. Default.
 node = "sjc/1"                       # Disambiguates relays sharing a cluster.
 depth = 1                            # Also bucket by the first N path segments (per tenant).
+layout = "broadcast"                 # Or "track": each group is a track of the node's one broadcast.
 linger = "5m"                        # Keep an empty group's broadcast announced this long. Default.
 ```
 
@@ -347,7 +348,9 @@ Each node publishes its traffic and session counters as MoQ tracks, split by a
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
 Each run, and each group returning after its linger, announces under a fresh
 [epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
-the same path. Each group's totals count everything since its epoch began, so
+the same path. With `layout = "track"` a group is a
+[track](/concept/stats#group-tracks) instead, and a returning one restarts its
+counters without an announce. Each group's totals count everything since its epoch began, so
 billing reads those; per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.

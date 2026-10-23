@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 /// carries plain `.json` tracks of cumulative counters (per-tier totals,
 /// per-path traffic, per-root sessions, and per-root presence on request) plus compressed
 /// `.json.z` siblings; see `moq_stats` for the wire format and per-field
-/// semantics.
+/// semantics. [`Self::layout`] `track` keeps the one broadcast and publishes
+/// each [`Self::depth`] group as a track on it instead.
 #[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -81,12 +82,29 @@ pub struct Config {
 	)]
 	pub depth: usize,
 
+	/// Where each `depth` group is published: `broadcast` (the default)
+	/// announces one broadcast per group per node; `track` keeps the single
+	/// `<prefix>/node/<node>` broadcast and lists each group as a
+	/// `<group>/group.json` track on it, so group churn costs no announce
+	/// traffic.
+	///
+	/// See [`moq_stats::produce::Layout`].
+	#[usage(
+		long = "stats-layout",
+		env = "MOQ_STATS_LAYOUT",
+		value_enum,
+		default = "broadcast",
+		setting = "stats.layout"
+	)]
+	pub layout: Layout,
+
 	/// How long a group's stats broadcast stays announced after the group's
 	/// last session and traffic leave, e.g. "5m" or "30s". Defaults to 5
 	/// minutes. A group that returns within it keeps its broadcast, so viewer
 	/// churn doesn't unannounce and re-announce it across the mesh; one that
 	/// returns after it announces under a new epoch. Only applies at `depth` 1
-	/// or more. See [`moq_stats::produce::Config::linger`].
+	/// or more; with `layout = "track"`, it is how long a group's track stays
+	/// listed. See [`moq_stats::produce::Config::linger`].
 	#[usage(skip)]
 	#[serde(with = "crate::duration::serde_option")]
 	pub linger: Option<Duration>,
@@ -106,6 +124,7 @@ impl Default for Config {
 			interval_arg: None,
 			node: None,
 			depth: 0,
+			layout: Layout::Broadcast,
 			linger: None,
 			linger_arg: None,
 		}
@@ -141,17 +160,40 @@ impl Config {
 		anyhow::ensure!(!interval.is_zero(), "stats.interval must be non-zero");
 		let node = self.node.clone().map(PathOwned::from);
 		let depth = self.depth;
+		let layout = self.layout;
 		let linger = self.linger();
-		tracing::info!(prefix, ?interval, node = ?node, depth, ?linger, "stats publishing enabled");
+		tracing::info!(prefix, ?interval, node = ?node, depth, ?layout, ?linger, "stats publishing enabled");
 		let mut config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
 			.with_interval(interval)
 			.with_node(node)
-			.with_depth(depth);
+			.with_depth(depth)
+			.with_layout(layout.into());
 		if let Some(linger) = linger {
 			config = config.with_linger(linger);
 		}
 		Ok(moq_stats::Producer::new(config))
+	}
+}
+
+/// Where each stats group is published; see [`moq_stats::produce::Layout`].
+#[derive(usage_rs::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[usage(ignore_case)]
+#[serde(rename_all = "kebab-case")]
+pub enum Layout {
+	/// One broadcast per group per node.
+	#[default]
+	Broadcast,
+	/// One broadcast per node, with each group a track on it.
+	Track,
+}
+
+impl From<Layout> for moq_stats::produce::Layout {
+	fn from(layout: Layout) -> Self {
+		match layout {
+			Layout::Broadcast => Self::Broadcast,
+			Layout::Track => Self::Track,
+		}
 	}
 }

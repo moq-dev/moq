@@ -9,7 +9,7 @@ use std::{
 	time::Duration,
 };
 
-use super::{Order, Sequence, Subscription, TrackState, clamp_combined};
+use super::{Order, Subscription, TrackState, clamp_combined};
 
 mod ranges;
 use ranges::Ranges;
@@ -25,9 +25,11 @@ pub(super) struct Subscriptions {
 	/// [`super::Demand::wanted`].
 	wanted: u64,
 	/// A join over the track's refresh ratio asked for a group past every sequence written,
-	/// and no such group has landed yet. Read against the namespace rather than stored as a
-	/// number, so a datagram taking the next sequence can never leave the ask behind.
+	/// and no such group has landed yet. Read against `next` rather than stored as a number,
+	/// so a datagram taking the next sequence can never leave the ask behind.
 	refresh: bool,
+	/// One past the highest sequence written, which a pending refresh asks for.
+	next: u64,
 	waiters: kio::WaiterList,
 }
 
@@ -83,30 +85,18 @@ impl Subscriptions {
 	}
 
 	/// The lowest group consumers want, whether or not anyone consumes now: the next free
-	/// sequence of `namespace` while a refresh is pending.
-	///
-	/// Read under this lock, so a write that moves the namespace after it wakes the waiters
-	/// armed here (see [`Self::wrote`]).
-	pub(super) fn wanted(&self, namespace: &Sequence) -> u64 {
+	/// sequence while a refresh is pending.
+	pub(super) fn wanted(&self) -> u64 {
 		match self.refresh {
-			true => namespace.next().max(self.wanted),
+			true => self.next.max(self.wanted),
 			false => self.wanted,
 		}
 	}
 
 	/// [`Self::wanted`], arming `waiter` for its next change.
-	pub(super) fn poll_wanted(&mut self, namespace: &Sequence, waiter: &kio::Waiter) -> u64 {
+	pub(super) fn poll_wanted(&mut self, waiter: &kio::Waiter) -> u64 {
 		waiter.register(&mut self.waiters);
-		self.wanted(namespace)
-	}
-
-	/// Raise the floor of [`Self::wanted`] to `group`, taking the wakes only when it moved.
-	pub(super) fn want(&mut self, group: u64) -> kio::WaiterList {
-		if group <= self.wanted {
-			return Default::default();
-		}
-		self.wanted = group;
-		self.waiters.take()
+		self.wanted()
 	}
 
 	/// A join over the refresh ratio: ask for a group past every sequence written. Joins
@@ -118,10 +108,12 @@ impl Subscriptions {
 		self.waiters.take()
 	}
 
-	/// Sequence `sequence` was written at or past `next`, the namespace's next free sequence
-	/// before it. A group subscribers receive answers a pending refresh; anything else, such
-	/// as a datagram, moves the sequence it asks for.
-	pub(super) fn wrote(&mut self, sequence: u64, next: u64, answers: bool) -> kio::WaiterList {
+	/// Sequence `sequence` was written. One at or past the next free sequence moves it: a
+	/// group subscribers receive answers a pending refresh, and anything else, such as a
+	/// datagram, moves the sequence it asks for.
+	pub(super) fn wrote(&mut self, sequence: u64, answers: bool) -> kio::WaiterList {
+		let next = self.next;
+		self.next = next.max(sequence.saturating_add(1));
 		if !self.refresh || sequence < next {
 			return Default::default();
 		}

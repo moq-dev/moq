@@ -17,6 +17,10 @@
 //! tracks: each row walks its ancestors once a prefix is held, so the cost
 //! grows with rows times depth, plus each held track's encode.
 //!
+//! `stats/groups` sweeps the track layout over held paths and the groups they
+//! spread across, each group one track: the rows cost the same however they
+//! split, so a slope in groups is per-track overhead.
+//!
 //! Run `cargo bench -p moq-stats --features bench --bench producer_tick`.
 
 #![expect(
@@ -96,14 +100,21 @@ struct Relay {
 }
 
 impl Relay {
-	/// `depth` is each path's segment count, at least 2.
-	fn build(paths: usize, tiers: usize, changed_percent: usize, depth: usize) -> Self {
+	/// `depth` is each path's segment count, at least 2. With `groups`, the
+	/// paths spread over that many first segments and the driver publishes each
+	/// as a group track.
+	fn build(paths: usize, tiers: usize, changed_percent: usize, depth: usize, groups: Option<usize>) -> Self {
 		let registry = stats::Registry::new(
 			stats::Config::new().with_exclude(moq_net::Pattern::subtree(".stats").expect("literal prefix")),
 		);
 		let (origin, origin_driver) = origin::Producer::new(origin::Config::default());
 		let nested = "/s".repeat(depth - 2);
-		let path_names: Vec<String> = (0..paths).map(|index| format!("room/{index:06}{nested}")).collect();
+		let path_names: Vec<String> = (0..paths)
+			.map(|index| match groups {
+				Some(groups) => format!("g{:04}/{index:06}{nested}", index % groups),
+				None => format!("room/{index:06}{nested}"),
+			})
+			.collect();
 		let publishers: Vec<_> = path_names
 			.iter()
 			.map(|path| {
@@ -130,7 +141,11 @@ impl Relay {
 		registry.report(&mut report);
 		assert_eq!(report.traffic.len(), paths * tiers, "one held entry per path and tier");
 
-		let driver = Driver::new(registry.clone(), origin.clone()).expect("stats broadcast");
+		let driver = match groups {
+			Some(_) => Driver::tracks(registry.clone(), origin.clone()),
+			None => Driver::new(registry.clone(), origin.clone()),
+		}
+		.expect("stats broadcast");
 		Self {
 			registry,
 			tiers: tier_labels,
@@ -234,7 +249,7 @@ fn bench(c: &mut Criterion) {
 				let mut relay = None;
 				group.bench_function(id, |b| {
 					let relay = relay.get_or_insert_with(|| {
-						let mut relay = Relay::build(paths, tiers, changed, 2);
+						let mut relay = Relay::build(paths, tiers, changed, 2, None);
 						let row = sample(&mut relay);
 						let micros = row.elapsed.as_secs_f64() * 1e6;
 						println!(
@@ -383,7 +398,7 @@ fn prefix(c: &mut Criterion) {
 				let mut relay = None;
 				group.bench_function(id, |b| {
 					let relay = relay.get_or_insert_with(|| {
-						let mut relay = Relay::build(paths, 1, 10, depth);
+						let mut relay = Relay::build(paths, 1, 10, depth, None);
 						black_box(relay.driver.tick());
 						relay.hold(held);
 						let row = sample(&mut relay);
@@ -411,5 +426,47 @@ fn prefix(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench, presence, prefix);
+const GROUP_PATHS: [usize; 2] = [1_000, 10_000];
+
+/// Groups the paths spread across, each a track.
+const GROUPS: [usize; 3] = [1, 100, 1_000];
+
+/// What the track layout costs a tick, with a tenth of the paths moving.
+fn groups(c: &mut Criterion) {
+	println!("paths groups allocs/tick us/tick");
+
+	let mut group = c.benchmark_group("stats/groups");
+	group.sample_size(10);
+	group.warm_up_time(Duration::from_millis(200));
+	group.measurement_time(Duration::from_secs(1));
+	for &paths in &GROUP_PATHS {
+		for &groups in GROUPS.iter().filter(|&&groups| groups <= paths) {
+			let id = BenchmarkId::from_parameter(format!("{paths}p_{groups}g"));
+			group.throughput(Throughput::Elements(paths as u64));
+			let mut relay = None;
+			group.bench_function(id, |b| {
+				let relay = relay.get_or_insert_with(|| {
+					let mut relay = Relay::build(paths, 1, 10, 2, Some(groups));
+					let row = sample(&mut relay);
+					let micros = row.elapsed.as_secs_f64() * 1e6;
+					println!("{paths:>5} {groups:>6} {allocs:>11} {micros:>8.1}", allocs = row.allocs);
+					relay
+				});
+				b.iter_custom(|iters| {
+					let mut total = Duration::ZERO;
+					for _ in 0..iters {
+						relay.touch();
+						let start = Instant::now();
+						black_box(relay.driver.tick());
+						total += start.elapsed();
+					}
+					total
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench, presence, prefix, groups);
 criterion_main!(benches);

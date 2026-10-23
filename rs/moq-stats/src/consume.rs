@@ -4,8 +4,8 @@ use moq_net::stats::{Role, Tier};
 use moq_net::{AsPath, broadcast};
 
 use crate::{
-	Encoding, PrefixFrame, PresenceFrame, Result, SessionsFrame, TotalsFrame, TrafficFrame, prefix_track,
-	presence_track, sessions_track, totals_track, traffic_track,
+	Encoding, GroupFrame, PrefixFrame, PresenceFrame, Result, SessionsFrame, TotalsFrame, TrafficFrame, group_track,
+	prefix_track, presence_track, sessions_track, totals_track, traffic_track,
 };
 
 /// Configuration for a [`Consumer`]. Construct with [`Config::new`]
@@ -39,7 +39,10 @@ impl Config {
 /// [`Self::traffic`], [`Self::sessions`], [`Self::presence`], and
 /// [`Self::prefix`]. A named tier's tracks are held open with an empty frame
 /// until the tier records, and a label's presence track and a prefix's track
-/// are produced only while subscribed.
+/// are produced only while subscribed. In the
+/// [track layout](crate::produce::Layout::Track), discover live groups from
+/// the broadcast's [track listing](moq_net::broadcast::Consumer::tracks) with
+/// [`crate::parse_group_track`] and read each with [`Self::group`].
 pub struct Consumer {
 	broadcast: broadcast::Consumer,
 	config: Config,
@@ -95,6 +98,17 @@ impl Consumer {
 		let name = prefix_track(path, self.config.encoding);
 		Ok(PrefixConsumer {
 			inner: self.subscribe(&name).await?,
+		})
+	}
+
+	/// Subscribe to group `group`'s track, awaiting the subscription handshake.
+	/// The track compresses itself, so [`Config::encoding`] does not apply.
+	/// Fails with [`NotFound`](moq_net::Error::NotFound) unless the group is
+	/// listed.
+	pub async fn group(&self, group: impl AsPath) -> Result<GroupConsumer> {
+		let track = self.broadcast.track(&group_track(group))?.subscribe(None).await?;
+		Ok(GroupConsumer {
+			inner: moq_json::snapshot::Consumer::new(track, Default::default()),
 		})
 	}
 
@@ -168,6 +182,21 @@ impl PrefixConsumer {
 	/// [`FrameTooLarge`](moq_net::Error::FrameTooLarge) once the frame outgrows
 	/// the cache.
 	pub async fn next(&mut self) -> Result<Option<PrefixFrame>> {
+		Ok(self.inner.latest().await?.map(|value| value.value))
+	}
+}
+
+/// A typed reader over one group's track; see [`TrafficConsumer`].
+pub struct GroupConsumer {
+	inner: moq_json::snapshot::Consumer<GroupFrame>,
+}
+
+impl GroupConsumer {
+	/// The next frame, or `None` once the track ends (the producer went away
+	/// or the group lingered out of the listing). Fails with
+	/// [`FrameTooLarge`](moq_net::Error::FrameTooLarge) once the frame outgrows
+	/// the cache.
+	pub async fn next(&mut self) -> Result<Option<GroupFrame>> {
 		Ok(self.inner.latest().await?.map(|value| value.value))
 	}
 }
