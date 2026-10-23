@@ -1018,6 +1018,7 @@ int main()
 		if (sibling) {
 			hidden = TestOk(relay.origin->create_broadcast("obs/test/hidden"), "unannounced sibling");
 			config.broadcast = "./hidden";
+			config.epoch = "01900000-0000-7000-8000-000000000001";
 		}
 		snapshot->video.clear();
 		snapshot->video.emplace("!unavailable", config);
@@ -1031,6 +1032,15 @@ int main()
 			std::lock_guard<std::mutex> lock(ctx->mutex);
 			moq_source_subscribe_video(ctx, ctx->connection, *snapshot);
 			CHECK(ctx->connection->pending_video != nullptr);
+		}
+		if (hidden) {
+			// An unannounced sibling stays pending, without interrupting current playback.
+			const int frames = g_output_frames;
+			CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
+			// A different publisher instance is a real resolution failure.
+			moq::Route route;
+			route.epoch = "01900000-0000-7000-8000-000000000002";
+			TestOk(hidden->announce(route), "announce mismatched sibling");
 		}
 		{
 			std::unique_lock<std::mutex> lock(g_candidate_mutex);
