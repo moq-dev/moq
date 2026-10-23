@@ -1866,7 +1866,10 @@ class ConsumeBroadcast extends broadcast.Consumer {
 					if (!hold) query.abort();
 				}
 			},
-			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options, consumed),
+			// FETCH streams start at lite-05; older sessions offer no fetch at all.
+			fetchGroup: hasTrackStream(subscriber.version)
+				? (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options, consumed)
+				: undefined,
 		});
 		this.#subscriber = subscriber;
 		this.#path = path;
