@@ -53,26 +53,35 @@ impl<T: Message> Encode<Version> for T {
 
 impl<T: Message> Decode<Version> for T {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let size = decode_size(r, Self::MAX_SIZE)?;
-		let mut body = r.sub(size)?;
-
-		// The body is complete, so running short inside it is malformed, not a wait for more.
-		let result = Self::decode_msg(&mut body, version)
-			.map_err(DecodeError::complete)
-			.and_then(|msg| match body.is_empty() {
-				true => Ok(msg),
-				false => Err(DecodeError::Long),
-			});
-
-		match &result {
-			Ok(msg) => tracing::trace!(?msg, "decoded"),
-			Err(err) => tracing::warn!(%err, "decode failed"),
-		}
-		if result.is_ok() {
-			r.control = T::CONTROL;
-		}
-		result
+		decode_with(r, |body| T::decode_msg(body, version))
 	}
+}
+
+/// Decode a size-prefixed `T`, reading its body with `decode` in place of
+/// [`Message::decode_msg`], for a body whose bounds come from the session.
+pub(super) fn decode_with<T: Message>(
+	r: &mut Decoder<'_>,
+	decode: impl FnOnce(&mut Decoder<'_>) -> Result<T, DecodeError>,
+) -> Result<T, DecodeError> {
+	let size = decode_size(r, T::MAX_SIZE)?;
+	let mut body = r.sub(size)?;
+
+	// The body is complete, so running short inside it is malformed, not a wait for more.
+	let result = decode(&mut body)
+		.map_err(DecodeError::complete)
+		.and_then(|msg| match body.is_empty() {
+			true => Ok(msg),
+			false => Err(DecodeError::Long),
+		});
+
+	match &result {
+		Ok(msg) => tracing::trace!(?msg, "decoded"),
+		Err(err) => tracing::warn!(%err, "decode failed"),
+	}
+	if result.is_ok() {
+		r.control = T::CONTROL;
+	}
+	result
 }
 
 #[cfg(test)]

@@ -5,6 +5,12 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `stats.interval` is a duration (#6472)
+
+`stats.interval`, `--stats-interval`, and `MOQ_STATS_INTERVAL` take a duration such as `"1s"` or `"500ms"` instead of a bare number of seconds, and a zero interval refuses to start.
+Write `interval = 5` as `interval = "5s"`.
+In Rust, `stats::Config::interval` is a `Duration`, and `stats::Config::build` returns a `Result`.
+
 ### `receive_window` has a floor (#5878)
 
 The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.
@@ -19,6 +25,10 @@ Upgrade any client that still speaks only `webtransport` over WebSocket before t
 
 `uring::Workers::serve(cluster, auth, shutdown, sessions)` is now `spawn` with the same arguments, which sets every worker up without accepting, followed by `serve()`, which starts them accepting.
 Install anything that must be in place before the first session (`Relay::run` installs its signal handlers) between the two.
+
+### `Accepted` takes any transport's handshake (#6176)
+
+`Accepted` loses its transport type parameter, since `moq_net::server::Handshake` has none: write `Accepted` instead of `Accepted<S>`.
 
 ### `supervise` takes a `Serving` guard (#6144)
 

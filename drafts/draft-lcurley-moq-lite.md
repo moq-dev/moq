@@ -1371,6 +1371,7 @@ Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (
 An optional unsigned 32-bit byte ratio, encoded as the ratio plus one; `0` disables refresh.
 On a live-edge join, a publisher asks for a group beyond every sequence already produced when the newest group's bytes after its first frame exceed the ratio times that first frame's bytes.
 Joins coalesce until the requested group arrives.
+The request does not hold back delivery: the joiner still receives the newest cached group while it is pending.
 A relay preserves the ratio and evaluates joins against its own cache, forwarding demand in SUBSCRIBE_UPDATE.
 Versions before lite-07 omit Refresh and Wanted Group; a Track received on those versions never refreshes.
 
