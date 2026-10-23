@@ -115,9 +115,8 @@ enum Config {
 struct Media {
 	handle: Mutex<Handle>,
 	track: String,
-	/// The source, reference, and epoch a sibling is bound through, to re-issue a bind that
-	/// failed before it ever resolved.
-	sibling: Option<(moq_mux::Source, moq_net::path::RelativeOwned, Option<moq_net::Epoch>)>,
+	/// The rendition reads another broadcast than the catalog's.
+	sibling: bool,
 }
 
 struct Handle {
@@ -154,7 +153,8 @@ impl Media {
 		Ok(Self {
 			handle: Mutex::new(handle),
 			track: track.to_string(),
-			sibling: sibling(source, rel).map(|rel| (source.clone(), rel, reference.epoch().cloned())),
+			// `bind` already rejected an escaping reference, so both sides name a path.
+			sibling: source.resolve_reference(rel) != source.resolve_reference(None),
 		})
 	}
 
@@ -172,33 +172,16 @@ impl Media {
 	/// Register the bound broadcast's close and retain its track before new lookups are refused.
 	fn poll_sync(&self, waiter: &kio::Waiter, window: &segments::Producer) -> Arc<moq_mux::Binding> {
 		let mut handle = self.handle.lock().expect("media lock poisoned");
-		let mut reissued = false;
-		loop {
-			match handle.binding.poll_broadcast(waiter) {
-				Poll::Ready(Ok(broadcast)) => {
-					handle.capture(&broadcast, &self.track);
-					if self.sibling.is_some() && !handle.ended && broadcast.poll_closed(waiter).is_ready() {
-						// End and Restart both drain only the pinned instance. Looking its path
-						// up again could serve a replacement under the old timeline's rows.
-						handle.ended = true;
-						window.end();
-					}
-				}
-				// Only a binding that never resolved may be reissued. The source pins every
-				// successful result, so a replacement can never answer these old rows.
-				Poll::Ready(Err(_)) if !reissued => {
-					reissued = true;
-					if let Some((source, rel, epoch)) = &self.sibling
-						&& let Ok(next) = source.bind(Some(rel), epoch.as_ref())
-					{
-						handle.binding = Arc::new(next);
-						continue;
-					}
-				}
-				_ => {}
+		if let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(waiter) {
+			handle.capture(&broadcast, &self.track);
+			if self.sibling && !handle.ended && broadcast.poll_closed(waiter).is_ready() {
+				// End and Restart both drain only the pinned instance. Looking its path up again
+				// could serve a replacement under the old timeline's rows.
+				handle.ended = true;
+				window.end();
 			}
-			return handle.binding.clone();
 		}
+		handle.binding.clone()
 	}
 
 	fn poll_track(
@@ -213,18 +196,6 @@ impl Media {
 		handle.capture(&broadcast, &self.track);
 		Poll::Ready(handle.track.as_ref().map(|query| (broadcast, query.track())))
 	}
-}
-
-/// A catalog `broadcast` reference that names a different path than the catalog itself.
-fn sibling(
-	source: &moq_mux::Source,
-	rel: Option<&moq_net::path::RelativeOwned>,
-) -> Option<moq_net::path::RelativeOwned> {
-	let target = source.resolve_reference(rel)?;
-	if source.resolve_reference(None).as_ref() == Some(&target) {
-		return None;
-	}
-	Some(rel.cloned().unwrap_or_else(moq_net::path::Relative::empty))
 }
 
 /// Clear the video fields that don't change how the rendition decodes or is muxed, so a config
@@ -706,7 +677,7 @@ impl Rendition {
 	}
 
 	/// Fail if a timeline this rendition lists failed (see [`failure`](Self::failure)).
-	fn check(&self) -> Result<()> {
+	pub(crate) fn check(&self) -> Result<()> {
 		if let Some(err) = self.live.failure() {
 			return Err(err);
 		}
@@ -838,6 +809,11 @@ impl Rendition {
 	/// any later row will resolve.
 	pub(crate) fn is_failed(&self, row: &segments::Row) -> bool {
 		self.resolve(row) == Content::Failed
+	}
+
+	/// Why this rendition's own timeline failed, whether or not that fails its listings.
+	pub(crate) fn own_failure(&self) -> Option<crate::Error> {
+		self.spans.failure().map(|failure| failure.err)
 	}
 
 	/// Whether the playlist has anything to serve yet (at least one segment, or the broadcast
@@ -1232,11 +1208,6 @@ fn listed_tag(rows: &[segments::Row]) -> String {
 
 #[cfg(test)]
 impl Rendition {
-	/// Whether this rendition's own timeline failed, whether or not that fails its listings.
-	pub(crate) fn own_failure(&self) -> bool {
-		self.spans.failure().is_some()
-	}
-
 	/// Fetch the listed segment numbered `segment`, under the tag its rows carry.
 	pub(crate) async fn listed_segment(&self, segment: u64) -> Result<Option<Bytes>> {
 		let tag = listed_tag(&self.live.window().segments);

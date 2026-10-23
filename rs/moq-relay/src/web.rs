@@ -408,6 +408,7 @@ impl Web {
 	/// reload. The caller builds `app` from [`routes`](Self::routes) plus any
 	/// extra routes it merged in. An embedder driving a [`crate::Relay`]
 	/// passes that router to [`crate::Relay::with_web`] instead of calling this.
+	/// Every route can extract the accepted peer as `ConnectInfo<SocketAddr>`.
 	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
 		let Web {
 			state,
@@ -422,11 +423,14 @@ impl Web {
 		let app = app
 			.fallback(serve_landing)
 			.layer(axum::middleware::from_fn(get_cors))
-			.into_make_service_with_connect_info::<crate::listener::Peer>();
+			.into_make_service_with_connect_info::<net::SocketAddr>();
 		let ws = config.resolved_ws();
+		// Each request is admitted on its own, so a connection may have as many in flight
+		// as a session may have credentials verifying; the client queues the rest.
+		let streams = u32::try_from(state.auth.verifications()).unwrap_or(u32::MAX);
 
 		let http = if let Some(listener) = http_listener {
-			let server = crate::listener::server(
+			let mut server = crate::listener::server(
 				listener,
 				crate::listener::Config {
 					health: health.clone(),
@@ -435,6 +439,7 @@ impl Web {
 				},
 				WebAcceptor::plain(ws),
 			)?;
+			server.http_builder().http2().max_concurrent_streams(streams);
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -454,7 +459,7 @@ impl Web {
 					),
 				);
 			}
-			let server = crate::listener::server(
+			let mut server = crate::listener::server(
 				listener,
 				crate::listener::Config {
 					health: health.clone(),
@@ -463,6 +468,7 @@ impl Web {
 				},
 				WebAcceptor::tls(rustls_config, ws),
 			)?;
+			server.http_builder().http2().max_concurrent_streams(streams);
 			Some(server.serve(app))
 		} else {
 			None
@@ -970,7 +976,7 @@ async fn admit_http(
 	query: AuthQuery,
 	uri: &http::Uri,
 	headers: &http::HeaderMap,
-	remote: crate::listener::Peer,
+	remote: net::SocketAddr,
 	mtls: Option<Extension<MtlsPeer>>,
 ) -> axum::response::Result<(auth::Lease, moq_net::origin::Consumer)> {
 	// The public request API represents a missing or root path as empty; the
@@ -983,7 +989,7 @@ async fn admit_http(
 		.map(str::to_owned)
 		.or_else(|| query.jwt.map(|jwt| format!("jwt={jwt}")));
 	request.server_name = request_host(uri, headers);
-	request.remote = Some(remote.0);
+	request.remote = Some(remote);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	// The listener's timeout bounds admission as it bounds the request headers. An
 	// HTTP read has no handshake deadline to inherit, so the bound starts here.
@@ -1012,7 +1018,7 @@ async fn serve_announced(
 	path: Option<Path<String>>,
 	Query(query): Query<AuthQuery>,
 	mtls: Option<Extension<MtlsPeer>>,
-	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
+	ConnectInfo(remote): ConnectInfo<net::SocketAddr>,
 	uri: http::Uri,
 	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
@@ -1050,7 +1056,7 @@ async fn serve_fetch(
 	Path(path): Path<String>,
 	Query(params): Query<FetchParams>,
 	mtls: Option<Extension<MtlsPeer>>,
-	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
+	ConnectInfo(remote): ConnectInfo<net::SocketAddr>,
 	uri: http::Uri,
 	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
@@ -1206,7 +1212,7 @@ mod tests {
 				let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 				let web = Web::new(auth, cluster, certificates.clone(), Config::default());
 				let state = web.state;
-				let remote = ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap()));
+				let remote = ConnectInfo("127.0.0.1:1234".parse().unwrap());
 				let status = if fetch {
 					serve_fetch(
 						Path("room/video".to_owned()),
@@ -1281,7 +1287,7 @@ mod tests {
 				group: FetchGroup::Latest,
 			}),
 			None,
-			ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/fetch/room/video".parse().unwrap(),
 			http::HeaderMap::new(),
 			State(state.clone()),
@@ -1292,7 +1298,7 @@ mod tests {
 			Some(Path("room".to_owned())),
 			Query(AuthQuery { jwt: None }),
 			None,
-			ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/announced/room".parse().unwrap(),
 			http::HeaderMap::new(),
 			State(state.clone()),
@@ -1363,7 +1369,7 @@ mod tests {
 						group: selector,
 					}),
 					None,
-					ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+					ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 					format!("/fetch/room/video?tier={tier}").parse().unwrap(),
 					http::HeaderMap::new(),
 					State(state.clone()),
@@ -1379,7 +1385,7 @@ mod tests {
 				Some(Path("room".into())),
 				Query(AuthQuery { jwt: None }),
 				None,
-				ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+				ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 				format!("/announced/room?tier={tier}").parse().unwrap(),
 				http::HeaderMap::new(),
 				State(state.clone()),
@@ -1452,7 +1458,7 @@ mod tests {
 		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 		cluster.stats = moq_net::stats::Registry::new(Default::default());
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
-		let peer = || ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap()));
+		let peer = || ConnectInfo("127.0.0.1:1234".parse().unwrap());
 		let fetched = serve_fetch(
 			Path("room/video".into()),
 			Query(FetchParams {
@@ -1857,6 +1863,44 @@ mod tests {
 		serving.abort();
 	}
 
+	/// An embedded route can read the accepted address with Axum's standard
+	/// extractor, regardless of client-supplied proxy headers.
+	#[tokio::test]
+	async fn embedded_routes_receive_the_socket_address() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let mut config = Config::default();
+		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		let auth = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		}
+		.init("test", &moq_tokio::tls::Connect::default(), false)
+		.unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
+		let http = web.addrs().http.unwrap();
+		let app = Router::new().route(
+			"/remote",
+			get(|ConnectInfo(remote): ConnectInfo<net::SocketAddr>| async move { remote.to_string() }),
+		);
+		let serving = tokio::spawn(web.serve(app));
+		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
+		let expected = tcp.local_addr().unwrap().to_string();
+		tcp.write_all(
+			b"GET /remote HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 192.0.2.1\r\nConnection: close\r\n\r\n",
+		)
+		.await
+		.unwrap();
+		let mut response = String::new();
+		tcp.read_to_string(&mut response).await.unwrap();
+		assert_eq!(response.split("\r\n\r\n").nth(1), Some(expected.as_str()), "{response}");
+		serving.abort();
+		let _ = serving.await;
+	}
+
 	/// HTTPS settings without the HTTPS listener that would read them are refused,
 	/// not ignored.
 	#[tokio::test]
@@ -1982,6 +2026,115 @@ mod tests {
 		let response = String::from_utf8_lossy(&response);
 		assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
 		assert!(start.elapsed() >= timeout, "refused before the timeout");
+
+		serving.abort();
+	}
+
+	/// An HTTP/2 connection carries no more requests at once than a session may have
+	/// credentials verifying, advertised up front so the client queues the rest rather
+	/// than having them refused.
+	#[tokio::test]
+	async fn h2_streams_are_bounded_by_the_verification_budget() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let mut config = Config::default();
+		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		let (auth, _admissions) = crate::auth::Auth::embedded("test");
+		let auth = auth.with_verifications(7);
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
+		let http = web.addrs().http.expect("the HTTP listener is configured");
+		let routes = web.routes();
+		let serving = tokio::spawn(web.serve(routes));
+
+		// Prior-knowledge HTTP/2: the preface, then an empty SETTINGS frame.
+		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
+		tcp.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+			.await
+			.unwrap();
+
+		// The server's own SETTINGS frame comes first.
+		let mut header = [0; 9];
+		tcp.read_exact(&mut header).await.unwrap();
+		assert_eq!(header[3], 0x4, "the server opened with something other than SETTINGS");
+		let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+		let mut payload = vec![0; len];
+		tcp.read_exact(&mut payload).await.unwrap();
+		let streams = payload
+			.as_chunks::<6>()
+			.0
+			.iter()
+			.find(|setting| setting[..2] == [0, 0x3])
+			.map(|setting| u32::from_be_bytes(setting[2..].try_into().unwrap()));
+		assert_eq!(streams, Some(7));
+
+		serving.abort();
+	}
+
+	/// An upgraded WebSocket reads no more than one qmux record at a time: a frame
+	/// declaring more is refused at its header, before SETUP and without buffering it,
+	/// even with no timeout to end the wait. Real sockets, so this runs on the wall clock.
+	#[cfg(feature = "websocket")]
+	#[tokio::test]
+	async fn a_websocket_frame_past_one_record_is_refused_at_its_header() {
+		use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+		let mut config = Config::default();
+		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		config.ws = true;
+		let auth_config = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		};
+		let auth = auth_config
+			.init("test", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, config)
+			.with_timeout(None)
+			.bind()
+			.unwrap();
+		let http = web.addrs().http.expect("the HTTP listener is configured");
+		let routes = web.routes();
+		let serving = tokio::spawn(web.serve(routes));
+
+		let tcp = tokio::net::TcpStream::connect(http).await.unwrap();
+		let mut tcp = tokio::io::BufReader::new(tcp);
+		tcp.write_all(
+			b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+			Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+			Sec-WebSocket-Protocol: qmux-01.moq-lite-06\r\n\r\n",
+		)
+		.await
+		.unwrap();
+		let mut status = String::new();
+		tcp.read_line(&mut status).await.unwrap();
+		assert!(status.starts_with("HTTP/1.1 101"), "{status}");
+		loop {
+			let mut header = String::new();
+			tcp.read_line(&mut header).await.unwrap();
+			if header == "\r\n" {
+				break;
+			}
+		}
+
+		// A masked binary frame declaring 1 MiB, with none of its payload sent.
+		let mut frame = vec![0x82, 0x80 | 127];
+		frame.extend_from_slice(&(1u64 << 20).to_be_bytes());
+		frame.extend_from_slice(&[0; 4]);
+		tcp.write_all(&frame).await.unwrap();
+
+		let mut rest = Vec::new();
+		tokio::time::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
+			.await
+			.expect("the socket waited to buffer a frame larger than a record")
+			.ok();
 
 		serving.abort();
 	}

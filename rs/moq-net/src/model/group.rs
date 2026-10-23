@@ -2262,16 +2262,19 @@ impl Demand {
 	}
 }
 
-/// A small inline batch of completed frames, drained from the shared group state
-/// under one lock and then handed out without re-locking.
+/// A small batch of completed frames, drained from the shared group state under one
+/// lock and then handed out without re-locking.
 ///
 /// Each [`Consumer::read_frame`] otherwise takes the group mutex and allocates a
 /// waker just to clone one `Bytes`; draining a batch amortizes both across `CAP`
-/// frames. Storage is inline and uninitialized (no heap), so a consumer that never
-/// reads whole frames, or drains through a higher-level buffer, pays nothing.
+/// frames. Storage is uninitialized and allocated by the first non-empty fill, so a
+/// consumer that never reads whole frames, or drains through a higher-level buffer,
+/// pays nothing. Inline storage would triple the size of every [`Consumer`], which
+/// moves by value through each layer that hands out a group.
+#[derive(Default)]
 struct Prefetch {
 	// Initialized, not-yet-taken frames are `frames[pos..len]`; the rest are uninitialized.
-	frames: [MaybeUninit<Frame>; Self::CAP],
+	frames: Option<Box<[MaybeUninit<Frame>; Self::CAP]>>,
 	// Relay metadata for `frames`, allocated by the first batch that carries any.
 	fields: Option<Box<[Option<Arc<super::object::Fields>>; Self::CAP]>>,
 	// Inflated sizes for `frames`, filled only by a batch of a compressed group's stored slices.
@@ -2293,8 +2296,9 @@ impl Prefetch {
 		if self.pos == self.len {
 			return None;
 		}
+		let frames = self.frames.as_mut()?;
 		// SAFETY: `pos < len`, so this slot was written by `fill` and not yet taken.
-		let frame = unsafe { self.frames[self.pos].assume_init_read() };
+		let frame = unsafe { frames[self.pos].assume_init_read() };
 		self.pos += 1;
 		Some(frame)
 	}
@@ -2319,9 +2323,14 @@ impl Prefetch {
 			Some(flate) if !raw && count > 0 => Some(state.inflate(flate, local + count - 1)?),
 			_ => None,
 		};
-		for frame in state.frames.range(local..local + count) {
-			self.frames[self.len].write(frame.clone());
-			self.len += 1;
+		if count > 0 {
+			let frames = self
+				.frames
+				.get_or_insert_with(|| Box::new([const { MaybeUninit::uninit() }; Self::CAP]));
+			for frame in state.frames.range(local..local + count) {
+				frames[self.len].write(frame.clone());
+				self.len += 1;
+			}
 		}
 		match &state.flate {
 			Some(flate) if raw => {
@@ -2348,12 +2357,15 @@ impl Prefetch {
 	/// frames. A frame that fails to inflate ends the batch, failing it if first.
 	fn inflate(&mut self, job: &Inflate, local: usize, meter: &stats::Meter) -> Result<()> {
 		job.run(meter);
+		let Some(frames) = &mut self.frames else {
+			return Ok(());
+		};
 		for i in self.pos..self.len {
 			match job.get(local + i) {
 				// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
-				Ok(payload) => unsafe { self.frames[i].assume_init_mut() }.payload = payload,
+				Ok(payload) => unsafe { frames[i].assume_init_mut() }.payload = payload,
 				Err(err) => {
-					for slot in &mut self.frames[i..self.len] {
+					for slot in &mut frames[i..self.len] {
 						// SAFETY: as above, and `len` drops below them right after.
 						unsafe { slot.assume_init_drop() };
 					}
@@ -2369,7 +2381,10 @@ impl Prefetch {
 	/// Read once per fill to bump the egress payload counters for the whole batch.
 	fn buffered(&self) -> (u64, u64) {
 		let mut bytes = 0u64;
-		for slot in &self.frames[self.pos..self.len] {
+		let Some(frames) = &self.frames else {
+			return (0, 0);
+		};
+		for slot in &frames[self.pos..self.len] {
 			// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
 			bytes += unsafe { slot.assume_init_ref() }.payload.len() as u64;
 		}
@@ -2377,21 +2392,12 @@ impl Prefetch {
 	}
 }
 
-impl Default for Prefetch {
-	fn default() -> Self {
-		Self {
-			frames: [const { MaybeUninit::uninit() }; Self::CAP],
-			fields: None,
-			inflated: None,
-			pos: 0,
-			len: 0,
-		}
-	}
-}
-
 impl Drop for Prefetch {
 	fn drop(&mut self) {
-		for slot in &mut self.frames[self.pos..self.len] {
+		let Some(frames) = &mut self.frames else {
+			return;
+		};
+		for slot in &mut frames[self.pos..self.len] {
 			// SAFETY: slots in `pos..len` are initialized and were never taken.
 			unsafe { slot.assume_init_drop() };
 		}

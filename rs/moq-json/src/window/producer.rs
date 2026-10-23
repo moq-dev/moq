@@ -95,8 +95,8 @@ impl<T> Producer<T> {
 	///
 	/// A join wants one once the open group's ops outweigh the track's
 	/// [`refresh`](moq_net::track::Info::refresh) ratio times its header (see
-	/// [`Demand::wanted`](moq_net::track::Demand::wanted)), so that joiner reads the window without
-	/// downloading them. The header carries the newest timestamp written. Nothing happens before
+	/// [`Demand::wanted`](moq_net::track::Demand::wanted)). It is a soft trigger: that joiner still
+	/// reads the cached group, then the new one. The header carries the newest timestamp written. Nothing happens before
 	/// the first edit, or on a track without a ratio.
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
