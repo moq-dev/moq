@@ -100,7 +100,7 @@ impl Stats {
 	/// Record one group keyframe's wall-clock delivery latency.
 	pub fn latency(&self, sent_ms: u128) {
 		// Read the clock before locking so contention is not measured as latency.
-		let now_ms = SystemTime::now()
+		let now_ms = SystemTime::from(moq_clock::wall())
 			.duration_since(UNIX_EPOCH)
 			.unwrap_or_default()
 			.as_millis();
@@ -125,7 +125,7 @@ impl Stats {
 	/// recorded stats are partial is invalid, so the caller must fail the run
 	/// rather than exit green.
 	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) -> anyhow::Result<()> {
-		let mut ticker = tokio::time::interval(interval);
+		let mut ticker = moq_clock::interval(interval);
 		// Skip the immediate first tick so the first report covers a full interval.
 		ticker.tick().await;
 
@@ -419,7 +419,7 @@ impl Latency {
 		// include only part of an observation. One that reads the clock before the
 		// boundary but locks after it counts in the next interval, unaltered.
 		let state = self.state.lock().expect("latency lock poisoned");
-		let captured_at = SystemTime::now();
+		let captured_at = SystemTime::from(moq_clock::wall());
 		let LatencyState {
 			buckets,
 			max_ms,
@@ -481,6 +481,11 @@ fn highest_bucket(buckets: &[u64]) -> Option<u64> {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use std::sync::Arc;
 

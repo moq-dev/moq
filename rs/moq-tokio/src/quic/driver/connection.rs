@@ -6,7 +6,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker, ready},
@@ -542,13 +542,12 @@ impl Connection {
         data: Bytes,
         options: SendOptions<'_>,
     ) -> Result<(), SendDatagramError> {
+        let options = send_group::to_quic(options, &self.0.0);
         let conn = &mut *self.0.state.lock("send_datagram");
         if let Some(x) = &conn.error {
             return Err(SendDatagramError::ConnectionLost(x.clone()));
         }
-        conn.inner
-            .datagrams()
-            .send(data, send_group::to_quic(options))?;
+        conn.inner.datagrams().send(data, options)?;
         conn.wake();
         Ok(())
     }
@@ -640,6 +639,19 @@ impl Connection {
     /// Returns connection statistics
     pub fn stats(&self) -> ConnectionStats {
         self.0.state.lock("stats").inner.stats()
+    }
+
+    /// Whether the connection has freed the send stream's state
+    #[cfg(test)]
+    pub(crate) fn send_stream_freed(&self, id: StreamId) -> bool {
+        let mut state = self.0.state.lock("send_stream_freed");
+        state.inner.send_stream(id).stopped().is_err()
+    }
+
+    /// How many streams have `SendStream::stopped` waiters registered, to check none leak
+    #[cfg(test)]
+    pub(crate) fn stopped_waiters(&self) -> usize {
+        self.0.state.lock("stopped_waiters").stopped.len()
     }
 
     /// The wire counters the driver updates as it sends and receives.
@@ -867,14 +879,11 @@ fn poll_open<'a>(
     mut notify: Pin<&mut Notified<'a>>,
     dir: Dir,
 ) -> Poll<Result<(ConnectionRef, StreamId, bool), ConnectionError>> {
+    let options = send_group::to_quic(options, &conn.0);
     let mut state = conn.state.lock("poll_open");
     if let Some(e) = &state.error {
         return Poll::Ready(Err(e.clone()));
-    } else if let Some(id) = state
-        .inner
-        .streams()
-        .open(dir, send_group::to_quic(options))
-    {
+    } else if let Some(id) = state.inner.streams().open(dir, options) {
         let is_0rtt = state.inner.side().is_client() && state.inner.is_handshaking();
         drop(state); // Release the lock so clone can take it
         return Poll::Ready(Ok((conn.clone(), id, is_0rtt)));
@@ -1092,7 +1101,7 @@ pub(crate) struct State {
     endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
     pub(crate) blocked_writers: FxHashMap<StreamId, Waker>,
     pub(crate) blocked_readers: FxHashMap<StreamId, Waker>,
-    pub(crate) stopped: FxHashMap<StreamId, Arc<Notify>>,
+    pub(crate) stopped: FxHashMap<StreamId, Arc<StopWaiters>>,
     /// Always set to Some before the connection becomes drained
     pub(crate) error: Option<ConnectionError>,
     sender: Pin<Box<dyn UdpSender>>,
@@ -1103,7 +1112,6 @@ pub(crate) struct State {
 }
 
 impl State {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         inner: moq_quic::Connection,
         handle: ConnectionHandle,
@@ -1279,9 +1287,9 @@ impl State {
                     // Might mean any number of streams are ready, so we wake up everyone
                     shared.stream_budget_available[dir as usize].notify_waiters();
                 }
-                Stream(StreamEvent::Finished { id }) => wake_stream_notify(id, &mut self.stopped),
-                Stream(StreamEvent::Stopped { id, .. }) => {
-                    wake_stream_notify(id, &mut self.stopped);
+                Stream(StreamEvent::Finished { id }) => self.resolve_stopped(id, None),
+                Stream(StreamEvent::Stopped { id, error_code }) => {
+                    self.resolve_stopped(id, Some(error_code));
                     wake_stream(id, &mut self.blocked_writers);
                 }
                 PathUpdated => {
@@ -1372,6 +1380,14 @@ impl State {
         self.close(0u32.into(), Bytes::new(), shared);
     }
 
+    /// Resolves the stream's `stopped` waiters with the peer's STOP_SENDING code, or `None`
+    pub(crate) fn resolve_stopped(&mut self, id: StreamId, outcome: Option<VarInt>) {
+        if let Some(waiters) = self.stopped.remove(&id) {
+            let _ = waiters.outcome.set(outcome);
+            waiters.notify.notify_waiters();
+        }
+    }
+
     pub(crate) fn check_0rtt(&self) -> Result<(), ()> {
         if self.inner.is_handshaking()
             || self.inner.accepted_0rtt()
@@ -1411,16 +1427,19 @@ fn wake_all(wakers: &mut FxHashMap<StreamId, Waker>) {
     wakers.drain().for_each(|(_, waker)| waker.wake())
 }
 
-fn wake_stream_notify(stream_id: StreamId, wakers: &mut FxHashMap<StreamId, Arc<Notify>>) {
-    if let Some(notify) = wakers.remove(&stream_id) {
-        notify.notify_waiters()
-    }
+/// The `SendStream::stopped` futures waiting on one stream
+#[derive(Debug, Default)]
+pub(crate) struct StopWaiters {
+    pub(crate) notify: Notify,
+    /// What a STOP_SENDING, a delivered finish, or a local reset settled, kept here because the
+    /// stream may be freed before a woken waiter polls. Once set, nothing later counts.
+    pub(crate) outcome: OnceLock<Option<VarInt>>,
 }
 
-fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<Notify>>) {
+fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<StopWaiters>>) {
     wakers
         .drain()
-        .for_each(|(_, notify)| notify.notify_waiters())
+        .for_each(|(_, waiters)| waiters.notify.notify_waiters())
 }
 
 /// Errors that can arise when sending a datagram

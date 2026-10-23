@@ -175,8 +175,8 @@ fn total_memory() -> u64 {
 /// relay's construction shapes. Returns on the first tick after that.
 async fn governor(pool: cache::PoolWeak, capacity: Option<u64>, headroom: u64) {
 	let mut sys = sysinfo::System::new();
-	let mut interval = tokio::time::interval(GOVERNOR_INTERVAL);
-	interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+	let mut interval = moq_clock::interval(GOVERNOR_INTERVAL);
+	interval.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
 
 	loop {
 		interval.tick().await;

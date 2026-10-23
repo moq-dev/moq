@@ -4,8 +4,14 @@
 //!
 //! You should not use this module directly; see [crate] for the high-level API.
 
-// Private codec entry points remain testable when their session callers are absent.
-#![cfg_attr(not(feature = "async"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+	not(feature = "async"),
+	allow(
+		dead_code,
+		unused_imports,
+		reason = "private codec entry points remain testable when their session callers are absent"
+	)
+)]
 
 #[macro_use]
 mod parameters;
@@ -21,6 +27,7 @@ pub(crate) mod epoch;
 pub(crate) mod error;
 mod fetch;
 mod filter;
+pub(crate) mod flate;
 mod goaway;
 mod group;
 pub mod hidden;
@@ -45,6 +52,7 @@ mod session;
 pub mod solicit;
 mod subscribe;
 mod subscribe_namespace;
+mod subscribe_tracks;
 #[cfg(feature = "async")]
 mod subscriber;
 pub(crate) mod token;
@@ -73,6 +81,7 @@ pub use request::*;
 pub use session::*;
 pub use subscribe::*;
 pub use subscribe_namespace::*;
+pub use subscribe_tracks::*;
 #[cfg(feature = "async")]
 use subscriber::*;
 pub use track::*;

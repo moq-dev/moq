@@ -17,7 +17,7 @@ import { TRACK_STATUS_ERROR_14 } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** Whether the draft treats the requester finishing its messages as cancellation. */
-export function finCancels(version: IetfVersion): boolean {
+function finCancels(version: IetfVersion): boolean {
 	return (
 		version === Version.DRAFT_14 ||
 		version === Version.DRAFT_15 ||
@@ -48,12 +48,12 @@ const ERROR_14: Record<RequestKind, number> = {
 };
 
 async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
-	await w.u53(version === Version.DRAFT_14 ? ERROR_14[kind] : RequestError.id);
-	await new RequestError({
+	const err = new RequestError({
 		requestId: version <= Version.DRAFT_16 ? refusal.requestId : undefined,
 		errorCode: toRequestCode(refusal.condition, kind, version),
 		reasonPhrase: refusal.reasonPhrase,
-	}).encode(w, version);
+	});
+	await Message.write(w, version === Version.DRAFT_14 ? ERROR_14[kind] : RequestError.id, err, version);
 }
 
 /**

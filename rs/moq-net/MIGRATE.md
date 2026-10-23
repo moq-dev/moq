@@ -4,6 +4,140 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A listing says whether a removed track finished (#6399)
+
+`broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
+`broadcast::Lister::finish()`, which ended every reader as if the broadcast ended, is `Lister::end()`. `Lister::finish(name)` now unlists a track as finished, beside `remove(name)` for one that left unfinished.
+
+### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
+
+Match the version yourself: lite-01, lite-02, and moq-transport draft 14 negotiate the version in SETUP; every other version negotiates it through ALPN.
+
+### Sessions box their transport (#6176)
+
+`Driver` and `server::Handshake` lose their transport type parameter: write `moq_net::Driver` and `moq_net::server::Handshake`.
+`Client::connect_lite`, `Server::accept_lite`, and `Server::accept_request_lite` are gone; call `connect`, `accept`, or `accept_request`, which accept every ALPN.
+Every session now takes a `transport::poll::Boxable` transport, whose streams must also be `Sync` on native.
+A `!Send` transport wraps itself in a type that checks the thread on use, such as `moq_uring::transport::Local`.
+`Client::connect` and `Server::accept_request` are plain functions returning `impl Future`, so call them as before with `.await`.
+
+### `track::Producer::largest()` is a getter
+
+`track::Producer::largest(&self)` returns the track's largest location now, `None` before any, instead of streaming each newer one; `track::Producer::poll_largest` is gone.
+Replace `poll_largest(&kio::Waiter::noop())` and `largest().await` on a producer with `largest()`.
+To wait for each newer one, keep a reader and follow its stream: `let mut reader = producer.consume();`, then `reader.largest().await`.
+
+### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
+
+On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
+Readers accept both forms and set End Of Track to the sequence after the fetched group.
+An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 20 and later, whose inclusive End Location is unchanged.
+No Rust API changes.
+
+### Receive streams are read through leases (#5878)
+
+`transport::poll::RecvStream` now has `poll_lease(cx, want)`, `set_priority`, and `stop`, plus the provided `poll_read_chunk` and `read_chunk`.
+`poll_read`, `poll_read_buf`, `poll_closed`, `read`, `read_buf`, `closed`, `Read`, and `ReadBuf` are gone.
+A lease borrows the stream's unreleased bytes as a `bytes::Buf`: reading moves past bytes for good, but they keep their flow-control credit until `Lease::release()`.
+Bytes not read stay for the next lease, `Lease::chunks()` peeks without reading, and `is_fin` replaces `closed`.
+A transport that can only hand out chunks implements `transport::poll::Chunks` (`poll_read_chunk` and `stop`) and wraps each stream in `transport::poll::Buffered`.
+
+```rust
+// Before
+let n = stream.read(&mut buf).await?;
+
+// After: copy what arrived, then return its credit
+let mut lease = poll_fn(|cx| stream.poll_lease(cx, 1)).await?;
+let n = lease.remaining().min(buf.len()); // 0 with `lease.is_fin()` is the end
+lease.copy_to_slice(&mut buf[..n]);
+lease.release();
+```
+
+`transport::CloseKind` gained `Evicted`, which `Error::from_transport` maps to `Error::Evicted`.
+`transport::Stats` gained `streams_evicted()`, and `session::Stats` the matching `streams_evicted` field.
+
+### Stage a requested track before subscribers see it (#6111)
+
+`track::Request::stage(info)` returns a `track::Staged` that derefs to the track's `Producer` while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
+A relay that holds groups of a lazily served track writes them before committing, so the first reader (and an IETF `SUBSCRIBE_OK`'s Largest Location) sees them.
+Dropping a `Staged` uncommitted rejects the request with `Error::Dropped`. `accept(info)` is unchanged and equals `stage(info).commit()`.
+
+```rust
+let mut staged = request.stage(info);
+for group in retained { /* staged.create_group(..), write, finish */ }
+let producer = staged.commit();
+```
+
+### Frame writers own their group (#6111)
+
+`group::Producer::create_frame` now takes the writer by value and returns an owned `frame::Producer` with no lifetime.
+`frame::Producer::finish` hands the group writer back, and `frame::Producer::group()` returns `&group::Producer` instead of a `group::Info` copy.
+A frame the group refuses (closed, or past its size) now aborts the group.
+
+```rust
+// Before
+let mut frame = group.create_frame(info)?;
+frame.write(payload)?;
+frame.finish()?;
+// After
+let mut frame = group.create_frame(info)?;
+frame.write(payload)?;
+group = frame.finish()?;
+```
+
+A caller that holds the group behind `&mut` can write a whole frame with `write_frame` instead.
+
+### A received track's end waits for groups in flight (#6111)
+
+Call `track::Producer::received()` before writing what a peer sends into a track, then declare the peer's end with `finish_at`.
+On a received copy, readers wait at a hole below that end for the subscription's max delay (or one second) in case its group is still in flight; `drop_groups(range, err)` marks groups the peer said it skipped, so readers stop waiting for them and a group still arriving there ends with `err`.
+`finish_at` now accepts a repeat of the same end and a refinement within the last group; any other second end fails with `Error::ProtocolViolation`.
+
+`track::Request::request_start(floor)` leaves an accepted copy's start pending at `floor` until `track::Producer::start_at` resolves it, for a subscriber whose peer reports the start after accepting.
+
+### A frameless group is not the live edge (#6111)
+
+Every group reaches readers as soon as it is created, but the live edge, `largest()`, and the judgment of whether a group was succeeded count a group only once its first frame opens or it finishes.
+A group followed by a frameless one is judged against the next group that has a frame.
+
+### Ending a track aborts its open groups (#6111)
+
+Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::SessionClosed`.
+`track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
+
+### Priorities are signed, with 0 unset (#6142)
+
+`track::Info::priority`, `track::Subscription::priority`, `group::Fetch::priority`, and `group::Request::priority()` are `i8`, higher first, and 0 is the unset midpoint.
+The track's default was 127, the midpoint, and the subscription's was 0, the least urgent; both are 0 now.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+The publisher's `Info::priority` now breaks ties between subscriptions at one subscriber priority.
+
+On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority`, so an unset priority goes out as 128 on moq-lite (was 127) and 127 on moq-transport (was 128), and an absent moq-transport priority reads as 0.
+
+### A client session asks only about what its readers watch (#6165)
+
+On moq-lite, a client session no longer asks its peer for announcements under its whole subscribe scope at connect.
+It asks only under the prefixes its subscribe origin's readers watch, with `announced()`, `follow`, `routed`, `routed_broadcast`, or `announced_broadcast`, and stops asking 2s after nothing at or beneath a prefix is watched.
+`request_broadcast` watches nothing, so on a client it fails with `Error::Unroutable` for a path no reader watches, even when the peer announces it.
+Resolve a path with `routed_broadcast` or `announced_broadcast`, or hold an `announced()` stream over its prefix while requesting, the way `routed` already did after connecting.
+A broadcast resolved through a discovered route keeps its path watched until dropped.
+A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
+Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.
+moq-transport sessions, and moq-lite-03/04 sessions (whose announce streams mark no initial set), are unchanged.
+
+### Frames carry their arrival time
+
+`frame::Frame` gains a private arrival stamp, read with `Frame::arrived()`, so it can no longer be built with a struct literal.
+Replace `Frame { timestamp, payload }` with `Frame::new(timestamp, payload)`.
+`timestamp` and `payload` stay public fields.
+
+### Timestamps stop at 2^61 - 1 (#6168)
+
+`Timestamp::new`, its `from_*` constructors, `convert`, `checked_add`, and `TryFrom<Duration>` return `TimeOverflow` past `2^61 - 1` instead of `2^62 - 1`, the most lite-05/06 can carry as a group's first frame.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `(1 << 61) - 1`.
+
 ### A dropped or cut group ends its reader with an error (#6143)
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.
@@ -81,7 +215,7 @@ Handle it like any other skipped group.
 ### Track readers follow `largest()` instead of reading `latest()` (#5725)
 
 `latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.
-Await `largest()` and read `.group` where you used the sequence; where you read the edge without waiting, poll `poll_largest` once with `kio::Waiter::noop()`.
+Await `largest()` and read `.group` where you used the sequence; on a `Producer`, `largest()` reads the edge without waiting.
 It streams the newest location, the current one at once and then each newer one, and `None` once the track ends.
 A new group or datagram raises it at frame 0 before any frame lands, and it can name a frame the publisher reported before its group arrives.
 
@@ -119,7 +253,9 @@ let rate = bandwidth.as_ref().and_then(|b| b.peek());
 ### A timed track refuses a group that rewinds (#5803)
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, fails with `TimestampMismatch`; `@moq/net` throws it the same way.
-Received groups are accepted as is, since their timestamps may be send times.
+A group received over moq-lite-07 is checked the same way.
+A track received over moq-lite-05/06 arrives untimed, since its timestamps may be send times: read times from the payload, such as the hang container's, instead of `frame::Frame::timestamp`.
+One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
 
 ### `broadcast::Producer::finish` is back, and lingers (#5795)

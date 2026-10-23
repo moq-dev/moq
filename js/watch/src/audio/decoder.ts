@@ -18,14 +18,17 @@ import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync } from "../sync";
-import { type AudioBuffer, createAudioBuffer } from "./buffer";
+import { AudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 import { AUTO_MAX_DELAY, ringSamples, target } from "./latency";
+import { Order } from "./order";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { Terminal } from "./terminal";
+
+type FrameRead = Extract<Container.Read, { kind: "frame" }>;
 
 /** Signals the decoder reads. */
 export type DecoderInput = {
@@ -59,9 +62,6 @@ type DecoderOutput = {
 	// Whether the audio buffer is stalled (waiting to fill)
 	stalled: Signal<boolean>;
 
-	// How many times the ring ran dry mid-playback, so the UI can show that the target is too low.
-	underruns: Signal<number>;
-
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<Container.BufferedRanges>;
 };
@@ -79,6 +79,8 @@ type Shape = {
 export interface Stats {
 	/** Number of encoded bytes received. */
 	bytesReceived: number;
+	/** How many times playback ran dry mid-stream; a rising count means the delay is too low. */
+	underruns: number;
 }
 
 /**
@@ -102,7 +104,6 @@ export class Decoder {
 		stats: new Signal<Stats | undefined>(undefined),
 		timestamp: new Signal<Milli | undefined>(undefined),
 		stalled: new Signal<boolean>(true),
-		underruns: new Signal<number>(0),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
 	/** The derived outputs, read-only. */
@@ -111,7 +112,7 @@ export class Decoder {
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<Container.BufferedRanges>([]);
 
-	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
+	// Audio ring bridging the main thread and the worklet.
 	#ring = new Signal<AudioBuffer | undefined>(undefined);
 
 	// The context, worklet, and ring are keyed on this alone. It outlives a rendition's absence, so
@@ -269,8 +270,12 @@ export class Decoder {
 			const latencySamples = ringSamples(sampleRate, delay);
 			const buffered = this.sync.out.buffered.peek();
 
-			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
-			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples, buffered);
+			const ring = new AudioBuffer(worklet, {
+				channels: channelCount,
+				rate: sampleRate,
+				latency: latencySamples,
+				buffered,
+			});
 			effect.cleanup(() => ring.close());
 			effect.set(this.#ring, ring);
 
@@ -283,8 +288,17 @@ export class Decoder {
 			effect.run((inner) => {
 				this.#out.stalled.set(inner.get(ring.stalled));
 			});
+			// Each ring counts from zero, so add only what this one counted to the cumulative stats.
+			let counted = 0;
 			effect.run((inner) => {
-				this.#out.underruns.set(inner.get(ring.underruns));
+				const underruns = inner.get(ring.underruns);
+				const added = underruns - counted;
+				counted = underruns;
+				if (added <= 0) return;
+				this.#out.stats.update((stats) => ({
+					bytesReceived: stats?.bytesReceived ?? 0,
+					underruns: (stats?.underruns ?? 0) + added,
+				}));
 			});
 
 			effect.set(this.#out.root, worklet);
@@ -420,15 +434,18 @@ export class Decoder {
 			// A config the probe accepted can still fail to parse (a malformed init segment or Opus
 			// header). Report it like a decode failure, which also retires the outgoing estimate.
 			const props = { config, failure, path: active.path };
-			try {
-				if (config.container.kind === "cmaf") {
-					this.#runCmafDecoder(run, sub, props);
-				} else {
-					this.#runLegacyDecoder(run, sub, props);
+			run.spawn(async () => {
+				try {
+					if (config.container.kind === "cmaf") {
+						await this.#runCmafDecoder(run, sub, props);
+					} else {
+						this.#runLegacyDecoder(run, sub, props);
+					}
+				} catch (error) {
+					if (run.abort.aborted) return;
+					failure.set(error instanceof Error ? error : new Error(String(error)));
 				}
-			} catch (error) {
-				failure.set(error instanceof Error ? error : new Error(String(error)));
-			}
+			});
 		});
 	}
 
@@ -473,20 +490,27 @@ export class Decoder {
 			};
 			decoder.configure(decoderConfig);
 
+			const order = this.#order();
+			const play = (reads: FrameRead[]) => this.#play(effect, decoder, decoderConfig, order, reads);
 			for (;;) {
 				const next = await nextMedia(consumer);
-				if (!next) break;
-				if (this.#onRead(next)) {
-					decoder.reset();
-					decoder.configure(decoderConfig);
+				if (next?.kind !== "frame") {
+					// The track ending, or a gap or end, cuts a held head short.
+					if (!(await play(order.flush()))) return;
+					if (!next) break;
+					if (this.#onRead(next)) {
+						decoder.reset();
+						decoder.configure(decoderConfig);
+						order.reset();
+					}
+					if (next.kind === "gap") this.#arrivals.write(gap(next));
+					continue;
 				}
-				if (next.kind === "gap") this.#arrivals.write(gap(next));
-				if (next.kind !== "frame") continue;
 				const { frame } = next;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
-				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				const late = this.sync.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
@@ -494,40 +518,27 @@ export class Decoder {
 
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
+					underruns: stats?.underruns ?? 0,
 				}));
 
-				const ring = await this.#ready(effect);
-				if (!ring) break;
-
-				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
-				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await ring.wait(frame.timestamp as Micro, effect.abort);
-				if (effect.abort.aborted) break;
-
-				const chunk = new EncodedAudioChunk({
-					// WebCodecs audio chunks are key even inside a MoQ group.
-					type: "key",
-					data: frame.payload,
-					timestamp: frame.timestamp,
-				});
-
-				// A fatal decode error closes the decoder, so decoding again throws InvalidStateError out
-				// of this loop. Stop instead: the error callback already reported the real failure.
-				if (decoder.state === "closed") break;
-				decoder.decode(chunk);
+				if (!(await play(order.push(next)))) return;
 			}
 		});
 	}
 
-	#runCmafDecoder(
+	async #runCmafDecoder(
 		effect: Effect,
 		sub: Moq.Track.Subscriber,
 		{ config, failure, path }: { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid },
-	): void {
+	): Promise<void> {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
+		const abort = effect.abort;
+		const Cmaf = await import("@moq/hang/cmaf");
+		if (abort.aborted) return;
+
 		const initSegment = base64ToBytes(config.container.init);
-		const init = Container.Cmaf.decodeInitSegment(initSegment);
+		const init = Cmaf.decodeInitSegment(initSegment);
 		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
 		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
 		this.#terminal.clear(preSkip, Micro.fromMilli(Milli(config.warmup ?? 0)));
@@ -540,7 +551,7 @@ export class Decoder {
 					? Util.Hex.toBytes(config.description)
 					: init.description;
 
-		const consumer = this.#consume(effect, sub, new Container.Cmaf.Format(init), { config, path });
+		const consumer = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -563,21 +574,26 @@ export class Decoder {
 			};
 			decoder.configure(decoderConfig);
 
+			const order = this.#order();
+			const play = (reads: FrameRead[]) => this.#play(effect, decoder, decoderConfig, order, reads);
 			for (;;) {
 				const next = await nextMedia(consumer);
-				if (!next) break;
-
-				// Reset and re-anchor before decoding the first frame of a new codec epoch.
-				if (this.#onRead(next)) {
-					decoder.reset();
-					decoder.configure(decoderConfig);
+				if (next?.kind !== "frame") {
+					// The track ending, or a gap or end, cuts a held head short.
+					if (!(await play(order.flush()))) return;
+					if (!next) break;
+					if (this.#onRead(next)) {
+						decoder.reset();
+						decoder.configure(decoderConfig);
+						order.reset();
+					}
+					if (next.kind === "gap") this.#arrivals.write(gap(next));
+					continue;
 				}
-				if (next.kind === "gap") this.#arrivals.write(gap(next));
-				if (next.kind !== "frame") continue;
 				const { frame } = next;
 
 				const timestamp = Milli.fromMicro(frame.timestamp);
-				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				const late = this.sync.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
@@ -585,27 +601,68 @@ export class Decoder {
 
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
+					underruns: stats?.underruns ?? 0,
 				}));
 
-				const ring = await this.#ready(effect);
-				if (!ring) break;
-
-				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
-				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await ring.wait(frame.timestamp, effect.abort);
-				if (effect.abort.aborted) break;
-
-				if (decoder.state === "closed") break;
-				decoder.decode(
-					new EncodedAudioChunk({
-						// WebCodecs audio chunks are key even inside a MoQ group.
-						type: "key",
-						data: frame.payload,
-						timestamp: frame.timestamp,
-					}),
-				);
+				if (!(await play(order.push(next)))) return;
 			}
 		});
+	}
+
+	// Decode released frames, resetting the decoder before the first frame of a new codec epoch and
+	// only then dropping one that is out of order. The terminal sees them in decode order, so it
+	// anchors on the oldest. Reports whether to keep going.
+	async #play(
+		effect: Effect,
+		decoder: AudioDecoder,
+		config: AudioDecoderConfig,
+		order: Order<FrameRead>,
+		reads: FrameRead[],
+	): Promise<boolean> {
+		for (const read of reads) {
+			if (this.#onRead(read)) {
+				decoder.reset();
+				decoder.configure(config);
+				order.reset();
+			}
+			if (!order.admit(read)) continue;
+			if (!(await this.#decode(effect, decoder, read.frame))) return false;
+		}
+		return true;
+	}
+
+	// Decode one frame once backpressure admits it, reporting whether to keep going.
+	async #decode(effect: Effect, decoder: AudioDecoder, frame: Container.ReceivedFrame): Promise<boolean> {
+		const ring = await this.#ready(effect);
+		if (!ring) return false;
+
+		// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
+		// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
+		await ring.wait(frame.timestamp, effect.abort);
+		if (effect.abort.aborted) return false;
+
+		// A fatal decode error closes the decoder, so decoding again throws InvalidStateError out
+		// of the loop. Stop instead: the error callback already reported the real failure.
+		if (decoder.state === "closed") return false;
+		decoder.decode(
+			new EncodedAudioChunk({
+				// WebCodecs audio chunks are key even inside a MoQ group.
+				type: "key",
+				data: frame.payload,
+				timestamp: frame.timestamp,
+			}),
+		);
+		return true;
+	}
+
+	// A buffered subscription holds its head until it runs past the floor, which playback waits for
+	// anyway, or spans the window the relay serves.
+	#order(): Order<FrameRead> {
+		if (!this.sync.out.buffered.peek()) return new Order(undefined);
+		return new Order(() => ({
+			floor: Micro.fromMilli(this.sync.out.delay.peek()),
+			maxDelay: Micro.fromMilli(this.#subscribeMaxDelay.peek()),
+		}));
 	}
 
 	// Reorders groups and frames up to the shared max delay. A rename is not a cold start: the path's
@@ -721,8 +778,7 @@ export class Decoder {
 			channelData.push(data.slice(frameOffset, frameOffset + frames));
 		}
 
-		// Hand off to the ring. Shared transport writes directly; post transport
-		// transfers the ArrayBuffers.
+		// Hand off to the ring, which transfers the ArrayBuffers.
 		ring.insert(timestamp, channelData);
 
 		sample.close();
@@ -784,7 +840,11 @@ export class Decoder {
 		return true;
 	}
 
-	/** Observe every frame and gap received from now until the handle or this decoder closes. */
+	/**
+	 * Observe every frame and gap received from now until the handle or this decoder closes.
+	 *
+	 * Each open handle queues every entry until read, so read it continuously or close it.
+	 */
 	arrivals(): Arrivals {
 		return this.#arrivals.consume();
 	}
@@ -821,7 +881,8 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 			description = Util.Hex.toBytes(config.description);
 		} else if (config.container.kind === "cmaf") {
 			try {
-				description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
+				const Cmaf = await import("@moq/hang/cmaf");
+				description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
 			} catch (err) {
 				// A malformed init segment means we can't extract the codec
 				// description, so we can't probe support reliably. Reject the
@@ -832,6 +893,9 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 			}
 		}
 	}
+	// Install the WebCodecs polyfill before probing, since playback would decode through it where
+	// AudioDecoder is missing (Node, Bun, older browsers). Loads nothing where WebCodecs audio is native.
+	await Util.Libav.polyfill();
 	const res = await AudioDecoder.isConfigSupported({
 		...config,
 		description,

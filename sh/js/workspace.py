@@ -142,6 +142,7 @@ def run(action, plan):
 
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
+        command("python3", "sh/js/playwright.test.py")
         command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
                 "js/common/docs.test.ts", "js/common/worklet.test.ts")
         scripts("test")
@@ -163,6 +164,7 @@ def run(action, plan):
                              r"import\.meta\.env", "js"])
     if result.returncode != 1:
         raise RuntimeError("import.meta.env scan found a reference or failed")
+    command("python3", "sh/js/playwright.py")
     command("bun", "js/common/deps.ts")
     if plan["wasm"]:
         command("just", "js", "wasm", "dev")

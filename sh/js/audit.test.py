@@ -7,21 +7,11 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-PROJECTS = [".", "infra/apt", "infra/rpm", "infra/moq-sh", "demo/pub"]
+# The script finds projects through `git ls-files`, so these only shape the fixture.
+PROJECTS = [".", "demo/pub", "infra/apt", "infra/nix"]
 
 
 class Audit(unittest.TestCase):
-    def test_every_lockfile_is_covered(self):
-        lockfiles = subprocess.check_output(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "*bun.lock"],
-            cwd=ROOT,
-            text=True,
-        ).splitlines()
-        self.assertEqual(
-            sorted(str(Path(path).parent) for path in lockfiles if (ROOT / path).exists()),
-            sorted(PROJECTS),
-        )
-
     def run_audit(self, failing):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -30,7 +20,13 @@ class Audit(unittest.TestCase):
             tools = root / "bin"
             tools.mkdir()
             for name, script in {
-                "git": '#!/bin/sh\nprintf "%s\\n" "$AUDIT_ROOT"\n',
+                "git": """#!/bin/sh
+case "$1" in
+rev-parse) printf '%s\\n' "$AUDIT_ROOT" ;;
+ls-files) printf '%s\\n' $AUDIT_LOCKS ;;
+*) exit 2 ;;
+esac
+""",
                 "bun": """#!/bin/sh
 test "$#" = 1 && test "$1" = audit || exit 2
 printf '%s\\n' "$PWD" >> "$AUDIT_LOG"
@@ -46,6 +42,7 @@ test "$PWD" != "$AUDIT_FAIL"
                     **os.environ,
                     "PATH": f"{tools}:{os.environ['PATH']}",
                     "AUDIT_ROOT": str(root),
+                    "AUDIT_LOCKS": " ".join(f"{project}/bun.lock" for project in PROJECTS),
                     "AUDIT_LOG": str(root / "audits"),
                     "AUDIT_FAIL": str(root / failing) if failing else "",
                 },

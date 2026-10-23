@@ -13,11 +13,15 @@ keywords = ["webrtc", "ice", "stun", "str0m", "moq"]
 categories = ["network-programming", "multimedia"]
 
 [dependencies]
+moq-clock = { workspace = true }
 str0m = { workspace = true }
 stun-types = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

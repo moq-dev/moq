@@ -14,6 +14,7 @@ import {
 	TimestampMismatch,
 	TooFarBehind,
 } from "./error.ts";
+import { Compression, stored } from "./flate/group.ts";
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import type { Timestamp } from "./time.ts";
 
@@ -30,7 +31,7 @@ export const MAX_GROUP_FRAMES = 8192;
  * converts it into the track's negotiated timescale.
  */
 export interface Frame {
-	/** The frame payload. */
+	/** The plain payload, shared across readers even when the track stores compressed bytes. */
 	payload: Uint8Array;
 	/**
 	 * Presentation timestamp, present exactly when the track has a timescale. A frame on a
@@ -69,6 +70,8 @@ class GroupState {
 	start = 0;
 
 	cacheBytes = 0;
+	compressed?: boolean;
+	flate?: Compression;
 	// Whether the owning track has a timescale, so every frame must carry a timestamp (true)
 	// or none may (false). Undefined for a group no track has claimed yet, which takes either.
 	timed?: boolean;
@@ -102,7 +105,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 
 	state.timestamp ??= frame.timestamp;
 	state.latest = frame.timestamp;
-	state.cacheBytes += frame.payload.byteLength;
+	state.cacheBytes += stored(frame)?.payload.length ?? frame.payload.byteLength;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
 	});
@@ -185,6 +188,29 @@ export class Producer {
 	}
 
 	static {
+		hooks.bindGroupCompression = (group, compressed) => {
+			const state = group.#state;
+			if (state.compressed === compressed) return;
+			if (state.compressed !== undefined)
+				throw new ProtocolViolation("group compression disagrees with its track");
+			if (compressed && state.start !== 0) throw new ProtocolViolation("compressed group lacks its prefix");
+			state.compressed = compressed;
+			if (!compressed) return;
+			const flate = new Compression();
+			state.flate = flate;
+			const frames = state.frames.peek().map((frame) => flate.push(frame));
+			state.frames.set(frames);
+			state.cacheBytes = flate.stored;
+			if (flate.stored > MAX_GROUP_CACHE_BYTES) group.#overflow();
+			for (const mirror of group.#mirrors ?? []) {
+				mirror.frames.set(frames.slice(mirror.start - state.start));
+				mirror.flate = flate;
+				mirror.compressed = true;
+			}
+			if (state.closed.peek() !== undefined) flate.finish();
+		};
+		hooks.writeGroupFrame = (group, frame, inflated) => group.#writeFrame(frame, inflated);
+		hooks.groupCacheBytes = (group) => group.#state.flate?.bytes ?? group.#state.cacheBytes;
 		hooks.groupProgress = (group, fn) => {
 			const state = group.#state;
 			fn(state.total.peek());
@@ -209,7 +235,7 @@ export class Producer {
 			const first = state.frames.peek()[0];
 			// Without its first frame the cache cannot measure the group, so it asks for nothing.
 			if (state.start !== 0 || first === undefined) return false;
-			const head = first.payload.byteLength;
+			const head = stored(first)?.payload.length ?? first.payload.byteLength;
 			return state.cacheBytes - head > head * ratio;
 		};
 		hooks.limitGroup = (group, frames) => {
@@ -257,6 +283,8 @@ export class Producer {
 		const dst = new GroupState(this.sequence);
 		dst.timestamp = this.#state.timestamp;
 		dst.latest = this.#state.latest;
+		dst.flate = this.#state.flate;
+		dst.compressed = this.#state.compressed;
 		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
 		dst.start = this.#state.start;
 		// The replay only covers what is still buffered, so the count has to come from the
@@ -293,13 +321,20 @@ export class Producer {
 
 	/** Writes a frame to the group. */
 	writeFrame(frame: Frame) {
+		this.#writeFrame(frame);
+	}
+
+	#writeFrame(frame: Frame, inflated?: number) {
 		// Closed first: a write after a clean close at the cap would otherwise take the
 		// overflow path, wipe committed frames, and leave readers with an empty success.
 		if (this.#state.closed.peek() !== undefined) throw new Error("group is closed");
 		// A frame past the cache cap would make the group exceed its budget by itself, so
 		// accepting it would report success for a write nothing can ever read. Rust rejects
 		// it up front with `Error::FrameTooLarge`; do the same rather than silently dropping it.
-		if (frame.payload.byteLength > MAX_GROUP_CACHE_BYTES) throw new FrameTooLarge();
+		if (frame.payload.byteLength > MAX_GROUP_CACHE_BYTES || (inflated ?? 0) > MAX_GROUP_CACHE_BYTES)
+			throw new FrameTooLarge();
+		if (inflated !== undefined && (!this.#state.flate || !Number.isSafeInteger(inflated) || inflated < 0))
+			throw new ProtocolViolation("unexpected inflated frame size");
 		checkTimed(this.#state.timed, frame);
 		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
 			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
@@ -313,21 +348,20 @@ export class Producer {
 		}
 		if (
 			this.#state.total.peek() >= MAX_GROUP_FRAMES ||
-			this.#state.cacheBytes + frame.payload.byteLength > MAX_GROUP_CACHE_BYTES
+			((!this.#state.flate || inflated !== undefined) &&
+				this.#state.cacheBytes + frame.payload.byteLength > MAX_GROUP_CACHE_BYTES) ||
+			(this.#state.flate?.declared ?? this.#state.cacheBytes) + (inflated ?? frame.payload.length) >
+				MAX_GROUP_CACHE_BYTES
 		) {
-			const err = new GroupTooLarge();
-			this.#state.frames.set([]);
-			this.#state.cacheBytes = 0;
-			if (this.#mirrors) {
-				for (const mirror of this.#mirrors) {
-					mirror.frames.set([]);
-					mirror.cacheBytes = 0;
-				}
-			}
-			this.close(err);
-			throw err;
+			this.#overflow();
 		}
 
+		if (this.#state.flate) {
+			frame = this.#state.flate.push(frame, inflated);
+			if (this.#state.flate.stored > MAX_GROUP_CACHE_BYTES) {
+				this.#overflow();
+			}
+		}
 		this.#activity = now();
 		appendFrame(this.#state, frame);
 		if (commits) {
@@ -343,6 +377,19 @@ export class Producer {
 		}
 	}
 
+	#overflow(): never {
+		const error = new GroupTooLarge();
+		this.#state.frames.set([]);
+		this.#state.cacheBytes = 0;
+		this.#state.flate?.abort(error);
+		for (const mirror of this.#mirrors ?? []) {
+			mirror.frames.set([]);
+			mirror.cacheBytes = 0;
+		}
+		this.close(error);
+		throw error;
+	}
+
 	/** True once the group has been closed. */
 	get isClosed(): boolean {
 		return this.#state.closed.peek() !== undefined;
@@ -351,6 +398,7 @@ export class Producer {
 	/** Closes the group, optionally with an error to abort readers. */
 	close(abort?: Error) {
 		if (this.#state.closed.peek() !== undefined) return;
+		this.#state.flate?.finish();
 		this.#state.closed.set(abort ?? null);
 
 		if (this.#mirrors) {
@@ -520,6 +568,7 @@ export class Consumer {
 			group.#state.unverified = true;
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
+		hooks.groupStarted = (group) => group.#state.total.peek() > 0 || group.#state.closed.peek() !== undefined;
 		hooks.arriveGroup = (group, at) => {
 			group.#state.arrived = at;
 		};
@@ -534,7 +583,7 @@ export class Consumer {
 				group.#closed = undefined;
 		};
 		hooks.guardGroup = (group, operation) => group.#guard(operation);
-		hooks.readGroupFrame = (group, from) => group.#readFramePosition(true, from);
+		hooks.readGroupFrame = (group, from, compressed) => group.#readFramePosition(true, from, compressed);
 		hooks.evictGroup = (group) => {
 			group.#evict();
 		};
@@ -609,6 +658,7 @@ export class Consumer {
 			this.#state.start += frames.length;
 		}
 		this.#state.cacheBytes = 0;
+		this.#state.flate = undefined;
 		this.#state.frames.set([]);
 	}
 
@@ -713,17 +763,29 @@ export class Consumer {
 		return frames;
 	}
 
-	#readBufferedFrame(pending = false): ReadGroupFrame | undefined {
+	#readBufferedFrame(pending = false, compressed = false): ReadGroupFrame | undefined {
 		const frames = this.#bufferedFrames();
 		const buffered = frames.shift();
 		if (!buffered) return undefined;
 
+		const slice = compressed ? stored(buffered) : undefined;
+		let frame: Frame;
+		try {
+			frame = { payload: slice?.payload ?? buffered.payload, timestamp: buffered.timestamp };
+		} catch (error) {
+			this.#terminal = error instanceof Error ? error : new Error(String(error));
+			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
+			this.#closed?.refresh();
+			throw this.#terminal;
+		}
+		if (frames.length === 0 && this.#state.closed.peek() !== undefined) this.#state.flate = undefined;
 		const sequence = this.#state.start++;
 		if (pending) this.#pendingFrames++;
 		let completed = false;
 		return {
 			sequence,
-			frame: buffered,
+			frame,
+			inflated: slice?.inflated,
 			complete: () => {
 				if (completed) return;
 				completed = true;
@@ -814,14 +876,14 @@ export class Consumer {
 		return (await this.#readFramePosition())?.frame;
 	}
 
-	async #readFramePosition(pending = false, from = 0): Promise<ReadGroupFrame | undefined> {
+	async #readFramePosition(pending = false, from = 0, compressed = false): Promise<ReadGroupFrame | undefined> {
 		for (;;) {
 			if (this.#terminal) {
 				this.#abandon();
 				throw this.#terminal;
 			}
 
-			const read = this.#readBufferedFrame(pending);
+			const read = this.#readBufferedFrame(pending, compressed);
 			if (read) {
 				if (read.sequence < from) {
 					read.complete();
@@ -886,7 +948,13 @@ export class Consumer {
 
 	/** Closes the group, optionally with an error to abort readers. Idempotent. */
 	close(abort?: Error) {
+		// A copy failure recovery was continuing past ends with the abort instead.
+		if (abort && this.#recover && this.#state.closed.peek() instanceof Error) {
+			this.#terminal ??= abort;
+			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
+		}
 		this.#abandon();
+		this.#recover?.close?.();
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;

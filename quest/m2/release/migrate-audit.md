@@ -1,51 +1,45 @@
-# [L] API-diff check on release PRs
+# [M] Migration audit of the breaking cut
 
 ## Goal
 
-Every PR into `release` runs a check that diffs each published package's
-public API against its last published version. A backport fails on any break; on
-the breaking cut PR the diff is reported for the auditor, who confirms every
-break, including those in surfaces the diff cannot see, has its `MIGRATE.md`
-entry before the cut merges.
+Before the breaking cut merges, every break it ships, including those in
+surfaces the [API-diff check](/quest/m1/api-diff.md) cannot see, has its
+`MIGRATE.md` entry, and each entry states the net change from the last
+published version.
 
 ## Plan
 
-Decided 2026-10-16 (maintainer interview):
+Decided 2026-10-16 (maintainer interview); the diff tooling moved to its own
+m1 quest on 2026-10-22.
 
-- Commit `!` markers undercount: a 2026-10-16 sample estimated 12-15
-  unmarked breaks on top of 87 marked ones, a floor since signature-only
-  changes escape the heuristic. This check is the backstop; PRs into `main`
-  get no CI check.
-- Runs on PRs into `release` only: backports must keep the published API
-  (CONTRIBUTING), and the cut PR gets a full audit.
-- Backports fail on any detected break. The cut PR only reports: Rust
-  versions are bumped by release-plz after the cut lands, so the diff cannot
-  gate on a version bump there.
-- One `just` recipe, three backends: cargo-semver-checks for Rust crates,
-  emitted `.d.ts` API reports for `@moq/*` packages, and a `moq.h` plus
-  UniFFI interface diff for the bindings. Prefer maintained tools over
-  hand-rolled diffing. Wire it into the workflow that runs on PRs into
-  `release`, and add the audit step to CONTRIBUTING.md's Releases section.
-- Baseline is the last published artifact, not a git tag: `@moq/*` and
-  `moq-rs` publish without tags. Rust compares against crates.io
-  (cargo-semver-checks' default), JS against the npm tarball's declarations,
-  and the FFI interfaces against the published `moq-ffi` crate and the last
-  released C archive's `moq.h`.
-- Coverage: the report covers Rust crates, `@moq/*` declarations, and the
-  generated FFI interfaces. A break only in a hand-written binding wrapper
-  (`py/moq-rs`, `kt/moq`, `dart/moq`, `go/wrapper`, `swift`, `cpp/moq`,
-  `cpp/obs`) or a binary's flags, env vars, or config keys escapes it, so the
-  cut's audit also reads the diff of those paths by hand. Per-language wrapper
-  checks are out of scope until a missed break shows they are needed.
-- For this cut, fill every gap the report and the manual pass show in the
-  matching `MIGRATE.md`. Known gaps: breaking releases cut after the
-  2026-09-23 train have no transition section yet (moq-json 0.4 -> 0.5,
-  moq-flate 0.1 -> 0.2, and possibly moq-audio and moq-video), because their
-  breaks predate the backfill's merge base.
+- PRs stop writing `MIGRATE.md` entries once
+  [MIGRATE.md at the cut](/quest/m0/migrate-at-cut.md) lands (decided
+  2026-10-23): gather every `!` subject in `git log` since the `release`
+  merge base and write each PR's Impact-bullet migration note into its
+  package's guide.
+- Run the API-diff report on the cut PR and read the diff of the
+  hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
+  `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,
+  env vars, and config keys by hand. Add the audit step to CONTRIBUTING.md's
+  Releases section.
+- Fill every gap the report and the manual pass show in the matching
+  `MIGRATE.md`. Known gaps: breaking releases cut after the
+  2026-09-23 train have no transition section yet (moq-json 0.4 -> 0.5
+  and possibly moq-audio and moq-video), because their breaks predate the
+  backfill's merge base. The [compression migration](/quest/m1/compress/migrate.md)
+  deletes moq-flate before this cut: audit the migration from its published
+  API to ordinary tracks with `compress`, rather than promising a new
+  moq-flate transition release.
+- Each `## Unreleased` section says how to migrate from the published
+  version to the candidate (decided 2026-10-22, maintainer, from an external
+  API audit). Collapse entries a later change reversed or reshaped (an API
+  removed then reintroduced, a default changed twice) into the net change,
+  and drop the intermediate history.
 - Compile-check the code in every `MIGRATE.md` section the cut ships against
   the candidate. Nothing else builds it.
 - Required by the cut, after m1's breaking work has landed.
 
 ## Required
 
+- [API-diff check](/quest/m1/api-diff.md) - the report this audit reads
 - [Breaking release readiness](/quest/m1/README.md) - all breaking work and the MIGRATE.md convention have landed

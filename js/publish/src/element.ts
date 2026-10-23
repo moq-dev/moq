@@ -25,7 +25,28 @@ function parseUrl(value: string | null): URL | undefined {
 	}
 }
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "backend", "announce", "linger"] as const;
+// Parse the `versions` attribute: a comma-separated list, or the defaults when absent or empty.
+// The connection checks the names and reports an unsupported one on `connection.error`.
+function parseVersions(value: string | null): string[] | undefined {
+	const versions = value
+		?.split(",")
+		.map((version) => version.trim())
+		.filter((version) => version !== "");
+	return versions?.length ? versions : undefined;
+}
+
+const OBSERVED = [
+	"url",
+	"versions",
+	"name",
+	"muted",
+	"invisible",
+	"source",
+	"preview",
+	"backend",
+	"announce",
+	"linger",
+] as const;
 type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
@@ -76,8 +97,9 @@ function parsePreview(value: string | null): Preview.Mode {
 }
 
 function parseBackend(value: string | null): Preview.Backend {
-	if (value === null) return "auto";
-	if (value === "auto" || value === "webgpu" || value === "2d") return value;
+	const trimmed = value?.trim();
+	if (!trimmed) return "auto";
+	if (trimmed === "auto" || trimmed === "webgpu" || trimmed === "2d") return trimmed;
 	console.warn(`moq-publish: invalid backend="${value}", expected "auto", "webgpu", or "2d"`);
 	return "auto";
 }
@@ -273,7 +295,8 @@ export default class MoqPublish extends HTMLElement {
 				// A canvas that lost its GPU never hands out another context, so swap in a fresh copy.
 				// The observer above picks it up and this effect builds a renderer for it.
 				effect.run((inner) => {
-					if (inner.get(renderer.out.error) === "surface-lost") preview.replaceWith(preview.cloneNode());
+					if (inner.get(renderer.out.error)?.name === "InvalidStateError")
+						preview.replaceWith(preview.cloneNode());
 				});
 				return;
 			}
@@ -330,6 +353,8 @@ export default class MoqPublish extends HTMLElement {
 
 		if (name === "url") {
 			this.connection.url.set(parseUrl(newValue));
+		} else if (name === "versions") {
+			this.connection.versions.set(parseVersions(newValue));
 		} else if (name === "name") {
 			this.#name.set(Moq.Path.from(newValue ?? ""));
 		} else if (name === "source") {
@@ -446,6 +471,15 @@ export default class MoqPublish extends HTMLElement {
 
 	set url(value: string | URL | undefined) {
 		this.connection.url.set(value ? new URL(value) : undefined);
+	}
+
+	/** The protocol versions to offer, most preferred first; undefined offers the defaults. */
+	get versions(): readonly string[] | undefined {
+		return this.connection.versions.peek();
+	}
+
+	set versions(value: readonly string[] | undefined) {
+		this.connection.versions.set(value);
 	}
 
 	/** The broadcast name, mirrored by the `name` attribute. */

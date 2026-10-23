@@ -189,7 +189,17 @@ pub(crate) mod request {
 	const TIMEOUT: u64 = 0x2;
 
 	/// The endpoint does not implement this request at all, as opposed to refusing this one.
-	const NOT_SUPPORTED: u64 = 0x3;
+	pub(crate) const NOT_SUPPORTED: u64 = 0x3;
+
+	/// A second subscription to a track the peer already subscribes to. Draft-16 and later.
+	pub(crate) const DUPLICATE_SUBSCRIPTION: u64 = 0x19;
+
+	/// The endpoint is overloaded and cannot process the request. Draft-18 and later.
+	pub(crate) const EXCESSIVE_LOAD: u64 = 0x9;
+
+	/// A SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS prefix overlapping an established one.
+	/// Draft-15 and later.
+	pub(crate) const PREFIX_OVERLAP: u64 = 0x30;
 
 	/// A GOAWAY is draining the session, so no new request is accepted. Draft-17 and later.
 	const GOING_AWAY: u64 = 0x6;

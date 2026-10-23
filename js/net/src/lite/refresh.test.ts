@@ -53,13 +53,13 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		expect((await received.readFrame())?.payload.length).toBe(3);
 		expect((await received.readFrame())?.payload.length).toBe(3);
 		const joins = [remote.subscribe()];
-		await clock.advanceAsync(Nano(0));
+		await clock.advance(Nano(0));
 		expect(producer.demand().wanted.peek()).toBe(0);
 		updates.length = 0;
 		group.writeFrame({ payload: new Uint8Array(1) });
 		expect((await received.readFrame())?.payload.length).toBe(1);
 		for (let i = 0; i < 8; i++) joins.push(remote.subscribe());
-		await clock.advanceAsync(Nano(0));
+		await clock.advance(Nano(0));
 		if (alpn === ALPN_07_WIP) {
 			while (producer.demand().wanted.peek() !== 1) await producer.demand().wanted.changed();
 		}
@@ -68,7 +68,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1] : []);
 		// A parameter change restates the wanted group rather than clearing it.
 		joins.push(remote.subscribe({ priority: 9 }));
-		await clock.advanceAsync(Nano(0));
+		await clock.advance(Nano(0));
 		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1, 1] : []);
 		for (const join of joins) join.close();
 		received.close();
@@ -78,7 +78,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		spy.mockRestore();
 		for (const origin of [b, source]) origin.close();
 		for (const peer of peers) peer.abort();
-		await clock.advanceAsync(Nano(0));
+		await clock.advance(Nano(0));
 		restore();
 	}
 });

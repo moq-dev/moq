@@ -570,6 +570,31 @@ async fn unreachable_directory_fails_inside_the_budget() {
 	);
 }
 
+/// A stop signal during the first issuance ends startup, since a container's
+/// PID 1 ignores one left at its default action until issuance gives up.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_signal_during_issuance_stops_startup() {
+	let _signals = crate::shutdown::SIGNALS.lock().await;
+	let (_refusing, closed) = refusing();
+	let url: Url = format!("http://{closed}/directory").parse().unwrap();
+	let dir = tempfile::tempdir().unwrap();
+	let mut config = relay_config(&url, dir.path(), &[DOMAIN]);
+	config.acme.timeout = Some(Duration::from_secs(60 * 60));
+
+	let relay = Relay::load(config).await.unwrap();
+	let ready = relay.ready();
+	let run = relay.run();
+	tokio::pin!(run);
+	// Nothing awaits before issuance, so one poll leaves `run` waiting on it.
+	assert!(futures::FutureExt::now_or_never(run.as_mut()).is_none());
+	crate::shutdown::raise(libc::SIGTERM).await;
+	let started = tokio::time::Instant::now();
+	run.await.expect("a stop during issuance is not a failure");
+	assert_eq!(started.elapsed(), Duration::ZERO, "waited out the issuance");
+	assert!(ready.wait().await.is_err(), "reported ready without a certificate");
+}
+
 /// Repeated failed validations stop the first issuance short of Let's Encrypt's
 /// failed-validation limit, and a restart inside the hour does not try again.
 #[tokio::test]

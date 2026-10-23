@@ -291,6 +291,15 @@ pub struct Release {
 	/// MPEG-TS system clock may be (ISO/IEC 13818-1 2.4.2.1), which the output cannot follow.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub out_of_tolerance: u64,
+	/// Groups that `--sync` began behind the end of the group before them on their PID, the
+	/// lane too narrow to absorb that group: a leg missing the earlier group's tail places
+	/// them elsewhere, so the legs differ until the lane catches up.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub overruns: u64,
+	/// Packets that `--sync` dropped for reaching their slot after it went out, leaving
+	/// stuffing there.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub late: u64,
 }
 
 impl Release {
@@ -304,6 +313,8 @@ impl Release {
 			offset: jitter.offset().map(millis),
 			drift: jitter.drift().map(|drift| drift * 1e6),
 			out_of_tolerance: jitter.out_of_tolerance(),
+			overruns: 0,
+			late: 0,
 		}
 	}
 }

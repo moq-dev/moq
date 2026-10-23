@@ -118,7 +118,7 @@ test("retired aliases are capped", async () => {
 
 	// The oldest tombstones are forgotten, so they fall back to the unknown-alias wait.
 	const forgotten = aliases.get(0n).catch((error: unknown) => error);
-	await clock.advanceAsync(Nano.fromMilli(Milli(1000)));
+	await clock.advance(Nano.fromMilli(Milli(1000)));
 	expect(await forgotten).toHaveProperty("message", "unknown track alias: 0");
 	await expect(aliases.get(73n)).rejects.toBeInstanceOf(RetiredTrackAlias);
 });

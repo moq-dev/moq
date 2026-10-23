@@ -25,7 +25,7 @@ import { moveToward } from "./input.ts";
 import type { DriveState } from "./schemas.ts";
 
 /** How one physical axis maps onto a normalized control. */
-export const AxisMapSchema = z.object({
+const AxisMapSchema = z.object({
 	/** Index into `Gamepad.axes`. */
 	axis: z.number(),
 	/** Raw value at rest: wheel centered, pedal up. */
@@ -36,7 +36,7 @@ export const AxisMapSchema = z.object({
 export type AxisMap = z.infer<typeof AxisMapSchema>;
 
 /** A complete device layout: which axis/button drives which control. */
-export const WheelProfileSchema = z.object({
+const WheelProfileSchema = z.object({
 	steer: AxisMapSchema,
 	throttle: AxisMapSchema,
 	brake: AxisMapSchema,
@@ -77,14 +77,14 @@ export const WHEEL_RATES = {
 };
 
 /** Ignore rim wobble this close to center, and rescale so full lock still reaches 1. */
-export const STEER_DEADZONE = 0.03;
+const STEER_DEADZONE = 0.03;
 /** Pedal travel below this reads as fully released... */
-export const PEDAL_DEADZONE = 0.05;
+const PEDAL_DEADZONE = 0.05;
 /** ...and above this as fully applied, so worn pedals can still reach the stops. */
-export const PEDAL_SATURATION = 0.95;
+const PEDAL_SATURATION = 0.95;
 
 /** Movement (in normalized units) that counts as the driver touching the wheel. */
-export const MOVE_EPSILON = 0.02;
+const MOVE_EPSILON = 0.02;
 
 /**
  * The wheel refuses to take over from the keyboard while the throttle is
@@ -92,7 +92,7 @@ export const MOVE_EPSILON = 0.02;
  * control to the wheel. Applies to the handoff only; once armed, the pedal is
  * honored normally.
  */
-export const ARM_MAX_THROTTLE = 0.05;
+const ARM_MAX_THROTTLE = 0.05;
 
 /** A control that can be bound to a wheel button. */
 export type WheelButton = "gearUp" | "gearDown" | "estop";
@@ -126,7 +126,7 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 /** Normalize a raw axis into 0..1 of its calibrated travel (may over/undershoot). */
-export function readAxis(axes: readonly number[], map: AxisMap): number {
+function readAxis(axes: readonly number[], map: AxisMap): number {
 	const raw = axes[map.axis];
 	const span = map.full - map.rest;
 	if (raw === undefined || Math.abs(span) < 1e-6) return 0;
@@ -414,7 +414,7 @@ function loadProfile(id: string): WheelProfile | undefined {
 }
 
 /** Minimum axis travel that counts as "the driver moved this control". */
-export const CAPTURE_THRESHOLD = 0.25;
+const CAPTURE_THRESHOLD = 0.25;
 
 /**
  * Pick the axis that moved furthest from its resting value.
@@ -463,7 +463,7 @@ export interface CalibrationStep {
 	optional: boolean;
 }
 
-export const CALIBRATION_STEPS: readonly CalibrationStep[] = [
+const CALIBRATION_STEPS: readonly CalibrationStep[] = [
 	{
 		key: "rest",
 		kind: "rest",

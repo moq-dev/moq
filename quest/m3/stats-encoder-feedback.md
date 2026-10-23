@@ -18,7 +18,7 @@ Decided 2026-10-08: parked, and the transcode leg is out. The
 `moq-transcode` rung's target, so `moq transcode --echo` feeds the folded
 stall signal to that controller rather than to `rate::Control`; split it
 into its own quest requiring the controller if this is revived. This quest
-covers the encode producers and `moq import --echo`, which need no ladder.
+covers the encode producers and `moq import --echo-path`, which need no ladder.
 
 - `encode::Options` in `rs/moq-video` and `rs/moq-audio` (the producer
   options, beside `bandwidth`) gains `echo: Option<echo::Consumer>`.
@@ -54,8 +54,8 @@ covers the encode producers and `moq import --echo`, which need no ladder.
   (`Options::bandwidth` in `rs/moq-audio/src/encode/producer.rs` reserves
   only). It follows this signal only once the grant quest lands; until then
   the loop drives video.
-- `moq import --echo <path>` sets the catalog's `echo` section and wires the
-  handle.
+- `moq import --echo-path <path>`, which already sets the catalog's `echo`
+  section ([Rust stats](/quest/m2/stats/rust.md)), also wires the handle.
 - Test: the CLI publishes to a relay, and two `moq play --echo` viewers
   report under the echo path, one of them throttled through the impairment
   profile. The target bitrate drops within two intervals of the throttled

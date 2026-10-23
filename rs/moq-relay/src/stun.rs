@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
+use moq_clock::Instant;
 use serde::{Deserialize, Serialize};
 use stun_types::attribute::XorMappedAddress;
 use stun_types::message::{BINDING, Message, MessageClass, MessageHeader, MessageWriteMutSlice};
 use stun_types::prelude::*;
-use tokio::time::Instant;
 
 /// Configuration for the optional public STUN Binding listener.
 #[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
@@ -274,6 +274,11 @@ impl Server {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	use stun_types::message::{MessageType, MessageWriteVec};

@@ -89,6 +89,9 @@ pub struct RequestOk {
 	/// MoQ Active Count: how many NAMESPACE messages follow before the subscription is
 	/// synced. Only on the answer to a SUBSCRIBE_NAMESPACE, when negotiated.
 	pub active: Option<u64>,
+	/// LARGEST_OBJECT: on the answer to a REQUEST_UPDATE that resumed forwarding, where the
+	/// subscription now joins (draft-18 section 5.1). Absent before the track has objects.
+	pub largest: Option<Location>,
 }
 
 impl Message for RequestOk {
@@ -102,7 +105,10 @@ impl Message for RequestOk {
 		} else {
 			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
-		encode_params!(w, version, ACTIVE_COUNT_PARAM => self.active);
+		encode_params!(w, version,
+			0x09 => self.largest,
+			ACTIVE_COUNT_PARAM => self.active,
+		);
 		Ok(())
 	}
 
@@ -114,14 +120,17 @@ impl Message for RequestOk {
 		};
 		// A REQUEST_UPDATE_OK may refresh EXPIRES, which is ignored like SUBSCRIBE_OK's.
 		// LARGEST_OBJECT is a MUST on a REQUEST_UPDATE_OK or TRACK_STATUS_OK once the track
-		// has objects. We send neither request, so nothing reads it, but rejecting it would
-		// close the session over a parameter a compliant peer is required to send.
+		// has objects.
 		decode_params!(r, version,
 			0x08 => _expires: Option<u64>,
-			0x09 => _largest: Option<Location>,
+			0x09 => largest: Option<Location>,
 			ACTIVE_COUNT_PARAM => active: Option<u64>,
 		);
-		Ok(Self { request_id, active })
+		Ok(Self {
+			request_id,
+			active,
+			largest,
+		})
 	}
 }
 
@@ -196,6 +205,7 @@ mod tests {
 	#[test]
 	fn test_request_ok_round_trip() {
 		let msg = RequestOk {
+			largest: None,
 			request_id: Some(RequestId(42)),
 			active: None,
 		};
@@ -245,6 +255,7 @@ mod tests {
 		for (version, request_id) in [(Version::Draft16, Some(RequestId(3))), (Version::Draft22, None)] {
 			for count in [None, Some(0), Some(7)] {
 				let msg = RequestOk {
+					largest: None,
 					request_id,
 					active: count,
 				};
@@ -293,6 +304,7 @@ mod tests {
 	#[test]
 	fn test_request_ok_v17_round_trip() {
 		let msg = RequestOk {
+			largest: None,
 			request_id: None,
 			active: None,
 		};
@@ -324,6 +336,7 @@ mod tests {
 	#[test]
 	fn test_request_ok_v18_round_trip() {
 		let msg = RequestOk {
+			largest: None,
 			request_id: None,
 			active: None,
 		};
@@ -339,6 +352,7 @@ mod tests {
 	#[test]
 	fn test_request_ok_v18_wire_matches_v17() {
 		let msg = RequestOk {
+			largest: None,
 			request_id: None,
 			active: None,
 		};

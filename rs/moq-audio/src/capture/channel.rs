@@ -10,7 +10,9 @@ use std::sync::{
 	Arc,
 	atomic::{AtomicU64, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use moq_clock::Instant;
 
 use tokio::sync::mpsc;
 

@@ -1,5 +1,5 @@
 // The TypeScript qmux peer against the Rust one, per draft, in both roles.
-// The Rust side is qmux 0.6.3's interop examples, installed by `just test qmux`.
+// The Rust side is the in-tree qmux crate's interop examples, built by `just test qmux`.
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import Session, { selectSubprotocol, type Version, type WebSocketStreamLike } from "@moq/qmux";

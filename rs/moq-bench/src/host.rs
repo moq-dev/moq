@@ -233,7 +233,7 @@ mod linux {
 		target.ctx.retain(|tid| live.contains(&tid));
 
 		Ok(Sample {
-			timestamp_ms: SystemTime::now()
+			timestamp_ms: SystemTime::from(moq_clock::wall())
 				.duration_since(UNIX_EPOCH)
 				.unwrap_or_default()
 				.as_millis(),
@@ -280,7 +280,7 @@ mod linux {
 				.join(", ")
 		);
 
-		let start = std::time::Instant::now();
+		let start = moq_clock::now();
 		loop {
 			// Host-wide once per round: unlike the per-target reads inside `sample`,
 			// a failure here is not a target exiting, so it fails the run.
@@ -313,6 +313,10 @@ mod linux {
 			) else {
 				return Ok(());
 			};
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the sampler runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(delay);
 		}
 	}

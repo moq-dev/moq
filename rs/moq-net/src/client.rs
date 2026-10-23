@@ -1,5 +1,7 @@
+use crate::driver::Transport;
 use crate::origin;
 use crate::time::{Deadlines, Instant};
+use crate::transport::poll::Session as _;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
 	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
@@ -20,6 +22,7 @@ pub struct Client {
 	peer_hop: Option<crate::Hop>,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
+	bandwidth: Option<crate::bandwidth::Allocator>,
 }
 
 impl Client {
@@ -64,6 +67,22 @@ impl Client {
 	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
 		self.limits = limits;
 		self
+	}
+
+	/// Share `bandwidth`'s reservations with every session this client dials.
+	///
+	/// Each session probes for what they add up to, and its
+	/// [`Session::bandwidth`](crate::Session::bandwidth) reserves into the same registry,
+	/// so a reservation taken on one session still counts after a reconnect. Without
+	/// one, each session starts an empty registry of its own.
+	pub fn with_bandwidth(mut self, bandwidth: crate::bandwidth::Allocator) -> Self {
+		self.bandwidth = Some(bandwidth);
+		self
+	}
+
+	/// The registry the next session probes for.
+	fn bandwidth(&self) -> crate::bandwidth::Allocator {
+		self.bandwidth.clone().unwrap_or_default()
 	}
 
 	/// Restrict which protocol versions to offer, in preference order.
@@ -176,16 +195,13 @@ impl Client {
 
 	/// Start a lite session on an already-negotiated version: build our SETUP,
 	/// wire the origins, and return the session and its driver.
-	fn start_lite<S>(
+	fn start_lite(
 		&self,
 		runtime: Deadlines,
-		session: S,
+		session: Transport,
 		version: lite::Version,
 		peer_hop: crate::Hop,
-	) -> Result<(Session, crate::Driver<S>), Error>
-	where
-		S: crate::transport::poll::Session,
-	{
+	) -> Result<(Session, crate::Driver), Error> {
 		let (publish, subscribe) = self.origins(peer_hop);
 
 		// Advertise our capabilities (we report what the transport measures; we
@@ -209,6 +225,7 @@ impl Client {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			stats: self.stats.clone(),
 			client: true,
 			limits: self.limits,
 			session: session.clone(),
@@ -233,43 +250,24 @@ impl Client {
 				goaway: start.goaway,
 				auth: start.auth,
 				estimate: Some(start.estimate),
+				bandwidth: self.bandwidth(),
 			},
 		))
-	}
-
-	/// Perform the MoQ handshake for moq-lite only, over any transport.
-	///
-	/// Unlike [`connect`](Self::connect) this puts no thread-affinity bound on
-	/// the transport, so a pinned `!Send` transport works and yields a `!Send`
-	/// machine that stays on its thread. The trade is protocol scope: only a
-	/// moq-lite ALPN is accepted, since the moq-transport driver still needs a
-	/// [`Boxable`](crate::transport::poll::Boxable) transport. An ietf ALPN, an
-	/// unknown one, or the legacy no-ALPN SETUP negotiation is refused with
-	/// [`Error::Version`].
-	pub async fn connect_lite<S>(&self, now: Instant, session: S) -> Result<(Session, crate::Driver<S>), Error>
-	where
-		S: crate::transport::poll::Session,
-	{
-		let runtime = Deadlines::new(now);
-		let version = match session.protocol() {
-			Some(ALPN_LITE_07_WIP) => lite::Version::Lite07,
-			Some(ALPN_LITE_06) => lite::Version::Lite06,
-			Some(ALPN_LITE_05) => lite::Version::Lite05,
-			Some(ALPN_LITE_04) => lite::Version::Lite04,
-			Some(ALPN_LITE_03) => lite::Version::Lite03,
-			_ => return Err(Error::Version),
-		};
-		self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
-		self.start_lite(runtime, session, version, self.assigned_hop())
 	}
 
 	/// Perform the MoQ handshake, returning the [`Session`] and its [`Driver`](crate::Driver).
 	///
 	/// Poll the returned driver with nondecreasing time, starting at `now`.
-	pub async fn connect<S>(&self, now: Instant, mut session: S) -> Result<(Session, crate::Driver<S>), Error>
-	where
-		S: crate::transport::poll::Boxable,
-	{
+	pub fn connect(
+		&self,
+		now: Instant,
+		session: impl crate::transport::poll::Boxable,
+	) -> impl Future<Output = Result<(Session, crate::Driver), Error>> {
+		// Box before any protocol code runs, so it is compiled once rather than per transport.
+		self.connect_boxed(now, Transport::new(session))
+	}
+
+	async fn connect_boxed(&self, now: Instant, mut session: Transport) -> Result<(Session, crate::Driver), Error> {
 		let runtime = Deadlines::new(now);
 		let peer_hop = self.assigned_hop();
 		let (publish, subscribe) = self.origins(peer_hop);
@@ -296,6 +294,7 @@ impl Client {
 				let auth = crate::auth::Handle::ietf(self.extensions.auth);
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
+					stats: self.stats.clone(),
 					limits: self.limits,
 					session: session.clone(),
 					setup: None,
@@ -327,6 +326,7 @@ impl Client {
 						goaway,
 						auth,
 						estimate: None,
+						bandwidth: self.bandwidth(),
 					},
 				));
 			}
@@ -379,7 +379,7 @@ impl Client {
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
-		let mut stream = Stream::open(&mut session, encoding).await?;
+		let mut stream = Stream::open(&mut session, encoding).await?.with_stats(&self.stats);
 
 		// The encoding is always an IETF version for SETUP negotiation.
 		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
@@ -404,6 +404,7 @@ impl Client {
 		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
 		ietf::max_age::into_setup(&mut parameters, ietf_encoding);
 		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
+		ietf::flate::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
@@ -426,6 +427,7 @@ impl Client {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
 					runtime: runtime.clone(),
+					stats: self.stats.clone(),
 					client: true,
 					limits: self.limits,
 					session: session.clone(),
@@ -462,6 +464,7 @@ impl Client {
 					hidden: ietf::hidden::from_setup(&parameters, v),
 					max_age: ietf::max_age::from_setup(&parameters, v),
 					active_count: ietf::active_count::from_setup(&parameters, v),
+					flate: ietf::flate::from_setup(&parameters, v)?,
 					..Default::default()
 				};
 
@@ -471,6 +474,7 @@ impl Client {
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
+					stats: self.stats.clone(),
 					limits: self.limits,
 					session: session.clone(),
 					setup: Some(stream),
@@ -504,6 +508,7 @@ impl Client {
 				goaway,
 				auth,
 				estimate,
+				bandwidth: self.bandwidth(),
 			},
 		))
 	}
@@ -546,6 +551,8 @@ mod tests {
 		state: Arc<FakeSessionState>,
 		// Per-clone, so each pending poll_closed keeps its own registration live.
 		park: kio::Park,
+		/// The sender, set by [`Self::with_probe`].
+		probe: Option<crate::transport::Probe>,
 	}
 
 	#[derive(Default)]
@@ -569,9 +576,9 @@ mod tests {
 		fn new(protocol: Option<&'static str>, server_control_bytes: Vec<u8>) -> Self {
 			let writes = Arc::new(Mutex::new(Vec::new()));
 			let send = FakeSendStream { writes: writes.clone() };
-			let recv = FakeRecvStream {
+			let recv = crate::transport::poll::Buffered::new(FakeChunks {
 				data: VecDeque::from(server_control_bytes),
-			};
+			});
 			let state = FakeSessionState {
 				protocol,
 				control_stream: Mutex::new(Some((send, recv))),
@@ -583,11 +590,23 @@ mod tests {
 			Self {
 				state: Arc::new(state),
 				park: kio::Park::default(),
+				probe: None,
 			}
 		}
 
 		fn set_send_rate(&self, rate: Option<u64>) {
 			*self.state.send_rate.lock().unwrap() = rate;
+		}
+
+		/// Give the transport a sender, so the session hands it a target.
+		fn with_probe(mut self) -> Self {
+			self.probe = Some(crate::transport::Probe::new());
+			self
+		}
+
+		/// What the session last handed the sender, in bits per second.
+		fn probe_target(&self) -> u64 {
+			self.probe.as_ref().expect("built with_probe").target().as_bps()
 		}
 
 		fn set_bytes_sent(&self, bytes: Option<u64>) {
@@ -678,6 +697,10 @@ mod tests {
 				bytes_sent: *self.state.bytes_sent.lock().unwrap(),
 			}
 		}
+
+		fn probe(&self) -> Option<crate::transport::Probe> {
+			self.probe.clone()
+		}
 	}
 
 	struct FakeStats {
@@ -726,30 +749,25 @@ mod tests {
 		}
 	}
 
-	struct FakeRecvStream {
+	type FakeRecvStream = crate::transport::poll::Buffered<FakeChunks>;
+
+	struct FakeChunks {
 		data: VecDeque<u8>,
 	}
 
-	impl crate::transport::poll::RecvStream for FakeRecvStream {
+	impl crate::transport::poll::Chunks for FakeChunks {
 		type Error = FakeError;
 
-		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		fn poll_read_chunk(&mut self, _cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 			if self.data.is_empty() {
 				return Poll::Ready(Ok(None));
 			}
 
-			let size = dst.len().min(self.data.len());
-			for slot in dst.iter_mut().take(size) {
-				*slot = self.data.pop_front().unwrap();
-			}
-			Poll::Ready(Ok(Some(size)))
+			let size = max.min(self.data.len());
+			Poll::Ready(Ok(Some(self.data.drain(..size).collect())))
 		}
 
 		fn stop(&mut self, _code: u32) {}
-
-		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
-		}
 	}
 
 	fn mock_server_setup(negotiated: Version) -> Vec<u8> {
@@ -961,232 +979,6 @@ mod tests {
 		assert!(matches!(futures::executor::block_on(session.closed()), Error::Cancel));
 	}
 
-	/// A transport made deliberately `!Send` by an `Rc` marker on the session and
-	/// both stream types: compiling at all is the point, proving the lite path
-	/// never demands thread mobility of any transport piece.
-	#[derive(Clone)]
-	struct LocalSession {
-		inner: FakeSession,
-		_local: std::rc::Rc<()>,
-	}
-
-	struct LocalSend {
-		inner: FakeSendStream,
-		_local: std::rc::Rc<()>,
-	}
-
-	struct LocalRecv {
-		inner: FakeRecvStream,
-		_local: std::rc::Rc<()>,
-	}
-
-	impl crate::transport::poll::Session for LocalSession {
-		type SendStream = LocalSend;
-		type RecvStream = LocalRecv;
-		type Error = FakeError;
-
-		fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-			self.inner.poll_accept_uni(cx).map_ok(|stream| LocalRecv {
-				inner: stream,
-				_local: self._local.clone(),
-			})
-		}
-
-		fn poll_accept_bi(
-			&mut self,
-			cx: &mut Context<'_>,
-		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
-			self.inner.poll_accept_bi(cx).map_ok(|(send, recv)| {
-				(
-					LocalSend {
-						inner: send,
-						_local: self._local.clone(),
-					},
-					LocalRecv {
-						inner: recv,
-						_local: self._local.clone(),
-					},
-				)
-			})
-		}
-
-		fn poll_open_bi(
-			&mut self,
-			cx: &mut Context<'_>,
-			options: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
-		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
-			self.inner.poll_open_bi(cx, options).map_ok(|(send, recv)| {
-				(
-					LocalSend {
-						inner: send,
-						_local: self._local.clone(),
-					},
-					LocalRecv {
-						inner: recv,
-						_local: self._local.clone(),
-					},
-				)
-			})
-		}
-
-		fn poll_open_uni(
-			&mut self,
-			cx: &mut Context<'_>,
-			options: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
-		) -> Poll<Result<Self::SendStream, Self::Error>> {
-			self.inner.poll_open_uni(cx, options).map_ok(|stream| LocalSend {
-				inner: stream,
-				_local: self._local.clone(),
-			})
-		}
-
-		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
-			None
-		}
-
-		fn send_datagram(
-			&mut self,
-			payload: Bytes,
-			options: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
-		) -> Result<(), Self::Error> {
-			self.inner.send_datagram(payload, options)
-		}
-
-		fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
-			self.inner.poll_recv_datagram(cx)
-		}
-
-		fn max_datagram_size(&self) -> usize {
-			self.inner.max_datagram_size()
-		}
-
-		fn binding(&self) -> crate::transport::Binding {
-			crate::transport::Binding::InBand
-		}
-		fn protocol(&self) -> Option<&str> {
-			self.inner.protocol()
-		}
-
-		fn close(&mut self, code: u32, reason: &str) {
-			self.inner.close(code, reason);
-		}
-
-		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
-			self.inner.poll_closed(cx)
-		}
-
-		fn stats(&self) -> impl crate::transport::Stats {
-			self.inner.stats()
-		}
-	}
-
-	impl crate::transport::poll::SendStream for LocalSend {
-		type Error = FakeError;
-		type Group = crate::transport::poll::Ungrouped;
-
-		fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-			self.inner.poll_write(cx, buf)
-		}
-
-		fn set_priority(&mut self, order: i64) {
-			self.inner.set_priority(order);
-		}
-
-		fn set_group(&mut self, group: &Self::Group) {
-			match *group {}
-		}
-
-		fn finish(&mut self) -> Result<(), Self::Error> {
-			self.inner.finish()
-		}
-
-		fn reset(&mut self, code: u32) {
-			self.inner.reset(code);
-		}
-
-		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			crate::transport::poll::SendStream::poll_closed(&mut self.inner, cx)
-		}
-	}
-
-	impl crate::transport::poll::RecvStream for LocalRecv {
-		type Error = FakeError;
-
-		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-			self.inner.poll_read(cx, dst)
-		}
-
-		fn stop(&mut self, code: u32) {
-			self.inner.stop(code);
-		}
-
-		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			crate::transport::poll::RecvStream::poll_closed(&mut self.inner, cx)
-		}
-	}
-
-	// The point of the lite-only entry: a `!Send` transport yields a `!Send`
-	// driver polled by its caller, while the severed Session handle stays
-	// Send + Sync. Compiling is most of the assertion; the rest checks the
-	// machine still relays the close.
-	#[test]
-	fn connect_lite_over_a_send_less_transport() {
-		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
-		let local = LocalSession {
-			inner: fake.clone(),
-			_local: std::rc::Rc::new(()),
-		};
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-
-		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
-		let (session, mut driver) = futures::executor::block_on(client.connect_lite(runtime.now(), local)).unwrap();
-		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
-
-		fn assert_send_sync<T: Send + Sync>(_: &T) {}
-		assert_send_sync(&session);
-
-		session.abort(Error::Cancel);
-		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(fake.state.close_events.read()[0].0, SessionError::Cancel.to_code());
-	}
-
-	// The server-side twin: a `!Send` transport accepts a lite session whose
-	// driver the caller polls directly.
-	#[test]
-	fn accept_lite_over_a_send_less_transport() {
-		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
-		let local = LocalSession {
-			inner: fake.clone(),
-			_local: std::rc::Rc::new(()),
-		};
-		let server = crate::Server::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-
-		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
-		let (session, mut driver) = futures::executor::block_on(server.accept_lite(runtime.now(), local)).unwrap();
-		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
-		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
-
-		drop(session);
-		assert!(fake.state.close_events.read().is_empty());
-		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(fake.state.close_events.read()[0].0, SessionError::Cancel.to_code());
-	}
-
-	// The lite-only entry refuses everything that still needs the boxed ietf
-	// driver, instead of silently negotiating it.
-	#[test]
-	fn connect_lite_refuses_ietf_alpns() {
-		let fake = FakeSession::new(Some(ALPN_19), Vec::new());
-		let local = LocalSession {
-			inner: fake,
-			_local: std::rc::Rc::new(()),
-		};
-		let client = Client::new();
-		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
-		let result = futures::executor::block_on(client.connect_lite(runtime.now(), local));
-		assert!(matches!(result, Err(Error::Version)));
-	}
-
 	// `stats()` reads the machine's latest sample and primes the sampler, so a
 	// periodic poller observes fresh counters without consuming the bandwidth
 	// channel.
@@ -1268,6 +1060,108 @@ mod tests {
 		assert_eq!(
 			bandwidth.changed().await.unwrap(),
 			Some(crate::bandwidth::Rate::from_bps(2_000_000))
+		);
+	}
+
+	/// A track to reserve against, with the broadcast keeping it alive.
+	fn reservable() -> (crate::broadcast::Producer, crate::track::Producer) {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast.create_track("t", crate::track::Info::timed()).unwrap();
+		(broadcast, track)
+	}
+
+	/// Run the driver until the sender's target reads `bps`.
+	async fn probes_to(fake: &FakeSession, bps: u64) {
+		while fake.probe_target() != bps {
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+		}
+	}
+
+	// The session probes for every reservation on its allocator, demanded or not: a
+	// stopped rendition loses its viewers, and still has to be funded to resume.
+	#[moq_clock::test]
+	async fn the_sender_probes_to_the_reservations() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
+		fake.set_send_rate(Some(1_000_000));
+
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
+		let bandwidth = session.bandwidth();
+
+		let (_watched_broadcast, watched) = reservable();
+		let _sub = watched.subscribe(None);
+		let watched = bandwidth.reserve(&watched.demand(), crate::bandwidth::Rate::from_bps(4_000_000));
+		probes_to(&fake, 4_000_000).await;
+
+		let (_idle_broadcast, idle) = reservable();
+		let idle = bandwidth.reserve(&idle.demand(), crate::bandwidth::Rate::from_bps(1_000_000));
+		probes_to(&fake, 5_000_000).await;
+
+		idle.update(crate::bandwidth::Rate::from_bps(2_000_000));
+		probes_to(&fake, 6_000_000).await;
+
+		drop(watched);
+		probes_to(&fake, 2_000_000).await;
+		drop(idle);
+		probes_to(&fake, 0).await;
+	}
+
+	// An override replaces the sum, zero turns probing off, and clearing it follows the
+	// reservations again.
+	#[moq_clock::test]
+	async fn an_override_replaces_the_reservations() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
+		let bandwidth = session.bandwidth();
+
+		let (_broadcast, track) = reservable();
+		let _reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));
+		probes_to(&fake, 4_000_000).await;
+
+		bandwidth.set_target(Some(crate::bandwidth::Rate::ZERO));
+		probes_to(&fake, 0).await;
+
+		bandwidth.set_target(Some(crate::bandwidth::Rate::from_bps(10_000_000)));
+		probes_to(&fake, 10_000_000).await;
+
+		bandwidth.set_target(None);
+		probes_to(&fake, 4_000_000).await;
+	}
+
+	// A reconnecting caller dials every session with one allocator, so a reservation
+	// taken before the reconnect still moves the next session's target.
+	#[moq_clock::test]
+	async fn a_reconnect_keeps_following_the_reservations() {
+		let bandwidth = crate::bandwidth::Allocator::default();
+		let client = Client::new()
+			.with_versions(Version::Lite(lite::Version::Lite04).into())
+			.with_bandwidth(bandwidth.clone());
+
+		let (_broadcast, track) = reservable();
+		let reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));
+
+		let first = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
+		let (session, driver) = client.connect(moq_clock::now(), first.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
+		probes_to(&first, 4_000_000).await;
+		session.abort(Error::Cancel);
+		session.closed().await;
+		drop(session);
+
+		let second = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
+		let (_session, driver) = client.connect(moq_clock::now(), second.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
+		probes_to(&second, 4_000_000).await;
+
+		reserved.update(crate::bandwidth::Rate::from_bps(3_000_000));
+		probes_to(&second, 3_000_000).await;
+		assert_eq!(
+			first.probe_target(),
+			4_000_000,
+			"a closed session's sender is left alone"
 		);
 	}
 }

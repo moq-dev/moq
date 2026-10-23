@@ -744,8 +744,10 @@ For example:
 An audio or video rendition MAY declare `warmup`, an integer duration in milliseconds after a group start before its decoded output is presentable without decoding the previous group.
 A publisher MUST round a fractional-millisecond warmup up to the next whole millisecond.
 Absent or `0` means every group start is immediately presentable.
-After a non-continuous join, a consumer MUST decode from the group start and MUST NOT present frames stamped before the group's start plus `warmup`.
-It SHOULD join that much earlier to obtain the requested presentation time.
+After a non-continuous join, a consumer MUST decode from the group start.
+It SHOULD join `warmup` earlier to obtain the requested presentation time.
+Unless it also decodes from an earlier group start, it MUST NOT present frames stamped before the group's start plus `warmup`.
+A consumer that does MAY present those frames, which can show decoding artifacts, but MUST switch to the earlier decoder's frames once that decoder reaches the presented timestamp.
 
 For video, `warmup` can describe a refresh cycle during which decoding converges without an initial keyframe.
 For audio, it describes decoder pre-roll, for example 80 milliseconds for Opus, and does not change the group-start rule.
@@ -992,7 +994,7 @@ The `store` field, if present, is the object-store URL the recording objects liv
 Authorization for `replay` and `store` is external.
 
 The `version` field is the version of that recording object format.
-It is 2 for this specification.
+It is 3 for this specification.
 A publisher that exposes a store MUST set it; a publisher that does not MUST omit it.
 
 A catalog that composes another broadcast's renditions MUST preserve that child's `archive` entry instead of synthesizing one.
@@ -1189,6 +1191,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- The archive `version` is 3: the recording format stores a track's `priority` signed, -128 through 127 with 0 unset, instead of its moq-lite byte.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
@@ -1203,7 +1206,7 @@ This document has no IANA actions.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
 
-- Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures.
+- Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures. A consumer also decoding from an earlier group start may present frames before `warmup`, switching to that decoder once it reaches the presented timestamp.
 - Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks.
 - Allowed a DVR to delete timeline objects no checkpoint recovery needs, oldest first.

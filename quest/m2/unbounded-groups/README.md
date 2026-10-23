@@ -66,8 +66,9 @@ Decided 2026-10-16 (maintainer interview):
   not lite-07. Frame-boundary holes already refill over lite-07's
   frame-precise ranges.
 - JS is a separate quest. Docs change inline: the lite draft, `doc/concept`,
-  the relay cache docs, the json/flate docs, and the e2ee draft's 32 MiB
-  interop cap. There is no new page.
+  the relay cache docs, the JSON and moq-net compression docs, and the e2ee
+  draft's 32 MiB interop cap. The
+  [m1 compression migration](/quest/m1/compress/migrate.md) deletes the flate packages. There is no new page.
 
 The refill API is the
 [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)

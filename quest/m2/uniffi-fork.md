@@ -25,7 +25,9 @@ UniFFI:
   external generator has released for 0.32, so moq already carries three
   forks, each pinned in about five places. The core also blocks work moq
   needs: byte copies, zero-copy returns, and namespaced external types
-  (mozilla/uniffi-rs#3026).
+  (mozilla/uniffi-rs#3026, auto-closed by our
+  [#5498](https://github.com/moq-dev/moq/pull/5498) and still unfixed
+  upstream).
 - **Hard fork, fresh repo**: `moq-dev/uniffi` is a new repository, not a
   GitHub fork and not submodules. Import uniffi-rs at the 0.32.2 release and
   the three generators at their pinned tags

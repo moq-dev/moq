@@ -13,9 +13,6 @@ tag-driven publish works. `moq` has only 0.1.0 (2026-09-25), the one
 `moq-dart-v*` tag so far, so whether its tag publishes unattended through
 trusted publishing is still unproven.
 
-Decided in the 2026-10-10 audit: publication waits for Codecs and the epoch
-rename, so Dart takes the binding breaks in one
-release. This replaces the 2026-10-05 decision to drop the FFI shape wait.
 Trusted-publishing configuration and checks of already-published artifacts
 can proceed independently; cutting the tag cannot.
 

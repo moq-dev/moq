@@ -46,11 +46,12 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
   built on first demand, shared across readers, billed to the cache pool, and
   dropped with its group. A thousand old-lite viewers cost one inflate.
 - **Signaling:** lite-07 TrackInfo carries the codec id and the frame header the
-  size; IETF draft-16+ carries them only
-  after both peers advertise a setup parameter
-  ([IETF](/quest/m1/compress/ietf.md)), because unknown track properties are
-  discarded. Lite-01..06, IETF draft-14/15, and IETF peers without the
-  parameter get the inflated copy, with no flag.
+  size; IETF draft-17+ carries them only
+  after both peers advertise a setup parameter, because unknown track
+  properties are discarded. Lite-01..06, IETF draft-14/15/16, and IETF peers without the
+  parameter get the inflated copy, with no flag. A sealed compression
+  declaration is preserved, so delivery is refused when plain fallback would
+  remove it.
 - **Ranges.** A range starting at frame N of a compressed group is served
   from N. The requester only asks from N because it holds 0..N-1, so it
   inflates from its own cached prefix. Reading frame N without 0..N-1 is a
@@ -80,12 +81,9 @@ This README owns the end-to-end proof and the guide once every child lands:
 
 ## Required
 
-- [Mid-group subscriptions widen](/quest/m1/compress/app-range-widen.md) - an application range starting mid-group on a compressed track widens to frame 0 at the subscriber instead of failing with `Lagged`
-- [IETF extension](/quest/m1/compress/ietf.md) - moq-transport draft-16+ peers that negotiate the extension exchange compressed tracks
-- [JavaScript](/quest/m1/compress/js.md) - js/net publishes and consumes compressed tracks on lite-07
+- [moq-transport mid-group subscriptions widen](/quest/m1/compress/ietf-range-widen.md) - an application range starting mid-group on a compressed track widens to frame 0 at a moq-transport subscriber instead of failing with `Lagged`
 - [Migrate](/quest/m1/compress/migrate.md) - catalogs, stats, and timelines publish one compressed track; moq-flate, @moq/flate, and every `.z` name are gone
 
 ## Related
 
-- [Refresh](/quest/m1/refresh/README.md) - its byte ratio measures the stored, compressed group
 - [Front eviction](/quest/m2/unbounded-groups/front-eviction.md) - a compressed group's evicted prefix must refill before a reader can inflate past it

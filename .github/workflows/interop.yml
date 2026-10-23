@@ -3,7 +3,8 @@ name: Interop
 # Cross-language interop test built from THIS checkout (not the published
 # packages, unlike smoke.yml). Stands up a relay and runs the
 # publish x subscribe matrix across rust / python / go / browser / native-js / c,
-# then browser-to-browser media QA. TS validation has its own workflow.
+# on moq-lite and then on each even moq-transport draft, then browser-to-browser
+# media QA. TS validation has its own workflow.
 on:
   # Manual on-demand runs.
   workflow_dispatch:
@@ -52,13 +53,9 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
-      # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
-      # runtime libs (`--with-deps` needs the host package manager) so the
-      # browser client can launch headless Chromium. interop.sh's own
-      # `playwright install` then no-ops.
-      - name: Playwright Chromium
+      - name: Workspace dependencies
         id: setup
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
+        run: nix develop --command bun install --frozen-lockfile
         shell: bash -leo pipefail {0}
 
       # Each suite reports independently after setup, while a failed step still fails the job.
@@ -67,6 +64,15 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test max-age
         shell: bash -leo pipefail {0}
+
+      - name: Receive credit recovery
+        id: receive-credit
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test receive-credit
+        shell: bash -leo pipefail {0}
+        env:
+          # Fail rather than skip the io_uring arm if the runner's kernel lacks it.
+          MOQ_STRICT: 1
 
       - name: Harness regressions
         id: harness
@@ -95,6 +101,21 @@ jobs:
           # The run writes its directory here, so a failed one is uploaded below
           # and a passing one is deleted as usual. Each case's record lands beside
           # it, for the report below.
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          MOQ_TEST_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+
+      # The same matrix with every client pinned to one moq-transport draft per pass. A release
+      # PR runs the oldest and newest even draft between Rust and native JS; nightly and manual
+      # runs cover every even draft and every client.
+      - name: Interop (moq-transport)
+        id: interop-ietf
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          read -ra args <<<"$INTEROP_ARGS"
+          nix develop --command just test interop "${args[@]}"
+        shell: bash -leo pipefail {0}
+        env:
+          INTEROP_ARGS: ${{ github.event_name == 'pull_request' && '--publishers rust --subscribers rust,js-native-node,js-native-bun --versions moq-transport-14,moq-transport-22' || '--all --versions ietf' }}
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
           MOQ_TEST_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
@@ -184,10 +205,12 @@ jobs:
             "Rust cache": "${{ steps.rust-cache.outcome }}",
             "Playwright Chromium": "${{ steps.setup.outcome }}",
             "Optional publisher retention": "${{ steps.max-age.outcome }}",
+            "Receive credit recovery": "${{ steps.receive-credit.outcome }}",
             "Harness regressions": "${{ steps.harness.outcome }}",
             "Subscription termination interop": "${{ steps.bare-fin.outcome }}",
             "P2P data-channel transport": "${{ steps.p2p.outcome }}",
             "Interop (full matrix)": "${{ steps.interop.outcome }}",
+            "Interop (moq-transport)": "${{ steps.interop-ietf.outcome }}",
             "Released wire compatibility": "${{ steps.wire-compat.outcome }}",
             "Portrait transcode": "${{ steps.portrait.outcome }}",
             "Interop negative control": "${{ steps.negative.outcome }}",
@@ -219,7 +242,7 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
-      # Deletes a stale Pages artifact.
+      # Delete a Pages artifact left by an earlier run attempt.
       actions: write
       contents: write
       pages: write
@@ -245,14 +268,10 @@ jobs:
       - name: Commit report
         run: just gh pages-publish interop "$RUNNER_TEMP/interop-report" "$RUNNER_TEMP/pages"
 
-      # A re-run attempt sees the earlier attempt's Pages artifact beside its own, and
-      # deploy-pages refuses to choose between them.
       - name: Drop a stale Pages artifact
+        run: just gh pages-clean
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=github-pages" --jq '.artifacts[].id' |
-            while read -r id; do gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"; done
 
       - name: Upload site
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

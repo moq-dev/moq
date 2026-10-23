@@ -19,10 +19,15 @@ pub struct TestRelay {
 }
 
 /// Bind a public test relay on ephemeral loopback ports without TOML or port probes.
+///
+/// It also accepts the work-in-progress moq-lite-07, for a client that opts in.
 pub async fn test_relay() -> anyhow::Result<TestRelay> {
 	let mut config = Config::default();
 	config.drain_timeout = std::time::Duration::ZERO;
 	config.listen.bind = Some("127.0.0.1:0".parse()?);
+	config.listen.version = std::iter::once("moq-lite-07-wip".parse().map_err(anyhow::Error::msg)?)
+		.chain(moq_net::Versions::all().iter().copied())
+		.collect();
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.web.http.listen = Some("127.0.0.1:0".parse()?);
 	config.auth.public = vec![moq_auth::Pattern::all()];

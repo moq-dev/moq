@@ -11,10 +11,9 @@
 		"@moq/hang": "workspace:*",
 		"@moq/net": "workspace:*",
 		"@moq/publish": "workspace:*",
-		"@moq/signals": "workspace:*",
 		"@moq/watch": "workspace:*"
 	},
 	"devDependencies": {
-		"playwright": "^1.64.0"
+		"playwright": "1.64.1"
 	}
 }

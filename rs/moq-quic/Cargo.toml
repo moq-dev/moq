@@ -44,6 +44,9 @@ tracing-log = ["tracing/log"]
 rustls-log = ["rustls?/logging"]
 # Enable qlog support
 qlog = ["dep:qlog"]
+# The sans-IO QMux connection, which runs the stream state machine over a reliable, ordered
+# transport. Driven by the `qmux` crate.
+mux = []
 # Internal (PRIVATE!) features used to aid testing.
 # Don't rely on these whatsoever. They may disappear at any time.
 
@@ -59,6 +62,7 @@ arbitrary = { version = "1.5", features = ["derive"], optional = true }
 aws-lc-rs = { version = "1.9", default-features = false, optional = true }
 bytes = { workspace = true }
 fastbloom = { version = "0.17", default-features = false, optional = true }
+indexmap = { workspace = true }
 lru-slab = "0.1.2"
 # Without the runtime, which is meant for dev-dependencies; a driver brings its own.
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
@@ -90,6 +94,8 @@ criterion = { workspace = true }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
 moq-clock = { path = "../moq-clock" }
+# The mux module's tests run in the default merge gate.
+moq-quic = { path = ".", features = ["mux"] }
 proptest = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
 stats_alloc = "0.1.10"
@@ -127,7 +133,8 @@ name = "wire"
 harness = false
 required-features = ["fuzz"]
 
-# quinn's workspace lints, kept so upstream code stays clean against them.
+# quinn's workspace lints, kept so upstream code stays clean against them. Cargo
+# can't extend the workspace table per crate, so its suppression rule is repeated.
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
 unnameable_types = "warn"
@@ -135,6 +142,7 @@ unreachable_pub = "warn"
 unused_qualifications = "warn"
 
 [lints.clippy]
+allow_attributes_without_reason = "warn"
 manual_let_else = "warn"
 or_fun_call = "warn"
 use_self = "warn"

@@ -107,6 +107,6 @@ stats rows (the unlisted PID's row asserted field by field), and an export
 round trip of the carried streams. The MPEG-2 video arm also runs the TSDuck
 round trip and an FFmpeg decode of the export in `test/ts`.
 
-## Related
+## Required
 
-- [Live PAT/PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) - a revised `stream_type` takes the route this quest declares
+- [Shared parser](/quest/m1/ts-reliability/shared-parser.md) - one parser owns the PID map this plan's accounting needs

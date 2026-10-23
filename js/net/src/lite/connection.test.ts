@@ -199,7 +199,7 @@ function holdFins(transport: MockTransport, streams: "uni" | "incoming-bidi") {
 function mockDeadline() {
 	const clock = new Manual();
 	return {
-		expire: () => clock.advanceAsync(Nano.fromMilli(Milli(1000))),
+		expire: () => clock.advance(Nano.fromMilli(Milli(1000))),
 		restore: clock.install(),
 	};
 }
@@ -562,3 +562,43 @@ test("a malformed complete GOAWAY closes the session", async () => {
 		}
 	}
 });
+
+// Each write is backpressured until the receiver reads it, before FIN is sent.
+for (const [alpn, version] of [
+	[ALPN_05, Version.DRAFT_05],
+	[ALPN_06, Version.DRAFT_06],
+	[ALPN_07_WIP, Version.DRAFT_07],
+] as const) {
+	test(`padding is discarded only on lite-07: ${alpn}`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const connection = new Connection({
+			url: new URL("https://relay.example/"),
+			quic: pair.server,
+			version,
+		});
+		let closed = false;
+		void connection.closed.then(() => {
+			closed = true;
+		});
+		const writer = new Writer(await pair.client.createUnidirectionalStream(), version);
+		try {
+			await writer.u53(2);
+			if (version === Version.DRAFT_07) {
+				for (let i = 0; i < 32; i++) await writer.write(new Uint8Array(4096));
+				writer.close();
+				await writer.closed;
+			} else {
+				await expect(writer.closed).rejects.toThrow();
+			}
+			expect(closed).toBe(false);
+			// A subsequent stream is still handled after the padding finishes or resets.
+			const goaway = await Stream.open(pair.client, { version });
+			await goaway.writer.u53(StreamId.Goaway);
+			await new Goaway("").encode(goaway.writer, version);
+			goaway.writer.close();
+			expect((await wireOf(connection).goaway).uri).toBe("");
+		} finally {
+			connection.abort();
+		}
+	});
+}

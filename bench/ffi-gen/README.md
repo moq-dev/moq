@@ -36,7 +36,7 @@ just bench-ffi-gen build bench  # or some steps: build | bench | size
 `target/ffi-gen`, then builds the slice with each generator, its Python, Kotlin, and
 Swift bindings, both `.wasm` builds, and BoltFFI's web package. `bench` runs
 `MOQ_BENCH_ROUNDS` rounds (default 3), alternating which generator goes first, and
-writes `target/ffi-gen/results/report.md`. Each case gets 3 warmup steps and a
+writes `target/ffi-gen/results/report.md` and appends the table to the Actions job summary. Each case gets 3 warmup steps and a
 `MOQ_BENCH_SECONDS` budget (default 1). Throughput mirrors `just bench-ffi`:
 `clamp(8 MiB / size, 1, 64)` frames per group, every byte checked, and CPU from
 `getrusage`. `size` builds moq-ffi and moq-wasm for reference, then prints the size

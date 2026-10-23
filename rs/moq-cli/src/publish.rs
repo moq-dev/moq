@@ -7,8 +7,8 @@ use moq_mux::container::{flv, fmp4, ts};
 pub enum PublishFormat {
 	/// Raw AVC (H.264) Annex B elementary stream.
 	Avc3,
-	/// Fragmented MP4 (CMAF).
-	Fmp4,
+	/// Fragmented MP4 (CMAF), republished whole as CMAF when `passthrough`.
+	Fmp4 { passthrough: bool },
 	/// MPEG-TS (transport stream), limited to one `program` of a multiplex when given.
 	Ts { program: Option<u16> },
 	/// MPEG-TS published whole, paced on `pcr_pid` when given rather than the PMT's clock.
@@ -60,8 +60,9 @@ pub struct CaptureArgs {
 	pub camera: Option<Option<String>>,
 
 	/// Capture a whole display, by the id `moq devices` reports. Bare
-	/// `--display` captures the main display. On Wayland the desktop portal opens
-	/// a picker dialog; X11 accepts the listed monitor id.
+	/// `--display` captures the main display, or on Wayland opens the system
+	/// portal picker (requires the `pipewire` feature). Wayland accepts only
+	/// the XWayland `x11:` ids it lists.
 	#[usage(long, group = "video-source", alias = "screen")]
 	pub display: Option<Option<String>>,
 
@@ -272,9 +273,13 @@ fn ts_import(
 	Ok((import, catalog))
 }
 
-// Exactly one Source exists per process, so the size gap between the small
-// Stream variant and the larger Capture config is irrelevant.
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+	feature = "capture",
+	expect(
+		clippy::large_enum_variant,
+		reason = "exactly one Source exists per process, so the gap between Stream and the larger Capture config is irrelevant"
+	)
+)]
 enum Source {
 	/// Decode a container read from stdin.
 	Stream {
@@ -304,8 +309,8 @@ pub struct Publish {
 	broadcast: Option<moq_net::broadcast::Producer>,
 	// A stdin import's route, announced once its catalog lists the tracks; see [`Self::announce`].
 	route: Option<moq_net::origin::Route>,
-	// The `--stats` report, written beside the decode loop; see [`Self::with_stats`].
-	stats: Option<crate::report::Stats>,
+	// The `--report` track, written beside the decode loop; see [`Self::with_report`].
+	report: Option<crate::report::Stats>,
 }
 
 /// A broadcast's announcement, held until its catalog first goes out.
@@ -366,7 +371,7 @@ impl Publish {
 				},
 				broadcast: Some(broadcast),
 				route: None,
-				stats: None,
+				report: None,
 			});
 		}
 
@@ -381,9 +386,9 @@ impl Publish {
 					import: Box::new(import),
 				}
 			}
-			PublishFormat::Fmp4 => {
+			PublishFormat::Fmp4 { passthrough } => {
 				let timebase = catalog.timebase();
-				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve());
+				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_passthrough(*passthrough);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
@@ -413,7 +418,7 @@ impl Publish {
 			},
 			broadcast: Some(broadcast),
 			route: None,
-			stats: None,
+			report: None,
 		})
 	}
 
@@ -431,7 +436,7 @@ impl Publish {
 			},
 			broadcast: None,
 			route: None,
-			stats: None,
+			report: None,
 		}
 	}
 
@@ -471,24 +476,25 @@ impl Publish {
 			},
 			broadcast: Some(broadcast),
 			route: None,
-			stats: None,
+			report: None,
 		})
 	}
 
-	/// Name a stats track in the catalog and write it beside the decode loop: what each track
-	/// has written, and the transport of `connection` when there is one.
+	/// Name a media report track in the catalog's `stats` section and write it beside the
+	/// decode loop: what each track has written, and the transport of `connection` when there
+	/// is one.
 	///
 	/// Call it before the importer declares its tracks, so the section rides the first catalog.
-	pub fn with_stats(mut self, connection: Option<moq_tokio::connection::Monitor>) -> anyhow::Result<Self> {
+	pub fn with_report(mut self, connection: Option<moq_tokio::connection::Monitor>) -> anyhow::Result<Self> {
 		let (Some(broadcast), Source::Stream { catalog, .. }) = (self.broadcast.as_mut(), &self.source) else {
-			anyhow::bail!("--stats reports a stdin import's one catalog");
+			anyhow::bail!("--report reports a stdin import's one catalog");
 		};
-		let stats = match catalog {
+		let report = match catalog {
 			PublishCatalog::Media(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
 			PublishCatalog::Ts(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
 			PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
 		};
-		self.stats = Some(stats);
+		self.report = Some(report);
 		Ok(self)
 	}
 
@@ -521,7 +527,7 @@ impl Publish {
 					tokio::io::stdin(),
 					self.broadcast,
 					pending,
-					self.stats,
+					self.report,
 				)
 				.await
 			}
@@ -585,7 +591,7 @@ impl Publish {
 /// The finished `broadcast` then stays servable until its media is stale, so a subscriber
 /// that saw the final catalog only at EOF can still request it.
 ///
-/// `report` writes `--stats` beside the read loop, so a stalled input keeps reporting, and ends
+/// `report` writes `--report` beside the read loop, so a stalled input keeps reporting, and ends
 /// with its final counts when the media tracks do.
 async fn decode(
 	mut decoder: PublishDecoder,
@@ -605,7 +611,7 @@ async fn decode(
 	// diagnosed by the rate at which these climb, and stdin may never end, so
 	// they have to surface as they accumulate rather than at exit.
 	let mut log = ts::stats::Log::default();
-	let mut sampled = tokio::time::Instant::now();
+	let mut sampled = moq_clock::now();
 	let sections = report.as_ref().map(crate::report::Stats::sections);
 	let report_mpegts = |snapshot: &ts::stats::Snapshot| {
 		if let Some(sections) = &sections {
@@ -630,7 +636,7 @@ async fn decode(
 			}
 
 			if sampled.elapsed() >= ts::stats::Log::INTERVAL {
-				sampled = tokio::time::Instant::now();
+				sampled = moq_clock::now();
 				if let Some(stats) = decoder.stats() {
 					report_mpegts(&stats);
 					log.sample(stats);
@@ -719,8 +725,17 @@ impl CaptureArgs {
 			}
 		} else if let Some(id) = &self.app {
 			Source::App(id.clone())
-		} else if let Some(index) = &self.display {
-			Source::Display(index.clone())
+		} else if let Some(id) = &self.display {
+			match id {
+				Some(id) => Source::Display(Some(id.clone())),
+				// Wayland has no main display to name, so the system picker chooses the screen.
+				#[cfg(all(target_os = "linux", feature = "pipewire"))]
+				None if std::env::var_os("WAYLAND_DISPLAY").is_some() => {
+					use moq_video::capture::portal::{Kind, Selection};
+					Source::Portal(Selection::new(Kind::Screen))
+				}
+				None => Source::Display(None),
+			}
 		} else {
 			Source::Camera(self.camera.clone().flatten())
 		})
@@ -787,6 +802,11 @@ impl CaptureArgs {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 pub(crate) mod tests {
 	use std::time::Duration;
 
@@ -1036,7 +1056,13 @@ pub(crate) mod tests {
 		broadcast.announce(Default::default()).unwrap();
 		settle().await;
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1113,7 +1139,13 @@ pub(crate) mod tests {
 			Default::default(),
 		)
 		.unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1156,6 +1188,9 @@ pub(crate) mod tests {
 	#[tokio::test]
 	async fn ts_passthrough_crosses_a_relay_through_a_flagged_jump() {
 		const KYRION: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/kyrion_mpeg2av_ac3.ts");
+		if !test_env::Env::without(&["MOQ_CONNECT", "MOQ_HOP"]).isolate() {
+			return;
+		}
 		// The capture with its clock `seconds` ahead, its first PCR flagged as a discontinuity
 		// when `flagged`.
 		let shifted = |seconds: u64, flagged: bool| {
@@ -1183,9 +1218,8 @@ pub(crate) mod tests {
 		let second = shifted(24, true);
 		let input = [&lead[..], &second].concat();
 
-		let _env = crate::test_env::EnvGuard::clear(&["MOQ_CONNECT", "MOQ_HOP"]);
 		let _ = moq_tokio::crypto::install_default();
-		for version in ["moq-lite-06", "moq-transport-14"] {
+		for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-14"] {
 			let fixture = moq_relay::test_relay().await.unwrap();
 			let ready = fixture.relay.ready();
 			tokio::spawn(fixture.relay.run());
@@ -1221,7 +1255,13 @@ pub(crate) mod tests {
 				Default::default(),
 			)
 			.unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, .. } = &mut publish.source else {
 				panic!("expected a stream source");
 			};
@@ -1339,8 +1379,9 @@ pub(crate) mod tests {
 			// Joining once every group is out, with a budget half the jump, reads every group
 			// after it past the marker, and none of the groups the jump left more than
 			// the budget behind. An IETF subscription starts at the newest group, so only lite
-			// has the groups behind it to read.
-			if version.starts_with("moq-lite") {
+			// has the groups behind it to read, and a lite-06 subscriber drops the timestamps
+			// that carry the jump.
+			if version == "moq-lite-07-wip" {
 				let late =
 					read(start(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))).await)
 						.await
@@ -1370,7 +1411,13 @@ pub(crate) mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1428,7 +1475,13 @@ pub(crate) mod tests {
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1464,7 +1517,13 @@ pub(crate) mod tests {
 			let input = tokio::fs::File::open(file.path()).await.unwrap();
 			let broadcast = moq_net::broadcast::Info::new().produce();
 			let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
@@ -1488,7 +1547,13 @@ pub(crate) mod tests {
 		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1520,7 +1585,13 @@ pub(crate) mod tests {
 		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1565,14 +1636,21 @@ pub(crate) mod tests {
 		for (format, input) in [
 			(PublishFormat::Ts { program: None }, TS),
 			(PublishFormat::TsPassthrough { pcr_pid: None }, TS),
-			(PublishFormat::Fmp4, FMP4),
+			(PublishFormat::Fmp4 { passthrough: false }, FMP4),
+			(PublishFormat::Fmp4 { passthrough: true }, FMP4),
 		] {
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();
 			let mut announced = consumer.announced();
 			let broadcast = origin.create_broadcast("demo").unwrap();
 			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
@@ -1639,7 +1717,13 @@ pub(crate) mod tests {
 			.subscribe(None)
 			.await
 			.unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("stream source");
 		};
@@ -1668,7 +1752,13 @@ pub(crate) mod tests {
 			let mut announced = origin.consume().announced();
 			let broadcast = origin.create_broadcast("demo").unwrap();
 			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
@@ -1781,7 +1871,13 @@ pub(crate) mod tests {
 	fn a_multiplex_is_refused_with_the_programs_and_the_flag() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};

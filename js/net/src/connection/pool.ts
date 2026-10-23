@@ -58,8 +58,11 @@ export interface ConnectionProps {
 	 */
 	share?: boolean;
 
-	/** Protocol versions to offer, most preferred first, spelled like `moq-lite-06`; connections pool by URL and this list. */
-	versions?: readonly string[];
+	/**
+	 * Protocol versions to offer, most preferred first, spelled like `moq-lite-06`; connections pool by
+	 * URL and this list. Pass a `Signal` to switch versions live.
+	 */
+	versions?: readonly string[] | Signal<readonly string[] | undefined>;
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportPropsType;
@@ -134,6 +137,9 @@ export class Connection {
 	/** Relay URL to connect to; updating it reconnects to that URL. */
 	url: Signal<URL | undefined>;
 
+	/** Protocol versions to offer, or undefined for the defaults; updating it reconnects with that list. */
+	versions: Signal<readonly string[] | undefined>;
+
 	/** Whether to hold a connection at all; clearing it releases this handle's share. */
 	enabled: Signal<boolean>;
 
@@ -143,8 +149,9 @@ export class Connection {
 	/**
 	 * The failure that stopped retrying the current URL, or undefined while the loop is live.
 	 *
-	 * Set on an auth rejection or when a private retry window expires. Cleared when a new URL
-	 * or a disable/re-enable starts another sequence, not on a page hide/show.
+	 * Set on an auth rejection, when a private retry window expires, or when {@link versions} names
+	 * one this build cannot offer. Cleared when a new URL or version list, or a disable/re-enable,
+	 * starts another sequence, not on a page hide/show.
 	 */
 	readonly error: Getter<Error | undefined>;
 
@@ -206,11 +213,15 @@ export class Connection {
 	 * (plus the linger window) wants them.
 	 */
 	constructor(props?: ConnectionProps) {
-		const versions = normalizeVersions(props);
+		const given = props?.versions;
+		// A plain list is checked and copied now, so a bad name throws here and mutating the array
+		// later changes nothing. A live list is checked as it changes, failing on `error`.
+		const fixed = normalizeVersions({ ...props, versions: Array.isArray(given) ? given : undefined });
 		refuse(props);
 		this.#signals = new Effect();
 
 		this.url = Signal.from(props?.url);
+		this.versions = Signal.from(Array.isArray(given) ? fixed : given);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.status = this.#status;
 		this.error = this.#error;
@@ -226,7 +237,7 @@ export class Connection {
 		const href = this.#signals.computed((effect) => effect.get(this.url)?.href);
 
 		if (props && (props.share === false || requiresPrivate(props))) {
-			this.#runPrivate({ ...props, versions }, href);
+			this.#runPrivate(props, href);
 			return;
 		}
 
@@ -234,6 +245,11 @@ export class Connection {
 			if (!effect.get(this.enabled)) return;
 			const key = effect.get(href);
 			if (!key) return;
+			const versions = offered(effect.get(this.versions));
+			if (versions instanceof TypeError) {
+				effect.set(this.#error, versions, undefined);
+				return;
+			}
 
 			const lease = acquire(key, versions, linger);
 			effect.cleanup(lease.release);
@@ -254,28 +270,49 @@ export class Connection {
 		const origin = props.consume ?? new Origin.Producer();
 		if (owned) this.#signals.cleanup(() => origin.close());
 
-		const loop = new Reload({
-			url: this.url,
-			enabled: this.enabled,
-			publish: props.publish ?? (owned ? origin.consume() : undefined),
-			consume: origin,
-			versions: props.versions,
-			webtransport: props.webtransport,
-			websocket: props.websocket,
-			delay: props.delay,
-			goaway: props.goaway,
-		});
-		this.#signals.cleanup(() => loop.close());
+		const publish = props.publish ?? (owned ? origin.consume() : undefined);
 
-		this.#signals.run((effect) => {
-			if (!effect.get(this.enabled) || !effect.get(href)) return;
-			effect.set(this.#origin, origin, undefined);
-			effect.set(this.#bandwidth, loop.bandwidth, undefined);
-		});
-		this.#signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
-		this.#signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
-		this.#signals.run((effect) => effect.set(this.#probe, loop.probe, undefined));
-		this.#signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
+		// The origin spans version changes; only the loop dialing it is replaced. Each loop is built
+		// synchronously, not in an effect a microtask later, so its hold on `consume` is in place
+		// before a watcher created alongside could sync on an empty table.
+		let stop: (() => void) | undefined;
+		const start = (list: readonly string[] | undefined) => {
+			stop?.();
+			const signals = new Effect();
+			stop = () => signals.close();
+
+			const versions = offered(list);
+			if (versions instanceof TypeError) {
+				signals.run((effect) => effect.set(this.#error, versions, undefined));
+				return;
+			}
+
+			const loop = new Reload({
+				url: this.url,
+				enabled: this.enabled,
+				publish,
+				consume: origin,
+				versions,
+				webtransport: props.webtransport,
+				websocket: props.websocket,
+				delay: props.delay,
+				goaway: props.goaway,
+			});
+			signals.cleanup(() => loop.close());
+
+			signals.run((effect) => {
+				if (!effect.get(this.enabled) || !effect.get(href)) return;
+				effect.set(this.#origin, origin, undefined);
+				effect.set(this.#bandwidth, loop.bandwidth, undefined);
+			});
+			signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
+			signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
+			signals.run((effect) => effect.set(this.#probe, loop.probe, undefined));
+			signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
+		};
+		start(this.versions.peek());
+		this.#signals.cleanup(this.versions.subscribe(start));
+		this.#signals.cleanup(() => stop?.());
 	}
 
 	/**
@@ -355,6 +392,16 @@ export namespace Connection {
 	export type Established = EstablishedType;
 	/** The moq-transport extensions a one-shot session offers. */
 	export type Extensions = ExtensionsType;
+}
+
+/** The checked copy of `versions` to dial with, or why it cannot be offered. */
+function offered(versions: readonly string[] | undefined): string[] | undefined | TypeError {
+	try {
+		return normalizeVersions({ versions });
+	} catch (err) {
+		if (err instanceof TypeError) return err;
+		throw err;
+	}
 }
 
 /** Throw if `props` cannot be honored, rather than silently dropping them. */

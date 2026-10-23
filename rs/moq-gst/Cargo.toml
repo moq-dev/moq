@@ -7,7 +7,9 @@ license = "MIT OR Apache-2.0"
 
 version = "0.4.12"
 edition = "2024"
-rust-version.workspace = true
+# gstreamer 0.25 needs 1.92, above the 1.91 workspace floor. moq-gst is a
+# plugin, not a library other crates build on, so the bump stays per-crate.
+rust-version = "1.92"
 publish = true
 
 [lib]
@@ -18,8 +20,9 @@ crate-type = ["cdylib", "rlib"]
 
 anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
-gst = { package = "gstreamer", version = "0.24" }
+gst = { package = "gstreamer", version = "0.25" }
 hang = { workspace = true }
+moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = true }
@@ -36,8 +39,13 @@ criterion = { workspace = true }
 futures = { workspace = true }
 # Decodes the OpusHead the sink publishes, so the surround regression checks playback.
 moq-audio = { path = "../moq-audio", default-features = false }
+# Runs the tests that need a variable set or unset in a child process given it.
+test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "catalog"
 harness = false
+
+[lints]
+workspace = true

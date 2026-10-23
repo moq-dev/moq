@@ -148,9 +148,9 @@ test("a Stream Count of 0 is a hint, so a late stream within the grace is still 
 	const next = reader.recvGroup().finally(() => {
 		ended = true;
 	});
-	await clock.advanceAsync(Nano.fromMilli(Milli(GRACE - 1)));
+	await clock.advance(Nano.fromMilli(Milli(GRACE - 1)));
 	expect(ended).toBe(false);
-	await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+	await clock.advance(Nano.fromMilli(Milli(1)));
 	expect(await next).toBeUndefined();
 	expect(await reader.closed).toBeNull();
 });

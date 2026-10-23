@@ -71,11 +71,11 @@ impl Address for Peer {
 	type Listener = Listener;
 }
 
-/// Lets a handler extract the peer address as `ConnectInfo<Peer>`, so the auth
-/// request can report where a WebSocket or HTTP session came from.
-impl axum::extract::connect_info::Connected<Peer> for Peer {
+/// Expose the accepted socket through Axum's standard extractor, including to
+/// routes supplied by an embedder.
+impl axum::extract::connect_info::Connected<Peer> for SocketAddr {
 	fn connect_info(target: Peer) -> Self {
-		target
+		target.0
 	}
 }
 
@@ -183,7 +183,7 @@ impl AddrListener<Accepted, Peer> for Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						tokio::time::sleep(delay).await;
+						moq_clock::sleep(delay).await;
 					}
 				}
 			}

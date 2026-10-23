@@ -83,3 +83,7 @@ and each compressed object's authenticated inflated size.
 ## Required
 
 - [moq-net traits](/quest/m2/net-wrap/traits.md) - the traits this implements
+
+## Related
+
+- [Compressed tracks](/quest/m1/compress/README.md) - the per-group compression the wrapper applies before AEAD

@@ -46,13 +46,18 @@ Decisions (maintainer, 2026-10-13):
   and run uncached.
 - Decided 2026-10-19: the merge queue is trusted like `main`, since a queued
   PR is about to land. Rust cache writers are the jobs on `main` and in its
-  queue, and no separate warm rebuilds what landed.
+  queue, and no separate warm rebuilds what landed. Since
+  [#6040](https://github.com/moq-dev/moq/pull/6040) the queue runs on the
+  self-hosted `moq-queue` runner with mbx's local store, so the R2 writers are
+  the hosted Nightly jobs on `main`.
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
-  Reopened 2026-10-19, conditionally: [faster runners](/quest/m0/ci/runners.md)
-  compares it again once the pipeline is optimized. Since 2026-10-20 the
-  queue runs on the persistent `nix/runner` VM; that quest records its
-  measurements.
+  Reopened 2026-10-19, conditionally, to compare runners once the pipeline
+  was optimized. Decided 2026-10-22 (maintainer): the queue runner is the
+  persistent `nix/runner` VM (no host mounts or tailnet, firewalled to public
+  egress), in use since 2026-10-20. Over 32 one-pass entries it took a median
+  5.5 minutes per merged PR (p90 11.9, at most 24.2) against 21 minutes on a
+  hosted runner, with no per-minute bill. Blacksmith is not pursued.
 
 Decided 2026-10-15: local CPU admission, test-cost reductions, and setup
 reductions are all m0. `quest gate` owns generic command admission; repositories
@@ -77,7 +82,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 - [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
-- [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - condition: the maintainer bootstrap; then measure hits, restore time, and expiry
+- [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
+- [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first `moq-ffi-v*` tag that runs `Release FFI`, and a `Shipping sizes` run; verify the wrappers and size keys
-- [Faster runners](/quest/m0/ci/runners.md) - pick hosted, Blacksmith or the NixOS desktop from measurements of the optimized queue

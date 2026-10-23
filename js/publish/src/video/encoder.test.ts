@@ -269,7 +269,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 
 // Step through 40 back-to-back probes, which outlasts any chain of re-probes a test triggers.
 async function settle(): Promise<void> {
-	for (let i = 0; i < 40; i++) await clock.advanceAsync(PROBE);
+	for (let i = 0; i < 40; i++) await clock.advance(PROBE);
 }
 
 // The codec probe only speaks for the codec and coded-size ceiling it ran against. Those live in
@@ -637,7 +637,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 
 		for (const millis of [0, 33, 66]) {
 			controller.enqueue(new Frame(millis * 1000) as unknown as VideoFrame);
-			await clock.advanceAsync(PROBE);
+			await clock.advance(PROBE);
 		}
 		expect(encoded.filter((frame) => frame.black)).toEqual([]);
 
@@ -962,7 +962,7 @@ async function recordKeyframes(
 
 	const send = async (millis: number) => {
 		controller.enqueue(new Frame(millis * 1000) as unknown as VideoFrame);
-		await clock.advanceAsync(PROBE);
+		await clock.advance(PROBE);
 	};
 
 	try {
@@ -1216,7 +1216,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 	});
 	const send = async (millis: number) => {
 		controller.enqueue(new Frame(millis * 1000) as unknown as VideoFrame);
-		await clock.advanceAsync(PROBE);
+		await clock.advance(PROBE);
 	};
 
 	try {

@@ -28,12 +28,11 @@ Boundaries:
 Decided with the maintainer on 2026-10-21, from an inventory of the
 coverage on `main` at `3ab6cbf81d`.
 
-- `just test interop` is moq-lite only today: the AUTH clients pin
-  `moq-lite-07-wip` and the rest default to lite. moq-transport is covered
-  only by in-process codec tests (`rs/moq-net/src/test_interop.rs`), the
-  public relays page (published clients), and the Cloudflare and Moxygen
-  smoke lanes. The [IETF matrix](/quest/m1/interop-coverage/ietf-matrix.md)
-  comes first; every new case runs on it.
+- `just test interop --versions ietf` runs the matrix on each even draft;
+  every new case runs on it. Beyond it, moq-transport is covered by
+  in-process codec tests (`rs/moq-net/src/test_interop.rs`), the public
+  relays page (published clients), and the Cloudflare and Moxygen smoke
+  lanes.
 - Even drafts only (14, 16, 18, 20, 22), nightly.
 - Case ranking follows interop bug history: subgroup data and namespace
   discovery, then late join and FETCH, then GOAWAY, TRACK_STATUS,
@@ -41,12 +40,12 @@ coverage on `main` at `3ab6cbf81d`.
 
 ## Required
 
-- [IETF matrix](/quest/m1/interop-coverage/ietf-matrix.md) - every interop client pair exchanges hang media over moq-transport through moq-relay
-- [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - our runner clients run data-subgroup-basic and subscribe-namespace-lifecycle
+- [JS namespace lifecycle](/quest/m1/interop-coverage/js-namespace-done.md) - moq-dev-js subscribe-namespace-lifecycle sees NAMESPACE_DONE with publisher and subscriber in one process
+- [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md) - moq-dev-js data-subgroup-basic passes against imquic, or the cell is classified with imquic's split-header bug reported upstream
 - [Late join and FETCH](/quest/m1/interop-coverage/late-join.md) - a late subscriber gets the current group from object 0, and a standalone FETCH returns a past group exactly
-- [Control cases](/quest/m1/interop-coverage/control.md) - GOAWAY redirect, TRACK_STATUS, datagrams, and request-ID limits pass across implementations
 
 ## Related
 
-- [Interop audit](/quest/m0/audit-interop.md) - classifies the red cells these cases produce
+- [Runner client bump](/quest/m2/release/runner-client-bump.md) - after the cut publishes #5083, the runner's Rust client stops stamping every object
+- [Interop audit](/quest/m1/audit-interop.md) - classifies the red cells these cases produce
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - Moxygen's moq-test conformance through moq-relay

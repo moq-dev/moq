@@ -4,11 +4,12 @@
  * @module
  */
 import { encodeVarint, Reader } from "../stream.ts";
-import { type Version, wireTimescale } from "./version.ts";
+import { hasCompression, type Version, wireTimescale } from "./version.ts";
 
 /**
- * A QUIC datagram body: `subscribe (i) | sequence (i) | [timestamp (i)] | payload (b)`, with the
- * timestamp present only when the subscription's track carries one (see `wireTimescale`).
+ * A QUIC datagram body: `subscribe (i) | sequence (i) | [timestamp (i)] | [inflated (i)] | payload (b)`, with the
+ * timestamp present only when the subscription's track carries one (see `wireTimescale`),
+ * and the inflated size only on a compressed lite-07 track.
  *
  * The payload runs to the datagram boundary, so unlike a size-prefixed lite message there is no
  * inner length prefix. Mirrors the Rust `lite::Datagram`; the model counterpart is
@@ -23,6 +24,8 @@ export class Datagram {
 	timestamp: number | undefined;
 	/** The frame payload, delimited by the datagram boundary. */
 	payload: Uint8Array;
+	/** Plain payload length on a compressed lite-07 track. */
+	inflated?: number;
 
 	constructor(subscribe: bigint, sequence: number, timestamp: number | undefined, payload: Uint8Array) {
 		this.subscribe = subscribe;
@@ -38,12 +41,19 @@ export class Datagram {
 			throw new Error(`version ${version} has no untimed datagram`);
 		}
 
+		if (this.inflated !== undefined && !hasCompression(version))
+			throw new Error("compressed datagram needs lite-07");
+		const inflated = this.inflated === undefined ? new Uint8Array() : encodeVarint(this.inflated, version);
 		const subscribe = encodeVarint(this.subscribe, version);
 		const sequence = encodeVarint(this.sequence, version);
 		const timestamp = this.timestamp === undefined ? new Uint8Array() : encodeVarint(this.timestamp, version);
 
 		const out = new Uint8Array(
-			subscribe.byteLength + sequence.byteLength + timestamp.byteLength + this.payload.byteLength,
+			subscribe.byteLength +
+				sequence.byteLength +
+				timestamp.byteLength +
+				inflated.length +
+				this.payload.byteLength,
 		);
 		let offset = 0;
 		out.set(subscribe, offset);
@@ -52,6 +62,8 @@ export class Datagram {
 		offset += sequence.byteLength;
 		out.set(timestamp, offset);
 		offset += timestamp.byteLength;
+		out.set(inflated, offset);
+		offset += inflated.length;
 		out.set(this.payload, offset);
 		return out;
 	}
@@ -60,12 +72,20 @@ export class Datagram {
 	 * Decode a datagram body from the raw bytes of one QUIC datagram. `timed` reports whether the
 	 * track of the given subscribe ID carries a timestamp, which the body itself does not say.
 	 */
-	static async decode(data: Uint8Array, version: Version, timed: (subscribe: bigint) => boolean): Promise<Datagram> {
+	static async decode(
+		data: Uint8Array,
+		version: Version,
+		framing: (subscribe: bigint) => { timed: boolean; compressed?: boolean },
+	): Promise<Datagram> {
 		const r = new Reader(undefined, data, version);
 		const subscribe = await r.u62();
 		const sequence = await r.u53();
-		const timestamp = timed(subscribe) ? await r.u53() : undefined;
+		const { timed, compressed } = framing(subscribe);
+		const timestamp = timed ? await r.u53() : undefined;
+		const inflated = hasCompression(version) && compressed ? await r.u53() : undefined;
 		const payload = await r.readAll();
-		return new Datagram(subscribe, sequence, timestamp, payload);
+		const result = new Datagram(subscribe, sequence, timestamp, payload);
+		result.inflated = inflated;
+		return result;
 	}
 }

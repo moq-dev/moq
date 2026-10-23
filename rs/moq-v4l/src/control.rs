@@ -5,7 +5,6 @@ use std::{ffi, fmt, mem, str};
 use crate::sys::*;
 
 /// Control data type
-#[allow(clippy::unreadable_literal)]
 #[rustfmt::skip]
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -64,7 +63,6 @@ impl fmt::Display for Type {
 }
 
 bitflags! {
-	#[allow(clippy::unreadable_literal)]
 	#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 	pub struct Flags: u32 {
 		const DISABLED              = 0x0001;

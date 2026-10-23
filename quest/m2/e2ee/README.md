@@ -35,7 +35,7 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 - A core produces only under an epoch it minted itself (decided 2026-10-08). Only `credential.produce()` mints a producing generation, and it takes no epoch: it mints a fresh UUIDv7 and returns a `generation::Producer` owning `epoch()` for the route and `name(semantic)` for opaque track names. `credential.consume(epoch)` binds a discovered epoch as a consume-only `generation::Consumer` with `name(semantic)`. The two are separate types, so producing under a discovered or shared epoch does not compile (names decided 2026-10-11 in [#5313](https://github.com/moq-dev/moq/pull/5313)). Clones of a producing generation share publisher claims so reopening a track cannot reset its nonce counters.
 - Applications only handle semantic track names (maintainer, 2026-10-17). `broadcast::Producer` wraps a `moq-net` broadcast under a producing generation and `broadcast::Consumer` wraps one under a consuming generation; each derives the physical name, so only the CDN sees physical names. `generation` no longer opens tracks itself. The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876).
 - The wrappers implement the [moq-net traits](/quest/m2/net-wrap/README.md) at the broadcast, track, group, and frame levels, datagrams included (decided 2026-10-20, maintainer, because one encrypted broadcast then works with every writer and reader). moq-mux, moq-json, hang, and the CLI publish and consume an encrypted broadcast unchanged, under semantic names, and every AEAD call still has the canonical physical name and transport identity. The e2ee mux bridge ([#5822](https://github.com/moq-dev/moq/pull/5822)) is closed and superseded.
-- Errors are the draft's typed codes plus the transport's. Nothing catalog-, hang-, or MSF-shaped lives here: a catalog is a track under a derived name, and compression is the catalog owner's job.
+- Errors are the draft's typed codes plus the transport's. Nothing catalog-, hang-, or MSF-shaped lives here: a catalog is a track under a derived name. The catalog owner sets logical `track::Info.compress`; the [e2ee wrapper](/quest/m2/net-wrap/e2ee.md) compresses before AEAD and authenticates the logical compression metadata.
 - Stateless `seal`/`open` primitives with caller-chosen identities, HKDF labels and info builders, raw key bytes, and process-global claims are not public. The vectors are tested inside each core.
 
 ### Application and platform shape
@@ -66,6 +66,9 @@ Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
+- [One epoch, one producer](/quest/m2/e2ee/lifecycle-hardening.md) - the epoch rule
+  holds in the TypeScript API, a failed grouped write ends the group, and an
+  out-of-range datagram is dropped
 
 ## Closes
 

@@ -260,8 +260,8 @@ impl MoqBandwidthConsumer {
 
 #[uniffi::export]
 impl MoqBandwidthConsumer {
-	/// Read the current estimate in bits per second, or None while unavailable.
-	pub fn peek(&self) -> Option<u64> {
+	/// The current estimate in bits per second, or None while unavailable.
+	pub fn rate(&self) -> Option<u64> {
 		self.inner
 			.lock()
 			.unwrap()
@@ -270,8 +270,9 @@ impl MoqBandwidthConsumer {
 			.map(moq_net::bandwidth::Rate::as_bps)
 	}
 
-	/// Wait for the estimate to change, returning an error when its producer closes.
-	pub async fn changed(&self) -> Result<Option<u64>, MoqError> {
+	/// Wait for the estimate to change and return the new [`rate`](Self::rate), erroring when
+	/// its producer closes.
+	pub async fn rate_changed(&self) -> Result<Option<u64>, MoqError> {
 		self.changed
 			.run(|_guard| async move {
 				moq_net::kio::wait(|waiter| {
@@ -304,12 +305,12 @@ mod consumer_tests {
 	};
 
 	#[tokio::test]
-	async fn owned_consumer_peeks_while_waiting_and_cancel_releases_demand() {
+	async fn owned_consumer_reads_while_waiting_and_cancel_releases_demand() {
 		tokio::time::pause();
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
 		assert!(producer.is_used());
-		let mut changed = std::pin::pin!(consumer.changed());
+		let mut changed = std::pin::pin!(consumer.rate_changed());
 		assert!(
 			changed
 				.as_mut()
@@ -317,9 +318,9 @@ mod consumer_tests {
 				.is_pending()
 		);
 		producer.set(Some(moq_net::bandwidth::Rate::from_bps(123))).unwrap();
-		assert_eq!(consumer.peek(), Some(123));
+		assert_eq!(consumer.rate(), Some(123));
 		assert_eq!(changed.await.unwrap(), Some(123));
-		let mut changed = std::pin::pin!(consumer.changed());
+		let mut changed = std::pin::pin!(consumer.rate_changed());
 		assert!(
 			changed
 				.as_mut()
@@ -328,7 +329,7 @@ mod consumer_tests {
 		);
 		consumer.cancel();
 		assert!(!producer.is_used());
-		assert_eq!(consumer.peek(), None);
+		assert_eq!(consumer.rate(), None);
 		assert!(matches!(changed.await, Err(MoqError::Cancelled)));
 	}
 
@@ -347,6 +348,6 @@ mod consumer_tests {
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
 		producer.abort(moq_net::Error::Cancel).unwrap();
-		assert!(matches!(consumer.changed().await, Err(MoqError::Cancelled)));
+		assert!(matches!(consumer.rate_changed().await, Err(MoqError::Cancelled)));
 	}
 }

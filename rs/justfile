@@ -46,6 +46,9 @@ check-test *args:
 lint *args:
     python3 sh/rs/stats-docs.py
     python3 sh/rs/model-markers.py
+    # The environment is process-wide, so nothing writes it. A text check, because the
+    # clock lint's test allowances also silence clippy's disallowed_methods.
+    git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs'; [ $? -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
     cargo fmt --all --check
     # quinn-udp and quinn keep quinn's formatting; cargo fmt skips them (see moq-sock's lib.rs, moq-tokio's quic.rs).
     rustfmt --edition 2024 --check rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs
@@ -117,6 +120,8 @@ uring-changed base="":
 uring *args:
     just rs uring-check "$@"
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --tests "$@"
+    # Needs a second IPv6 address on lo, which the io_uring CI lanes add.
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --test integration --run-ignored only -E 'test(=local_addr::a_v6_wildcard_answers_from_the_address_reached)' "$@"
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --tests "$@"
 
@@ -197,7 +202,7 @@ android *args:
 wasm *args:
     cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@" -- -D warnings
 
-# Run the browser clock backend on the Playwright Chromium installed by wasm.yml,
+# Run the browser clock backend on the root devShell's Playwright Chromium,
 # with the runtime and with reads alone.
 wasm-test:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown
@@ -453,9 +458,9 @@ gst-smoke *args:
 bench-feed-fetch *args:
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-net --lib --run-ignored only -E 'test(benchmark_feed_fetch_wakes)' --success-output immediate "$@"
 
-# Device-free mixer cost, swept over sink count and frames per callback.
+# Device-free mixer and resampler cost, swept over fanout, packetization, and layout.
 bench-playback:
-    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks)' --success-output immediate
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler)' --success-output immediate
 
 # Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
 [positional-arguments]

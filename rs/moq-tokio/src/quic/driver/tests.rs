@@ -7,7 +7,7 @@ use rustls::crypto::ring::default_provider;
 
 use std::{
     convert::TryInto,
-    future::Future,
+    future::{Future, poll_fn},
     io::{self, IoSliceMut},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     pin::{Pin, pin},
@@ -21,7 +21,7 @@ use std::{
 
 use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender, wrap_udp_socket};
 use crate::quic::driver::{Duration, Instant};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use moq_quic::{
     ConnectionId, RandomConnectionIdGenerator,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
@@ -44,7 +44,7 @@ use tracing::{error_span, info};
 use tracing_subscriber::EnvFilter;
 
 use super::{
-    ClientConfig, Credit, Endpoint, EndpointConfig, ReadError, ReadToEndError, RecvStream,
+    ClientConfig, Connection, Endpoint, EndpointConfig, ReadError, ReadToEndError, RecvStream,
     SendStream, TransportConfig, VarInt,
 };
 
@@ -1531,6 +1531,51 @@ async fn remote_address_monitoring() {
     client_conn.close(0u32.into(), b"done");
 }
 
+/// A send group from another connection panics where it is passed in, without poisoning the
+/// connection's lock: a poisoned lock panics again in every handle's drop, aborting the process.
+#[tokio::test]
+async fn foreign_send_group_panics_cleanly() {
+    use futures::FutureExt;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let connect = || async {
+        tokio::try_join!(
+            endpoint
+                .connect(endpoint.local_addr().unwrap(), "localhost")
+                .unwrap(),
+            async { endpoint.accept().await.unwrap().await }
+        )
+        .unwrap()
+    };
+    let (conn, server_conn) = connect().await;
+    let (other, _other_server) = connect().await;
+    let group = other.send_group(0);
+    let options = super::SendOptions {
+        group: Some(&group),
+        priority: 0,
+    };
+
+    let uni = AssertUnwindSafe(conn.open_uni(options)).catch_unwind();
+    assert!(uni.await.is_err(), "open_uni accepted a foreign group");
+    let bi = AssertUnwindSafe(conn.open_bi(options)).catch_unwind();
+    assert!(bi.await.is_err(), "open_bi accepted a foreign group");
+    let datagram = catch_unwind(AssertUnwindSafe(|| {
+        conn.send_datagram(Bytes::from_static(b"x"), options)
+    }));
+    assert!(datagram.is_err(), "send_datagram accepted a foreign group");
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    let set = catch_unwind(AssertUnwindSafe(|| send.set_group(Some(&group))));
+    assert!(set.is_err(), "set_group accepted a foreign group");
+
+    // The connection still works, and its handles drop without panicking.
+    send.write_all(b"after").await.unwrap();
+    send.finish().unwrap();
+    let mut recv = server_conn.accept_uni().await.unwrap();
+    assert_eq!(recv.read_to_end(usize::MAX).await.unwrap(), b"after");
+}
+
 #[tokio::test]
 async fn stream_id_flow_control() {
     let _guard = subscribe();
@@ -1789,6 +1834,169 @@ async fn finished_send_stream_survives_drop() {
     assert_eq!(data, b"complete");
 }
 
+/// Connects `endpoint` to itself, returning the client and server sides
+async fn connect_self(endpoint: &Endpoint) -> (Connection, Connection) {
+    tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap()
+}
+
+/// Wait until the peer's STOP_SENDING has been processed
+async fn stop_sending_received(conn: &Connection) {
+    timeout(Duration::from_secs(10), async {
+        while conn.stats().frame_rx.stop_sending == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("no STOP_SENDING arrived");
+}
+
+/// A peer's stop code that arrived before a local reset still wins
+#[tokio::test]
+async fn stream_stop_before_reset_wins() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    let mut recv = server.accept_uni().await.unwrap();
+    recv.stop(5u32.into()).unwrap();
+    stop_sending_received(&conn).await;
+
+    send.reset(7u32.into()).unwrap();
+    let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+    assert_eq!(stopped, Ok(Ok(Some(5u32.into()))));
+}
+
+/// A STOP_SENDING that arrives after a local reset no longer counts
+#[tokio::test]
+async fn stream_stop_after_reset_is_ignored() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    let mut recv = server.accept_uni().await.unwrap();
+    // Neither side runs in between, so the peer stops a stream it hasn't seen reset yet.
+    send.reset(7u32.into()).unwrap();
+    recv.stop(5u32.into()).unwrap();
+    stop_sending_received(&conn).await;
+
+    let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+    assert_eq!(stopped, Ok(Ok(None)));
+}
+
+/// A stop code that arrived first still wins once the reset stream is freed before the waiter polls
+#[tokio::test]
+async fn stream_stop_survives_freed_reset() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    let stopped = send.stopped();
+    let mut recv = server.accept_uni().await.unwrap();
+    recv.stop(5u32.into()).unwrap();
+    stop_sending_received(&conn).await;
+
+    send.reset(7u32.into()).unwrap();
+    let id = send.id();
+    timeout(Duration::from_secs(10), async {
+        while !conn.send_stream_freed(id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reset stream was never freed");
+    let stopped = timeout(Duration::from_secs(10), stopped).await;
+    assert_eq!(stopped, Ok(Ok(Some(5u32.into()))));
+}
+
+/// A local reset resolves `stopped`, though no stream event reports it
+#[tokio::test]
+async fn stream_reset_resolves_stopped() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    send.reset(7u32.into()).unwrap();
+    let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+    assert_eq!(stopped, Ok(Ok(None)));
+}
+
+#[tokio::test]
+async fn stream_reset_at_resolves_stopped() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    send.reset_at(2, 7u32.into()).unwrap();
+    let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+    assert_eq!(stopped, Ok(Ok(None)));
+}
+
+/// `stopped` futures made before a reset resolve on it, whether or not they were polled yet
+#[tokio::test]
+async fn stream_stopped_pending_across_reset() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    let unpolled = send.stopped();
+    let polled = tokio::spawn(send.stopped());
+    tokio::task::yield_now().await;
+    assert!(!polled.is_finished());
+    send.reset(7u32.into()).unwrap();
+    let polled = timeout(Duration::from_secs(10), polled).await;
+    assert_eq!(polled.expect("polled never resolved").unwrap(), Ok(None));
+    let unpolled = timeout(Duration::from_secs(10), unpolled).await;
+    assert_eq!(unpolled, Ok(Ok(None)));
+}
+
+/// A `stopped` future outliving its stream resolves on the drop reset
+#[tokio::test]
+async fn dropped_stream_resolves_stopped() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"truncated").await.unwrap();
+    let stopped = send.stopped();
+    drop(send);
+    let stopped = timeout(Duration::from_secs(10), stopped).await;
+    assert_eq!(stopped, Ok(Ok(None)));
+    assert_eq!(conn.stopped_waiters(), 0);
+}
+
+/// A reset releases the stream's `stopped` waiters, even one dropped while pending
+#[tokio::test]
+async fn stream_reset_releases_stopped() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    {
+        let mut stopped = pin!(send.stopped());
+        let poll = std::future::poll_fn(|cx| Poll::Ready(stopped.as_mut().poll(cx))).await;
+        assert!(poll.is_pending());
+    }
+    assert_eq!(conn.stopped_waiters(), 1);
+    send.reset(7u32.into()).unwrap();
+    assert_eq!(conn.stopped_waiters(), 0);
+    // Answered at once, without registering a waiter for a stream that will never report
+    drop(send.stopped());
+    assert_eq!(conn.stopped_waiters(), 0);
+}
+
 #[tokio::test]
 async fn stream_drop_removes_blocked_reader() {
     let _guard = subscribe();
@@ -1929,10 +2137,10 @@ async fn dropped_connection_cleans_up() {
     endpoint.wait_idle().await;
 }
 
-/// Held reads keep the connection window spent until their credit drops, while a stream window
-/// far smaller than it keeps replenishing; credit outlives its stream.
+/// Leases keep the connection window spent until consumed, while a stream window far smaller
+/// than it keeps replenishing; a lease outlives its stream.
 #[tokio::test]
-async fn held_reads_spend_the_connection_window() {
+async fn leases_spend_the_connection_window() {
     const WINDOW: usize = 32 * 1024;
     let _guard = subscribe();
     let mut transport = TransportConfig::default();
@@ -1949,43 +2157,116 @@ async fn held_reads_spend_the_connection_window() {
     .unwrap();
     let mut send = client.open_uni(Default::default()).await.unwrap();
     let writer = tokio::spawn(async move {
-        // The receiver walks away before this finishes.
-        let _ = send.write_all(&[7; 4 * WINDOW]).await;
+        send.write_all(&[7; WINDOW + 500]).await.unwrap();
+        send.finish().unwrap();
     });
 
     let mut recv = server.accept_uni().await.unwrap();
-    let mut buf = vec![0; WINDOW];
-    let mut held = read_held_exact(&mut recv, &mut buf).await;
-    assert_eq!(held.len(), WINDOW as u64);
+    assert_eq!(leased(&mut recv, WINDOW).await, WINDOW);
     let stats = server.stats().credit;
-    assert_eq!((stats.held, stats.available), (WINDOW as u64, 0));
+    assert_eq!((stats.leased, stats.available), (WINDOW as u64, 0));
 
     // Far below the usual update threshold, and still enough to unblock.
-    drop(held.split(100));
-    held.merge(read_held_exact(&mut recv, &mut buf[..100]).await);
-    assert_eq!(server.stats().credit.held, WINDOW as u64);
+    consume(&mut recv, 100).await;
+    assert_eq!(leased(&mut recv, WINDOW).await, WINDOW);
+    assert_eq!(server.stats().credit.leased, WINDOW as u64);
 
-    drop(held);
-    let tail = read_held_exact(&mut recv, &mut buf[..500]).await;
-    drop(recv);
-    assert_eq!(
-        server.stats().credit.held,
-        500,
-        "credit outlives its stream"
-    );
-    drop(tail);
-    assert_eq!(server.stats().credit.held, 0);
+    consume(&mut recv, WINDOW).await;
+    assert_eq!(leased(&mut recv, 400).await, 400);
+    let fin = poll_fn(|cx| recv.poll_lease(cx, 401).map_ok(|lease| lease.is_fin())).await;
+    assert!(fin.unwrap(), "the FIN ends a wait for more");
     writer.await.unwrap();
+    assert_eq!(
+        server.stats().credit.leased,
+        400,
+        "a lease outlives its stream"
+    );
+    drop(recv);
+    assert_eq!(server.stats().credit.leased, 0);
 }
 
-/// Fill `buf` with held reads, returning the credit for all of it.
-async fn read_held_exact(recv: &mut RecvStream, buf: &mut [u8]) -> Credit {
-    let mut held = recv.read_held(buf).await.unwrap().unwrap();
-    while (held.len() as usize) < buf.len() {
-        let read = held.len() as usize;
-        held.merge(recv.read_held(&mut buf[read..]).await.unwrap().unwrap());
+/// Two readers each waiting for more than the window can give both: the lower-priority stream
+/// is evicted, and the other gets the window to itself.
+#[tokio::test]
+async fn stuck_window_evicts_the_lower_priority() {
+    const WINDOW: usize = 32 * 1024;
+    let _guard = subscribe();
+    let mut transport = TransportConfig::default();
+    transport.receive_window((WINDOW as u32).into());
+    // Short of the window, so the first stream cannot keep the second from arriving.
+    transport.stream_receive_window((WINDOW as u32 / 4 * 3).into());
+    let endpoint = endpoint_with_config(transport);
+
+    let (client, server) = tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap();
+    let writers = [
+        client.open_uni(Default::default()).await.unwrap(),
+        client.open_uni(Default::default()).await.unwrap(),
+    ]
+    .map(|mut send| {
+        let id = send.id();
+        let writer = tokio::spawn(async move {
+            // Queuing the whole write and FIN can succeed before the peer evicts the stream.
+            // Only the peer's final outcome proves whether it was stopped.
+            if send.write_all(&[7; WINDOW]).await.is_ok() {
+                send.finish().unwrap();
+            }
+            send.stopped().await.unwrap()
+        });
+        (id, writer)
+    });
+
+    let mut low = server.accept_uni().await.unwrap();
+    let mut high = server.accept_uni().await.unwrap();
+    low.set_priority(-1);
+    high.set_priority(1);
+    let leased = tokio::join!(
+        poll_fn(|cx| low.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())),
+        poll_fn(|cx| high.poll_lease(cx, WINDOW).map_ok(|mut lease| {
+            let len = lease.remaining();
+            lease.advance(len);
+            lease.release();
+            len
+        })),
+    );
+    assert_eq!(leased, (Err(ReadError::Evicted), Ok(WINDOW)));
+
+    let low_id = low.id();
+    // The peer hears of the eviction once the stream is stopped. Drain the survivor to FIN
+    // instead of dropping unread data, which would stop that stream too.
+    drop(low);
+    assert!(
+        poll_fn(|cx| high.poll_lease(cx, 1).map_ok(|lease| lease.is_fin()))
+            .await
+            .unwrap()
+    );
+    for (id, writer) in writers {
+        assert_eq!(writer.await.unwrap(), (id == low_id).then(|| 0u32.into()));
     }
-    held
+}
+
+/// Wait until `recv` leases at least `want` bytes, returning how many it leased.
+async fn leased(recv: &mut RecvStream, want: usize) -> usize {
+    poll_fn(|cx| recv.poll_lease(cx, want).map_ok(|lease| lease.remaining()))
+        .await
+        .unwrap()
+}
+
+/// Consume the first `n` leased bytes of `recv`.
+async fn consume(recv: &mut RecvStream, n: usize) {
+    poll_fn(|cx| {
+        recv.poll_lease(cx, n).map_ok(|mut lease| {
+            lease.advance(n);
+            lease.release();
+        })
+    })
+    .await
+    .unwrap()
 }
 
 #[derive(Default)]

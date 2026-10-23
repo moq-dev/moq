@@ -25,6 +25,10 @@ impl codec::Bridge for Bridge {
 		self.import.decode(frame.payload, pts)
 	}
 
+	fn finish(&mut self) -> Result<()> {
+		self.import.finish()
+	}
+
 	fn abort(self: Box<Self>, err: moq_net::Error) {
 		self.import.abort(err);
 	}

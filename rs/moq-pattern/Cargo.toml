@@ -28,3 +28,6 @@ serde_json = { workspace = true }
 [[bench]]
 name = "matching"
 harness = false
+
+[lints]
+workspace = true

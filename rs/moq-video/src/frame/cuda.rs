@@ -570,4 +570,9 @@ impl Slot {
 
 #[cfg(test)]
 #[path = "cuda_test.rs"]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests;

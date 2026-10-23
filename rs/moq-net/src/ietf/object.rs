@@ -71,6 +71,7 @@ pub(crate) struct Decoded {
 	pub properties: Properties,
 	pub timestamp: Option<Timestamp>,
 	pub gap: Option<u64>,
+	pub inflated: Option<u64>,
 }
 
 /// The largest properties block an object may carry, which a relay forwards unchanged.
@@ -105,6 +106,8 @@ struct List {
 	time: Option<u64>,
 	gap: Option<u64>,
 	sealed_time: Option<u64>,
+	inflated: Option<u64>,
+	sealed_inflated: Option<u64>,
 	immutable: bool,
 }
 
@@ -118,6 +121,8 @@ fn list(data: &Bytes, version: Version, immutable: bool, lift: bool) -> Result<L
 		time: None,
 		gap: None,
 		sealed_time: None,
+		inflated: None,
+		sealed_inflated: None,
 		immutable: false,
 	};
 	let mut previous = 0u64;
@@ -131,6 +136,9 @@ fn list(data: &Bytes, version: Version, immutable: bool, lift: bool) -> Result<L
 		let value = if id % 2 == 0 {
 			let value = decoder.varint()?;
 			if id == 0x3e && result.gap.replace(value).is_some() {
+				return Err(Error::MalformedTrack);
+			}
+			if id == super::flate::INFLATED && result.inflated.replace(value).is_some() {
 				return Err(Error::MalformedTrack);
 			}
 			if id == 0x10 {
@@ -155,6 +163,12 @@ fn list(data: &Bytes, version: Version, immutable: bool, lift: bool) -> Result<L
 				}
 				let nested = list(&bytes, version, true, true).map_err(|_| Error::MalformedTrack)?;
 				result.sealed_time = nested.time;
+				result.sealed_inflated = nested.inflated;
+				if let Some(size) = nested.inflated
+					&& result.inflated.replace(size).is_some()
+				{
+					return Err(Error::MalformedTrack);
+				}
 				result.time = result.time.or(nested.time);
 				if let Some(gap) = nested.gap
 					&& result.gap.replace(gap).is_some()
@@ -252,6 +266,40 @@ fn timed(value: Option<u64>, timescale: Option<Timescale>) -> Result<Option<Time
 		.transpose()
 }
 
+/// Restate an object's known size declaration, preserving sealed declarations verbatim.
+pub(super) fn compression(data: Vec<u8>, version: Version, inflated: Option<u64>) -> Result<Vec<u8>, Error> {
+	if data.is_empty() && inflated.is_none() {
+		return Ok(data);
+	}
+	let mut parsed = list(&Bytes::from(data), version, false, false)?;
+	if let Some(sealed) = parsed.sealed_inflated {
+		return match inflated == Some(sealed) {
+			true => serialize(&parsed.values, version),
+			false => Err(Error::Unsupported),
+		};
+	}
+	parsed.values.retain(|p| p.id != super::flate::INFLATED);
+	if let Some(size) = inflated {
+		parsed.values.push(Property {
+			id: super::flate::INFLATED,
+			value: Value::Int(size),
+		});
+	}
+	let out = serialize(&parsed.values, version)?;
+	if out.len() > MAX_BLOCK {
+		return Err(Error::Unsupported);
+	}
+	Ok(out)
+}
+
+/// A compressed frame must declare its inflated size; a plain frame must not.
+pub(super) fn inflated(size: Option<u64>, compressed: bool) -> Result<Option<u64>, Error> {
+	if size.is_some() != compressed {
+		return Err(Error::MalformedTrack);
+	}
+	Ok(size)
+}
+
 /// Every property a block from a `version` publisher holds, decoded, for tests to inspect.
 #[cfg(test)]
 pub(crate) fn listed(properties: &Properties, version: Version) -> Vec<Property> {
@@ -279,12 +327,19 @@ pub(crate) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>)
 /// on a track in `timescale`. No frame holds its time, so a mutable Timestamp stays in the
 /// block, as on an untimed track.
 pub(crate) fn unframed(data: &Bytes, version: Version, timescale: Option<Timescale>) -> Result<Properties, Error> {
-	Ok(decode(data, version, timescale, false)?.properties)
+	let decoded = decode(data, version, timescale, false)?;
+	if decoded.inflated.is_some() {
+		return Err(Error::MalformedTrack);
+	}
+	Ok(decoded.properties)
 }
 
 fn decode(data: &Bytes, version: Version, timescale: Option<Timescale>, framed: bool) -> Result<Decoded, Error> {
 	let lifted = timescale.filter(|_| framed);
-	let parsed = list(data, version, false, lifted.is_some())?;
+	let mut parsed = list(data, version, false, lifted.is_some())?;
+	if framed {
+		parsed.values.retain(|p| p.id != super::flate::INFLATED);
+	}
 	let properties = Properties {
 		sealed_time: timed(parsed.sealed_time, timescale)?,
 		block: block(&parsed.values, version)?,
@@ -296,6 +351,7 @@ fn decode(data: &Bytes, version: Version, timescale: Option<Timescale>, framed: 
 		properties,
 		timestamp: timed(parsed.time, timescale)?,
 		gap: parsed.gap,
+		inflated: parsed.inflated,
 	})
 }
 
@@ -636,7 +692,7 @@ mod tests {
 		let decoded = read(&list(limit), Version::Draft22, milli).unwrap();
 		assert_eq!(decoded.properties.heap(), limit as u64);
 		assert!(check_frame(&decoded.properties, milli).is_ok());
-		let latest = Timestamp::new((1 << 62) - 1, Timescale::MILLI).unwrap();
+		let latest = Timestamp::new((1 << 61) - 1, Timescale::MILLI).unwrap();
 		let written = write(
 			&decoded.properties,
 			Some(Version::Draft22),
@@ -807,5 +863,99 @@ mod tests {
 			),
 			Err(Error::Unsupported)
 		));
+	}
+}
+
+#[cfg(test)]
+mod compression_tests {
+	use super::*;
+	#[test]
+	fn inflated_size_is_admitted_before_any_inflate() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast
+			.create_track("data", crate::track::Info::default().with_compress(true))
+			.unwrap();
+		let group = track.append_group().unwrap();
+		let header = crate::frame::Header {
+			info: crate::frame::Info {
+				size: 1,
+				timestamp: None,
+			},
+			fields: None,
+			inflated: inflated(Some(crate::group::MAX_CACHE_BYTES + 1), true).unwrap(),
+		};
+		assert!(matches!(group.create_object(header), Err(Error::FrameTooLarge)));
+	}
+
+	fn property(id: u64, value: u64) -> Property {
+		Property {
+			id,
+			value: Value::Int(value),
+		}
+	}
+	#[test]
+	fn sizes_are_known_and_unknown_properties_survive() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+			let unknown = property(0x8800, 7);
+			let wire = compression(serialize([&unknown], version).unwrap(), version, Some(123)).unwrap();
+			let decoded = read(&wire.into(), version, None).unwrap();
+			assert_eq!(decoded.inflated, Some(123));
+			assert_eq!(listed(&decoded.properties, version), [unknown]);
+			assert_eq!(inflated(Some(0), true).unwrap(), Some(0));
+			assert!(inflated(None, true).is_err());
+			assert!(inflated(Some(0), false).is_err());
+		}
+	}
+	#[test]
+	fn a_status_cannot_declare_an_inflated_size() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+			let size = property(super::super::flate::INFLATED, 0);
+			for value in [
+				size.clone(),
+				Property {
+					id: 0x0b,
+					value: Value::Bytes(serialize([&size], version).unwrap().into()),
+				},
+			] {
+				let wire = serialize([&value], version).unwrap();
+				assert!(matches!(
+					unframed(&wire.into(), version, None),
+					Err(Error::MalformedTrack)
+				));
+			}
+		}
+	}
+
+	#[test]
+	fn sealed_sizes_are_forwarded_or_refused_without_rewriting() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+			let sealed = Property {
+				id: 0x0b,
+				value: Value::Bytes(
+					serialize([&property(super::super::flate::INFLATED, 23)], version)
+						.unwrap()
+						.into(),
+				),
+			};
+			let wire = serialize([&sealed], version).unwrap();
+			let decoded = read(&wire.clone().into(), version, None).unwrap();
+			assert_eq!(decoded.inflated, Some(23));
+			assert!(super::super::flate::egress_object(&decoded.properties, Some(version), true).is_ok());
+			assert!(matches!(
+				super::super::flate::egress_object(&decoded.properties, Some(version), false),
+				Err(Error::Unsupported)
+			));
+			assert_eq!(compression(wire.clone(), version, Some(23)).unwrap(), wire);
+			assert!(matches!(
+				compression(wire.clone(), version, None),
+				Err(Error::Unsupported)
+			));
+			assert!(matches!(
+				compression(wire.clone(), version, Some(24)),
+				Err(Error::Unsupported)
+			));
+			let repeated = serialize([&sealed, &property(super::super::flate::INFLATED, 23)], version).unwrap();
+			assert!(read(&repeated.into(), version, None).is_err());
+		}
 	}
 }

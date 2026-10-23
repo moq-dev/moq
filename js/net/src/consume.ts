@@ -69,7 +69,7 @@ export class BroadcastCache {
 			if (!entries) continue;
 			let best: { identity: object; route: Route } | undefined;
 			for (const entry of entries.values()) {
-				if (!best || compareRouteCandidates(path, entry.route, best.route) < 0) best = entry;
+				if (!best || compareRouteCandidates(path, prefix, entry.route, best.route) < 0) best = entry;
 			}
 			if (best) {
 				const cached = this.#cache.get(path)?.get(best.route.epoch ?? best.identity);

@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { readFileSync } from "node:fs";
 import { Manual, Micro, Milli, Nano, now, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
@@ -180,9 +181,9 @@ type Read = Container.Read;
 // A manual clock installed at `ms`, so parked sleeps only wake when a test advances it.
 function manualAt(ms: number) {
 	const clock = new Manual();
-	clock.advance(Nano.fromMilli(Milli(ms)));
+	clock.jump(Nano.fromMilli(Milli(ms)));
 	const restore = clock.install();
-	return { advance: (by: number) => clock.advanceAsync(Nano.fromMilli(Milli(by))), restore };
+	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), restore };
 }
 function sample(group: number, timestamp: number, keyframe = true): Read {
 	return {
@@ -201,6 +202,8 @@ const gap: Read = { kind: "gap", timestamp: Micro(0), duration: Micro(0) };
 // `reads` stands in for the container consumer, unless `live`, which reads what tests publish into
 // `producer` through real consumers instead.
 async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = [], live = false) {
+	// Load the optional container before the fixture drains only reactive microtasks.
+	if (kind === "cmaf") await import("@moq/hang/cmaf");
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
 	const originalChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
 	const submitted: number[] = [];
@@ -269,7 +272,11 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	});
 	const video = config({ codedWidth: 16, codedHeight: 16, description: "01640028ffe100046764002801000268ee" });
 	if (kind === "cmaf")
-		video.container = { kind, init: Buffer.from(Container.Cmaf.createVideoInitSegment(video)).toString("base64") };
+		video.container = {
+			kind,
+			init: JSON.parse(readFileSync(new URL("../../../hang/src/cmaf/fixtures.json", import.meta.url), "utf8"))
+				.videoInit,
+		};
 	// The catalog's own broadcast, and the one the rendition reads. They differ once only one of
 	// them is republished, as with a rendition's `broadcast` override.
 	let producer = new Moq.Broadcast.Producer();
@@ -295,12 +302,9 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	// an unknown track.
 	const track = live ? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI }) : undefined;
 	const decoder = new Decoder({ source, sync, enabled });
-	// Opened before the reads below, so it observes every one of them.
-	const arrivals = decoder.arrivals();
 	await microtasks();
 	return {
 		decoder,
-		arrivals,
 		delay,
 		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
 		emit: (timestamp: number, index = -1) => frames.at(index)?.(new Picture(timestamp) as unknown as VideoFrame),
@@ -483,7 +487,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.outputs).toEqual(stage === "queued" ? [] : [picture]);
 			const before = playback.decoder.out.frame.peek();
 
-			playback.sync.received(Milli(skipTo), "audio", Milli(5000));
+			playback.sync.received(Milli(skipTo), Milli(5000));
 			playback.release();
 			await microtasks();
 			const due = playback.decoder.out.frame.peek();
@@ -518,7 +522,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.outputs).toEqual([]);
 
 			// "instant" has no cap, so every newer frame skips the playhead without passing over anything.
-			playback.sync.received(Milli(10_000), "video", Nano.toMilli(Nano(now())));
+			playback.sync.received(Milli(10_000), Nano.toMilli(Nano(now())));
 			playback.release();
 			await microtasks();
 
@@ -539,11 +543,6 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		]);
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
-			for (const timestamp of [1, 1.1, 1.2])
-				expect(await playback.arrivals.next()).toMatchObject({
-					kind: "frame",
-					timestamp: Milli(timestamp),
-				});
 			// Rejected payloads were still received, but never counted as frames.
 			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
 		} finally {
@@ -727,11 +726,11 @@ it("a shared audio clock reset cannot present a parked video frame", async () =>
 	}
 });
 
-it("closing the track releases a video wait parked across a reset", async () => {
+it("closing the track releases a parked video wait", async () => {
 	const clock = manualAt(1000);
 	const reads: Read[] = [];
 	const playback = await guardedPlayback("legacy", reads);
-	const waits: Promise<void>[] = [];
+	const waits: Promise<boolean>[] = [];
 	const original = playback.sync.wait.bind(playback.sync);
 	const wait = spyOn(playback.sync, "wait").mockImplementation((timestamp, signal) => {
 		const waiting = original(timestamp, signal);
@@ -746,10 +745,8 @@ it("closing the track releases a video wait parked across a reset", async () => 
 		playback.enabled.set(true);
 		await microtasks();
 		expect(playback.submitted).toEqual([0, 100_000]);
-		playback.sync.reset();
-		await microtasks();
 		expect(waits.map((waiting) => Bun.peek.status(waiting))).toContain("pending");
-		// No frame re-anchors the shared clock, but the closed track must not leave its wait behind.
+		// Nothing moves the shared clock, but the closed track must not leave its wait behind.
 		playback.enabled.set(false);
 		await microtasks();
 		expect(waits.map((waiting) => Bun.peek.status(waiting))).not.toContain("pending");
@@ -870,8 +867,7 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true);
 
-	// The postMessage ring every page without cross-origin isolation plays from, following the
-	// shared delay the way the audio decoder drives the worklet.
+	// The audio ring, following the shared delay the way the audio decoder drives the worklet.
 	const RATE = 48_000;
 	const STEP = 20; // ms of audio inserted and rendered per tick, one Opus frame
 	const samples = (RATE * STEP) / 1000;

@@ -21,8 +21,8 @@ copy's first one.
 
 Found while building SUBSCRIBE_ALL
 ([moq-dev/moq#5931](https://github.com/moq-dev/moq/pull/5931)), which
-patched it for listed tracks only by sending the resolved start as an
-absolute floor (`listed_demand` in `f074d09e7`).
+closed unmerged; its listed-track workaround (sending the resolved start as
+an absolute floor) never reached main.
 
 Decided by the maintainer on 2026-10-19: re-offer when the max age widens,
 with no wire change.

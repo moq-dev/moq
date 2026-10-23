@@ -10,11 +10,11 @@ function openEnum<const Value extends string>(values: readonly Value[]) {
 }
 
 /** Transmission gear, mirrored from the truck's `drive::Gear`. */
-export const GearSchema = z.enum(["neutral", "forward", "reverse"]);
+const GearSchema = z.enum(["neutral", "forward", "reverse"]);
 export type Gear = z.infer<typeof GearSchema>;
 
 /** The drive state the truck is currently honoring. */
-export const DriveStateSchema = z.object({
+const DriveStateSchema = z.object({
 	steering: z.number(),
 	throttle: z.number(),
 	brake: z.number(),
@@ -27,7 +27,7 @@ export type DriveState = z.infer<typeof DriveStateSchema>;
  * +x, speed in m/s. Deliberately not latitude and longitude - see
  * `demo/carla/sim/moq_carla_sim/roadmap.py`.
  */
-export const PoseSchema = z.object({
+const PoseSchema = z.object({
 	x: z.number(),
 	y: z.number(),
 	yaw: z.number(),
@@ -40,12 +40,11 @@ export type Pose = z.infer<typeof PoseSchema>;
  * (longitudinal positive forward, lateral positive right) and yaw rate in
  * deg/s.
  */
-export const MotionSchema = z.object({
+const MotionSchema = z.object({
 	yaw_rate: z.number(),
 	accel_lon: z.number(),
 	accel_lat: z.number(),
 });
-export type Motion = z.infer<typeof MotionSchema>;
 
 /**
  * The truck's most recent contact.
@@ -55,7 +54,7 @@ export type Motion = z.infer<typeof MotionSchema>;
  * viewer who opens the page long after the impact ages it correctly instead of
  * treating the retained snapshot as a fresh crash.
  */
-export const CollisionSchema = z.object({
+const CollisionSchema = z.object({
 	at: z.number(),
 	other: z.string(),
 	impulse: z.number(),
@@ -63,7 +62,7 @@ export const CollisionSchema = z.object({
 export type Collision = z.infer<typeof CollisionSchema>;
 
 /** A camera receive/decode/render latency component echoed by the truck. */
-export const LatencyEntrySchema = z.object({
+const LatencyEntrySchema = z.object({
 	label: z.string(),
 	ms: z.number(),
 });

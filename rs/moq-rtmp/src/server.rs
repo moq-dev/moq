@@ -83,7 +83,7 @@ const PLAY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// the interval between probes. Once a connection is publishing or playing it can
 /// block in a `read` indefinitely, so without keepalive a half-open connection (a
 /// peer that vanished without sending a FIN/RST, e.g. a yanked network cable)
-/// would pin its broadcast (and its first-publisher stream-key slot) forever.
+/// would pin its broadcast forever.
 /// Keepalive lets the kernel surface the dead peer as a read error, tearing the
 /// session down. The values are generous enough not to disturb a healthy but
 /// momentarily quiet connection.
@@ -593,8 +593,8 @@ impl<S: Stream> Publish<S> {
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
 	/// advertise segments that are still fetchable. Lower it when nothing reads history
 	/// and the memory matters.
-	pub fn with_max_age(mut self, max_age: Option<Duration>) -> Self {
-		self.max_age = max_age;
+	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
+		self.max_age = max_age.into();
 		self
 	}
 
@@ -615,6 +615,12 @@ impl<S: Stream> Publish<S> {
 	/// relay's shared origin, optionally re-rooted/scoped per the authenticated
 	/// token). This future resolves when the connection ends, so callers usually
 	/// run it on its own task.
+	///
+	/// A client that unpublishes (`deleteStream`) ends cleanly: the finished broadcast
+	/// stays up until its media is stale, so subscribers still catching up drain the tail,
+	/// and the future resolves after that. Dropping the future ends the linger early, as
+	/// does a newer publish at `path`. A connection that drops without unpublishing
+	/// closes the broadcast at once.
 	pub async fn accept(mut self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
 		// Reserve the broadcast path before telling the client the publish succeeded:
@@ -657,19 +663,34 @@ impl<S: Stream> Publish<S> {
 		)
 		.await;
 
-		match &result {
-			// Clean end: flush so the final groups close cleanly before unannouncing.
-			Ok(()) => {
-				if let Err(err) = publisher.finish() {
-					tracing::debug!(peer = %self.peer, %err, "error finishing RTMP publish");
+		let peer = self.peer;
+		match result {
+			// A clean end: serve the finished broadcast until its media is stale, so subscribers
+			// still catching up drain the tail. The encoder is done, so hang up on it first.
+			Ok(End::Unpublished) => {
+				drop(self.stream);
+				match publisher.finish() {
+					Ok(finish) => {
+						tracing::info!(%peer, %path, linger = ?finish.linger(), "rtmp publish ended, serving the finished broadcast until its media is stale");
+						finish.wait().await;
+					}
+					Err(err) => tracing::debug!(%peer, %err, "error finishing RTMP publish"),
 				}
 			}
-			// The pump failed (e.g. the client dropped mid-stream): abort with the
-			// real cause so subscribers see it instead of a bare drop's Error::Dropped.
-			Err(err) => publisher.abort(moq_net::Error::Transport(err.to_string())),
+			// The connection dropped without unpublishing: flush, then close at once.
+			Ok(End::Disconnected) => {
+				if let Err(err) = publisher.close() {
+					tracing::debug!(%peer, %err, "error closing RTMP publish");
+				}
+			}
+			// The pump failed (e.g. the client went silent): abort with the real cause so
+			// subscribers see it instead of a bare drop's Error::Dropped.
+			Err(err) => {
+				publisher.abort(moq_net::Error::Transport(err.to_string()));
+				return Err(err.into());
+			}
 		}
-
-		Ok(result?)
+		Ok(())
 	}
 
 	/// Reject the publish, sending `reason` back to the client as the
@@ -714,9 +735,8 @@ pub struct Play<S = Conn> {
 	tc_url: Option<String>,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one. Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); override with
-	/// [`with_max_delay`](Self::with_max_delay).
-	latency: Duration,
+	/// one; see [`with_max_delay`](Self::with_max_delay).
+	max_delay: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -747,10 +767,9 @@ impl<S: Stream> Play<S> {
 	}
 
 	/// Set the FLV release delay and stalled-group budget.
-	/// Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); zero releases
-	/// available frames immediately without deadline drops.
-	pub fn with_max_delay(mut self, latency: Duration) -> Self {
-		self.latency = latency;
+	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
+	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
@@ -835,7 +854,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(self.latency)
+			.with_delay(self.max_delay)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -1164,7 +1183,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							latency: crate::DEFAULT_MAX_DELAY,
+							max_delay: crate::DEFAULT_MAX_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
@@ -1187,6 +1206,15 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 	}
 }
 
+/// How a publish's connection ended without an error.
+#[derive(Debug, PartialEq, Eq)]
+enum End {
+	/// The client unpublished (`closeStream` or `deleteStream`) after its final media.
+	Unpublished,
+	/// The connection closed without unpublishing first.
+	Disconnected,
+}
+
 /// Pump RTMP media into the publisher until the client disconnects or finishes.
 async fn pump<S: Stream>(
 	stream: &mut S,
@@ -1194,7 +1222,7 @@ async fn pump<S: Stream>(
 	work: &mut VecDeque<ServerSessionResult>,
 	publisher: &mut Publisher,
 	peer: SocketAddr,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<End> {
 	let mut buffer = [0u8; READ_BUFFER];
 	let mut media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 	loop {
@@ -1233,7 +1261,8 @@ async fn pump<S: Stream>(
 			}
 		}
 		if finished {
-			break;
+			tracing::debug!(%peer, "rtmp publish unpublished");
+			return Ok(End::Unpublished);
 		}
 
 		let n = tokio::select! {
@@ -1243,16 +1272,14 @@ async fn pump<S: Stream>(
 			}
 		};
 		if n == 0 {
-			break;
+			tracing::debug!(%peer, "rtmp connection closed without unpublishing");
+			return Ok(End::Disconnected);
 		}
 		let results = session
 			.handle_input(&buffer[..n])
 			.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
 		work.extend(results);
 	}
-
-	tracing::debug!(%peer, "rtmp connection closed");
-	Ok(())
 }
 
 /// Stream a broadcast to an RTMP player until the broadcast ends or the viewer
@@ -1442,10 +1469,12 @@ async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::R
 
 /// An active publish: the moq-mux FLV importer, which owns the origin-created
 /// [`BroadcastProducer`](moq_net::broadcast::Producer) it publishes into.
-/// Either [`Self::finish`] or dropping it closes the broadcast and unannounces
-/// the path.
+/// [`Self::close`] or dropping it closes the broadcast and unannounces the path;
+/// [`Self::finish`] hands back the finished broadcast to linger on.
 struct Publisher {
 	importer: FlvImport,
+	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
+	catalog: moq_mux::catalog::Producer,
 	metadata: crate::metadata::Dropped,
 	// A clone of the importer's producer, so an end can close the broadcast
 	// (prompt unannounce) even though the importer owns it.
@@ -1470,6 +1499,7 @@ impl Publisher {
 
 		Ok(Self {
 			importer,
+			catalog,
 			metadata: crate::metadata::Dropped::new(path),
 			broadcast: handle,
 			epoch,
@@ -1488,9 +1518,18 @@ impl Publisher {
 		Ok(self.importer.decode(&flv::tag(tag_type, timestamp, body))?)
 	}
 
+	/// Flush any buffered media and finish every track, the catalog included, returning
+	/// the finished broadcast, which stays announced until it is dropped.
+	fn finish(mut self) -> anyhow::Result<moq_net::broadcast::Finish> {
+		self.importer.finish()?;
+		self.catalog.finish()?;
+		// Taken while the importer is alive, so it holds the tracks just finished.
+		Ok(self.broadcast.finish())
+	}
+
 	/// Flush any buffered media, close out the broadcast's open groups, and end
 	/// the broadcast so the origin unannounces it immediately.
-	fn finish(&mut self) -> anyhow::Result<()> {
+	fn close(mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
 		self.broadcast.close();
 		Ok(())
@@ -1508,7 +1547,11 @@ impl Publisher {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	#[tokio::test(start_paused = true)]
@@ -1543,8 +1586,7 @@ mod tests {
 		.await
 		.unwrap();
 		assert_eq!(publisher.metadata.count, 2);
-		publisher.finish().unwrap();
-		drop(publisher);
+		drop(publisher.finish().unwrap());
 		logs_assert(|lines| {
 			let warnings = lines
 				.iter()
@@ -1579,32 +1621,8 @@ mod tests {
 	/// by the test. Generic over the transport so the same client exercises both
 	/// plaintext RTMP and RTMPS.
 	async fn run_client<S: Stream>(mut stream: S, mode: ClientMode) {
-		// Handshake.
-		let mut handshake = Handshake::new(PeerType::Client);
-		stream
-			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
-			.await
-			.unwrap();
+		let remaining = client_handshake(&mut stream).await;
 		let mut buffer = [0u8; 4096];
-		let remaining = loop {
-			let n = stream.read(&mut buffer).await.unwrap();
-			match handshake.process_bytes(&buffer[..n]).unwrap() {
-				HandshakeProcessResult::InProgress { response_bytes } => {
-					if !response_bytes.is_empty() {
-						stream.write_all(&response_bytes).await.unwrap();
-					}
-				}
-				HandshakeProcessResult::Completed {
-					response_bytes,
-					remaining_bytes,
-				} => {
-					if !response_bytes.is_empty() {
-						stream.write_all(&response_bytes).await.unwrap();
-					}
-					break remaining_bytes;
-				}
-			}
-		};
 
 		let (mut session, initial) = ClientSession::new(ClientSessionConfig::new()).unwrap();
 		let mut work: VecDeque<ClientSessionResult> = VecDeque::from(initial);
@@ -1643,6 +1661,160 @@ mod tests {
 			match session.handle_input(&buffer[..n]) {
 				Ok(results) => work.extend(results),
 				Err(_) => return,
+			}
+		}
+	}
+
+	/// How [`publish_one_keyframe`] leaves once its media is sent.
+	enum Leave {
+		/// `deleteStream`, then wait for the server to hang up.
+		Unpublish,
+		/// Close the connection without unpublishing.
+		Hangup,
+	}
+
+	/// Publish one AVC keyframe as `live/cam0` over `stream`, then leave.
+	async fn publish_one_keyframe<S: Stream>(mut stream: S, leave: Leave) {
+		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
+		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
+		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00];
+		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
+
+		let remaining = client_handshake(&mut stream).await;
+		let (mut session, initial) = ClientSession::new(ClientSessionConfig::new()).unwrap();
+		let mut work: VecDeque<ClientSessionResult> = VecDeque::from(initial);
+		work.extend(session.handle_input(&remaining).unwrap());
+		work.push_back(session.request_connection("live".to_string()).unwrap());
+		let mut buffer = [0u8; 4096];
+		loop {
+			while let Some(result) = work.pop_front() {
+				match result {
+					ClientSessionResult::OutboundResponse(packet) => stream.write_all(&packet.bytes).await.unwrap(),
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestAccepted) => work.push_back(
+						session
+							.request_publishing("cam0".to_string(), PublishRequestType::Live)
+							.unwrap(),
+					),
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::PublishRequestAccepted) => {
+						for body in [&vseq, &vframe] {
+							let data = bytes::Bytes::copy_from_slice(body);
+							let result = session.publish_video_data(data, RtmpTimestamp::new(0), false).unwrap();
+							work.push_back(result);
+						}
+						match leave {
+							Leave::Unpublish => work.extend(session.stop_publishing().unwrap()),
+							Leave::Hangup => {
+								for result in work.drain(..) {
+									if let ClientSessionResult::OutboundResponse(packet) = result {
+										stream.write_all(&packet.bytes).await.unwrap();
+									}
+								}
+								return;
+							}
+						}
+					}
+					_ => {}
+				}
+			}
+			match stream.read(&mut buffer).await {
+				Ok(0) | Err(_) => return,
+				Ok(n) => work.extend(session.handle_input(&buffer[..n]).unwrap()),
+			}
+		}
+	}
+
+	/// Accept the publish arriving on `stream` into `origin` at `live/cam0`, declaring `max_age`.
+	async fn accept_publish(stream: tokio::io::DuplexStream, origin: origin::Producer, max_age: Duration) {
+		let peer = "127.0.0.1:1935".parse().unwrap();
+		let Some(Request::Publish(publish)) = accept_stream(stream, peer).await.unwrap() else {
+			panic!("expected a publish request");
+		};
+		publish
+			.with_max_age(Some(max_age))
+			.accept(&origin, "live/cam0")
+			.await
+			.unwrap();
+	}
+
+	/// An unpublish is a clean end: the finished broadcast keeps serving a late subscriber
+	/// until its media is stale, then closes. A hangup without one closes at once.
+	#[tokio::test(start_paused = true)]
+	async fn an_unpublish_lingers_and_a_hangup_does_not() {
+		for (leave, linger) in [
+			(Leave::Unpublish, Duration::from_secs(10)),
+			(Leave::Hangup, Duration::ZERO),
+		] {
+			let origin = moq_tokio::origin::spawn();
+			let consumer = origin.consume();
+			let (client, server) = tokio::io::duplex(64 * 1024);
+			let start = tokio::time::Instant::now();
+			let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
+			let broadcast = async {
+				consumer.routed("live/cam0").await.unwrap();
+				consumer.request_broadcast("live/cam0", None).await.unwrap()
+			};
+			let (broadcast, ()) = tokio::join!(broadcast, publish_one_keyframe(client, leave));
+
+			accept.await.unwrap();
+			assert_eq!(start.elapsed(), linger);
+			assert!(broadcast.is_closed());
+		}
+	}
+
+	/// A late subscriber still reads the finished media during the linger, and an encoder
+	/// reconnecting under the same key ends the linger at once.
+	#[tokio::test(start_paused = true)]
+	async fn a_reconnect_ends_the_linger() {
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let (client, server) = tokio::io::duplex(64 * 1024);
+		let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
+		publish_one_keyframe(client, Leave::Unpublish).await;
+
+		tokio::time::sleep(Duration::from_secs(5)).await;
+		let finished = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let mut video = finished.track("0.flv-v").unwrap().subscribe(None).await.unwrap();
+		assert!(
+			video.recv_group().await.unwrap().is_some(),
+			"the late subscriber reads the tail"
+		);
+		assert!(!accept.is_finished());
+
+		let start = tokio::time::Instant::now();
+		let (client, server) = tokio::io::duplex(64 * 1024);
+		let _reconnect = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
+		let _encoder = tokio::spawn(publish_one_keyframe(client, Leave::Hangup));
+		accept.await.unwrap();
+		assert_eq!(start.elapsed(), Duration::ZERO);
+		assert!(finished.is_closed());
+	}
+
+	/// The client half of the RTMP handshake, returning the bytes read past it.
+	async fn client_handshake<S: Stream>(stream: &mut S) -> Vec<u8> {
+		let mut handshake = Handshake::new(PeerType::Client);
+		stream
+			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
+			.await
+			.unwrap();
+		let mut buffer = [0u8; 4096];
+		loop {
+			let n = stream.read(&mut buffer).await.unwrap();
+			match handshake.process_bytes(&buffer[..n]).unwrap() {
+				HandshakeProcessResult::InProgress { response_bytes } => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+				}
+				HandshakeProcessResult::Completed {
+					response_bytes,
+					remaining_bytes,
+				} => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+					return remaining_bytes;
+				}
 			}
 		}
 	}

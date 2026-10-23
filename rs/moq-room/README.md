@@ -29,4 +29,4 @@ while let Some(event) = room.next().await {
 Chat uses `moq-json::window` with ten seconds of history. Drive
 `Publisher::expire()` alongside incoming sends (or call `poll_expire` from a poll
 loop) so messages expire while idle. `Subscriber::recv` returns push/pop/skip
-events and propagates errors. The format differs from iroh-live's raw UTF-8 chat.
+events with their send time and propagates errors. The format differs from iroh-live's raw UTF-8 chat.

@@ -16,11 +16,10 @@
 //!
 //! This mirrors `moq-tokio`'s `Server` / `Request`, so the gateway stays
 //! unopinionated about auth: the embedder (e.g. a relay verifying the stream id
-//! as a JWT) owns that policy. For the unauthenticated convenience that accepts
-//! everything and routes by prefix, use [`crate::run`].
+//! as a JWT) owns that policy.
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant as StdInstant};
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use moq_mux::container::Frame;
@@ -404,6 +403,11 @@ impl Publish {
 	/// relay's shared origin, optionally scoped per the authenticated token). This
 	/// future resolves when the connection ends, so callers usually run it on its
 	/// own task.
+	///
+	/// Once the stream ends, the finished broadcast stays up until its media is stale, so
+	/// subscribers still catching up drain the tail, and the future resolves after that.
+	/// Dropping the future ends the linger early, as does a newer publish at `path`. A
+	/// socket or demux error closes the broadcast at once.
 	pub async fn accept(self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
 		let socket = self.0.request.accept(None).await?;
@@ -526,13 +530,26 @@ pub(crate) async fn serve_publish(
 	}
 	.await;
 
-	match &result {
-		// Clean end (the caller closed): flush the final groups.
-		Ok(()) => publisher.finish()?,
+	match result {
+		// The stream ended: serve the finished broadcasts until their media is stale, so
+		// subscribers still catching up drain the tail. srt-tokio ends the stream the same
+		// way for a shutdown and a peer gone silent, so both count as clean here; the
+		// media up to that point is complete either way, and a reconnect cuts the linger.
+		Ok(()) => {
+			drop(socket);
+			let finished = publisher.finish()?;
+			let linger = finished.iter().map(moq_net::broadcast::Finish::linger).max();
+			tracing::info!(%path, ?linger, "SRT ingest ended, serving the finished broadcast until its media is stale");
+			// Polled together, so each program closes at its own expiry.
+			futures::future::join_all(finished.into_iter().map(moq_net::broadcast::Finish::wait)).await;
+			Ok(())
+		}
 		// The socket or demux failed: abort with the real cause so subscribers see it.
-		Err(err) => publisher.abort(moq_net::Error::Transport(err.to_string())),
+		Err(err) => {
+			publisher.abort(moq_net::Error::Transport(err.to_string()));
+			Err(err)
+		}
 	}
-	result
 }
 
 /// Mux the requested broadcast back to MPEG-TS and stream it to the SRT caller
@@ -582,28 +599,19 @@ pub(crate) async fn serve_subscribe(
 		};
 		// Sample the muxer's generation alongside the frame it describes, so a new
 		// program clock re-anchors the pacing rather than mapping the new timeline
-		// through the old anchor.
+		// through the old anchor. srt-tokio paces on std's clock, where a late payload
+		// keeps its past instant, so TSBPD still sees its spacing from its neighbors.
 		for (at, payload) in egress.push(&frame, subscriber.discontinuity(), moq_net::time::now()) {
-			socket.send((host_instant(at), payload)).await?;
+			socket.send((at.into_std(), payload)).await?;
 		}
 	}
 
 	if let Some((at, payload)) = egress.flush() {
-		socket.send((host_instant(at), payload)).await?;
+		socket.send((at.into_std(), payload)).await?;
 	}
 	socket.close().await?;
 
 	Ok(())
-}
-
-/// The std instant `at` names, since srt-tokio paces on std's clock. A late payload
-/// keeps its past instant, so TSBPD still sees its spacing from its neighbors.
-fn host_instant(at: Instant) -> StdInstant {
-	let (now, host) = (moq_net::time::now(), StdInstant::now());
-	match at.checked_duration_since(now) {
-		Some(ahead) => host + ahead,
-		None => host.checked_sub(now - at).unwrap_or(host),
-	}
 }
 
 /// Clamp a paced send instant up to the connection's first one, seeding that floor
@@ -661,19 +669,17 @@ fn parse_stream_id(stream_id: Option<&StreamId>) -> Option<(String, ConnectionMo
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
+	use std::time::Instant as StdInstant;
+
 	use super::*;
 	use bytes::Bytes;
 	use std::time::Duration;
-
-	/// A late payload keeps its spacing on std's clock instead of collapsing onto now.
-	#[test]
-	fn a_late_payload_keeps_its_past_host_instant() {
-		let now = StdInstant::now();
-		let late = host_instant(moq_net::time::now() - Duration::from_millis(100));
-		assert!(late < now, "{late:?} should precede {now:?}");
-		assert!(host_instant(moq_net::time::now() + Duration::from_millis(100)) > now);
-	}
 
 	/// Regression for #2978: a frame that completes a chunk must not re-stamp bytes
 	/// already buffered from an earlier pacing instant.

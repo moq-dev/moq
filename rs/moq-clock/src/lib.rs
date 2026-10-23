@@ -43,7 +43,10 @@ pub use deadline::{Deadline, Deadlines, Entered};
 pub use installed::Installed;
 pub use instant::Instant;
 pub use manual::Manual;
-pub use timer::{Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, drive, interval, sleep, sleep_until, timeout};
+pub use timer::{
+	Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, drive, interval, interval_at, sleep, sleep_until, timeout,
+	timeout_at,
+};
 pub use wall::{OutOfRange, Wall};
 
 /// Run an `async fn` test to completion on [`sim::run`].

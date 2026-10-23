@@ -108,7 +108,7 @@ where
 
 	// When the next attempt may start: the first as soon as an address resolves,
 	// each later one a stagger after the one before it.
-	let mut ready = tokio::time::Instant::now();
+	let mut ready = moq_clock::now();
 
 	let mut next_index = 0;
 	let mut start = |addr: SocketAddr, attempts: &mut FuturesUnordered<_>| {
@@ -151,7 +151,7 @@ where
 						failures.push((index, Attempt { addr, error: err }));
 						// A failure starts the next candidate immediately (RFC 8305
 						// section 5) rather than waiting out the stagger delay.
-						ready = tokio::time::Instant::now();
+						ready = moq_clock::now();
 					}
 				}
 			}
@@ -162,7 +162,7 @@ where
 				match addr {
 					Some(addr) => {
 						start(addr, &mut attempts);
-						ready = tokio::time::Instant::now() + delay;
+						ready = moq_clock::now() + delay;
 					}
 					None => exhausted = true,
 				}
@@ -175,8 +175,8 @@ where
 ///
 /// Resolution can outlast the stagger, in which case the attempt starts as soon
 /// as an address lands.
-async fn pull(candidates: &mut Candidates, ready: tokio::time::Instant) -> Option<SocketAddr> {
-	tokio::time::sleep_until(ready).await;
+async fn pull(candidates: &mut Candidates, ready: moq_clock::Instant) -> Option<SocketAddr> {
+	moq_clock::sleep_until(ready).await;
 	candidates.next().await
 }
 
@@ -190,6 +190,11 @@ fn collapse<E: Aggregate>(mut failures: Vec<Attempt<E>>) -> E {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	use crate::connect::DEFAULT_RACE;

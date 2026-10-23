@@ -4,6 +4,59 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `announce` takes an `AnnounceRoute`
+
+`BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:, epoch:)` instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
+`MoqRoute` is only what announcements report. To re-announce an observed route, copy its `cost` and `epoch`.
+
+### Cancelling a stream cancels its pending read
+
+`await subscription.cancel()` on announcements, authorization grants, and server requests now waits for the pending native operation to release, even when no event arrives.
+Announcement subscriptions still own and release their cursor; cancelling a grant or request subscription keeps its shared `Auth` or `Server` usable.
+The generated async methods now return `UniffiRustFuture<T>`, a `Future<T>` with `cancel()`; existing `await` and `Future<T>` assignments work unchanged.
+Custom implementations of generated interfaces must return `UniffiRustFuture<T>` instead of a plain `Future<T>`.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: add a `.timeout` to the future.
+
+### JSON snapshot `deltaRatio` is `deltas`
+
+`SnapshotConfig.deltaRatio` is replaced by `bool deltas` (default `true`).
+Pass `deltas: false` where you passed `deltaRatio: 0`, and drop the argument otherwise.
+Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
+
+### Priorities are signed (#6142)
+
+`TrackInfo.priority`, `Subscription.priority`, and `FetchGroupOptions.priority` take `-128..=127`, higher first, and 0 is the unset midpoint.
+`TrackInfo.priority` defaulted to 127 and now defaults to 0.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.
+`requestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
+Resolve the path with `announcedBroadcast()`, or hold `announced()` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `ContainerFormat.fmp4` unwraps to Legacy (#6250)
+
+A container import with `ContainerFormat.fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `ContainerFormat.cmaf` to keep publishing CMAF.
+
+### Catalog references carry their epoch
+
+`Video` and `Audio` renditions gain `epoch`, the publisher instance their `broadcast` reference names.
+`BroadcastConsumer.resolve(reference:)` becomes `resolve(rendition:)`, taking the catalog `Rendition` and reading its `broadcast` and `epoch` from it.
+Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another epoch.
+
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Writing a frame, or any other call that takes a timestamp, fails with `TimeOverflow` past `2^61 - 1` microseconds instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
@@ -41,7 +94,7 @@ A subscription now reads only the groups its own `ranges` cover.
 `TrackDemand.isUsed()`, `used()`, and `unused()` are gone.
 `wanted()` returns null while nobody subscribes, otherwise the group subscribers want next, and `wantedChanged()` waits for it to change (the first call returns at once).
 Loop on `wantedChanged()` until it returns non-null where you awaited `used()`, and null where you awaited `unused()`.
-`TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
+`TrackInfo` gains `refresh`.
 
 ### `CongestionControl` gained `none` (#5926)
 
@@ -61,8 +114,8 @@ To start at group `n`, pass one range starting at the absolute anchor for group 
 ### Receive estimates come from `Session.recvBandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and `cancel()` it to stop.
-Replace `stats().estimatedRecvRateBps` with `recvBandwidth()?.peek()`.
+Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `rate()` or wait with `rateChanged()`, and `cancel()` it to stop.
+Replace `stats().estimatedRecvRateBps` with `recvBandwidth()?.rate()`.
 
 ### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
 

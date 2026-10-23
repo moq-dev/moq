@@ -1,4 +1,5 @@
 import * as Ietf from "../ietf/index.ts";
+import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
@@ -159,8 +160,6 @@ async function acceptSetup(
 
 	const client = await Ietf.ClientSetup.decode(stream.reader, version);
 
-	await stream.writer.u53(Lite.StreamId.ServerCompat);
-
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(true));
@@ -171,7 +170,7 @@ async function acceptSetup(
 	Ietf.activeCountIntoSetup(params, version);
 
 	const server = new Ietf.ServerSetup({ version, parameters: params });
-	await server.encode(stream.writer, version);
+	await Message.write(stream.writer, Lite.StreamId.ServerCompat, server, version);
 
 	const maxRequestId = client.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 
@@ -225,8 +224,6 @@ async function acceptNegotiated(
 		selectedVersion = match;
 	}
 
-	await stream.writer.u53(Lite.StreamId.ServerCompat);
-
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(true));
@@ -237,7 +234,7 @@ async function acceptNegotiated(
 	Ietf.activeCountIntoSetup(params, setupVersion);
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });
-	await server.encode(stream.writer, setupVersion);
+	await Message.write(stream.writer, Lite.StreamId.ServerCompat, server, setupVersion);
 
 	if (Object.values(Lite.Version).includes(selectedVersion as Lite.Version)) {
 		return new Lite.Connection({

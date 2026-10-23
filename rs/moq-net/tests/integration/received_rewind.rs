@@ -1,11 +1,11 @@
 #![cfg(feature = "async")]
 
-//! A relay re-serves what it received without checking it for a rewind.
+//! A relay drops the timestamps it receives over lite-05/06.
 //!
 //! Lite-06 stamps an untimed track's frames with their send time and declares
-//! milliseconds, so the relay's copy reads as timed and re-advertises that scale. A group
-//! sent after a higher one carries the later stamp, which the next hop must not refuse:
-//! only a local publisher's writes are checked.
+//! milliseconds, so a group sent after a higher one carries the later stamp. The relay
+//! cannot tell that from media time, so its copy is untimed and every hop past it sees an
+//! untimed track that nothing can refuse.
 
 use crate::support;
 
@@ -28,21 +28,32 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 }
 
 fn write_group(track: &moq_net::track::Producer, sequence: u64) {
+	// A timed track's group starts at its sequence in seconds, so none rewinds.
+	let timestamp = track
+		.info()
+		.timescale
+		.map(|_| moq_net::Timestamp::from_millis(sequence * 1000).unwrap());
 	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-	group.write_frame(None, &b"x"[..]).unwrap();
+	group.write_frame(timestamp, &b"x"[..]).unwrap();
 	group.finish().unwrap();
 }
 
-/// Groups 1 then 0 of an untimed track, into a relay over lite-06 and out over `downstream`.
-/// Returns the scale the subscriber learned and the groups it read.
-async fn relay(downstream: &str) -> (Option<moq_net::Timescale>, Vec<u64>) {
+/// Groups 1 then 0 of a track at `timescale`, into a relay over `upstream` and out over
+/// `downstream`. Returns the scale the subscriber learned and the groups it read.
+async fn relay(
+	upstream: &str,
+	downstream: &str,
+	timescale: Option<moq_net::Timescale>,
+) -> (Option<moq_net::Timescale>, Vec<u64>) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("data", Info::default()).unwrap();
+	let track = broadcast
+		.create_track("data", Info::default().with_timescale(timescale))
+		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let relay_origin = produce_origin(2);
-	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
+	let mut options = MockConnectOptions::new(upstream.parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(relay_origin.clone());
 	let upstream = connect_mock(options).await;
@@ -114,9 +125,27 @@ async fn relay(downstream: &str) -> (Option<moq_net::Timescale>, Vec<u64>) {
 async fn a_relay_forwards_descending_send_times_without_closing_the_track() {
 	let mut failures = Vec::new();
 	for downstream in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
-		let got = relay(downstream).await;
-		// The relay's copy reads as timed, so every hop past it sees a timescale.
-		if got.0.is_none() || got.1 != [1, 0] {
+		let got = relay("moq-lite-06", downstream, None).await;
+		if got.0.is_some() || got.1 != [1, 0] {
+			failures.push(format!("{downstream}: {got:?}"));
+		}
+	}
+	assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A moq-transport peer may stamp arrival times, so a relay keeps a timed track's timestamps
+/// unchecked and passes them on only over moq-transport: a moq-lite hop, which checks every
+/// timestamp it receives, is served the track untimed.
+#[moq_clock::test]
+async fn moq_transport_timestamps_stay_on_moq_transport() {
+	let mut failures = Vec::new();
+	for (downstream, expected) in [
+		("moq-lite-06", None),
+		("moq-lite-07-wip", None),
+		("moq-transport-22", Some(moq_net::Timescale::MILLI)),
+	] {
+		let got = relay("moq-transport-22", downstream, Some(moq_net::Timescale::MILLI)).await;
+		if got.0 != expected || got.1 != [1, 0] {
 			failures.push(format!("{downstream}: {got:?}"));
 		}
 	}
@@ -125,7 +154,7 @@ async fn a_relay_forwards_descending_send_times_without_closing_the_track() {
 
 /// Fetch groups 1 then 0 of a finished untimed track over `version`, with no live
 /// subscription. Each answer carries its send time, so group 0 lands after group 1; the
-/// copy the fetches fill is still received, so neither is refused.
+/// copy the fetches fill drops them, so neither is refused.
 async fn fetch_only(version: &str) -> Vec<Result<u64, moq_net::Error>> {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();

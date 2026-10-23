@@ -31,8 +31,12 @@ features = ["from", "display", "debug"]
 
 [dev-dependencies]
 anyhow = { workspace = true }
+moq-clock = { workspace = true }
 moq-mux = { path = "../moq-mux" }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs", "websocket"] }
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = { workspace = true }
 url = { workspace = true }
+
+[lints]
+workspace = true

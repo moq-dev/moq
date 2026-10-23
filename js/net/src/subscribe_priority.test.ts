@@ -16,8 +16,8 @@ import { wireOf } from "./wire.ts";
 const url = new URL("https://localhost:4443/test");
 const path = Path.from("test");
 
-const LOW = 1;
-const HIGH = 200;
+const LOW = -100;
+const HIGH = 100;
 
 // Dial a session that consumes what `origin` serves. Draft-14's ALPN is the generic one, so
 // the server is told the version instead.

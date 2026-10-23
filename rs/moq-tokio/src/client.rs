@@ -5,7 +5,7 @@
 //! accept side is [`crate::server`].
 
 use crate::connection::Goaway;
-use crate::{Addrs, Backoff, Connection, Error};
+use crate::{Addrs, Backoff, Connection, Error, Restart};
 #[cfg(all(feature = "websocket", feature = "quic"))]
 use std::future::Future;
 use url::Url;
@@ -56,6 +56,7 @@ pub struct Client {
 	pub(crate) reconnect: bool,
 	pub(crate) backoff: Backoff,
 	pub(crate) goaway: Goaway,
+	pub(crate) restart: Restart,
 	/// Whether the TLS config pins a certificate fingerprint, which only verifies
 	/// the configured host, so a GOAWAY may not redirect elsewhere.
 	pub(crate) pinned: bool,
@@ -144,6 +145,7 @@ impl Client {
 			reconnect: !config.once.unwrap_or(false),
 			backoff: config.backoff,
 			goaway: config.goaway,
+			restart: Restart::default(),
 			pinned: !config.tls.fingerprint.is_empty(),
 			#[cfg(feature = "tcp")]
 			failover_delay,
@@ -217,6 +219,12 @@ impl Client {
 		self
 	}
 
+	/// Share `bandwidth`'s reservations with every session this client dials.
+	pub(crate) fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
+		self.moq = self.moq.with_bandwidth(bandwidth);
+		self
+	}
+
 	/// Price the links this client dials; see [`moq_net::Client::with_cost`].
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.moq = self.moq.with_cost(cost);
@@ -235,6 +243,12 @@ impl Client {
 	/// Defaults to true, unless [`crate::connect::Config::once`] turned it off.
 	pub fn with_reconnect(mut self, reconnect: bool) -> Self {
 		self.reconnect = reconnect;
+		self
+	}
+
+	/// Choose what a GOAWAY naming no URI does. Defaults to [`Restart::Redial`].
+	pub fn with_restart(mut self, restart: Restart) -> Self {
+		self.restart = restart;
 		self
 	}
 
@@ -316,14 +330,12 @@ impl Client {
 			let session = qmux::Session::connect(opened.channel, config)
 				.await
 				.map_err(crate::webrtc::Error::from)?;
-			// A data channel has no request URI, so a path would ride the SETUP; a peer link has none.
-			let transport = crate::transport::Session::new(session, moq_net::transport::Binding::InBand);
-			Ok::<_, Error>(connect_session(&self.moq, transport).await?)
+			Ok::<_, Error>(connect_session(&self.moq, session).await?)
 		};
 
 		let session = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => tokio::time::timeout(self.timeout, attempt)
+			false => moq_clock::timeout(self.timeout, attempt)
 				.await
 				.map_err(|_| Error::ConnectTimeout(self.timeout))??,
 		};
@@ -370,7 +382,7 @@ impl Client {
 		// arm was still pending.
 		let dialed = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => match tokio::time::timeout(self.timeout, attempt).await {
+			false => match moq_clock::timeout(self.timeout, attempt).await {
 				Ok(res) => res?,
 				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
 			},
@@ -409,7 +421,7 @@ impl Client {
 		// sending it again is a protocol violation. An iroh-only build reads none of this:
 		// that dial waits for the negotiated binding and builds its own.
 		let moq = self.moq_with_path(setup_path(&url));
-		#[allow(unused_variables)]
+		#[allow(unused_variables, reason = "an iroh-only build never reads it")]
 		let moq = match setup_authority(&url) {
 			Some(authority) => moq.with_authority(authority),
 			None => moq,
@@ -421,11 +433,7 @@ impl Client {
 		if url.scheme() == "tcp" {
 			let session =
 				crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay, self.resolution_delay).await?;
-			let session = connect_session(
-				&moq,
-				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
-			)
-			.await?;
+			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
 
@@ -440,11 +448,7 @@ impl Client {
 				self.resolution_delay,
 			)
 			.await?;
-			let session = connect_session(
-				&moq,
-				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
-			)
-			.await?;
+			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
 
@@ -453,11 +457,7 @@ impl Client {
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
 			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
-			let session = connect_session(
-				&moq,
-				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
-			)
-			.await?;
+			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Unix));
 		}
 
@@ -533,11 +533,7 @@ impl Client {
 		let alpns = self.versions.alpns();
 		let session =
 			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
-		let session = connect_session(
-			&self.moq,
-			crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
-		)
-		.await?;
+		let session = connect_session(&self.moq, session).await?;
 		Ok(Dialed::new(session, crate::Transport::WebSocket))
 	}
 
@@ -576,11 +572,7 @@ impl Client {
 		match race_transport_connect(&url, quic, websocket).await? {
 			TransportRace::Quic(quic) => Ok(Dialed::new(connect_session(moq, quic).await?, transport)),
 			TransportRace::WebSocket(session) => {
-				let session = connect_session(
-					&self.moq,
-					crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
-				)
-				.await?;
+				let session = connect_session(&self.moq, session).await?;
 				Ok(Dialed::new(session, crate::Transport::WebSocket))
 			}
 		}
@@ -669,7 +661,7 @@ impl Dialed {
 			feature = "tcp",
 			feature = "uds"
 		)),
-		allow(dead_code)
+		allow(dead_code, reason = "only a transport feature dials")
 	)]
 	fn new(session: moq_net::Session, transport: crate::Transport) -> Self {
 		Self { session, transport }
@@ -795,6 +787,7 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 

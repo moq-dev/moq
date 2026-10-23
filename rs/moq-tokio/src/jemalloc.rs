@@ -98,6 +98,7 @@ pub async fn run() -> crate::Result<()> {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	const USR1_CHILD: &str = "MOQ_NATIVE_USR1_CHILD";
 

@@ -190,6 +190,7 @@ pub struct Setup {
 }
 
 impl Message for Setup {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
 	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
@@ -240,6 +241,7 @@ pub(super) struct ReceivedSetup {
 }
 
 impl Message for ReceivedSetup {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
 	const MAX_SIZE: usize = Setup::MAX_SIZE;
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
@@ -455,6 +457,18 @@ mod tests {
 
 		let rate_only = SinkStats::default().with_send_rate(1_000_000);
 		let session = SinkSession::new(Default::default()).with_stats(rate_only);
+		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
+	}
+
+	/// Probing to a local target never reaches the wire, so a sender alone promises the
+	/// peer nothing more than a report.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_sender_still_reports() {
+		use crate::lite::test_transport::{SinkSession, SinkStats};
+
+		let stats = SinkStats::default().with_send_rate(1_000_000);
+		let session = SinkSession::new(Default::default()).with_stats(stats).with_probe();
 		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
 	}
 

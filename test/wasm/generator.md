@@ -175,11 +175,11 @@ three bindings. moq-wasm's column is the existing suite in [`src/main.ts`](src/m
 
 | case | moq-wasm | moq-ffi, UniFFI | slice, UniFFI and BoltFFI |
 |---|---|---|---|
-| negotiates each relay's version | yes, via `version()` | yes, by offering only that version: no negotiated-version accessor | same as moq-ffi |
+| negotiates each relay's version | yes, via `version()` | yes, by offering only that version (the spike predates `MoqConnectionStats.version`, [#5723](https://github.com/moq-dev/moq/pull/5723)) | same as moq-ffi |
 | reads a published broadcast, every byte, 128 KiB frames | yes | yes | yes |
 | refuses a missing track | yes | yes: rejects with `NotFound` (transport-19) or `Protocol` (lite) | yes: rejects with the slice's `Net { reason: "not found" }` |
 | publishes | no: consume only | yes | yes |
-| frame timestamps | no: payload only | yes, exact, as `bigint` microseconds | yes |
+| frame timestamps | no: payload only | yes, exact, as `bigint` microseconds on a version that delivers them (not lite-02 or lite-06) | yes |
 | u64 sequence above 2^53, end to end | not testable: no publisher can send it | yes, 2^53+1 on all three; 2^62-1 on lite-02 and transport-19 (see bugs) | same as moq-ffi |
 | cancellation through `AbortSignal` | no: `free()` rejects pending calls | rejects with `AbortError`; the next call still gets the next frame | UniFFI: `AbortError`; BoltFFI: `BoltFFICancelledError`; neither steals the next frame |
 | aborting releases the call's state | n/a | yes: a track's demand drops only once the aborted future is freed | not testable: the slice has no demand |
@@ -249,7 +249,8 @@ targets, over one dual-annotated crate.
   The measurements above used a workaround in the pin patch. Since
   [#5681](https://github.com/moq-dev/moq/pull/5681), moq-mux reads moq-clock's browser
   wall clock instead, and the cases pass without the workaround.
-- **On moq-lite-06, group sequence 2^62-1 never arrives.** lite-02 and transport-19
-  carry it, and 2^53+1 crosses all three. Nothing errors: the subscriber waits forever.
-  Both moq-ffi and the slice hit it under both generators. Tracked in
-  [lite-06 max sequence](/quest/m1/lite06-max-sequence.md).
+- **On moq-lite-06, group sequence 2^62-1 never arrived.** The cases also stamped it as
+  the frame timestamp, which lite-05/06 cannot zigzag as a group's first frame, so the
+  publisher dropped the group and the subscriber waited forever. Both moq-ffi and the
+  slice hit it under both generators. Timestamps now stop at 2^61-1, so `writeFrame`
+  refuses the unencodable one and the sequence itself crosses every version.

@@ -21,8 +21,10 @@ use super::{Error, Fragmenter, fragment, synthesize_audio_trak, synthesize_video
 const TRACK_ID: u32 = 1;
 
 /// Whether the muxer serves a video or an audio rendition, with its catalog config.
-// One per muxer, so the variant sizes never add up to an allocation's worth.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per muxer, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
+)]
 enum Kind {
 	Video(VideoConfig),
 	Audio(AudioConfig),
@@ -174,8 +176,8 @@ impl Muxer {
 		use crate::container::Container as _;
 
 		let mut out: Vec<Frame> = Vec::new();
-		while let Some(frames) = self.container.read(group).await? {
-			for frame in frames {
+		while let Some(wire) = group.read_frame().await? {
+			for frame in self.container.decode(wire)? {
 				if let Some(bound) = self.container.end(&frame) {
 					if matches!(self.kind, Kind::Video(_))
 						&& let Some(last) = out.last_mut()

@@ -3,8 +3,9 @@
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
 //! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), or a PipeWire
-//!   camera node (`pipewire` feature), X11 display and window -> X11, Wayland
-//!   display and window -> xdg-desktop-portal + PipeWire (`pipewire` feature).
+//!   camera node (`pipewire` feature), X11 display and window -> X11, and a
+//!   system-picked screen or window -> xdg-desktop-portal + PipeWire (`pipewire`
+//!   feature).
 //! - Windows camera -> native Media Foundation (`IMFSourceReader`), display and
 //!   window -> Windows.Graphics.Capture (GPU NV12, Windows 10 2004 or newer).
 //!
@@ -96,8 +97,10 @@ pub enum Source {
 
 	/// A whole display. `None` opens the main display.
 	///
-	/// The id is the opaque value [`displays`] reports. On Wayland the
-	/// xdg-desktop-portal picker owns selection and no stable id is available.
+	/// The id is the opaque value [`displays`] reports. Linux supports X11
+	/// displays only, including XWayland's `x11:` ids; on Wayland the main
+	/// display and any other id are refused, so ask the system picker with
+	/// [`Source::Portal`] instead.
 	Display(Option<String>),
 
 	/// A single window, by the id [`windows`] reports. Supported on macOS,
@@ -397,7 +400,7 @@ impl Synthetic {
 	}
 
 	/// Deliver a frame acquired at `captured`.
-	pub(crate) fn push_at(&self, surface: crate::frame::Surface, captured: std::time::Instant) {
+	pub(crate) fn push_at(&self, surface: crate::frame::Surface, captured: moq_clock::Instant) {
 		self.chan.push_at(surface, captured);
 	}
 
@@ -452,18 +455,7 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 			{
 				wgc::open(config).await
 			}
-			#[cfg(all(target_os = "linux", feature = "pipewire"))]
-			{
-				if x11::selected(device.as_deref()) {
-					x11::open_display(config, device.as_deref()).await
-				} else {
-					if let Some(device) = device {
-						tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
-					}
-					pipewire::open(config, None).await
-				}
-			}
-			#[cfg(all(target_os = "linux", not(feature = "pipewire")))]
+			#[cfg(target_os = "linux")]
 			{
 				x11::open_display(config, device.as_deref()).await
 			}
@@ -492,7 +484,7 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 			}
 		}
 		#[cfg(all(target_os = "linux", feature = "pipewire"))]
-		Source::Portal(selection) => pipewire::open(config, Some(selection)).await,
+		Source::Portal(selection) => pipewire::open(config, selection).await,
 		Source::App(id) => {
 			let _ = id;
 			#[cfg(target_os = "macos")]

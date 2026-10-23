@@ -1,4 +1,5 @@
 //! Grouped tracks and datagrams on moq-lite and MoQ Transport.
+#![expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 
 mod support;
 

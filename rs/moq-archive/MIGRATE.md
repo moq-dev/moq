@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Recording format version 3 stores a signed priority (#6142)
+
+`Info::priority`, `Info::new`, and `Error::Priority` use `i8`, higher first, with 0 unset.
+`VERSION` is 3, whose `.info` stores that `i8` as written; version 2 stored the moq-lite byte, `priority + 128`.
+Readers still read version 2 recordings, converting the byte, so a stored 127 reads as -1; a decoded version 2 `Info` keeps `version: 2` and refuses to `encode`.
+A `Producer` refuses to resume a version 2 recording with `Error::Version(2)`, so start a new prefix.
+
 ### `Producer` replaces `Writer` (#6160)
 
 `Writer`, its `Control`, and `writer::{Config, Retention}` are removed; record with `Producer::new(store, broadcast, producer::Config::default()).run().await` instead.

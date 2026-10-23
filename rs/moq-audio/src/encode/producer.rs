@@ -74,7 +74,9 @@ impl Default for Options {
 /// a subscriber that opens the catalog before any frames arrive still sees the
 /// track.
 pub struct Producer<E: CatalogExt = ()> {
-	encoder: Encoder,
+	// None after a successful finish: keep the track and catalog rendition, not the codec.
+	encoder: Option<Encoder>,
+	bitrate: moq_net::bandwidth::Rate,
 	input: Input,
 	/// Converts the input layout to the codec's, when they differ.
 	remix: Option<Remix>,
@@ -98,9 +100,6 @@ pub struct Producer<E: CatalogExt = ()> {
 	decoder_boundary: bool,
 	/// How the encoder classified the packet it published most recently.
 	activity: Activity,
-	/// Set after a successful [`finish`](Self::finish). Writes then fail with
-	/// [`moq_net::Error::Closed`]; [`abort`](Self::abort) can still run.
-	finished: bool,
 }
 
 struct Terminal {
@@ -195,7 +194,8 @@ impl<E: CatalogExt> Reserved<E> {
 	/// Spend the reservation on a registered encoder, publishing through the track.
 	pub(crate) fn encode(self, registered: Registered) -> Producer<E> {
 		Producer {
-			encoder: registered.encoder,
+			bitrate: registered.encoder.bitrate(),
+			encoder: Some(registered.encoder),
 			input: registered.input,
 			remix: registered.remix,
 			resampler: registered.resampler,
@@ -209,7 +209,6 @@ impl<E: CatalogExt> Reserved<E> {
 			pending_discontinuity: false,
 			decoder_boundary: true,
 			activity: Activity::Active,
-			finished: false,
 		}
 	}
 }
@@ -296,12 +295,19 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Current encoder target bitrate.
 	pub fn bitrate(&self) -> moq_net::bandwidth::Rate {
-		self.encoder.bitrate()
+		self.bitrate
 	}
 
 	/// Retune the live encoder to `bitrate`.
 	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
-		self.encoder.set_bitrate(bitrate)
+		let encoder = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?;
+		encoder.set_bitrate(bitrate)?;
+		self.bitrate = encoder.bitrate();
+		Ok(())
+	}
+
+	fn encoder(&self) -> Result<&Encoder, Error> {
+		self.encoder.as_ref().ok_or(moq_net::Error::Closed.into())
 	}
 
 	/// Re-anchor the timeline to the next frame's timestamp, dropping any
@@ -312,7 +318,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// `reanchor`. If the codec had started, a marker group is published before
 	/// the next packet so subscribers jump the playhead.
 	pub fn reanchor(&mut self) {
-		if self.encoder.started() && !self.decoder_boundary {
+		if self.encoder.as_ref().is_some_and(Encoder::started) && !self.decoder_boundary {
 			self.pending_discontinuity = true;
 		}
 		self.reset_state();
@@ -323,7 +329,9 @@ impl<E: CatalogExt> Producer<E> {
 		self.activity = Activity::Active;
 		self.frames_produced = 0;
 		self.pending.clear();
-		self.encoder.reset();
+		if let Some(encoder) = self.encoder.as_mut() {
+			encoder.reset();
+		}
 		// The resampler holds samples of its own, plus filter state primed by them.
 		// Left alone, `finish` would flush that pre-reset audio onto the track
 		// (stamped at an anchor that no longer exists), and the next write would run
@@ -351,7 +359,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// Writes after a successful [`finish`](Self::finish) fail with
 	/// [`moq_net::Error::Closed`].
 	pub fn write(&mut self, frame: &Frame) -> Result<(), Error> {
-		if self.finished {
+		if self.encoder.is_none() {
 			return Err(moq_net::Error::Closed.into());
 		}
 		if self.pending_discontinuity {
@@ -384,18 +392,18 @@ impl<E: CatalogExt> Producer<E> {
 	/// Encode and publish every full frame in `pending`, keeping any partial
 	/// trailing frame for the next call.
 	fn publish_full_frames(&mut self, anchor_us: u64) -> Result<(), Error> {
-		let frame_samples = self.encoder.frame_size() * self.encoder.codec_channels() as usize;
+		let frame_samples = self.encoder()?.frame_size() * self.encoder()?.codec_channels() as usize;
 		while self.pending.len() >= frame_samples {
 			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
-			let packet = self.encoder.encode(&chunk)?;
+			let packet = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?.encode(&chunk)?;
 
 			let timestamp = Self::timestamp(
 				anchor_us,
 				self.frames_produced,
-				self.encoder.folded_delay(),
-				self.encoder.codec_rate(),
+				self.encoder()?.folded_delay(),
+				self.encoder()?.codec_rate(),
 			)?;
-			self.frames_produced += self.encoder.frame_size() as u64;
+			self.frames_produced += self.encoder()?.frame_size() as u64;
 			self.activity = packet.activity;
 			self.publish(packet, timestamp)?;
 			self.decoder_boundary = false;
@@ -432,7 +440,7 @@ impl<E: CatalogExt> Producer<E> {
 			duration: None,
 		};
 		self.track.write(mux_frame)?;
-		self.grouped += self.encoder.frame_size() as u64;
+		self.grouped += self.encoder()?.frame_size() as u64;
 		// Cut as soon as the group is long enough rather than when the next packet arrives, so
 		// the relay sees it finish without waiting. No boundary to give: the next packet bounds
 		// this one, and codec frames have a deterministic duration anyway. Cut before observing
@@ -491,10 +499,11 @@ impl<E: CatalogExt> Producer<E> {
 	/// the track.
 	///
 	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
-	/// run after a successful finish. Writes after this fail with
-	/// [`moq_net::Error::Closed`].
+	/// run after a successful finish. The codec and input scratch are released, while the
+	/// track and its catalog rendition stay published. Writes and bitrate changes then
+	/// fail with [`moq_net::Error::Closed`].
 	pub fn finish(&mut self) -> Result<(), Error> {
-		if self.finished {
+		if self.encoder.is_none() {
 			return Ok(());
 		}
 		// Whatever the resampler still holds belongs to this track: its last partial
@@ -509,15 +518,19 @@ impl<E: CatalogExt> Producer<E> {
 		let anchor_us = self.anchor_us.unwrap_or(0);
 		self.publish_full_frames(anchor_us)?;
 
-		let frame_size = self.encoder.frame_size();
-		let codec_rate = self.encoder.codec_rate();
-		let channels = self.encoder.codec_channels() as usize;
+		let frame_size = self.encoder()?.frame_size();
+		let codec_rate = self.encoder()?.codec_rate();
+		let channels = self.encoder()?.codec_channels() as usize;
 		let source_frames = self.pending.len() / channels;
-		let delay = self.encoder.folded_delay();
+		let delay = self.encoder()?.folded_delay();
 		let start = Self::timestamp(anchor_us, self.frames_produced, delay, codec_rate)?;
 		// The source ends where it ends: priming only moves the packets carrying it.
 		let end = Self::timestamp(anchor_us, self.frames_produced + source_frames as u64, 0, codec_rate)?;
-		let finish = self.encoder.drain(&self.pending)?;
+		let finish = self
+			.encoder
+			.as_mut()
+			.ok_or(moq_net::Error::Closed)?
+			.drain(&self.pending)?;
 		let discard_padding = finish.discard_padding();
 		let packets = finish.into_packets();
 
@@ -542,7 +555,9 @@ impl<E: CatalogExt> Producer<E> {
 		}
 
 		self.track.finish()?;
-		self.finished = true;
+		self.encoder = None;
+		self.pending = Vec::new();
+		self.remix = None;
 		Ok(())
 	}
 
@@ -556,6 +571,7 @@ impl<E: CatalogExt> Producer<E> {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	async fn decoded_frame(consumer: &mut crate::decode::Consumer) -> Result<Option<Frame>, Error> {
 		loop {
@@ -628,6 +644,65 @@ mod tests {
 			.await
 			.expect("producer closed");
 		assert!(matches!(closed, moq_net::Error::Dropped));
+	}
+
+	/// A finished publication may live as long as its broadcast; the codec and input
+	/// allocation count must stay flat as more tracks retire on it.
+	#[tokio::test(start_paused = true)]
+	async fn finished_publications_release_encoding_resources() {
+		let backend = crate::encode::backend::stub::install();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut retired = Vec::new();
+		for index in 0..16 {
+			let input = Input {
+				format: Format::F32,
+				sample_rate: 44_100,
+				layout: Layout::Stereo,
+			};
+			let options = Options {
+				track: Some(format!("audio-{index}")),
+				settings: Settings::from_input(crate::encode::Codec::Aac, &Input::new(48_000, Layout::Mono)),
+				..Options::default()
+			};
+			let mut producer = Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
+			assert_eq!(backend.resources(), 1);
+			producer.write(&pcm_frame(&vec![0.1; 4096], 0)).unwrap();
+			assert!(producer.pending.capacity() > 0);
+			assert!(producer.remix.is_some());
+			let bitrate = producer.bitrate();
+			producer.finish().unwrap();
+			assert_eq!(backend.resources(), 0, "retired {index} codecs");
+			assert_eq!(producer.pending.capacity(), 0);
+			assert!(producer.remix.is_none());
+			assert!(producer.resampler.is_none());
+			assert_eq!(producer.bitrate(), bitrate);
+			producer.finish().unwrap();
+			assert!(matches!(
+				producer.set_bitrate(bitrate),
+				Err(Error::Net(moq_net::Error::Closed))
+			));
+			retired.push(producer);
+
+			// Retention still owns both the published track and its catalog rendition.
+			let mut reader = consumer
+				.track(&format!("audio-{index}"))
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			let mut frames = 0;
+			while let Some(mut group) = reader.recv_group().await.unwrap() {
+				while group.read_frame().await.unwrap().is_some() {
+					frames += 1;
+				}
+			}
+			assert!(frames > 0);
+			assert_eq!(catalog.snapshot().audio.renditions.len(), index + 1);
+		}
+		assert_eq!(backend.resources(), 0);
+		assert_eq!(retired.len(), 16);
 	}
 
 	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.

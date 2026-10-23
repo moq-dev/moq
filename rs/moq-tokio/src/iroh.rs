@@ -33,6 +33,10 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::Cont
 #[derive(Clone, Copy, Debug)]
 struct Unlimited;
 
+#[expect(
+	clippy::disallowed_types,
+	reason = "noq's traits take its std instants, which this controller ignores"
+)]
 impl noq_proto::congestion::Controller for Unlimited {
 	fn on_congestion_event(&mut self, _: std::time::Instant, _: std::time::Instant, _: bool, _: bool, _: u64, _: u64) {}
 
@@ -56,6 +60,10 @@ impl noq_proto::congestion::Controller for Unlimited {
 	}
 }
 
+#[expect(
+	clippy::disallowed_types,
+	reason = "noq's traits take its std instants, which this controller ignores"
+)]
 impl noq_proto::congestion::ControllerFactory for Unlimited {
 	fn build(self: Arc<Self>, _: std::time::Instant, _: u16) -> Box<dyn noq_proto::congestion::Controller> {
 		Box::new(*self)
@@ -492,6 +500,11 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 

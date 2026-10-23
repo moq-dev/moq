@@ -154,10 +154,13 @@ impl DmaBufPlane {
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 pub struct DmaBufExport {
 	fd: OwnedFd,
-	// The producer's lease, held so its buffer outlives the descriptor. Only the
-	// renderer ever reads it back out, through `into_parts`, so without that feature
-	// the field is pure keepalive rather than dead.
-	#[cfg_attr(not(feature = "render"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "render"),
+		allow(
+			dead_code,
+			reason = "the producer's lease, held so its buffer outlives the descriptor. Only the renderer ever reads it back out, through `into_parts`, so without that feature the field is pure keepalive rather than dead"
+		)
+	)]
 	inner: Arc<dyn DmaBufFrame>,
 }
 
@@ -177,11 +180,11 @@ pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 		events: libc::POLLIN,
 		revents: 0,
 	};
-	let deadline = std::time::Instant::now() + DMA_BUF_FENCE_TIMEOUT;
+	let deadline = moq_clock::now() + DMA_BUF_FENCE_TIMEOUT;
 	loop {
 		// A signal restarts the wait against the same deadline rather than
 		// granting a fresh budget, so the total stall stays bounded.
-		let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+		let remaining = deadline.saturating_duration_since(moq_clock::now());
 		if remaining.is_zero() {
 			return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
 		}
@@ -616,7 +619,10 @@ impl Surface {
 					Surface::I420(buffer.inner.download_i420()?.resize(size)?)
 				}
 			},
-			#[allow(unreachable_patterns)]
+			#[allow(
+				unreachable_patterns,
+				reason = "the other surfaces exist only on some platforms and features"
+			)]
 			other => Surface::I420(other.to_i420()?.into_owned().resize(size)?),
 		};
 		resized.label(implied);
@@ -633,7 +639,10 @@ impl Surface {
 	pub fn into_i420(self) -> Result<I420, Error> {
 		match self {
 			Surface::I420(i420) => Ok(i420),
-			#[allow(unreachable_patterns)]
+			#[allow(
+				unreachable_patterns,
+				reason = "the other surfaces exist only on some platforms and features"
+			)]
 			other => Ok(other.to_i420()?.into_owned()),
 		}
 	}
@@ -893,7 +902,10 @@ impl I420 {
 	/// strides, which a decoder may pad wider than the visible width. Used by the
 	/// software H.264 decode backend, whose `DecodedYUV` exposes strided planes.
 	/// Width and height must be even (4:2:0 chroma).
-	#[cfg_attr(not(feature = "openh264"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, reason = "only the `openh264` feature uses it")
+	)]
 	pub(crate) fn from_planes(
 		y: &[u8],
 		u: &[u8],

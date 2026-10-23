@@ -72,6 +72,15 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      # A KLV stream joins the program mid-stream and leaves it: the export announces each
+      # layout at the next PMT version, and carries the stream only while a PMT lists it.
+      - name: TS PMT revision
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --revision --strict
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       - name: TS audio-only SCTE-35
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --clockless audio-scte35

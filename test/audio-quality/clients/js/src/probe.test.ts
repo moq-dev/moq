@@ -32,12 +32,12 @@ test("audio-only sampling holds probe demand until its final RTT sample", async 
 	const measurement = probe(watch);
 	try {
 		await drain();
-		await clock.advanceAsync(Nano.fromMilli(Milli(250)));
+		await clock.advance(Nano.fromMilli(Milli(250)));
 		expect(measurement.drain().map((sample) => sample.rtt)).toEqual([12]);
 		await measurement.finish();
 		expect(measurement.drain().at(-1)?.rtt).toBe(12);
 		expect(network.used.peek()).toBe(false);
-		await clock.advanceAsync(Nano.fromMilli(Milli(500)));
+		await clock.advance(Nano.fromMilli(Milli(500)));
 		expect(measurement.drain()).toEqual([]);
 	} finally {
 		producer.close();

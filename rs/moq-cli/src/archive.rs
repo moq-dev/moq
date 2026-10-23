@@ -275,7 +275,7 @@ pub async fn import(
 	};
 	let refresh = async {
 		loop {
-			tokio::time::sleep(interval).await;
+			moq_clock::sleep(interval).await;
 			// A rendition the recording enrolled after the replay started.
 			for (track, timeline) in listing.timelines().await? {
 				if let std::collections::btree_map::Entry::Vacant(entry) = timelines.entry(track) {
@@ -310,6 +310,7 @@ fn open(url: &Url) -> anyhow::Result<moq_archive::Store<Arc<dyn ObjectStore>>> {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -337,8 +338,6 @@ mod tests {
 	/// `<path>/@<epoch>`, and leaves out what is announced elsewhere.
 	#[tokio::test]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
-		// `open_store` reads the credential variables.
-		let _env = crate::test_env::EnvGuard::clear(&[]);
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 

@@ -82,6 +82,7 @@ mod tests {
 		let properties = Properties {
 			unknown: Default::default(),
 			dynamic_groups: false,
+			compress: false,
 			max_cache_duration: None,
 			timescale: Some(Timescale::new(90_000).unwrap()),
 			priority: Some(64),
@@ -125,6 +126,9 @@ mod tests {
 			largest_location: Some(Location { group: 9, object: 0 }),
 			forward: true,
 			properties,
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
 		};
 
 		let fetch = Fetch {

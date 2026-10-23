@@ -2,9 +2,10 @@
 //!
 //! Everything else takes time from its caller: drivers are polled with an instant,
 //! and cache pools collect at the one they are handed. What reads the clock here is
-//! the explicit [`Timestamp::now`](crate::Timestamp::now) convenience and the
-//! [`anchor`] that maps an instant onto a timestamp, so a port swaps this module
-//! for its platform's clock.
+//! the explicit [`Timestamp::now`](crate::Timestamp::now) convenience, the
+//! [`anchor`] that maps an instant onto a timestamp, the arrival a group stamps on
+//! each frame it caches, and the cache's wall-clock staleness, so a port swaps this
+//! module for its platform's clock.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};

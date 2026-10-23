@@ -638,12 +638,12 @@ async fn transcode_group_inner(
 ) -> Result<(), Error> {
 	let mut first = true;
 
-	while let Some(frames) = container.read(source).await? {
-		for frame in frames {
+	while let Some(wire) = source.read_frame().await? {
+		for frame in container.decode(wire)? {
 			let timestamp = frame.timestamp;
 
 			// A group opens on a keyframe by construction, so the first frame is
-			// an IDR. The low-level `Container::read` the transcoder uses does not
+			// an IDR. The low-level `Container::decode` the transcoder uses does not
 			// reconstruct the keyframe bit for legacy sources (that lives in the
 			// higher-level container consumer), so `first` is the reliable signal;
 			// OR in the container's own flag so CMAF mid-group keyframes still
@@ -719,7 +719,7 @@ impl Pipeline {
 		decode.output = rung.resize.output;
 		decode.scale_hint = scale_hint(rung.info.size, rung.resize.output);
 		// A `Sink` for the same reason as the encoder above: a fetch task holds this
-		// pipeline across `Container::read`, so the codec must own its thread.
+		// pipeline across a group read, so the codec must own its thread.
 		let decoder = moq_video::decode::Sink::open(&rung.config, &decode).await?;
 
 		Ok(Self {

@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### CMAF decoding is a separate module
+
+Replace `Container.Cmaf` with `import * as Cmaf from "@moq/hang/cmaf"`.
+Its `Format`, `decodeInitSegment`, and `decodeDataSegment` remain synchronous.
+The CMAF encoder (`createVideoInitSegment`, `createAudioInitSegment`, and `encodeDataSegment`) is removed; Hang publishers write Legacy or LOC instead.
+
 ### A container decode error rejects `Consumer.next()` (#5942)
 
 A payload the format fails to decode, or a data track's marker sharing its group, now rejects `Container.Consumer.next()` with that error and ends the reader.

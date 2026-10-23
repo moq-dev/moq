@@ -17,8 +17,9 @@ pub(super) use window::{Containing, Held, Holdings, Resolved, Unheld, Window, la
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Subscription {
-	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
-	pub priority: u8,
+	/// Delivery priority, higher first, defaulting to 0. Higher values preempt lower ones
+	/// when bandwidth is constrained.
+	pub priority: i8,
 	/// How long a superseded group stays worth delivering to this subscriber.
 	///
 	/// [`Duration::ZERO`] (the default) skips immediately: group 8 arriving means group 7
@@ -271,7 +272,7 @@ impl Default for Subscription {
 
 impl Subscription {
 	/// Set the delivery priority, returning `self` for chaining.
-	pub fn with_priority(mut self, priority: u8) -> Self {
+	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
 		self
 	}

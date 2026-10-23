@@ -44,7 +44,7 @@ Decided with the maintainer on 2026-10-21.
   registry's client contract.
 - Track the runner's HEAD, not a pinned commit. The registry lives in the
   runner's checkout, so a pin would freeze it and hide every implementation
-  registered after it until the next [interop audit](/quest/m0/audit-interop.md).
+  registered after it until the next [interop audit](/quest/m1/audit-interop.md).
   The Cloudflare and Moxygen smoke lanes already build and run unpinned
   third-party HEAD the same way.
 - Split the work the way `interop.yml` does, so upstream code never runs
@@ -70,4 +70,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Interop audit](/quest/m0/audit-interop.md) - audits this job's moq.dev cells each run
+- [Interop audit](/quest/m1/audit-interop.md) - audits this job's moq.dev cells each run

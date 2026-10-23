@@ -6,7 +6,9 @@ description: Ready-to-run tools built on MoQ
 # Applications
 
 Everything here is a binary or plugin you can run without writing code. See
-[Install](/setup/install) for packages.
+[Install](/setup/install) for packages. For a complete local session, start
+with [Quick start](/setup/); to adapt an integration, see [Examples](/setup/examples).
+Once connected, [Inspect a relay](/bin/inspect) shows what it is receiving.
 
 ## Core
 
