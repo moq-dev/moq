@@ -74,9 +74,9 @@ Targeted reproductions confirmed a finite HLS startup race, retained HLS
 server state after final drop, idle Dart stream cancellation, empty expiry
 indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
 reordered-frame timestamps and missing EOF output. Each owning quest records
-the reproduction's limits. The JS datagram range defect moved from the JS
-ranges quest into [JS subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md)
-on 2026-10-22; the OBS quest retains ownership of its findings. Go reservation disposal remains an investigation, and
+the reproduction's limits. JS reader and publisher datagram paths now enforce
+subscription bounds; the OBS quest retains ownership of its findings.
+Go reservation disposal remains an investigation, and
 the security-sensitive HLS admission item is deliberately a public pointer.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
@@ -97,7 +97,6 @@ child records whether its behavior is new on main or inherited from release.
 - [Decode order](/quest/m1/ts-reliability/decode-order.md) - the exporters' decode clock holds at most the declared reorder depth, so flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
 - [Validate CMAF header fields](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count, and a zero timescale is refused
 - [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
-- [JS honors subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md) - each reader and each datagram stays inside its own subscription's group bounds, not the aggregate's
 - [Refuse partial lite groups in JS](/quest/m1/release-audit/js-partial-group.md) - a nonzero `frameStart` closes the session as a protocol violation, not a renumbered complete group
 - [Cancel Dart stream reads](/quest/m1/release-audit/dart-cancellation.md) - listener cancellation releases pending native operations without an unrelated event
 - [Parse QMux records without copying suffixes](/quest/m1/release-audit/qmux-copy.md) - many small frames do not cause quadratic copying
