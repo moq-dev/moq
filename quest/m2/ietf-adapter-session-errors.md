@@ -29,7 +29,3 @@ ProtocolViolation while a uni or datagram poll is pending, and the client
 must see a terminal error and not redial.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [moq-net compiles once](/quest/m1/net-erase-transport.md) - its open PR [moq-dev/moq#6176](https://github.com/moq-dev/moq/pull/6176) touches the same adapter

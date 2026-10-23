@@ -14,6 +14,22 @@ A handle backs one active session at a time, plus the ones draining after a GOAW
 `Auth.None` is removed; nothing returned it.
 On moq-lite, a token refused with a code that may pass (`Internal`, `TooManyRequests`, `Timeout`) is presented again after a backoff of 1s doubling to 30s, instead of `add` rejecting with that code.
 
+### Published names refuse navigation segments
+
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Path normalization, relative references, and subscription paths retain their semantics.
+
+### A listing says whether a removed track finished (#6399)
+
+`Broadcast.TracksEvent` gains `{ kind: "finished", name }`: the track left the listing because it finished. `{ kind: "removed", name }` now means it left unfinished. Handle both where you matched `"removed"`.
+
+### `Track.Producer.largest()` is a getter
+
+`Track.Producer.largest()` returns the track's largest location synchronously, `undefined` before any, instead of a promise for the next newer one.
+Drop the `await`. Every caller reads the same value: the old shared cursor let one caller take an update and leave another waiting forever.
+To wait for each newer one, keep a reader and follow its stream: `const reader = producer.subscribe();`, then `await reader.largest()`.
+
 ### Stage a requested track before subscribers see it (#6111)
 
 `Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
@@ -52,7 +68,7 @@ Close the claim and claim again to change it, and close an answer's producer to 
 `Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.
 A largest past the cap or below the floor reports nothing; the cache never stands in for it.
 A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
-Unbounded readers and `Track.Producer.largest()` are unchanged.
+Unbounded readers are unchanged.
 To read the track's edge from a capped reader, lift the cap with `setGroups({})` first.
 
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`

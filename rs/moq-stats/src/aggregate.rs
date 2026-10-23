@@ -18,7 +18,7 @@ use moq_net::track::Subscribing;
 use moq_net::{AsPath, Epoch, PathOwned, origin};
 
 use crate::{
-	Prefix, PrefixFrame, PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, Usage,
+	Encoding, Prefix, PrefixFrame, PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, Usage,
 	parse_node_path, prefix_track, presence_track, sessions_track, totals_track, traffic_track,
 };
 
@@ -39,10 +39,10 @@ pub struct Config {
 	/// is deeper than this are not recognized as node broadcasts and are
 	/// skipped. Must match the producer's depth.
 	pub depth: usize,
-	/// Read the compressed `.json.z` tracks instead of the plain `.json` ones.
-	/// Same data for a fraction of the bytes, but requires a producer that
-	/// publishes them. Defaults to `false`.
-	pub compression: bool,
+	/// Which encoding of each track to read. [`Encoding::Compressed`] carries
+	/// the same data for a fraction of the bytes. Defaults to
+	/// [`Encoding::Plain`].
+	pub encoding: Encoding,
 	/// How long a departed node's traffic waits for its path to return before
 	/// folding into the retired total (default 10 minutes). A return within it
 	/// under the same epoch (or again without one) resumes the node's own
@@ -70,9 +70,9 @@ impl Config {
 		self
 	}
 
-	/// Read the compressed `.json.z` tracks instead of the plain `.json` ones.
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
+	/// Read each track in `encoding`.
+	pub fn with_encoding(mut self, encoding: Encoding) -> Self {
+		self.encoding = encoding;
 		self
 	}
 
@@ -88,7 +88,7 @@ impl Default for Config {
 		Self {
 			prefix: PathOwned::from(".stats"),
 			depth: 0,
-			compression: false,
+			encoding: Encoding::Plain,
 			// Well above reconnect times; a longer grace only costs memory.
 			grace: Duration::from_secs(600),
 		}
@@ -149,7 +149,7 @@ impl Consumer {
 	/// the group. Nodes are subscribed lazily as they announce, so this returns
 	/// without a handshake.
 	pub fn totals(&self) -> TotalsConsumer {
-		let name = totals_track(self.config.compression);
+		let name = totals_track(self.config.encoding);
 		TotalsConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
@@ -158,7 +158,7 @@ impl Consumer {
 	/// A merged reader over the traffic track for `(tier, role)`; see
 	/// [`Self::totals`].
 	pub fn traffic(&self, tier: &Tier, role: Role) -> TrafficConsumer {
-		let name = traffic_track(tier, role, self.config.compression);
+		let name = traffic_track(tier, role, self.config.encoding);
 		TrafficConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
@@ -166,7 +166,7 @@ impl Consumer {
 
 	/// A merged reader over the sessions track for `tier`; see [`Self::totals`].
 	pub fn sessions(&self, tier: &Tier) -> SessionsConsumer {
-		let name = sessions_track(tier, self.config.compression);
+		let name = sessions_track(tier, self.config.encoding);
 		SessionsConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
@@ -175,7 +175,7 @@ impl Consumer {
 	/// A merged reader over `label`'s presence track, holding it on every
 	/// node broadcast in the group; see [`Self::totals`].
 	pub fn presence(&self, label: impl AsPath) -> PresenceConsumer {
-		let name = presence_track(label, self.config.compression);
+		let name = presence_track(label, self.config.encoding);
 		PresenceConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
@@ -184,7 +184,7 @@ impl Consumer {
 	/// A merged reader over broadcast prefix `path`'s track, holding it on
 	/// every node broadcast in the group; see [`Self::totals`].
 	pub fn prefix(&self, path: impl AsPath) -> PrefixConsumer {
-		let name = prefix_track(path, self.config.compression);
+		let name = prefix_track(path, self.config.encoding);
 		PrefixConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
@@ -680,9 +680,7 @@ impl<V: Mergeable> Merged<V> {
 			name,
 			config: {
 				let mut json = moq_json::snapshot::consumer::Config::default();
-				if config.compression {
-					json.compression = moq_json::Compression::Deflate;
-				}
+				json.compression = config.encoding.compression();
 				json
 			},
 			nodes: HashMap::new(),
@@ -1019,7 +1017,7 @@ mod tests {
 
 	/// Kept-alive handles from [`feed`]: dropping them closes the subscription and
 	/// announce, bumping the `_closed` counters.
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
 		announced: announce::Consumer,
 		source: broadcast::Producer,
@@ -1099,7 +1097,7 @@ mod tests {
 	/// can fail one node's reader alone (the registry-driven producer only
 	/// publishes whole broadcasts). Its route carries no epoch, so a new one at
 	/// the same path is that node returning. Dropping it unannounces the node.
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct NodeBroadcast {
 		source: broadcast::Producer,
 		traffic: moq_json::snapshot::Producer<TrafficFrame>,
@@ -1112,7 +1110,7 @@ mod tests {
 			let path = format!(".stats/{group}/node/{node}");
 			let source = origin.create_broadcast(path.as_str()).expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
-			let name = traffic_track(&Tier::default(), Role::Publisher, false);
+			let name = traffic_track(&Tier::default(), Role::Publisher, Encoding::Plain);
 			let track = source.create_track(name, timed()).expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
@@ -1409,7 +1407,7 @@ mod tests {
 			.announce(origin::Route::default().with_epoch(epoch_a.clone()))
 			.unwrap();
 		old.publish("acme/room", 100);
-		let name = traffic_track(&Tier::default(), Role::Publisher, false);
+		let name = traffic_track(&Tier::default(), Role::Publisher, Encoding::Plain);
 		let mut merged = Merged::<Traffic>::new(origin.consume(), &Config::new().with_depth(1), name.clone());
 		let initial = futures::executor::block_on(kio::wait(|waiter| {
 			driver.poll(now, waiter).unwrap();
@@ -1889,7 +1887,9 @@ mod tests {
 				.create_broadcast(format!(".stats/acme/node/{node}").as_str())
 				.expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
-			let track = source.create_track(totals_track(false), timed()).expect("create track");
+			let track = source
+				.create_track(totals_track(Encoding::Plain), timed())
+				.expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				_source: source,

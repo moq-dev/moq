@@ -33,6 +33,12 @@ mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
+`server_name` is the SNI that selected the relay's certificate. It is absent
+over plaintext, on the `tls://` TCP listener, and for an IP-literal dial, and
+never filled from a `Host` header or a WebTransport authority. The client still picks it among the names
+the relay serves, so a hostname-scoped server binds the tenant to the
+credential, not to `server_name` alone.
+
 **Connect.** A 2xx with a grant admits. A 403 can carry JSON such as
 `{"reason":"expired","root":"rooms/123","tier":"edge"}`. The reason is
 `refused`, `forbidden`, or `expired`; unknown reason strings read as `refused`.
@@ -73,7 +79,8 @@ bytes sent and received. A shutdown waits for these reports before exiting.
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;
 `unix://` speaks HTTP over a socket; `http://` is accepted for a loopback host
-only. There is no shared secret.
+only. There is no shared secret. Redirects are not followed, since each request
+carries a credential: point `url` at the final address.
 
 ```toml
 [auth]
@@ -161,7 +168,9 @@ it; it never joins the union. A `PUBLISH_NAMESPACE` grant must cover the whole
 namespace: `room/**`, not just `room`. A session verifies at most
 `verifications` tokens at once (`--auth-verifications`, default 128), counting
 checks still running past the admission timeout. Later tokens wait their turn
-rather than being refused. A waiting token the peer withdraws never reaches the
+rather than being refused. Each HTTP request is admitted on its own, so an
+HTTP/2 connection carries at most as many requests at once, and the client
+queues the rest. A waiting token the peer withdraws never reaches the
 auth server. The ten-second admission timeout counts from a token's arrival, so
 one that times out while waiting is refused without being sent. A sent check
 always runs to completion, so the connection's `end` stays its last request and
@@ -189,23 +198,9 @@ everything. Put application data somewhere other than the token.
 Tokens and key scopes from the older `moq-token` format still work: each `put`
 and `get` prefix `p` reads as the subtree `p/**`.
 
-`publish` and `subscribe` can also carry an optional bitrate cap in bits per
-second, for example `{"path":"alice/**","rate":8000000}`. Omit `rate` for
-uncapped access; zero, fractional, and inexact JSON integers are refused.
-Key scopes bound paths and refuse a bitrate cap. Capped tokens and auth-server
-grants always use the object form so older readers refuse them in full.
-
-The relay currently refuses every capped grant because its transports cannot
-enforce it yet, including a cap introduced at revalidation or in-band renewal.
-HTTP `/fetch` and `/announced` always refuse caps: a request has no connection
-to meter. An embedder running its own gateway must enforce the cap or refuse
-the grant before forwarding media.
-
-Caps describe a per-connection limit, so N connections can spend N times the
-rate. Pair them with a short expiry and a per-token session limit for a budget,
-remembering that the auth server's session counts are approximate across
-restarts. Account for keyframe bursts and leave headroom above the encoder
-bitrate when choosing a limit.
+Roles are pattern arrays. Object roles, including bitrate caps such as
+`{"path":["alice/**"],"rate":8000000}`, are refused in full by token and
+auth-server grant parsing. No transport currently enforces bitrate caps.
 
 ### Path matching
 
@@ -275,7 +270,9 @@ Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` (or a
 server granting its cluster CA everything with `peer: true`); see
 [Clustering](/bin/relay/cluster). `--mtls-peer` marks every certificate as
-another relay; leave it off when certificates identify clients.
+another relay; leave it off when certificates identify clients. Without
+`peer`, a certificate is a client's: it routes like one and sees
+[hidden](/concept/moq-lite#hidden-broadcasts) routes only by asking.
 `--mtls-upstream`, which needs `--mtls-peer`, also marks them
 [upstream](/bin/relay/cluster#upstream-links). Changing either flag ends each
 live mTLS session at its next re-check (the `--revalidate` cadence or a

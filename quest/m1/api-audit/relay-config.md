@@ -26,8 +26,9 @@ Decided 2026-10-22 (API audit):
   `*.tls.root`: `[cluster.api] url`, `tls.root`.
 - `auth.verifications`/`Auth::with_verifications(usize)` is used only by a
   bench and panics on 0: a private constant.
-- `[listen|connect.extensions]` is TOML-only and unset everywhere: drop the
-  config field and `Web::with_extensions`, keep the Rust API.
+- `[listen|connect.extensions]` stays (maintainer, 2026-10-23, reversing the
+  drop): it is the operator's interop knob for moq-transport extensions
+  ([moq-transport stays private](/quest/m1/api-audit/ietf-private.md)).
 - `uring::Workers::spawn` then `serve()` is order-dependent (`serve()` alone
   no-ops): typestate `spawn(self) -> Spawned`.
 - `cluster::with_client_tls` repeats TLS `with_connect` holds: delete.

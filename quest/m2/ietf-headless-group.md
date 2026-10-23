@@ -70,7 +70,5 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - where the
-  dropped group showed up, against Cloudflare's client
 - [Late join and FETCH](/quest/m1/interop-coverage/late-join.md) - the
   joining FETCH that normally supplies the head

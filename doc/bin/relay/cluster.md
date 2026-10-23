@@ -83,6 +83,25 @@ For a full mesh, list every other relay, or serve the list from `connect_api`.
 A session carries both directions, so one dial per pair is enough; listing a
 pair on both sides opens a redundant second session.
 
+`cluster.max_hops` bounds the hop path this relay accepts or forwards, from 1
+to 32, with 32 as the default. Set it near the mesh's diameter after any single
+link or node failure, plus a margin, to cut off long detours during withdrawal
+path hunting. Count the publisher's hop too. A cap below that diameter can
+partition the mesh; a lower cap only drops longer paths and preserves route
+selection among the remaining paths. A peer hears the best route with room
+for this relay's hop, even when a cheaper route at the cap serves locally.
+
+```toml
+[cluster]
+max_hops = 6
+```
+
+The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. It covers
+moq-lite-03 through moq-lite-07-wip and moq-transport drafts 17 through 22 when
+the MoQ Cluster extension is negotiated. A forwarded path counts this relay's
+own hop even when its peer appends it on receipt. Older versions and peers
+without hop paths hide their depth, which this setting cannot bound.
+
 ## Upstream links
 
 Mark a link `upstream` and this relay never offers it a route learned on
@@ -143,7 +162,9 @@ Routing prefers the longest covering prefix, then a fully identified hop list
 over one holding an anonymous hop (0), then the lowest cost, then the shortest
 hop list. Remaining ties hash the requested path, so equal-cost advertisers of
 one prefix, such as a transcode pool, split its paths, and every relay picks
-the same one for a given path.
+the same one for a given path. A publisher connected straight to the relay is
+not hashed at its own path: its newest session wins, so a publisher that
+restarts takes over from its lingering old session at once.
 
 ```toml
 [cluster]
@@ -164,7 +185,10 @@ connect = [
 Prices aren't static. A publisher can re-price a live announcement, which is
 how a standby transcoder pool seeds a high cost and drops it once it's working,
 and a relay receiving a GOAWAY re-prices every route learned from that peer to
-the maximum so new subscriptions go elsewhere while existing ones finish.
+the maximum so new subscriptions go elsewhere while existing ones finish. A
+relay keeps its session to a peer draining to restart until that peer closes
+it, and redials only then, so it reaches the replacement rather than the
+draining process.
 
 A route's price is the publisher's production cost plus the link costs it
 crosses. A live publisher seeds 0, and caching never changes it.
@@ -253,8 +277,11 @@ needs an auth server that grants the cluster CA, such as
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer`. An
 accepted peer counts as a cluster peer only when its grant sets `peer: true`,
 as `--mtls-peer` does; otherwise what it announces counts as ingest here, like
-a client's. Dials retry forever with capped backoff, so a rejected peer is loud
-in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls).
+a client's, and it lists [hidden](/concept/moq-lite#hidden-broadcasts) routes
+only by asking, which a relay below moq-lite-07-wip, or on moq-transport
+without the hidden extension, cannot. Dials retry forever with jittered backoff
+capped at 30s, so a rejected peer is loud in the logs rather than fatal. See
+[Authentication](/bin/relay/auth#mtls).
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
 this relay dialed and holds a session with.
