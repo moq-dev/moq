@@ -60,6 +60,7 @@ impl<'de> DeserializeAs<'de, Option<Duration>> for MillisCeil {
 #[cfg(test)]
 mod test {
 	use crate::catalog::Catalog;
+	use std::str::FromStr;
 
 	fn audio(jitter: Option<std::time::Duration>) -> Catalog {
 		let mut catalog = Catalog::default();

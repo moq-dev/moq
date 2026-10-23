@@ -18,7 +18,7 @@ import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync } from "../sync";
-import { type AudioBuffer, createAudioBuffer } from "./buffer";
+import { AudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 import { AUTO_MAX_DELAY, ringSamples, target } from "./latency";
@@ -62,9 +62,6 @@ type DecoderOutput = {
 	// Whether the audio buffer is stalled (waiting to fill)
 	stalled: Signal<boolean>;
 
-	// How many times the ring ran dry mid-playback, so the UI can show that the target is too low.
-	underruns: Signal<number>;
-
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<Container.BufferedRanges>;
 };
@@ -82,6 +79,8 @@ type Shape = {
 export interface Stats {
 	/** Number of encoded bytes received. */
 	bytesReceived: number;
+	/** How many times playback ran dry mid-stream; a rising count means the delay is too low. */
+	underruns: number;
 }
 
 /**
@@ -105,7 +104,6 @@ export class Decoder {
 		stats: new Signal<Stats | undefined>(undefined),
 		timestamp: new Signal<Milli | undefined>(undefined),
 		stalled: new Signal<boolean>(true),
-		underruns: new Signal<number>(0),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
 	/** The derived outputs, read-only. */
@@ -114,7 +112,7 @@ export class Decoder {
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<Container.BufferedRanges>([]);
 
-	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
+	// Audio ring bridging the main thread and the worklet.
 	#ring = new Signal<AudioBuffer | undefined>(undefined);
 
 	// The context, worklet, and ring are keyed on this alone. It outlives a rendition's absence, so
@@ -272,8 +270,12 @@ export class Decoder {
 			const latencySamples = ringSamples(sampleRate, delay);
 			const buffered = this.sync.out.buffered.peek();
 
-			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
-			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples, buffered);
+			const ring = new AudioBuffer(worklet, {
+				channels: channelCount,
+				rate: sampleRate,
+				latency: latencySamples,
+				buffered,
+			});
 			effect.cleanup(() => ring.close());
 			effect.set(this.#ring, ring);
 
@@ -286,8 +288,17 @@ export class Decoder {
 			effect.run((inner) => {
 				this.#out.stalled.set(inner.get(ring.stalled));
 			});
+			// Each ring counts from zero, so add only what this one counted to the cumulative stats.
+			let counted = 0;
 			effect.run((inner) => {
-				this.#out.underruns.set(inner.get(ring.underruns));
+				const underruns = inner.get(ring.underruns);
+				const added = underruns - counted;
+				counted = underruns;
+				if (added <= 0) return;
+				this.#out.stats.update((stats) => ({
+					bytesReceived: stats?.bytesReceived ?? 0,
+					underruns: (stats?.underruns ?? 0) + added,
+				}));
 			});
 
 			effect.set(this.#out.root, worklet);
@@ -507,6 +518,7 @@ export class Decoder {
 
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
+					underruns: stats?.underruns ?? 0,
 				}));
 
 				if (!(await play(order.push(next)))) return;
@@ -589,6 +601,7 @@ export class Decoder {
 
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
+					underruns: stats?.underruns ?? 0,
 				}));
 
 				if (!(await play(order.push(next)))) return;
@@ -765,8 +778,7 @@ export class Decoder {
 			channelData.push(data.slice(frameOffset, frameOffset + frames));
 		}
 
-		// Hand off to the ring. Shared transport writes directly; post transport
-		// transfers the ArrayBuffers.
+		// Hand off to the ring, which transfers the ArrayBuffers.
 		ring.insert(timestamp, channelData);
 
 		sample.close();
@@ -828,7 +840,11 @@ export class Decoder {
 		return true;
 	}
 
-	/** Observe every frame and gap received from now until the handle or this decoder closes. */
+	/**
+	 * Observe every frame and gap received from now until the handle or this decoder closes.
+	 *
+	 * Each open handle queues every entry until read, so read it continuously or close it.
+	 */
 	arrivals(): Arrivals {
 		return this.#arrivals.consume();
 	}

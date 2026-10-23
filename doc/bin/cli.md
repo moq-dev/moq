@@ -238,12 +238,13 @@ ceiling that backends with live bitrate control lower to fit the connection.
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.
 
-On Wayland, bare `--window` asks the system portal to choose one window;
-there is no window id to look up or supply. An explicit `--window <id>` still
-selects a native window, including XWayland windows through their X11 ids.
-The portal may reuse its grant when capture reopens within the same process;
-a new process shows the picker again. Bare `--window` requires a Linux build
-with `pipewire`; other builds require an explicit window id.
+On Wayland, bare `--window` and bare `--display` ask the system portal to
+choose one window or screen; there is no id to look up or supply. An explicit
+`--window <id>` or `--display <id>` still selects a native source, including
+XWayland's through their `x11:` ids, and any other id fails rather than opening
+the picker. The portal may reuse its grant when capture reopens within the same
+process; a new process shows the picker again. Bare `--window` requires a Linux
+build with `pipewire`; other builds require an explicit window id.
 
 Requires the `capture` feature, plus `openh264` on a host without a hardware
 encoder. On Linux the microphone needs the ALSA
@@ -441,24 +442,6 @@ bytes. A run that arrives after its deadline is dropped and counted, leaving a
 continuity error, and the rest carry on. It takes neither `--linger`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
-
-`export ts --sync` renders every packet from the broadcast alone, so two exports
-of it, joined at different moments and fed with different skew, emit identical
-TS for the content both receive, continuity counters included, as the legs of a
-1+1 pair must; an SMPTE ST 2022-7 pair also needs identical RTP framing around
-it, which this command does not write. Each PID gets a fixed lane of the constant rate, sized
-for its codec's most, with video taking the rest; content one leg lacks leaves
-its packets as stuffing there. The PCR rides a PID of its own, and each PID's
-continuity counter restarts at every group with the break flagged. It needs a
-constant rate, the same on every leg since the lanes follow from it
-(`--mux-rate`, or the catalog's), costing headroom over the
-source's (a 10 Mb/s channel needs about 12), and takes neither `--stitch` nor
-`--passthrough`. A group that starts behind the one before it, on a lane too
-narrow to absorb that one, is logged and counted in `overruns`: the legs can
-differ there. So can reordered video whose SPS declares no reorder depth
-(`max_num_reorder_frames`), which is logged, and SI while one leg holds an older
-revision than the other or around an SI table the catalog adds or drops, which
-each leg takes up when its catalog update arrives.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same

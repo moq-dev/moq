@@ -19,10 +19,16 @@ pub struct SendGroup(Arc<Inner>);
 /// How an outgoing stream or datagram is scheduled: its [`SendGroup`] and priority
 pub type SendOptions<'a> = moq_quic::SendOptions<'a, SendGroup>;
 
-/// The options as the connection knows them.
-pub(crate) fn to_quic(options: SendOptions<'_>) -> moq_quic::SendOptions<'_> {
+/// The options as `conn` knows them.
+///
+/// # Panics
+/// - when `options.group` belongs to another connection
+pub(crate) fn to_quic<'a>(
+    options: SendOptions<'a>,
+    conn: &ConnectionInner,
+) -> moq_quic::SendOptions<'a> {
     moq_quic::SendOptions {
-        group: options.group.map(SendGroup::id),
+        group: options.group.map(|group| group.id_on(conn)),
         priority: options.priority,
     }
 }
@@ -62,6 +68,21 @@ impl SendGroup {
     /// The group as the connection knows it, which refuses it on any other connection.
     pub(crate) fn id(&self) -> &moq_quic::SendGroup {
         self.0.group.as_ref().expect("only taken on drop")
+    }
+
+    /// The group as `conn` knows it.
+    ///
+    /// Call it before taking `conn`'s lock: moq-quic makes the same check, but panicking
+    /// there poisons the lock, so every handle's drop panics again and aborts the process.
+    ///
+    /// # Panics
+    /// - when the group belongs to another connection
+    pub(crate) fn id_on(&self, conn: &ConnectionInner) -> &moq_quic::SendGroup {
+        assert!(
+            std::ptr::eq(&*self.0.conn, conn),
+            "send group used on another connection"
+        );
+        self.id()
     }
 }
 

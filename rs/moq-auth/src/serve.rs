@@ -264,7 +264,7 @@ impl Policy {
 			}
 			Keys::Set(path) => {
 				let json = tokio::fs::read_to_string(path).await.map_err(|_| Denial::UnknownKey)?;
-				KeySet::from_str(&json)
+				json.parse::<KeySet>()
 					.map_err(|err| Denial::InvalidToken(err.to_string()))?
 					.key(jwt)
 					.and_then(|key| key.verify_claims(jwt))
