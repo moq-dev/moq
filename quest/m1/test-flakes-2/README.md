@@ -42,6 +42,7 @@ Public API: none. Wire: none.
 - [Union renewal](/quest/m1/test-flakes-2/auth-union-renewal.md) - the JS subscriber never leaves a torn REQUEST_UPDATE on the stream
 - [One process](/quest/m1/test-flakes-2/one-process.md) - no test writes process-wide env or unwraps the crypto provider install
 - [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
+- [Media tone windows](/quest/m1/test-flakes-2/media-tone-windows.md) - the existing audio-tone agreement survives build load, fixed at its cause
 - [Interop cpp to js budget](/quest/m1/test-flakes-2/interop-cpp-js.md) - the cpp -> js cell finishes inside its 30 s budget, fixed at its cause
 
 ## Related
