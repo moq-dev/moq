@@ -19,6 +19,7 @@ export * as Broadcast from "./broadcast.ts";
 export { Connection } from "./connection/index.ts";
 /** Publisher instance identities, carried in broadcast paths as UUIDv7 epochs. */
 export * as Epoch from "./epoch.ts";
+/** The codes a session closes with and a stream resets with. */
 export { SessionCode, StreamCode } from "./error.ts";
 /** Session, stream, and local request errors. */
 export * as Error from "./errors.ts";
@@ -30,6 +31,7 @@ export * as Origin from "./origin.ts";
 export * as Path from "./path.ts";
 /** Presentation timestamps and their timescales; duration units live in `@moq/clock`. */
 export * as Time from "./time.ts";
+/** A value paired with the timestamp it was captured at, absent when untimed. */
 export type { Timed } from "./timed.ts";
 /** Track role handles. */
 export * as Track from "./track.ts";

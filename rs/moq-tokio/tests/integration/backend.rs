@@ -158,7 +158,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		// The client wired only a subscriber, so its advertised role reaches the server
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
-		assert_eq!(request.role(), Some(moq_tokio::moq_net::Role::Subscriber));
+		assert_eq!(request.role(), Some(moq_tokio::moq_net::setup::Role::Subscriber));
 		if let Some(expect_path) = expect_path {
 			assert_eq!(request.path(), expect_path);
 		}
@@ -672,7 +672,7 @@ async fn iroh_connect_test(version: Option<&str>) {
 		// The client wired only a subscriber, so its advertised role reaches the server
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
-		assert_eq!(request.role(), Some(moq_tokio::moq_net::Role::Subscriber));
+		assert_eq!(request.role(), Some(moq_tokio::moq_net::setup::Role::Subscriber));
 		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC: no request
 		// URL, leaving the SETUP as the only place for the request target.
 		assert_eq!(request.transport(), moq_tokio::Transport::Iroh);

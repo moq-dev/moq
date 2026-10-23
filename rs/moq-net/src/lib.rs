@@ -67,7 +67,7 @@
 //!
 //! [`origin::Producer::new`] also returns a producer and driver. Its driver runs
 //! route changes, serving, linger, teardown, and the origin's cache expiration.
-//! Standalone caches expose [`cache::Pool::gc`]. Frame read/write methods
+//! Standalone caches expose [`cache::Pool::poll`]. Frame read/write methods
 //! clear their expiration timestamp for the next cleanup pass. Datagrams use a bounded
 //! FIFO; model read/write APIs take no time argument, though a frame write stamps
 //! its arrival from the ambient clock ([`frame::Frame::arrived`]).
@@ -82,7 +82,13 @@
 // `Arc` stays and the lint is unactionable here.
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
+// Sessions hand out the auth, GOAWAY, and SETUP handles, so without `async` they are
+// unobtainable and stay private to the model and wire code that still uses them.
+#[cfg(feature = "async")]
 pub mod auth;
+#[cfg(not(feature = "async"))]
+#[allow(dead_code, unused_imports)]
+mod auth;
 #[cfg(feature = "async")]
 mod client;
 mod coding;
@@ -92,7 +98,11 @@ mod discovery;
 mod driver;
 mod epoch;
 mod error;
+#[cfg(feature = "async")]
 pub mod goaway;
+#[cfg(not(feature = "async"))]
+#[allow(dead_code, unused_imports)]
+mod goaway;
 // Not part of the public API: compiled only for the crate's own tests and for the
 // `fuzz/` harness.
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
@@ -107,7 +117,11 @@ pub mod path;
 mod priority;
 #[cfg(feature = "async")]
 mod recv;
+#[cfg(feature = "async")]
 pub mod setup;
+#[cfg(not(feature = "async"))]
+#[allow(dead_code, unused_imports)]
+mod setup;
 #[cfg(feature = "async")]
 mod tail;
 #[cfg(all(test, feature = "async"))]
@@ -130,8 +144,6 @@ pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
 pub use driver::Driver;
 pub use epoch::{Epoch, InvalidEpoch};
 pub use error::*;
-/// The session direction a client advertises in its SETUP (moq-lite-05+).
-pub use lite::Role;
 pub use model::*;
 pub use path::{AsPath, InvalidPattern, Path, PathOwned, Pattern, Patterns};
 #[cfg(feature = "async")]

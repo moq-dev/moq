@@ -871,7 +871,7 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 	if let Some(publisher) = publisher {
 		request = request.with_subscriber(publisher);
 	}
-	let lease = lease.preparing(request.auth(), request.role())?;
+	let lease = lease.preparing(request.auth(), request.requests(), request.role())?;
 	let serving = serve.shutdown.serve();
 	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
 	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the

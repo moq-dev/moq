@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Track.Location` is `Track.Position`
+
+Rename the type; its `group` and `frame` fields are unchanged. It matches the Rust `track::Position`.
+
+### `Origin.Requesting.unroutable` is gone
+
+It could read `true` while a local `dynamic()` claim still held the request.
+Follow `active` for what serves the path, and `closed` for a refusal, an origin shutdown, or a pinned instance that stopped serving.
+A request on a closed origin now settles `closed` at once.
+
 ### Stage a requested track before subscribers see it (#6111)
 
 `Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.

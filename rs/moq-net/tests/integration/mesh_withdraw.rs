@@ -17,7 +17,7 @@ use moq_net::{Hop, Version, announce, broadcast, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	produce(hop, origin::DEFAULT_UPDATE_HOLD)
+	produce(hop, origin::Config::default().update_hold)
 }
 
 /// An origin holding route updates for `hold`. Its cache never expires idle
@@ -392,7 +392,7 @@ async fn cross_node_close_retracts_once_lite07() {
 }
 
 async fn cross_node_close_retracts_once(version: &str) {
-	let mut cluster = Cluster::new(version, STALE_PATHS, origin::DEFAULT_UPDATE_HOLD, 7, 1).await;
+	let mut cluster = Cluster::new(version, STALE_PATHS, origin::Config::default().update_hold, 7, 1).await;
 	for round in 0..3 {
 		let (broadcast, client) = cluster.publish("room/a").await;
 		assert_eq!(client, [Kind::Start], "round {round}");
@@ -439,7 +439,7 @@ async fn residual_slow_ring_reannounces() {
 		((0, 1), ms(141)), ((0, 2), ms(55)), ((2, 3), ms(29)), ((1, 4), ms(135)), ((4, 5), ms(148)), ((3, 5), ms(22)),
 	];
 	use Kind::*;
-	let mut cluster = Cluster::new("moq-lite-06", EDGES, origin::DEFAULT_UPDATE_HOLD, 0, 3).await;
+	let mut cluster = Cluster::new("moq-lite-06", EDGES, origin::Config::default().update_hold, 0, 3).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
 	assert_eq!(client, [End, Start, End]);
@@ -458,7 +458,7 @@ async fn residual_mesh_revives() {
 		((0, 6), ms(121)), ((3, 7), ms(81)), ((0, 2), ms(96)), ((2, 8), ms(93)), ((5, 8), ms(89)),
 	];
 	use Kind::*;
-	let mut cluster = Cluster::new("moq-lite-06", EDGES, origin::DEFAULT_UPDATE_HOLD, 4, 8).await;
+	let mut cluster = Cluster::new("moq-lite-06", EDGES, origin::Config::default().update_hold, 4, 8).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
 	assert_eq!(client, [End, Start, End, Start, End]);
@@ -530,7 +530,14 @@ async fn residual_random_meshes() {
 	let (mut hunted, mut revived, mut extra) = (0, 0, 0);
 	for seed in 0..200 {
 		let (edges, publisher) = random_mesh(seed);
-		let mut cluster = Cluster::new("moq-lite-06", &edges, origin::DEFAULT_UPDATE_HOLD, publisher, 0).await;
+		let mut cluster = Cluster::new(
+			"moq-lite-06",
+			&edges,
+			origin::Config::default().update_hold,
+			publisher,
+			0,
+		)
+		.await;
 		let (broadcast, _) = cluster.publish("room/a").await;
 		let (_, relays) = cluster.close("room/a", broadcast).await;
 		for kinds in relays {

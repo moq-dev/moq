@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Smaller public API
+
+- `origin::Producer::peer()` is `with_link(origin::Link::Peer)`, and a handle marked upstream uses `with_link(origin::Link::Upstream)`. The last call wins, so a `Peer` link no longer leaves an upstream handle upstream.
+- `moq_net::Role` is `moq_net::setup::Role`.
+- `origin::DEFAULT_UPDATE_HOLD` is private; read the default from `origin::Config::default().update_hold`.
+- A server answers the client's tokens with `server::Handshake::requests()` (or `moq_tokio::server::Request::requests()`) instead of `handshake.auth().requests()`. It cannot fail: a second call ends the queue the first returned.
+- `Client::with_cost` takes `impl Into<origin::Cost>`, like `Route::with_cost`. A `u64` still works.
+- Without the default `async` feature, the `auth`, `goaway`, and `setup` modules are private, since only sessions hand out their types.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
@@ -99,8 +108,8 @@ It asks only under the prefixes its subscribe origin's readers watch, with `anno
 `request_broadcast` watches nothing, so on a client it fails with `Error::Unroutable` for a path no reader watches, even when the peer announces it.
 Resolve a path with `routed_broadcast` or `announced_broadcast`, or hold an `announced()` stream over its prefix while requesting, the way `routed` already did after connecting.
 A broadcast resolved through a discovered route keeps its path watched until dropped.
-A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
-Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.
+A server session, and a client fed a handle `with_link(origin::Link::Peer)` or `Link::Upstream`, still asks for everything it may, so a relay discovers as before.
+Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.with_link(origin::Link::Upstream)` (or `Link::Peer`) instead of a plain handle.
 moq-transport sessions, and moq-lite-03/04 sessions (whose announce streams mark no initial set), are unchanged.
 
 ### Frames carry their arrival time
@@ -307,9 +316,9 @@ Give it a budget to replay or tolerate reordering.
 let sub = track::Subscription::default().with_max_delay(Duration::from_secs(1));
 ```
 
-### `cache::Pool::gc` takes a waiter
+### `cache::Pool::gc` is `poll` and takes a waiter
 
-Call `pool.gc(now, &waiter)`, and call it again when the waiter wakes, since a parked read can arm an earlier deadline than the one returned.
+Call `pool.poll(now, &waiter)`, and call it again when the waiter wakes, since a parked read can arm an earlier deadline than the one returned.
 
 ### A replacement track owns its start sequence (#5068)
 

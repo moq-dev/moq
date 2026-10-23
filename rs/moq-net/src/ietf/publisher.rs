@@ -11010,7 +11010,7 @@ mod serve_tests {
 			let peer_setup = peer::PeerSetup::default();
 			peer_setup.set(peer::Peer::default());
 			let auth = crate::auth::Handle::new(false);
-			let mut requests = auth.requests().unwrap();
+			let mut requests = auth.requests();
 			// A limit of nothing, so only the token admits the subscription.
 			auth.authorize(&match token {
 				true => crate::auth::Grant::default(),
@@ -11158,7 +11158,7 @@ mod serve_tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.requests().unwrap();
+		let mut requests = auth.requests();
 		// A limit of nothing, so only the token admits the subscription.
 		auth.authorize(&crate::auth::Grant::default());
 		let publisher = Publisher::new(
@@ -11649,7 +11649,7 @@ mod serve_tests {
 	/// [`crate::auth::Auth`].
 	fn auth_covering_other() -> (crate::auth::Handle, crate::auth::Requests, crate::auth::Auth) {
 		let auth = crate::auth::Handle::new(true);
-		let requests = auth.requests().unwrap();
+		let requests = auth.requests();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		// The peer lets us publish everything, and we let it read only "other".
 		auth.granted(0, crate::auth::Grant::all());
@@ -12746,7 +12746,7 @@ mod serve_tests {
 	async fn a_request_token_on_a_no_auth_session_is_verified() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.requests().unwrap();
+		let mut requests = auth.requests();
 		auth.authorize(&crate::auth::Grant::default());
 
 		let h = serve_with_auth(VERSION, auth, Vec::new());
@@ -12797,7 +12797,7 @@ mod serve_tests {
 	) -> (crate::auth::Handle, Serve, Serving) {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.requests().unwrap();
+		let mut requests = auth.requests();
 		if let Some(limit) = &limit {
 			auth.authorize(limit);
 		}
@@ -12887,7 +12887,7 @@ mod serve_tests {
 	async fn a_covering_peer_grant_never_skips_the_verifier() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Handle::new(true);
-		let mut requests = auth.requests().unwrap();
+		let mut requests = auth.requests();
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
 		let h = serve_with_auth(VERSION, auth, Vec::new());
@@ -13064,7 +13064,7 @@ mod serve_tests {
 
 		// Withdrawn before the application looked.
 		let auth = crate::auth::Handle::new(false);
-		let _requests = auth.requests().unwrap();
+		let _requests = auth.requests();
 		let mut h = serve_with_auth(VERSION, auth, Vec::new());
 		h.publisher.subscriptions = crate::session::Slots::new(1);
 		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
@@ -13086,7 +13086,7 @@ mod serve_tests {
 
 		// Withdrawn after the application took it.
 		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.requests().unwrap();
+		let mut requests = auth.requests();
 		let mut h = serve_with_auth(VERSION, auth, Vec::new());
 		h.publisher.subscriptions = crate::session::Slots::new(1);
 		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
@@ -13126,7 +13126,7 @@ mod serve_tests {
 	async fn a_request_token_cannot_exceed_the_peers_grant() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Handle::new(true);
-		let mut requests = auth.requests().unwrap();
+		let mut requests = auth.requests();
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(
 			0,

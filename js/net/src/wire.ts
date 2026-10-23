@@ -27,7 +27,7 @@ export interface Broadcast {
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
 	// pending: /quest/m1/public-model/serve.md
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
-	largest(name: string): track.Location | undefined;
+	largest(name: string): track.Position | undefined;
 	// pending: /quest/m1/public-model/serve.md
 	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	// pending: /quest/m1/public-model/answer.md
@@ -70,8 +70,6 @@ export interface OriginProducer {
 	): origin.Dynamic;
 	// pending: /quest/m1/public-model/answer.md
 	attach(discovery: boolean): Dispose;
-	// pending: /quest/m1/public-model/answer.md
-	expect(): Dispose;
 	// pending: /quest/m1/public-model/answer.md
 	/**
 	 * Hold the origin's announcement streams overlapping `prefix` unsynced until

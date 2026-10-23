@@ -50,8 +50,8 @@ async fn dial(dialer: &origin::Producer, edge: &origin::Producer) -> Link {
 
 	// Cluster dials publish and subscribe through a peer handle, which is what
 	// records the announcing session on the route.
-	let dialer_origin = dialer.clone().peer();
-	let edge_origin = edge.clone().peer();
+	let dialer_origin = dialer.clone().with_link(moq_net::origin::Link::Peer);
+	let edge_origin = edge.clone().with_link(moq_net::origin::Link::Peer);
 	let client = Client::new()
 		.with_versions(version.into())
 		.with_publisher(dialer_origin.consume().with_hidden(true))

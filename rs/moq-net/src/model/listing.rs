@@ -505,7 +505,7 @@ impl Consumer {
 /// [`sync`](Self::synced) before reporting [`TracksEvent::Synced`]. Answer while [`poll_used`](Self::poll_used): list what the
 /// publisher behind the handler holds and keep it current, then [`clear`](Self::clear)
 /// once [`poll_unused`](Self::poll_unused). Dropping it clears what it listed.
-pub struct Lister {
+pub(crate) struct Lister {
 	state: kio::Shared<BroadcastState>,
 }
 
@@ -538,17 +538,17 @@ impl Lister {
 	}
 
 	/// Ready once anyone lists the broadcast; [`Error::Closed`] once it ended.
-	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		self.poll_readers(waiter, true)
 	}
 
 	/// Ready once nobody lists the broadcast; [`Error::Closed`] once it ended.
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		self.poll_readers(waiter, false)
 	}
 
 	/// List a track. Fails with [`Error::Duplicate`] if this answer already lists it.
-	pub fn add(&self, name: impl Into<Arc<str>>, info: track::Info) -> Result<(), Error> {
+	pub(crate) fn add(&self, name: impl Into<Arc<str>>, info: track::Info) -> Result<(), Error> {
 		let mut state = self.state.lock();
 		if state.closing {
 			return Err(Error::Closed);
@@ -557,7 +557,7 @@ impl Lister {
 	}
 
 	/// Stop listing a track. Fails with [`Error::NotFound`] if this answer does not list it.
-	pub fn remove(&self, name: &str) -> Result<(), Error> {
+	pub(crate) fn remove(&self, name: &str) -> Result<(), Error> {
 		let mut state = self.state.lock();
 		if state.closing {
 			return Err(Error::Closed);
@@ -566,7 +566,7 @@ impl Lister {
 	}
 
 	/// The answer holds everything this hop knows now; later changes are live.
-	pub fn synced(&self) {
+	pub(crate) fn synced(&self) {
 		let mut state = self.state.lock();
 		let was = state.listing.synced();
 		state.listing.answered = true;
@@ -574,20 +574,20 @@ impl Lister {
 	}
 
 	/// Withdraw the answer: every track it listed, and its sync.
-	pub fn clear(&self) {
+	pub(crate) fn clear(&self) {
 		self.state.lock().listing.answer_clear();
 	}
 
 	/// End every current reader as if the broadcast ended, and withdraw the answer, as
 	/// when the publisher behind the handler ends its broadcast first. A later reader
 	/// asks again.
-	pub fn finish(&self) {
+	pub(crate) fn finish(&self) {
 		self.end(Ok(()));
 	}
 
 	/// Fail every current reader with `err` and withdraw the answer. A later reader
 	/// asks again.
-	pub fn abort(&self, err: Error) {
+	pub(crate) fn abort(&self, err: Error) {
 		self.end(Err(err));
 	}
 
