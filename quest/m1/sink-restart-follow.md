@@ -43,7 +43,9 @@ Audit and fix the rest the same way:
   (`EXT-X-DISCONTINUITY`); a failed timeline answers its playlists with a no-store 5xx.
 - `export rtmp`, `export srt`, `export rtc`, both `--listen` (per-viewer
   streams in `moq-rtmp`, `moq-srt`, `moq-rtc`) and `--connect` (one push).
-  SRT already rides the TS follower (`--linger`, `--stitch`); confirm its
+  SRT already rides the TS follower (`--linger`, becoming `--follow` in
+  [TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md),
+  and `--stitch`); confirm its
   listen side does too. FLV and WebRTC need a decision.
 - `transcode`: its source broadcast; following means restarting the ladder
   on the new instance.

@@ -23,8 +23,6 @@ Decided 2026-10-22 (API audit):
   wrapper pass-throughs uses them.
 - `MoqBroadcastConsumer::resolve(reference, epoch)` takes two adjacent
   `Option<String>`s; take `MoqRendition`, as the rendition consumers do.
-- Document that a dropped `MoqBroadcastFinish` closes the broadcast, which a
-  garbage-collected language (Kotlin, Go, Dart) does late.
 - moq-c: `moq_bandwidth_set_target` has no consumer beyond the README; keep
   it only if [native rung disable](/quest/m1/simulcast-rung-disable.md) uses
   it. Align `moq_client_defaults` wrapping across languages.

@@ -17,11 +17,11 @@ Decided 2026-10-22 (API audit):
   raw TS multiplex on `import|export ts`. Rename the fmp4/hls one to
   `--container cmaf` or another distinct name, consistent with
   [container formats](/quest/m1/api-audit/container-format.md).
-- `linger`: publishers already linger on a clean end in rtmp, srt, rtc, and
-  the CLI. Drop moqsink's new boolean `linger` property and `<moq-publish>`'s
-  `linger` attribute so every publisher lingers; NULL and `close` still end
-  at once. `linger` then means only the subscriber-side wait for a
-  replacement (`moq export --linger`).
+- `linger`: drop moqsink's new boolean `linger` property and
+  `<moq-publish>`'s `linger` attribute, keeping today's close at the end.
+  Revised 2026-10-23 (maintainer): don't make every publisher finish through
+  moq-net's `Finish`; [broadcast lifecycle](/quest/m1/broadcast-lifecycle/README.md)
+  deletes it and owns completion and retention.
 - gst: moqsrc's `versions` (comma list) versus the CLI's repeatable
   `--connect-version`; mirror one name, give moqsink the same, and give both
   elements the same connection properties (moqsrc lacks
