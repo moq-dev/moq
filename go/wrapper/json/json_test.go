@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -124,6 +125,61 @@ func TestTracks(t *testing.T) {
 	}
 	if err := stream.Finish(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A window reader sees each push and pop in order, with its timestamp.
+func TestWindow(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	broadcast, consumer := newBroadcast(t)
+
+	scale := uint64(1_000_000)
+	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale})
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, err := moqjson.NewWindowProducer(track, moqjson.WindowOptions{Compression: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	windowConsumer, err := moqjson.NewWindowConsumer(subscribeTrack(ctx, t, consumer, "log"), moqjson.ConsumerOptions{Compression: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windowConsumer.Cancel()
+
+	ms := func(n int) *time.Duration {
+		at := time.Duration(n) * time.Millisecond
+		return &at
+	}
+	for n := range 3 {
+		if err := window.Push(map[string]any{"n": n}, ms(n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := window.Pop(2, ms(3)); err != nil {
+		t.Fatal(err)
+	}
+	if err := window.Finish(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []moqjson.TimedWindowEvent{
+		{Event: moqjson.WindowPush{Index: 0, Value: json.RawMessage(`{"n":0}`)}, Timestamp: ms(0)},
+		{Event: moqjson.WindowPush{Index: 1, Value: json.RawMessage(`{"n":1}`)}, Timestamp: ms(1)},
+		{Event: moqjson.WindowPush{Index: 2, Value: json.RawMessage(`{"n":2}`)}, Timestamp: ms(2)},
+		{Event: moqjson.WindowPop{Start: 0, End: 2}, Timestamp: ms(3)},
+	}
+	var got []moqjson.TimedWindowEvent
+	for event, err := range windowConsumer.All(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, *event)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %+v, want %+v", got, want)
 	}
 }
 

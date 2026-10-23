@@ -213,8 +213,11 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
 
 ### Data
 
-`moq.json.SnapshotProducer.update(value, timestamp=None)` and
-`moq.json.StreamProducer.append(value, timestamp=None)` preserve optional capture time.
+`moq.json.SnapshotProducer.update(value, timestamp=None)`,
+`moq.json.StreamProducer.append(value, timestamp=None)`, and
+`moq.json.WindowProducer.push(value, timestamp=None)` / `.pop(count, timestamp=None)` preserve
+optional capture time. A window keeps a sliding run of records a reader can join at any point;
+the catalog has no window mode, so `WindowProducer` takes only the track.
 `moq.flate.SnapshotProducer` and `moq.flate.StreamProducer` offer the same operations for bytes.
 Omitting time leaves data untimed; choose the track's `timescale` to match.
 
@@ -233,7 +236,7 @@ Omitting time leaves data untimed; choose the track's `timescale` to match.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
 
 ### Origin (advanced)
 
