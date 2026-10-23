@@ -27,15 +27,33 @@ integrator on their own HTML, and nothing here showed a gain worth asking for.
 CI injects no main-thread jank, but decoding and ring writes run on main in
 both paths, so a long task stalls them alike.
 
-Start after [moq-dev/moq#6425](https://github.com/moq-dev/moq/pull/6425)
-merges; it edits both rings and `buffer.ts`, and lands as is.
+[moq-dev/moq#6425](https://github.com/moq-dev/moq/pull/6425) merged before
+the pre-removal comparison. The nightlies compare listener quality only.
+The required one-off headless Chromium CPU/allocation A/B at 1, 4 and 16
+players is recorded with source snapshots and raw windows in
+[the measurement report](/test/audio-quality/ring-ab.md). All 54 corrected
+windows completed with advancing playheads and no underruns. The initial
+relative-timer fixture underfed the device and its measurements were withdrawn;
+the corrected fixture paces from the AudioContext clock.
 
-The nightlies compare listener quality only. Before deleting, measure
-main-thread CPU and allocations at 1, 4, and 16 players on both rings in
-headless Chromium, and put the numbers in the PR. If postMessage costs
-materially more, stop and reconsider the removal with the maintainer. This is
-a one-off A/B, not a persistent bench: the surviving path gets the
-[watch worker plan](/quest/m2/plan-watch-worker.md)'s N-player sweep.
+The removal remains unfinished. At 16 players, the paired main-thread CPU
+increase for postMessage was a median 9.638 ms/s (0.964 percentage points of
+one CPU core), versus an A/A median 0.684 ms/s; median sampled JS allocation
+was 687.705 versus 544.690 KiB/s. These isolate ring overhead, not full player
+cost: decoding, network, Decoder/Sync effects, separate player AudioContexts,
+worklet-thread costs and native backing-store/serialization allocations are
+outside the comparison. Both rings remain selected as before.
+
+“Materially more” has no settled numeric definition. Before deleting, the
+maintainer must judge this absolute cost against the listener-quality evidence
+and maintenance simplification: accept the increase and continue the removal,
+or retain both paths and revise when to remove the shared one. Do not treat any
+measurable difference as an automatic failed goal, or infer a threshold. Keep
+this tested checkpoint draft until that tradeoff is settled. The surviving
+path still gets the [watch worker plan](/quest/m2/plan-watch-worker.md)'s
+N-player sweep; this one-off comparison does not replace it.
+
+Remaining removal after that decision:
 
 - Delete `js/watch/src/audio/shared-ring-buffer.ts` and its test,
   `SharedAudioBuffer`, `supportsSharedArrayBuffer`, the `createAudioBuffer`
@@ -44,9 +62,10 @@ a one-off A/B, not a persistent bench: the surviving path gets the
   `render.ts` and `render-worklet.ts` into the single protocol.
 - `replay.ts` drops `Options.ring`; `playout.test.ts`, `replay.test.ts`, and
   `buffer.test.ts` drop their ring parametrization.
-- Add unit coverage for the main-thread buffer class and the worklet's message
-  dispatch, which today have none (`buffer.test.ts` only reaches the shared
-  class under Bun).
+- Keep and adapt the postMessage coverage in `buffer.test.ts` and
+  `render-worklet.test.ts`: transfer ownership and control ordering, cancellation
+  on close, backpressure/reset epochs, truncation, and latency resizing. These
+  exercise the real buffer and registered processor independently of removal.
 - Delete `js/common/vite-plugin-isolate.ts` and its use in `demo/web` and
   `demo/boy`.
 - Drop the audio-quality `ring` axis entirely, not only its `isolated` value:

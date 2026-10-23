@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import type { Micro } from "@moq/clock";
+import { type Micro, Milli } from "@moq/clock";
 import { createAudioBuffer } from "./buffer";
-import type { InitShared, State } from "./render";
+import type { InitShared, Message, State } from "./render";
 import { SharedRingBuffer } from "./shared-ring-buffer";
 
 describe("SharedAudioBuffer", () => {
@@ -138,6 +138,52 @@ describe("SharedAudioBuffer", () => {
 });
 
 describe("PostAudioBuffer", () => {
+	it("transfers PCM ownership and orders control messages after the data they change", async () => {
+		const channel = new MessageChannel();
+		const global = globalThis as { crossOriginIsolated?: boolean };
+		const previous = global.crossOriginIsolated;
+		global.crossOriginIsolated = false;
+		let buffer: ReturnType<typeof createAudioBuffer>;
+		try {
+			buffer = createAudioBuffer({ port: channel.port1 } as AudioWorkletNode, 2, 1000, 100, true);
+		} finally {
+			global.crossOriginIsolated = previous;
+		}
+		const messages: Message[] = [];
+		const received = new Promise<void>((resolve) => {
+			channel.port2.onmessage = ({ data }: MessageEvent<Message>) => {
+				messages.push(data);
+				if (data.type === "reset") resolve();
+			};
+		});
+		try {
+			const left = new Float32Array([1, 2, 3]);
+			const right = new Float32Array([4, 5, 6]);
+			buffer.insert(500_000 as Micro, [left, right]);
+			expect(left.byteLength).toBe(0);
+			expect(right.byteLength).toBe(0);
+			buffer.setLatency(200);
+			buffer.truncate(502_000 as Micro);
+			buffer.reset();
+			await received;
+			expect(messages).toEqual([
+				{ type: "init-post", channels: 2, rate: 1000, latency: Milli(100), buffered: true },
+				{
+					type: "data",
+					timestamp: 500_000 as Micro,
+					data: [new Float32Array([1, 2, 3]), new Float32Array([4, 5, 6])],
+				},
+				{ type: "latency", latency: Milli(200) },
+				{ type: "truncate", timestamp: 502_000 as Micro },
+				{ type: "reset", epoch: 1 },
+			]);
+		} finally {
+			buffer.close();
+			channel.port1.close();
+			channel.port2.close();
+		}
+	});
+
 	// Only the postMessage path exists outside cross-origin isolation.
 	function post(): {
 		buffer: ReturnType<typeof createAudioBuffer>;
@@ -186,6 +232,22 @@ describe("PostAudioBuffer", () => {
 			expect(Bun.peek.status(buffer.wait(0 as Micro, signal))).toBe("fulfilled");
 			expect(Bun.peek.status(buffer.wait(100_000 as Micro, signal))).toBe("fulfilled");
 			expect(Bun.peek.status(buffer.wait(120_000 as Micro, signal))).toBe("pending");
+		} finally {
+			close();
+		}
+	});
+
+	it("releases its waiters and stops observing the port when closed", async () => {
+		const { buffer, state, close } = post();
+		try {
+			await state(100_000, false, 0);
+			const held = buffer.wait(10_000_000 as Micro, new AbortController().signal);
+			expect(Bun.peek.status(held)).toBe("pending");
+			buffer.close();
+			expect(Bun.peek.status(held)).toBe("fulfilled");
+			await state(5_000_000, false, 0);
+			expect(buffer.timestamp.peek()).toBe(100_000 as Micro);
+			expect(Bun.peek.status(buffer.wait(10_000_000 as Micro, new AbortController().signal))).toBe("fulfilled");
 		} finally {
 			close();
 		}
