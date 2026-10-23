@@ -738,7 +738,9 @@ mod tests {
 		assert_eq!(opened.output, decoder.output);
 		assert_eq!(opened.scale_hint, decoder.scale_hint);
 
-		let frame = pollster::block_on(consumer.next_frame()).unwrap().expect("a decoded frame");
+		let frame = pollster::block_on(consumer.next_frame())
+			.unwrap()
+			.expect("a decoded frame");
 		assert!(
 			matches!(frame.surface, crate::Surface::I420(_)),
 			"CPU output was not enforced"
@@ -942,7 +944,6 @@ mod tests {
 		read(&mut consumer).await;
 		assert_eq!(reads, ["frame 100000", "end 133333", "frame 200000", "none"]);
 	}
-
 
 	/// A read dropped while a threaded flush is in flight loses nothing: the
 	/// next read finishes that same flush rather than issuing another into a

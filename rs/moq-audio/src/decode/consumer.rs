@@ -1242,12 +1242,21 @@ mod tests {
 			}
 		}
 		let end = ended.expect("the marker reads as an end");
-		assert_eq!(before.len(), 2, "the stopped encoder's body and resampler tail: {before:?}");
-		assert!(before.iter().all(|timestamp| *timestamp < end), "{before:?} past {end:?}");
+		assert_eq!(
+			before.len(),
+			2,
+			"the stopped encoder's body and resampler tail: {before:?}"
+		);
+		assert!(
+			before.iter().all(|timestamp| *timestamp < end),
+			"{before:?} past {end:?}"
+		);
 		assert!(!after.is_empty(), "a later group opens a fresh decoded timeline");
-		assert!(after.iter().all(|timestamp| *timestamp >= end), "{after:?} before {end:?}");
+		assert!(
+			after.iter().all(|timestamp| *timestamp >= end),
+			"{after:?} before {end:?}"
+		);
 	}
-
 
 	/// A packet whose sample count isn't a multiple of the resampler's chunk leaves
 	/// samples buffered, and the next output starts with those. Stamping that

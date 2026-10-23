@@ -219,7 +219,11 @@ impl Selector {
 					ended.is_none_or(|ended| end > ended) && last.is_none_or(|last| end >= last)
 				}
 			});
-			state.pictures = state.queue.iter().filter(|(read, _)| matches!(read, Read::Frame(_))).count();
+			state.pictures = state
+				.queue
+				.iter()
+				.filter(|(read, _)| matches!(read, Read::Frame(_)))
+				.count();
 		}
 	}
 }
