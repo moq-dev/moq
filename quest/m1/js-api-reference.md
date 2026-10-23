@@ -3,7 +3,7 @@
 ## Goal
 
 The doc site has an API reference for every published `@moq/*` package,
-including `@moq/watch`, `@moq/publish`, `@moq/libav`, and `@moq/moq-boy`,
+including `@moq/watch`, `@moq/publish`, `@moq/libav`, and `@moq/boy`,
 which JSR cannot host because of their global type augmentation. Each package
 page under `doc/lib/js/` links its reference.
 

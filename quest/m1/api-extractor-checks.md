@@ -20,7 +20,10 @@ Decided 2026-10-23 (maintainer interview):
 - Keep only the rules API Extractor enforces. A `docs.ts` rule with no
   API Extractor equivalent is dropped, not kept in a reduced checker.
 - JSR reads `@module` blocks, so define `@module` in `tsdoc.json` instead of
-  switching entrypoints to `@packageDocumentation`.
+  switching entrypoints to `@packageDocumentation`. API Extractor reads an
+  entrypoint's summary only from a block tagged `@packageDocumentation`, so
+  add that tag beside `@module` (or an equivalent transform) to keep module
+  summaries in the doc model for the reference.
 - `stripInternal` stays: rolling declarations up with release tags
   (`dtsRollup`) is a non-goal.
 - Prove the replacement: reintroducing the `@moq/auth` `AccessInput` bug
