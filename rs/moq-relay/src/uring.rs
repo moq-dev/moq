@@ -797,13 +797,8 @@ async fn serve_request(
 	}
 	auth_request.remote = Some(remote);
 	auth_request.local = Some(serve.local);
-	// Like the tokio listener: the SNI, else the host a WebTransport client addressed.
-	auth_request.server_name = sni.or_else(|| {
-		url.as_ref()
-			.and_then(|url| url.host_str())
-			.filter(|host| !host.is_empty())
-			.map(str::to_owned)
-	});
+	// Only the SNI, like the tokio listener: the CONNECT host selected no certificate.
+	auth_request.server_name = sni;
 	auth_request.alpn = alpn.clone();
 	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 	let admission = lifecycle.clone();
@@ -889,7 +884,7 @@ async fn serve_request(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -899,7 +894,6 @@ mod tests {
 	/// `Config` is non-exhaustive, so the windows are filled in after `default`
 	/// rather than in a struct literal.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn windows_are_applied() {
 		let mut quic = moq_tokio::quic::Config::default();
 		quic.receive_window = Some(128 << 20);
@@ -914,7 +908,6 @@ mod tests {
 
 	/// Incomplete messages hold connection credit, so the window has to fit the largest.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn a_receive_window_below_the_largest_message_is_refused() {
 		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
 		let mut quic = moq_tokio::quic::Config::default();
@@ -933,7 +926,6 @@ mod tests {
 	/// left at the documented defaults: the tokio backends apply `Resolved`'s
 	/// windows as they are, and the workers must get exactly those.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn windows_match_the_tokio_runtime() {
 		let mut set = moq_tokio::quic::Config::default();
 		set.receive_window = Some(256 << 20);
@@ -965,10 +957,10 @@ mod tests {
 	/// A direct `bind` validates `[quic]` too, so a key log nobody can read back fails
 	/// instead of binding and logging nothing.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn bind_refuses_a_keylog_without_sslkeylogfile() {
-		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
+			return;
+		}
 		let mut server = moq_tokio::server::Config::default();
 		server.quic.keylog = Some(true);
 		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))

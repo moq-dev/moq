@@ -57,8 +57,8 @@ export class Renderer {
 		timestamp: Getter<Milli | undefined>;
 		// Whether the canvas should currently download per the configured distance and tab focus.
 		visible: Getter<boolean>;
-		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererError}.
-		error: Getter<Video.RendererError | undefined>;
+		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererOutput.error}.
+		error: Getter<Error | undefined>;
 	}>;
 
 	#signals = new Effect();

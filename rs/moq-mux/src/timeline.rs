@@ -598,9 +598,6 @@ pub struct Timelines {
 impl Timelines {
 	/// Timelines for tracks of `broadcast`.
 	pub fn new(broadcast: &moq_net::broadcast::Producer) -> Self {
-		// The contents are `Send + Sync` natively; on wasm moq-net's handles are `Rc`-backed, so
-		// clippy sees a pointlessly atomic `Arc`. One type for both targets is worth it.
-		#[allow(clippy::arc_with_non_send_sync)]
 		let registry = Arc::new(Mutex::new(Registry {
 			tracks: BTreeMap::new(),
 			finished: false,
@@ -644,7 +641,6 @@ impl Timelines {
 
 		let timeline = hang::timeline::default_name(name);
 		let track = self.broadcast.create_track(timeline.as_str(), Producer::info())?;
-		#[allow(clippy::arc_with_non_send_sync)]
 		let live = Arc::new(Mutex::new(Live {
 			segmenter: Segmenter::new(config),
 			on_declare: None,

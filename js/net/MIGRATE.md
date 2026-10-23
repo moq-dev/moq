@@ -34,6 +34,10 @@ const group = recv.kind === "group" ? recv.group : undefined;
 `Track.Ordered.tryNextGroup()`, `Track.finalSequence(end)`, `Track.Consumer.info({ hold })`, and `Group.Consumer.expired` are new.
 A custom publisher races its writes against `expired` and against `closed` settling with an error (an eviction, or an aborted copy no route continues), and resets the stream once either does.
 
+### A listing says whether a removed track finished (#6399)
+
+`Broadcast.TracksEvent` gains `{ kind: "finished", name }`: the track left the listing because it finished. `{ kind: "removed", name }` now means it left unfinished. Handle both where you matched `"removed"`.
+
 ### `Track.Producer.largest()` is a getter
 
 `Track.Producer.largest()` returns the track's largest location synchronously, `undefined` before any, instead of a promise for the next newer one.

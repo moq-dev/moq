@@ -19,8 +19,10 @@
 //!
 //! Run `cargo bench -p moq-stats --features bench --bench producer_tick`.
 
-// Custom timings measure the real time the work took, not the ambient clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "custom timings measure the real time the work took, not the ambient clock"
+)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;

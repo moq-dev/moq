@@ -1,5 +1,8 @@
 #![warn(missing_docs)]
-#![cfg_attr(test, allow(clippy::disallowed_methods))]
+#![cfg_attr(
+	test,
+	expect(clippy::disallowed_methods, reason = "tests read the host clock directly")
+)]
 
 //! UniFFI bindings for [`moq_net`].
 //!
@@ -10,7 +13,13 @@
 // `Rc`-backed, so clippy sees a pointlessly atomic `Arc` at every construction site. The
 // `Arc` is uniffi's ABI rather than our choice, and the target is single-threaded, so the
 // wasted atomics are what one type serving both targets costs.
-#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+#![cfg_attr(
+	target_arch = "wasm32",
+	expect(
+		clippy::arc_with_non_send_sync,
+		reason = "`Arc` is uniffi's ABI, and wasm is single-threaded"
+	)
+)]
 
 #[cfg(target_os = "android")]
 mod android;

@@ -404,6 +404,7 @@ fn lite_tracks_interop() {
 				format!("+{name}")
 			}
 			lite::TracksEvent::Removed { name } => format!("-{name}"),
+			lite::TracksEvent::Finished { name } => format!("~{name}"),
 			lite::TracksEvent::Synced => "synced".to_string(),
 		});
 	}

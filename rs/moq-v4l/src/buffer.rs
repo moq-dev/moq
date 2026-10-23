@@ -6,7 +6,6 @@ use crate::timestamp::Timestamp;
 /// Buffer type
 ///
 /// Specific types of devices require buffers of corresponding types.
-#[allow(clippy::unreadable_literal)]
 #[rustfmt::skip]
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
@@ -31,7 +30,6 @@ pub enum Type {
 }
 
 bitflags! {
-	#[allow(clippy::unreadable_literal)]
 	#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 	pub struct Flags: u32 {
 		/// Buffer is mapped

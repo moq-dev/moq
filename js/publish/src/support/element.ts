@@ -91,8 +91,7 @@ export default class MoqPublishSupport extends HTMLElement {
 		if (!support.audio.encoding || !support.video.encoding) return "none";
 		if (!support.audio.capture) return "none";
 
-		if (!Object.values(support.audio.encoding).some((v) => v === true || v === "full" || v === "partial"))
-			return "none";
+		if (!Object.values(support.audio.encoding).some((v) => v !== "none")) return "none";
 		if (!Object.values(support.video.encoding).some((v) => v.software || v.hardware)) return "none";
 
 		if (support.video.capture === "partial") return "partial";
@@ -257,7 +256,7 @@ export default class MoqPublishSupport extends HTMLElement {
 		addRow("Capture", "Audio", binary(support.audio.capture));
 		addRow("", "Video", partial(support.video.capture));
 		addRow("Encoding", "Opus", partial(support.audio.encoding.opus));
-		addRow("", "AAC", binary(support.audio.encoding.aac));
+		addRow("", "AAC", partial(support.audio.encoding.aac));
 		addRow("", "AV1", hardware(support.video.encoding?.av1));
 		addRow("", "H.265", hardware(support.video.encoding?.h265));
 		addRow("", "H.264", hardware(support.video.encoding?.h264));

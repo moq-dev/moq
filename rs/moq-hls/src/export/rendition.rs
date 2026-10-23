@@ -103,8 +103,10 @@ struct Run {
 }
 
 /// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
-// One per rendition, so the variant sizes never add up to an allocation's worth.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per rendition, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
+)]
 enum Config {
 	Video(VideoConfig),
 	Audio(AudioConfig),
@@ -508,7 +510,10 @@ impl Rendition {
 	}
 
 	/// The generation every segment URL currently carries.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) fn generation(&self) -> Option<Arc<str>> {
 		self.run().generation
 	}
@@ -947,7 +952,10 @@ impl Rendition {
 	/// Fetch and transmux the segment of the reference tagged `tag` whose timeline `pts` is
 	/// `time`, in the timeline's timescale (DASH `$Time$` addressing of the same bytes
 	/// [`segment`](Self::segment) serves by aligned number).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn segment_at(&self, tag: &str, time: u64) -> Result<Option<Bytes>> {
 		self.media.sync(&self.live);
 		let Some(segment) = self.live.segment_number_at(tag, time, self.timescale()) else {
@@ -1031,7 +1039,10 @@ impl Rendition {
 
 	/// The init segment served at `init.{hash}.mp4`: `None` when `hash` names any other bytes,
 	/// so a URL never serves an init it does not describe.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn init_versioned(&self, hash: &str) -> Result<Option<Bytes>> {
 		let init = self.load_init().await?;
 		Ok(init.filter(|init| init.hash == hash).map(|init| init.bytes.clone()))
