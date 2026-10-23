@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A certificate has one cluster-link role (#6535)
+
+Replace `serve::Policy.mtls_peer` and `.mtls_upstream` with `.mtls_link`:
+use `None` for ordinary certificate grants, `Some(serve::Link::Peer)` for peers,
+and `Some(serve::Link::Upstream)` for upstream peers. `Grant.peer` and
+`Grant.upstream` retain their existing JSON boolean contract.
+
+
 ### `Client::connect` has no timeout of its own (#5765)
 
 `Client::connect` waits on the auth server for as long as its caller does, and dropping the future drops the request.

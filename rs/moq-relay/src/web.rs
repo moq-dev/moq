@@ -273,12 +273,14 @@ impl Web {
 	}
 
 	/// Serve HTTPS from the ACME resolver, which also answers TLS-ALPN-01 challenges.
+	#[cfg(feature = "acme")]
 	pub(crate) fn with_acme(mut self, resolver: Option<Arc<dyn rustls::server::ResolvesServerCert>>) -> Self {
 		self.acme = resolver;
 		self
 	}
 
 	/// The bound HTTPS socket, where ACME answers challenges before serving starts.
+	#[cfg(feature = "acme")]
 	pub(crate) fn https_listener(&self) -> Option<&net::TcpListener> {
 		self.https_listener.as_ref()
 	}
@@ -301,7 +303,7 @@ impl Web {
 	}
 
 	/// Choose which moq-transport extensions WebSocket sessions offer in SETUP.
-	pub fn with_extensions(mut self, extensions: moq_net::setup::Extensions) -> Self {
+	pub(crate) fn with_extensions(mut self, extensions: moq_net::setup::Extensions) -> Self {
 		self.extensions = extensions;
 		self
 	}
@@ -563,11 +565,7 @@ fn build_acme_config(
 	tls.resolver = Some(resolver);
 	tls.root = root.to_vec();
 
-	let alpn = vec![
-		b"h2".to_vec(),
-		b"http/1.1".to_vec(),
-		rustls_acme::acme::ACME_TLS_ALPN_NAME.to_vec(),
-	];
+	let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"acme-tls/1".to_vec()];
 	tls.server_config(alpn).context("failed to build https TLS config")
 }
 
@@ -718,7 +716,7 @@ impl<I: HttpStream> HttpStream for TlsStream<I> {
 		self.get_ref().1.alpn_protocol() == Some(b"h2")
 	}
 	fn acme_challenge(&self) -> bool {
-		self.get_ref().1.alpn_protocol() == Some(rustls_acme::acme::ACME_TLS_ALPN_NAME)
+		self.get_ref().1.alpn_protocol() == Some(b"acme-tls/1")
 	}
 	fn mtls_peer(&self) -> Option<MtlsPeer> {
 		self.get_ref()

@@ -146,8 +146,8 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The extensions to offer in SETUP, every moq-transport one by default.
-	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
+	/// Extensions offered by a programmatic endpoint; unavailable in TOML.
+	#[serde(skip)]
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,
 
@@ -581,16 +581,14 @@ mod tests {
 	/// The listen config offers every extension unless told otherwise, and leaves the
 	/// default out when serialized.
 	#[test]
-	fn extensions_default_on_and_parse_off() {
-		let config: Config = toml::from_str("[extensions]\nauth = false\n").expect("parse");
+	fn extensions_are_rust_only() {
+		for value in ["false", "true"] {
+			assert!(toml::from_str::<Config>(&format!("[extensions]\nauth = {value}\n")).is_err());
+		}
+		let mut config = Config::default();
+		config.extensions.auth = false;
 		assert!(!config.extensions.auth);
-		assert!(config.extensions.solicit);
-		assert!(toml::to_string(&config).expect("serialize").contains("auth = false"));
-		assert!(
-			!toml::to_string(&Config::default())
-				.expect("serialize")
-				.contains("extensions")
-		);
+		assert!(!toml::to_string(&config).unwrap().contains("extensions"));
 	}
 	/// A parser wrapping the config, since it derives `Args` (see the note in
 	/// [`crate::connect`]).

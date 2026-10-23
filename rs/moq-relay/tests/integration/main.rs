@@ -6,12 +6,13 @@
 //! the drills.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
-mod auth_embedder;
 mod auth_lifetime;
 mod cluster_close;
 mod cluster_idle;
 mod cluster_unknown;
+#[cfg(feature = "test-support")]
 mod connection;
+#[cfg(feature = "test-support")]
 mod drain;
 mod embed;
 mod goaway_cluster;

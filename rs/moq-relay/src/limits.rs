@@ -3,38 +3,54 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+/// Request and transport limits grouped by the authorized connection's role.
+#[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Config {
+	/// Request caps for ordinary clients.
+	#[usage(flatten)]
+	pub client: Client,
+	/// Request and QUIC caps for authenticated cluster peers.
+	#[usage(flatten)]
+	pub peer: Peer,
+	#[usage(flatten)]
+	#[serde(skip)]
+	pub(crate) legacy: Legacy,
+}
+
 /// Request caps for ordinary client sessions.
 #[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct Session {
+pub struct Client {
 	/// Maximum simultaneously announced broadcasts or namespaces.
 	#[usage(
-		long = "session-announces",
-		env = "MOQ_SESSION_ANNOUNCES",
+		long = "limits-client-announces",
+		env = "MOQ_LIMITS_CLIENT_ANNOUNCES",
 		default = "1000",
-		setting = "session.announces"
+		setting = "limits.client.announces"
 	)]
 	pub announces: usize,
 	/// Maximum simultaneously held subscriptions.
 	#[usage(
-		long = "session-subscriptions",
-		env = "MOQ_SESSION_SUBSCRIPTIONS",
+		long = "limits-client-subscriptions",
+		env = "MOQ_LIMITS_CLIENT_SUBSCRIPTIONS",
 		default = "1000",
-		setting = "session.subscriptions"
+		setting = "limits.client.subscriptions"
 	)]
 	pub subscriptions: usize,
 	/// Maximum simultaneously held FETCH requests.
 	#[usage(
-		long = "session-fetches",
-		env = "MOQ_SESSION_FETCHES",
+		long = "limits-client-fetches",
+		env = "MOQ_LIMITS_CLIENT_FETCHES",
 		default = "10000",
-		setting = "session.fetches"
+		setting = "limits.client.fetches"
 	)]
 	pub fetches: usize,
 }
 
-impl Default for Session {
+impl Default for Client {
 	fn default() -> Self {
 		Self {
 			announces: 1000,
@@ -44,7 +60,7 @@ impl Default for Session {
 	}
 }
 
-impl Session {
+impl Client {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
 		resolve(self.announces, self.subscriptions, self.fetches)
 	}
@@ -57,29 +73,29 @@ impl Session {
 pub struct Peer {
 	/// Maximum simultaneously announced broadcasts or namespaces.
 	#[usage(
-		long = "peer-announces",
-		env = "MOQ_PEER_ANNOUNCES",
+		long = "limits-peer-announces",
+		env = "MOQ_LIMITS_PEER_ANNOUNCES",
 		default = "100000",
-		setting = "peer.announces"
+		setting = "limits.peer.announces"
 	)]
 	pub announces: usize,
 	/// Maximum simultaneously held subscriptions.
 	#[usage(
-		long = "peer-subscriptions",
-		env = "MOQ_PEER_SUBSCRIPTIONS",
+		long = "limits-peer-subscriptions",
+		env = "MOQ_LIMITS_PEER_SUBSCRIPTIONS",
 		default = "10000",
-		setting = "peer.subscriptions"
+		setting = "limits.peer.subscriptions"
 	)]
 	pub subscriptions: usize,
 	/// Maximum simultaneously held FETCH requests.
 	#[usage(
-		long = "peer-fetches",
-		env = "MOQ_PEER_FETCHES",
+		long = "limits-peer-fetches",
+		env = "MOQ_LIMITS_PEER_FETCHES",
 		default = "10000",
-		setting = "peer.fetches"
+		setting = "limits.peer.fetches"
 	)]
 	pub fetches: usize,
-	/// QUIC limits a peer session widens to (`[peer.quic]`).
+	/// QUIC limits a peer session widens to (`[limits.peer.quic]`).
 	#[usage(flatten)]
 	pub quic: Quic,
 }
@@ -108,26 +124,26 @@ impl Peer {
 pub struct Quic {
 	/// Maximum concurrent QUIC streams the peer may open, per direction.
 	#[usage(
-		long = "peer-quic-max-streams",
-		env = "MOQ_PEER_QUIC_MAX_STREAMS",
+		long = "limits-peer-quic-max-streams",
+		env = "MOQ_LIMITS_PEER_QUIC_MAX_STREAMS",
 		default = "100000",
-		setting = "peer.quic.max_streams"
+		setting = "limits.peer.quic.max_streams"
 	)]
 	pub max_streams: std::num::NonZeroU64,
 	/// Connection-wide QUIC receive window, in bytes.
 	#[usage(
-		long = "peer-quic-receive-window",
-		env = "MOQ_PEER_QUIC_RECEIVE_WINDOW",
+		long = "limits-peer-quic-receive-window",
+		env = "MOQ_LIMITS_PEER_QUIC_RECEIVE_WINDOW",
 		default = "671088640",
-		setting = "peer.quic.receive_window"
+		setting = "limits.peer.quic.receive_window"
 	)]
 	pub receive_window: std::num::NonZeroU64,
 	/// Cap on unacknowledged outgoing QUIC data, in bytes.
 	#[usage(
-		long = "peer-quic-send-window",
-		env = "MOQ_PEER_QUIC_SEND_WINDOW",
+		long = "limits-peer-quic-send-window",
+		env = "MOQ_LIMITS_PEER_QUIC_SEND_WINDOW",
 		default = "671088640",
-		setting = "peer.quic.send_window"
+		setting = "limits.peer.quic.send_window"
 	)]
 	pub send_window: std::num::NonZeroU64,
 }
@@ -151,7 +167,7 @@ impl Quic {
 	pub(crate) fn validate(&self) -> anyhow::Result<()> {
 		let mut quic = moq_tokio::quic::Config::default();
 		self.dial(&mut quic);
-		quic.validate().context("invalid [peer.quic]")
+		quic.validate().context("invalid [limits.peer.quic]")
 	}
 
 	/// Apply these limits to the `[quic]` section a peer link is dialed with.
@@ -178,4 +194,92 @@ fn resolve(announces: usize, subscriptions: usize, fetches: usize) -> moq_net::s
 	limits.subscriptions = subscriptions;
 	limits.fetches = fetches;
 	limits
+}
+
+#[derive(usage_rs::Args, Clone, Debug, Default)]
+pub(crate) struct Legacy {
+	#[usage(long = "session-announces", env = "MOQ_SESSION_ANNOUNCES", hide = true)]
+	session_announces: Option<u64>,
+	#[usage(long = "session-subscriptions", env = "MOQ_SESSION_SUBSCRIPTIONS", hide = true)]
+	session_subscriptions: Option<u64>,
+	#[usage(long = "session-fetches", env = "MOQ_SESSION_FETCHES", hide = true)]
+	session_fetches: Option<u64>,
+	#[usage(long = "peer-announces", env = "MOQ_PEER_ANNOUNCES", hide = true)]
+	peer_announces: Option<u64>,
+	#[usage(long = "peer-subscriptions", env = "MOQ_PEER_SUBSCRIPTIONS", hide = true)]
+	peer_subscriptions: Option<u64>,
+	#[usage(long = "peer-fetches", env = "MOQ_PEER_FETCHES", hide = true)]
+	peer_fetches: Option<u64>,
+	#[usage(long = "peer-quic-max-streams", env = "MOQ_PEER_QUIC_MAX_STREAMS", hide = true)]
+	peer_quic_max_streams: Option<u64>,
+	#[usage(long = "peer-quic-receive-window", env = "MOQ_PEER_QUIC_RECEIVE_WINDOW", hide = true)]
+	peer_quic_receive_window: Option<u64>,
+	#[usage(long = "peer-quic-send-window", env = "MOQ_PEER_QUIC_SEND_WINDOW", hide = true)]
+	peer_quic_send_window: Option<u64>,
+}
+
+impl Legacy {
+	pub(crate) fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.session_announces.is_some() {
+			found.flag(
+				"--session-announces",
+				Some("MOQ_SESSION_ANNOUNCES"),
+				"--limits-client-announces",
+			);
+		}
+		if self.session_subscriptions.is_some() {
+			found.flag(
+				"--session-subscriptions",
+				Some("MOQ_SESSION_SUBSCRIPTIONS"),
+				"--limits-client-subscriptions",
+			);
+		}
+		if self.session_fetches.is_some() {
+			found.flag(
+				"--session-fetches",
+				Some("MOQ_SESSION_FETCHES"),
+				"--limits-client-fetches",
+			);
+		}
+		if self.peer_announces.is_some() {
+			found.flag(
+				"--peer-announces",
+				Some("MOQ_PEER_ANNOUNCES"),
+				"--limits-peer-announces",
+			);
+		}
+		if self.peer_subscriptions.is_some() {
+			found.flag(
+				"--peer-subscriptions",
+				Some("MOQ_PEER_SUBSCRIPTIONS"),
+				"--limits-peer-subscriptions",
+			);
+		}
+		if self.peer_fetches.is_some() {
+			found.flag("--peer-fetches", Some("MOQ_PEER_FETCHES"), "--limits-peer-fetches");
+		}
+		if self.peer_quic_max_streams.is_some() {
+			found.flag(
+				"--peer-quic-max-streams",
+				Some("MOQ_PEER_QUIC_MAX_STREAMS"),
+				"--limits-peer-quic-max-streams",
+			);
+		}
+		if self.peer_quic_receive_window.is_some() {
+			found.flag(
+				"--peer-quic-receive-window",
+				Some("MOQ_PEER_QUIC_RECEIVE_WINDOW"),
+				"--limits-peer-quic-receive-window",
+			);
+		}
+		if self.peer_quic_send_window.is_some() {
+			found.flag(
+				"--peer-quic-send-window",
+				Some("MOQ_PEER_QUIC_SEND_WINDOW"),
+				"--limits-peer-quic-send-window",
+			);
+		}
+		found
+	}
 }

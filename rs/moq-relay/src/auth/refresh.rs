@@ -250,7 +250,7 @@ impl Refresh {
 		let Some(source) = self.source.as_ref() else {
 			return;
 		};
-		while self.pending.len() + self.settling.len() < source.auth.verifications {
+		while self.pending.len() + self.settling.len() < source.auth.verifications() {
 			let Some(waiting) = self.waiting.pop_front() else {
 				return;
 			};

@@ -99,7 +99,7 @@ Raise the receive windows when a fat, long path idles below the link rate. The
 128 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
 how much unread data and incomplete messages one peer can make the relay
 buffer. It has to fit the largest message, just over 64 MiB, so a smaller
-value, here or in `[peer.quic]`, is refused at startup. When incomplete
+value, here or in `[limits.peer.quic]`, is refused at startup. When incomplete
 messages fill the window, the relay cancels the least urgent stream: the
 lowest subscription priority, then the group its subscription would deliver
 last. Over iroh the window bounds only
@@ -107,40 +107,40 @@ unread data, and over WebSocket or TCP nothing bounds incomplete messages.
 `stream_receive_window` only paces one stream: its credit returns as bytes are
 read, whether or not their message is complete.
 
-## \[session] and \[peer]
+## \[limits.client] and \[limits.peer]
 
 Request caps apply separately to each session on every transport. The relay
-uses `[peer]` for an admitted grant marked `peer` or `upstream`, including
+uses `[limits.peer]` for an admitted grant marked `peer` or `upstream`, including
 verified LAN membership, and for links it dials through the cluster. A client
 certificate, route hop, or cluster-looking URL alone does not select peer caps.
 
 ```toml
-[session]
+[limits.client]
 announces = 1000                     # Simultaneous broadcasts or namespaces.
 subscriptions = 1000                # Simultaneously held subscriptions.
 fetches = 10000                      # Independent simultaneous FETCH requests.
 
-[peer]
+[limits.peer]
 announces = 100000
 subscriptions = 10000
 fetches = 10000
 
-[peer.quic]
+[limits.peer.quic]
 max_streams = 100000                 # Concurrent QUIC streams per direction.
 receive_window = 671088640           # Connection-wide receive window (640 MiB).
 send_window = 671088640              # Unacknowledged outgoing data (640 MiB).
 ```
 
-`[peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
+`[limits.peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
 any other `[quic]` key is refused. They replace the `[quic]` values for a
 peer's QUIC connection once its grant is known, before the SETUP reply. Links
 the relay dials get them from the handshake on. A link carrying a whole cluster is then
 not throttled by `[quic]` limits sized for one viewer, for example
-`--peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
+`--limits-peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
 their transport's own limits.
 
-These are the defaults. For example, `--peer-subscriptions=50000` raises the
-subscription cap on cluster links. `--session-fetches` and `--peer-fetches`
+These are the defaults. For example, `--limits-peer-subscriptions=50000` raises the
+subscription cap on cluster links. `--limits-client-fetches` and `--limits-peer-fetches`
 set the independent FETCH caps; concurrent callers of the same group each
 hold a slot. Size peer caps for the combined traffic they carry, and use
 session peak counters to check announcement and subscription headroom.
@@ -204,13 +204,14 @@ See [HTTP endpoints](/bin/relay/http).
 ## \[acme]
 
 The relay provisions and renews a publicly trusted certificate itself, for QUIC
-and HTTPS alike (Unix only, where the key can be kept owner-only):
+and HTTPS alike (Unix only, where the key can be kept owner-only). This needs
+the default `acme` Cargo feature; builds without it refuse configured issuance:
 
 ```toml
 [acme]
 domains = ["relay.example.com"]      # Enables ACME. No wildcards.
 contact = ["mailto:ops@example.com"] # Optional account contact.
-dir = "/var/lib/moq-relay/acme"      # Required: account key and certificate, kept owner-only.
+cache = "/var/lib/moq-relay/acme"      # Required: account key and certificate, kept owner-only.
 # directory = "https://acme-staging-v02.api.letsencrypt.org/directory"  # Default: Let's Encrypt production.
 # timeout = "5m"                     # How long the first issuance may take before startup fails.
 ```
@@ -220,11 +221,11 @@ domain, so `web.https.listen` is required and must be reachable there, directly
 or forwarded. `[acme]` cannot be combined with `listen.tls.cert`, `key`, or
 `generate`, or with `web.https.cert` and `key`.
 
-With no usable certificate in `dir` (missing, expired, missing a domain, or
+With no usable certificate in `cache` (missing, expired, missing a domain, or
 from another directory), startup answers only the challenge until one is
 issued; QUIC, the other routes, and readiness wait for it, and startup fails
 with the ACME error once `timeout` runs out. It also fails after 3 failed
-validations within an hour, counting earlier starts recorded in `dir`, so a
+validations within an hour, counting earlier starts recorded in `cache`, so a
 restart loop stops short of Let's Encrypt's limit of 5 per hostname per hour. Renewal runs in the background
 well before expiry and reaches every listener on its next handshake. A failed
 renewal keeps the current certificate serving and retries.
@@ -267,7 +268,6 @@ url = "http://127.0.0.1:4440/"       # An auth server asked once per session eve
 # public = "anon/**"                 # Or a static anonymous grant rooted at /, publish and subscribe alike.
 # public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
 # public_publish = ["anon/**"]
-verifications = 128                  # In-band tokens one session verifies at once; later ones wait.
 ```
 
 See [Authentication](/bin/relay/auth).
@@ -278,10 +278,12 @@ See [Authentication](/bin/relay/auth).
 [cluster]
 connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token, upstream} objects.
 node = "https://us-west.example.com/"                 # This relay's own URL.
-# connect_api_tls_root = ["api-ca.pem"]              # Private API roots, independent from connect.tls.
-connect_api = "https://api.example.com/peers"        # Or fetch the peer list (JSON array of URLs and/or objects) live.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 id = 12345                                            # Stable Hop ID across restarts.
+
+[cluster.api]
+url = "https://api.example.com/peers"                  # Live JSON peer list; a local file also works.
+# tls.root = ["api-ca.pem"]                           # API server trust, independent from connect.tls.
 
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true
@@ -303,9 +305,6 @@ tls.cert = "relay.pem"               # Present a client certificate (mTLS to pee
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
-extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
-extensions.solicit = false           # Decline MoQ Solicit.
-extensions.epoch = false             # Decline MoQ Epoch. All default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only

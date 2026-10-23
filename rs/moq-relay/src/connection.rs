@@ -30,7 +30,7 @@ impl From<auth::Error> for StatusError {
 /// publish/subscribe origins, and serve the session until it closes.
 ///
 /// The request is a moq-tokio [`Request`](moq_tokio::server::Request), or an
-/// [`Accepted`](crate::Accepted) session from any moq-net transport.
+/// in-memory accepted session when the `test-support` feature is enabled.
 pub struct Connection<R: Incoming = moq_tokio::server::Request> {
 	request: R,
 	lifecycle: Lifecycle,

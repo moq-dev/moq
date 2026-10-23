@@ -5,9 +5,44 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### One loader and role-scoped config (#6535)
+
+After an embedded CLI's `parse_from_with_settings`, call `config.relay.merge(&cli_layer)?`.
+It reads `relay.file`, applies CLI > environment > file > defaults, refuses obsolete
+settings, and retains provenance through `Config::source`; root CLI-only fields stay intact.
+Replace direct `merge_into` setup or TOML plus `update_from` with that call.
+
+Move `[session]` to `[limits.client]` and `[peer]` to `[limits.peer]`, including its
+`quic` table. Flags and environment variables use `--limits-client-*` /
+`MOQ_LIMITS_CLIENT_*` and `--limits-peer-*` / `MOQ_LIMITS_PEER_*`.
+Rust uses `config.limits.client` / `config.limits.peer` and `limits::Client`
+in place of `limits::Session`.
+
+Rename `acme.dir` / `--acme-dir` / `MOQ_ACME_DIR` to `acme.cache` /
+`--acme-cache` / `MOQ_ACME_CACHE`. The default `acme` feature preserves automatic
+certificates; builds without it refuse configured ACME settings.
+Move `cluster.connect_api` to `cluster.api.url` and `cluster.connect_api_tls_root`
+to `cluster.api.tls.root`; use `--cluster-api-url`, `--cluster-api-tls-root`,
+`MOQ_CLUSTER_API_URL`, and `MOQ_CLUSTER_API_TLS_ROOT`.
+Remove `Cluster::with_client_tls`: the peer-list API presents `with_connect`'s
+client identity, with its own `api.tls.root` server trust.
+
+Remove `auth.verifications` / `--auth-verifications` / `MOQ_AUTH_VERIFICATIONS`
+and `Auth::with_verifications`; the verification window is a private production policy.
+Remove `[listen.extensions]` and `[connect.extensions]` from TOML. The typed Rust
+fields and native endpoint setup APIs remain; the relay still offers IETF support.
+`Web::with_extensions` is private to the relay's own setup.
+
+`Workers::spawn(self, …)` now returns `uring::Spawned`; call `serve`, `failed`,
+and consuming `shutdown` on that value. A merely bound worker group cannot serve.
+`Incoming` and `Accepted` require the `test-support` feature for in-memory tests.
+`Cluster::admit`, `cluster::Admitted`, and `auth::hold` are private; real admissions
+use the existing `Auth::embedded` / `Admissions` and `Lease` lifecycle.
+
+
 ### `receive_window` has a floor (#5878)
 
-The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.
+The `[quic]` and `[limits.peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.
 Raise an explicit value below that, or remove it.
 
 ### WebSocket clients must offer a QMux subprotocol (#6231)
@@ -43,8 +78,8 @@ Write the hex to a file (`openssl rand -hex 32 > cluster.key`) and pass its path
 
 `listen.timeout` now bounds auth admission as part of the handshake, replacing the fixed ten-second admission timeout, so `"0"` also lets admission wait forever.
 HTTP reads bound admission by the web listener's timeout.
-`Auth::admit` and `Cluster::admit` no longer time out on their own, so a slow embedded decider no longer refuses after ten seconds: the caller owns the deadline.
-Bound them with `moq_tokio::server::Request::within` on an accepted session, or wrap them in `tokio::time::timeout`; dropping the future withdraws the admission from the decider.
+`Auth::admit` no longer times out on its own, so a slow embedded decider no longer refuses after ten seconds: the caller owns the deadline.
+Bound it with `moq_tokio::server::Request::within` on an accepted session, or wrap it in `tokio::time::timeout`; dropping the future withdraws the admission from the decider.
 Tokens attached in band keep their ten-second bound and are refused as `auth::Error::Unavailable` past it.
 
 ### Usage types come from usage-rs 7 (#6060)
@@ -115,7 +150,7 @@ Each used to be ignored: drop it, or add the listener it configures.
 ### `--cluster-mesh` and `--cluster-linger` are unknown flags (#4818)
 
 They, TOML `mesh` and `linger`, and `MOQ_CLUSTER_MESH` / `MOQ_CLUSTER_LINGER` are no longer read.
-List every peer with `--cluster-connect` or `--cluster-connect-api`.
+List every peer with `--cluster-connect` or `--cluster-api-url`.
 In Rust, `cluster::Config` has no `mesh` or `linger` field.
 
 ### A route without a publisher keeps hop 0 (#4969)
@@ -137,7 +172,7 @@ Set `listen` and `quic` on a `moq_tokio::server::Config` and pass it to `bind`.
 ### Gossip discovery is removed (#4601)
 
 A relay dials only the peers it lists or finds on the LAN, never a URL learned from an announcement, and no longer announces `.internal/origins`.
-`--cluster-mesh` and TOML `mesh` are refused by name: list every peer with `--cluster-connect` or `--cluster-connect-api`.
+`--cluster-mesh` and TOML `mesh` are refused by name: list every peer with `--cluster-connect` or `--cluster-api-url`.
 The `/nodes` endpoint lists only peers this relay dialed.
 
 ## 0.15 -> 0.16

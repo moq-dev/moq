@@ -1200,7 +1200,7 @@ async fn an_mtls_client_ingests_here() {
 }
 
 /// The source the relay records for a broadcast announced over a certificate
-/// session, admitted by `moq auth serve` with `mtls_peer` set as given.
+/// session, admitted by `moq auth serve` with the peer link role when requested.
 async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -1208,7 +1208,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 
 	let mut policy = moq_auth::serve::Policy::default();
 	policy.mtls = moq_auth::Permissions::new(all(), all());
-	policy.mtls_peer = mtls_peer;
+	policy.mtls_link = mtls_peer.then_some(moq_auth::serve::Link::Peer);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 	let server = moq_auth::serve::Server::new(policy).unwrap();
