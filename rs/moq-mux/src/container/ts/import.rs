@@ -8180,7 +8180,10 @@ pub(super) mod test {
 		let err = import
 			.decode(&packet(true, (super::STAGING_UNITS_MAX % 16) as u8, 0, &CUE))
 			.unwrap_err();
-		assert!(err.to_string().contains("whole PES while waiting for a timestamp"));
+		assert!(err.to_string().contains(&format!(
+			"TS staging exceeds {} buffered units",
+			super::STAGING_UNITS_MAX
+		)));
 		assert_eq!(import.sections[&0x21].held.len(), super::STAGING_UNITS_MAX);
 		assert_eq!(
 			import.staging.bytes.load(super::Ordering::Relaxed),
@@ -9030,26 +9033,28 @@ pub(super) mod test {
 	/// A malformed unbounded PES drained at EOF is still refused and counted.
 	#[test]
 	fn damaged_final_access_unit_is_refused() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.reserve());
 		let mut au = annexb_au(true);
 		let nal = au
 			.windows(5)
 			.position(|bytes| bytes[..4] == [0, 0, 0, 1] && bytes[4] & 0x1f == 5)
 			.unwrap();
 		au[nal + 4] |= 0x80;
-		let mut packet = video_pes(VIDEO, 0, 90_000, None, &au);
-		let start = 5 + usize::from(packet[4]);
-		packet[start + 4..start + 6].fill(0);
-		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
-		data.extend(packet);
-		import.decode(&data).unwrap();
-		assert_eq!(import.stats().streams[&VIDEO].damaged, 0, "PES has not ended yet");
-		import.finish().unwrap();
-		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
-		assert_eq!(import.stats().streams[&VIDEO].units, 0);
-		assert!(catalog.snapshot().video.renditions.is_empty());
+		for au in [au, vec![0], vec![0, 0], vec![0, 0, 0]] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve());
+			let mut packet = video_pes(VIDEO, 0, 90_000, None, &au);
+			let start = 5 + usize::from(packet[4]);
+			packet[start + 4..start + 6].fill(0);
+			let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+			data.extend(packet);
+			import.decode(&data).unwrap();
+			assert_eq!(import.stats().streams[&VIDEO].damaged, 0, "PES has not ended yet");
+			import.finish().unwrap();
+			assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
+			assert_eq!(import.stats().streams[&VIDEO].units, 0);
+			assert!(catalog.snapshot().video.renditions.is_empty());
+		}
 	}
 
 	/// An invalid trailing Opus control header refuses the complete PES before its first

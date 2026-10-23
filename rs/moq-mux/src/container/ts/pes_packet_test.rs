@@ -750,7 +750,8 @@ fn tiny_whole_pes_held_for_a_timestamp_are_bounded_by_count() {
 	let mut imported = start(false);
 	let err = imported.import.decode(&feed.bytes()).expect_err("the flood is refused");
 	assert!(
-		err.to_string().contains("whole PES while waiting for a timestamp"),
+		err.to_string()
+			.contains(&format!("TS staging exceeds {units} buffered units")),
 		"{err:#}"
 	);
 }

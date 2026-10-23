@@ -1,18 +1,19 @@
 //! Video assembly across access-unit size and PES fragmentation.
 use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::time::Duration;
+use mpeg2ts::{
+	pes::{PesPacketReader, ReadPesPacket},
+	ts::TsPacketReader,
+};
+use std::{io::Cursor, time::Duration};
 
 fn input(size: usize, payload: usize) -> Vec<u8> {
-	let mut au = Vec::new();
-	for nal in [
-		&[0x67, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..],
-		&[0x68, 0xce, 0x3c, 0x80],
-		&[0x65, 0x88, 0x84, 0x21, 0, 0x11, 0x22, 0x33],
-	] {
-		au.extend([0, 0, 0, 1]);
-		au.extend(nal);
-	}
+	let fixture = include_bytes!("../src/container/ts/test_data/poc-avc.ts");
+	let mut reader = PesPacketReader::new(TsPacketReader::new(Cursor::new(fixture)));
+	// A real SPS/PPS/IDR exercises the timing parser rather than its explicit-PTS
+	// fallback for unsupported syntax. Padding stays in the final slice NAL.
+	let mut au = reader.read_pes_packet().unwrap().unwrap().data;
+	assert!(au.len() <= size);
 	au.resize(size, 0xff);
 	// The fixture's SDT/PAT/PMT declare one AVC stream on PID 0x100.
 	let mut out = include_bytes!("../src/container/ts/test_data/poc-avc.ts")[..188 * 3].to_vec();

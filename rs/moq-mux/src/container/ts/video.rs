@@ -172,7 +172,9 @@ impl Assembly {
 				.map_err(crate::Error::from)
 				.map_err(unit_error)?;
 			let Some(start) = start else {
-				anyhow::ensure!(!eof, "truncated Annex B start code at end of TS video");
+				if eof {
+					return Err(unit_error(crate::codec::annexb::Error::MissingStartCode.into()));
+				}
 				return Ok(None);
 			};
 			// A new picture's header closes the preceding AU even while its final
