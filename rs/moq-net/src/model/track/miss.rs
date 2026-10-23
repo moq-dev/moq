@@ -348,7 +348,8 @@ impl Misses {
 		asks
 	}
 
-	/// Ask the fills for `runs`, settling what no handler can take as refused.
+	/// Ask the fills for `runs` in the reader's order, settling what no handler can take as
+	/// refused. Fills queue in the order asked, so a descending reader's newest run comes first.
 	pub fn ask(
 		&mut self,
 		state: &kio::Consumer<TrackState>,
@@ -357,7 +358,11 @@ impl Misses {
 		asking: &Asking,
 		given_up: &mut GivenUp,
 	) {
-		for run in runs.iter() {
+		let mut runs: Vec<ops::Range<u64>> = runs.iter().cloned().collect();
+		if asking.order == Order::Descending {
+			runs.reverse();
+		}
+		for run in runs {
 			let frame = asking
 				.start
 				.filter(|start| start.group == run.start)

@@ -62,19 +62,25 @@ impl Pending {
 		}
 	}
 
-	/// Count one join out of reading `groups`, which it counted in.
-	fn unwant(&mut self, groups: ops::Range<u64>) {
+	/// Count one join out of reading `groups`, which it counted in. Returns the runs nobody
+	/// reads any more.
+	fn unwant(&mut self, groups: ops::Range<u64>) -> Vec<ops::Range<u64>> {
 		let counts: Vec<(ops::Range<u64>, u32)> = self
 			.wants
 			.overlapping(&groups)
 			.map(|(run, count)| (run.start.max(groups.start)..run.end.min(groups.end), count - 1))
 			.collect();
+		let mut unwanted = Vec::new();
 		for (run, count) in counts {
 			match count {
-				0 => self.wants.remove(run),
+				0 => {
+					self.wants.remove(run.clone());
+					unwanted.push(run);
+				}
 				count => self.wants.insert(run, count),
 			}
 		}
+		unwanted
 	}
 
 	/// The runs of `span` a join still reads.
@@ -204,11 +210,11 @@ impl Drop for Join {
 		// its handler is about to drop.
 		let mut fills = self.fills.lock();
 		drop(self.outcome.take());
-		let Some(pending) = fills.pending.get_mut(&self.id).filter(|pending| self.is_ours(pending)) else {
+		if !fills.pending.get(&self.id).is_some_and(|pending| self.is_ours(pending)) {
 			return;
-		};
+		}
 		for run in std::mem::take(&mut self.held).iter() {
-			pending.unwant(run.clone());
+			fills.unwant(self.id, run.clone());
 		}
 		if !self.attempt.is_used() {
 			fills.withdraw(self.id);
@@ -234,15 +240,15 @@ impl Join {
 		if released.is_empty() {
 			return;
 		}
-		let mut fills = self.fills.lock();
-		let pending = fills.pending.get_mut(&self.id).filter(|pending| self.is_ours(pending));
 		for run in &released {
 			self.held.remove(run.clone());
 		}
-		if let Some(pending) = pending {
-			for run in released {
-				pending.unwant(run);
-			}
+		let mut fills = self.fills.lock();
+		if !fills.pending.get(&self.id).is_some_and(|pending| self.is_ours(pending)) {
+			return;
+		}
+		for run in released {
+			fills.unwant(self.id, run);
 		}
 	}
 }
@@ -362,6 +368,20 @@ impl FillState {
 			self.queue.push_back(id);
 		}
 		(joins, unfillable)
+	}
+
+	/// Count a join out of reading `groups` of fill `id`. What nobody reads any more is no
+	/// longer routed to it: a reader wanting it later asks afresh rather than joining a fetch
+	/// being cancelled, so a sequence a fill stops owing stays unowed.
+	fn unwant(&mut self, id: u64, groups: ops::Range<u64>) {
+		let Some(pending) = self.pending.get_mut(&id) else {
+			return;
+		};
+		for run in pending.unwant(groups) {
+			for range in self.routed(id, &run) {
+				self.covers.remove(range);
+			}
+		}
 	}
 
 	/// Take the oldest queued fill, still pending (joinable) until it ends.
@@ -540,7 +560,8 @@ impl Fill {
 	}
 
 	/// Name `groups` as never to be delivered: the source no longer has them. Readers stop
-	/// waiting for them, and the track records them so nobody asks again.
+	/// waiting for them, and the track records them so nobody asks again. Only the groups a
+	/// reader still reads count; the rest of the fill was never owed.
 	pub fn drop_groups(&self, groups: ops::Range<u64>) {
 		self.inner.drop_groups(groups, Error::NotFound);
 	}
@@ -660,13 +681,27 @@ impl Inner {
 	}
 
 	/// Refuse `groups` with `err`, recording them in the track's drops when the source no
-	/// longer has them, which binds every reader.
+	/// longer has them, which binds every reader. Only what a reader still reads: a handler
+	/// refusing the whole fill never checked the rest.
 	fn drop_groups(&self, groups: ops::Range<u64>, err: Error) {
 		let groups = groups.start.max(self.start.group)..groups.end.min(self.end);
 		if groups.is_empty() {
 			return;
 		}
-		let unresolved = self.unresolved(groups);
+		let wanted = self.wanted();
+		let unresolved: RangeSet<u64> = {
+			let outcome = self.result.read();
+			let mut unresolved = RangeSet::new();
+			for run in wanted.overlapping(&groups) {
+				for gap in outcome
+					.resolved
+					.gaps(&(run.start.max(groups.start)..run.end.min(groups.end)))
+				{
+					unresolved.insert(gap);
+				}
+			}
+			unresolved
+		};
 		if unresolved.is_empty() {
 			return;
 		}
@@ -823,10 +858,26 @@ impl GroupFill {
 		self.frame_start
 	}
 
-	/// Poll until no reader waits on the fill.
+	/// Poll until no reader waits on this group, as when every reader narrowed past it.
 	// private: capability gap
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.inner.result.poll_unused(waiter).map(|_| ())
+		if self.inner.result.poll_unused(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		let (id, sequence) = (self.inner.id, self.sequence);
+		self.inner
+			.fills
+			.poll(waiter, |fills| {
+				match fills
+					.pending
+					.get(&id)
+					.is_some_and(|pending| pending.wants.contains_key(&sequence))
+				{
+					true => Poll::Pending,
+					false => Poll::Ready(()),
+				}
+			})
+			.map(drop)
 	}
 
 	/// Poll until the track closes, with its abort error.

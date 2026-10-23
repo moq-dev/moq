@@ -15996,7 +15996,8 @@ mod test {
 	}
 
 	/// A reader narrowing its ranges leaves the part of its fill it no longer reads: the
-	/// handler is not asked for it, and dropping the fill names none of it dropped.
+	/// handler is not asked for it, a fetch of it in flight is cancelled, and neither a bulk
+	/// refusal nor dropping the fill names it dropped.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_narrowed_reader_leaves_the_rest_of_its_fill() {
@@ -16012,14 +16013,20 @@ mod test {
 			panic!("below the start is a miss");
 		};
 		assert_eq!(fill.next(), Some(0));
+		let fetching = fill.group(0);
+		assert!(fetching.poll_unused(&waiter).is_pending());
 
 		subscriber.update(ascending(8..)).unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert!(fetching.poll_unused(&waiter).is_ready(), "nobody reads group 0 now");
+		drop(fetching);
+		assert!(fill.group(8).poll_unused(&waiter).is_pending());
 		assert_eq!(fill.next(), Some(8), "nobody reads below 8 any more");
 		write_filled(fill.accept(8, None), 8);
 		assert_eq!(fill.next(), Some(9));
-		// Over, so what the dropped fill left is a drop rather than a group still to come.
+		// Over, so what the fill refuses is a drop rather than a group still to come.
 		producer.finish().unwrap();
+		fill.drop_groups(0..9);
 		drop(fill);
 
 		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
@@ -16028,6 +16035,55 @@ mod test {
 		assert_eq!(group.sequence, 8);
 		assert_eq!(drained_drops(&mut subscriber), [(9, 10)], "only what it still read");
 		assert!(producer.state.read().drops.overlapping(&(0..8)).next().is_none());
+	}
+
+	/// What a fill stopped owing is asked afresh by a reader that wants it later, rather than
+	/// joining a fetch its handler is cancelling.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_later_reader_asks_afresh_for_what_a_fill_stopped_owing() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let ascending = |groups| replay().with_groups(groups).with_order(Order::Ascending);
+		let mut narrowed = producer.subscribe(ascending(0..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = narrowed.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		narrowed.update(ascending(8..)).unwrap();
+		assert!(narrowed.poll_recv_group(&waiter).is_pending());
+
+		let mut later = producer.subscribe(ascending(0..));
+		while let Poll::Ready(Ok(Some(_))) = later.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(again)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("what the first fill stopped owing is asked afresh");
+		};
+		assert_eq!((again.start().group, again.end()), (0, 8));
+		assert_eq!(fill.next(), Some(8), "the first fill still owes only 8 and up");
+		assert!(fill.group(0).poll_unused(&waiter).is_ready());
+	}
+
+	/// A descending reader's disjoint misses queue newest first, so a handler serving one fill
+	/// at a time reaches the newer history first.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_descending_reader_asks_its_newest_miss_first() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let mut subscriber =
+			producer.subscribe(replay().with_ranges([Range::groups(0..2), Range::groups(4..6), Range::groups(8..)]));
+		producer.start_at(8).unwrap();
+		write_group(&producer, 8);
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let mut asked = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			asked.push((fill.start().group, fill.end()));
+		}
+		assert_eq!(asked, [(4, 6), (0, 2)]);
 	}
 
 	/// A group the handler refused that still arrives live is delivered.
