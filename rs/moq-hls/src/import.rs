@@ -549,8 +549,11 @@ impl TrackState {
 		// segment that never yields a moov surfaces later as a decode error.
 		importer.decode(&bytes)?;
 
-		// A changed map starts a new track generation. The new importer publishes its
-		// configuration first, then dropping the old importer retires its catalog entries.
+		// The old generation must finish before retiring its catalog entries, so a subscriber
+		// draining its final group sees a clean end instead of a dropped producer.
+		if let Some(previous) = self.importer.as_mut() {
+			previous.finish()?;
+		}
 		self.importer = Some(importer);
 		self.map = Some(resource);
 		self.next_discontinuity = None;
@@ -1620,6 +1623,198 @@ mod tests {
 			import.video[0].map.as_ref().unwrap().range.unwrap().start,
 			second_init as u64
 		);
+	}
+
+	/// The first frame of every buffered group, without waiting for another source event.
+	fn group_stamps(subscriber: &mut moq_net::track::Ordered) -> (Vec<(u64, u128)>, Option<moq_net::Error>) {
+		let mut out = Vec::new();
+		loop {
+			let mut group = match subscriber.poll_next_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(group))) => group,
+				Poll::Pending | Poll::Ready(Ok(None)) => break,
+				Poll::Ready(Err(error)) => return (out, Some(error)),
+			};
+			let frame = match group.poll_read_frame(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(frame))) => frame,
+				Poll::Ready(Err(error)) => return (out, Some(error)),
+				other => panic!("reading a published group's first frame: {other:?}"),
+			};
+			out.push((group.sequence, frame.timestamp.unwrap().as_micros()));
+		}
+		(out, None)
+	}
+
+	struct Discontinuity {
+		result: Result<usize>,
+		before: String,
+		after: String,
+		old_groups: Vec<(u64, u128)>,
+		terminal: Option<moq_net::Error>,
+		new_groups: Vec<(u64, u128)>,
+	}
+
+	/// Exercise the playlist/map path with real fMP4 produced by the exporter's muxer.
+	async fn discontinuity(video: bool, passthrough: bool, changed_map: bool, after_us: u64) -> Discontinuity {
+		use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
+		use moq_mux::container::{Frame, fmp4::Muxer};
+
+		let muxer = if video {
+			let mut config = VideoConfig::new(VideoCodec::VP8);
+			config.coded_width = Some(320);
+			config.coded_height = Some(240);
+			config.framerate = Some(50.0);
+			Muxer::video(&config).unwrap()
+		} else {
+			Muxer::audio(&AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap()
+		};
+		let frame = |micros| Frame {
+			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+			duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),
+			payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
+			keyframe: true,
+		};
+		let dir = temp_dir();
+		let init = muxer.init().unwrap().unwrap();
+		std::fs::write(dir.join("init.mp4"), &init).unwrap();
+		std::fs::write(dir.join("other.mp4"), &init).unwrap();
+		std::fs::write(dir.join("before.m4s"), muxer.fragment(0, &[frame(5_000_000)]).unwrap()).unwrap();
+		std::fs::write(dir.join("after.m4s"), muxer.fragment(1, &[frame(after_us)]).unwrap()).unwrap();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let sink = Sink::new(broadcast, catalog.clone(), passthrough);
+		let mut track = TrackState::new(
+			if video { "video" } else { "audio" }.to_string(),
+			Url::from_file_path(dir.join("media.m3u8")).unwrap(),
+			if video {
+				select_video_only()
+			} else {
+				select_audio_only()
+			},
+			sink,
+		);
+		let before = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\nbefore.m4s\n";
+		let before = m3u8_rs::parse_media_playlist_res(before.as_bytes()).unwrap();
+		track.consume_segments(&fetcher(), &before).await.unwrap();
+		let name = |snapshot: &moq_mux::catalog::hang::Catalog| {
+			if video {
+				snapshot.video.renditions.keys().next()
+			} else {
+				snapshot.audio.renditions.keys().next()
+			}
+			.unwrap()
+			.clone()
+		};
+		let before_name = name(&catalog.snapshot());
+		let replay = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+		let mut old = consumer
+			.track(&before_name)
+			.unwrap()
+			.subscribe(replay.clone())
+			.await
+			.unwrap()
+			.ordered();
+		let map = if changed_map {
+			"#EXT-X-MAP:URI=\"other.mp4\"\n"
+		} else {
+			""
+		};
+		let after = format!(
+			"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\nbefore.m4s\n#EXT-X-DISCONTINUITY\n{map}#EXTINF:1,\nafter.m4s\n"
+		);
+		let after = m3u8_rs::parse_media_playlist_res(after.as_bytes()).unwrap();
+		let result = track.consume_segments(&fetcher(), &after).await;
+		let after_name = name(&catalog.snapshot());
+		let (old_groups, terminal) = group_stamps(&mut old);
+		let new_groups = if before_name != after_name {
+			let mut new = consumer
+				.track(&after_name)
+				.unwrap()
+				.subscribe(replay)
+				.await
+				.unwrap()
+				.ordered();
+			let (groups, error) = group_stamps(&mut new);
+			assert!(error.is_none(), "new generation failed: {error:?}");
+			groups
+		} else {
+			Vec::new()
+		};
+		std::fs::remove_dir_all(dir).unwrap();
+		Discontinuity {
+			result,
+			before: before_name,
+			after: after_name,
+			old_groups,
+			terminal,
+			new_groups,
+		}
+	}
+
+	#[tokio::test]
+	async fn forward_discontinuity_preserves_source_time_and_identity() {
+		for video in [false, true] {
+			for passthrough in [false, true] {
+				let case = discontinuity(video, passthrough, false, 7_000_000).await;
+				case.result.unwrap();
+				assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
+				assert_eq!(case.before, case.after);
+				assert_eq!(
+					case.old_groups,
+					[(0, 5_000_000), (moq_sequence(1, 1).unwrap(), 7_000_000)]
+				);
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn timestamp_reset_discontinuity_never_rewinds_an_existing_track() {
+		for video in [false, true] {
+			for passthrough in [false, true] {
+				let case = discontinuity(video, passthrough, false, 0).await;
+				match case.result {
+					Ok(_) => {
+						assert_ne!(case.before, case.after, "a reset needs a new published identity");
+						assert_eq!(case.new_groups, [(moq_sequence(1, 1).unwrap(), 0)]);
+					}
+					Err(error) => {
+						assert!(
+							matches!(
+								error,
+								Error::Mux(moq_mux::Error::TimestampRewind(_))
+									| Error::Mux(moq_mux::Error::Moq(moq_net::Error::TimestampMismatch))
+							),
+							"video={video} passthrough={passthrough}: {error:?}"
+						);
+						assert_eq!(case.before, case.after);
+						assert!(case.new_groups.is_empty());
+						if passthrough {
+							assert!(matches!(case.terminal, Some(moq_net::Error::TimestampMismatch)));
+						} else {
+							assert!(case.terminal.is_none());
+						}
+					}
+				}
+				assert_eq!(case.old_groups, [(0, 5_000_000)]);
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn changed_map_discontinuity_publishes_a_fresh_identity() {
+		for video in [false, true] {
+			for passthrough in [false, true] {
+				for after_us in [0, 7_000_000] {
+					let case = discontinuity(video, passthrough, true, after_us).await;
+					case.result.unwrap();
+					assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
+					assert_ne!(case.before, case.after);
+					assert_eq!(case.old_groups, [(0, 5_000_000)]);
+					assert_eq!(case.new_groups, [(moq_sequence(1, 1).unwrap(), u128::from(after_us))]);
+				}
+			}
+		}
 	}
 
 	/// Every frame timestamp `name` carries so far, in microseconds.

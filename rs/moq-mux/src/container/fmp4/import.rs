@@ -1221,7 +1221,10 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			self.estimator.cut(Some(timestamp));
 		}
 		let fragment_len = fragment.len();
-		group.write_frame(timestamp, fragment)?;
+		if let Err(error) = group.write_frame(timestamp, fragment) {
+			let _ = group.abort(error.clone());
+			return Err(error.into());
+		}
 
 		// Only once published, so a rejected fragment is never indexed. Audio is always
 		// independently decodable; video says whether this fragment really begins on an IDR,
