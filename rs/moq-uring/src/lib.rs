@@ -14,10 +14,10 @@
 //!
 //! [`quic`] stacks a sans-IO QUIC stack on that path: a [`quic::Endpoint`]
 //! serves many connections on one socket (demuxed by connection id, dials
-//! included), each a [`quic::Connection`] wrapped by [`transport::Session`],
-//! so `moq_net::Client::connect_lite` and `Server::accept_lite` run real
-//! moq-lite sessions on the worker, and [`transport::Local`] lets the
-//! `Send`-bounded moq-transport paths run there too. The socket is the identity: whatever is
+//! included), each a [`quic::Connection`] wrapped by [`transport::Session`]
+//! and [`transport::Local`], which meets moq-net's `Send` bound by checking the
+//! thread on every use, so `moq_net::Client::connect` and `Server::accept` run
+//! real MoQ sessions on the worker. The socket is the identity: whatever is
 //! built on it runs on the worker that adopted it, and a socket adopted as a
 //! member of a steered reuseport group ([`udp::Bound`]) issues connection ids
 //! that steer back to it. [`Handle::run`] supplies time and schedules driver

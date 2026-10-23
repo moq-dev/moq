@@ -17,7 +17,3 @@ this quest once that PR merges.
 The released client adds the property, which third-party subscribers count as
 an unexpected extension in `data-subgroup-basic`. The interop audit's standing
 approval covers PRs touching the `moq-dev-*` builds.
-
-## Related
-
-- [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - the cases this keeps green
