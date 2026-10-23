@@ -1997,6 +1997,7 @@ test("largest names the newest frame written", async () => {
 	const subscriber = producer.subscribe({ maxDelay: Milli(1_000) });
 
 	// Nothing published yet, so the first read waits.
+	expect(producer.largest()).toBeUndefined();
 	const initial = subscriber.largest();
 	expect(await Promise.race([initial.then(() => "ready"), Promise.resolve("pending")])).toBe("pending");
 
@@ -2004,6 +2005,9 @@ test("largest names the newest frame written", async () => {
 	first.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
 	first.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.now() });
 	expect(await initial).toEqual({ group: 0, frame: 1 });
+	// The producer's getter holds no cursor, so every caller reads the same edge.
+	expect(producer.largest()).toEqual({ group: 0, frame: 1 });
+	expect(producer.largest()).toEqual({ group: 0, frame: 1 });
 	first.close();
 
 	// A new group raises the largest at its head before any frame, so its first frame names
