@@ -830,6 +830,10 @@ impl Import {
 				}
 				Err(err) => match on_error {
 					OnError::Fail => return Err(err),
+					// A playlist that ended before this rendition saw it live is refused input, not a
+					// dead variant the others can cover for: importing the rest would publish a
+					// broadcast silently missing it.
+					OnError::Warn if matches!(err, Error::PlaylistEnded) => return Err(err),
 					// Keep the other renditions going: one bad variant or segment shouldn't
 					// drop the rest or abort the whole step.
 					OnError::Warn => {
@@ -1547,6 +1551,7 @@ mod tests {
 	/// recording. The refusal is settled, so `run` reports it without spending the retry budget.
 	#[tokio::test]
 	async fn an_initially_ended_playlist_is_refused() {
+		tokio::time::pause();
 		let (resource, playlist) = recording(4, true);
 		let (mut import, catalog) = write_import(&temp_dir(), &resource, &playlist);
 
@@ -1560,11 +1565,39 @@ mod tests {
 		assert!(matches!(run, Err(Error::PlaylistEnded)));
 	}
 
+	/// One rendition that had already ended is refused even while another is live and ingesting,
+	/// rather than importing a broadcast without it until the live one ends.
+	#[tokio::test]
+	async fn an_ended_rendition_beside_a_live_one_is_refused() {
+		tokio::time::pause();
+		let dir = temp_dir();
+		let (resource, live) = recording(3, false);
+		let (_, ended) = recording(4, true);
+		std::fs::write(dir.join("media.mp4"), &resource).unwrap();
+		std::fs::write(dir.join("live.m3u8"), live).unwrap();
+		std::fs::write(dir.join("ended.m3u8"), ended).unwrap();
+		let master = "#EXTM3U\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360,CODECS=\"avc1.4d401f\"\nlive.m3u8\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,CODECS=\"avc1.4d401f\"\nended.m3u8\n";
+		std::fs::write(dir.join("master.m3u8"), master).unwrap();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let cfg = Config::new(Url::from_file_path(dir.join("master.m3u8")).unwrap());
+		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
+
+		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+			.await
+			.expect("the ended rendition ends the import");
+		assert!(matches!(run, Err(Error::PlaylistEnded)), "{run:?}");
+	}
+
 	/// A followed playlist that gains `EXT-X-ENDLIST` ends the import once its last segment is in,
 	/// including one published alongside the end, and the finished broadcast keeps serving it,
 	/// catalog included, for the retention.
 	#[tokio::test]
 	async fn a_playlist_that_ends_later_finishes_the_import() {
+		tokio::time::pause();
 		let (resource, playlist) = recording(3, false);
 		let dir = temp_dir();
 		std::fs::write(dir.join("media.mp4"), &resource).unwrap();
