@@ -601,22 +601,6 @@ function after(a: Location, b: Location): boolean {
 	return a.group > b.group || (a.group === b.group && a.frame > b.frame);
 }
 
-async function nextLargest(
-	state: TrackState,
-	seen: Location | undefined,
-	commit: (largest: Location) => void,
-): Promise<Location | undefined> {
-	for (;;) {
-		const largest = state.largest.peek();
-		if (largest && (!seen || after(largest, seen))) {
-			commit(largest);
-			return largest;
-		}
-		if (state.closed.peek() !== undefined || state.largestEnded.peek()) return undefined;
-		await Signal.race(state.largest, state.closed, state.largestEnded);
-	}
-}
-
 // A source group retained in the producer cache, with the mirror handed to each sink
 // so eviction can drop them together.
 // `arrived` is when the group joined this track, which its mirrors age a predecessor from.
@@ -784,7 +768,6 @@ export class Producer {
 	// datagram taking the next sequence can never leave the ask behind.
 	#refresh = false;
 	#demand: Demand;
-	#largestSeen?: Location;
 	// The largest group's content may still grow: it has not closed cleanly, and it is not a
 	// datagram. An aborted one stays open, since it can be recreated.
 	#largestOpen = false;
@@ -1267,9 +1250,9 @@ export class Producer {
 		for (const sink of this.#sinks) sink.largest.set(largest);
 	}
 
-	/** The track's largest location, as {@link Subscriber.largest} follows it. */
-	async largest(): Promise<Location | undefined> {
-		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
+	/** The track's largest location: its newest group or datagram at the newest frame, or undefined before any. */
+	largest(): Location | undefined {
+		return this.#state.largest.peek();
 	}
 
 	// Evict cached groups idle for longer than the cache window. Idle means nothing

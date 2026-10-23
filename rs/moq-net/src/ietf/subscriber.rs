@@ -8172,13 +8172,8 @@ mod tests {
 				"SUBSCRIBE_OK priority must be committed before alias registration"
 			);
 			// The answer's largest is known before any group arrives.
-			let mut reader = track.producer.clone().unwrap();
-			let reported = match reader.poll_largest(&kio::Waiter::noop()) {
-				Poll::Ready(reported) => reported,
-				Poll::Pending => None,
-			};
 			assert_eq!(
-				reported,
+				track.producer.as_ref().unwrap().largest(),
 				largest.map(|largest| track::Position {
 					group: largest.group,
 					frame: 0,

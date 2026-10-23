@@ -78,7 +78,6 @@ Rejected in planning:
 - [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone
 - [Binding connection state](/quest/m1/api-audit/binding-state.md) - one `state()` snapshot and `state_changed()` replace `status`, `connects`, and both `failure` polls
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - Rust and JS model exports without a consumer go private, wrong ones are deleted, and JS names mirror Rust
-- [largest is a getter](/quest/m1/api-audit/largest-getter.md) - `track::Producer::largest` is a plain read in Rust and JS, never a shared cursor
 - [One clean close](/quest/m1/api-audit/clean-close.md) - a clean session close has one spelling and failures are recorded inside moq-net
 - [Session limits only where needed](/quest/m1/api-audit/session-limits.md) - `session::Limits` keeps only bounds that nothing else enforces, and its documented example compiles
 - [Ranges refuse what the wire drops](/quest/m1/api-audit/ranges-wire.md) - relative and time anchors fail loud where a wire cannot carry them, `floor()` honors the subscription, and bindings take an optional max delay
