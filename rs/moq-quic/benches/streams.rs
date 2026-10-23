@@ -112,7 +112,12 @@ fn bench_write_size(c: &mut Criterion<ThreadCpu>) {
             );
         }
     }
-    let windows = [(16 << 10, false), (64 << 10, false), (TOTAL, false), (TOTAL, true)];
+    let windows = [
+        (16 << 10, false),
+        (64 << 10, false),
+        (TOTAL, false),
+        (TOTAL, true),
+    ];
     for (window, holes) in windows {
         for size in [64, 1024, 16384] {
             let mut pair = None;
