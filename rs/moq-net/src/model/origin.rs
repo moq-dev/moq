@@ -2352,8 +2352,7 @@ impl Producer {
 	}
 
 	/// Land a peer's claim with its wire route metadata.
-	#[doc(hidden)]
-	pub fn dynamic_route(&self, prefix: impl AsPath, route: Route) -> Result<Dynamic, Error> {
+	pub(crate) fn dynamic_route(&self, prefix: impl AsPath, route: Route) -> Result<Dynamic, Error> {
 		self.dynamic_inner(prefix, route, false)
 	}
 
@@ -5443,8 +5442,7 @@ impl Dynamic {
 	/// The prefix is fixed at announce time: to move a route, drop this and call
 	/// [`Producer::dynamic`] again. Fails with [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
-	#[doc(hidden)]
-	pub fn update_route(&self, route: Route) -> Result<(), Error> {
+	pub(crate) fn update_route(&self, route: Route) -> Result<(), Error> {
 		self.announcement.update(route)
 	}
 
@@ -5584,6 +5582,14 @@ impl ServeState {
 /// [`Consumer::request_broadcast`]; [`prepare`](Self::prepare) then [`Prepared::publish`]
 /// resolves it with a new exact-path broadcast, and [`reject`](Self::reject) resolves it
 /// with an error. Dropping the request without either rejects it.
+///
+/// Only the built-in sessions answer with a broadcast they already hold:
+///
+/// ```compile_fail,E0624
+/// fn answer(request: moq_net::origin::Request, broadcast: moq_net::broadcast::Consumer) {
+///     request.accept(broadcast);
+/// }
+/// ```
 pub struct Request {
 	// Absolute path that was requested.
 	path: PathOwned,
@@ -5620,16 +5626,7 @@ impl Request {
 	}
 
 	/// Resolve a session-forwarded claim with its peer's already-routed broadcast.
-	///
-	/// # Panics
-	///
-	/// On a request from [`Producer::dynamic`], which answers only through [`Self::prepare`].
-	#[doc(hidden)]
-	pub fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
-		assert!(
-			self.publisher.is_none(),
-			"an application claim answers through prepare and publish"
-		);
+	pub(crate) fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
 		let broadcast = broadcast.consume();
 		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast));
 		// `self.producer` drops here, closing the channel; the value is still observable.
@@ -10661,16 +10658,6 @@ mod tests {
 		assert_eq!(pinned.expect("resolves").info().epoch.as_ref(), Some(&epoch));
 		let stale = consumer.request_broadcast("room/alice", crate::Epoch::mint());
 		assert!(matches!(stale.await, Err(Error::Unroutable)));
-	}
-
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	#[should_panic(expected = "prepare and publish")]
-	async fn an_application_claim_cannot_accept_an_arbitrary_broadcast() {
-		let producer = origin(1).produce();
-		let claim = producer.dynamic("room").unwrap();
-		let _pending = producer.consume().request_broadcast("room/alice", None);
-		queued(&claim).await.accept(broadcast::Info::new().produce());
 	}
 
 	/// A refusal from the longest prefix is the answer: neither a costlier advertiser of

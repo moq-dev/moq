@@ -303,6 +303,25 @@ pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::or
 	origin.excluding(peer)
 }
 
+/// Land a claim with a peer's wire route, as a session does, for the origin bench.
+pub fn dynamic_route(
+	origin: &crate::origin::Producer,
+	prefix: impl crate::AsPath,
+	route: crate::origin::Route,
+) -> Result<crate::origin::Dynamic, crate::Error> {
+	origin.dynamic_route(prefix, route)
+}
+
+/// Replace a peer claim's route in place, as a session does on a route update.
+pub fn update_route(dynamic: &crate::origin::Dynamic, route: crate::origin::Route) -> Result<(), crate::Error> {
+	dynamic.update_route(route)
+}
+
+/// Answer a peer claim's request with the broadcast its session already holds.
+pub fn accept(request: crate::origin::Request, broadcast: impl crate::Consume<broadcast::Consumer>) {
+	request.accept(broadcast)
+}
+
 /// A session's snapshot of its peer's initial announcements, for the synced bench.
 /// Drop it to land the snapshot.
 pub struct Snapshot(#[allow(dead_code, reason = "held for its drop, which lands the snapshot")] crate::model::Snapshot);

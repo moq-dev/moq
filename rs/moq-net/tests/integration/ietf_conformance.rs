@@ -3,8 +3,8 @@
 //! Moxygen announces one prefix, then serves its sixteen-field test namespaces.
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
-use moq_net::{Hop, Version, broadcast, origin};
-use std::sync::Arc;
+use moq_net::{Epoch, Hop, Version, origin};
+use std::{cell::RefCell, rc::Rc};
 
 // Moxygen c27ae6358df62a1195da479b2e07c50dd8174279, moqtest/Utils.cpp.
 const PREFIX: &str = "moq-test-00";
@@ -21,15 +21,18 @@ async fn routing(version: &str, cluster: bool) {
 	let publisher = origin(1);
 	let relay = origin(2);
 	let reader = origin(4);
-	let prefix = Arc::new(publisher.dynamic_route(PREFIX, Default::default()).unwrap());
-	let broadcast = broadcast::Info::new().produce();
-	let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
-	let serving = prefix.clone();
-	let answer = broadcast.consume();
+	let prefix = Rc::new(publisher.dynamic(PREFIX).unwrap());
+	let answered = Rc::new(RefCell::new(None));
+	let (serving, answer) = (prefix.clone(), answered.clone());
 	moq_clock::sim::spawn(async move {
 		let request = serving.requested_broadcast().await.unwrap();
 		assert_eq!(request.path().as_str(), NAMESPACE);
-		request.accept(answer);
+		let prepared = request.prepare(Epoch::mint()).unwrap();
+		let track = prepared
+			.broadcast()
+			.create_track("test", moq_net::track::Info::default())
+			.unwrap();
+		*answer.borrow_mut() = Some((prepared.publish().unwrap(), track));
 	});
 
 	let mut options = MockConnectOptions::new(version);
@@ -56,6 +59,7 @@ async fn routing(version: &str, cluster: bool) {
 	reader.consume().routed(NAMESPACE).await.unwrap();
 	let remote = reader.consume().request_broadcast(NAMESPACE, None).await.unwrap();
 	let mut subscription = remote.track("test").unwrap().subscribe(None).await.unwrap();
+	let (broadcast, track) = answered.borrow_mut().take().expect("the claim answered");
 	crate::support::harness::subscribed(&track).await;
 	let mut group = track.append_group().unwrap();
 	group.write_frame(None, &b"conformance"[..]).unwrap();

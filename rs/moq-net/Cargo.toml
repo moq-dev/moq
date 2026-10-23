@@ -80,10 +80,11 @@ name = "fuzz-seeds"
 path = "examples/fuzz-seeds.rs"
 required-features = ["fuzz"]
 
+# Lands peer claims through the hidden `fuzz` module, as a session does.
 [[bench]]
 name = "origin"
 harness = false
-required-features = ["async"]
+required-features = ["fuzz"]
 
 # Reaches the crate-private session view of an origin through the hidden `fuzz` module.
 [[bench]]

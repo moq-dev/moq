@@ -80,6 +80,7 @@ async fn expect_replaced(version: Version, announced: &mut announce::Consumer, p
 }
 
 /// Nothing more arrives, past the update hold.
+#[cfg(feature = "fuzz")]
 async fn quiet(version: Version, announced: &mut announce::Consumer) {
 	if let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
 		panic!("{version}: expected nothing more, got {event:?}");
@@ -172,17 +173,20 @@ relay_chain_tests! {
 }
 
 /// A worker claiming `pool` without an epoch, answering each request with an output
-/// whose `video` track carries the worker's name.
+/// whose `video` track carries the worker's name. The claim is a peer's, landed through
+/// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
+#[cfg(feature = "fuzz")]
 struct Worker {
 	origin: origin::Producer,
 	_claim: Rc<origin::Dynamic>,
 	_outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
+#[cfg(feature = "fuzz")]
 impl Worker {
 	fn new(hop: u64) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(origin.dynamic_route("pool", origin::Route::default()).unwrap());
+		let claim = Rc::new(moq_net::fuzz::dynamic_route(&origin, "pool", origin::Route::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
@@ -190,7 +194,7 @@ impl Worker {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
 				write(&track, &format!("{hop}"));
-				request.accept(&output);
+				moq_net::fuzz::accept(request, &output);
 				served.borrow_mut().push((output, track));
 			}
 		}));
@@ -206,6 +210,7 @@ impl Worker {
 /// `pool/job-2` from `10` to itself while `11` keeps winning `pool` itself and
 /// `pool/job-0`, and `10` keeps `pool/job-1` (pinned by the spread hash). `D` restarts
 /// `pool`, and the next subscribes reach the right workers.
+#[cfg(feature = "fuzz")]
 async fn prefix_pool(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let upstream = produce_origin(2);
@@ -240,6 +245,7 @@ async fn prefix_pool(version: &str) {
 	}
 }
 
+#[cfg(feature = "fuzz")]
 #[moq_clock::test]
 async fn prefix_pool_lite06() {
 	moq_clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-06"))
@@ -247,6 +253,7 @@ async fn prefix_pool_lite06() {
 		.expect("timed out");
 }
 
+#[cfg(feature = "fuzz")]
 #[moq_clock::test]
 async fn prefix_pool_lite07() {
 	moq_clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-07-wip"))
@@ -255,24 +262,28 @@ async fn prefix_pool_lite07() {
 }
 
 /// A claim at `live` whose handler answers each request with a fresh output, kept so
-/// the test can write into it: `outputs[n]` answered the `n`th request.
+/// the test can write into it: `outputs[n]` answered the `n`th request. Only a peer's
+/// claim carries an epoch or re-prices, so it lands through the hidden `fuzz` module as
+/// a session lands it.
+#[cfg(feature = "fuzz")]
 struct Claim {
 	dynamic: Rc<origin::Dynamic>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
+#[cfg(feature = "fuzz")]
 impl Claim {
 	fn new(origin: &origin::Producer, epoch: Option<Epoch>) -> Self {
 		let mut route = origin::Route::default();
 		route.epoch = epoch;
-		let dynamic = Rc::new(origin.dynamic_route("live", route).unwrap());
+		let dynamic = Rc::new(moq_net::fuzz::dynamic_route(origin, "live", route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (dynamic.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
-				request.accept(&output);
+				moq_net::fuzz::accept(request, &output);
 				served.borrow_mut().push((output, track));
 			}
 		}));
@@ -292,7 +303,11 @@ impl Claim {
 	fn update_epoch(&self, epoch: Option<Epoch>) {
 		let mut route = self.dynamic.route();
 		route.epoch = epoch;
-		self.dynamic.update_route(route).unwrap();
+		self.update_route(route);
+	}
+
+	fn update_route(&self, route: origin::Route) {
+		moq_net::fuzz::update_route(&self.dynamic, route).unwrap();
 	}
 }
 
@@ -300,6 +315,7 @@ impl Claim {
 /// A same-epoch re-price keeps every handle. Moving to `to` restarts `V`, the
 /// subscription already open stays on the old answer, and a re-request asks the
 /// handler again and reads none of the old answer's cached groups.
+#[cfg(feature = "fuzz")]
 async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
@@ -320,7 +336,7 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	assert_eq!(read(&mut sticky).await, "old:0", "{version}");
 
 	// A re-price at the same epoch is an update at most: every handle survives.
-	claim.dynamic.update_route(claim.dynamic.route().with_cost(5)).unwrap();
+	claim.update_route(claim.dynamic.route().with_cost(5));
 	while let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
 			matches!(event, Some(announce::Event::Update(_))),
@@ -373,6 +389,7 @@ fn epochs() -> (Epoch, Epoch) {
 macro_rules! dynamic_epoch_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
+			#[cfg(feature = "fuzz")]
 			#[moq_clock::test]
 			async fn $name() {
 				let (a, b) = epochs();
@@ -396,17 +413,15 @@ dynamic_epoch_tests! {
 /// An update does not override route selection: with a second claim still at the
 /// epoch, a claim dropping it hands re-requests to the second, which outranks any
 /// route without one.
+#[cfg(feature = "fuzz")]
 #[moq_clock::test]
 async fn dynamic_epoch_second_route_keeps_winning() {
 	let (a, _) = epochs();
 	let origin = produce_origin(1);
 	let first = Claim::new(&origin, Some(a.clone()));
-	first.dynamic.update_route(first.dynamic.route().with_cost(1)).unwrap();
+	first.update_route(first.dynamic.route().with_cost(1));
 	let second = Claim::new(&origin, Some(a.clone()));
-	second
-		.dynamic
-		.update_route(second.dynamic.route().with_cost(5))
-		.unwrap();
+	second.update_route(second.dynamic.route().with_cost(5));
 	let mut announced = origin.consume().announced();
 	match next_event(&mut announced).await {
 		announce::Event::Start(announce) => assert_eq!(announce.route.epoch.as_ref(), Some(&a)),
@@ -563,6 +578,7 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 	}
 }
 
+#[cfg(feature = "fuzz")]
 #[moq_clock::test]
 async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 	for name in [
