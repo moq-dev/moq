@@ -31,8 +31,8 @@ IETF FETCH dispatch. Resized from [M] to [L] for it.
 When ranges add frame bounds, the group model carries a lite group's
 `frameStart` instead of refusing a nonzero one, as
 [partial lite groups](/quest/m1/release-audit/js-partial-group.md) does until
-then. The group-bound rule itself, for reads and datagrams, lands first in
-[subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md).
+then. Preserve the per-reader group-bound rule for reliable reads, live-edge
+selection, subscription updates, and publisher datagrams.
 
 ## Required
 
@@ -40,5 +40,4 @@ then. The group-bound rule itself, for reads and datagrams, lands first in
 
 ## Related
 
-- [JS subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md) - today's `groups` bounds enforced per reader and on datagrams
 - [Partial lite groups](/quest/m1/release-audit/js-partial-group.md) - refuses a nonzero `frameStart` until this models it
