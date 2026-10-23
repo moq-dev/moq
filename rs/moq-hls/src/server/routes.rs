@@ -1127,7 +1127,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut catalog_broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::path::Relative::new("../source").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
 		let track = media_broadcast.create_track("video0", timed()).unwrap();
 		let mut media = reserved
 			.video(
