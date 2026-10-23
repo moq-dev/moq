@@ -1055,8 +1055,17 @@ export class ControlStreamAdapter implements Session {
 				if (subNs08 === undefined) throw new Error("unexpected message 0x08: no SubscribeNamespace stream");
 				return { route: Route.FollowUp, requestId: subNs08 };
 			}
+			case 0x0f: {
+				// TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body on draft 14.
+				if (this.version !== Version.DRAFT_14) throw new Error("unexpected TrackStatusError");
+				return { route: Route.ErrorResponse, requestId: await readRequestId() };
+			}
 			case 0x0e: {
-				if (this.version === Version.DRAFT_14 || this.version === Version.DRAFT_15) {
+				if (this.version === Version.DRAFT_14) {
+					// TRACK_STATUS_OK names its request, unlike draft 16's namespace entry.
+					return { route: Route.Response, requestId: await readRequestId() };
+				}
+				if (this.version === Version.DRAFT_15) {
 					throw new Error("unexpected message 0x0e");
 				}
 				// v16+: NamespaceDone entry (no requestId) — route to SubscribeNamespace stream

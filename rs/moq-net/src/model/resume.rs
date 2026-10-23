@@ -4350,7 +4350,10 @@ mod test {
 				Arc::new(broadcast::Info::default()),
 				"video",
 				crate::track::Info {
-					unchecked: true,
+					properties: Some(Arc::new(crate::model::object::TrackProperties {
+						version: crate::ietf::Version::Draft22,
+						values: Vec::new(),
+					})),
 					..crate::track::Info::timed()
 				},
 			);

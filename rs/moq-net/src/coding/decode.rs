@@ -141,6 +141,11 @@ pub struct Decoder<'a> {
 	len: usize,
 	/// See [`Self::need`].
 	need: usize,
+	/// The control message read, counted once the read is consumed.
+	pub(crate) control: Option<crate::stats::Control>,
+	/// Leading bytes left out of the `control` count: a type selector the sender writes
+	/// apart from the message, and so never counts.
+	pub(crate) uncounted: usize,
 }
 
 impl<'a> Decoder<'a> {
@@ -152,6 +157,8 @@ impl<'a> Decoder<'a> {
 			form,
 			len: buf.len(),
 			need: 0,
+			control: None,
+			uncounted: 0,
 		}
 	}
 
@@ -174,6 +181,12 @@ impl<'a> Decoder<'a> {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn form(&self) -> Form {
 		self.form
+	}
+
+	/// How many bytes have been read.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn position(&self) -> usize {
+		self.len - self.buf.len()
 	}
 
 	/// The number of unread bytes.
