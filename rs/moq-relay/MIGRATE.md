@@ -73,11 +73,11 @@ Give the cluster `with_connect(connect, quic)`, plus `with_iroh(endpoint)` for `
 A `[quic]` `max_streams` of 0 stops startup, as `[peer.quic]` already did, since zero streams wedge the connection.
 Remove it to keep the default.
 
-### Auth roles carry `moq_auth::Access` (#5697)
+### Auth roles are patterns
 
-`auth::Token::publish` and `subscribe` are `moq_auth::Access`, so an embedder reads the patterns from `.path`.
-The relay refuses every grant with a bitrate cap, including one added in-band or at revalidation, because no transport meters it yet; HTTP `/fetch` and `/announced` always refuse caps.
-An embedder running its own gateway must enforce the cap or refuse the grant before forwarding media.
+`auth::Token::publish` and `subscribe` are `moq_auth::Patterns`, matching release.
+Read and construct each pattern union directly instead of using `moq_auth::Access` and `.path`.
+Token and auth-server grant parsers refuse object roles, including bitrate caps, before relay admission; no transport currently enforces a cap.
 
 ### Workers default to unpinned (#5688)
 
