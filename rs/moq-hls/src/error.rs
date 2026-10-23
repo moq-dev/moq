@@ -18,15 +18,6 @@ impl std::fmt::Display for SequenceKind {
 	}
 }
 
-/// Whether an HTTP response status means "ask again later".
-///
-/// A response that arrived is the server's answer, and only this narrow set invites another
-/// attempt: request timeout, rate limit, and the gateway/overload statuses. Every other status,
-/// `404` and `403` included, is settled.
-pub(crate) fn status_retryable(status: u16) -> bool {
-	matches!(status, 408 | 429 | 502 | 503 | 504)
-}
-
 /// Errors produced by the HLS <-> MoQ gateway (import and export).
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -144,6 +135,20 @@ pub enum Error {
 		/// Why the timeline failed.
 		source: Box<Error>,
 	},
+
+	/// A media playlist already carried `EXT-X-ENDLIST` when import first saw it; import follows live playlists only.
+	#[error("playlist already ended (EXT-X-ENDLIST); HLS import follows live playlists only")]
+	PlaylistEnded,
+
+	/// Import refused a rendition whose timestamps went backwards, such as a reset at an
+	/// `EXT-X-DISCONTINUITY` under the same init segment. A restarted source is a new broadcast.
+	#[error("rendition {rendition} rewound its timestamps; HLS import refuses a timestamp reset: {source}")]
+	Rewind {
+		/// The rendition's label.
+		rendition: String,
+		/// The rewind the importer refused.
+		source: moq_mux::Error,
+	},
 }
 
 impl Error {
@@ -156,6 +161,21 @@ impl Error {
 		match self {
 			Self::Reqwest(err) => err.status().map(|status| status.as_u16()),
 			_ => None,
+		}
+	}
+
+	/// Whether this is the source's settled answer, which another import pass cannot change.
+	///
+	/// A response that arrived is the server's answer, and only a narrow set of statuses invites
+	/// another attempt: request timeout, rate limit, and the gateway/overload statuses. Every other
+	/// status, `404` and `403` included, is settled, as is a playlist that had already ended when
+	/// the import joined it. A failure with no answer at all is left to the backoff budget.
+	pub(crate) fn settled(&self) -> bool {
+		match self {
+			Self::PlaylistEnded => true,
+			_ => self
+				.status()
+				.is_some_and(|status| !matches!(status, 408 | 429 | 502 | 503 | 504)),
 		}
 	}
 }

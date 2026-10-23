@@ -517,15 +517,19 @@ test("an op that would evict the header rolls first", () => {
 	frame.commit();
 });
 
-test("a header larger than the group cache is rejected", () => {
-	const encoder = new Encoder<string>();
+// Compression doesn't lift the limit: a reader inflates the header whole, so one past the group budget
+// is refused however small it deflates.
+for (const compression of [false, true]) {
+	test(`a header larger than the group cache is rejected (compression=${compression})`, () => {
+		const encoder = new Encoder<string>({ compression });
 
-	expect(() => encoder.push("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow("group cache limit");
-	expect(encoder.window).toEqual([]);
+		expect(() => encoder.push("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow("group cache limit");
+		expect(encoder.window).toEqual([]);
 
-	const frame = encoder.push("ok");
-	expect(frame.keyframe).toBeTrue();
-});
+		const frame = encoder.push("ok");
+		expect(frame.keyframe).toBeTrue();
+	});
+}
 
 test("an uncommitted edit leaves the window unchanged", () => {
 	const encoder = new Encoder<number>();

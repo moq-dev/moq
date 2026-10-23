@@ -5,7 +5,7 @@
 //! over a [`moq_net::transport::memory`] pair and spawns both protocol drivers, giving tests
 //! two live sessions ready for pub/sub without any real QUIC or network I/O.
 
-#![allow(dead_code)]
+#![allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 
 use moq_net::{Client, Server, Session, Version, origin};
 

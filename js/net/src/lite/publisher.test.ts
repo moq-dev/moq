@@ -6,6 +6,7 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
+import { Version as IetfVersion } from "../ietf/version.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -14,6 +15,7 @@ import { sendOrder } from "../priority.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
+import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
@@ -555,7 +557,7 @@ test("lite draft-06: an unchecked track's fetched frames carry their send time",
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, unchecked: true });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, ietf: IetfVersion.DRAFT_22 });
 
 	const group = new GroupProducer(0);
 	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));
@@ -637,6 +639,7 @@ function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
 async function servedSubscription(
 	options: {
 		startGroup?: number;
+		startFrame?: number;
 		endGroup?: number;
 		endFrame?: number;
 		gated?: boolean;
@@ -673,6 +676,7 @@ async function servedSubscription(
 		track: "video",
 		priority: 0,
 		startGroup: options.startGroup,
+		startFrame: options.startFrame,
 		endGroup: options.endGroup,
 		endFrame: options.endFrame,
 	});
@@ -685,6 +689,7 @@ async function servedSubscription(
 
 	return {
 		client,
+		datagrams: pair.client.datagrams.readable,
 		track,
 		serving,
 		parked: gate.parked,
@@ -865,6 +870,52 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 }
+
+test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group and frame bounds", async (version) => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const sub = await servedSubscription({ version, startGroup: 0, startFrame: 1, endGroup: 1, endFrame: 0 });
+	const reader = sub.datagrams.getReader();
+	const received: number[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const next = await reader.read();
+			if (next.done) return;
+			received.push((await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence);
+		}
+	})();
+	try {
+		for (let sequence = 0; sequence < 3; sequence++)
+			sub.track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+		await clock.advance(Nano.zero);
+		expect(received).toEqual([1]);
+		// Widen both boundaries, then narrow to one datagram. Each update is applied before new arrivals.
+		await replayUpdate({ priority: 0, startGroup: 0, startFrame: 0, endGroup: 4, endFrame: 0 }).encode(
+			sub.client.writer,
+			version,
+		);
+		await clock.advance(Nano.zero);
+		for (let sequence = 2; sequence < 6; sequence++)
+			sub.track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+		await clock.advance(Nano.zero);
+		expect(received).toEqual([1, 2, 3, 4]);
+		await replayUpdate({ priority: 0, startGroup: 6, startFrame: 1, endGroup: 7, endFrame: 0 }).encode(
+			sub.client.writer,
+			version,
+		);
+		await clock.advance(Nano.zero);
+		for (let sequence = 6; sequence < 9; sequence++)
+			sub.track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+		await clock.advance(Nano.zero);
+		expect(received).toEqual([1, 2, 3, 4, 7]);
+	} finally {
+		await reader.cancel();
+		await reading;
+		await sub.close();
+		await sub.serving;
+		restore();
+	}
+});
 
 // A sent datagram is accounted for, so the end sweep does not drop it, as the Rust publisher does.
 test("lite draft-06: the end sweep does not drop a sent datagram", async () => {

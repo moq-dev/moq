@@ -1580,6 +1580,64 @@ describe("Session integration (scripted peer)", () => {
 		});
 	});
 
+	// Chrome rejects an over-limit create rather than queueing it, and @moq/net
+	// passes waitUntilAvailable: false where it relies on that.
+	describe("waitUntilAvailable: false refuses instead of waiting", () => {
+		const refused = (err: unknown) => {
+			expect(err).toBeInstanceOf(DOMException);
+			expect((err as DOMException).name).toBe("NetworkError");
+		};
+
+		test("an exhausted uni limit rejects at once, and a later grant is usable", async () => {
+			const { session, peer } = connect();
+			await session.ready;
+			peer.send({ type: "transport_parameters", params: peerParams({ initialMaxStreamsUni: 1n }) });
+
+			await session.createUnidirectionalStream({ waitUntilAvailable: false });
+			refused(await settleTo(session.createUnidirectionalStream({ waitUntilAvailable: false })));
+
+			// The refusal claimed nothing: one more slot opens exactly one more stream.
+			peer.send({ type: "max_streams_uni", max: 2n });
+			peer.send({ type: "ping_request", sequence: 1n });
+			await waitFor(() => peer.has("ping_response"));
+			await session.createUnidirectionalStream({ waitUntilAvailable: false });
+			refused(await settleTo(session.createUnidirectionalStream({ waitUntilAvailable: false })));
+			session.close();
+		});
+
+		test("an exhausted bidi limit rejects at once", async () => {
+			const { session, peer } = connect();
+			await session.ready;
+			peer.send({ type: "transport_parameters", params: peerParams({ initialMaxStreamsBidi: 0n }) });
+
+			refused(await settleTo(session.createBidirectionalStream({ waitUntilAvailable: false })));
+			session.close();
+		});
+
+		test("a create before TRANSPORT_PARAMETERS waits for the peer's limit", async () => {
+			const { session, peer } = connect();
+			await session.ready;
+
+			const created = session.createUnidirectionalStream({ waitUntilAvailable: false });
+			await flushMicrotasks();
+			peer.send({ type: "transport_parameters", params: peerParams() });
+
+			expect(await created).toBeInstanceOf(WritableStream);
+			session.close();
+		});
+
+		test("a create before TRANSPORT_PARAMETERS rejects with the close reason", async () => {
+			const { session } = connect();
+			await session.ready;
+
+			const created = settleTo(session.createBidirectionalStream({ waitUntilAvailable: false }));
+			await flushMicrotasks();
+			session.close({ closeCode: 42, reason: "bye" });
+
+			expect(((await created) as Error).message).toBe("Connection closed: 42 bye");
+		});
+	});
+
 	describe("close threads its reason into blocked Credit.claim() waiters", () => {
 		test("a uni stream blocked on stream-count credit rejects with the graceful close reason", async () => {
 			const { session, peer } = connect();

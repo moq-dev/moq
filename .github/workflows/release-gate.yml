@@ -121,6 +121,9 @@ jobs:
               - "test/max-age/**"
               - "test/portrait/**"
               - "rs/moq-tokio/tests/integration/max_age.rs"
+              - "test/receive-credit/**"
+              - "rs/moq-tokio/tests/integration/receive_credit.rs"
+              - "rs/moq-uring/tests/integration/receive_credit.rs"
               # The interop job also depends on the recipe that invokes it and the
               # workspace membership that links the JS clients to source.
               - "test/justfile"

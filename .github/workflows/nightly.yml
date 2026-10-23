@@ -40,6 +40,11 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      bench-base:
+        description: Revision the paired Rust benchmarks compare against; the run's own commit gives an A/A run. Empty is the previous scheduled Nightly's commit.
+        type: string
+        default: ""
   schedule:
     - cron: "0 7 * * *"
 
@@ -50,6 +55,10 @@ concurrency:
 jobs:
   features:
     uses: ./.github/workflows/features.yml
+    secrets: inherit
+
+  ietf-conformance:
+    uses: ./.github/workflows/ietf-conformance.yml
     secrets: inherit
 
   runner-vm:
@@ -83,12 +92,19 @@ jobs:
   # build environment, so a benchmark reuses the dependencies its group already
   # compiled. The Rust benchmarks outgrew one hour, so they split by harness:
   # nextest's ignored benchmark tests and cargo's bench targets share few builds.
+  # A paired group also builds and runs the previous nightly's commit beside this
+  # one on the same runner, which is what fails the job on a regression; the
+  # cross-night history on the benchmark site stays informational.
   nightly:
     name: Nightly (${{ matrix.name }})
     runs-on: ${{ matrix.runner || 'ubuntu-24.04-arm' }}
     # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
+    permissions:
+      contents: read
+      # Paired groups look up the previous scheduled Nightly's commit.
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -127,16 +143,25 @@ jobs:
             artifact: bench-rust
             artifact-path: target/bench/nightly/rust-bench
             benchmark: true
+            paired: true
+          - name: Rust shared bench targets
+            recipe: gh nightly rust-shared
+            artifact: bench-rust-shared
+            artifact-path: target/bench/nightly/rust-shared
+            benchmark: true
+            paired: true
           - name: Rust supplemental benchmarks
             recipe: gh nightly rust-extra
             artifact: bench-rust-extra
             artifact-path: target/bench/nightly/rust-extra
             benchmark: true
+            paired: true
           - name: io_uring benchmarks
             recipe: gh nightly rust-uring
             artifact: bench-rust-uring
             artifact-path: target/bench/nightly/rust-uring
             benchmark: true
+            paired: true
           - name: JS benchmarks
             recipe: gh nightly js
             artifact: bench-js
@@ -179,6 +204,11 @@ jobs:
           - name: OBS
             recipe: obs ci
             shell: .#obs
+          # The OBS unit tests under ThreadSanitizer, against stubbed libobs, so
+          # the plain shell suffices. A loaded run of moq-output-test can take
+          # 60 to 90 s instead of about 8; the suite took 2 to 4.5 min locally.
+          - name: OBS TSan
+            recipe: obs test
           - name: moq-c C fixtures
             recipe: rs c-tests
 
@@ -208,6 +238,8 @@ jobs:
         run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: default
+          MOQ_BENCH_BASE: ${{ matrix.paired && (inputs.bench-base || 'previous-nightly') || '' }}
+          GH_TOKEN: ${{ matrix.paired && github.token || '' }}
 
       - name: Record benchmark outcome
         if: ${{ matrix.benchmark && !cancelled() }}
@@ -220,6 +252,12 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact-path }}
           retention-days: 45
+
+      # After the upload, so the benchmark site still records tonight's history and
+      # publishes the comparison that failed this job before the alert links to it.
+      - name: Fail on paired regressions
+        if: ${{ matrix.paired && steps.workload.outcome == 'success' }}
+        run: nix develop --command just gh benchmark-report gate "${{ matrix.artifact-path }}"
 
   # gh-pages is the one Pages site, and each directory has one writer: this job owns
   # bench/ (the regression table and its history) and the root index listing every
@@ -293,7 +331,7 @@ jobs:
           comment-on-alert: false
           fail-on-alert: false
       - name: Publish shared history
-        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-publish finish benchmark-site
+        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-publish finish benchmark-site benchmark-reports/paired.json
       - name: Drop a stale Pages artifact
         run: nix shell --inputs-from . nixpkgs#just --command just gh pages-clean
         env:
@@ -321,7 +359,6 @@ jobs:
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
-        # `gh test` exercises workflow and release tooling, which no pull request runs.
         # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
@@ -331,7 +368,7 @@ jobs:
         # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
         # `rs render-sw` renders through wgpu on Mesa's software Vulkan driver.
         # `test qmux` runs js/qmux against the in-tree Rust qmux, per draft.
-        recipe: ["gate", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test json-properties", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
+        recipe: ["gate", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
         include:
           - recipe: rs send-depth
             nightly: true
@@ -351,6 +388,10 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: nightly
+      - name: Add a second IPv6 loopback address
+        if: matrix.recipe == 'rs uring'
+        # moq-uring's local address test reaches a wildcard socket on it.
+        run: sudo ip -6 addr add fd6d:6f71::2/128 dev lo nodad
       - name: Test
         run: nix develop --command just ${{ matrix.recipe }}
         env:
@@ -413,7 +454,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
-    # Thirty-six rows at a minute each, plus the relay, CLI, and shaper built from source.
+    # Twenty-four rows at a minute each, plus the relay, CLI, and shaper built from source.
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -432,6 +473,9 @@ jobs:
       - name: Browser publisher fairness benchmark
         run: nix develop --command just js serve-bench
         shell: bash -leo pipefail {0}
+      - name: Audio ring benchmark
+        run: nix develop --command just js ring-bench
+        shell: bash -leo pipefail {0}
       - name: Native headless playback
         if: ${{ !cancelled() }}
         run: nix develop --command just test native-play
@@ -440,7 +484,7 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
       - name: Audio quality
         if: ${{ !cancelled() }}
-        run: nix develop --command just test audio-quality --rings isolated,plain --enforce --capture
+        run: nix develop --command just test audio-quality --runtimes chromium --enforce --capture
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
@@ -452,7 +496,7 @@ jobs:
       # it is fixed. Kept beside the browser run so its ceilings can be re-measured.
       - name: Native audio quality
         if: ${{ !cancelled() }}
-        run: nix develop --command just test audio-quality --rings pulse
+        run: nix develop --command just test audio-quality --runtimes native
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
@@ -603,11 +647,13 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Collect and compare sizes
+        id: sizes
         run: nix develop --command just gh size-nightly size-report "$GITHUB_RUN_ID"
         env:
           GH_TOKEN: ${{ github.token }}
+      # Only after the comparison ran, so a setup failure stays the job's only error.
       - name: Preserve sizes and attribution
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.sizes.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: nightly-size-history

@@ -76,7 +76,6 @@ impl Frame {
 /// A frame with the relay metadata its group keeps beside it, read only by wire egress.
 #[cfg(feature = "async")]
 #[derive(Clone, Debug)]
-// private: passthrough
 pub(crate) struct Object {
 	pub frame: Frame,
 	pub fields: Option<Arc<super::object::Fields>>,
@@ -94,7 +93,6 @@ impl std::ops::Deref for Object {
 }
 
 /// A streamed frame's private header, alongside the unchanged public header.
-// private: passthrough
 pub(crate) struct Header {
 	pub info: Info,
 	pub fields: Option<Arc<super::object::Fields>>,
@@ -207,7 +205,6 @@ impl<const N: usize> Buffer<N> {
 /// Every broadcast, track, and group minted from an [`crate::origin::Producer`] handle shares
 /// its budget. The built-in sessions each ingest through a handle with its own.
 #[derive(Clone, Default)]
-// private: tuning
 pub(crate) struct Budget(Arc<Remaining>);
 
 struct Remaining(AtomicUsize);
@@ -232,7 +229,6 @@ impl Budget {
 
 	/// A budget of `bytes`, for a benchmark sweeping it.
 	#[cfg(any(test, feature = "fuzz"))]
-	// private: tuning
 	pub(crate) fn new(bytes: usize) -> Self {
 		Self(Arc::new(Remaining(AtomicUsize::new(bytes))))
 	}
@@ -530,8 +526,7 @@ impl Producer {
 	}
 
 	/// Transfer a receive handler's cancellation cleanup into its in-flight frame.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: capability gap
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// A dropped receive handler cannot name its error; a public driver aborts explicitly.
 	pub(crate) fn cancel_on_drop(mut self) -> Self {
 		self.cancel_on_drop = true;
@@ -565,8 +560,7 @@ impl Producer {
 	/// to publish bytes nobody can observe yet.
 	///
 	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: tuning
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn write_deferred<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		let len = chunk.as_ref().len();
 		if len > self.remaining() {
@@ -592,8 +586,7 @@ impl Producer {
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: tuning
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn notify(&self) {
 		self.group().frame_notify();
 	}
@@ -704,13 +697,11 @@ pub struct Consumer {
 	// The group's channel, used to park while a partial frame fills.
 	state: kio::Consumer<GroupState>,
 	info: Info,
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: passthrough
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fields: Option<Arc<super::object::Fields>>,
 	/// The inflated size of a compressed frame read in its stored form (see
 	/// [`group::Consumer::compressed`]), whose payload is then the DEFLATE slice.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: passthrough
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) inflated: Option<u64>,
 	source: Source,
 	// Byte offset consumed so far.

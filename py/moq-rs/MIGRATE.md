@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Video rendition preference
+
+`moq.media.Video` gains `preference`, defaulting to `0`. Prefer keyword construction and upgrade `moq-ffi` alongside the wrapper. Higher values are preferred; compatibility transcodes use `-1`.
+
+### `announce` takes an `AnnounceRoute`
+
+`BroadcastProducer.announce` takes `moq.AnnounceRoute(cost=..., epoch=...)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
+`Route` is only what announcements report. To re-announce an observed route, copy its `cost` and `epoch`.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve()` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel the task or wrap it in `asyncio.wait_for`.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `SnapshotProducer(delta_ratio=...)` is replaced by `deltas: bool = True`.
@@ -31,8 +45,14 @@ Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.
 ### Catalog references carry their epoch
 
 `Video` and `Audio` renditions gain `epoch`, the publisher instance their `broadcast` reference names.
-`BroadcastConsumer.resolve(reference)` becomes `resolve(reference, epoch)`; pass the rendition's `epoch` alongside its `broadcast`, or `None` to resolve whichever instance answers.
+`BroadcastConsumer.resolve(reference)` becomes `resolve(id, rendition)`, taking the catalog rendition the reference belongs to and reading its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, raise for a rendition whose broadcast is proven to serve another epoch.
+
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Writing a frame, or any other call that takes a timestamp, fails with `TimeOverflow` past `2^61 - 1` microseconds instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
@@ -70,7 +90,7 @@ A subscription now reads only the groups its own `ranges` cover.
 `TrackDemand.is_used()`, `used()`, and `unused()` are gone.
 `wanted()` returns `None` while nobody subscribes, otherwise the group subscribers want next, and `await wanted_changed()` waits for it to change (the first call returns at once).
 Loop on `wanted_changed()` until it returns non-`None` where you awaited `used()`, and `None` where you awaited `unused()`.
-`TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
+`TrackInfo` gains `refresh`.
 
 ### `CongestionControl` gained `NONE` (#5926)
 
@@ -90,11 +110,11 @@ To start at group `n`, pass one range starting at the absolute anchor for group 
 ### Receive estimates come from `Session.recv_bandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `Session.recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop.
+Hold the consumer `Session.recv_bandwidth` returns to request PROBE, read it with `rate()` or wait with `rate_changed()`, and drop it to stop.
 
 ```python
 bandwidth = session.recv_bandwidth()
-rate = bandwidth.peek() if bandwidth else None
+rate = bandwidth.rate() if bandwidth else None
 ```
 
 ### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)

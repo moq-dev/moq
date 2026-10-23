@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A compressed group is held to the group budget
+
+A compressed group may inflate to at most `Group.MAX_GROUP_CACHE_BYTES` (32 MiB), the most a plain group carries.
+The encoders charge each frame its plaintext: a compressed snapshot over 32 MiB throws `FrameTooLarge` (it used to pass up to 64 MiB), a window header over it throws, and deltas and ops roll a new group once a group's plaintext would pass the budget.
+A compressed stream's budget is 32 MiB of record plaintext.
+
 ### Groups roll on joiner demand
 
 `Snapshot` `deltaRatio` and `Window` `opRatio` are replaced by `deltas` and `ops` booleans (both default `true`).

@@ -9,6 +9,8 @@ build. Nothing in the repository calls the hand-written ABI any more.
 ## Plan
 
 - Port the interop client first; it is the smallest real consumer and proves
-  the callback and dispatcher shape end to end.
+  the callback and dispatcher shape end to end. It skips a disabled audio
+  rendition through the generated record's `enabled`, as js-native does; the
+  hand-written ABI has only `moq_consume_video_enabled` (decided 2026-10-23).
 - Rewrite `doc/lib/c` around the generated API, including a sample that runs
   callbacks on the host's own loop through `moq_set_dispatcher`.

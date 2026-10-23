@@ -253,7 +253,7 @@ int main(void) {
     info.timescale.value = 1000000;
     moq_track_producer *track = NULL;
     ok(moq_broadcast_producer_publish_track(broadcast, "data", &info, &track), "publish_track");
-    moq_route route = moq_route_default();
+    moq_announce_route route = moq_announce_route_default();
     ok(moq_broadcast_producer_announce(broadcast, &route), "announce");
 
     const char *generate[] = {"localhost"};

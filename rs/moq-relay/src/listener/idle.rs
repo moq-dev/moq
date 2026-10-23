@@ -229,7 +229,10 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Io<I> {
 	unused_imports,
 	reason = "The benchmark includes this private module without a test harness"
 )]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[allow(
+	clippy::disallowed_methods,
+	reason = "tests read the host clock directly; an allow because the benchmark compiles them out"
+)]
 mod tests {
 	use super::*;
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
