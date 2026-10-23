@@ -111,7 +111,6 @@ child records whether its behavior is new on main or inherited from release.
 - [Release HLS server state](/quest/m1/release-audit/hls-shutdown.md) - final server drop retires its watchers while publishers remain live
 - [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets
 - [Preserve IETF timestamps](/quest/m1/release-audit/ietf-timestamps.md) - JS encoding uses exact same-scale conversion and rejects unsupported values before sending
-- [Settle Go reservation release](/quest/m1/release-audit/go-reservation.md) - investigate prompt allocation release through the public wrapper
 - [Settle finite HLS import](/quest/m1/release-audit/hls-finite.md) - initially ended playlists have an explicit and tested start position
 - [Settle HLS timestamp resets](/quest/m1/release-audit/hls-discontinuity.md) - unchanged-map discontinuities preserve timeline identity or are explicitly refused
 
