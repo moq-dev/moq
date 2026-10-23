@@ -9,6 +9,16 @@ How to update your code for each breaking change, newest first.
 `MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
 `MoqRoute` is only what announcements report, and the `InvalidRoute` error is gone.
 
+### Native futures support operation cancellation
+
+Generated async calls return `UniffiRustFuture<T>`, which implements `Future<T>` and adds `Future<void> cancel()`.
+Existing `await` and `Future<T>` assignments work unchanged; custom implementations of generated interfaces must return the new type.
+Direct callers of `uniffiRustCallAsync` must pass the native cancel function before the free function.
+Keep the original call to cancel it: futures returned by `then`, `timeout`, and other `Future` combinators do not propagate cancellation.
+`cancel()` is idempotent and waits for native cleanup without closing the object that started the call.
+The original future throws `UniffiCancelledException` if cancellation wins; a result already ready can still win the race.
+Regenerate with the patched generator from `nix develop` and `just dart generate`; native symbols and UniFFI checksums are unchanged.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.

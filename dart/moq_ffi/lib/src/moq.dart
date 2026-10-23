@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -7537,7 +7539,7 @@ class FfiConverterMoqAudioCodec {
 abstract class MoqAudioConsumerInterface {
   void cancel();
   int delayUs();
-  Future<MoqAudioFrame?> next();
+  UniffiRustFuture<MoqAudioFrame?> next();
 }
 
 final _MoqAudioConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -7550,7 +7552,7 @@ class MoqAudioConsumer implements MoqAudioConsumerInterface {
   MoqAudioConsumer._(this._ptr) {
     _MoqAudioConsumerFinalizer.attach(this, _ptr, detach: this);
   }
-  static Future<MoqAudioConsumer> subscribe({
+  static UniffiRustFuture<MoqAudioConsumer> subscribe({
     required MoqBroadcastConsumer broadcast,
     required String id,
     required MoqAudio catalogAudio,
@@ -7565,6 +7567,7 @@ class MoqAudioConsumer implements MoqAudioConsumerInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (int handle) => MoqAudioConsumer._(Pointer<Void>.fromAddress(handle)),
       moqExceptionErrorHandler,
@@ -7612,12 +7615,13 @@ class MoqAudioConsumer implements MoqAudioConsumerInterface {
     );
   }
 
-  Future<MoqAudioFrame?> next() {
+  UniffiRustFuture<MoqAudioFrame?> next() {
     return uniffiRustCallAsync(
       () =>
           uniffi_moq_ffi_fn_method_moqaudioconsumer_next(uniffiClonePointer()),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqAudioFrame.lift,
       moqExceptionErrorHandler,
@@ -7917,9 +7921,9 @@ class FfiConverterMoqAudioProducer {
 }
 
 abstract class MoqAuthInterface {
-  Future<MoqAuthToken> add({required String token});
+  UniffiRustFuture<MoqAuthToken> add({required String token});
   MoqGrant? grant();
-  Future<MoqGrant?> grantChanged();
+  UniffiRustFuture<MoqGrant?> grantChanged();
 }
 
 final _MoqAuthFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -7951,7 +7955,7 @@ class MoqAuth implements MoqAuthInterface {
     rustCall((status) => uniffi_moq_ffi_fn_free_moqauth(_ptr, status));
   }
 
-  Future<MoqAuthToken> add({required String token}) {
+  UniffiRustFuture<MoqAuthToken> add({required String token}) {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqauth_add(
         uniffiClonePointer(),
@@ -7959,6 +7963,7 @@ class MoqAuth implements MoqAuthInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) => FfiConverterMoqAuthToken.lift(Pointer<Void>.fromAddress(ptr)),
       moqExceptionErrorHandler,
@@ -7974,12 +7979,13 @@ class MoqAuth implements MoqAuthInterface {
     );
   }
 
-  Future<MoqGrant?> grantChanged() {
+  UniffiRustFuture<MoqGrant?> grantChanged() {
     return uniffiRustCallAsync(
       () =>
           uniffi_moq_ffi_fn_method_moqauth_grant_changed(uniffiClonePointer()),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqGrant.lift,
       moqExceptionErrorHandler,
@@ -8015,7 +8021,7 @@ class FfiConverterMoqAuth {
 
 abstract class MoqAuthTokenInterface {
   void cancel();
-  Future<void> closed();
+  UniffiRustFuture<void> closed();
   MoqGrant? grant();
 }
 
@@ -8059,11 +8065,12 @@ class MoqAuthToken implements MoqAuthTokenInterface {
     }, null);
   }
 
-  Future<void> closed() {
+  UniffiRustFuture<void> closed() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqauthtoken_closed(uniffiClonePointer()),
       ffi_moq_ffi_rust_future_poll_void,
       ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_cancel_void,
       ffi_moq_ffi_rust_future_free_void,
       (_) {},
       moqExceptionErrorHandler,
@@ -8189,7 +8196,7 @@ class FfiConverterMoqBandwidth {
 abstract class MoqBandwidthConsumerInterface {
   void cancel();
   int? rate();
-  Future<int?> rateChanged();
+  UniffiRustFuture<int?> rateChanged();
 }
 
 final _MoqBandwidthConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -8247,13 +8254,14 @@ class MoqBandwidthConsumer implements MoqBandwidthConsumerInterface {
     );
   }
 
-  Future<int?> rateChanged() {
+  UniffiRustFuture<int?> rateChanged() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqbandwidthconsumer_rate_changed(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalUInt64.lift,
       moqExceptionErrorHandler,
@@ -8372,13 +8380,15 @@ class FfiConverterMoqReservation {
 }
 
 abstract class MoqBroadcastConsumerInterface {
-  Future<MoqGroupConsumer> fetchGroup({
+  UniffiRustFuture<MoqGroupConsumer> fetchGroup({
     required String name,
     required int sequence,
     required MoqFetchGroupOptions? options,
   });
-  Future<MoqBroadcastConsumer> resolve({required MoqRendition rendition});
-  Future<MoqTrackConsumer> subscribeTrack({
+  UniffiRustFuture<MoqBroadcastConsumer> resolve({
+    required MoqRendition rendition,
+  });
+  UniffiRustFuture<MoqTrackConsumer> subscribeTrack({
     required String name,
     required MoqSubscription? subscription,
   });
@@ -8419,7 +8429,7 @@ class MoqBroadcastConsumer implements MoqBroadcastConsumerInterface {
     );
   }
 
-  Future<MoqGroupConsumer> fetchGroup({
+  UniffiRustFuture<MoqGroupConsumer> fetchGroup({
     required String name,
     required int sequence,
     required MoqFetchGroupOptions? options,
@@ -8433,6 +8443,7 @@ class MoqBroadcastConsumer implements MoqBroadcastConsumerInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) =>
           FfiConverterMoqGroupConsumer.lift(Pointer<Void>.fromAddress(ptr)),
@@ -8440,7 +8451,9 @@ class MoqBroadcastConsumer implements MoqBroadcastConsumerInterface {
     );
   }
 
-  Future<MoqBroadcastConsumer> resolve({required MoqRendition rendition}) {
+  UniffiRustFuture<MoqBroadcastConsumer> resolve({
+    required MoqRendition rendition,
+  }) {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqbroadcastconsumer_resolve(
         uniffiClonePointer(),
@@ -8448,6 +8461,7 @@ class MoqBroadcastConsumer implements MoqBroadcastConsumerInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) =>
           FfiConverterMoqBroadcastConsumer.lift(Pointer<Void>.fromAddress(ptr)),
@@ -8455,7 +8469,7 @@ class MoqBroadcastConsumer implements MoqBroadcastConsumerInterface {
     );
   }
 
-  Future<MoqTrackConsumer> subscribeTrack({
+  UniffiRustFuture<MoqTrackConsumer> subscribeTrack({
     required String name,
     required MoqSubscription? subscription,
   }) {
@@ -8467,6 +8481,7 @@ class MoqBroadcastConsumer implements MoqBroadcastConsumerInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) =>
           FfiConverterMoqTrackConsumer.lift(Pointer<Void>.fromAddress(ptr)),
@@ -8503,7 +8518,7 @@ class FfiConverterMoqBroadcastConsumer {
 
 abstract class MoqGroupConsumerInterface {
   void cancel();
-  Future<MoqFrame?> readFrame();
+  UniffiRustFuture<MoqFrame?> readFrame();
   int sequence();
 }
 
@@ -8547,13 +8562,14 @@ class MoqGroupConsumer implements MoqGroupConsumerInterface {
     }, null);
   }
 
-  Future<MoqFrame?> readFrame() {
+  UniffiRustFuture<MoqFrame?> readFrame() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqgroupconsumer_read_frame(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqFrame.lift,
       moqExceptionErrorHandler,
@@ -8601,10 +8617,10 @@ class FfiConverterMoqGroupConsumer {
 abstract class MoqTrackConsumerInterface {
   void cancel();
   MoqTrackInfo info();
-  Future<MoqGroupConsumer?> nextGroup();
-  Future<MoqFrame?> readFrame();
-  Future<MoqDatagram?> recvDatagram();
-  Future<MoqGroupConsumer?> recvGroup();
+  UniffiRustFuture<MoqGroupConsumer?> nextGroup();
+  UniffiRustFuture<MoqFrame?> readFrame();
+  UniffiRustFuture<MoqDatagram?> recvDatagram();
+  UniffiRustFuture<MoqGroupConsumer?> recvGroup();
   void update({required MoqSubscription subscription});
 }
 
@@ -8659,52 +8675,56 @@ class MoqTrackConsumer implements MoqTrackConsumerInterface {
     );
   }
 
-  Future<MoqGroupConsumer?> nextGroup() {
+  UniffiRustFuture<MoqGroupConsumer?> nextGroup() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqtrackconsumer_next_group(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqGroupConsumer.lift,
       moqExceptionErrorHandler,
     );
   }
 
-  Future<MoqFrame?> readFrame() {
+  UniffiRustFuture<MoqFrame?> readFrame() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqtrackconsumer_read_frame(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqFrame.lift,
       moqExceptionErrorHandler,
     );
   }
 
-  Future<MoqDatagram?> recvDatagram() {
+  UniffiRustFuture<MoqDatagram?> recvDatagram() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqtrackconsumer_recv_datagram(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqDatagram.lift,
       moqExceptionErrorHandler,
     );
   }
 
-  Future<MoqGroupConsumer?> recvGroup() {
+  UniffiRustFuture<MoqGroupConsumer?> recvGroup() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqtrackconsumer_recv_group(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqGroupConsumer.lift,
       moqExceptionErrorHandler,
@@ -8751,7 +8771,7 @@ class FfiConverterMoqTrackConsumer {
 abstract class MoqTrackDemandInterface {
   String name();
   int? wanted();
-  Future<int?> wantedChanged();
+  UniffiRustFuture<int?> wantedChanged();
 }
 
 final _MoqTrackDemandFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -8807,13 +8827,14 @@ class MoqTrackDemand implements MoqTrackDemandInterface {
     );
   }
 
-  Future<int?> wantedChanged() {
+  UniffiRustFuture<int?> wantedChanged() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqtrackdemand_wanted_changed(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalUInt64.lift,
       moqExceptionErrorHandler,
@@ -9054,8 +9075,8 @@ class FfiConverterMoqFlateStreamProducer {
 
 abstract class MoqJsonSnapshotConsumerInterface {
   void cancel();
-  Future<MoqJsonValue?> latest();
-  Future<MoqJsonValue?> next();
+  UniffiRustFuture<MoqJsonValue?> latest();
+  UniffiRustFuture<MoqJsonValue?> next();
 }
 
 final _MoqJsonSnapshotConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -9115,26 +9136,28 @@ class MoqJsonSnapshotConsumer implements MoqJsonSnapshotConsumerInterface {
     }, null);
   }
 
-  Future<MoqJsonValue?> latest() {
+  UniffiRustFuture<MoqJsonValue?> latest() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqjsonsnapshotconsumer_latest(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqJsonValue.lift,
       moqExceptionErrorHandler,
     );
   }
 
-  Future<MoqJsonValue?> next() {
+  UniffiRustFuture<MoqJsonValue?> next() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqjsonsnapshotconsumer_next(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqJsonValue.lift,
       moqExceptionErrorHandler,
@@ -9284,7 +9307,7 @@ class FfiConverterMoqJsonSnapshotProducer {
 
 abstract class MoqJsonStreamConsumerInterface {
   void cancel();
-  Future<MoqJsonValue?> next();
+  UniffiRustFuture<MoqJsonValue?> next();
 }
 
 final _MoqJsonStreamConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -9344,13 +9367,14 @@ class MoqJsonStreamConsumer implements MoqJsonStreamConsumerInterface {
     }, null);
   }
 
-  Future<MoqJsonValue?> next() {
+  UniffiRustFuture<MoqJsonValue?> next() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqjsonstreamconsumer_next(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqJsonValue.lift,
       moqExceptionErrorHandler,
@@ -9500,7 +9524,7 @@ class FfiConverterMoqJsonStreamProducer {
 
 abstract class MoqMediaCatalogConsumerInterface {
   void cancel();
-  Future<MoqCatalog?> next();
+  UniffiRustFuture<MoqCatalog?> next();
 }
 
 final _MoqMediaCatalogConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -9515,7 +9539,7 @@ class MoqMediaCatalogConsumer implements MoqMediaCatalogConsumerInterface {
   MoqMediaCatalogConsumer._(this._ptr) {
     _MoqMediaCatalogConsumerFinalizer.attach(this, _ptr, detach: this);
   }
-  static Future<MoqMediaCatalogConsumer> subscribe({
+  static UniffiRustFuture<MoqMediaCatalogConsumer> subscribe({
     required MoqBroadcastConsumer broadcast,
   }) {
     return uniffiRustCallAsync(
@@ -9524,6 +9548,7 @@ class MoqMediaCatalogConsumer implements MoqMediaCatalogConsumerInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (int handle) =>
           MoqMediaCatalogConsumer._(Pointer<Void>.fromAddress(handle)),
@@ -9563,13 +9588,14 @@ class MoqMediaCatalogConsumer implements MoqMediaCatalogConsumerInterface {
     }, null);
   }
 
-  Future<MoqCatalog?> next() {
+  UniffiRustFuture<MoqCatalog?> next() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqmediacatalogconsumer_next(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqCatalog.lift,
       moqExceptionErrorHandler,
@@ -9849,7 +9875,7 @@ class FfiConverterMoqMediaContainerProducer {
 
 abstract class MoqMediaGroupConsumerInterface {
   void cancel();
-  Future<MoqMediaFrame?> next();
+  UniffiRustFuture<MoqMediaFrame?> next();
   int sequence();
 }
 
@@ -9878,7 +9904,7 @@ class MoqMediaGroupConsumer implements MoqMediaGroupConsumerInterface {
        ) {
     _MoqMediaGroupConsumerFinalizer.attach(this, _ptr, detach: this);
   }
-  static Future<MoqMediaGroupConsumer> fetch({
+  static UniffiRustFuture<MoqMediaGroupConsumer> fetch({
     required MoqBroadcastConsumer broadcast,
     required MoqMediaGroupConfig config,
   }) {
@@ -9889,6 +9915,7 @@ class MoqMediaGroupConsumer implements MoqMediaGroupConsumerInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (int handle) =>
           MoqMediaGroupConsumer._(Pointer<Void>.fromAddress(handle)),
@@ -9928,13 +9955,14 @@ class MoqMediaGroupConsumer implements MoqMediaGroupConsumerInterface {
     }, null);
   }
 
-  Future<MoqMediaFrame?> next() {
+  UniffiRustFuture<MoqMediaFrame?> next() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqmediagroupconsumer_next(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqMediaFrame.lift,
       moqExceptionErrorHandler,
@@ -10051,7 +10079,7 @@ class FfiConverterMoqMediaTimebase {
 
 abstract class MoqMediaTrackConsumerInterface {
   void cancel();
-  Future<MoqMediaFrame?> next();
+  UniffiRustFuture<MoqMediaFrame?> next();
 }
 
 final _MoqMediaTrackConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -10066,7 +10094,7 @@ class MoqMediaTrackConsumer implements MoqMediaTrackConsumerInterface {
   MoqMediaTrackConsumer._(this._ptr) {
     _MoqMediaTrackConsumerFinalizer.attach(this, _ptr, detach: this);
   }
-  static Future<MoqMediaTrackConsumer> subscribe({
+  static UniffiRustFuture<MoqMediaTrackConsumer> subscribe({
     required MoqBroadcastConsumer broadcast,
     required MoqMediaTrackConfig config,
   }) {
@@ -10077,6 +10105,7 @@ class MoqMediaTrackConsumer implements MoqMediaTrackConsumerInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (int handle) =>
           MoqMediaTrackConsumer._(Pointer<Void>.fromAddress(handle)),
@@ -10116,13 +10145,14 @@ class MoqMediaTrackConsumer implements MoqMediaTrackConsumerInterface {
     }, null);
   }
 
-  Future<MoqMediaFrame?> next() {
+  UniffiRustFuture<MoqMediaFrame?> next() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqmediatrackconsumer_next(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqMediaFrame.lift,
       moqExceptionErrorHandler,
@@ -10445,7 +10475,7 @@ class FfiConverterMoqMediaTrackStreamProducer {
 
 abstract class MoqAnnounceConsumerInterface {
   void cancel();
-  Future<MoqAnnounceEvent?> next();
+  UniffiRustFuture<MoqAnnounceEvent?> next();
 }
 
 final _MoqAnnounceConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -10490,13 +10520,14 @@ class MoqAnnounceConsumer implements MoqAnnounceConsumerInterface {
     }, null);
   }
 
-  Future<MoqAnnounceEvent?> next() {
+  UniffiRustFuture<MoqAnnounceEvent?> next() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqannounceconsumer_next(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqAnnounceEvent.lift,
       moqExceptionErrorHandler,
@@ -10531,7 +10562,7 @@ class FfiConverterMoqAnnounceConsumer {
 }
 
 abstract class MoqAnnouncedBroadcastInterface {
-  Future<MoqBroadcastConsumer> available();
+  UniffiRustFuture<MoqBroadcastConsumer> available();
   void cancel();
 }
 
@@ -10570,13 +10601,14 @@ class MoqAnnouncedBroadcast implements MoqAnnouncedBroadcastInterface {
     );
   }
 
-  Future<MoqBroadcastConsumer> available() {
+  UniffiRustFuture<MoqBroadcastConsumer> available() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqannouncedbroadcast_available(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) =>
           FfiConverterMoqBroadcastConsumer.lift(Pointer<Void>.fromAddress(ptr)),
@@ -10811,7 +10843,9 @@ class FfiConverterMoqBroadcastRequest {
 abstract class MoqOriginConsumerInterface {
   MoqAnnounceConsumer announced({required MoqAnnounceConfig config});
   MoqAnnouncedBroadcast announcedBroadcast({required String path});
-  Future<MoqBroadcastConsumer> requestBroadcast({required String path});
+  UniffiRustFuture<MoqBroadcastConsumer> requestBroadcast({
+    required String path,
+  });
 }
 
 final _MoqOriginConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -10872,7 +10906,9 @@ class MoqOriginConsumer implements MoqOriginConsumerInterface {
     );
   }
 
-  Future<MoqBroadcastConsumer> requestBroadcast({required String path}) {
+  UniffiRustFuture<MoqBroadcastConsumer> requestBroadcast({
+    required String path,
+  }) {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqoriginconsumer_request_broadcast(
         uniffiClonePointer(),
@@ -10880,6 +10916,7 @@ class MoqOriginConsumer implements MoqOriginConsumerInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) =>
           FfiConverterMoqBroadcastConsumer.lift(Pointer<Void>.fromAddress(ptr)),
@@ -10916,7 +10953,7 @@ class FfiConverterMoqOriginConsumer {
 
 abstract class MoqOriginDynamicInterface {
   void cancel();
-  Future<MoqBroadcastRequest> requestedBroadcast();
+  UniffiRustFuture<MoqBroadcastRequest> requestedBroadcast();
 }
 
 final _MoqOriginDynamicFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -10959,13 +10996,14 @@ class MoqOriginDynamic implements MoqOriginDynamicInterface {
     }, null);
   }
 
-  Future<MoqBroadcastRequest> requestedBroadcast() {
+  UniffiRustFuture<MoqBroadcastRequest> requestedBroadcast() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqorigindynamic_requested_broadcast(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) =>
           FfiConverterMoqBroadcastRequest.lift(Pointer<Void>.fromAddress(ptr)),
@@ -11113,7 +11151,7 @@ class FfiConverterMoqOriginProducer {
 
 abstract class MoqBroadcastDynamicInterface {
   void cancel();
-  Future<MoqTrackRequest> requestedTrack();
+  UniffiRustFuture<MoqTrackRequest> requestedTrack();
 }
 
 final _MoqBroadcastDynamicFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -11158,13 +11196,14 @@ class MoqBroadcastDynamic implements MoqBroadcastDynamicInterface {
     }, null);
   }
 
-  Future<MoqTrackRequest> requestedTrack() {
+  UniffiRustFuture<MoqTrackRequest> requestedTrack() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqbroadcastdynamic_requested_track(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) => FfiConverterMoqTrackRequest.lift(Pointer<Void>.fromAddress(ptr)),
       moqExceptionErrorHandler,
@@ -11201,7 +11240,7 @@ class FfiConverterMoqBroadcastDynamic {
 abstract class MoqBroadcastFinishInterface {
   void close();
   int lingerUs();
-  Future<void> wait();
+  UniffiRustFuture<void> wait();
 }
 
 final _MoqBroadcastFinishFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -11257,13 +11296,14 @@ class MoqBroadcastFinish implements MoqBroadcastFinishInterface {
     );
   }
 
-  Future<void> wait() {
+  UniffiRustFuture<void> wait() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqbroadcastfinish_wait(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_void,
       ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_cancel_void,
       ffi_moq_ffi_rust_future_free_void,
       (_) {},
       moqExceptionErrorHandler,
@@ -11684,7 +11724,7 @@ class FfiConverterMoqGroupRequest {
 
 abstract class MoqTrackDynamicInterface {
   void cancel();
-  Future<MoqGroupRequest> requestedGroup();
+  UniffiRustFuture<MoqGroupRequest> requestedGroup();
 }
 
 final _MoqTrackDynamicFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -11727,13 +11767,14 @@ class MoqTrackDynamic implements MoqTrackDynamicInterface {
     }, null);
   }
 
-  Future<MoqGroupRequest> requestedGroup() {
+  UniffiRustFuture<MoqGroupRequest> requestedGroup() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqtrackdynamic_requested_group(
         uniffiClonePointer(),
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) => FfiConverterMoqGroupRequest.lift(Pointer<Void>.fromAddress(ptr)),
       moqExceptionErrorHandler,
@@ -12068,14 +12109,14 @@ class FfiConverterMoqTrackRequest {
 }
 
 abstract class MoqRequestInterface {
-  Future<MoqSession> accept({
+  UniffiRustFuture<MoqSession> accept({
     MoqOriginProducer? publish = null,
     MoqOriginProducer? consume = null,
   });
   void cancel();
   String path();
   String? query();
-  Future<void> reject({required int code});
+  UniffiRustFuture<void> reject({required int code});
   MoqTransport transport();
   String? url();
 }
@@ -12111,7 +12152,7 @@ class MoqRequest implements MoqRequestInterface {
     rustCall((status) => uniffi_moq_ffi_fn_free_moqrequest(_ptr, status));
   }
 
-  Future<MoqSession> accept({
+  UniffiRustFuture<MoqSession> accept({
     MoqOriginProducer? publish = null,
     MoqOriginProducer? consume = null,
   }) {
@@ -12123,6 +12164,7 @@ class MoqRequest implements MoqRequestInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) => FfiConverterMoqSession.lift(Pointer<Void>.fromAddress(ptr)),
       moqExceptionErrorHandler,
@@ -12157,7 +12199,7 @@ class MoqRequest implements MoqRequestInterface {
     );
   }
 
-  Future<void> reject({required int code}) {
+  UniffiRustFuture<void> reject({required int code}) {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqrequest_reject(
         uniffiClonePointer(),
@@ -12165,6 +12207,7 @@ class MoqRequest implements MoqRequestInterface {
       ),
       ffi_moq_ffi_rust_future_poll_void,
       ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_cancel_void,
       ffi_moq_ffi_rust_future_free_void,
       (_) {},
       moqExceptionErrorHandler,
@@ -12219,10 +12262,10 @@ class FfiConverterMoqRequest {
 }
 
 abstract class MoqServerInterface {
-  Future<MoqRequest?> accept();
+  UniffiRustFuture<MoqRequest?> accept();
   void cancel();
   List<String> certFingerprints();
-  Future<String> listen();
+  UniffiRustFuture<String> listen();
 }
 
 final _MoqServerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -12266,11 +12309,12 @@ class MoqServer implements MoqServerInterface {
     rustCall((status) => uniffi_moq_ffi_fn_free_moqserver(_ptr, status));
   }
 
-  Future<MoqRequest?> accept() {
+  UniffiRustFuture<MoqRequest?> accept() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqserver_accept(uniffiClonePointer()),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqRequest.lift,
       moqExceptionErrorHandler,
@@ -12294,11 +12338,12 @@ class MoqServer implements MoqServerInterface {
     );
   }
 
-  Future<String> listen() {
+  UniffiRustFuture<String> listen() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqserver_listen(uniffiClonePointer()),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterString.lift,
       moqExceptionErrorHandler,
@@ -12334,7 +12379,7 @@ class FfiConverterMoqServer {
 
 abstract class MoqClientInterface {
   void cancel();
-  Future<MoqSession> connect({required String url});
+  UniffiRustFuture<MoqSession> connect({required String url});
   MoqException? failure();
 }
 
@@ -12385,7 +12430,7 @@ class MoqClient implements MoqClientInterface {
     }, null);
   }
 
-  Future<MoqSession> connect({required String url}) {
+  UniffiRustFuture<MoqSession> connect({required String url}) {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqclient_connect(
         uniffiClonePointer(),
@@ -12393,6 +12438,7 @@ class MoqClient implements MoqClientInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) => FfiConverterMoqSession.lift(Pointer<Void>.fromAddress(ptr)),
       moqExceptionErrorHandler,
@@ -12441,15 +12487,15 @@ abstract class MoqSessionInterface {
   MoqAuth auth();
   MoqBandwidth bandwidth();
   void cancel({required int code});
-  Future<void> closed();
+  UniffiRustFuture<void> closed();
   int connects();
   MoqOriginConsumer consume();
   MoqException? failure();
   MoqOriginProducer publish();
   MoqBandwidthConsumer? recvBandwidth();
-  Future<void> shutdown();
+  UniffiRustFuture<void> shutdown();
   MoqConnectionStats stats();
-  Future<MoqConnectionStatus> status();
+  UniffiRustFuture<MoqConnectionStatus> status();
 }
 
 final _MoqSessionFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -12515,11 +12561,12 @@ class MoqSession implements MoqSessionInterface {
     }, null);
   }
 
-  Future<void> closed() {
+  UniffiRustFuture<void> closed() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqsession_closed(uniffiClonePointer()),
       ffi_moq_ffi_rust_future_poll_void,
       ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_cancel_void,
       ffi_moq_ffi_rust_future_free_void,
       (_) {},
       moqExceptionErrorHandler,
@@ -12581,11 +12628,12 @@ class MoqSession implements MoqSessionInterface {
     );
   }
 
-  Future<void> shutdown() {
+  UniffiRustFuture<void> shutdown() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqsession_shutdown(uniffiClonePointer()),
       ffi_moq_ffi_rust_future_poll_void,
       ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_cancel_void,
       ffi_moq_ffi_rust_future_free_void,
       (_) {},
       moqExceptionErrorHandler,
@@ -12603,11 +12651,12 @@ class MoqSession implements MoqSessionInterface {
     );
   }
 
-  Future<MoqConnectionStatus> status() {
+  UniffiRustFuture<MoqConnectionStatus> status() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqsession_status(uniffiClonePointer()),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterMoqConnectionStatus.lift,
       moqExceptionErrorHandler,
@@ -12643,7 +12692,7 @@ class FfiConverterMoqSession {
 
 abstract class MoqVideoConsumerInterface {
   void cancel();
-  Future<MoqVideoDecodedFrame?> next();
+  UniffiRustFuture<MoqVideoDecodedFrame?> next();
 }
 
 final _MoqVideoConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -12656,7 +12705,7 @@ class MoqVideoConsumer implements MoqVideoConsumerInterface {
   MoqVideoConsumer._(this._ptr) {
     _MoqVideoConsumerFinalizer.attach(this, _ptr, detach: this);
   }
-  static Future<MoqVideoConsumer> subscribe({
+  static UniffiRustFuture<MoqVideoConsumer> subscribe({
     required MoqBroadcastConsumer broadcast,
     required String id,
     required MoqVideo catalogVideo,
@@ -12671,6 +12720,7 @@ class MoqVideoConsumer implements MoqVideoConsumerInterface {
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
+      ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
       (int handle) => MoqVideoConsumer._(Pointer<Void>.fromAddress(handle)),
       moqExceptionErrorHandler,
@@ -12707,12 +12757,13 @@ class MoqVideoConsumer implements MoqVideoConsumerInterface {
     }, null);
   }
 
-  Future<MoqVideoDecodedFrame?> next() {
+  UniffiRustFuture<MoqVideoDecodedFrame?> next() {
     return uniffiRustCallAsync(
       () =>
           uniffi_moq_ffi_fn_method_moqvideoconsumer_next(uniffiClonePointer()),
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
       FfiConverterOptionalMoqVideoDecodedFrame.lift,
       moqExceptionErrorHandler,

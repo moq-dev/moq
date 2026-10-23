@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- [**breaking**] Publish and subscribe roles in claims, grants, and permissions now carry `Access { path, rate }`. Optional positive bitrate caps survive signing, authorization, and grant serialization; key scopes refuse them. Gateway embedders must enforce caps or refuse capped grants before admitting media.
+- [**breaking**] Auth roles hold path patterns directly, matching release. Removed the unenforced `Access`/`Rate` API and the unvalidated public `Key::decode`; object roles, including bitrate caps, are refused during parsing.
 
 - Auth requests distinguish `webtransport` from native `quic`. Upgrade auth servers before relays: older servers reject the new value. Rust and JavaScript auth parsers now map future transport names to `unknown`.
 - `moq auth serve` refuses a query carrying more than one `jwt`, even an empty or escaped one, with `serve::Refusal::DuplicateJwt` instead of believing the last. The value is percent-decoded once.
