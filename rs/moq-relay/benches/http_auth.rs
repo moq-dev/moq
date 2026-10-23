@@ -58,7 +58,12 @@ impl Fixture {
 		let mut config = web::Config::default();
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		let cluster = cluster::Cluster::new(Default::default()).unwrap();
-		let web = web::Web::new(auth, cluster, certificates, config).bind().unwrap();
+		// No admission timeout, so held requests stay waiting however long setup and the
+		// measurement take.
+		let web = web::Web::new(auth, cluster, certificates, config)
+			.with_timeout(None)
+			.bind()
+			.unwrap();
 		let addr = web.addrs().http.unwrap();
 		let routes = web.routes();
 		let server = tokio::spawn(async move {
