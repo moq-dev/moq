@@ -65,3 +65,6 @@ procfs = "0.18"
 test-env = { path = "../test-env" }
 # test-util enables tokio::time::pause/advance for the deterministic produce tests.
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

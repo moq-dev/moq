@@ -21,8 +21,10 @@ use super::{Error, Fragmenter, fragment, synthesize_audio_trak, synthesize_video
 const TRACK_ID: u32 = 1;
 
 /// Whether the muxer serves a video or an audio rendition, with its catalog config.
-// One per muxer, so the variant sizes never add up to an allocation's worth.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per muxer, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
+)]
 enum Kind {
 	Video(VideoConfig),
 	Audio(AudioConfig),

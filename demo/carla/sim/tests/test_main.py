@@ -84,7 +84,7 @@ def supervise_with(closed, clock_failed=never_fails) -> tuple[BaseException | No
         truck = asyncio.create_task(asyncio.Event().wait(), name="truck:truck1")
         try:
             await asyncio.wait_for(main_module.supervise(client, [truck], clock, watchdog), timeout=1.0)
-        except BaseException as err:  # noqa: BLE001 - the test asserts on it
+        except BaseException as err:  # the test asserts on it
             return err, truck
         return None, truck
 

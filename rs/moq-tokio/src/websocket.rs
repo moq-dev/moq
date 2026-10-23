@@ -694,7 +694,10 @@ impl Listener {
 		let accepted = Arc::new(Mutex::new(None::<(String, Url)>));
 		let accepted_callback = accepted.clone();
 		let protocols = self.protocols.clone();
-		#[allow(clippy::result_large_err)]
+		#[expect(
+			clippy::result_large_err,
+			reason = "the error type is tungstenite's handshake response, not ours"
+		)]
 		let callback = move |request: &tungstenite::handshake::server::Request,
 		               mut response: tungstenite::handshake::server::Response|
 		      -> std::result::Result<_, tungstenite::handshake::server::ErrorResponse> {
@@ -916,7 +919,10 @@ mod tests {
 			let server_name = tls.get_ref().1.server_name().map(str::to_string);
 			let host = Arc::new(Mutex::new(None));
 			let request_host = host.clone();
-			#[allow(clippy::result_large_err)]
+			#[expect(
+				clippy::result_large_err,
+				reason = "the error type is tungstenite's handshake response, not ours"
+			)]
 			let callback = move |request: &tungstenite::handshake::server::Request,
 			            mut response: tungstenite::handshake::server::Response| {
 				*request_host.lock().unwrap() = request
