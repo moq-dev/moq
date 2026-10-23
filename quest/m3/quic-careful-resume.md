@@ -18,7 +18,7 @@ RTT with its age, jumps the congestion window toward that estimate once the
 new path's RTT matches the recorded one, and drops back to ordinary slow
 start on the first loss or a mismatched RTT.
 
-- Implement in `moq-quic` as a `Controller` wrapper: any controller can be
+- Implement in `moq-congestion` as a controller wrapper: any controller can be
   resumed. BBR3 seeds its bandwidth model and pacing rate directly; Cubic
   seeds `ssthresh`.
 - The store is a bounded, in-process map keyed by remote address plus SNI,
@@ -35,3 +35,7 @@ loss-based traffic when BBR alone does not fill the queue. Random loss may
 prove fallback correctness, but never grades the jump's performance.
 Ship it on by default
 only when the jump never makes the first second worse than slow start.
+
+## Required
+
+- [Portable controller trait](/quest/m1/congestion/trait.md) - followers land in `moq-congestion` on its trait

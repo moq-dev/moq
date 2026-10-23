@@ -71,6 +71,7 @@ tracks, so per-group stats stop costing cluster announces.
 ## Required
 
 - [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
+- [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
 - [Readers follow restarts](/quest/m1/sink-restart-follow.md) - every moq-cli and moq-gst reader, moqsrc and `moq play` included, follows instances through `announced_broadcast` and an epochless `Restart` where its output can mark it; otherwise it stays on the old instance and fails once that route dies
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
