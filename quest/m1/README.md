@@ -17,7 +17,7 @@ here instead of moving out; the cut is what ships them.
 - Preserve epoch correctness, routing recovery, outbound federation, and
   announcement takeover on both lite and IETF. Catalogs, long-lived readers,
   and late joiners obey the same identity contract.
-- Keep IETF passthrough, the public model audit, the broad clock conversion,
+- Keep IETF passthrough, the API audit, the broad clock conversion,
   archive replay/DVR correctness, and the TS fidelity
   expansion in m1. Keep their correctness, interoperability, memory, and
   performance evidence with them.
@@ -42,10 +42,10 @@ acceptance with the downstream operator.
 
 Keep one owner per shared code area and order prerequisites before consumers
 (re-ranked in the 2026-10-20 audit: auth before cluster routing, the C line
-before the binding breaks, and every lite-07 and public model prerequisite
-before those quests).
-The moq-transport passthrough fields remain crate-private, the existing
-explicit exception to the public model audit.
+before the binding breaks, and every lite-07 prerequisite before those
+quests).
+The moq-transport passthrough fields remain crate-private: no public moq-net
+item exists only for moq-transport (maintainer, 2026-10-23).
 
 Added 2026-10-16: refresh, a breaking `Demand` change, so it lands before
 the cut.
@@ -85,7 +85,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [Video preference in bindings](/quest/m1/ffi-video-preference.md) - every binding's video catalog record carries hang's rendition `preference`
 - [Binding encoder config](/quest/m1/binding-encoder-config.md) - binding encoders take an exact rational framerate, and the publication track name moves to options only the producers take
 - [FFI shutdown requests the drain synchronously](/quest/m1/ffi-shutdown-sync.md) - `shutdown()` becomes a sync drain request awaited with `closed()`, so a dropped future can no longer cancel
-- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
+- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly under the relay conformance profile, except cases that use a subgroup other than 0
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - a warm relay serves a reader with a wider max age the cached groups a cold relay would, with no wire change
@@ -96,7 +96,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
-- [A public model](/quest/m1/public-model/README.md) - every model item a built-in session reaches is public, unnecessary, or marked deliberately private, so a custom publisher, subscriber, or relay builds from the public model alone
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break has its MIGRATE entry
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
@@ -123,7 +122,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
 - [Producers drop the phantom catalog type](/quest/m1/catalog-phantom.md) - moq-video, moq-audio and moq-mux producers lose an `E: CatalogExt` parameter that only `PhantomData` holds
 - [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
-- [Tooling tests gate every merge](/quest/m1/gh-test-gate.md) - every queue Check runs `just gh test`, so a change to the CI selector or release tooling cannot merge without its own tests
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
 - [libav polyfill fork fix](/quest/m1/libav-polyfill-fork.md) - our polyfill fork copies planar audio correctly and `@moq/hang` drops its patch
 - [Interop AAC](/quest/m1/interop-aac.md) - the Rust interop publisher adds an AAC tone and every subscriber checks it beside Opus
@@ -133,7 +131,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Subscribe update camera check](/quest/m1/subscribe-update-churn.md) - a person checks a physical-camera publish for SUBSCRIBE_UPDATE chatter; bbb and the fake camera measured quiet
 - [Unprefixed C++ free functions](/quest/m1/cpp-free-function-prefix.md) - generated free functions drop `moq_`, and `moq.hpp` deletes its five pass-through wrappers before C++ first publishes
 - [Error cleanups](/quest/m1/error-cleanups.md) - delete the unused `Error::SessionClosed`; raw transport failures already map to `Unroutable`
-- [FromStr parsers](/quest/m1/from-str-trait.md) - hang, moq-auth, and moq-msf implement `FromStr` instead of inherent `from_str`
 - [API-diff check](/quest/m1/api-diff.md) - a recipe diffs every published package's API against its last release, run on PRs into release and against main before the cut
 - [API Extractor checks](/quest/m1/api-extractor-checks.md) - API Extractor fails a PR on a forgotten export, an unresolved declaration, or an undocumented export, replacing the hand-rolled `.d.ts` checkers
 - [Generated JS API reference](/quest/m1/js-api-reference.md) - the doc site renders an API reference for every `@moq/*` package from API Extractor's doc model
@@ -152,6 +149,9 @@ tracks, so per-group stats stop costing cluster announces.
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [Interop audit](/quest/m1/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down
 - [Lint override and deprecation audit](/quest/m1/audit-lints.md) - repeat the suppression and deprecation audit, starting with the conditional allows and the lanes clippy never runs
+- [Refuse unknown MOQ_* environment variables](/quest/m1/env-unknown.md) - every binary exits at startup naming a `MOQ_*` variable it does not read
+- [HLS cursors error on every incomplete recording](/quest/m1/hls-teardown.md) - the recorder cursors return `Ok(None)` only for a complete recording
+- [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - `export hls --output <dir>` records playlists and segments to a directory
 
 ## Related
 
