@@ -1061,10 +1061,12 @@ export class Subscriber {
 		void stopped.then(() => stop.abort());
 
 		for (;;) {
+			// With no subscriber left there is nothing to follow: the subscription is ending, or
+			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = producer.subscription.peek();
 			const wanted = toWire(subscription?.priority ?? 0);
-			const wantedMaxAge = this.#maxAge ? (subscription?.maxDelay ?? Number.MAX_SAFE_INTEGER) : undefined;
-			if ((wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
+			const wantedMaxAge = this.#maxAge ? subscription?.maxDelay : undefined;
+			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
 					disposes.push(
@@ -1092,10 +1094,19 @@ export class Subscriber {
 			const update = legacy
 				? new SubscribeUpdate({ requestId, ownRequestId: own, parameters })
 				: new SubscribeUpdate({ requestId: own, parameters });
+			let message: Uint8Array;
+			try {
+				message = await Message.frame(stream.writer.version, SubscribeUpdate.id, update, version);
+			} catch (err) {
+				// Nothing reached the wire, but the track can no longer follow its subscribers.
+				console.warn(`subscribe update failed: id=${requestId} error=${reason(error(err))}`);
+				producer.close(error(err));
+				return;
+			}
 			// Counted before writing: the answer can be read before the write's promise resolves.
 			if (answered) unanswered.update((count) => count + 1);
 			try {
-				await Message.write(stream.writer, SubscribeUpdate.id, update, version);
+				await stream.writer.write(message);
 			} catch {
 				// The publisher stopped reading; its responses decide how the track ends.
 				return;
