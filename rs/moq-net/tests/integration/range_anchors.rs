@@ -47,7 +47,10 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("room").unwrap();
 	let track = broadcast
-		.create_track("data", Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER))
+		.create_track(
+			"data",
+			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	for sequence in 0..5 {
@@ -105,7 +108,10 @@ fn from(start: Anchor) -> Range {
 #[moq_clock::test]
 async fn a_held_track_resolves_relative_and_time_starts() {
 	assert_eq!(read(None, from(Anchor::Relative(2))).await.unwrap(), vec![2, 3, 4]);
-	assert_eq!(read(None, from(Anchor::Time(millis(2500)))).await.unwrap(), vec![2, 3, 4]);
+	assert_eq!(
+		read(None, from(Anchor::Time(millis(2500)))).await.unwrap(),
+		vec![2, 3, 4]
+	);
 }
 
 /// Over a session, the anchors the wire cannot carry are refused, while the live and
@@ -141,6 +147,10 @@ async fn a_received_copy_refuses_what_its_wire_drops() {
 		let live = read(Some(version), Range::live()).await;
 		assert_eq!(live.unwrap().last(), Some(&4), "{version}: live reads the latest group");
 		let oldest = read(Some(version), Range::oldest()).await;
-		assert_eq!(oldest.unwrap().last(), Some(&4), "{version}: oldest reads through the latest group");
+		assert_eq!(
+			oldest.unwrap().last(),
+			Some(&4),
+			"{version}: oldest reads through the latest group"
+		);
 	}
 }

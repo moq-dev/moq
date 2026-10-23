@@ -95,9 +95,10 @@ class Subscription:
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
     ``max_delay`` is how far a non-latest group may fall behind before it is skipped,
-    ``None`` for moq-net's default of zero, which skips at once; it caps every range. ``ranges`` are the spans of the track to
-    deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which pending
-    group the publisher sends first, ``None`` for newest first.
+    ``None`` for moq-net's default of zero, which skips at once; it caps every range.
+    ``ranges`` are the spans of the track to deliver, ``None`` for everything ``max_delay``
+    still allows. ``order`` is which pending group the publisher sends first, ``None`` for
+    newest first.
     """
 
     priority: int = 0
