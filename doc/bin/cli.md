@@ -486,7 +486,8 @@ capture, the gateways, `archive`, and `ts --program all` refuse it.
 `import --echo-path <path>` solicits feedback from the same imports: it sets
 the catalog's `echo` path, resolved against the broadcast like a relative URL,
 so `viewers` from `room/event` is `room/viewers`. A path above the connection
-root is refused, since readers would refuse the catalog.
+root is refused, since readers would refuse the catalog, and so is one no
+viewer could publish beneath: a segment holding `*`, or past 32 segments.
 `export --echo <name>` answers: under the catalog's `echo` path it publishes
 `<name>.echo`, reporting what each rendition the export reads has received and
 its newest arrival, until the export ends. It covers the stdout container

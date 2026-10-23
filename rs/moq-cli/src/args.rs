@@ -327,10 +327,17 @@ impl Invocation {
 				// A reader refuses the whole catalog over a path it cannot resolve.
 				let broadcast = command.broadcast(&self.moq);
 				let rel = hang::moq_net::path::Relative::new(path);
-				anyhow::ensure!(
-					hang::moq_net::Path::new(&broadcast).try_resolve(&rel).is_some(),
-					"--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`"
-				);
+				let Some(prefix) = hang::moq_net::Path::new(&broadcast).try_resolve(&rel) else {
+					anyhow::bail!("--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`");
+				};
+				// An origin refuses a broadcast a pattern could not name, so no viewer could
+				// publish its `<NAME>.echo` beneath this.
+				let feedback = prefix.join("viewer.echo");
+				if let Err(err) = hang::moq_net::Pattern::literal(feedback.as_str()) {
+					anyhow::bail!(
+						"--echo-path `{path}` resolves to `{prefix}`, where no viewer can publish its feedback: {err}"
+					);
+				}
 			}
 			let Command::Export(export) = command else {
 				continue;
@@ -1524,10 +1531,11 @@ mod tests {
 		}
 	}
 
-	/// `--echo-path` resolves against the broadcast, and a path above the connection root, which
-	/// every reader would refuse the catalog over, is refused before dialing.
+	/// `--echo-path` resolves against the broadcast. A path above the connection root, which
+	/// every reader would refuse the catalog over, or one no viewer could publish its `.echo`
+	/// beneath, is refused before dialing.
 	#[test]
-	fn echo_path_stays_under_the_connection_root() {
+	fn echo_path_names_where_viewers_can_publish() {
 		let import = |broadcast: &str, path: &str| {
 			let argv = [
 				"moq",
@@ -1542,10 +1550,27 @@ mod tests {
 			];
 			Invocation::try_parse_from(argv).unwrap().validate()
 		};
-		for (broadcast, path) in [("room", "viewers"), ("room/live", "../viewers")] {
+		// `viewers` from `<n parts>` resolves to n parts, and the feedback sits one beneath.
+		let deep = |parts: usize| (0..parts).map(|i| format!("p{i}")).collect::<Vec<_>>().join("/");
+		let (fits, too_deep) = (
+			deep(hang::moq_net::Path::MAX_PARTS - 1),
+			deep(hang::moq_net::Path::MAX_PARTS),
+		);
+		for (broadcast, path) in [
+			("room", "viewers"),
+			("room/live", "../viewers"),
+			(fits.as_str(), "viewers"),
+		] {
 			import(broadcast, path).unwrap();
 		}
-		for (broadcast, path) in [("room", "../viewers"), ("room/live", "../../viewers")] {
+		for (broadcast, path) in [
+			("room", "../viewers"),
+			("room/live", "../../viewers"),
+			("room", "*"),
+			("room", "viewers/**"),
+			("room", "view*"),
+			(too_deep.as_str(), "viewers"),
+		] {
 			let err = import(broadcast, path).unwrap_err().to_string();
 			assert!(err.contains("--echo-path"), "{broadcast} {path}: {err}");
 		}
