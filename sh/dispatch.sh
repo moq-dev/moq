@@ -300,6 +300,7 @@ for module in "${selected[@]}"; do
         check:nix) files '*.nix' | xargs -0 nixfmt --check ;;
         check:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --check --justfile ;;
         fix:rs) just rs fix-changed "$rs_list" ;;
+        fix:js) just js fix "$js_list" ;;
         fix:markdown)
             bun install
             sh/markdown.sh fix

@@ -21,7 +21,7 @@ Decided 2026-10-23 (maintainer interview):
   commits drop the PR body, so the
   [migration audit](/quest/m2/release/migrate-audit.md) greps `git log` for
   `!` subjects since the `release` merge base, reads each PR's Impact
-  section, and relies on the [API-diff check](/quest/m1/api-diff.md) for
+  section, and relies on the release gate's `just api-diff` for
   breaks a PR left unmarked. Rejected: a `breaking` label (one more thing to
   remember) and reading every merged PR (hundreds per cycle). A behavior
   break that keeps its declarations and lacks `!` escapes both; it escapes

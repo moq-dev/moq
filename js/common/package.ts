@@ -6,6 +6,7 @@ import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { publint } from "publint";
 import { formatMessage } from "publint/utils";
+import { checkReports } from "./api.ts";
 import { problems, type Source } from "./declarations.ts";
 import { undocumented } from "./docs.ts";
 
@@ -163,6 +164,9 @@ if (published) {
 		for (const problem of missing) console.error(`  dist/${problem}`);
 		process.exit(1);
 	}
+
+	console.log("🔍 Checking API reports...");
+	checkReports(".");
 }
 
 console.log("📦 Package built successfully in dist/");

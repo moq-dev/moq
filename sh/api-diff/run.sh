@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Diff every published package's public API against its last published release:
-# Rust crates through cargo-semver-checks, `@moq/*` packages through API
-# Extractor reports, and the FFI interfaces (`moq.h` and moq-ffi's UniFFI
-# surface) as headers. Writes target/api-diff/report.md and prints it.
+# Diff every published package's public API against its last release: Rust
+# crates through cargo-semver-checks against crates.io, `@moq/*` packages
+# through their committed API Extractor reports against `release`'s (or
+# API_DIFF_BASE's), and the FFI interfaces (`moq.h` and moq-ffi's UniFFI
+# surface) as headers against the released archives. Writes
+# target/api-diff/report.md and prints it.
 #
 # usage: sh/api-diff/run.sh [--deny] [rust|js|ffi]...
 #
@@ -30,6 +32,7 @@ done
 cd "$(git rev-parse --show-toplevel)"
 root=$PWD
 out=$root/target/api-diff
+base=${API_DIFF_BASE:-origin/release}
 rm -rf "$out"
 mkdir -p "$out"
 
@@ -37,7 +40,6 @@ summary=$out/summary.md
 details=$out/details.md
 printf '| Surface | Baseline | Result |\n| --- | --- | --- |\n' >"$summary"
 : >"$details"
-failed=
 
 # Record one surface's row, and its diff when it changed.
 row() {
@@ -170,24 +172,31 @@ rust() {
     done
 }
 
+# Each published `@moq/*` package's committed API Extractor reports against the
+# base branch's. The build checks the reports against the code on every PR, so
+# neither side is rebuilt here.
 js() {
-    # Builds every package's dist/ the way a publish does.
-    just js build
-    # It writes a failed entrypoint's error as its report, so the diff shows it.
-    bun sh/api-diff/js.ts "$out/js" || failed=1
-    local name version file entry surface
-    while IFS=$'\t' read -r name version; do
-        if [[ "$version" == - ]]; then
-            row "$name" unpublished new
-            continue
-        fi
+    git rev-parse --verify --quiet "$base^{commit}" >/dev/null || {
+        echo "api-diff: $base does not exist; fetch it or set API_DIFF_BASE" >&2
+        exit 1
+    }
+    local manifest dir name version file entry surface
+    for manifest in js/*/package.json; do
+        jq -e .scripts.release "$manifest" >/dev/null || continue
+        dir=${manifest%/package.json}
+        name=$(jq -r .name "$manifest")
+        version=$(git show "$base:$manifest" 2>/dev/null | jq -r .version) || version=-
+        mkdir -p "$out/js/$name"
+        while read -r file; do
+            git show "$base:$dir/api/$file" >"$out/js/$name/$file"
+        done < <(git ls-tree --name-only "$base" "$dir/api/" | sed 's|.*/||')
         while read -r file; do
             entry=${file%.api.md}
             surface=$name/$entry
             [[ "$entry" != index ]] || surface=$name
-            compare "$surface" "$version" "$out/js/baseline/$name/$file" "$out/js/current/$name/$file"
-        done < <(find "$out/js/baseline/$name" "$out/js/current/$name" -name '*.api.md' -printf '%f\n' | sort -u)
-    done <"$out/js/versions.tsv"
+            compare "$surface" "$version" "$out/js/$name/$file" "$dir/api/$file"
+        done < <(find "$out/js/$name" "$dir/api" -name '*.api.md' -printf '%f\n' 2>/dev/null | sort -u)
+    done
 }
 
 ffi() {
@@ -226,10 +235,6 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     fi
 fi
 
-if [[ -n "$failed" ]]; then
-    echo "api-diff: a surface could not be extracted; see the report" >&2
-    exit 1
-fi
 if [[ -n "$deny" ]] && grep -q '| break |$' "$summary"; then
     echo "api-diff: a published API changed; backports must keep it" >&2
     exit 1

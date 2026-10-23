@@ -12,11 +12,14 @@ item without a doc comment (`ae-undocumented`) fail the build.
 
 Decided 2026-10-23 (maintainer interview):
 
-- Builds on the per-package API Extractor config and committed `.api.md`
-  reports that [the API-diff check](/quest/m1/api-diff.md) adds
-  ([moq-dev/moq#6477](https://github.com/moq-dev/moq/pull/6477)). One config
-  serves the reports, these checks, and the
-  [reference](/quest/m1/js-api-reference.md); do not add a second.
+- Builds on the shared API Extractor config in `js/common/api.ts` and the
+  committed `.api.md` reports that
+  [moq-dev/moq#6477](https://github.com/moq-dev/moq/pull/6477) added. One
+  config serves the reports, these checks, and the
+  [reference](/quest/m1/js-api-reference.md); do not add a second. It
+  analyzes a copy of `dist/` with no `node_modules`, so a package's report
+  never depends on its dependencies being built, and silences every message
+  for now.
 - Keep only the rules API Extractor enforces. A `docs.ts` rule with no
   API Extractor equivalent is dropped, not kept in a reduced checker.
 - JSR reads `@module` blocks, so define `@module` in `tsdoc.json` instead of
@@ -29,10 +32,6 @@ Decided 2026-10-23 (maintainer interview):
 - Prove the replacement: reintroducing the `@moq/auth` `AccessInput` bug
   and dropping an export's doc comment must each fail `just check`.
 - Rust is a non-goal: docs.rs and cargo-semver-checks cover it.
-
-## Required
-
-- [API-diff check](/quest/m1/api-diff.md) - adds the shared config and committed reports these checks extend
 
 ## Related
 
