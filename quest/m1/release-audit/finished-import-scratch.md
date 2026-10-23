@@ -37,4 +37,4 @@ long-lived binding broadcasts that retire video or imported media sources.
 ## Related
 
 - [TS state bounds](/quest/m1/ts-reliability/state-bound.md) - bounds live SI and route revisions, distinct from finished parser storage
-- [Interop finish](/quest/m1/interop-finish.md) - proves clean broadcast tails across implementations
+- [moq-dev/moq#6307](https://github.com/moq-dev/moq/pull/6307) - interop proves clean broadcast tails across implementations
