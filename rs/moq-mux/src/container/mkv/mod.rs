@@ -19,6 +19,10 @@ mod import_test;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// A track field is outside the catalog's numeric range.
+	#[error("MKV {0} is outside the catalog's numeric range")]
+	ValueOutOfRange(&'static str),
+
 	/// Container display metadata has no valid catalog aspect ratio.
 	#[error("invalid display aspect: {0}")]
 	InvalidAspect(&'static str),

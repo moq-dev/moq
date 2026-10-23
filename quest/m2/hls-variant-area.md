@@ -14,5 +14,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [MKV import refuses out-of-range values](/quest/m2/mkv-dimension-overflow.md) - the same class of catalogue-field overflow in another importer
 - [HLS admission](/quest/m1/release-audit/hls-admission.md) - the other HLS import hardening from the audit
