@@ -5,6 +5,14 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Keylog files must be private ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+The existing boolean keylog setting still opts into `SSLKEYLOGFILE`; no ABI or
+property name changes. Its destination is captured when configuration is adapted.
+Native QUIC initialization now refuses group/other-accessible existing Unix files
+(for example mode 0644), without changing permissions; newly created logs use 0600.
+Make an existing log private before enabling key logging.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.

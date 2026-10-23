@@ -64,7 +64,7 @@ tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
 uds = ["tcp", "qmux/uds"]
 # Native WebRTC data channels over str0m, with a full ICE agent (the `webrtc` module).
 webrtc = ["_transport", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", "dep:mdns-sd"]
-ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/rustls-ring"]
+ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/ring"]
 
 [dependencies]
 bytes = "1"
@@ -85,7 +85,7 @@ moq-clock = { workspace = true }
 moq-ice = { workspace = true, optional = true }
 moq-net = { workspace = true, optional = true }
 # The QUIC state machine `quic::driver` drives; the crypto-provider features pick its provider.
-moq-quic = { workspace = true, features = ["bloom"], optional = true }
+moq-quic = { workspace = true, optional = true }
 moq-sock = { workspace = true }
 # iroh runs on upstream noq rather than moq-quic, and re-exports only the
 # ControllerFactory trait, not the concrete congestion configs. Version matched to

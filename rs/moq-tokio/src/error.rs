@@ -93,8 +93,8 @@ pub enum Error {
 	#[error("qlog capture requires the 'qlog' feature")]
 	QlogUnsupported,
 
-	/// Key logging was configured, but `SSLKEYLOGFILE` names no file to write to.
-	#[error("quic.keylog requires SSLKEYLOGFILE to name a file")]
+	/// Key logging was enabled without a destination, including a boolean binding's missing env path.
+	#[error("quic.keylog needs a nonempty path; boolean keylog settings require SSLKEYLOGFILE")]
 	KeylogUnset,
 
 	/// The config was parsed from released spellings that no longer work. The
@@ -275,8 +275,8 @@ impl Error {
 			| Self::WindowRange(_)
 			| Self::ReceiveWindowTooSmall(_)
 			| Self::StreamsRange
-			| Self::QlogUnsupported
 			| Self::KeylogUnset
+			| Self::QlogUnsupported
 			| Self::Connect(_) => true,
 			#[cfg(feature = "quic")]
 			Self::Quic(err) => err.is_terminal(),

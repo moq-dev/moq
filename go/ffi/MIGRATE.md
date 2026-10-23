@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Keylog files must be private ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+The boolean opt-in remains unchanged. Native QUIC captures `SSLKEYLOGFILE` when
+configuration is adapted, creates new Unix logs with mode 0600, and refuses an
+existing group/other-accessible file (for example mode 0644) without changing it.
+Make an existing log private before enabling key logging.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.Resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.

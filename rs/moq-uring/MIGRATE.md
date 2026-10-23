@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The manual-clock hook is private ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+The testing-only `manual` feature is `_manual`. Production consumers should remove it;
+tests installing a moq-clock manual clock can enable the internal hook.
+
 ### Timers run on moq-clock
 
 The worker is a moq-clock backend, so its deadlines are `moq_clock::Instant`s instead of `std::time::Instant`s.

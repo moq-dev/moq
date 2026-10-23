@@ -57,7 +57,7 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 		let mut discovered = peer_origin.consume().with_hidden(true).announced();
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.expect("cluster dial");
-			let (session, _driver) = request.with_subscriber(peer_origin).ok().await.expect("accept");
+			let session = request.with_subscriber(peer_origin).ok().await.expect("accept");
 			session.closed().await;
 		});
 

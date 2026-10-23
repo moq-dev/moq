@@ -1,4 +1,4 @@
-//! Human-readable command-line durations.
+//! Human-readable configuration durations.
 
 use std::fmt;
 use std::ops::Deref;
@@ -7,7 +7,7 @@ use std::time::Duration as StdDuration;
 
 use ::serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// A duration that parses human-readable command-line values such as `500ms` or `2m`.
+/// A configuration duration that parses and serializes human-readable values such as `500ms` or `2m`.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Duration {
 	value: StdDuration,
@@ -79,33 +79,6 @@ impl<'de> Deserialize<'de> for Duration {
 	}
 }
 
-pub(crate) mod serde_duration {
-	/// Human-readable serialization for an optional duration.
-	pub mod option {
-		use ::serde::{Deserialize, Deserializer, Serializer};
-		use std::time::Duration;
-
-		pub fn serialize<S>(value: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
-		where
-			S: Serializer,
-		{
-			match value {
-				Some(value) => serializer.collect_str(&humantime::format_duration(*value)),
-				None => serializer.serialize_none(),
-			}
-		}
-
-		pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
-		where
-			D: Deserializer<'de>,
-		{
-			Option::<String>::deserialize(deserializer)?
-				.map(|value| humantime::parse_duration(&value).map_err(::serde::de::Error::custom))
-				.transpose()
-		}
-	}
-}
-
 // Exercise the same precedence contract for each duration config, including its
 // own interpretation of zero (disabled, unlimited, or a minimum pacing floor).
 #[cfg(test)]
@@ -136,15 +109,18 @@ macro_rules! test_config_duration {
 			assert_eq!(resolve(&merged(&unset)), default, "unset round-trip");
 			for value in [std::time::Duration::ZERO, std::time::Duration::from_secs(3)] {
 				for mut config in [parse(&[]), merged(&parse(&[])), <$config>::default()] {
-					config.$field = value.into();
+					config.$field = Some(value.into());
 					assert_eq!(resolve(&config), expected(value), "typed {value:?}");
 					assert_eq!(resolve(&merged(&config)), expected(value), "round-trip {value:?}");
 				}
 				let flag_value = if value.is_zero() { "3s" } else { "0s" };
-				let flag_duration = humantime::parse_duration(flag_value).unwrap();
 				for mut config in [parse(&[$flag, flag_value]), merged(&parse(&[$flag, flag_value]))] {
-					config.$field = value.into();
-					assert_eq!(resolve(&config), expected(flag_duration), "explicit flag");
+					config.$field = Some(value.into());
+					assert_eq!(
+						resolve(&config),
+						expected(value),
+						"typed assignment replaces the parsed flag"
+					);
 				}
 			}
 		}

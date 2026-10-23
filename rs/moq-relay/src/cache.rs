@@ -61,13 +61,9 @@ pub struct Config {
 	/// cadence. The `capacity` budget is the one that depends on writes: a
 	/// publisher that stops writing pays none of it down, so under memory pressure
 	/// it is repaid by the tracks that are still writing.
-	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_option")]
-	pub duration: Option<Duration>,
-
 	#[usage(long = "cache-duration", env = "MOQ_CACHE_DURATION", setting = "cache.duration")]
-	#[serde(default, rename = "__cli_duration", skip_serializing_if = "Option::is_none")]
-	duration_arg: Option<crate::duration::Duration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub duration: Option<moq_tokio::cli::Duration>,
 }
 
 /// The relay's resolved cache settings: the shared byte-budget pool plus the
@@ -105,10 +101,7 @@ impl Config {
 	/// point, say) leaves nothing sampling memory behind.
 	pub fn init(&self) -> anyhow::Result<Cache> {
 		let capacity = self.capacity.as_deref().map(parse_limit).transpose()?;
-		let duration = self
-			.duration_arg
-			.map(crate::duration::Duration::into_std)
-			.or(self.duration);
+		let duration = self.duration.map(Into::into);
 		let config = cache::Config::default()
 			.with_capacity(capacity)
 			.with_expiry(duration.unwrap_or(cache::DEFAULT_EXPIRY));
@@ -221,7 +214,7 @@ mod tests {
 	fn explicit_duration_configures_both_bounds() {
 		let duration = Duration::from_secs(5);
 		let config = Config {
-			duration: Some(duration),
+			duration: Some((duration).into()),
 			..Default::default()
 		};
 		let cache = config.init().unwrap();

@@ -5,8 +5,6 @@ pub mod auth;
 use std::task::{Poll, ready};
 use std::time::Duration;
 
-use crate::cli::Duration as CliDuration;
-
 use moq_net::Version;
 use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthProducer};
 use moq_net::kio;
@@ -73,24 +71,15 @@ pub struct Backoff {
 	/// Doubles as the bar a session must stay up to count as healthy, so it is
 	/// floored at 50ms: at zero every session would look healthy and the retry
 	/// pacing would collapse.
-	/// `None` uses the default; an explicit command-line flag or environment variable wins.
-	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
-	pub initial: Option<Duration>,
-
-	/// Initial delay before the first reconnect attempt. Defaults to 1s, floored at 50ms.
+	/// `None` uses the default. Zero retains the existing retry pacing floor.
 	#[usage(
 		name = "backoff-initial",
 		long,
 		env = "MOQ_BACKOFF_INITIAL",
 		setting = "connect.backoff.initial"
 	)]
-	#[serde(default, rename = "__cli_initial", skip_serializing_if = "Option::is_none")]
-	initial_arg: Option<CliDuration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub initial: Option<crate::cli::Duration>,
 
 	/// Multiplier applied to delay after each failure. Defaults to 2.
 	#[usage(
@@ -103,19 +92,10 @@ pub struct Backoff {
 	pub multiplier: u32,
 
 	/// Maximum delay between reconnect attempts. Defaults to 5s.
-	/// `None` uses the default; an explicit command-line flag or environment variable wins.
-	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
-	pub max: Option<Duration>,
-
-	/// Maximum delay between reconnect attempts. Defaults to 5s.
+	/// `None` uses the default. The maximum is never below the initial delay.
 	#[usage(name = "backoff-max", long, env = "MOQ_BACKOFF_MAX", setting = "connect.backoff.max")]
-	#[serde(default, rename = "__cli_max", skip_serializing_if = "Option::is_none")]
-	max_arg: Option<CliDuration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub max: Option<crate::cli::Duration>,
 
 	/// Maximum time to spend retrying before giving up. Defaults to 10s.
 	///
@@ -126,54 +106,46 @@ pub struct Backoff {
 	///
 	/// Resets after a stable connection (one that outlives the initial backoff) outside a redirect
 	/// loop, so a flapping session that reconnects then immediately drops still counts toward the
-	/// timeout. Set to `Some(Duration::ZERO)` for unlimited retries. `None` takes the default. When this config was
-	/// parsed from the command line, a `--backoff-timeout` given there wins over this field.
+	/// timeout. Set to `Some(Duration::ZERO.into())` for unlimited retries. `None` takes the default. When this config was
+	/// parsed from the command line, a later assignment replaces its parsed value.
 	///
 	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
 	/// type's default, and only `None` tells "unset" apart from "retry forever".
-	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
-	pub timeout: Option<Duration>,
-
-	// No parser default: the parser stores one as if it were given, and it would then beat a
-	// window set in code. The default lives in [`Backoff::window`] instead.
-	/// Maximum time to spend retrying before giving up. Defaults to 10s; 0s retries forever.
 	#[usage(
 		name = "backoff-timeout",
 		long,
 		env = "MOQ_BACKOFF_TIMEOUT",
 		setting = "connect.backoff.timeout"
 	)]
-	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
-	timeout_arg: Option<CliDuration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub timeout: Option<crate::cli::Duration>,
 }
 
 impl Default for Backoff {
 	fn default() -> Self {
 		Self {
-			initial: Some(DEFAULT_INITIAL),
-			initial_arg: None,
+			initial: None,
 			multiplier: DEFAULT_MULTIPLIER,
-			max: Some(DEFAULT_MAX),
-			max_arg: None,
-			timeout: Some(DEFAULT_TIMEOUT),
-			timeout_arg: None,
+			max: None,
+			timeout: None,
 		}
 	}
 }
 
 impl Backoff {
-	/// The retry window in effect, where zero means unlimited: the flag, then the typed field, then
-	/// the default.
-	fn window(&self) -> Duration {
-		self.timeout_arg
-			.map(Into::into)
-			.or(self.timeout)
-			.unwrap_or(DEFAULT_TIMEOUT)
+	/// The initial retry delay and healthy-session threshold, including its 50ms floor.
+	pub fn initial(&self) -> Duration {
+		self.initial.map(Into::into).unwrap_or(DEFAULT_INITIAL).max(MIN_BACKOFF)
+	}
+
+	/// The retry-delay cap, never lower than the initial delay.
+	pub fn max(&self) -> Duration {
+		self.max.map(Into::into).unwrap_or(DEFAULT_MAX).max(self.initial())
+	}
+
+	/// The retry deadline window, with zero meaning unlimited and unset using the default.
+	pub fn timeout(&self) -> Duration {
+		self.timeout.map(Into::into).unwrap_or(DEFAULT_TIMEOUT)
 	}
 }
 
@@ -350,32 +322,22 @@ pub struct Goaway {
 	/// "10s" or "500ms". This is a cap: a GOAWAY naming a shorter deadline wins,
 	/// since the peer force-closes at its own deadline regardless, but a longer one
 	/// does not extend it. Defaults to 10 seconds.
-	/// `None` uses the default; an explicit command-line flag or environment variable wins.
-	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
-	pub handover: Option<Duration>,
-
-	/// How long the old session keeps serving after its replacement connects. Defaults to 10s.
+	/// `None` uses the default; zero disables this duration.
 	#[usage(
 		name = "goaway-handover",
 		long,
 		env = "MOQ_GOAWAY_HANDOVER",
 		setting = "connect.goaway.handover"
 	)]
-	#[serde(default, rename = "__cli_handover", skip_serializing_if = "Option::is_none")]
-	handover_arg: Option<CliDuration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub handover: Option<crate::cli::Duration>,
 }
 
 impl Default for Goaway {
 	fn default() -> Self {
 		Self {
 			redirect: Redirect::SameHost,
-			handover: Some(DEFAULT_HANDOVER),
-			handover_arg: None,
+			handover: None,
 		}
 	}
 }
@@ -412,13 +374,8 @@ struct Pacing {
 
 impl Pacing {
 	fn new(backoff: &Backoff) -> Self {
-		let initial = backoff
-			.initial_arg
-			.map(Into::into)
-			.or(backoff.initial)
-			.unwrap_or(DEFAULT_INITIAL)
-			.max(MIN_BACKOFF);
-		let max = backoff.max_arg.map(Into::into).or(backoff.max).unwrap_or(DEFAULT_MAX);
+		let initial = backoff.initial();
+		let max = backoff.max();
 		Self {
 			initial,
 			max: max.max(initial),
@@ -440,11 +397,7 @@ impl Goaway {
 	fn resolve(&self) -> Resolved {
 		Resolved {
 			redirect: self.redirect,
-			handover: self
-				.handover_arg
-				.map(Into::into)
-				.or(self.handover)
-				.unwrap_or(DEFAULT_HANDOVER),
+			handover: self.handover.map(Into::into).unwrap_or(DEFAULT_HANDOVER),
 		}
 	}
 }
@@ -679,7 +632,7 @@ pub struct Snapshot {
 /// Handle to a connection maintained by a background task.
 ///
 /// The task connects, waits for the session to end, then (unless reconnecting is
-/// disabled, see [`crate::connect::Config::once`](crate::connect::Config::once))
+/// disabled, see [`crate::Client::with_reconnect`])
 /// redials with exponential backoff. The read surface mirrors [`moq_net::Session`]
 /// so a caller can treat it like a session that transparently reconnects:
 /// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
@@ -851,7 +804,7 @@ impl Connection {
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
-		let timeout = backoff.window();
+		let timeout = backoff.timeout();
 		let initial = pacing.initial;
 		let mut retry = Retry::new(initial);
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
@@ -1678,16 +1631,16 @@ mod tests {
 
 		// Stand in for the TOML layer, then re-apply the CLI with none of the flags set.
 		let mut parsed = Wrapper::parse_from(&[]).unwrap();
-		parsed.backoff.initial = Some(Duration::from_secs(7));
+		parsed.backoff.initial = Some((Duration::from_secs(7)).into());
 		parsed.backoff.multiplier = 5;
-		parsed.backoff.max = Some(Duration::from_secs(11));
-		parsed.backoff.timeout = Some(Duration::ZERO);
+		parsed.backoff.max = Some((Duration::from_secs(11)).into());
+		parsed.backoff.timeout = Some((Duration::ZERO).into());
 		parsed.update_from(&[]);
 
-		assert_eq!(parsed.backoff.initial, Some(Duration::from_secs(7)));
+		assert_eq!(parsed.backoff.initial, Some((Duration::from_secs(7)).into()));
 		assert_eq!(parsed.backoff.multiplier, 5);
-		assert_eq!(parsed.backoff.max, Some(Duration::from_secs(11)));
-		assert_eq!(parsed.backoff.window(), Duration::ZERO, "0 means retry forever");
+		assert_eq!(parsed.backoff.max, Some((Duration::from_secs(11)).into()));
+		assert_eq!(parsed.backoff.timeout(), Duration::ZERO, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the typed defaults.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
@@ -1695,7 +1648,7 @@ mod tests {
 		let pacing = Pacing::new(&parsed.backoff);
 		assert_eq!(pacing.initial, DEFAULT_INITIAL);
 		assert_eq!(pacing.max, DEFAULT_MAX);
-		assert_eq!(parsed.backoff.window(), DEFAULT_TIMEOUT);
+		assert_eq!(parsed.backoff.timeout(), DEFAULT_TIMEOUT);
 
 		// And a flag still lands where the merge can see it.
 		let parsed =
@@ -1739,7 +1692,7 @@ mod tests {
 	#[test]
 	fn handover_takes_the_earlier_deadline() {
 		let config = Goaway {
-			handover: Some(Duration::from_secs(10)),
+			handover: Some((Duration::from_secs(10)).into()),
 			..Default::default()
 		};
 
@@ -2015,7 +1968,7 @@ mod tests {
 		// A zero initial would also make every session look healthy, resetting the
 		// give-up window forever.
 		let pacing = Pacing::new(&Backoff {
-			initial: Some(Duration::ZERO),
+			initial: Some((Duration::ZERO).into()),
 			..Default::default()
 		});
 		assert_eq!(pacing.initial, MIN_BACKOFF);
@@ -2023,7 +1976,7 @@ mod tests {
 
 		// A cap below the floor would clamp the delay straight back down.
 		let pacing = Pacing::new(&Backoff {
-			max: Some(Duration::ZERO),
+			max: Some((Duration::ZERO).into()),
 			..Default::default()
 		});
 		assert_eq!(pacing.max, pacing.initial);
@@ -2038,8 +1991,8 @@ mod tests {
 
 		// All at once: still paced.
 		let pacing = Pacing::new(&Backoff {
-			initial: Some(Duration::ZERO),
-			max: Some(Duration::ZERO),
+			initial: Some((Duration::ZERO).into()),
+			max: Some((Duration::ZERO).into()),
 			multiplier: 0,
 			..Default::default()
 		});
@@ -2054,9 +2007,9 @@ mod tests {
 	#[test]
 	fn pacing_grows_to_the_cap() {
 		let pacing = Pacing::new(&Backoff {
-			initial: Some(Duration::from_millis(100)),
+			initial: Some((Duration::from_millis(100)).into()),
 			multiplier: 2,
-			max: Some(Duration::from_millis(400)),
+			max: Some((Duration::from_millis(400)).into()),
 			..Default::default()
 		});
 
@@ -2334,7 +2287,7 @@ mod tests {
 	async fn an_unsupported_scheme_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Some(Duration::ZERO);
+		config.backoff.timeout = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).expect("build client");
 		let started = tokio::time::Instant::now();
 		let connection = client.connect(url("moqz://localhost/"));
@@ -2352,7 +2305,7 @@ mod tests {
 	async fn an_invalid_tls_server_name_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Some(Duration::ZERO);
+		config.backoff.timeout = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).expect("build client");
 		for target in [
 			"https://a!b:1/",
@@ -2394,15 +2347,15 @@ mod tests {
 			.to_string();
 
 		let mut config = crate::connect::Config::default();
-		config.backoff.initial = Some(Duration::from_millis(50));
-		config.backoff.max = Some(Duration::from_millis(50));
-		config.backoff.timeout = Some(Duration::from_millis(100));
+		config.backoff.initial = Some((Duration::from_millis(50)).into());
+		config.backoff.max = Some((Duration::from_millis(50)).into());
+		config.backoff.timeout = Some((Duration::from_millis(100)).into());
 		// No timer may be pending while a dial is in flight, since the paused clock
 		// jumps to it whenever the runtime idles. Linux and macOS refuse a loopback
 		// connect inside the call, but Windows reports it later, after retrying the
 		// SYN, so the connect deadline or the Happy Eyeballs stagger would fire first.
-		config.timeout = Some(Duration::ZERO);
-		config.race = Some(Duration::ZERO);
+		config.timeout = Some((Duration::ZERO).into());
+		config.race = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).expect("build client");
 
 		let started = tokio::time::Instant::now();
@@ -2433,9 +2386,9 @@ mod tests {
 		crate::resolve::hosts::point(HOST, failing);
 
 		let mut config = crate::connect::Config::default();
-		config.backoff.initial = Some(MIN_BACKOFF);
-		config.backoff.max = Some(MIN_BACKOFF);
-		config.backoff.timeout = Some(Duration::ZERO);
+		config.backoff.initial = Some((MIN_BACKOFF).into());
+		config.backoff.max = Some((MIN_BACKOFF).into());
+		config.backoff.timeout = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).unwrap();
 		let mut connection = client.connect(url(&format!("tcp://{HOST}:1/")));
 		let monitor = connection.monitor();
@@ -2475,9 +2428,9 @@ mod tests {
 		// A held port, not a released one: another test's server could claim a
 		// released port, and the dial would connect instead of failing.
 		let mut config = crate::connect::Config::default();
-		config.backoff.initial = Some(MIN_BACKOFF);
-		config.backoff.max = Some(MIN_BACKOFF);
-		config.backoff.timeout = Some(Duration::ZERO);
+		config.backoff.initial = Some((MIN_BACKOFF).into());
+		config.backoff.max = Some((MIN_BACKOFF).into());
+		config.backoff.timeout = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).unwrap();
 		let connection = client.connect(dead().await);
 		let mut monitor = connection.monitor();
@@ -2660,7 +2613,7 @@ mod tests {
 		tokio::spawn(async move {
 			while let Some(request) = server.accept().await {
 				let transport = request.transport();
-				if let Ok((session, _driver)) = request.ok().await {
+				if let Ok(session) = request.ok().await {
 					let _ = accepted.send((transport, session));
 				}
 			}
@@ -2693,7 +2646,7 @@ mod tests {
 
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.websocket.delay = Some(Duration::ZERO);
+		config.websocket.delay = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).unwrap();
 		let url = url(&format!("http://127.0.0.1:{port}/"));
 		let connection = tokio::time::timeout(WAIT, client.connect(url).established())
@@ -2734,7 +2687,7 @@ mod tests {
 		let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 		let task = tokio::spawn(async move {
 			while let Some(request) = server.accept().await {
-				if let Ok((session, _driver)) = request.with_publisher(&origin).ok().await {
+				if let Ok(session) = request.with_publisher(&origin).ok().await {
 					let _ = accepted.send(session);
 				}
 			}
@@ -2768,10 +2721,10 @@ mod tests {
 
 		let subscriber = crate::origin::spawn();
 		let mut config = crate::connect::Config::default();
-		config.goaway.handover = Some(HANDOVER);
+		config.goaway.handover = Some((HANDOVER).into());
 		// A session younger than the initial delay counts as redirected immediately and
 		// waits out a backoff, which this test is not about.
-		config.backoff.initial = Some(MIN_BACKOFF);
+		config.backoff.initial = Some((MIN_BACKOFF).into());
 		let client = config
 			.init(Default::default())
 			.unwrap()
@@ -2909,7 +2862,7 @@ mod duration_tests {
 		Backoff,
 		timeout,
 		"--backoff-timeout",
-		|c: &Backoff| c.window(),
+		|c: &Backoff| c.timeout(),
 		|d| d
 	);
 	crate::cli::duration::test_config_duration!(

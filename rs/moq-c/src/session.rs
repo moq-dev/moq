@@ -26,7 +26,6 @@ enum Link {
 
 struct Accepted {
 	session: moq_net::Session,
-	driver: ffi::Background,
 }
 
 /// Everything needed to prepare a session without holding the global state lock.
@@ -183,7 +182,8 @@ impl Session {
 				if let Link::Accepted(Some(accepted)) = &entry.link
 					&& let Err(error) = ffi::run(async {
 						accepted.session.abort(moq_net::Error::Cancel);
-						accepted.driver.finished().await
+						let _ = accepted.session.closed().await;
+						Ok(())
 					})
 					.await
 				{
@@ -199,25 +199,16 @@ impl Session {
 
 	/// Establish an accepted session, publish it to the entry, and wait for it to close.
 	async fn serve(id: Id, callback: ffi::OnStatus, request: moq_tokio::server::Request) -> Result<(), Error> {
-		let (session, driver) = request.ok().await.map_err(map_connect_error)?;
-		let driver = ffi::Background::new(async move {
-			match driver.await {
-				Ok(result) => result.map_err(map_connect_error),
-				Err(error) if error.is_panic() => Err(Error::Panic),
-				Err(_) => Err(moq_net::Error::Cancel.into()),
-			}
-		});
+		let session = request.ok().await.map_err(map_connect_error)?;
 
 		if let Some(entry) = State::lock().session.task.get_mut(id) {
 			entry.link = Link::Accepted(Some(Accepted {
 				session: session.clone(),
-				driver: driver.clone(),
 			}));
 		}
 
 		// A server-accepted session is a single transport, so it only ever connects once.
 		callback.call(1);
-		driver.finished().await?;
 		Err(session.closed().await.into())
 	}
 

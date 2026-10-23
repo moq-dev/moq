@@ -5475,7 +5475,10 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(quic.idle_timeout, unset.idle_timeout);
 	assert_eq!(quic.keep_alive, unset.keep_alive);
 	assert_eq!(defaults.websocket.enabled, Some(true));
-	assert!(defaults.backoff.initial_us.is_some() && defaults.backoff.max_us.is_some());
+	let backoff = moq_tokio::connection::Backoff::default();
+	assert_eq!(defaults.backoff.initial_us, micros(backoff.initial()));
+	assert_eq!(defaults.backoff.max_us, micros(backoff.max()));
+	assert_eq!(defaults.backoff.timeout_us, micros(backoff.timeout()));
 
 	// The backend picks these, so there is no single value to report.
 	assert_eq!(defaults.tls.system_roots, None);
@@ -7413,7 +7416,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 	let serving = tokio::spawn(async move {
 		let request = listener.accept().await.expect("accept");
 		let mut requests = request.auth().requests().unwrap();
-		let (session, driver) = request.ok().await.unwrap();
+		let session = request.ok().await.unwrap();
 		let mut issued = Vec::new();
 		while let Some(request) = requests.next().await {
 			match request.token().as_ref() {
@@ -7427,7 +7430,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 				_ => request.reject(moq_net::SessionError::Unauthorized, "unknown token"),
 			}
 		}
-		drop((session, driver, issued));
+		drop((session, issued));
 	});
 
 	let client = MoqClient::new(MoqClientConfig {

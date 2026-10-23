@@ -5,6 +5,13 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Embedder durations use the shared adapter ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+Set `drain_timeout` with `Some(std_duration.into())`; `None` uses the default.
+ACME `timeout`, stats `linger`, and cache `duration` use the same `moq_tokio::cli::Duration`
+adapter. TOML and CLI duration strings retain their names. Later Rust assignments
+replace parsed values directly; there are no hidden CLI shadow fields.
+
 ### `receive_window` has a floor (#5878)
 
 The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.
@@ -58,10 +65,13 @@ A CLI that flattens them depends on `usage-rs = "7"` under its own name: the der
 Pass `auth::Error::Refused(moq_auth::Refusal::default())` to `Admission::refuse` for an unattributed refusal, or set its `reason`, optional verified `root`, and `tier`.
 Match `auth::Error::Refused(refusal)` to inspect it; never use the dialed path as refusal attribution.
 
-### Key logging is opt-in (#5907)
+### Key logging names its file ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
 
-`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
-Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = true`) to capture them; without `SSLKEYLOGFILE` it stops startup.
+Replace `SSLKEYLOGFILE` and boolean `[quic] keylog` with `keylog = "/private/keys.log"`,
+`--quic-keylog /private/keys.log`, or `MOQ_QUIC_KEYLOG=/private/keys.log`.
+Tokio and io\_uring share this logger. Initialization refuses an inaccessible path
+or a group/other-accessible existing Unix file, such as mode 0644; new files are mode 0600.
+Iroh currently refuses an explicit keylog path when enabled.
 
 ### Cluster dials build from a template (#5674)
 
@@ -101,9 +111,9 @@ A qlog directory gets one file per endpoint instead of one per connection.
 
 ### A QUIC load-balancer nonce needs its server id (#5114)
 
-`listen.lb_nonce` (`--listen-quic-lb-nonce`, `MOQ_LISTEN_QUIC_LB_NONCE`) without `lb_id` stops startup.
-Setting `lb_id` or `lb_nonce` together with `load_balancer` also stops; `lb_id` used to win.
-Set `load_balancer`, or `lb_id` alone (nonce 8), or `lb_id` with `lb_nonce`.
+Move `listen.lb_id` / `listen.lb_nonce` or `listen.load_balancer` into `[listen.lb]`
+with `id` and optional `nonce` (default 8). Existing `--listen-quic-lb-*` flags keep
+their names and override that same table. A nonce without an ID stops startup.
 
 ### Settings no listener reads stop startup (#5006)
 
@@ -165,7 +175,7 @@ Environment variables follow the flag (`MOQ_SERVER_BIND` is `MOQ_LISTEN`), and a
 | `--client-connect` | `--connect` |
 | `--client-*` | `--connect-*` |
 | `--client-failover-delay` | `--connect-race` |
-| `--client-reconnect=false` | `--connect-once` |
+| `--client-reconnect=false` | Removed; CLI dials reconnect. Native callers use `Client::with_reconnect(false)`. |
 | `--tls-disable-verify`, `--client-tls-disable-verify` | `--connect-tls-insecure` |
 | `--server-quic-*`, `--client-quic-*` | `--quic-*`, applied to both directions |
 | TOML `[server]`, `[client]` | `[listen]`, `[connect]` |

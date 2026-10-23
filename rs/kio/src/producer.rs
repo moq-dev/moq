@@ -124,7 +124,7 @@ impl<T> Producer<T> {
 	/// while pending.
 	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
-	#[cfg_attr(feature = "sim", track_caller)]
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll<F>(&self, waiter: &Waiter, f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<()>,
@@ -151,7 +151,7 @@ impl<T> Producer<T> {
 	/// [`Mut`], so it never flags the state modified and never wakes consumers.
 	/// Use it to wait on a read condition from the producer side without creating
 	/// a [`Consumer`].
-	#[cfg_attr(feature = "sim", track_caller)]
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_ref<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
@@ -193,7 +193,7 @@ impl<T> Producer<T> {
 
 	/// Poll for channel closure (an explicit [`Mut::close`], e.g. an abort),
 	/// registering the waiter if still open.
-	#[cfg_attr(feature = "sim", track_caller)]
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
@@ -213,7 +213,7 @@ impl<T> Producer<T> {
 
 	/// Poll-based variant of [`Self::unused`]: `Ready(Ok(()))` when no consumers
 	/// remain, [`Closed`] if the channel closed first, else `Pending`.
-	#[cfg_attr(feature = "sim", track_caller)]
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_unused(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
 		let mut state = self.state.lock();
 		if state.closed {
@@ -252,7 +252,7 @@ impl<T> Producer<T> {
 
 	/// Poll-based variant of [`Self::used`]: `Ready(Ok(()))` once a consumer
 	/// exists, [`Closed`] if the channel closed first, else `Pending`.
-	#[cfg_attr(feature = "sim", track_caller)]
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_used(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
 		let mut state = self.state.lock();
 		if state.closed {

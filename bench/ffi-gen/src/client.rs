@@ -24,15 +24,14 @@ impl MoqClient {
 	/// A client that dials once, with no reconnect.
 	#[cfg_attr(feature = "uniffi", uniffi::constructor)]
 	pub fn new() -> Result<Self, MoqError> {
-		let mut connect = moq_tokio::connect::Config::default();
-		connect.once = Some(true);
+		let connect = moq_tokio::connect::Config::default();
 		let _guard = runtime().enter();
 		let client = connect
 			.init(moq_tokio::quic::Config::default())
 			.map_err(|err| MoqError::Net {
 				reason: err.to_string(),
 			})?;
-		Ok(Self { client })
+		Ok(Self { client: client.with_reconnect(false) })
 	}
 
 	/// Connect to `url`, publishing and consuming through `origin`. Takes `&self`, which

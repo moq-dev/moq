@@ -93,6 +93,11 @@ Code that handles every value needs one more case.
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
 Pass `keylog=True` to `Client`, `connect`, or `Server` as well to capture them; without `SSLKEYLOGFILE` the client refuses to build and the server refuses to listen.
 
+The boolean opt-in remains unchanged. Native QUIC captures `SSLKEYLOGFILE` when
+configuration is adapted, creates new Unix logs with mode 0600, and refuses an
+existing group/other-accessible file (for example mode 0644) without changing it.
+Make an existing log private before enabling key logging.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.group_start` and `group_end` are replaced by `ranges`, a list of `Range` whose ends are an `Anchor` (an absolute group and frame, or a count of groups before the latest), and an optional `order`.

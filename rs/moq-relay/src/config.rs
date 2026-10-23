@@ -20,6 +20,7 @@ use crate::{auth, cache, cluster, internal, stats, web};
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
+#[derive(Default)]
 pub struct Config {
 	/// Request caps for ordinary client sessions.
 	#[usage(flatten)]
@@ -114,18 +115,14 @@ pub struct Config {
 	/// them, exiting as soon as they have all left; a second signal exits
 	/// immediately. Zero closes them at once, with no GOAWAY
 	/// they would have no time to act on. Defaults to 10 seconds.
-	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_duration")]
-	pub drain_timeout: std::time::Duration,
-
 	#[usage(
 		name = "drain-timeout",
 		long = "drain-timeout",
 		env = "MOQ_DRAIN_TIMEOUT",
 		setting = "drain_timeout"
 	)]
-	#[serde(default, rename = "__cli_drain_timeout", skip_serializing_if = "Option::is_none")]
-	drain_timeout_arg: Option<crate::duration::Duration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub drain_timeout: Option<moq_tokio::cli::Duration>,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
@@ -142,36 +139,6 @@ pub struct Config {
 	#[serde(default)]
 	#[cfg(feature = "iroh")]
 	pub iroh: moq_tokio::iroh::Config,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			session: Default::default(),
-			peer: Default::default(),
-			listen: Default::default(),
-			server: None,
-			connect: Default::default(),
-			client: None,
-			quic: Default::default(),
-			log: Default::default(),
-			runtime: Default::default(),
-			cluster: Default::default(),
-			auth: Default::default(),
-			web: Default::default(),
-			acme: Default::default(),
-			stun: Default::default(),
-			stats: Default::default(),
-			cache: Default::default(),
-			internal: Default::default(),
-			drain_timeout: crate::DEFAULT_DRAIN_TIMEOUT,
-			drain_timeout_arg: None,
-			file: None,
-			origins: None,
-			#[cfg(feature = "iroh")]
-			iroh: Default::default(),
-		}
-	}
 }
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
@@ -210,9 +177,9 @@ pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
 impl Config {
 	/// Resolve the shutdown grace period after command-line overrides.
 	pub(crate) fn drain_timeout(&self) -> std::time::Duration {
-		self.drain_timeout_arg
-			.map(crate::duration::Duration::into_std)
-			.unwrap_or(self.drain_timeout)
+		self.drain_timeout
+			.map(Into::into)
+			.unwrap_or(crate::DEFAULT_DRAIN_TIMEOUT)
 	}
 
 	/// Parses configuration from CLI arguments, optionally merging with a
@@ -376,8 +343,6 @@ impl Config {
 		self.quic
 			.max_streams
 			.get_or_insert(moq_tokio::quic::DEFAULT_MAX_STREAMS);
-		self.drain_timeout = self.drain_timeout();
-		self.drain_timeout_arg = None;
 		Ok(())
 	}
 }
@@ -847,7 +812,7 @@ ws = false
 	#[test]
 	fn cache_duration_serde_round_trip() {
 		let set: cache::Config = toml::from_str(r#"duration = "30s""#).expect("deserialize Some");
-		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30)));
+		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30).into()));
 
 		let unset: cache::Config = toml::from_str("").expect("deserialize absent");
 		assert_eq!(unset.duration, None);
@@ -1061,7 +1026,7 @@ ws = false
 				env: &[],
 				cli: &[],
 				key: "cache.duration",
-				check: |config| assert_eq!(config.cache.duration, Some(std::time::Duration::from_secs(30))),
+				check: |config| assert_eq!(config.cache.duration, Some(std::time::Duration::from_secs(30).into())),
 				source: "duration",
 			},
 			Case {
@@ -1070,7 +1035,7 @@ ws = false
 				env: &[],
 				cli: &[],
 				key: "connect.timeout",
-				check: |config| assert_eq!(config.connect.timeout, Some(std::time::Duration::from_secs(120))),
+				check: |config| assert_eq!(config.connect.timeout, Some(std::time::Duration::from_secs(120).into())),
 				source: "timeout",
 			},
 			Case {
@@ -1311,7 +1276,7 @@ ws = false
 	}
 
 	/// A QUIC-LB nonce with no server id stops startup from TOML and the
-	/// environment, and `lb_id` no longer hides `load_balancer`.
+	/// environment, and CLI assignments override the same nested fields.
 	///
 	/// The CLI flag pair already requires `--listen-quic-lb-id`, so this does not
 	/// add a second command-line error for that spelling.
@@ -1351,41 +1316,31 @@ ws = false
 
 		refuse(
 			"nonce.toml",
-			"[listen]\nlb_nonce = 8\n",
+			"[listen.lb]\nnonce = 8\n",
 			&[],
 			&[],
 			"requires --listen-quic-lb-id",
-		);
-		refuse(
-			"both.toml",
-			"[listen]\nlb_id = \"ab\"\nload_balancer = { id = \"cd\", nonce = 4 }\n",
-			&[],
-			&[],
-			"cannot be combined",
-		);
-		refuse(
-			"env-id.toml",
-			"[listen]\nload_balancer = { id = \"cd\", nonce = 4 }\n",
-			&[("MOQ_LISTEN_QUIC_LB_ID", "ab")],
-			&[],
-			"cannot be combined",
-		);
-		refuse(
-			"cli-id.toml",
-			"[listen]\nload_balancer = { id = \"cd\", nonce = 4 }\n",
-			&[],
-			&["--listen-quic-lb-id", "ee"],
-			"cannot be combined",
 		);
 
 		#[cfg(feature = "quic")]
 		{
 			let path = dir.join("typed.toml");
-			std::fs::write(&path, "[listen]\nload_balancer = { id = \"ab\", nonce = 8 }\n").unwrap();
-			let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).expect("typed");
-			let load_balancer = config.listen.load_balancer().expect("typed load_balancer");
-			assert_eq!(load_balancer.id, "ab".parse().unwrap());
-			assert_eq!(load_balancer.nonce, 8);
+			std::fs::write(&path, "[listen.lb]\nid = \"ab\"\nnonce = 8\n").unwrap();
+			let config =
+				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).expect("typed");
+			let load_balancer = config.listen.lb;
+			assert_eq!(load_balancer.id, Some("ab".parse().unwrap()));
+			assert_eq!(load_balancer.nonce, Some(8));
+			let config = Config::parse_and_merge([
+				std::ffi::OsString::from("moq-relay"),
+				path.into(),
+				"--listen-quic-lb-id".into(),
+				"ee".into(),
+			])
+			.expect("CLI overrides the same nested config field");
+			let load_balancer = config.listen.lb;
+			assert_eq!(load_balancer.id, Some("ee".parse().unwrap()));
+			assert_eq!(load_balancer.nonce, Some(8));
 		}
 	}
 }

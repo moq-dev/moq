@@ -36,7 +36,7 @@ async fn wire_sources(io_uring: bool) {
 	config.stats.enabled = true;
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
 	config.stats.interval = 3600;
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some((Duration::ZERO).into());
 	if io_uring {
 		config.runtime.workers = Some(1);
 		config.runtime.pin = false;

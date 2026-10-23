@@ -95,6 +95,11 @@ Spell it out as `CongestionControl.none` when assigning to `QuicConfig.congestio
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
 Set `QuicConfig.keylog` to `true` as well to capture them; without `SSLKEYLOGFILE` the client or server refuses to build.
 
+The boolean opt-in remains unchanged. Native QUIC captures `SSLKEYLOGFILE` when
+configuration is adapted, creates new Unix logs with mode 0600, and refuses an
+existing group/other-accessible file (for example mode 0644) without changing it.
+Make an existing log private before enabling key logging.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.groupStart` and `groupEnd` are replaced by `ranges`, a list of `Subscription.Range` whose ends are a `Subscription.Anchor` (`.absolute(group:frame:)` or `.relative(groups:)`), and an optional `order`.

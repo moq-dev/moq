@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Lease scheduling is internal to the client ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+`lease::Due` and `Producer::{due, failed}` are private; drive authorization through
+`Client` or update the lease directly as an embedder. The standalone `tokio` feature
+is removed. Enable `client` for HTTP lease scheduling or `serve` for the server;
+`Key::from_file_async` remains available with either.
+
 ### `Client::connect` has no timeout of its own (#5765)
 
 `Client::connect` waits on the auth server for as long as its caller does, and dropping the future drops the request.

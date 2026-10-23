@@ -106,7 +106,7 @@ fn bind_workers(
 /// Pinning is off throughout: a CI container may restrict which cores it may run
 /// on, and none of these tests are about placement.
 fn config(count: u16) -> worker::Config {
-	worker::Config::new(count).with_pin(false)
+	worker::Config::new(count)
 }
 
 /// Workers that outlive their owner are a leak with teeth: the threads keep
@@ -156,7 +156,7 @@ async fn stopping_the_group_closes_its_sessions() {
 			let mut listener = server.listen().await.unwrap();
 			while let Some(request) = listener.accept().await {
 				tokio::spawn(async move {
-					let (_session, _driver) = request.ok().await.unwrap();
+					let _session = request.ok().await.unwrap();
 					std::future::pending::<()>().await;
 				});
 			}
@@ -165,16 +165,15 @@ async fn stopping_the_group_closes_its_sessions() {
 
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.fingerprint = fingerprints;
-	connect.once = Some(true);
 	#[cfg(feature = "websocket")]
 	{
 		connect.websocket.enabled = Some(false);
 	}
 	// Far past the wait below, so only a close on the wire can end the session.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Some(std::time::Duration::from_secs(600));
+	quic.idle_timeout = Some((std::time::Duration::from_secs(600)).into());
 	quic.keep_alive = None;
-	let client = connect.init(quic).unwrap();
+	let client = connect.init(quic).unwrap().with_reconnect(false);
 	let url: url::Url = format!("https://{addr}/").parse().unwrap();
 	let session = client.connect(url).established().await.expect("connect");
 
@@ -787,7 +786,7 @@ async fn rotated_identity_reaches_every_worker() {
 				let send = send.clone();
 				let certificates = certificates.clone();
 				tokio::spawn(async move {
-					let (session, _driver) = request.ok().await.unwrap();
+					let session = request.ok().await.unwrap();
 					send.send((index, certificates.fingerprints())).unwrap();
 					let _ = session.closed().await;
 				});
@@ -817,12 +816,11 @@ async fn rotated_identity_reaches_every_worker() {
 				// Fresh client endpoints make independent handshakes, without session resumption.
 				let mut config = moq_tokio::connect::Config::default();
 				config.tls.fingerprint = expected.clone();
-				config.once = Some(true);
 				#[cfg(feature = "websocket")]
 				{
 					config.websocket.enabled = Some(false);
 				}
-				let client = config.init(Default::default()).unwrap();
+				let client = config.init(Default::default()).unwrap().with_reconnect(false);
 				let url: url::Url = format!("https://{addr}/").parse().unwrap();
 				let session = client
 					.connect(url)

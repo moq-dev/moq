@@ -221,7 +221,7 @@ fn connect_config(settings: &ResolvedSettings) -> moq_tokio::connect::Config {
 	let mut config = moq_tokio::connect::Config::default();
 	config.version = settings.versions.clone();
 	config.tls.insecure = Some(settings.tls_disable_verify);
-	config.backoff.timeout = Some(std::time::Duration::ZERO);
+	config.backoff.timeout = Some((std::time::Duration::ZERO).into());
 	config
 }
 
@@ -236,7 +236,9 @@ fn connect(
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.keylog = Some(settings.quic_keylog);
+	quic.keylog = settings
+		.quic_keylog
+		.then(|| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
 	let client = config.init(quic)?.with_subscriber(origin);
 	let connection = client.connect(settings.url.clone());
 	Ok((client, connection, consumer))
@@ -2640,7 +2642,11 @@ mod session_tests {
 	#[test]
 	fn the_source_retries_without_a_budget() {
 		let config = super::connect_config(&unreachable());
-		assert_eq!(config.backoff.timeout, Some(Duration::ZERO), "zero is unlimited");
+		assert_eq!(
+			config.backoff.timeout,
+			Some((Duration::ZERO).into()),
+			"zero is unlimited"
+		);
 	}
 
 	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.
@@ -3357,7 +3363,7 @@ mod session_tests {
 								let admit = *admitting.lock().unwrap();
 								match admit {
 									Admit::Serve => {
-										if let Ok((session, _driver)) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
+										if let Ok(session) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
 											sessions.push(session);
 										}
 									}

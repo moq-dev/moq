@@ -21,14 +21,14 @@ pub(crate) enum Clock {
 	///
 	/// The host clock alongside bounds teardown, which must end however long
 	/// the test leaves its clock alone.
-	#[cfg(feature = "manual")]
+	#[cfg(feature = "_manual")]
 	Installed(moq_clock::Installed, Host),
 }
 
 /// How the worker waits for its next deadline while parked.
 pub(crate) enum Wait {
 	/// The deadline already passed: run another turn instead of parking.
-	#[cfg_attr(not(feature = "manual"), allow(dead_code))]
+	#[cfg_attr(not(feature = "_manual"), allow(dead_code))]
 	Elapsed,
 	/// Park until a completion or a wake, with no timeout.
 	Forever,
@@ -39,7 +39,7 @@ pub(crate) enum Wait {
 impl Clock {
 	/// The clock installed on the current tokio runtime, or else the host's.
 	pub fn new() -> Self {
-		#[cfg(feature = "manual")]
+		#[cfg(feature = "_manual")]
 		if let Some(clock) = moq_clock::Installed::current() {
 			return Self::Installed(clock, Host::calibrate());
 		}
@@ -50,7 +50,7 @@ impl Clock {
 	pub fn now(&self) -> Instant {
 		match self {
 			Self::Host(host) => host.now(),
-			#[cfg(feature = "manual")]
+			#[cfg(feature = "_manual")]
 			Self::Installed(clock, _) => clock.now(),
 		}
 	}
@@ -60,7 +60,7 @@ impl Clock {
 	pub fn host_now(&self) -> Instant {
 		match self {
 			Self::Host(host) => host.now(),
-			#[cfg(feature = "manual")]
+			#[cfg(feature = "_manual")]
 			Self::Installed(_, host) => host.now(),
 		}
 	}
@@ -73,7 +73,7 @@ impl Clock {
 				let _ = (alarm, cx);
 				deadline.map_or(Wait::Forever, |at| Wait::Until(host.monotonic(at)))
 			}
-			#[cfg(feature = "manual")]
+			#[cfg(feature = "_manual")]
 			Self::Installed(clock, _) => {
 				use std::future::Future;
 
@@ -160,7 +160,7 @@ mod tests {
 
 	/// The host's time keeps passing while a manual clock stands still, so the
 	/// teardown bound it measures expires.
-	#[cfg(feature = "manual")]
+	#[cfg(feature = "_manual")]
 	#[test]
 	fn host_time_passes_on_a_standing_manual_clock() {
 		let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();

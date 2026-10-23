@@ -85,13 +85,9 @@ pub struct Config {
 	/// churn doesn't unannounce and re-announce it across the mesh; one that
 	/// returns after it announces under a new epoch. Only applies at `depth` 1
 	/// or more. See [`moq_stats::produce::Config::linger`].
-	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_option")]
-	pub linger: Option<Duration>,
-
 	#[usage(long = "stats-linger", env = "MOQ_STATS_LINGER", setting = "stats.linger")]
-	#[serde(default, rename = "__cli_linger", skip_serializing_if = "Option::is_none")]
-	pub(crate) linger_arg: Option<crate::duration::Duration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub linger: Option<moq_tokio::cli::Duration>,
 }
 
 impl Default for Config {
@@ -103,7 +99,6 @@ impl Default for Config {
 			node: None,
 			depth: 0,
 			linger: None,
-			linger_arg: None,
 		}
 	}
 }
@@ -111,7 +106,7 @@ impl Default for Config {
 impl Config {
 	/// The linger after command-line overrides; `None` keeps the producer's default.
 	pub(crate) fn linger(&self) -> Option<Duration> {
-		self.linger_arg.map(crate::duration::Duration::into_std).or(self.linger)
+		self.linger.map(Into::into)
 	}
 
 	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.

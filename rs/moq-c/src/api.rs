@@ -1277,16 +1277,14 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.websocket_delay_us = micros(websocket.delay);
 		dst.has_websocket_delay = true;
 
-		dst.backoff_initial_us = micros(config.connect.backoff.initial.unwrap());
+		dst.backoff_initial_us = micros(config.connect.backoff.initial());
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier;
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_us = micros(config.connect.backoff.max.unwrap());
+		dst.backoff_max_us = micros(config.connect.backoff.max());
 		dst.has_backoff_max = true;
-		if let Some(timeout) = config.connect.backoff.timeout {
-			dst.backoff_timeout_us = micros(timeout);
-			dst.has_backoff_timeout = true;
-		}
+		dst.backoff_timeout_us = micros(config.connect.backoff.timeout());
+		dst.has_backoff_timeout = true;
 
 		let quic = config.quic.resolve();
 		dst.quic_max_streams = quic.max_streams;
@@ -1557,7 +1555,9 @@ unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, 
 	listen.tls.generate = unsafe { ffi::parse_strings(config.tls_generate, config.tls_generate_len)? };
 
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.keylog = Some(config.quic_keylog);
+	quic.keylog = config
+		.quic_keylog
+		.then(|| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
 	listen.init(quic).map_err(|err| Error::InvalidConfig(err.to_string()))
 }
 

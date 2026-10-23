@@ -154,7 +154,7 @@ impl<T> ProducerWeak<T> {
 	}
 
 	/// Poll for channel closure, registering the waiter if still open.
-	#[cfg_attr(feature = "sim", track_caller)]
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
@@ -174,7 +174,7 @@ impl<T> ProducerWeak<T> {
 
 	/// Poll-based variant of [`Self::unused`]: `Ready(Ok(()))` when no consumers
 	/// remain, [`Closed`] if the channel closed first, else `Pending`.
-	#[cfg_attr(feature = "sim", track_caller)]
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_unused(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
 		// Closure is checked first, matching `Producer::poll_unused`: a closed channel
 		// with no consumers resolves `Closed` from either handle.
@@ -215,7 +215,7 @@ impl<T> ProducerWeak<T> {
 
 	/// Poll-based variant of [`Self::used`]: `Ready(Ok(()))` once a consumer
 	/// exists, [`Closed`] if the channel closed first, else `Pending`.
-	#[cfg_attr(feature = "sim", track_caller)]
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_used(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
 		// Closure is checked first, matching `Producer::poll_used`.
 		let mut state = self.state.lock();
@@ -280,7 +280,7 @@ impl<T> ConsumerWeak<T> {
 	/// Available here so a watcher can register for changes without joining the
 	/// consumer count, which is what [`Producer::unused`](crate::Producer::unused)
 	/// keys off.
-	#[cfg_attr(feature = "sim", track_caller)]
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
@@ -313,7 +313,7 @@ impl<T> ConsumerWeak<T> {
 	}
 
 	/// Poll for channel closure, registering the waiter if still open.
-	#[cfg_attr(feature = "sim", track_caller)]
+	#[cfg_attr(feature = "_sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {

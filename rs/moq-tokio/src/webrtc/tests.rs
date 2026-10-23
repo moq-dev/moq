@@ -53,7 +53,7 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 		.init()
 		.unwrap()
 		.with_subscriber(subscribed);
-	let ((_server, _driver), _client) = tokio::time::timeout(TIMEOUT, async {
+	let (_server, _client) = tokio::time::timeout(TIMEOUT, async {
 		tokio::join!(server, async { client.connect_webrtc(offerer).await.unwrap() })
 	})
 	.await

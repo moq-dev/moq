@@ -27,7 +27,7 @@ fn dial_template() -> (moq_tokio::connect::Config, moq_tokio::quic::Config) {
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.insecure = Some(true);
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Some(BARE_IDLE);
+	quic.idle_timeout = Some((BARE_IDLE).into());
 	(connect, quic)
 }
 

@@ -151,7 +151,7 @@ pub struct ResolvedSettings {
 pub(super) fn connect_config(settings: &ResolvedSettings) -> moq_tokio::connect::Config {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(settings.tls_disable_verify);
-	config.backoff.timeout = Some(std::time::Duration::ZERO);
+	config.backoff.timeout = Some((std::time::Duration::ZERO).into());
 	config
 }
 
@@ -161,12 +161,14 @@ pub(super) fn quic_config(settings: &ResolvedSettings) -> moq_tokio::quic::Confi
 	// The properties are optional and the config fields are not: an unset property
 	// leaves the library default rather than overriding it with one of its own.
 	if let Some(idle_timeout) = settings.quic_idle_timeout {
-		config.idle_timeout = Some(idle_timeout);
+		config.idle_timeout = Some((idle_timeout).into());
 	}
 	if let Some(keep_alive) = settings.quic_keep_alive {
-		config.keep_alive = Some(keep_alive);
+		config.keep_alive = Some((keep_alive).into());
 	}
-	config.keylog = Some(settings.quic_keylog);
+	config.keylog = settings
+		.quic_keylog
+		.then(|| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
 	config
 }
 

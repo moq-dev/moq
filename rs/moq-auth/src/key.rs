@@ -342,7 +342,7 @@ impl Key {
 	}
 
 	/// Async version of [`from_file`](Self::from_file), using `tokio::fs`.
-	#[cfg(feature = "tokio")]
+	#[cfg(any(feature = "client", feature = "serve"))]
 	pub async fn from_file_async<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
 		let contents = tokio::fs::read_to_string(path).await?;
 		Self::from_str(&contents)

@@ -50,10 +50,4 @@ impl Config {
 	pub fn new(count: u16) -> Self {
 		Self { count, pin: false }
 	}
-
-	/// Whether to pin each worker to a core.
-	pub fn with_pin(mut self, pin: bool) -> Self {
-		self.pin = pin;
-		self
-	}
 }

@@ -120,7 +120,7 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 		.await
 		.expect("accept timeout")
 		.expect("no incoming connection");
-	let (session, _driver) = request
+	let session = request
 		.with_publisher(&pub_origin)
 		.ok()
 		.await

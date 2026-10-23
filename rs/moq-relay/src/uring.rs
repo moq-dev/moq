@@ -139,7 +139,6 @@ impl Workers {
 						&& listen.tls.generate.is_empty()
 						&& listen.tls.root.is_empty()
 						&& listen.tls.identity.is_none()
-						&& listen.tls.resolver.is_none()
 						&& listen.tls.peers.is_none(),
 					"a shared TLS policy cannot be combined with listen.tls settings"
 				);
@@ -153,10 +152,10 @@ impl Workers {
 		// beats starting and quietly behaving differently from what the
 		// operator configured, which is the whole failure mode this mode is
 		// most likely to produce.
-		if listen.load_balancer().is_some() {
+		if listen.lb.id.is_some() {
 			anyhow::bail!(
 				"io_uring workers issue shard-steered connection ids and cannot also carry a \
-				 QUIC-LB server id (listen.lb_id)"
+				 QUIC-LB server id (listen.lb.id)"
 			);
 		}
 		// One resolution for the whole group, so a DNS answer that rotates
@@ -208,9 +207,9 @@ impl Workers {
 			.collect();
 		let quic = quic.resolve();
 		let mut tls = tls.config(alpn)?;
-		if quic.keylog {
+		if let Some(path) = &quic.keylog {
 			let tls = Arc::make_mut(&mut tls);
-			tls.key_log = Arc::new(rustls::KeyLogFile::new());
+			tls.key_log = Arc::new(moq_tokio::tls::KeyLog::open(path)?);
 		}
 		let mut server = moq_uring::quic::server::Config::new(tls);
 		server.transport = transport(&quic)?;
@@ -984,13 +983,11 @@ mod tests {
 	/// instead of binding and logging nothing.
 	#[test]
 	#[allow(clippy::field_reassign_with_default)]
-	fn bind_refuses_a_keylog_without_sslkeylogfile() {
-		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+	fn bind_refuses_an_empty_keylog_path() {
 		let mut server = moq_tokio::server::Config::default();
-		server.quic.keylog = Some(true);
-		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
-			.expect_err("a keylog without SSLKEYLOGFILE must be refused");
+		server.quic.keylog = Some(std::path::PathBuf::new());
+		let err =
+			Workers::bind(server, moq_tokio::worker::Config::new(1)).expect_err("an empty keylog path must be refused");
 		assert!(
 			matches!(err.downcast_ref(), Some(moq_tokio::Error::KeylogUnset)),
 			"{err:#}"
@@ -1054,7 +1051,7 @@ mod tests {
 		config.runtime.workers = Some(1);
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
-		config.drain_timeout = window;
+		config.drain_timeout = Some(window.into());
 		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let port = relay.addr().unwrap().port();
 		let mut admissions = relay.admissions().unwrap();
@@ -1063,7 +1060,7 @@ mod tests {
 
 		let mut client = moq_tokio::connect::Config::default();
 		client.tls.insecure = Some(true);
-		client.once = Some(true);
+
 		client.bind = Some("127.0.0.1:0".parse().unwrap());
 		let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().unwrap();
 		let client = client.init(Default::default()).unwrap();
@@ -1108,11 +1105,11 @@ mod tests {
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.cert = vec![cert_path];
 		config.listen.tls.key = vec![key_path];
-		config.listen.timeout = Some(timeout);
+		config.listen.timeout = Some(timeout.into());
 		config.runtime.workers = Some(1);
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
-		config.drain_timeout = std::time::Duration::from_millis(100);
+		config.drain_timeout = Some(std::time::Duration::from_millis(100).into());
 		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let port = relay.addr().unwrap().port();
 		let mut admissions = relay.admissions().unwrap();
@@ -1121,7 +1118,7 @@ mod tests {
 
 		let mut client = moq_tokio::connect::Config::default();
 		client.tls.insecure = Some(true);
-		client.once = Some(true);
+
 		client.bind = Some("127.0.0.1:0".parse().unwrap());
 		let url: url::Url = format!("moql://127.0.0.1:{port}/deadline").parse().unwrap();
 		let client = client.init(Default::default()).unwrap();
