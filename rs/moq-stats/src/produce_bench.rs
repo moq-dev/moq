@@ -74,9 +74,10 @@ impl Driver {
 	/// it. Keep the returned subscriber: dropping it lets a tick reclaim the
 	/// track.
 	pub fn hold_presence(&mut self, label: &str) -> track::Subscriber {
+		let stamp = self.drain.stamp(self.now);
 		let group = self.drain.groups.get_mut("").expect("the depth 0 broadcast");
 		let label = PathOwned::from(label.to_string());
-		group.adopt_presence(&self.drain.report, label.clone(), PendingPair::default(), self.now);
+		group.adopt_presence(&self.drain.report, label.clone(), PendingPair::default(), stamp);
 		group.presence[&label].pair.plain.track.subscribe(None)
 	}
 
@@ -84,13 +85,14 @@ impl Driver {
 	/// [`Self::hold_presence`].
 	pub fn hold_prefix(&mut self, path: &str) -> track::Subscriber {
 		let tick = self.drain.tick;
+		let stamp = self.drain.stamp(self.now);
 		let group = self.drain.groups.get_mut("").expect("the depth 0 broadcast");
 		group.adopt_prefix(
 			&self.drain.report,
 			PathOwned::from(path.to_string()),
 			PendingPair::default(),
 			tick,
-			self.now,
+			stamp,
 		);
 		group.prefixes[path].pair.plain.track.subscribe(None)
 	}
