@@ -322,7 +322,10 @@ impl Config {
 	}
 }
 
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 #[derive(usage_rs::Config)]
 struct Settings {
 	#[usage(env = "MOQ_BENCH_NAME", cli("--name"))]

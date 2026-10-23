@@ -47,3 +47,6 @@ harness = false
 name = "producer_tick"
 harness = false
 required-features = ["bench"]
+
+[lints]
+workspace = true

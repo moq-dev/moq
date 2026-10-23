@@ -85,7 +85,7 @@ pub const MOQ_ERROR_UNSUPPORTED_CATALOG: i32 = -43;
 
 /// Whether a protocol code is from the session or stream registry.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_error_scope {
 	/// A session close code.
@@ -97,7 +97,7 @@ pub enum moq_error_scope {
 /// A recognized protocol kind. Pair with [`moq_error_scope`]: `CANCEL` is 0 on a session
 /// and 1 on a stream. `APP` and `UNKNOWN` keep the numeric code in [`moq_protocol_error`].
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_protocol_kind {
 	/// Cancel.
@@ -156,7 +156,6 @@ pub enum moq_protocol_kind {
 /// Filled by [`crate::moq_error_protocol`] after a call returned a negative code. Do not parse
 /// [`crate::moq_error`] for this; that string is diagnostics only.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 pub struct moq_protocol_error {
 	/// [`moq_error_scope`] discriminant.

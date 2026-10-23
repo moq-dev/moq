@@ -736,6 +736,15 @@ pub struct Config {
 	)]
 	pub id: Option<u64>,
 
+	/// Longest hop path accepted or forwarded, from 1 to 32 (default 32).
+	#[usage(
+		name = "cluster-max-hops",
+		long = "cluster-max-hops",
+		env = "MOQ_CLUSTER_MAX_HOPS",
+		setting = "cluster.max_hops"
+	)]
+	pub max_hops: Option<usize>,
+
 	/// Connect to one or more other cluster nodes. Each entry is a full URL, e.g.
 	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`, `egress`,
 	/// `token`, and `upstream`; see [`Peer`]. A bare host or `host:port` is refused; pass the
@@ -1220,6 +1229,9 @@ impl Cluster {
 		peer.quic.validate()?;
 		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
+		if let Some(max) = config.max_hops {
+			origin_config.max_hops = origin::HopLimit::new(max).context("--cluster-max-hops must be from 1 to 32")?;
+		}
 		if let Some(cache) = cache {
 			origin_config.pool = cache.pool;
 			origin_config.cache_duration = cache.duration;
@@ -2331,7 +2343,7 @@ fn remote_status(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
@@ -3001,7 +3013,7 @@ mod tests {
 
 		#[derive(Debug, serde::Deserialize)]
 		struct Doc {
-			#[allow(dead_code)]
+			#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 			connect: Vec<Peer>,
 		}
 		let err = toml::from_str::<Doc>("connect = [{ url = \"https://peer.example/\", cost = \"cheap\" }]")
@@ -3165,6 +3177,31 @@ mod tests {
 			.err()
 			.expect("should error");
 			assert!(format!("{err}").contains("--cluster-id"), "got: {err}");
+		}
+	}
+
+	#[tokio::test]
+	async fn cluster_hop_limit_reaches_the_shared_origin() {
+		assert_eq!(
+			new_cluster(Config::default()).unwrap().origin.config().max_hops.get(),
+			32
+		);
+		for cap in [1, 6, 32] {
+			let cluster = new_cluster(Config {
+				max_hops: Some(cap),
+				..Default::default()
+			})
+			.unwrap();
+			assert_eq!(cluster.origin.config().max_hops.get(), cap);
+		}
+		for cap in [0, 33, usize::MAX] {
+			let err = new_cluster(Config {
+				max_hops: Some(cap),
+				..Default::default()
+			})
+			.err()
+			.unwrap();
+			assert!(err.to_string().contains("--cluster-max-hops"), "{err}");
 		}
 	}
 
