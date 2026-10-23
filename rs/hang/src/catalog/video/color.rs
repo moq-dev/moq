@@ -32,7 +32,7 @@ pub struct Color {
 }
 
 /// The numeric range of the samples, as H.273's `VideoFullRangeFlag`.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Range {
 	/// Studio swing: 8-bit luma spans 16..235 and chroma 16..240.

@@ -54,14 +54,8 @@ pub enum Matrix {
 	Bt2020,
 }
 
-/// The numeric range of the samples.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Range {
-	/// Studio swing: 8-bit luma spans 16..235 and chroma 16..240.
-	Limited,
-	/// Full swing: every 8-bit code is used.
-	Full,
-}
+/// The numeric range of the samples, the same type the catalog's colour carries.
+pub use hang::catalog::Range;
 
 /// The chromaticities of the RGB primaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

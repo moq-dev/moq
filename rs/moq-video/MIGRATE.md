@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Capture publishes through `publish_capture` only
+
+`encode::Control`, `encode::Driver`, and `encode::Options` are gone.
+Set the encode fields directly on `encode::Capture` (`bitrate`, `codec`, `kind`, `bandwidth`) next to `capture`, and run it with `encode::publish_capture`; drop its future to stop the capture.
+There is no public keyframe request for a capture publish; a joining subscriber still gets one through the track's refresh.
+
+### `encode::Applied` is gone
+
+`encode::Applied`, `Encoder::applied`, and `Sink::applied` are private.
+The encoder logs the controls it applied for `Config::preset` at debug level when it opens.
+
+### External DMA-BUF construction is private
+
+`DmaBuf::new` and `DmaBufLayout` are private until an external producer needs them.
+`DmaBuf` surfaces from capture and decode are unchanged.
+
 ### `Control::cut` is not rate limited, and capture advertises refresh (#6048)
 
 `encode::Control::cut` no longer spaces keyframes 500 ms apart: every request forces one on the next frame, so frequent calls produce all-keyframe video.
