@@ -1039,21 +1039,26 @@ impl Link {
 		})
 	}
 
-	/// The token to present again once a [`retry`](Self::retry) delay passes, or `None`
-	/// when it is no longer wanted here, or the session is draining and its successor
-	/// presents it instead.
+	/// The token to present again once a [`retry`](Self::retry) delay passes.
+	///
+	/// # Errors
+	///
+	/// [`Error::GoingAway`] once the session is draining, so a successor presents it instead
+	/// and a handle of the session's own never reads it as the peer's clean close, or
+	/// [`Error::Cancel`] when it is no longer wanted here.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn reopen(&self, id: u64) -> Option<Bytes> {
+	pub(crate) fn reopen(&self, id: u64) -> Result<Bytes> {
 		self.with(|link| {
 			if !link.active() {
-				return None;
+				return Err(Error::GoingAway);
 			}
-			let slot = link.slots.get_mut(&id)?;
-			if slot.withdrawn || slot.ended.is_some() {
-				return None;
+			match link.slots.get_mut(&id) {
+				Some(slot) if !slot.withdrawn && slot.ended.is_none() => {
+					slot.streamed = true;
+					Ok(slot.token.clone())
+				}
+				_ => Err(Error::Cancel),
 			}
-			slot.streamed = true;
-			Some(slot.token.clone())
 		})
 	}
 
@@ -2550,7 +2555,7 @@ mod tests {
 			gate.poll_ready(&waiter).is_pending(),
 			"judged before the retry answered"
 		);
-		handle.reopen(id);
+		handle.reopen(id).unwrap();
 		handle.granted(id, Grant::all());
 		assert!(gate.poll_ready(&waiter).is_ready());
 		assert!(handle.within_grant(Direction::Publish, "room"));
@@ -2967,19 +2972,20 @@ mod tests {
 		draining.ended(id, Error::Session(SessionError::Unauthorized));
 		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
 
-		assert_eq!(successor.reopen(id).as_deref(), Some(b"jwt".as_slice()));
+		assert_eq!(successor.reopen(id).unwrap().as_ref(), b"jwt");
 		successor.granted(id, Grant::all());
 		assert_eq!(auth.grant().peek(), Some(Grant::all()));
 	}
 
-	/// A retry that wakes after this side sent a GOAWAY opens nothing: the successor presents it.
+	/// A retry that wakes after this side sent a GOAWAY opens nothing: a successor presents
+	/// it, and on a session's own handle the token ends as going away, not as a clean close.
 	#[test]
 	fn a_draining_session_presents_no_retry() {
 		let link = Link::new(true);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
 		let goaway = std::sync::Arc::new(goaway);
 		link.drain_with(goaway.clone());
-		let _auth = link.present(Bytes::from_static(b"jwt"), false).unwrap();
+		let auth = link.present(Bytes::from_static(b"jwt"), false).unwrap();
 		let id = opened(&link);
 		link.refused(id);
 		let busy = Error::Session(SessionError::TooManyRequests);
@@ -2987,7 +2993,13 @@ mod tests {
 
 		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
 		assert!(!link.active());
-		assert_eq!(link.reopen(id), None);
+		let err = link.reopen(id).unwrap_err();
+		assert!(matches!(err, Error::GoingAway), "{err:?}");
+		link.ended(id, err);
+		assert!(matches!(
+			Selector::Token(auth.id()).ended(&link.state().read()),
+			Some(Error::GoingAway)
+		));
 	}
 
 	/// A refusal that may pass is presented again after a doubling backoff, and settles nothing.
@@ -3001,12 +3013,12 @@ mod tests {
 		link.refused(id);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL));
 		assert!(auth.poll_answered(&kio::Waiter::noop()).is_pending());
-		assert_eq!(link.reopen(id).as_deref(), Some(b"jwt".as_slice()));
+		assert_eq!(link.reopen(id).unwrap().as_ref(), b"jwt");
 		link.refused(id);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL * 2));
 		assert_eq!(link.retry(id, &busy), None, "only a refusal retries");
 
-		link.reopen(id);
+		link.reopen(id).unwrap();
 		link.granted(id, Grant::all());
 		assert!(matches!(
 			auth.poll_answered(&kio::Waiter::noop()),

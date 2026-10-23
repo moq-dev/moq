@@ -72,6 +72,7 @@ cases!(
 	nothing_outside_the_grant_reaches_the_peer,
 	a_shared_handle_presents_its_token_on_every_session,
 	a_handle_backs_one_active_session,
+	a_token_queued_before_our_goaway_rides_only_the_successor,
 	a_broadcast_received_from_the_peer_is_not_ours_to_check,
 );
 
@@ -2017,6 +2018,50 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 			"the draining session opened a new stream"
 		);
 		drop(later);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A token queued while the session is active, but dequeued only after this side sent a
+/// GOAWAY, opens no request on the draining session: its successor presents it.
+async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'static str) {
+	within(async {
+		use futures::FutureExt;
+
+		let handle = auth::Handle::new();
+		let options = || Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_requests: true,
+			client_auth: Some(handle.clone()),
+			..Default::default()
+		};
+		let mut first = connect(options()).await;
+		let mut first_tokens = serve(first.requests.take().unwrap(), |_| Some(Grant::all()));
+		let (setup, _setup) = first_tokens.next().await.expect("the setup token");
+		assert!(setup.is_empty());
+
+		// Its first poll queues the token; the driver runs only once this side drains.
+		let mut adding = Box::pin(handle.add("late"));
+		assert!(adding.as_mut().now_or_never().is_none());
+		first.client.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			first_tokens.next().now_or_never().is_none(),
+			"the draining session presented a new token"
+		);
+
+		let mut second = connect(options()).await;
+		let mut second_tokens = serve(second.requests.take().unwrap(), |_| Some(Grant::all()));
+		let mut tokens = vec![
+			second_tokens.next().await.expect("a token").0,
+			second_tokens.next().await.expect("another token").0,
+		];
+		tokens.sort();
+		assert_eq!(tokens, [b"".to_vec(), b"late".to_vec()]);
+		let (_late, answer) = adding.await.expect("granted on the successor");
+		assert_eq!(answer, auth::Answer::Granted);
 	})
 	.await
 	.expect("timed out");

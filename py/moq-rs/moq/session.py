@@ -155,7 +155,8 @@ class Auth:
         """Wait for the grant to differ from the one last reported, or held when this
         handle was made, returning it.
 
-        Raises once nothing will change it again, because the session ended."""
+        Raises once nothing will change it again: a client's connection or a server's
+        session ended. A reconnect is not an end."""
         return Grant._from_ffi(await self._inner.grant_changed())
 
     async def add(self, token: str) -> AuthToken:
@@ -178,7 +179,8 @@ class AuthToken:
         return Grant._from_ffi(self._inner.grant())
 
     async def closed(self) -> None:
-        """Wait for the token to end, raising the peer's revocation or the session's close."""
+        """Wait for the token to end, raising the peer's revocation or the end of a client's
+        connection or a server's session. A reconnect does not end it."""
         await self._inner.closed()
 
     def cancel(self) -> None:

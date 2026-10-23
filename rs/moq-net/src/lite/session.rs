@@ -699,8 +699,9 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 						return Poll::Ready(Error::Cancel);
 					}
 					ready!(deadline.poll(waiter));
-					let Some(token) = self.handle.reopen(self.id) else {
-						return Poll::Ready(Error::Cancel);
+					let token = match self.handle.reopen(self.id) {
+						Ok(token) => token,
+						Err(err) => return Poll::Ready(err),
 					};
 					self.state = PresentState::Open { token, answered: true };
 				}

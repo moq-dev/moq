@@ -94,7 +94,8 @@ impl MoqAuth {
 	/// Calls on one handle share what it last reported; an independent watcher takes its own
 	/// handle from [`MoqSession::auth`](crate::session::MoqSession::auth).
 	///
-	/// Errors once nothing will change it again, because the session ended.
+	/// Errors once nothing will change it again: a client's connection or a server's session
+	/// ended. A reconnect is not an end.
 	pub async fn grant_changed(&self) -> Result<Option<MoqGrant>, MoqError> {
 		self.changed
 			.run(|mut watch| async move { Ok(watch.changed().await?.map(Into::into)) })
@@ -145,7 +146,8 @@ impl MoqAuthToken {
 	}
 
 	/// Wait for the token to end: `Ok` when the peer closed it without an error, the peer's
-	/// revocation as [`MoqError::Protocol`], or the session's close.
+	/// revocation as [`MoqError::Protocol`], or the end of a client's connection or a server's
+	/// session as an error. A reconnect does not end it.
 	pub async fn closed(&self) -> Result<(), MoqError> {
 		self.token
 			.run(|token| async move {

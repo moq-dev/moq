@@ -253,7 +253,6 @@ pub(super) fn peer_grant(
 /// says it negotiated the extension. Never returns: a session without it just fails
 /// the tokens as unsupported.
 #[cfg(feature = "async")]
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_present<S>(
 	runtime: crate::time::Deadlines,
 	session: S,
@@ -261,7 +260,6 @@ pub(super) async fn run_present<S>(
 	handle: Link,
 	peer_setup: peer::PeerSetup,
 	version: Version,
-	going_away: crate::goaway::GoingAway,
 	stats: crate::stats::Session,
 ) -> Result<(), Error>
 where
@@ -295,14 +293,13 @@ where
 			version,
 			id,
 		};
-		let going_away = going_away.clone();
 		let violation = violation.clone();
 		tasks.push(async move {
-			// After a GOAWAY the peer must not see new requests. AUTH_ERROR carries no code
-			// that may pass, so unlike moq-lite a refusal is never presented again.
-			let err = match going_away.is_set() {
-				true => Error::GoingAway,
-				false => present.run(token).await,
+			// After a GOAWAY, sent or received, the peer must not see new requests. AUTH_ERROR
+			// carries no code that may pass, so unlike moq-lite a refusal is never presented again.
+			let err = match present.handle.active() {
+				true => present.run(token).await,
+				false => Error::GoingAway,
 			};
 			let err = crate::auth::protocol_error(err);
 			if matches!(err, Error::ProtocolViolation) {

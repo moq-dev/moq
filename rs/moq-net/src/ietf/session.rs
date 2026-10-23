@@ -473,7 +473,6 @@ where
 					auth.clone(),
 					peer_setup.clone(),
 					version,
-					goaway.going_away.clone(),
 					stats.clone(),
 				);
 				// Only a side that offered MoQ Auth answers the peer's Auth requests: one that

@@ -601,10 +601,16 @@ impl Drop for Shared {
 		};
 		// No session will present the tokens again, so they end with the loop.
 		let aborted = self.closed.lock().unwrap().clone();
-		self.auth.abort(match (aborted, failed) {
+		let err = match (aborted, failed) {
 			(Some(err), _) | (None, Some(Error::MoqNet(err))) => err,
 			(None, Some(err)) if err.is_auth() => moq_net::Error::Unauthorized,
-			_ => moq_net::Error::Cancel,
+			(None, Some(err)) => moq_net::Error::Transport(err.to_string()),
+			(None, None) => moq_net::Error::Closed,
+		};
+		self.auth.abort(match err {
+			// A token reads `Cancel` as its peer ending the grant cleanly.
+			moq_net::Error::Cancel => moq_net::Error::Closed,
+			err => err,
 		});
 	}
 }
@@ -1326,8 +1332,10 @@ impl Connection {
 
 	/// The auth handle every session of this connection is built on: its tokens are
 	/// presented on each reconnect, so a route naming one keeps it, and its grant follows
-	/// the live session. It ends with the connection: [`Error::MoqNet`]'s error, or
-	/// [`moq_net::Error::Unauthorized`] for a rejection, or [`moq_net::Error::Cancel`].
+	/// the live session. It ends with the connection: the abort's or [`Error::MoqNet`]'s
+	/// error, [`moq_net::Error::Unauthorized`] for a rejection, [`moq_net::Error::Transport`]
+	/// for any other failure, or [`moq_net::Error::Closed`] for a stop. Never
+	/// [`moq_net::Error::Cancel`], which a token reads as its peer ending the grant cleanly.
 	/// Aborting it ends the connection at its next reconnect, with the abort's error.
 	pub fn auth(&self) -> moq_net::auth::Handle {
 		self.auth.clone()
@@ -2576,8 +2584,9 @@ mod tests {
 		}
 		drop(connection);
 		let token = token.unwrap();
+		// Not `Cancel`, which reads as the peer ending the grant cleanly.
 		let closed = tokio::time::timeout(WAIT, token.closed()).await.unwrap();
-		assert!(matches!(closed, moq_net::Error::Cancel), "{closed:?}");
+		assert!(matches!(closed, moq_net::Error::Closed), "{closed:?}");
 	}
 
 	/// Ending the connection's auth handle ends the loop at its next reconnect, rather than
