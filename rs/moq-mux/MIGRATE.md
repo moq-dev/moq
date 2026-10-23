@@ -8,8 +8,9 @@ How to update your code for each breaking change, newest first.
 
 `ts::Import` assembles H.264/H.265 across PES boundaries instead of flushing each PES.
 A PES PTS stamps the AU starting there once. Multiple AUs in one PES need anchored
-POC plus declared proportional timing: AVC's TS timing descriptor and fixed-rate SPS
-VUI, or HEVC's proportional-POC VUI. Configure the encoder/muxer to declare that
+POC plus declared proportional timing: AVC's TS timing descriptor needs both
+`fixed_frame_rate_flag` and `temporal_poc_flag`, alongside fixed-rate SPS VUI;
+HEVC needs VUI's `vui_poc_proportional_to_timing_flag`. Configure the encoder/muxer to declare that
 clock, or supply each AU's PTS in its own PES. Missing timing now ends the import
 instead of repeating a timestamp. Packet loss discards the unconfirmed AU tail;
 codec-proven completed AUs remain published. Call `finish()` to drain a clean tail.
