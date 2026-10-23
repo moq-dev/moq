@@ -1322,7 +1322,10 @@ impl Horizon {
 		let horizon = Self { max_hops: None, ..self };
 		match horizon.exclude {
 			Some(peer) if routes.covering(path).any(|entry| !entry.visible_to(Some(peer))) => horizon,
-			_ => Self { exclude: None, ..horizon },
+			_ => Self {
+				exclude: None,
+				..horizon
+			},
 		}
 	}
 }
@@ -4350,12 +4353,10 @@ impl RouteNode {
 					if let Ok(mut selected) = watch.write() {
 						let change = match routes {
 							Some((routes, hold)) => {
-								let best = routes.best_route(
-									&selected.path,
-									Horizon::default(),
-									&HashSet::new(),
-									|entry| entry.via == selected.via,
-								);
+								let best =
+									routes.best_route(&selected.path, Horizon::default(), &HashSet::new(), |entry| {
+										entry.via == selected.via
+									});
 								selected.change(best, hold)
 							}
 							None => selected.current.is_some().then_some(Change::End),
@@ -5240,27 +5241,17 @@ impl Dynamic {
 		if table.closed {
 			return None;
 		}
-		let entry = table.best_route(
-			path,
-			Horizon::default(),
-			&HashSet::new(),
-			|entry| {
-				entry
-					.server
-					.as_ref()
-					.is_some_and(|server| server.same_channel(&self.state))
-			},
-		)?;
+		let entry = table.best_route(path, Horizon::default(), &HashSet::new(), |entry| {
+			entry
+				.server
+				.as_ref()
+				.is_some_and(|server| server.same_channel(&self.state))
+		})?;
 		let via = entry.via;
 		let instance = entry.instance();
 		let prefix = entry.prefix.clone();
 		let active = table
-			.best_route(
-				path,
-				Horizon::default(),
-				&HashSet::new(),
-				|entry| entry.via == via,
-			)
+			.best_route(path, Horizon::default(), &HashSet::new(), |entry| entry.via == via)
 			.is_some_and(|entry| entry.instance() == instance);
 		let producer = kio::Producer::new(Selected {
 			path: path.to_owned(),

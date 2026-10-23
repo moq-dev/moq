@@ -728,8 +728,12 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		let route = |first: u64, count: u64, cost: u64| {
 			origin::Route::default()
 				.with_hops(
-					moq_net::Hops::try_from((first..first + count).map(|id| Hop::new(id).unwrap()).collect::<Vec<_>>())
-						.unwrap(),
+					moq_net::Hops::try_from(
+						(first..first + count)
+							.map(|id| Hop::new(id).unwrap())
+							.collect::<Vec<_>>(),
+					)
+					.unwrap(),
 				)
 				.with_cost(origin::Cost::new(cost))
 		};
