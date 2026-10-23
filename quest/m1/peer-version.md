@@ -36,7 +36,11 @@ Decided with the maintainer on 2026-10-22:
     this lands, defined in `drafts/draft-lcurley-moq-lite.md` in the current
     wip revision. Receivers already ignore unknown parameters (the draft's
     Parameters section), so it is additive on every lite version with a SETUP
-    message and needs no new version. Send it on all of them.
+    message and needs no new version. Send it on all of them. Lite-01 to 04,
+    which have no Setup Stream, carry none and need none: two peers that both
+    have this feature negotiate lite-05 or later, so a session lands on an
+    older version only when one end predates it. An absent value therefore reads as "predates
+    this", which is itself the rollout count.
   - The value is UTF-8; a malformed one is a protocol violation. SETUP's
     existing length cap bounds it.
 - **Format: User-Agent product tokens.** A space-separated `name/version`
