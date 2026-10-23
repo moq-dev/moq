@@ -102,6 +102,32 @@ test("an unsolicited announcement lands", async () => {
 });
 
 /**
+ * Drafts 17+ withdraw a PUBLISH_NAMESPACE by resetting it, so the reset is a routine end:
+ * the handler retracts and returns rather than failing the bidi stream.
+ */
+test("a reset PUBLISH_NAMESPACE is withdrawn without an error", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+
+	const announced = subscriber.announced();
+	expect(await nextStream(pair.client)).toBeDefined();
+
+	const stream = await Stream.open(pair.server, { version: VERSION });
+	const handler = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("reset") }),
+		stream,
+	);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("reset"), kind: "announced" });
+
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream to reset");
+	peer.abort(new StreamError(StreamCode.Cancel, { message: "withdrawn" }));
+	await handler;
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("reset"), kind: "retracted" });
+});
+
+/**
  * A session without the Cluster extension names no publisher, so each connection stamps its
  * own random Hop ID in front of a 0: a publisher that reconnects reads as a new one, and the 0
  * keeps it ranked below identified routes.
