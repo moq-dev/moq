@@ -8,9 +8,7 @@ rs/AGENTS.md's typed-units rule.
 
 ## Plan
 
-Planned 2026-10-22 from the API audit
-([wrapper config names](/quest/m1/api-audit/wrapper-config.md) fixes the
-names in m1). Today Kotlin (`Durations.kt`), Dart (`durations.dart`), Go
+Planned 2026-10-22 from the API audit. Today Kotlin (`Durations.kt`), Dart (`durations.dart`), Go
 (`backoffMicros`), and Python (`timedelta`) each convert. First check that
 UniFFI's builtin `Duration` maps through the Go, C++, and Dart generator
 forks; if not, it waits on [the generator fork](/quest/m2/uniffi-fork.md).

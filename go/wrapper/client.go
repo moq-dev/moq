@@ -125,9 +125,15 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 		}
 		return &s
 	}
+	// The native side refuses zero streams and reads a null keylog as off, so
+	// Go's zero values map to null like the strings above.
 	var maxStreams *uint64
 	if c.QUIC.MaxStreams != 0 {
 		maxStreams = &c.QUIC.MaxStreams
+	}
+	var keylog *bool
+	if c.QUIC.Keylog {
+		keylog = &c.QUIC.Keylog
 	}
 	cfg := ffi.MoqClientConfig{
 		Bind:              str(c.Bind),
@@ -152,7 +158,7 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 			MtuDiscovery:      c.QUIC.MTUDiscovery,
 			CongestionControl: c.QUIC.CongestionControl,
 			Qlog:              str(c.QUIC.Qlog),
-			Keylog:            &c.QUIC.Keylog,
+			Keylog:            keylog,
 		},
 		Websocket: ffi.MoqWebSocketConfig{Enabled: c.WebSocket.Enabled, DelayUs: us("websocket delay", c.WebSocket.Delay)},
 		Once:      c.Once,

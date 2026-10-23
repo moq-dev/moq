@@ -1,0 +1,34 @@
+package moq
+
+import (
+	"reflect"
+	"testing"
+	"time"
+
+	ffi "moq.dev/moq-ffi/moq"
+)
+
+// Go's zero values mean "unset" to a caller, but an empty string, zero stream cap,
+// or zero duration means something else (or is refused) natively. Only nil and the
+// empty values map to the native null; an explicit zero duration passes through.
+func TestClientConfigFfiMapsZeroValuesToNativeDefaults(t *testing.T) {
+	got, err := ClientConfig{}.ffi()
+	if err != nil {
+		t.Fatalf("ClientConfig{}.ffi() failed: %v", err)
+	}
+	if !reflect.DeepEqual(got, ffi.MoqClientConfig{}) {
+		t.Errorf("ClientConfig{}.ffi() = %+v, want the native defaults", got)
+	}
+
+	got, err = ClientConfig{Timeout: ptr(time.Duration(0)), QUIC: QUICConfig{KeepAlive: ptr(time.Duration(0))}}.ffi()
+	if err != nil {
+		t.Fatalf("ffi() failed: %v", err)
+	}
+	if got.TimeoutUs == nil || *got.TimeoutUs != 0 || got.Quic.KeepAliveUs == nil || *got.Quic.KeepAliveUs != 0 {
+		t.Errorf("an explicit zero duration was dropped: timeout %v, keep-alive %v", got.TimeoutUs, got.Quic.KeepAliveUs)
+	}
+
+	if _, err := (ClientConfig{Race: ptr(-time.Millisecond)}).ffi(); err == nil {
+		t.Error("a negative race converted, want an error")
+	}
+}
