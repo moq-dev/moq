@@ -11,6 +11,11 @@ use `None` for ordinary certificate grants, `Some(serve::Link::Peer)` for peers,
 and `Some(serve::Link::Upstream)` for upstream peers. `Grant.peer` and
 `Grant.upstream` retain their existing JSON boolean contract.
 
+### `Key` and `KeySet` parse through `FromStr` (#6471)
+
+The inherent `Key::from_str` and `KeySet::from_str` are replaced by `impl FromStr`, with the same `Error`.
+Call `text.parse::<Key>()`, or bring `std::str::FromStr` into scope to keep calling `Key::from_str`.
+
 ### `Client::connect` has no timeout of its own (#5765)
 
 `Client::connect` waits on the auth server for as long as its caller does, and dropping the future drops the request.

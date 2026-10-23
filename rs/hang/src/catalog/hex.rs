@@ -31,6 +31,7 @@ impl<'de> DeserializeAs<'de, Bytes> for Hex {
 #[cfg(test)]
 mod test {
 	use crate::catalog::Catalog;
+	use std::str::FromStr;
 
 	// An avcC always starts with 0x01, so base64 encoding one starts with "AU": 'A' is a valid hex
 	// digit and 'U' is not. See https://github.com/moq-dev/moq/issues/2509.

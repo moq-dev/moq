@@ -867,8 +867,7 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true);
 
-	// The postMessage ring every page without cross-origin isolation plays from, following the
-	// shared delay the way the audio decoder drives the worklet.
+	// The audio ring, following the shared delay the way the audio decoder drives the worklet.
 	const RATE = 48_000;
 	const STEP = 20; // ms of audio inserted and rendered per tick, one Opus frame
 	const samples = (RATE * STEP) / 1000;

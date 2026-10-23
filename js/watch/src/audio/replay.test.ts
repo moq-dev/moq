@@ -34,7 +34,7 @@ async function underruns(trace: Arrival[], options: Options): Promise<number> {
 	return short;
 }
 
-describe.each(["shared", "post"] as const)("%s ring", (ring) => {
+describe("replay", () => {
 	// The consumer warns on every group it skips.
 	let warn: Mock<typeof console.warn>;
 	beforeEach(() => {
@@ -46,7 +46,7 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		expect(
 			await underruns(
 				paced(10, () => 30),
-				{ ring, rate: RATE, config: CONFIG, delay: Milli(100), duration: observed(10) },
+				{ rate: RATE, config: CONFIG, delay: Milli(100), duration: observed(10) },
 			),
 		).toBe(0);
 	});
@@ -55,11 +55,10 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		// Five frames held and flushed at once: 80 ms of arrival spread.
 		const trace = paced(10, (i) => 30 + (4 - (i % 5)) * 20);
 		expect(
-			await underruns(trace, { ring, rate: RATE, config: CONFIG, delay: Milli(40), duration: observed(10) }),
+			await underruns(trace, { rate: RATE, config: CONFIG, delay: Milli(40), duration: observed(10) }),
 		).toBeGreaterThan(50);
 		expect(
 			await underruns(trace, {
-				ring,
 				rate: RATE,
 				config: CONFIG,
 				delay: Milli(150),
@@ -75,7 +74,6 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		const frame = Math.ceil((20 / 1000) * (RATE / QUANTUM));
 		expect(
 			await underruns(trace, {
-				ring,
 				rate: RATE,
 				config: CONFIG,
 				delay: Milli(100),
@@ -92,7 +90,6 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 			.filter((_, i) => i !== 252);
 		expect(
 			await underruns(trace, {
-				ring,
 				rate: RATE,
 				config: CONFIG,
 				delay: Milli(100),
@@ -107,7 +104,6 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		for await (const { at, output } of replay(
 			paced(10, () => 30),
 			{
-				ring,
 				rate: RATE,
 				config: CONFIG,
 				delay: Milli(100),
@@ -122,11 +118,11 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 	});
 });
 
-describe.each(["shared", "post"] as const)("%s ring at auto", (ring) => {
+describe("replay at auto", () => {
 	/** The delay the replay resolved once `seconds` of {@link paced} frames played out. */
 	async function settled(seconds: number, lateness: (i: number) => number): Promise<number> {
 		let delay = 0;
-		const options: Options = { ring, rate: RATE, config: CONFIG, delay: "auto", duration: observed(seconds) };
+		const options: Options = { rate: RATE, config: CONFIG, delay: "auto", duration: observed(seconds) };
 		for await (const quantum of replay(paced(seconds, lateness), options)) delay = quantum.delay;
 		return delay;
 	}
@@ -140,13 +136,12 @@ describe.each(["shared", "post"] as const)("%s ring at auto", (ring) => {
 	});
 });
 
-describe.each(["shared", "post"] as const)("%s ingress diagnostics", (ring) => {
+describe("ingress diagnostics", () => {
 	it("keeps recorded arrival and lateness when delivery is held", async () => {
 		const trace = [0, 20, 40].map((timestamp) => ({ timestamp, at: timestamp + 1000, group: 0, duration: 20 }));
 		const run = async (decodeAfter?: number) => {
 			let window: Quantum["arrivals"] = [];
 			for await (const quantum of replay(trace, {
-				ring,
 				rate: RATE,
 				config: CONFIG,
 				delay: Milli(100),
@@ -170,7 +165,7 @@ describe.each(["shared", "post"] as const)("%s ingress diagnostics", (ring) => {
 	});
 });
 
-describe.each(["shared", "post"] as const)("%s recorded frame durations", (ring) => {
+describe("recorded frame durations", () => {
 	it("keeps missing packets out of the codec term even when most packets are absent", async () => {
 		const trace = Array.from({ length: 600 }, (_, i) => ({
 			at: i * 100,
@@ -180,7 +175,6 @@ describe.each(["shared", "post"] as const)("%s recorded frame durations", (ring)
 		}));
 		let delay = 0;
 		for await (const quantum of replay(trace, {
-			ring,
 			rate: RATE,
 			config: CONFIG,
 			delay: "auto",
@@ -199,7 +193,6 @@ describe.each(["shared", "post"] as const)("%s recorded frame durations", (ring)
 		}));
 		const targets: number[] = [];
 		for await (const quantum of replay(trace, {
-			ring,
 			rate: RATE,
 			config: CONFIG,
 			delay: "auto",
@@ -215,7 +208,6 @@ describe.each(["shared", "post"] as const)("%s recorded frame durations", (ring)
 		const trace = [{ at: 0, timestamp: 0, group: 0, duration: 20 }];
 		let heard = 0;
 		for await (const { output } of replay(trace, {
-			ring,
 			rate: RATE,
 			config: CONFIG,
 			delay: Milli(20),
@@ -230,7 +222,6 @@ it("replay refuses missing, non-finite or non-positive recorded durations", asyn
 	for (const duration of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 0, -20]) {
 		const trace = [{ at: 0, timestamp: 0, group: 0, duration }] as Arrival[];
 		const reader = replay(trace, {
-			ring: "shared",
 			rate: RATE,
 			config: CONFIG,
 			delay: "auto",
