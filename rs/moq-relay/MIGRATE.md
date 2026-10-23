@@ -5,6 +5,12 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `stats.interval` is a duration (#6472)
+
+`stats.interval`, `--stats-interval`, and `MOQ_STATS_INTERVAL` take a duration such as `"1s"` or `"500ms"` instead of a bare number of seconds, and a zero interval refuses to start.
+Write `interval = 5` as `interval = "5s"`.
+In Rust, `stats::Config::interval` is a `Duration`, and `stats::Config::build` returns a `Result`.
+
 ### Connection retry flags have the `connect-` prefix
 
 Rename `--backoff-*` to `--connect-backoff-*` and `--goaway-*` to `--connect-goaway-*`.

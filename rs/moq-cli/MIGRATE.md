@@ -4,6 +4,10 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
+
+Enable `nvidia` instead; the old names were aliases for it.
+
 ### Connection retry flags have the `connect-` prefix
 
 Rename `--backoff-*` to `--connect-backoff-*` and `--goaway-*` to `--connect-goaway-*`.

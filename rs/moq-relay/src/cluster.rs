@@ -2460,7 +2460,7 @@ mod tests {
 		};
 
 		let cluster = new_cluster(Config::default()).expect("cluster");
-		let stats = config.build(cluster.origin.clone());
+		let stats = config.build(cluster.origin.clone()).expect("stats");
 		let cluster = cluster.with_stats(stats);
 
 		let path = moq_net::Path::new(".stats").join("node").join("test");
@@ -3126,7 +3126,8 @@ mod tests {
 			node: Some("test".to_string()),
 			..Default::default()
 		}
-		.build(origin.clone());
+		.build(origin.clone())
+		.expect("stats");
 		let cluster = cluster.with_stats(stats);
 
 		assert_eq!(cluster.origin.hop().id(), origin.hop().id());
