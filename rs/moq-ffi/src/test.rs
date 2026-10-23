@@ -642,6 +642,151 @@ async fn raw_audio_activity() {
 	broadcast.close().unwrap();
 }
 
+/// Distinct channel tones, continuous across calls from different producer threads.
+#[cfg(feature = "audio")]
+fn audio_tone(start: usize, frames: usize, channels: usize) -> Vec<u8> {
+	(start..start + frames)
+		.flat_map(|sample| {
+			(0..channels).flat_map(move |channel| {
+				let frequency = if channel == 0 { 400.0 } else { 1000.0 };
+				(0.4 * (std::f32::consts::TAU * frequency * sample as f32 / 48_000.0).sin()).to_le_bytes()
+			})
+		})
+		.collect()
+}
+
+#[cfg(feature = "audio")]
+fn tone_power(samples: &[f32], frequency: f64) -> f64 {
+	let coefficient = 2.0 * (std::f64::consts::TAU * frequency / 48_000.0).cos();
+	let (mut previous, mut older) = (0.0, 0.0);
+	for &sample in samples {
+		let value = sample as f64 + coefficient * previous - older;
+		older = previous;
+		previous = value;
+	}
+	previous * previous + older * older - coefficient * previous * older
+}
+
+/// PCM written and finished from separate host threads survives the binding's locking and drain.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn audio_raw_publish_from_many_threads() {
+	use crate::audio::*;
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+	let output = MoqAudioEncoderOutput {
+		track: Some("tone".into()),
+		codec: MoqAudioCodec::opus(),
+		sample_rate: None,
+		channels: None,
+		bitrate: None,
+		frame_duration_us: 20_000,
+		preset: None,
+	};
+	let audio = MoqAudioProducer::new(
+		&catalog,
+		MoqAudioEncoderInput {
+			format: MoqAudioSampleFormat::F32,
+			sample_rate: 48_000,
+			channels: 2,
+		},
+		output,
+		None,
+	)
+	.unwrap();
+	let snapshot = catalogs.next().await.unwrap().unwrap();
+	let decoder = MoqAudioConsumer::subscribe(
+		&consumer,
+		"tone".into(),
+		snapshot.audio["tone"].clone(),
+		MoqAudioDecoderOutput {
+			// The track's whole retention: reading starts only after finish, and the budget
+			// ages groups by wall clock, so a stalled host would otherwise skip the start.
+			max_delay_us: Some(30_000_000),
+			..audio_output()
+		},
+	)
+	.await
+	.unwrap();
+	for index in 0..8 {
+		let producer = audio.clone();
+		std::thread::spawn(move || {
+			producer.write(MoqAudioFrame {
+				timestamp_us: 250_000 + index * 20_000,
+				data: audio_tone(index as usize * 960, 960, 2),
+			})
+		})
+		.join()
+		.unwrap()
+		.unwrap();
+	}
+	let closer = audio.clone();
+	std::thread::spawn(move || closer.finish()).join().unwrap().unwrap();
+	let mut pcm = Vec::new();
+	while let Some(frame) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+		assert_eq!(frame.timestamp_us, 250_000 + pcm.len() as u64 / 2 * 1_000_000 / 48_000);
+		pcm.extend(frame.data.as_chunks::<4>().0.iter().map(|s| f32::from_le_bytes(*s)));
+	}
+	assert_eq!(pcm.len(), 8 * 960 * 2, "finish must preserve the entire PCM duration");
+	for (channel, want, other) in [(0, 400.0, 1000.0), (1, 1000.0, 400.0)] {
+		let samples: Vec<f32> = pcm.iter().skip(channel).step_by(2).copied().collect();
+		assert!(
+			tone_power(&samples, want) > tone_power(&samples, other),
+			"channel {channel} lost its tone"
+		);
+	}
+	assert!(matches!(
+		audio.write(MoqAudioFrame {
+			timestamp_us: 0,
+			data: vec![0; 8]
+		}),
+		Err(MoqError::Closed)
+	));
+	broadcast.close().unwrap();
+}
+
+/// Reject incomplete PCM channel frames before feeding the codec.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn audio_raw_publish_rejects_bad_frames() {
+	use crate::audio::*;
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+	let audio = MoqAudioProducer::new(
+		&catalog,
+		MoqAudioEncoderInput {
+			format: MoqAudioSampleFormat::F32,
+			sample_rate: 48_000,
+			channels: 2,
+		},
+		MoqAudioEncoderOutput {
+			track: None,
+			codec: MoqAudioCodec::opus(),
+			sample_rate: None,
+			channels: None,
+			bitrate: None,
+			frame_duration_us: 20_000,
+			preset: None,
+		},
+		None,
+	)
+	.unwrap();
+	for size in [1, 4, 7] {
+		assert!(
+			audio
+				.write(MoqAudioFrame {
+					timestamp_us: 0,
+					data: vec![0; size]
+				})
+				.is_err()
+		);
+	}
+	audio.finish().unwrap();
+	broadcast.close().unwrap();
+}
+
 /// The decoder's playout delay is configurable and stays observable while a read waits:
 /// the decoder sits behind the read's lock, so the getter must not need it.
 #[cfg(feature = "audio")]
@@ -649,7 +794,7 @@ async fn raw_audio_activity() {
 async fn raw_audio_decode_delay() {
 	use crate::audio::*;
 
-	// 20 ms of mono silence at 48 kHz.
+	// 20 ms of a 400 Hz mono tone at 48 kHz.
 	const FRAME_SAMPLES: usize = 960;
 	const FRAME_US: u64 = 20_000;
 	const FIXED_US: u64 = 80_000;
@@ -709,17 +854,28 @@ async fn raw_audio_decode_delay() {
 		audio
 			.write(MoqAudioFrame {
 				timestamp_us: i * FRAME_US,
-				data: vec![0; FRAME_SAMPLES * std::mem::size_of::<f32>()],
+				data: audio_tone(i as usize * FRAME_SAMPLES, FRAME_SAMPLES, 1),
 			})
 			.unwrap();
 	}
 	for read in [fixed_read, estimated_read] {
-		tokio::time::timeout(TIMEOUT, read)
+		let frame = tokio::time::timeout(TIMEOUT, read)
 			.await
 			.expect("timed out waiting for decoded audio")
 			.unwrap()
 			.unwrap()
 			.expect("expected a decoded frame");
+		let pcm: Vec<f32> = frame
+			.data
+			.as_chunks::<4>()
+			.0
+			.iter()
+			.map(|s| f32::from_le_bytes(*s))
+			.collect();
+		assert!(
+			tone_power(&pcm, 400.0) > tone_power(&pcm, 1000.0),
+			"delay path lost the tone"
+		);
 	}
 
 	assert_eq!(fixed.delay_us(), FIXED_US, "a fixed delay ignores arrivals");

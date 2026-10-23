@@ -520,8 +520,6 @@ fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info
 		version,
 		values: properties.unknown.clone(),
 	}));
-	// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
-	info.unchecked = info.timescale.is_some();
 	info
 }
 
@@ -12869,7 +12867,7 @@ mod stitch_tests {
 	}
 
 	/// Relay `script` through a track the ingress times in `timescale`, which the cache
-	/// normalizes to microseconds like [`accepted_info`], via one relay or two joined by a
+	/// retains on the publisher's grid like [`accepted_info`], via one relay or two joined by a
 	/// moq-lite `hop`.
 	async fn relay_passthrough_via(
 		script: Vec<u8>,
@@ -13057,15 +13055,15 @@ mod stitch_tests {
 
 	/// A relayed Timestamp leaves in the units the publisher declared: the cache holds the
 	/// track on the publisher's grid, so a copy of the same instance over another route
-	/// matches it. A moq-lite hop serves the unchecked track untimed, so the Timestamp
-	/// stops there and the other property survives.
+	/// matches it, including across a moq-lite hop that negotiated the `ietf` extension.
 	#[moq_clock::test]
 	async fn passthrough_keeps_the_publishers_timestamp_units() {
 		let version = Version::Draft22;
 		// Timestamp 42 (ms), then an unknown property that must survive beside it.
 		let properties = [0x10, 42, 0x70, 7];
 		let script = object_stream(version, true, &[(0, &properties, None)]);
-		for (hop, timestamp) in [(false, Timestamp::new(42, Timescale::MILLI).ok()), (true, None)] {
+		for hop in [false, true] {
+			let timestamp = Timestamp::new(42, Timescale::MILLI).ok();
 			let (bytes, log) =
 				relay_passthrough_via(script.clone(), version, version, None, Some(Timescale::MILLI), hop).await;
 			assert!(log.resets().is_empty(), "hop: {hop}");

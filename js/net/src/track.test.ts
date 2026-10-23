@@ -3,6 +3,7 @@ import { Manual, Milli, Nano } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -2992,6 +2993,22 @@ test("an endless track with gaps remembers only those within the budget", () => 
 		expect(drainGroups(subscriber)).toEqual([2995]);
 	} finally {
 		time.restore();
+	}
+});
+
+test("IETF provenance survives normalization on timed and untimed tracks", () => {
+	for (const timescale of [undefined, Timescale.MILLI]) {
+		const info = infoDefaults({ ietf: IetfVersion.DRAFT_22, timescale });
+		expect(info.ietf).toBe(IetfVersion.DRAFT_22);
+		expect(info.timescale).toBe(timescale);
+	}
+	const producer = new TrackProducer("ietf").accept({ timescale: Timescale.MILLI, ietf: IetfVersion.DRAFT_22 });
+	try {
+		stampGroup(producer, 0, 1000);
+		stampGroup(producer, 1, 500);
+		producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
+	} finally {
+		producer.close();
 	}
 });
 
