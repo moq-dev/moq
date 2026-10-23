@@ -88,13 +88,13 @@ work, because obs-moq ships on its own schedule.
 
 ## Required
 
-The children comprise reproduced or source-confirmed findings,
+The entries comprise reproduced or source-confirmed findings,
 contract/lifetime investigations, and one security-review pointer. Each
 child records whether its behavior is new on main or inherited from release.
 
 - [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
-- [Bound export reorder storage](/quest/m1/release-audit/export-reorder.md) - flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
+- [Decode order](/quest/m1/ts-reliability/decode-order.md) - the exporters' decode clock holds at most the declared reorder depth, so flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
 - [Validate CMAF header fields](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count, and a zero timescale is refused
 - [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
 - [JS honors subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md) - each reader and each datagram stays inside its own subscription's group bounds, not the aggregate's
@@ -108,7 +108,6 @@ child records whether its behavior is new on main or inherited from release.
 - [Constrain auth credential redirects](/quest/m1/release-audit/auth-redirects.md) - JSON credentials cannot silently follow redirects to another origin
 - [Finish bitrate recovery](/quest/m1/release-audit/rate-recovery.md) - a quiet bandwidth grant no longer strands moq-video, moq-ffi, and moq-c encoders partway up the ramp
 - [Release finished FFI codecs](/quest/m1/release-audit/ffi-finished.md) - preserving finished tracks does not preserve drained encoders and scratch buffers
-- [Release HLS server state](/quest/m1/release-audit/hls-shutdown.md) - final server drop retires its watchers while publishers remain live
 - [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets
 - [Preserve IETF timestamps](/quest/m1/release-audit/ietf-timestamps.md) - JS encoding uses exact same-scale conversion and rejects unsupported values before sending
 - [Settle Go reservation release](/quest/m1/release-audit/go-reservation.md) - investigate prompt allocation release through the public wrapper

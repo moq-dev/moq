@@ -173,6 +173,7 @@ impl Server {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			stats: self.stats.clone(),
 			client: false,
 			limits: self.limits,
 			session: session.clone(),
@@ -372,8 +373,9 @@ impl Server {
 
 		// Legacy bidi SETUP exchange (IETF 14-16, lite 01/02). Read the client's
 		// SETUP to choose the version; `ok()` sends the server SETUP and starts.
+		// Stats attach in `ok()`: a caller may still replace them on the handshake.
 		let mut stream = Stream::accept(&mut session, encoding).await?;
-		let client: setup::Client = stream.reader.decode().await?;
+		let (client, client_setup_size) = stream.reader.decode_sized::<setup::Client>().await?;
 
 		let version = client
 			.versions
@@ -434,6 +436,7 @@ impl Server {
 					version,
 					request_id_max,
 					peer_declared,
+					client_setup_size,
 				}),
 			}),
 		})
@@ -545,12 +548,14 @@ impl PausedIetfModern {
 			version,
 			peer_setup,
 		} = self;
+		server.stats.control(stats::Control::Session, peer_setup.size, true);
 		let (publish, subscribe) = server.stat_tagged_origins();
 
 		// The client's SETUP was read at the pause; hand the stream back
 		// for GOAWAY. A server never advertises a path, hence `None`.
 		let (protocol, goaway) = ietf::start(ietf::Config {
 			runtime: runtime.clone(),
+			stats: server.stats.clone(),
 			limits: server.limits,
 			session: session.clone(),
 			setup: None,
@@ -598,6 +603,8 @@ struct PausedLegacy {
 	request_id_max: Option<ietf::RequestId>,
 	/// What the client's SETUP declared, for the options `ok` acts on.
 	peer_declared: ietf::peer::Peer,
+	/// The client SETUP's encoded size, counted under the final stats.
+	client_setup_size: usize,
 }
 
 impl PausedLegacy {
@@ -611,11 +618,14 @@ impl PausedLegacy {
 	) -> Result<(Session, crate::Driver), Error> {
 		let Self {
 			session,
-			mut stream,
+			stream,
 			version,
 			request_id_max,
 			peer_declared,
+			client_setup_size,
 		} = self;
+		let mut stream = stream.with_stats(&server.stats);
+		server.stats.control(stats::Control::Session, client_setup_size, true);
 		let (publish, subscribe) = server.stat_tagged_origins();
 
 		// Encode parameters using the version-appropriate type.
@@ -652,6 +662,7 @@ impl PausedLegacy {
 				// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
 				let start = lite::start(lite::Config {
 					runtime: runtime.clone(),
+					stats: server.stats.clone(),
 					client: false,
 					limits: server.limits,
 					session: session.clone(),
@@ -677,6 +688,7 @@ impl PausedLegacy {
 				// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
+					stats: server.stats.clone(),
 					limits: server.limits,
 					session: session.clone(),
 					setup: Some(stream),
@@ -834,7 +846,10 @@ impl Handshake {
 				session,
 				version,
 				client_setup,
-			} => server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth),
+			} => {
+				server.stats.control(stats::Control::Session, client_setup.size, true);
+				server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
+			}
 			PausedHandshake::IetfModern(paused) => paused.ok(server, runtime, peer_hop, auth),
 			// Boxed so the bidi SETUP write of these old versions doesn't size every caller's future.
 			PausedHandshake::Legacy(paused) => Box::pin(paused.ok(server, runtime, peer_hop, auth)).await,
@@ -1418,6 +1433,7 @@ mod tests {
 							crate::transport::boxed::RecvStream::new(crate::lite::test_transport::PendingRecv),
 							Version::Ietf(version),
 						),
+						size: 0,
 						path: None,
 						token: None,
 						declared: ietf::peer::Peer::default(),

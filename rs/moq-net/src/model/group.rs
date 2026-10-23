@@ -1932,6 +1932,13 @@ impl Handle {
 		state.abort.is_none().then_some(state.offset)
 	}
 
+	/// Whether this copy still holds every committed frame below `end`, so a compressed
+	/// tail requested there can inflate against it. Sparse object IDs are not ordinals.
+	pub(super) fn holds_prefix(&self, end: u64) -> bool {
+		let state = self.state.read();
+		state.abort.is_none() && state.offset == 0 && !state.sparse() && state.committed as u64 >= end
+	}
+
 	/// One past the last frame committed to an unfinished group, when that is past its
 	/// first: where a replacement route resumes. `None` once the group is finished, or
 	/// while it holds nothing a replacement could continue.
@@ -2794,8 +2801,8 @@ impl Consumer {
 	/// [`track::Info::lite_timescale`]).
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
-	pub(crate) fn lite_timescale(&self) -> Option<Timescale> {
-		self.track.lite_timescale()
+	pub(crate) fn lite_timescale(&self, ietf: bool) -> Option<Timescale> {
+		self.track.lite_timescale(ietf)
 	}
 
 	/// The draft the parent track's moq-transport publisher spoke, which serialized every

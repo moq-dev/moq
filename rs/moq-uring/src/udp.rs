@@ -422,6 +422,8 @@ pub(crate) struct SockShared {
 	/// Starts as `config.gso`, and clears for good once the kernel rejects a
 	/// train: the route or driver cannot segment.
 	gso: Cell<bool>,
+	/// When a lost send was last logged, so a flood of them logs once per interval.
+	lost_logged: Cell<Option<moq_clock::Instant>>,
 	bgid: u16,
 	closed: Cell<bool>,
 	rx: RefCell<Rx>,
@@ -483,10 +485,10 @@ impl SockShared {
 		rx.waiters.wake();
 	}
 
-	/// A send to `to` found no route. Unlike other send failures this says
-	/// nothing about the socket, so with a consumer only the connections
-	/// dialing `to` hear it. Without one there is no destination to route it
-	/// to, so it fails sends like any other error.
+	/// A send to `to` found no route, which says nothing about the socket, so
+	/// with a consumer only the connections dialing `to` hear it. Without one
+	/// there is no destination to route it to, so it fails the socket: a raw
+	/// socket has no other way to report it.
 	fn unreachable(&self, to: SocketAddr, code: i32) {
 		let mut rx = self.rx.borrow_mut();
 		let Some(reports) = rx.unreachable.as_mut() else {
@@ -504,6 +506,25 @@ impl SockShared {
 		let mut tx = self.tx.borrow_mut();
 		tx.error.get_or_insert(code);
 		tx.waiters.wake();
+	}
+
+	/// `op` is lost, which QUIC recovers like any other loss: log it, at most once an interval,
+	/// except the losses a peer causes as a matter of course.
+	fn lost(&self, op: &SendOp, err: io::Error) {
+		if matches!(err.raw_os_error(), Some(libc::ECONNREFUSED | libc::EMSGSIZE)) {
+			tracing::debug!(%err, to = %op.to, "send lost");
+			return;
+		}
+		let now = moq_clock::now();
+		if self
+			.lost_logged
+			.get()
+			.is_some_and(|last| now.saturating_duration_since(last) < LOST_LOG_INTERVAL)
+		{
+			return;
+		}
+		self.lost_logged.set(Some(now));
+		tracing::warn!(%err, to = %op.to, len = op.expect, "send lost");
 	}
 }
 
@@ -574,6 +595,21 @@ impl Socket {
 			set_option(&io, libc::IPPROTO_IPV6, libc::IPV6_RECVTCLASS)?;
 		}
 		set_option(&io, libc::IPPROTO_IP, libc::IP_RECVTOS)?;
+		// Send at the interface MTU and never fragment, as moq-sock does, so a forged ICMP
+		// fragmentation-needed cannot shrink a path below a GSO train and turn its sends into
+		// EMSGSIZE or a worker-wide GSO fallback. The v4 option covers v4-mapped peers on a v6
+		// socket too. IPv6 also needs DONTFRAG, since its output path can still fragment under
+		// PMTUDISC_PROBE alone.
+		set_value(&io, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, libc::IP_PMTUDISC_PROBE)?;
+		if io.local_addr()?.is_ipv6() {
+			set_value(
+				&io,
+				libc::IPPROTO_IPV6,
+				libc::IPV6_MTU_DISCOVER,
+				libc::IPV6_PMTUDISC_PROBE,
+			)?;
+			set_option(&io, libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG)?;
+		}
 
 		// The ring's entry count is fixed at registration, so it is sized for
 		// the ceiling; the buffers behind it are allocated as the pool grows.
@@ -638,6 +674,7 @@ impl Socket {
 			shard,
 			metrics: shared.metrics.clone(),
 			gso: Cell::new(config.gso),
+			lost_logged: Cell::new(None),
 			config,
 			bgid,
 			closed: Cell::new(false),
@@ -869,8 +906,10 @@ pub struct TxBuf {
 impl TxBuf {
 	/// Send the buffer on the owning socket as datagrams of `segment` bytes
 	/// (the last may be short), marked with `ecn`. Fire-and-forget:
-	/// the buffer returns to the pool when the kernel completes, and a
-	/// failed send surfaces on the next pool acquire.
+	/// the buffer returns to the pool when the kernel completes. A send the
+	/// kernel fails or cuts short is lost, as UDP allows, and only logged.
+	/// The next pool acquire fails only once the socket itself is unusable
+	/// or a send finds no route to its destination.
 	///
 	/// This only stages an SQE, so the datagram reaches the kernel when the
 	/// worker next enters the ring. Dropping the worker makes a bounded attempt
@@ -953,6 +992,25 @@ impl TxBuf {
 		}
 		sock.metrics.tx_datagrams.add(segments as u64);
 		Ok(())
+	}
+}
+
+impl TxBuf {
+	/// Stage this lease as a send to `to` that never reaches the kernel, for a test to complete
+	/// with whatever result it injects.
+	#[cfg(test)]
+	fn fake_send(mut self, to: SocketAddr) -> SendOp {
+		self.armed = true;
+		self.sock.stage_tx(self.id);
+		let expect = self.data.len();
+		self.sock.tx.borrow_mut().bufs[self.id as usize].data = std::mem::take(&mut self.data);
+		SendOp {
+			sock: self.sock.clone(),
+			id: self.id,
+			expect,
+			to,
+			train: None,
+		}
 	}
 }
 
@@ -1244,6 +1302,9 @@ pub(crate) fn on_recv(
 			}
 			// Socket teardown; nothing to surface.
 			libc::ECANCELED => return,
+			// What tokio tolerates too: ICMP surfacing on the socket (ECONNRESET), and a
+			// datagram too large for the buffer (EMSGSIZE). Each costs at most one receive.
+			libc::ECONNRESET | libc::EMSGSIZE => {}
 			_ => {
 				sock.fail_rx(code);
 				return;
@@ -1376,11 +1437,6 @@ fn on_recv_oneshot(one: OneshotRecv, cqe: Cqe) -> Result<(u16, Option<Queued>), 
 pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
 	if cqe.result < 0 {
 		let code = -cqe.result;
-		if code == libc::ECONNREFUSED {
-			// ICMP unreachable noise; QUIC treats it as loss.
-			tracing::debug!("send completed with ECONNREFUSED");
-			return;
-		}
 		// Linux has no way to ask whether a route or driver can segment; it
 		// only fails the train with EIO or EINVAL. Dropping the train would
 		// cost the connection a full RTO, so send it again unsegmented. Other
@@ -1394,18 +1450,48 @@ pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
 			}
 			return;
 		}
-		if moq_sock::udp::is_unreachable_err(&io::Error::from_raw_os_error(code)) {
-			op.sock.unreachable(op.to, code);
-			return;
-		}
-		if code != libc::ECANCELED {
-			op.sock.fail_tx(code);
+		match SendFailure::of(code) {
+			SendFailure::Cancelled => {}
+			SendFailure::Unreachable => op.sock.unreachable(op.to, code),
+			SendFailure::Lost => op.sock.lost(&op, io::Error::from_raw_os_error(code)),
+			SendFailure::Socket => op.sock.fail_tx(code),
 		}
 	} else if cqe.result as usize != op.expect {
-		tracing::warn!(sent = cqe.result, expected = op.expect, "short UDP send");
-		op.sock.fail_tx(libc::EIO);
+		let short = format!("short send: {} of {} bytes", cqe.result, op.expect);
+		op.sock.lost(&op, io::Error::other(short));
 	}
 }
+
+/// What a failed send costs, decided by its errno.
+#[derive(Debug, PartialEq, Eq)]
+enum SendFailure {
+	/// The socket is closing.
+	Cancelled,
+	/// No route to the destination: its connection decides whether to give up on the peer.
+	Unreachable,
+	/// This packet, which UDP always allows. A peer can provoke most of these, through a
+	/// netfilter drop (EPERM), a full conntrack table, memory pressure, or ICMP (ECONNREFUSED,
+	/// EMSGSIZE from an MTU probe), so none of them may cost the other connections sharing the
+	/// socket.
+	Lost,
+	/// The socket itself is unusable, so every later send would fail the same way.
+	Socket,
+}
+
+impl SendFailure {
+	fn of(code: i32) -> Self {
+		match code {
+			libc::ECANCELED => Self::Cancelled,
+			code if moq_sock::udp::is_unreachable_err(&io::Error::from_raw_os_error(code)) => Self::Unreachable,
+			// Not a socket, closed under us, or a buffer the kernel cannot read.
+			libc::EBADF | libc::ENOTSOCK | libc::EFAULT => Self::Socket,
+			_ => Self::Lost,
+		}
+	}
+}
+
+/// How often a socket logs a lost send.
+const LOST_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Stage a rejected GSO train again, one `sendmsg` per segment, from the
 /// buffer `op` still holds. Runs before `op` drops, so the slot stays leased.
@@ -1506,14 +1592,18 @@ fn read_int(data: &[u8]) -> Option<libc::c_int> {
 
 /// Turn a boolean socket option on.
 fn set_option(io: &UdpSocket, level: libc::c_int, name: libc::c_int) -> io::Result<()> {
-	let on: libc::c_int = 1;
+	set_value(io, level, name, 1)
+}
+
+/// Set an integer socket option.
+fn set_value(io: &UdpSocket, level: libc::c_int, name: libc::c_int, value: libc::c_int) -> io::Result<()> {
 	// SAFETY: valid fd, valid option buffer.
 	let ret = unsafe {
 		libc::setsockopt(
 			io.as_raw_fd(),
 			level,
 			name,
-			(&raw const on).cast(),
+			(&raw const value).cast(),
 			std::mem::size_of::<libc::c_int>() as libc::socklen_t,
 		)
 	};
@@ -1696,10 +1786,129 @@ mod tests {
 		assert!(!grow_rx(&mut rx, &config), "grew past the ceiling");
 	}
 
+	/// Every errno is either loss, a destination, the socket, or teardown, and only the errors
+	/// meaning the socket itself is gone fail it.
+	#[test]
+	fn send_errors_fail_the_socket_only_when_it_is_gone() {
+		for code in [libc::EBADF, libc::ENOTSOCK, libc::EFAULT] {
+			assert_eq!(SendFailure::of(code), SendFailure::Socket, "{code}");
+		}
+		for code in [libc::ENETUNREACH, libc::EHOSTUNREACH, libc::ENETDOWN] {
+			assert_eq!(SendFailure::of(code), SendFailure::Unreachable, "{code}");
+		}
+		for code in [
+			libc::EPERM,
+			libc::EACCES,
+			libc::ENOMEM,
+			libc::ENOBUFS,
+			libc::EMSGSIZE,
+			libc::ECONNREFUSED,
+			libc::EAGAIN,
+			libc::EINVAL,
+			libc::EIO,
+		] {
+			assert_eq!(SendFailure::of(code), SendFailure::Lost, "{code}");
+		}
+		assert_eq!(SendFailure::of(libc::ECANCELED), SendFailure::Cancelled);
+	}
+
+	/// A send that completes with a recoverable error, or short, costs that packet: the socket
+	/// it shares with every other connection on the worker keeps sending. An error that means
+	/// the socket is gone still fails it.
+	#[test]
+	fn a_failed_send_costs_only_its_packet() {
+		let mut worker = match crate::Worker::new(crate::Config::default()) {
+			Ok(worker) => worker,
+			Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+				eprintln!("skipping io_uring socket test: {reason}");
+				return;
+			}
+			Err(err) => panic!("worker setup failed: {err}"),
+		};
+		let handle = worker.handle();
+		let peer = std::net::UdpSocket::bind("127.0.0.1:0").expect("peer");
+		peer.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+			.expect("timeout");
+		let to = peer.local_addr().expect("peer addr");
+		let io = UdpSocket::bind("127.0.0.1:0").expect("bind");
+		let sock = handle.udp(io, Config::default()).expect("socket");
+
+		let lost = [
+			libc::EPERM,
+			libc::EACCES,
+			libc::ENOMEM,
+			libc::ENOBUFS,
+			libc::EMSGSIZE,
+			libc::EINVAL,
+		];
+		let err = worker
+			.block_on(async {
+				for code in lost {
+					let mut tx = sock.acquire().await.expect("a lost send keeps the socket");
+					tx.extend_from_slice(b"lost");
+					on_send(
+						tx.fake_send(to),
+						Cqe {
+							user_data: 0,
+							result: -code,
+							flags: 0,
+						},
+					);
+				}
+				let mut tx = sock.acquire().await.expect("a short send keeps the socket");
+				tx.extend_from_slice(b"short");
+				on_send(
+					tx.fake_send(to),
+					Cqe {
+						user_data: 0,
+						result: 2,
+						flags: 0,
+					},
+				);
+
+				// Still sending: a real datagram reaches the peer.
+				let mut tx = sock.acquire().await.expect("send buffer");
+				tx.extend_from_slice(b"alive");
+				tx.send(Transmit {
+					to,
+					segment: 5,
+					ecn: None,
+				})
+				.expect("staged");
+				// Let the worker submit it and reap its completion.
+				for _ in 0..1000 {
+					if sock.shared.tx.borrow().bufs.iter().all(|buf| buf.in_flight == 0) {
+						break;
+					}
+					crate::Timer::after(&handle, std::time::Duration::from_millis(1))
+						.wait()
+						.await;
+				}
+
+				let mut tx = sock.acquire().await.expect("send buffer");
+				tx.extend_from_slice(b"gone");
+				on_send(
+					tx.fake_send(to),
+					Cqe {
+						user_data: 0,
+						result: -libc::EBADF,
+						flags: 0,
+					},
+				);
+				sock.acquire().await.expect_err("a socket-gone error fails the socket")
+			})
+			.expect("worker");
+		assert_eq!(err.raw_os_error(), Some(libc::EBADF), "{err}");
+
+		let mut buf = [0u8; 16];
+		let (len, _) = peer.recv_from(&mut buf).expect("the healthy send arrived");
+		assert_eq!(&buf[..len], b"alive");
+	}
+
 	/// With nothing routing unreachable reports, a send that finds no route
-	/// fails later sends like any other error instead of queueing a report
-	/// nobody will collect. Linux refuses a v4-mapped destination on an
-	/// IPv6-only socket with `ENETUNREACH`.
+	/// fails later sends instead of queueing a report nobody will collect.
+	/// Linux refuses a v4-mapped destination on an IPv6-only socket with
+	/// `ENETUNREACH`.
 	#[test]
 	fn a_raw_socket_sees_an_unreachable_send_fail() {
 		use nix::sys::socket::{AddressFamily, SockFlag, SockType, SockaddrIn6, bind, setsockopt, socket, sockopt};
