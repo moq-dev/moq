@@ -206,17 +206,17 @@ pub struct MoqBackoff {
 	pub timeout_us: Option<u64>,
 }
 
+/// What sessions opened through this crate advertise in SETUP: moq-ffi ahead of its core.
+pub(crate) fn implementation() -> String {
+	format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION)
+}
+
 /// The settings a default [`MoqClientConfig`] dials with, for a settings UI to show.
 ///
 /// Dialing with it behaves the same as the default. Knobs whose default depends on the backend
 /// (`tls.system_roots`, `quic.gso`, `quic.mtu_discovery`, `quic.congestion_control`) stay null,
 /// as do the ones that are off by default. A wasm build honors none of the tuning, so it
 /// reports none.
-/// What sessions opened through this crate advertise in SETUP: moq-ffi ahead of its core.
-pub(crate) fn implementation() -> String {
-	format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION)
-}
-
 #[uniffi::export]
 pub fn moq_client_defaults() -> MoqClientConfig {
 	#[cfg(not(target_arch = "wasm32"))]
