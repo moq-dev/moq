@@ -20,7 +20,7 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-      - name: Pinned Moxygen through single and clustered relays
+      - name: Pinned Moxygen through the relay under the conformance profile
         run: nix develop --command just test ietf-conformance
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/ietf-conformance

@@ -6,11 +6,11 @@ builds the Moxygen revision and matching Meta dependencies pinned in
 `conformance_test.sh` through this checkout's relay. This is separate from the
 published-package smoke matrix.
 
-Sections 1-7 run on both shared drafts, 16 and 18, through one relay and through
-two relays joined with native lite-07. Each cell runs 29 upstream SUBSCRIBE
-cases. A direct-origin control runs the same cases once per draft, separating
-suite or pin failures from relay behavior. FETCH is skipped using upstream's `SKIP_FETCH`; section 8 uses PUBLISH
-and is outside the relay's support. Cases using forwarding modes 1 or 2 send
+Sections 1-7 run on both shared drafts, 16 and 18, through one relay. Each cell
+runs 29 upstream SUBSCRIBE cases. A direct-origin control runs the same cases
+once per draft, separating suite or pin failures from relay behavior. FETCH is
+skipped using upstream's `SKIP_FETCH`; section 8 uses PUBLISH and is outside the
+relay's support. Cases using forwarding modes 1 or 2 send
 nonzero subgroups and are explicitly excluded. Modes 0 and 3 are retained.
 The staged script preserves every selected case's arguments and deadline.
 A client that crashes after printing SUCCESS still fails. Selection tests prove
@@ -19,8 +19,9 @@ these exclusions and failure sensitivity, and refuse a changed script anchor.
 The publisher advertises the `moq-test-00` prefix. The client subscribes to
 16-field namespaces below it. Mock-clock integration tests in
 [`ietf_conformance.rs`](../../rs/moq-net/tests/integration/ietf_conformance.rs)
-prove this routing path on both drafts and topologies before the live suite.
-The live harness waits for that prefix at the subscriber relay before starting
+prove this routing path on both drafts, through one relay and through two
+relays joined with native lite-07. The live harness waits for that prefix at the
+relay before starting
 cases and rejects upstream publisher reconnects, so a recovered session cannot
 hide a failure.
 
@@ -52,19 +53,16 @@ Every other check is upstream's: forwarded object IDs, properties, payloads,
 END\_OF\_GROUP status objects and header bits, and FIRST\_OBJECT. Any other
 priority, a second END\_OF\_TRACK, or one anywhere else still fails.
 
-Measured on this branch:
+Measured over six consecutive runs:
 
-| Draft | Direct origin | One relay | Two relays |
-| --- | --- | --- | --- |
-| 16 | 29 pass | 29 pass | 0 pass, 29 fail |
-| 18 | 29 pass | 29 pass | 0 pass, 29 fail |
+| Draft | Direct origin | One relay |
+| --- | --- | --- |
+| 16 | 29 pass | 29 pass |
+| 18 | 29 pass | 29 pass |
 
-The command still exits 1, so the nightly job stays red until the
-[passthrough quest](../../quest/m1/ietf-extension/README.md)'s remaining work
-lands. The two-relay path needs metadata from TRACK\_STATUS before subscribing,
-and the pinned MoQTestPublisher inherits NOT\_SUPPORTED for that request. The
-relay preserves that refusal, rather than widening query-only demand into
-SUBSCRIBE. Separately, the direct draft-18 control has failed the "Large scale:
-Many groups and objects" case with `Group Mismatch: Actual=1 Expected=0`; the
-upstream verifier expects groups in order although each arrives on its own
-stream.
+A two-relay cell is not run yet. The edge needs metadata from TRACK\_STATUS
+before subscribing, and the pinned MoQTestPublisher inherits NOT\_SUPPORTED for
+that request, so every case fails before media. The relay preserves that
+refusal, rather than widening query-only demand into SUBSCRIBE. The
+[passthrough quest](../../quest/m1/ietf-extension/README.md) tracks adding the
+cell back once a pinned publisher answers it.

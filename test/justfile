@@ -85,7 +85,7 @@ interop-report results out *args:
 wire-compat *args:
     ./interop/compat.sh "$@"
 
-# Pinned Moxygen sections 1-7, subgroup zero, through one relay and a lite-07 cluster.
+# Pinned Moxygen sections 1-7, subgroup zero, through one relay under the conformance profile.
 ietf-conformance:
     ./ietf-conformance/run.sh
 
