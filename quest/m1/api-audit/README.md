@@ -52,7 +52,7 @@ Both are in m1, so the cut waits for them. hang's
 
 Rejected in planning:
 
-- Restoring `track::Demand::{used, unused}`: [refresh](/quest/m1/refresh/README.md)
+- Restoring `track::Demand::{used, unused}`: refresh
   decided one `wanted()` signal.
 - Removing `Audio.Decoder.arrivals()`: moq.dev has a planned consumer
   waiting on this release. Only the video handle goes
@@ -72,7 +72,6 @@ Rejected in planning:
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
 - [JS prepared answers](/quest/m1/api-audit/js-prepared.md) - a leaked or abandoned `Prepared` refuses its request instead of blocking the path
 - [The origin announces](/quest/m1/api-audit/announce-owner.md) - a broadcast producer cannot announce; the origin hands out the announcement, so `Prepared` and standalone broadcasts lose methods that always fail
-- [Auth access is patterns](/quest/m1/api-audit/auth-access.md) - token claims and grants carry path patterns only until a rate quest enforces caps, and `Key::decode` is gone
 - [Unpublish what nothing uses](/quest/m1/api-audit/unpublish.md) - packages, features, and listeners with no consumer stop shipping or stop being on by default
 - [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone
 - [Binding connection state](/quest/m1/api-audit/binding-state.md) - one `state()` snapshot and `state_changed()` replace `status`, `connects`, and both `failure` polls
@@ -86,7 +85,6 @@ Rejected in planning:
 - [One decode read](/quest/m1/api-audit/decode-read.md) - audio and video decoders yield the same `Frame`, `Gap`, `End` read as moq-mux containers
 - [Watch and publish trim](/quest/m1/api-audit/watch-trim.md) - the clock is re-exported, unused watch outputs are gone, and derived publish state is read-only
 - [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
-- [Stats names](/quest/m1/api-audit/stats-naming.md) - each stats track and reader has one name, and "stats" means one thing in the CLI
 - [CLI and gst flags](/quest/m1/api-audit/cli-flags.md) - one flag name per meaning across CLI subcommands and gst elements, and `linger` means one thing
 - [qmux shape](/quest/m1/api-audit/qmux-shape.md) - qmux binds framing at connect, shares flow-control names with moq-tokio, and JS drops the legacy wire
 - [Transport config](/quest/m1/api-audit/transport-config.md) - moq-tokio and moq-quic configs have one meaning for unset, enums for modes, no order-dependent setters, and no leftover features

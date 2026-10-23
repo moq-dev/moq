@@ -428,8 +428,8 @@ pub struct moq_audio_config {
 #[allow(non_camel_case_types)]
 pub struct moq_json_snapshot_config {
 	/// Encode updates as deltas against the group's snapshot. When off, each update opens a new
-	/// group with a full snapshot. When on, a joiner that would download more than eight
-	/// snapshots' worth of deltas gets the value restated in a fresh group. Ignored by the consumer.
+	/// group with a full snapshot. When on, a join after more than eight snapshots' worth of
+	/// deltas asks for the value restated in a fresh group. Ignored by the consumer.
 	pub deltas: bool,
 
 	/// DEFLATE-compress each group. Must match on the producer and consumer.
