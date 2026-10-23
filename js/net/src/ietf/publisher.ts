@@ -1134,13 +1134,17 @@ export class Publisher {
 			// The subscription's budget, or an eviction of what is left to read, may give up on the
 			// group mid-write, which abandons the stream. A group already given up never starts the write.
 			const write = async (op: () => Promise<unknown>) => {
-				const stop = await race([untilGivenUp(group, op), cancelled]);
-				if (left) throw new Error("unsubscribed while serving the group");
+				const stop = await untilGivenUp(group, op);
 				if (stop) throw stop;
+			};
+			// Writing the group stops for the pause too; the drain below answers it without a reset.
+			const send = async (op: () => Promise<unknown>) => {
+				await race([write(op), cancelled]);
+				if (left) throw new Error("unsubscribed while serving the group");
 			};
 
 			try {
-				await write(() => header.encode(stream, this.#session.version));
+				await send(() => header.encode(stream, this.#session.version));
 				// The first written object goes on the wire as its absolute id, so a trimmed
 				// head shows the true numbering rather than a silently renumbered group.
 				let first = true;
@@ -1166,7 +1170,7 @@ export class Publisher {
 					const obj = new Frame({ payload: read.payload, timestamp: read.timestamp });
 					const delta = first ? read.sequence : 0;
 					first = false;
-					await write(() => obj.encode(stream, header.flags, timescale, this.#session.version, delta));
+					await send(() => obj.encode(stream, header.flags, timescale, this.#session.version, delta));
 				}
 
 				// The track ends right after this group's last object, so the marker rides this

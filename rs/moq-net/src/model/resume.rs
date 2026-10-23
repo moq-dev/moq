@@ -983,7 +983,10 @@ impl Reader {
 			copy.floor = copy.floor.max(self.newest.map(Position::group));
 			let start = copy.start(self.groups.0);
 			if let (Sub::Ready(sub), Some(_)) = (&mut copy.sub, copy.floor) {
-				sub.set_range((Bound::Included(start), self.groups.1.map_or(Bound::Unbounded, Bound::Excluded)));
+				sub.set_range((
+					Bound::Included(start),
+					self.groups.1.map_or(Bound::Unbounded, Bound::Excluded),
+				));
 			}
 			copy.update(&self.mirrored);
 			self.copies.push(copy);
