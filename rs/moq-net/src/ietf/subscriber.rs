@@ -6687,12 +6687,8 @@ mod tests {
 			.expect("one prefix");
 		let (_live, live) = live();
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
-			stream,
-			prefix,
-			crate::model::Snapshot::landed(),
-			live
-		));
+		let mut run =
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed(), live));
 		let mut result = None;
 		for _ in 0..100 {
 			if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {

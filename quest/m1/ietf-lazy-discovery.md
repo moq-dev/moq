@@ -24,4 +24,18 @@ narrower request open under a broader one on every version.
 - `forward.ts` needs the session to say when a request is off the wire; the
   announced consumer reports only its local close today.
 
+Settled in [moq-dev/moq#6530](https://github.com/moq-dev/moq/pull/6530):
+
+- JS non-overlap is this quest, not that PR: it needs the session signal
+  above, and a refused JS watch only downgrades the session to blind answers.
+- Overlap policy is keyed on MoQ Solicit. Requests are exclusive only at a
+  peer that declared no Solicit, since only foreign peers enforce
+  PREFIX_OVERLAP; our own peers keep overlapping hold semantics, because on
+  drafts 14/15 our publisher withdraws what an unsubscribed request
+  advertised, so exclusive-everywhere would restart routes mid-handover.
+- A PUBLISH_NAMESPACE that outlives an UNSUBSCRIBE_NAMESPACE (drafts 14/15),
+  or arrives unsolicited, is kept until the peer withdraws it. It is bounded
+  by request credit or streams and the `announces` cap, and cancelling it
+  would lose it for good, since the peer does not repeat it.
+
 Public API: none expected. Wire: none.
