@@ -228,9 +228,17 @@ impl<E: CatalogExt> Producer<E> {
 	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
 	/// run after a successful finish.
 	pub fn finish(&mut self) -> Result<(), Error> {
+		// Each publish flushed its access unit, so the splitter holds only input storage, which
+		// ends here. The import stays, keeping the finished track and its rendition published.
 		match &mut self.codecs {
-			Codecs::H264 { import, .. } => import.finish()?,
-			Codecs::H265 { import, .. } => import.finish()?,
+			Codecs::H264 { split, import } => {
+				*split = Default::default();
+				import.finish()?
+			}
+			Codecs::H265 { split, import } => {
+				*split = Default::default();
+				import.finish()?
+			}
 		}
 		Ok(())
 	}

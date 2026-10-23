@@ -189,7 +189,8 @@ impl Import {
 			return Ok(());
 		}
 		let config = super::config_from_sps(sps_nal, true)?;
-		self.last_sps = Some(sps_nal.clone());
+		// Own just the parameter set: the access unit it was found in is far larger.
+		self.last_sps = Some(Bytes::copy_from_slice(sps_nal));
 		self.apply_config(config)?;
 		Ok(())
 	}
