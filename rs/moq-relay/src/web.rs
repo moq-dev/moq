@@ -193,7 +193,7 @@ pub struct Addrs {
 
 /// The implementation WebSocket sessions advertise in SETUP, or `None` for the library's.
 #[derive(Clone, Default)]
-#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+#[cfg_attr(not(feature = "websocket"), allow(dead_code, reason = "websocket-only"))]
 pub(crate) struct Implementation(pub Option<String>);
 
 /// Run a HTTP server using Axum

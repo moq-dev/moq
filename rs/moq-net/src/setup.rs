@@ -41,11 +41,11 @@ pub(crate) fn decode_implementation(bytes: Option<&[u8]>) -> Result<Option<Strin
 /// `None` until then. The protocol holds a clone for the life of its driver, so a
 /// session that ends before the SETUP arrives closes the channel instead of leaving
 /// `Session::peer_implementation` waiting.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 #[derive(Clone, Default)]
 pub(crate) struct PeerImplementation(kio::Producer<Option<Option<String>>>);
 
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl PeerImplementation {
 	/// A slot for a SETUP read before the session started, or a version that carries none.
 	pub fn known(value: Option<String>) -> Self {
@@ -66,7 +66,7 @@ impl PeerImplementation {
 	}
 }
 
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 /// Our Implementation value to send, or `None` when the caller configured it empty.
 pub(crate) fn implementation(value: &str) -> Option<String> {
 	(!value.is_empty()).then(|| value.to_owned())
