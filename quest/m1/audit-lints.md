@@ -68,9 +68,6 @@ benches and examples. Biome reports an unused `biome-ignore` as
   typescript 6 and eslint 9. Files outside any `tsconfig` project can't be
   typed-linted. Check whether typescript-eslint supports TS 7 before
   repeating that setup; if it does, consider joining CI.
-- `sh/rs/model-markers.py` walks attributes above a model marker, including
-  ones rustfmt wraps over several lines. Run its tests if a long reason moves
-  near a marker.
 
 ### Results (m0, 2026-10-20)
 

@@ -17,7 +17,7 @@ here instead of moving out; the cut is what ships them.
 - Preserve epoch correctness, routing recovery, outbound federation, and
   announcement takeover on both lite and IETF. Catalogs, long-lived readers,
   and late joiners obey the same identity contract.
-- Keep IETF passthrough, the public model audit, the broad clock conversion,
+- Keep IETF passthrough, the API audit, the broad clock conversion,
   archive replay/DVR correctness, and the TS fidelity
   expansion in m1. Keep their correctness, interoperability, memory, and
   performance evidence with them.
@@ -42,10 +42,10 @@ acceptance with the downstream operator.
 
 Keep one owner per shared code area and order prerequisites before consumers
 (re-ranked in the 2026-10-20 audit: auth before cluster routing, the C line
-before the binding breaks, and every lite-07 and public model prerequisite
-before those quests).
-The moq-transport passthrough fields remain crate-private, the existing
-explicit exception to the public model audit.
+before the binding breaks, and every lite-07 prerequisite before those
+quests).
+The moq-transport passthrough fields remain crate-private: no public moq-net
+item exists only for moq-transport (maintainer, 2026-10-23).
 
 Added 2026-10-16: refresh, a breaking `Demand` change, so it lands before
 the cut.
@@ -96,7 +96,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
-- [A public model](/quest/m1/public-model/README.md) - every model item a built-in session reaches is public, unnecessary, or marked deliberately private, so a custom publisher, subscriber, or relay builds from the public model alone
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break has its MIGRATE entry
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement

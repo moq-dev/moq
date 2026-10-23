@@ -33,10 +33,14 @@ handle's writer verbs and observers:
 
 Changes:
 
-- Rust `track::Producer::close()` folds into `abort(Error::SessionClosed)`.
-  Readers that drained a closed copy to a clean end now get `SessionClosed`:
-  update `resume.rs`'s clean-end mapping and the sessions that call it;
-  failover is unchanged since `route_failed` already lists both errors.
+- Rust `track::Producer::close()`, crate-private after
+  [session-only items stay private](/quest/m1/api-audit/model-private.md),
+  folds into `abort` with the clean-close error
+  ([moq-dev/moq#6482](https://github.com/moq-dev/moq/pull/6482) makes it
+  `Stream(Session(Cancel))`). Readers that drained a closed copy to a clean
+  end now get that error: update `resume.rs`'s clean-end mapping and the
+  sessions that call it; failover is unchanged since `route_failed` already
+  accepts it.
 - Rust `group::Producer::closed`/`poll_closed` fire on finish; sessions that
   need abort-only get a private poll.
 - JS `Group.Producer.close(abort?)` and `Track.Producer.close(abort?)` split

@@ -25,7 +25,7 @@ against AGENTS.md's Public API rules: names mirrored across languages, no
 callbacks or 4+ args, misuse unrepresentable, private until a consumer needs
 it. Propose 2-3 shapes with a recommendation, ask the maintainer, and file
 each approved change as a quest in m1, which holds the cut until it lands.
-Related: [public model](/quest/m1/public-model/README.md), which decides what
+Related: [session-only items stay private](/quest/m1/api-audit/model-private.md), which decides what
 moq-net exposes; this review judges the shape of what ships.
 
 ## Required

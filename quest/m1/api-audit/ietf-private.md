@@ -10,10 +10,9 @@ URL, and each version sends the part it carries.
 
 Decided 2026-10-23 (API audit follow-up, maintainer):
 
-- `track::Request::stage` and `track::Staged` (`rs/moq-net/src/model/track.rs`),
-  used only by the moq-transport subscriber, become `pub(crate)`. JS
-  `Track.Staged` and `Request.stage` (`js/net/src/track.ts`), used only by
-  `ietf/subscriber.ts`, become `@internal`.
+- `track::Request::stage` and `track::Staged`, used only by the moq-transport
+  subscriber, go private with the other session-only items in
+  [session-only items stay private](/quest/m1/api-audit/model-private.md).
 - `Client::with_path` and `Client::with_authority` become one
   `Client::with_url(url::Url)`. moq-net gains the `url` dependency and owns
   what moq-tokio's `setup_path` and `setup_authority` decide today
@@ -38,5 +37,5 @@ Recorded exceptions, so the next audit skips them:
   [token in band](/quest/m1/auth/token-in-band.md) gives lite-07 a SETUP
   token, which makes them shared and drops the moq-transport wording.
 
-Public API: moq-net and `@moq/net` breaking (`with_url`, `Address`, `Staged`
-private), and every transport crate and binding that sets a path. Wire: none.
+Public API: moq-net breaking (`with_url`, `Address`), and every transport
+crate and binding that sets a path. Wire: none.

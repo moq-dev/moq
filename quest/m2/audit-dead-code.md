@@ -35,7 +35,7 @@ Start by comparing the live tree against these baselines:
   through `cfg_attr`. The unconditional ones are drop guards, compile-time
   Send assertions, generated settings registries, shared test and benchmark
   harnesses, deserialization fixtures, FFI tables, and two `GroupConsumer`
-  helpers waiting on the [answering API](/quest/m1/public-model/answer.md).
+  helpers waiting on the [answering API](/quest/m1/api-audit/answer.md).
   Once the lint audit lands, every unconditional one is an `expect`, so a
   stale one fails the build; check what the conditional ones still guard.
   `cargo shear` found no unused dependencies.

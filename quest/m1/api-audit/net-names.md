@@ -10,16 +10,14 @@ docs that expose it.
 
 Decided 2026-10-23 (API audit follow-up, maintainer):
 
-- **Demand says `wanted`.** `group::Demand` and `broadcast::Demand` drop
+- **Demand says `wanted`.** `group::Demand` drops
   `is_used`/`used`/`unused`/`poll_used`/`poll_unused` for `track::Demand`'s
-  `wanted()` snapshot plus `wanted_changed()` (and its poll). JS mirrors it
-  (`Broadcast.Demand`'s `used` getter and `unused()` promise).
+  `wanted()` snapshot plus `wanted_changed()` (and its poll).
+  `broadcast::Demand` is deleted instead
+  ([net-exports](/quest/m1/api-audit/net-exports.md)).
 - **Allocator.** `Session::bandwidth()` returns the send allocator beside
   `send_bandwidth()`/`recv_bandwidth()` estimates: rename it `allocator()`, and
   `Client::with_bandwidth` `with_allocator`.
-- **Received copies.** `track::Request::request_start(floor)` is a builder
-  that requests nothing: `with_floor(floor)`. `track::Producer::received()`
-  reads as a predicate: `set_received()`.
 - **Stats and transport collisions.** `stats::Control` (vs `track::Control`)
   becomes `stats::Message`; `stats::Bytes` (vs `bytes::Bytes`) becomes
   `stats::Totals`; the trait `transport::Stats` (vs `session::Stats` and the
@@ -37,8 +35,8 @@ Decided 2026-10-23 (API audit follow-up, maintainer):
   `Pending` stays generic over the task so poll callers and `track()` keep
   working; awaiting it still yields `Result<Info>`.
 - **Reservation.** `bandwidth::Reservation::consumer()` becomes `consume()`;
-  JS `Reservation.grant` (vs `Auth.Grant`) becomes `rate`, as
-  [binding trim](/quest/m1/api-audit/binding-trim.md) names it.
+  JS `Reservation.grant` (vs `Auth.Grant`) becomes `rate`, as the bindings
+  name it.
 - **JS groups.** `Track.Producer.writeGroup` becomes `createGroup`, Rust's name.
 
 Kept, so the next audit skips them: `largest()` stays a snapshot on

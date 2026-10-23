@@ -28,5 +28,4 @@ trap). Wire: none.
 
 ## Related
 
-- [Claim request type](/quest/m1/public-model/claim-request-type.md) - splits `accept` off application requests in the same file; coordinate the order
-- [Public routes and answering](/quest/m1/public-model/answer.md) - later makes the forwarding claim public
+- [Claim request type](/quest/m1/api-audit/claim-request-type.md) - splits `accept` off application requests in the same file; coordinate the order

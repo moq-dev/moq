@@ -33,4 +33,4 @@ Public API: `@moq/net` breaking (`Prepared.reject` to `close`). Wire: none.
 
 ## Related
 
-- [Claim request type](/quest/m1/public-model/claim-request-type.md) - the JS `accept` half lives there
+- [Claim request type](/quest/m1/api-audit/claim-request-type.md) - the JS `accept` half lives there

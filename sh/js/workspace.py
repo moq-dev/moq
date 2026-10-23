@@ -157,7 +157,6 @@ def run(action, plan):
         raise RuntimeError("add these cross-tree JS inputs to the js pattern in sh/dispatch.sh: "
                            + " ".join(missing))
     command("python3", "sh/rs/stats-docs.py")
-    command("python3", "sh/rs/model-markers.py")
     # These inexpensive shared checks still protect every package's imports.
     result = subprocess.run(["grep", "-rn", "--include=*.ts", "--include=*.tsx",
                              "--exclude-dir=node_modules", "--exclude-dir=dist",
