@@ -163,11 +163,17 @@ pub(crate) struct WebState {
 	pub(crate) certificates: moq_tokio::tls::Certificates,
 	/// Relay-wide shutdown broadcast; WebSocket sessions drain with a GOAWAY
 	/// when it fires. Defaults to a handle that never fires.
-	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "websocket"),
+		allow(dead_code, reason = "only the `websocket` feature uses it")
+	)]
 	pub(crate) shutdown: crate::shutdown::Observer,
 	/// Live sessions on this node, so a WebSocket session is listed and nudged
 	/// like a QUIC one.
-	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "websocket"),
+		allow(dead_code, reason = "only the `websocket` feature uses it")
+	)]
 	pub(crate) sessions: crate::session::Registry,
 	/// How long a connection may sit with no complete request in flight (TLS
 	/// handshake and partial headers included), and a WebSocket wait for its MoQ
@@ -408,6 +414,7 @@ impl Web {
 	/// reload. The caller builds `app` from [`routes`](Self::routes) plus any
 	/// extra routes it merged in. An embedder driving a [`crate::Relay`]
 	/// passes that router to [`crate::Relay::with_web`] instead of calling this.
+	/// Every route can extract the accepted peer as `ConnectInfo<SocketAddr>`.
 	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
 		let Web {
 			state,
@@ -422,7 +429,7 @@ impl Web {
 		let app = app
 			.fallback(serve_landing)
 			.layer(axum::middleware::from_fn(get_cors))
-			.into_make_service_with_connect_info::<crate::listener::Peer>();
+			.into_make_service_with_connect_info::<net::SocketAddr>();
 		let ws = config.resolved_ws();
 		// Each request is admitted on its own, so a connection may have as many in flight
 		// as a session may have credentials verifying; the client queues the rest.
@@ -975,7 +982,7 @@ async fn admit_http(
 	query: AuthQuery,
 	uri: &http::Uri,
 	headers: &http::HeaderMap,
-	remote: crate::listener::Peer,
+	remote: net::SocketAddr,
 	mtls: Option<Extension<MtlsPeer>>,
 ) -> axum::response::Result<(auth::Lease, moq_net::origin::Consumer)> {
 	// The public request API represents a missing or root path as empty; the
@@ -988,7 +995,7 @@ async fn admit_http(
 		.map(str::to_owned)
 		.or_else(|| query.jwt.map(|jwt| format!("jwt={jwt}")));
 	request.server_name = request_host(uri, headers);
-	request.remote = Some(remote.0);
+	request.remote = Some(remote);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	// The listener's timeout bounds admission as it bounds the request headers. An
 	// HTTP read has no handshake deadline to inherit, so the bound starts here.
@@ -1017,7 +1024,7 @@ async fn serve_announced(
 	path: Option<Path<String>>,
 	Query(query): Query<AuthQuery>,
 	mtls: Option<Extension<MtlsPeer>>,
-	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
+	ConnectInfo(remote): ConnectInfo<net::SocketAddr>,
 	uri: http::Uri,
 	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
@@ -1055,7 +1062,7 @@ async fn serve_fetch(
 	Path(path): Path<String>,
 	Query(params): Query<FetchParams>,
 	mtls: Option<Extension<MtlsPeer>>,
-	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
+	ConnectInfo(remote): ConnectInfo<net::SocketAddr>,
 	uri: http::Uri,
 	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
@@ -1183,7 +1190,11 @@ impl IntoResponse for ServeGroup {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	use rcgen::{CertificateParams, KeyPair};
@@ -1211,7 +1222,7 @@ mod tests {
 				let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 				let web = Web::new(auth, cluster, certificates.clone(), Config::default());
 				let state = web.state;
-				let remote = ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap()));
+				let remote = ConnectInfo("127.0.0.1:1234".parse().unwrap());
 				let status = if fetch {
 					serve_fetch(
 						Path("room/video".to_owned()),
@@ -1286,7 +1297,7 @@ mod tests {
 				group: FetchGroup::Latest,
 			}),
 			None,
-			ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/fetch/room/video".parse().unwrap(),
 			http::HeaderMap::new(),
 			State(state.clone()),
@@ -1297,7 +1308,7 @@ mod tests {
 			Some(Path("room".to_owned())),
 			Query(AuthQuery { jwt: None }),
 			None,
-			ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/announced/room".parse().unwrap(),
 			http::HeaderMap::new(),
 			State(state.clone()),
@@ -1368,7 +1379,7 @@ mod tests {
 						group: selector,
 					}),
 					None,
-					ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+					ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 					format!("/fetch/room/video?tier={tier}").parse().unwrap(),
 					http::HeaderMap::new(),
 					State(state.clone()),
@@ -1384,7 +1395,7 @@ mod tests {
 				Some(Path("room".into())),
 				Query(AuthQuery { jwt: None }),
 				None,
-				ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+				ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 				format!("/announced/room?tier={tier}").parse().unwrap(),
 				http::HeaderMap::new(),
 				State(state.clone()),
@@ -1457,7 +1468,7 @@ mod tests {
 		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 		cluster.stats = moq_net::stats::Registry::new(Default::default());
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
-		let peer = || ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap()));
+		let peer = || ConnectInfo("127.0.0.1:1234".parse().unwrap());
 		let fetched = serve_fetch(
 			Path("room/video".into()),
 			Query(FetchParams {
@@ -1860,6 +1871,44 @@ mod tests {
 		);
 
 		serving.abort();
+	}
+
+	/// An embedded route can read the accepted address with Axum's standard
+	/// extractor, regardless of client-supplied proxy headers.
+	#[tokio::test]
+	async fn embedded_routes_receive_the_socket_address() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let mut config = Config::default();
+		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		let auth = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		}
+		.init("test", &moq_tokio::tls::Connect::default(), false)
+		.unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
+		let http = web.addrs().http.unwrap();
+		let app = Router::new().route(
+			"/remote",
+			get(|ConnectInfo(remote): ConnectInfo<net::SocketAddr>| async move { remote.to_string() }),
+		);
+		let serving = tokio::spawn(web.serve(app));
+		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
+		let expected = tcp.local_addr().unwrap().to_string();
+		tcp.write_all(
+			b"GET /remote HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 192.0.2.1\r\nConnection: close\r\n\r\n",
+		)
+		.await
+		.unwrap();
+		let mut response = String::new();
+		tcp.read_to_string(&mut response).await.unwrap();
+		assert_eq!(response.split("\r\n\r\n").nth(1), Some(expected.as_str()), "{response}");
+		serving.abort();
+		let _ = serving.await;
 	}
 
 	/// HTTPS settings without the HTTPS listener that would read them are refused,

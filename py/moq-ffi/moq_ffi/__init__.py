@@ -10,7 +10,7 @@ submodule; everything public is re-exported here.
 
 import atexit
 
-from ._uniffi import *  # noqa: F401,F403
+from ._uniffi import *  # noqa: F403
 from ._uniffi.moq import _UniffiLib
 
 # Rust runtime workers wake awaiting coroutines through a ctypes

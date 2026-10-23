@@ -62,7 +62,8 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   contract). Every receiver echoes, clients included; a closed session
   counts as the echo.
   The hop list leaves lite-07, and with it the
-  `Hop Base`/`Hop Keep` compression.
+  `Hop Base`/`Hop Keep` compression; `cluster.max_hops` then stops applying
+  to lite-07.
 
   ```text
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0

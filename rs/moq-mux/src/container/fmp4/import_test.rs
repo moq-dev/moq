@@ -2215,15 +2215,9 @@ async fn seek_keeps_the_decode_time_until_a_discontinuity_in(passthrough: bool) 
 	fmp4.discontinuity();
 	fmp4.seek(200).unwrap();
 	let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
-	// Passthrough writes its groups by hand, so the track refuses the rewound group; unwrapped,
-	// the media producer refuses the rewound keyframe before it gets that far.
-	assert!(
-		match passthrough {
-			true => matches!(err, crate::Error::Moq(moq_net::Error::TimestampMismatch)),
-			false => matches!(err, crate::Error::TimestampRewind(_)),
-		},
-		"{err:?}"
-	);
+	// Passthrough writes its groups by hand, so it refuses the rewound group itself, the way the
+	// media producer refuses an unwrapped track's rewound keyframe.
+	assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
 }
 
 /// The catalog is first published at the first fragment, carrying the clock that fragment

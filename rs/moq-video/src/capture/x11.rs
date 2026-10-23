@@ -327,8 +327,10 @@ impl Capture {
 	fn read(&mut self) -> Result<pump::Read, Error> {
 		let now = Instant::now();
 		if self.next > now {
-			// The capture thread runs outside any runtime, so it blocks on the host clock.
-			#[allow(clippy::disallowed_methods)]
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the capture thread runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(self.next - now);
 		}
 		self.next = Instant::now() + self.interval;
