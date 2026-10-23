@@ -981,6 +981,7 @@ fn reconcile(
 			renditions: HashMap::new(),
 			readers: tokio::task::JoinSet::new(),
 			current: None,
+			online: false,
 			finished: Finished::default(),
 			started: 0,
 			next_id: 0,
@@ -1030,8 +1031,8 @@ struct Plan {
 
 /// Follows the instances at one path and plays the renditions that read it on each in turn: a
 /// start reads them on that instance, an end idles their pads, and another instance taking over
-/// restarts each stream on the same pad. The catalog's own broadcast is a single instance that
-/// never ends.
+/// restarts each stream on the same pad. The same instance returning resumes its state. The
+/// catalog's own broadcast is a single instance that never ends.
 ///
 /// It owns its renditions' readers and the state of the instance they read, so whether a
 /// rendition is reading, idle, or playing out its tail is its own state rather than a task's.
@@ -1040,7 +1041,10 @@ struct Follower {
 	path: moq_net::PathOwned,
 	renditions: HashMap<Rendition, Entry>,
 	readers: tokio::task::JoinSet<(Rendition, u64, Exit)>,
+	/// The instance last started, kept across its end so its return resumes it.
 	current: Option<Current>,
+	/// Whether [`Self::current`] is announced.
+	online: bool,
 	/// Shared with the readers.
 	finished: Finished,
 	/// How many instances started, numbering each.
@@ -1147,7 +1151,7 @@ impl Follower {
 					}
 					Ok(moq_mux::follow::Event::End) => {
 						gst::info!(CAT, "{} is offline, holding its pads", self.path);
-						self.current = None;
+						self.online = false;
 						self.idle();
 					}
 					Err(err) => {
@@ -1159,7 +1163,7 @@ impl Follower {
 				// sibling renditions idle with it.
 				_ = catalog.closed(), if following && !listening => {
 					following = false;
-					self.current = None;
+					self.online = false;
 					self.idle();
 				}
 			}
@@ -1211,20 +1215,36 @@ impl Follower {
 
 	/// Read `instance`, which took over from any before it.
 	fn start(&mut self, instance: moq_net::broadcast::Consumer) {
-		self.started += 1;
-		// The first instance is the one the run started alongside. A later one's timestamps share
-		// no origin with the run's.
-		let timeline = match self.started {
-			1 => self.playback.timeline.clone(),
-			_ => Arc::default(),
-		};
-		self.current = Some(Current {
-			instance,
-			timeline,
-			serial: self.started,
-		});
-		self.finished.retain(|_, serial| serial == self.started);
-		self.idle();
+		self.online = true;
+		match &mut self.current {
+			// Announced again without an end, its readers carry on.
+			Some(current) if current.instance.is_clone(&instance) => {}
+			// The same publisher instance served again after an end keeps its timeline and the
+			// tracks it finished. An epochless one cannot prove it is the same.
+			Some(current)
+				if current.instance.info().epoch.is_some()
+					&& current.instance.info().epoch == instance.info().epoch =>
+			{
+				current.instance = instance;
+				self.idle();
+			}
+			_ => {
+				self.started += 1;
+				// The first instance is the one the run started alongside. A later one's
+				// timestamps share no origin with the run's.
+				let timeline = match self.started {
+					1 => self.playback.timeline.clone(),
+					_ => Arc::default(),
+				};
+				self.current = Some(Current {
+					instance,
+					timeline,
+					serial: self.started,
+				});
+				self.finished.retain(|_, serial| serial == self.started);
+				self.idle();
+			}
+		}
 		self.play();
 	}
 
@@ -1238,7 +1258,7 @@ impl Follower {
 
 	/// Start a reader on the current instance for each rendition without one that it may serve.
 	fn play(&mut self) {
-		let Some(current) = &self.current else {
+		let Some(current) = self.current.as_ref().filter(|_| self.online) else {
 			return;
 		};
 		for (rendition, entry) in &mut self.renditions {
@@ -3441,6 +3461,44 @@ mod session_tests {
 			recorder.seen()
 		);
 		drop(old);
+	}
+
+	/// The same sibling instance announced again resumes its state, whether or not its end reached
+	/// the follower first: a track it finished does not replay on its pad.
+	#[test]
+	fn a_reannounced_sibling_instance_does_not_replay_its_finish() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let _room = referencing(&origin, None);
+		let session = follow(&element, &origin);
+		let mut follow = origin.consume().follow("cam").unwrap();
+
+		let route = epoch();
+		let mut first = Publisher::sibling(&origin, route.clone());
+		let pad = recorder.written(&mut first, 1);
+		first.video.finish().unwrap();
+		await_finished(&first);
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		first.broadcast.unannounce();
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		first.broadcast.announce(route).unwrap();
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+
+		let mut second = Publisher::sibling(&origin, epoch());
+		assert_eq!(
+			recorder.written(&mut second, 2),
+			pad,
+			"the next instance moved to another pad"
+		);
+		stop(session);
+
+		// Only the next instance starts a stream on the pad.
+		let seen = recorder.seen();
+		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 1, "{seen:?}");
+		recorder.assert_one_pad_held();
+		drop(first);
 	}
 
 	/// A catalog finished while its broadcast stays up still follows its siblings: the next
