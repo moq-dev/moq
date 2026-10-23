@@ -1946,6 +1946,19 @@ mod tests {
 	) {
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		client_on(version, session, subscribe, solicit).await
+	}
+
+	/// [`client`] over `session`.
+	async fn client_on(
+		version: Version,
+		session: crate::lite::test_transport::SinkSession,
+		subscribe: crate::origin::Producer,
+		solicit: Option<bool>,
+	) -> (
+		crate::lite::test_transport::Log,
+		moq_clock::sim::JoinHandle<Result<(), Error>>,
+	) {
 		let log = session.log.clone();
 		let mut session = crate::driver::Transport::new(session);
 		let setup = match version {
@@ -2111,6 +2124,36 @@ mod tests {
 				crate::lite::test_transport::Sent::Write(_) => false,
 			});
 			assert!(ended, "{version:?} did not end the narrower request: {:?}", log.trail());
+		}
+	}
+
+	/// A request ended while it waits on the peer for stream credit holds nothing: the
+	/// broader request that replaced it goes out alone once the credit arrives.
+	#[moq_clock::test]
+	async fn a_request_ended_before_it_opened_does_not_block_the_broader_one() {
+		for version in [Version::Draft16, Version::Draft17, Version::Draft22] {
+			let subscribe = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let gate = kio::Producer::new(true);
+			let credit = kio::Producer::new(true);
+			let session =
+				crate::lite::test_transport::SinkSession::gated_bi(gate.consume()).with_open_bi_gate(credit.consume());
+			// Credit for draft-16's control stream only, opened before the driver runs.
+			let (log, _driver) = client_on(version, session, subscribe.clone(), None).await;
+			*credit.write().ok().unwrap() = false;
+			let opened = log.bi_opens();
+
+			let _front = watch(&subscribe, "cam/front");
+			for _ in 0..ANNOUNCE_TURNS {
+				moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+			}
+			let _cam = watch(&subscribe, "cam");
+			for _ in 0..ANNOUNCE_TURNS {
+				moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+			}
+			*credit.write().ok().unwrap() = true;
+			assert!(sent(&log, b"cam").await, "{version:?} never asked the broader prefix");
+			assert_eq!(log.bi_opens(), opened + 1, "{version:?} opened the replaced request");
+			assert!(!sent(&log, b"front").await, "{version:?} sent the replaced request");
 		}
 	}
 

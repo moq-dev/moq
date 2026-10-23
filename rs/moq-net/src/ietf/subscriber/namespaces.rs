@@ -163,24 +163,25 @@ where
 			live,
 			gone,
 		} = pending;
-		let proceed = kio::wait(|waiter| {
+		// The open waits on stream credit the peer grants, so it races `live` too: a request
+		// ended before it went out holds nothing, nor the broader one it blocks.
+		let mut opening = std::pin::pin!(opening);
+		let opened = kio::wait(|waiter| {
 			if live.poll_closed(waiter).is_ready() {
-				return Poll::Ready(false);
+				return Poll::Ready(None);
 			}
 			for blocker in &blockers {
 				if blocker.poll_closed(waiter).is_pending() {
 					return Poll::Pending;
 				}
 			}
-			Poll::Ready(true)
+			waiter.poll_future(opening.as_mut()).map(Some)
 		})
 		.await;
-		let res = match proceed {
-			true => match opening.await {
-				Ok(stream) => self.run_subscribe_namespace(stream, prefix, snapshot, live).await,
-				Err(err) => Err(err),
-			},
-			false => Ok(Ended::Local),
+		let res = match opened {
+			Some(Ok(stream)) => self.run_subscribe_namespace(stream, prefix, snapshot, live).await,
+			Some(Err(err)) => Err(err),
+			None => Ok(Ended::Local),
 		};
 		// Off the wire: an overlapping request may go out.
 		drop(gone);
