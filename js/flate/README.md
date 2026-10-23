@@ -50,4 +50,4 @@ new TextDecoder().decode(decoder.frame(a)); // "the quick brown fox"
 new TextDecoder().decode(decoder.frame(b)); // "the quick brown dog"
 ```
 
-Create a fresh `Encoder`/`Decoder` pair per independent stream (in moq-net terms, per group). `new Encoder({ level })` sets the DEFLATE level (`0..=9`, default `6`); `new Decoder({ maxFrameSize })` caps how far a single frame may inflate (default 64 MiB), rejecting zip bombs.
+Create a fresh `Encoder`/`Decoder` pair per independent stream (in moq-net terms, per group). `new Encoder({ level })` sets the DEFLATE level (`0..=9`, default `6`); a `Decoder` holds its whole window to the group budget (32 MiB), rejecting zip bombs: a compressed group never costs a reader more than a plain one.

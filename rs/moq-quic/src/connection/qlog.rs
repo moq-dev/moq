@@ -1,5 +1,7 @@
-// Function bodies in this module are regularly cfg'd out
-#![allow(unused_variables)]
+#![allow(
+    unused_variables,
+    reason = "function bodies in this module are regularly cfg'd out"
+)]
 
 #[cfg(feature = "qlog")]
 use std::sync::{Arc, Mutex};

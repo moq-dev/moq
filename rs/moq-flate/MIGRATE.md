@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A compressed group is held to the group budget
+
+`Decoder` holds its whole window, across every frame, to `moq_net::group::MAX_CACHE_BYTES` (32 MiB), the most a plain group carries, instead of capping each frame at 64 MiB.
+`DEFAULT_MAX_FRAME_SIZE` and `Decoder::with_max_frame_size` are removed; there is no other cap to set.
+The producers charge a compressed payload its inflated size: a snapshot value over 32 MiB fails with `moq_net::Error::FrameTooLarge` however small it deflates, and a stream log ends its budget at 32 MiB of inflated payload.
+Split a larger value across tracks.
+
 ### Consumers return `Timed<T>` (#5677)
 
 Snapshot and stream `next` / `poll_next` return `moq_net::Timed<T>`: read `.value` for the payload and `.at` for the frame's exact timestamp, `None` when untimed.

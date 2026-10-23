@@ -60,7 +60,7 @@ describe("Source error signal", () => {
 			});
 
 			await settle();
-			expect(source.out.error.peek()).toBe("unsupported");
+			expect(source.out.error.peek()?.name).toBe("NotSupportedError");
 			expect(source.out.available.peek()).toEqual({});
 
 			source.close();

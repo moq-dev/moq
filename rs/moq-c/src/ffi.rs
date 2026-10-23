@@ -9,7 +9,7 @@ use url::Url;
 use crate::{Error, Id, moq_protocol_error};
 
 /// A callback receiving a positive handle/value, zero on clean completion, or a negative error.
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_status_callback = Option<extern "C" fn(user_data: *mut c_void, code: i32)>;
 
 pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {

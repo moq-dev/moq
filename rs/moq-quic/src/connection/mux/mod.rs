@@ -23,8 +23,7 @@ use super::{
     spaces::Retransmits,
     stats::FrameStats,
     streams::{
-        Credit, RecvStream, SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent,
-        Streams, StreamsState,
+        Leased, RecvStream, SendGroups, SendOptions, SendStream, StreamEvent, Streams, StreamsState,
     },
 };
 use crate::{
@@ -387,14 +386,9 @@ impl Connection {
         Datagrams { conn: self }
     }
 
-    /// Return the connection credit [`Chunks::hold`](crate::Chunks::hold) took
-    ///
-    /// # Panics
-    /// If `credit` came from another connection.
-    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
-        let transmit = self.streams.release(credit);
-        self.pending.max_data |= transmit.should_transmit();
-        transmit
+    /// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
+    pub fn leased(&self, id: crate::StreamId) -> Option<&Leased> {
+        self.streams.leased(id)
     }
 
     /// The frame space of a record: the peer's `max_record_size`, under the STREAM ceiling

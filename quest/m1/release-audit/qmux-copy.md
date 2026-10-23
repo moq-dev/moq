@@ -28,7 +28,3 @@ Benchmark record size and frame count independently, including empty/control
 frames, truncated lengths, and retained tiny payloads. The current consumers
 are QMux WebSocket fallback receive loops. No public API or wire change is
 expected.
-
-## Related
-
-- [QMux no-wait opens](/quest/m1/qmux-no-wait.md) - distinct stream-creation credit behavior

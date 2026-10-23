@@ -87,7 +87,7 @@ func publish(url, broadcast string) error {
 
 	// CreateBroadcast only registers the path locally; Announce advertises it to
 	// the relay, once its tracks exist.
-	if err := producer.Announce(moq.Route{}); err != nil {
+	if err := producer.Announce(moq.AnnounceRoute{}); err != nil {
 		return err
 	}
 

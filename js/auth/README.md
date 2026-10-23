@@ -97,10 +97,6 @@ const claims = await Key.verify(key, token); // signature, kid, strict claims, a
 const permissions = authorize(claims, "rooms/meeting-123"); // patterns relative to the path
 ```
 
-Use `Key.decode(key, token)` when the signed payload is not a MoQ `Claims` object.
-It returns an unvalidated value after checking signature, algorithm, and key ID;
-validate its fields and lifetime in your application.
-
 Or as a CLI:
 
 ```bash

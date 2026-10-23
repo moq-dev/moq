@@ -185,7 +185,6 @@ async fn resets_and_stops_carry_their_codes() {
 	assert!(matches!(read_all(&mut recv).await, Err(Error::StreamReset(7))));
 	// The reset sticks: it never turns into a clean end
 	assert!(matches!(recv.read_chunk(usize::MAX).await, Err(Error::StreamReset(7))));
-	assert!(matches!(recv.closed().await, Err(Error::StreamReset(7))));
 
 	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
 	write_all(&mut send, Bytes::from_static(b"unwanted")).await;

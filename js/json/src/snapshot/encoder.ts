@@ -1,5 +1,5 @@
-import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
-import { Group } from "@moq/net";
+import { Encoder as Flate } from "@moq/flate";
+import { Group, Error as NetError } from "@moq/net";
 import type * as z from "@zod/mini";
 
 import { type Compression, isDeflate } from "../compression.ts";
@@ -112,8 +112,8 @@ export class Encoder<T> {
 	// baseline every delta is diffed against, and `undefined` until the first snapshot commits.
 	#last?: unknown;
 
-	// Bytes emitted into the current group, snapshot included: compressed frame sizes when
-	// compressing, raw otherwise, matching what the group holds on the wire.
+	// Bytes charged to the current group, snapshot included: each frame's slice, or its plaintext
+	// when that is larger, since a reader's DEFLATE window is held to the same budget.
 	#groupBytes = 0;
 	// Frames emitted into the current group, snapshot included.
 	#groupFrames = 0;
@@ -210,18 +210,20 @@ export class Encoder<T> {
 
 			// A delta is only readable while the group still holds the snapshot it applies to.
 			// Admitting a patch that pushes the group past that budget would abort it
-			// (`GroupTooLarge`), leaving a late subscriber with no value, so fall through to a
-			// fresh snapshot instead.
+			// (`GroupTooLarge`), or past a reader's inflate budget, leaving a late subscriber with no
+			// value, so fall through to a fresh snapshot instead.
 			//
-			// Measured on the encoded payload rather than the plaintext: a sync-flushed DEFLATE frame
-			// can come out slightly larger than its input, so the plaintext is not an upper bound.
-			// Compressing first advances the window, but `#snapshot` opens a fresh one, so an
-			// over-budget delta costs only the wasted compression.
-			if (this.#groupBytes + payload.length <= this.#maxGroupBytes) {
-				this.#groupBytes += payload.length;
+			// Charged the larger of the encoded payload and the plaintext: a sync-flushed DEFLATE frame
+			// can come out slightly larger than its input, while the reader's window counts what it
+			// inflates. Compressing first advanced the window past what any reader holds, so drop the
+			// group before rolling: if the snapshot is refused too, the next update must not be a delta.
+			const charge = Math.max(payload.length, delta.length);
+			if (this.#groupBytes + charge <= this.#maxGroupBytes) {
+				this.#groupBytes += charge;
 				this.#groupFrames += 1;
 				return this.#pend({ payload, keyframe: false }, json);
 			}
+			this.reset();
 		}
 
 		const payload = this.#snapshot(new TextEncoder().encode(text));
@@ -277,19 +279,13 @@ export class Encoder<T> {
 		return new TextEncoder().encode(JSON.stringify(result.patch));
 	}
 
-	// Reject plaintext the consumer's decoder could never reproduce. Every consumer decodes with
-	// `@moq/flate`'s default output cap, so a frame past it would be unreadable however small it
-	// compresses to. Checked before anything is published or the window advances.
-	#checkDecodable(frame: Uint8Array): void {
-		if (this.#compress && frame.byteLength > DEFAULT_MAX_FRAME_SIZE) {
-			throw new Error(`value larger than the decoder's ${DEFAULT_MAX_FRAME_SIZE} byte limit`);
-		}
-	}
-
 	// Encode a group's snapshot (frame 0), returning its payload. On the compressed path this opens a
 	// fresh stream (cold window), so the snapshot and its deltas share one DEFLATE window.
 	#snapshot(frame: Uint8Array): Uint8Array {
-		this.#checkDecodable(frame);
+		// Every consumer holds a compressed group to the group budget by its inflated size, so a value
+		// past it would be unreadable however small it compresses to: the same `FrameTooLarge` a plain
+		// one meets. Checked before anything is published or the window advances.
+		if (this.#compress && frame.byteLength > this.#maxGroupBytes) throw new NetError.FrameTooLarge();
 
 		// Build the window locally and install it only once framing succeeds. Assigning it first would
 		// leave a throw with a cold window in place, no resync pending, and the old group counters
@@ -299,7 +295,7 @@ export class Encoder<T> {
 		const payload = flate ? flate.frame(frame) : frame;
 
 		this.#flate = flate;
-		this.#groupBytes = payload.length;
+		this.#groupBytes = Math.max(payload.length, frame.length);
 		this.#groupFrames = 1;
 		this.#resync = false;
 
@@ -308,9 +304,6 @@ export class Encoder<T> {
 
 	// Compress a frame into the current group's window, or pass it through when uncompressed.
 	#frame(frame: Uint8Array): Uint8Array {
-		// A delta is worse than a snapshot here: there is no keyframe after it to resynchronize on,
-		// so one the consumer cannot decode makes the rest of the group unreadable.
-		this.#checkDecodable(frame);
 		return this.#flate ? this.#flate.frame(frame) : frame;
 	}
 }
