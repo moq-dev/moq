@@ -1586,16 +1586,16 @@ impl Reader {
 	}
 }
 
-/// Each track a follower's renditions played to the end on their pads, with the serial of the
-/// instance that served it. A new subscription to a finished track replays its last group, so a
+/// The track each of a follower's renditions last played to the end on its pad, per instance the
+/// follower keeps, by serial. A new subscription to a finished track replays its last group, so a
 /// catalog update that still lists the rendition (a publisher's final snapshot lands after its
-/// tracks end, a disable and an enable, or a switch back to a track) must not start it on that pad
-/// again. Another instance carries a new track, and a pad that never played the track joins it
-/// like any late subscriber. At most one record per track an instance the follower keeps served,
-/// on a listed pad. Shared with the readers, since a reader that replaces another on its pad
-/// learns this only once the other lets go.
+/// tracks end, or a disable and an enable) must not start it on that pad again. Another instance
+/// carries a new track, and a pad that never played the track joins it like any late subscriber.
+/// Only the last track is kept, so the records stay bounded by the catalog: a rendition switched
+/// back to a track it finished before another replays its last group. Shared with the readers,
+/// since a reader that replaces another on its pad learns this only once the other lets go.
 #[derive(Clone, Default)]
-struct Finished(Arc<Mutex<HashSet<(Rendition, String, u64)>>>);
+struct Finished(Arc<Mutex<HashMap<(Rendition, u64), String>>>);
 
 impl Finished {
 	/// Record that instance `serial` served the rendition's `track` to its end.
@@ -1603,7 +1603,7 @@ impl Finished {
 		self.0
 			.lock()
 			.unwrap()
-			.insert((rendition.clone(), track.to_string(), serial));
+			.insert((rendition.clone(), serial), track.to_string());
 	}
 
 	/// Whether instance `serial` already served the rendition's `track` to its end on its pad.
@@ -1611,7 +1611,8 @@ impl Finished {
 		self.0
 			.lock()
 			.unwrap()
-			.contains(&(rendition.clone(), track.to_string(), serial))
+			.get(&(rendition.clone(), serial))
+			.is_some_and(|finished| finished == track)
 	}
 
 	/// Keep only the records `keep` accepts.
@@ -1619,7 +1620,7 @@ impl Finished {
 		self.0
 			.lock()
 			.unwrap()
-			.retain(|(rendition, _, serial)| keep(rendition, *serial));
+			.retain(|(rendition, serial), _| keep(rendition, *serial));
 	}
 }
 
@@ -3670,16 +3671,11 @@ mod session_tests {
 
 	/// Block until `publisher`'s video track reads to its end, as a reader reading it does.
 	fn await_finished(publisher: &Publisher) {
-		await_track_finished(publisher, "video");
-	}
-
-	/// [`await_finished`] for the track `name`.
-	fn await_track_finished(publisher: &Publisher, name: &str) {
 		let broadcast = publisher.broadcast.consume();
 		super::RUNTIME.block_on(async {
 			let finished = async {
 				let subscriber = broadcast
-					.track(name)
+					.track("video")
 					.unwrap()
 					.subscribe(moq_net::track::Subscription::default())
 					.await
@@ -3944,76 +3940,6 @@ mod session_tests {
 			);
 		}
 		drop(first);
-	}
-
-	/// A rendition that finished one track, then another, and switches back to the first replays
-	/// nothing of it.
-	#[test]
-	fn a_rendition_switched_back_to_a_finished_track_does_not_replay_it() {
-		let _pad_ids = pad_ids();
-		let element = element();
-		let recorder = Recorder::attach(&element);
-		let origin = origin();
-		let mut room = referencing(&origin, None);
-		let _audio = room
-			.broadcast
-			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
-			.unwrap();
-		let session = follow(&element, &origin);
-
-		let mut first = Publisher::sibling(&origin, Default::default());
-		let pad = recorder.written(&mut first, 1);
-		first.video.finish().unwrap();
-		await_finished(&first);
-		let played = recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1));
-
-		// Writing through the publisher now feeds the other track.
-		let other = first
-			.broadcast
-			.create_track("other", hang::container::track_info(hang::catalog::PRIORITY.video))
-			.unwrap();
-		let mut finished = moq_mux::container::Producer::new(
-			other,
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
-		);
-		std::mem::swap(&mut first.video, &mut finished);
-		room.catalog
-			.modify()
-			.unwrap()
-			.video
-			.renditions
-			.get_mut("video")
-			.unwrap()
-			.track = Some("other".into());
-		assert_eq!(recorder.written(&mut first, 2), pad, "the switch moved to another pad");
-		first.video.finish().unwrap();
-		await_track_finished(&first, "other");
-
-		// The update also lists an audio rendition: its pad appearing proves the run acted on it.
-		{
-			let mut guard = room.catalog.modify().unwrap();
-			guard.video.renditions.get_mut("video").unwrap().track = None;
-			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
-		}
-		await_pad(&element, "audio_");
-		let mut second = Publisher::sibling(&origin, Default::default());
-		assert_eq!(
-			recorder.written(&mut second, 3),
-			pad,
-			"the next instance moved to another pad"
-		);
-		stop(session);
-
-		// The switch and the next instance each start a stream on the pad; the switch back none.
-		let seen = recorder.seen();
-		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 2, "{seen:?}");
-		assert_eq!(
-			recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1)),
-			played,
-			"{seen:?}"
-		);
-		recorder.assert_one_pad_held();
-		drop((first, finished));
 	}
 
 	/// A rendition delisted while its sibling is offline ends its idle pad, and the sibling's next
