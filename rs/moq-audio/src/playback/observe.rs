@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::task::{Poll, Waker};
+use std::task::Poll;
 use std::time::Duration;
 
 use super::driver::Commands;
@@ -105,8 +105,9 @@ pub(super) struct Shared {
 	/// The generation whose end a callback has closed out, or 0.
 	acknowledged: AtomicU64,
 	/// The [`Observer::finish`] waiting on [`acknowledged`](Self::acknowledged).
-	/// Woken off the audio thread, which only posts a driver sync.
-	waker: Mutex<Option<Waker>>,
+	/// Woken off the audio thread, which only posts a driver sync. Its entry dies
+	/// with the future, so a cancelled finish holds nothing here.
+	waiters: Mutex<kio::WaiterList>,
 	/// Posts that sync. Unset in tests that run a ledger without a driver.
 	driver: OnceLock<Commands>,
 	events: SyncSender<(u64, Event)>,
@@ -127,7 +128,7 @@ impl Default for Shared {
 			overflowed: AtomicU64::new(0),
 			finished: AtomicU64::new(0),
 			acknowledged: AtomicU64::new(0),
-			waker: Mutex::new(None),
+			waiters: Mutex::new(kio::WaiterList::new()),
 			driver: OnceLock::new(),
 			events,
 			received: Mutex::new(received),
@@ -144,9 +145,7 @@ impl Shared {
 	/// Wake a [`Observer::finish`] whose measurement a callback closed out. Locks,
 	/// so the driver thread calls it, never the audio thread.
 	pub(super) fn wake(&self) {
-		if let Some(waker) = self.waker.lock().unwrap().take() {
-			waker.wake();
-		}
+		self.waiters.lock().unwrap().wake();
 	}
 }
 
@@ -215,18 +214,20 @@ impl Observer {
 	/// Dropping the future still ends the measurement; it only stops waiting.
 	pub fn finish(&mut self) -> impl Future<Output = ()> + '_ {
 		self.shared.finished.store(self.generation, Ordering::Release);
-		std::future::poll_fn(|cx| {
-			let shared = &self.shared;
-			if shared.acknowledged.load(Ordering::Acquire) == self.generation {
-				return Poll::Ready(());
-			}
-			*shared.waker.lock().unwrap() = Some(cx.waker().clone());
-			// Checked again after registering, so an acknowledgement that raced it is not missed.
-			match shared.acknowledged.load(Ordering::Acquire) == self.generation {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		})
+		kio::wait(|waiter| self.poll_finished(waiter))
+	}
+
+	fn poll_finished(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let shared = &self.shared;
+		if shared.acknowledged.load(Ordering::Acquire) == self.generation {
+			return Poll::Ready(());
+		}
+		waiter.register(&mut shared.waiters.lock().unwrap());
+		// Checked again after registering, so an acknowledgement that raced it is not missed.
+		match shared.acknowledged.load(Ordering::Acquire) == self.generation {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
 	}
 }
 
@@ -470,6 +471,8 @@ impl Drop for Ledger {
 
 #[cfg(test)]
 mod tests {
+	use std::task::Waker;
+
 	use super::*;
 
 	const RATE: u32 = 48_000;
@@ -644,6 +647,20 @@ mod tests {
 		drop(ledger);
 		assert!(flag.0.load(Ordering::Acquire), "the waiting finish was not woken");
 		assert!(finish.as_mut().poll(&mut cx).is_ready());
+	}
+
+	/// A finish dropped while it waits, such as on a timeout, leaves no waker behind.
+	#[test]
+	fn a_cancelled_finish_releases_its_waker() {
+		let (_ledger, mut observer) = observed();
+		let shared = observer.shared.clone();
+		{
+			let mut cx = std::task::Context::from_waker(Waker::noop());
+			let mut finish = std::pin::pin!(observer.finish());
+			assert!(finish.as_mut().poll(&mut cx).is_pending());
+			assert!(!shared.waiters.lock().unwrap().is_empty());
+		}
+		assert!(shared.waiters.lock().unwrap().is_empty());
 	}
 
 	#[test]
