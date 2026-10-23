@@ -194,6 +194,14 @@ pub(crate) struct Hrd {
 	pub cpb_size: u64,
 }
 
+/// A sequence header that reorders deeper than the track already declared.
+#[derive(Debug, thiserror::Error)]
+#[error("video reorder depth {reorder} exceeds the {declared} the track declared")]
+struct Deepened {
+	declared: u8,
+	reorder: u8,
+}
+
 /// The catalog-publishing state a video importer overlays onto every config it resolves.
 ///
 /// Holds the caller's hint and the last config published (to dedupe re-publishes). Not generic
@@ -236,10 +244,22 @@ impl Catalog {
 	/// Overlay the hint onto `config` and publish it to `rendition`, unless it matches the last
 	/// publish. A changed config just re-mirrors the rendition; there are no fixed tracks to
 	/// reject a reconfiguration.
+	///
+	/// A declared `reorder` is fixed for the track's life, so a later sequence header declaring
+	/// less or none keeps it, and one declaring more fails: frames reordered that deep would
+	/// break the bound consumers already clock the track by.
 	pub(crate) fn publish(&mut self, track: &mut Track, mut config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.resolved = Some(config.clone());
 		self.hdr.apply(&mut config.color);
 		self.hint.apply(&mut config);
+		if let Some(declared) = self.last.as_ref().and_then(|last| last.reorder) {
+			match config.reorder {
+				Some(reorder) if reorder > declared => {
+					return Err(anyhow::Error::new(Deepened { declared, reorder }).into());
+				}
+				_ => config.reorder = Some(declared),
+			}
+		}
 		if self.last.as_ref() == Some(&config) {
 			return Ok(());
 		}

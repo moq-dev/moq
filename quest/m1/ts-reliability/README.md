@@ -62,7 +62,7 @@ refused means an error or a counted drop.
 
 | Mechanism | Contract | Owner |
 |:--|:--|:--|
-| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks`; DTS normalized from decode order. Today one access unit per PES | [access units](/quest/m1/ts-reliability/pes-access-units.md), [decode order](/quest/m1/ts-reliability/decode-order.md) |
+| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks`; DTS normalized from decode order. Today one access unit per PES | [access units](/quest/m1/ts-reliability/pes-access-units.md) |
 | AAC ADTS (0x0F), MP2, AC-3, E-AC-3, Opus (0x06 + `Opus`) | Preserved: audio rendition; Opus export labels mono and stereo, and 3 to 8 channels with an OpusHead in the Vorbis layout. Other mapping families (such as 255) refuse | landed |
 | Private and unknown PES types, LATM (0x11), metadata (0x15) | Preserved: `pesPacket`, PTS and DTS rebased | landed |
 | PES clock fields (ESCR, pack header, TREF), PES scrambling | Refused, counted in `refused` | landed |
@@ -100,7 +100,6 @@ remain with their current quests.
 ## Required
 
 - [State bound](/quest/m1/ts-reliability/state-bound.md) - SI and revision state retire with what the source stops repeating
-- [Decode order](/quest/m1/ts-reliability/decode-order.md) - TS, MKV and FLV author DTS from decode order and a declared `reorder` depth
 - [Shared parser](/quest/m1/ts-reliability/shared-parser.md) - `--program all` scans the multiplex once
 - [PMT export](/quest/m1/ts-reliability/pmt-export.md) - synced TS legs revise their PMT and grid identically
 - [Access units](/quest/m1/ts-reliability/pes-access-units.md) - a PES carrying several access units publishes each at its own time

@@ -237,7 +237,7 @@ pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig
 	Ok(config)
 }
 
-/// Copy the frame rate, display aspect, and colour from a decoded hvcC's first SPS.
+/// Copy the frame rate, display aspect, colour, and reorder depth from a decoded hvcC's first SPS.
 ///
 /// An hev1 record may list no SPS, leaving them unset.
 pub(crate) fn apply_hvcc_sps(hvcc: &mp4_atom::Hvcc, config: &mut hang::catalog::VideoConfig) -> Result<()> {
@@ -255,6 +255,7 @@ pub(crate) fn apply_hvcc_sps(hvcc: &mp4_atom::Hvcc, config: &mut hang::catalog::
 	config.display_aspect_width = metadata.display_aspect_width;
 	config.display_aspect_height = metadata.display_aspect_height;
 	config.color = metadata.color;
+	config.reorder = metadata.reorder;
 	Ok(())
 }
 
@@ -292,6 +293,14 @@ pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::cat
 	config.display_aspect_width = display_aspect.map(|(width, _)| width);
 	config.display_aspect_height = display_aspect.map(|(_, height)| height);
 	config.color = color;
+	config.reorder = full
+		.as_ref()
+		.and_then(|sps| {
+			let reorder = &sps.sub_layer_ordering_info.sps_max_num_reorder_pics;
+			let depth = *reorder.get(sps.sps_max_sub_layers_minus1 as usize).or(reorder.last())?;
+			u8::try_from(depth).ok()
+		})
+		.filter(|depth| u32::from(*depth) <= crate::codec::video::max_reorder(&config));
 	Ok(config)
 }
 

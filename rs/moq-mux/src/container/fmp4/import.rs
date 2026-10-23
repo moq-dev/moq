@@ -713,6 +713,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		config.display_aspect_width = metadata.display_aspect_width;
 		config.display_aspect_height = metadata.display_aspect_height;
 		config.color = metadata.color;
+		config.reorder = metadata.reorder;
 		config.description = Some(description.freeze());
 		config.container = container;
 		Ok(config)

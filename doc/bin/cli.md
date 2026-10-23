@@ -455,8 +455,9 @@ constant rate, the same on every leg since the lanes follow from it
 source's (a 10 Mb/s channel needs about 12), and takes neither `--stitch` nor
 `--passthrough`. A group that starts behind the one before it, on a lane too
 narrow to absorb that one, is logged and counted in `overruns`: the legs can
-differ there. So can reordered video whose SPS declares no reorder depth
-(`max_num_reorder_frames`), which is logged, and SI while one leg holds an older
+differ there. So can reordered video whose catalog declares no
+[`reorder`](/concept/hang), which the importers copy from the SPS and which is
+logged, and SI while one leg holds an older
 revision than the other or around an SI table the catalog adds or drops, which
 each leg takes up when its catalog update arrives.
 

@@ -1667,11 +1667,16 @@ async fn a_congested_path_sheds_what_it_made_late() {
 		"the queue made pictures late"
 	);
 	let lags = lags(&run);
+	// A group's leading pictures decode just before its keyframe is presented, so they leave
+	// later than the rest: compare the least lag of a whole group at each end.
+	let group = 12;
+	let (first, last) = (
+		lags[..group].iter().min().unwrap(),
+		lags[lags.len() - group..].iter().min().unwrap(),
+	);
 	assert!(
-		lags.last().unwrap().abs_diff(lags[0]) <= FRAME,
-		"the latency recovers: {:?} at first, {:?} at last",
-		lags[0],
-		lags.last().unwrap()
+		last.abs_diff(*first) <= FRAME,
+		"the latency recovers: {first:?} at first, {last:?} at last"
 	);
 }
 

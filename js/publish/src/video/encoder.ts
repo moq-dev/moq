@@ -375,6 +375,8 @@ export class Encoder {
 
 		let lastKeyframe: Micro | undefined;
 		let lastEncoded: Micro | undefined;
+		// The catalog declares no reordering, so each chunk must present after the one before it.
+		let lastOutput: number | undefined;
 		// The largest group demand asked for that a keyframe already answers. A join over the refresh
 		// ratio asks for one past the largest, which the next frame opens.
 		let answered: number | undefined;
@@ -387,6 +389,14 @@ export class Encoder {
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
 				output: (frame: EncodedVideoChunk) => {
+					if (lastOutput !== undefined && frame.timestamp <= lastOutput) {
+						this.#abort(
+							new Error(`encoder reordered a frame at ${frame.timestamp}us behind ${lastOutput}us`),
+							track,
+						);
+						return;
+					}
+					lastOutput = frame.timestamp;
 					const key = frame.type === "key";
 					if (key) {
 						lastKeyframe = frame.timestamp as Micro;
@@ -578,6 +588,8 @@ export class Encoder {
 			codedWidth: Catalog.u53(config.width),
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
+			// Realtime WebCodecs encoders emit no B-frames; the output callback refuses one that does.
+			reorder: Catalog.u8(0),
 			container: { kind: "legacy" } as const,
 			...estimate,
 		};

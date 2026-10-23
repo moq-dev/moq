@@ -196,11 +196,6 @@ pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
 	sps_vui(nal)?.hrd
 }
 
-/// The colour an SPS NAL unit's VUI signals, when it carries a video signal type.
-pub(crate) fn sps_color(nal: &[u8]) -> Option<hang::catalog::Color> {
-	sps_vui(nal)?.color
-}
-
 /// How a buffering period SEI lays out the delays of the NAL HRD an SPS NAL unit declares.
 pub(crate) fn sps_buffering(nal: &[u8]) -> Option<Buffering> {
 	sps_vui(nal)?.buffering
@@ -288,6 +283,11 @@ impl Vui {
 		config.display_aspect_width = display_aspect.map(|(width, _)| width);
 		config.display_aspect_height = display_aspect.map(|(_, height)| height);
 		config.color = self.color.clone();
+		// A field picture counts as half a frame, so only a frame-only SPS declares in frames.
+		config.reorder = self
+			.depth
+			.filter(|depth| self.frame_only && *depth <= crate::codec::video::max_reorder(config))
+			.and_then(|depth| u8::try_from(depth).ok());
 	}
 }
 
@@ -958,6 +958,7 @@ mod tests {
 	/// Only a VUI with a video signal type adds colour, and its colour description is read whole.
 	#[test]
 	fn sps_color_reads_the_video_signal_type() {
+		let sps_color = |nal: &[u8]| sps_vui(nal)?.color;
 		let sdr = sps_color(fixtures::SPS_BT709).unwrap();
 		assert_eq!(
 			(sdr.primaries, sdr.transfer, sdr.matrix, sdr.range),
