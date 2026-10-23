@@ -22,6 +22,14 @@ let subscriber = subscriber.with_range(5..);
 A custom publisher can now reach what the built-in ones use: `track::Subscriber::poll_start`, `track::Subscriber::poll_drop`, `group::Consumer::poll_expired`, `subscription::Position::final_sequence`, and `Subscription::{start, end, with_start, with_end}` for the covering span.
 It gives up on a group it is still writing once `poll_expired` is true, or `poll_finished` fails because the frames it has yet to read are gone.
 
+### Sessions box their transport (#6176)
+
+`Driver` and `server::Handshake` lose their transport type parameter: write `moq_net::Driver` and `moq_net::server::Handshake`.
+`Client::connect_lite`, `Server::accept_lite`, and `Server::accept_request_lite` are gone; call `connect`, `accept`, or `accept_request`, which accept every ALPN.
+Every session now takes a `transport::poll::Boxable` transport, whose streams must also be `Sync` on native.
+A `!Send` transport wraps itself in a type that checks the thread on use, such as `moq_uring::transport::Local`.
+`Client::connect` and `Server::accept_request` are plain functions returning `impl Future`, so call them as before with `.await`.
+
 ### `track::Producer::largest()` is a getter
 
 `track::Producer::largest(&self)` returns the track's largest location now, `None` before any, instead of streaming each newer one; `track::Producer::poll_largest` is gone.
