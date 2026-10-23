@@ -287,20 +287,48 @@ impl Sequence {
 	}
 }
 
-/// Whether a track's cache reflects its live feed; see [`TrackState::set_idle`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Whether a track's cache reflects its live feed; see [`TrackState::set_idle`]. Each
+/// state holds what only that feed knows, so nothing an ended feed set outlives it.
+#[derive(Clone, Copy, Debug)]
 enum Feed {
 	/// Readers take from the cache.
-	#[default]
-	Live,
+	Live {
+		/// Where a relative start taken before the feed produced anything counts back
+		/// from: the newest group when it went live, or else the first it produced since.
+		/// Kept after the group is evicted.
+		first: Option<u64>,
+		/// The group the route answered with, which its datagrams can show before any
+		/// group reaches it: relative starts count back from it until a newer group
+		/// arrives.
+		edge: Option<u64>,
+	},
 	/// The upstream subscription ended with the copy still held, so how stale the cache
 	/// is cannot be told until the route answers again.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	Idle,
+	Idle {
+		/// The newest group cached when the track went idle: what the route's answer is
+		/// judged against, whatever lands before it.
+		newest: Option<u64>,
+	},
 	/// The route answered that its feed reaches group `from`, which the cache cannot show
 	/// yet: until it can, the newest group cached would read as the live edge.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Answered { from: u64 },
+}
+
+impl Default for Feed {
+	fn default() -> Self {
+		Self::Live {
+			first: None,
+			edge: None,
+		}
+	}
+}
+
+impl Feed {
+	fn is_live(&self) -> bool {
+		matches!(self, Self::Live { .. })
+	}
 }
 
 #[derive(Default)]
@@ -376,10 +404,6 @@ pub(crate) struct TrackState {
 	// The newest group the publisher produced, which fetched backfill never moves: where
 	// relative starts count back from (see `latest_live`).
 	newest_produced: Option<u64>,
-	// Where a relative start taken before the live feed produced anything counts back
-	// from: the newest group when the feed went live, or else the first it produced
-	// since. Kept after the group is evicted.
-	first_live: Option<u64>,
 
 	// The name's sequence namespace within the broadcast, which can run past this track's
 	// `max_sequence` when an earlier producer of the name wrote further.
@@ -466,13 +490,6 @@ pub(crate) struct TrackState {
 	// Readers start at this group: the route's live feed starts past a gap after
 	// everything cached, so nothing bounds how old the cache below it is.
 	live_floor: Option<u64>,
-	// The group the route last answered with, which its datagrams can show before any
-	// group reaches it: relative starts count back from it until a newer group arrives.
-	live_edge: Option<u64>,
-	// The newest group cached when the track went idle: what the route's answer is
-	// judged against, whatever lands before it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	idle_newest: Option<u64>,
 
 	// Where production stopped, snapshotted when the open groups are released (an
 	// abort, or the last producer dropping). Computed live from the cache otherwise;
@@ -973,17 +990,21 @@ impl TrackState {
 	/// reached its end, which makes the cache the whole of it. An end declared but not
 	/// reached does not: the groups before it are still to come from the feed.
 	fn readable(&self) -> bool {
-		self.feed == Feed::Live || self.sealed || self.abort.is_some() || self.is_complete()
+		self.feed.is_live() || self.sealed || self.abort.is_some() || self.is_complete()
 	}
 
 	/// Where relative starts count back from: the live feed's newest group, produced or
 	/// answered. `None` while the cache does not reflect the feed, since an idle copy's
 	/// newest group is only what an ended feed left: a start taken then waits, as on an
-	/// empty track.
+	/// empty track. An idle copy that ends counts from its newest cached group.
 	fn latest_live(&self) -> Option<u64> {
+		let edge = match self.feed {
+			Feed::Live { edge, .. } => edge,
+			_ => None,
+		};
 		let floor = self.live_floor.unwrap_or(0);
 		self.newest_produced
-			.max(self.live_edge)
+			.max(edge)
 			.filter(|&latest| self.readable() && latest >= floor)
 	}
 
@@ -992,16 +1013,19 @@ impl TrackState {
 	/// holds the whole of, and not from where an earlier feed began.
 	fn first_live(&self) -> Option<u64> {
 		match self.feed {
-			Feed::Live => self.first_live,
+			Feed::Live { first, .. } => first,
 			_ => self.latest_live(),
 		}
 	}
 
-	/// The cache reflects the live feed again: a relative start that waited counts back
-	/// from its newest group now.
-	fn go_live(&mut self) {
-		self.feed = Feed::Live;
-		self.first_live = self.latest_live();
+	/// The cache reflects the live feed again, which reaches `edge` if the route named it:
+	/// a relative start that waited counts back from its newest group now.
+	fn go_live(&mut self, edge: Option<u64>) {
+		self.feed = Feed::Live { first: None, edge };
+		self.feed = Feed::Live {
+			first: self.latest_live(),
+			edge,
+		};
 	}
 
 	/// Find the next live group at or after `index` in arrival order.
@@ -1845,7 +1869,9 @@ impl TrackState {
 			self.latest_group = Some(sequence);
 		}
 		if visible {
-			self.first_live.get_or_insert(sequence);
+			if let Feed::Live { first, .. } = &mut self.feed {
+				first.get_or_insert(sequence);
+			}
 			self.newest_produced = self.newest_produced.max(Some(sequence));
 		}
 		if !self.protects(sequence) {
@@ -1927,7 +1953,7 @@ impl TrackState {
 		if let Feed::Answered { from } = self.feed
 			&& sequence >= from
 		{
-			self.go_live();
+			self.go_live(Some(from));
 		}
 	}
 
@@ -2343,15 +2369,13 @@ impl TrackState {
 	/// datagrams go too, since a reader returning later must not be handed them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn set_idle(&mut self) {
-		self.feed = Feed::Idle;
-		// The ended feed's answer: an idle copy that ends counts from what it cached.
-		self.live_edge = None;
-		self.idle_newest = self
+		let newest = self
 			.lookup
 			.iter()
 			.rev()
 			.find(|(_, slot)| slot.is_shown())
 			.map(|(sequence, _)| *sequence);
+		self.feed = Feed::Idle { newest };
 		self.datagram_offset += self.datagrams.len();
 		self.datagrams.clear();
 		// An open group stops because this copy dropped its feed, not because the publisher
@@ -2378,12 +2402,12 @@ impl TrackState {
 	/// read as the live edge, though the route already holds a newer one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) {
-		if self.feed != Feed::Idle {
+		let Feed::Idle { newest } = self.feed else {
 			return;
-		}
+		};
 		// Judged by what survived: the cancel that idled the copy resets the group in flight,
 		// and an answer past it leaves a gap after the newest group still cached.
-		let cached = self.idle_newest.take().and_then(|newest| {
+		let cached = newest.and_then(|newest| {
 			self.lookup
 				.range(..=newest)
 				.rev()
@@ -2399,10 +2423,9 @@ impl TrackState {
 			(None, Some(cached)) => Some(cached.saturating_add(1)),
 			_ => self.live_floor,
 		};
-		self.live_edge = largest.map(|largest| largest.group);
-		match largest {
-			Some(largest) if !self.shows(largest.group) => self.feed = Feed::Answered { from: largest.group },
-			_ => self.go_live(),
+		match largest.map(|largest| largest.group) {
+			Some(from) if !self.shows(from) => self.feed = Feed::Answered { from },
+			edge => self.go_live(edge),
 		}
 	}
 
@@ -2613,7 +2636,7 @@ fn poll_largest(
 /// end that is not reached yet does not count: an idle copy's largest is still only what
 /// its ended feed left.
 fn largest_live(state: &TrackState, waiter: &kio::Waiter) -> Poll<()> {
-	match state.feed == Feed::Live || state.sealed || state.abort.is_some() || state.largest_settled() {
+	match state.feed.is_live() || state.sealed || state.abort.is_some() || state.largest_settled() {
 		true => Poll::Ready(()),
 		false => {
 			state.watch_tail(waiter);
@@ -3108,7 +3131,7 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: capability gap
 	pub(crate) fn is_live(&self) -> bool {
-		self.state.read().feed == Feed::Live
+		self.state.read().feed.is_live()
 	}
 
 	/// While idle, the newest group cached when the track went idle: a route asked from
@@ -3117,7 +3140,10 @@ impl Producer {
 	// private: capability gap
 	pub(crate) fn idle_newest(&self) -> Option<u64> {
 		let state = self.state.read();
-		state.idle_newest.filter(|_| state.feed == Feed::Idle)
+		match state.feed {
+			Feed::Idle { newest } => newest,
+			_ => None,
+		}
 	}
 
 	/// [`Request::request_start`] for a copy already accepted, which a held copy's next
@@ -4533,7 +4559,7 @@ impl Consumer {
 		self.with_state(|state| {
 			state.is_some_and(|state| {
 				let state = state.read();
-				state.routes.is_none() && state.published && !state.closed && state.feed == Feed::Live
+				state.routes.is_none() && state.published && !state.closed && state.feed.is_live()
 			})
 		})
 	}
