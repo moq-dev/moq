@@ -295,7 +295,8 @@ export default class MoqPublish extends HTMLElement {
 				// A canvas that lost its GPU never hands out another context, so swap in a fresh copy.
 				// The observer above picks it up and this effect builds a renderer for it.
 				effect.run((inner) => {
-					if (inner.get(renderer.out.error) === "surface-lost") preview.replaceWith(preview.cloneNode());
+					if (inner.get(renderer.out.error)?.name === "InvalidStateError")
+						preview.replaceWith(preview.cloneNode());
 				});
 				return;
 			}

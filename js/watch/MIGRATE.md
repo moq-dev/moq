@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Video.Source.out.error` is an `Error`
+
+`Video.SourceError` is gone, and `Video.Source.out.error` holds an `Error` instead of the `"unsupported"` string, like every other `out.error`.
+Replace `error === "unsupported"` with `error?.name === "NotSupportedError"`.
+
 ### Time units come from `Clock`
 
 `Net.Time.Milli` and the other duration units moved to `@moq/clock`, which `@moq/watch` re-exports as `Clock`.

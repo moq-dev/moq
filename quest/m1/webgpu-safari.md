@@ -17,15 +17,15 @@ frames, biplanar formats, and iOS orientation.
   `auto` and `webgpu` on real Apple hardware or a hosted Safari session, over
   H.264 and the other catalog codecs, in each orientation.
 - #5138 decided an unimportable frame stays loud (it throws and that frame is
-  skipped). Revisit with what Safari actually does: keep it, or add a
-  `RendererError` value for it.
+  skipped). Revisit with what Safari actually does: keep it, or report it
+  through `out.error` under its own error name.
 - Fix what breaks at its source. If the probe passes but frames fail, consider
   extending the probe rather than a runtime fallback, which #5138 rejected.
 
 Needs a human-run or hosted Safari session; a background agent reports
 instead of guessing.
 
-Public API: possibly a new `RendererError` value. Wire: none.
+Public API: possibly a new `out.error` name. Wire: none.
 
 ## Related
 

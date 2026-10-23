@@ -55,8 +55,7 @@ Rejected in planning:
 - Restoring `track::Demand::{used, unused}`: [refresh](/quest/m1/refresh/README.md)
   decided one `wanted()` signal.
 - Removing `Audio.Decoder.arrivals()`: moq.dev has a planned consumer
-  waiting on this release. Only the video handle goes
-  ([watch trim](/quest/m1/api-audit/watch-trim.md)).
+  waiting on this release. Only the video handle went.
 - Pulling hang's `Projection`, `Stereo`, and `AudioLayout`: the maintainer
   decided 2026-10-20 to land the fields first.
 - One terminal verb across bindings: Kotlin's `end` exists only because
@@ -86,7 +85,6 @@ Rejected in planning:
 - [Binding surface trim](/quest/m1/api-audit/binding-trim.md) - route input is separate from route observation, watch verbs are uniform, and unused binding objects are gone
 - [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - Python, Go, and Dart client options use the FFI's names and nesting
 - [One decode read](/quest/m1/api-audit/decode-read.md) - audio and video decoders yield the same `Frame`, `Gap`, `End` read as moq-mux containers
-- [Watch and publish trim](/quest/m1/api-audit/watch-trim.md) - `out.error` has one type across watch and publish sources, decoders, and the renderer
 - [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
 - [Stats names](/quest/m1/api-audit/stats-naming.md) - each stats track and reader has one name, and "stats" means one thing in the CLI
 - [Gateway crate API](/quest/m1/api-audit/gateway-api.md) - rtmp and srt drop their unused `run` entry points and share builder names, and rtc has one router path

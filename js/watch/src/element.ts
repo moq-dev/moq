@@ -290,7 +290,7 @@ export default class MoqWatch extends HTMLElement {
 		// A canvas that lost its GPU never hands out another context, so swap in a fresh copy. The
 		// observer above picks it up, which clears the error and selects a renderer again.
 		this.signals.run((effect) => {
-			if (effect.get(this.renderer.out.error) !== "surface-lost") return;
+			if (effect.get(this.renderer.out.error)?.name !== "InvalidStateError") return;
 			// Peek: rerunning on the swap itself would replace the fresh canvas before the error clears.
 			const canvas = this.#canvas.peek();
 			canvas?.replaceWith(canvas.cloneNode());
