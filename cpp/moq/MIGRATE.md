@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Generated free functions drop the `moq_` prefix (#6476)
+
+`moq::moq_foo` is `moq::foo`, the name `moq.hpp` already wrapped most of them as; `moq::moq_epoch_time_ms` is `moq::epoch_time_ms`.
+Regenerate the C++ bindings with `uniffi-bindgen-cpp` `v0.11.0-kixelated.6+v0.32.2`.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
