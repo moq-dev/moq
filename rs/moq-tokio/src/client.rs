@@ -84,7 +84,16 @@ pub struct Client {
 	iroh: Option<crate::iroh::Endpoint>,
 	#[cfg(feature = "iroh")]
 	iroh_addrs: Vec<std::net::SocketAddr>,
+	/// Replaces the transport dial in tests, so the reconnect loop can run over
+	/// in-memory sessions on a paused clock.
+	#[cfg(test)]
+	pub(crate) dialer: Option<std::sync::Arc<Dialer>>,
 }
+
+/// A test stand-in for [`Client::dial`].
+#[cfg(test)]
+pub(crate) type Dialer =
+	dyn Fn(crate::connect::Addr) -> std::pin::Pin<Box<dyn Future<Output = crate::Result<Dialed>> + Send>> + Send + Sync;
 
 impl Client {
 	/// Build a client from its config.
@@ -113,6 +122,7 @@ impl Client {
 		}
 
 		quic.validate()?;
+		config.backoff.validate()?;
 
 		// Only the rustls-backed transports use this. Iroh and the plaintext
 		// qmux transports must not require a rustls crypto provider.
@@ -165,6 +175,8 @@ impl Client {
 			iroh: None,
 			#[cfg(feature = "iroh")]
 			iroh_addrs: Vec::new(),
+			#[cfg(test)]
+			dialer: None,
 		})
 	}
 
@@ -373,6 +385,11 @@ impl Client {
 		feature = "uds"
 	))]
 	pub(crate) async fn dial(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
+		#[cfg(test)]
+		if let Some(dialer) = &self.dialer {
+			return dialer(addr).await;
+		}
+
 		// Each compiled backend adds state to this dispatch future. Keep it off the
 		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
 		let attempt = Box::pin(self.connect_inner(addr));

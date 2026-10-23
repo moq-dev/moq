@@ -204,6 +204,9 @@ struct ConnectBackoff {
 	#[usage(env = "MOQ_BACKOFF_MAX", cli("--backoff-max"))]
 	max: Option<String>,
 
+	#[usage(env = "MOQ_BACKOFF_HEALTHY", cli("--backoff-healthy"))]
+	healthy: Option<String>,
+
 	#[usage(env = "MOQ_BACKOFF_TIMEOUT", cli("--backoff-timeout"))]
 	timeout: Option<String>,
 }

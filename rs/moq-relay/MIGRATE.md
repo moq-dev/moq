@@ -5,10 +5,18 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Each `[connect.backoff]` knob does one job ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+`initial` is only the first retry delay, where zero now retries at once, and `max` is only
+the cap, where zero now leaves the delay uncapped. A session counts as healthy once it
+outlives the new `healthy` (`--backoff-healthy`, `MOQ_BACKOFF_HEALTHY`), 1s by default,
+instead of `initial`; zero is refused. If you raised `initial` to slow redials after
+flapping sessions, set `healthy` to the same value.
+
 ### Embedder durations use the shared adapter ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
 
 Set `drain_timeout` with `Some(std_duration.into())`; `None` uses the default.
-ACME `timeout`, stats `linger`, and cache `duration` use the same `moq_tokio::cli::Duration`
+ACME `timeout`, stats `interval` and `linger`, and cache `duration` use the same `moq_tokio::cli::Duration`
 adapter. TOML and CLI duration strings retain their names. Later Rust assignments
 replace parsed values directly; there are no hidden CLI shadow fields.
 
@@ -16,7 +24,7 @@ replace parsed values directly; there are no hidden CLI shadow fields.
 
 `stats.interval`, `--stats-interval`, and `MOQ_STATS_INTERVAL` take a duration such as `"1s"` or `"500ms"` instead of a bare number of seconds, and a zero interval refuses to start.
 Write `interval = 5` as `interval = "5s"`.
-In Rust, `stats::Config::interval` is a `Duration`, and `stats::Config::build` returns a `Result`.
+In Rust, `stats::Config::build` returns a `Result`.
 
 ### `receive_window` has a floor (#5878)
 

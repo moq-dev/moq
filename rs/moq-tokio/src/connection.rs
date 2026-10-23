@@ -50,28 +50,27 @@ fn settles_walk(err: &Error) -> bool {
 
 /// Exponential backoff configuration for reconnection attempts.
 ///
-/// The delays carry jitter, so a fleet
-/// knocked offline together does not reconnect in lockstep. The timeout bounds every failure;
-/// a settled rejection, malformed protocol input, or invalid local configuration stops retrying.
-/// A GOAWAY naming no new URI is no failure: a restarting peer sends one to each session until
-/// it goes, and each of those
-/// serves, so it restarts the timeout instead.
+/// Three knobs, each with one job: `initial` and `multiplier` set the wait before
+/// each retry, `max` caps it, and `healthy` decides which sessions count as failed
+/// attempts. The delays carry jitter, so a fleet knocked offline together does not
+/// reconnect in lockstep. The timeout bounds every failure; a settled rejection,
+/// malformed protocol input, or invalid local configuration stops retrying. A GOAWAY
+/// naming no new URI is no failure: a restarting peer sends one to each session until
+/// it goes, and each of those serves, so it restarts the timeout instead.
 ///
-/// A GOAWAY off a session that outlived `initial` migrates at once, unless it sends the
-/// connection back to an endpoint that already redirected it elsewhere and the session lived
-/// less than `max`. Two peers redirecting to each other thus wait out this backoff and count
+/// A GOAWAY off a healthy session migrates at once, unless it sends the connection back
+/// to an endpoint that already redirected it elsewhere and the session lived less than
+/// `max`. Two peers redirecting to each other thus wait out this backoff and count
 /// against the timeout.
 #[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Backoff {
-	/// Initial delay before first reconnect attempt. Defaults to 1s.
+	/// Delay before the first reconnect attempt. Defaults to 1s; zero retries at once.
 	///
-	/// Doubles as the bar a session must stay up to count as healthy, so it is
-	/// floored at 50ms: at zero every session would look healthy and the retry
-	/// pacing would collapse.
-	/// `None` uses the default. Zero retains the existing retry pacing floor.
+	/// Later delays grow from it, so zero turns retry waiting off entirely: an immediate
+	/// close still counts as a failed attempt and spends the timeout.
 	#[usage(
 		name = "backoff-initial",
 		long,
@@ -81,7 +80,7 @@ pub struct Backoff {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub initial: Option<crate::cli::Duration>,
 
-	/// Multiplier applied to delay after each failure. Defaults to 2.
+	/// Multiplier applied to delay after each failure. Defaults to 2; 0 or 1 keeps it constant.
 	#[usage(
 		name = "backoff-multiplier",
 		long,
@@ -91,26 +90,36 @@ pub struct Backoff {
 	)]
 	pub multiplier: u32,
 
-	/// Maximum delay between reconnect attempts. Defaults to 5s.
-	/// `None` uses the default. The maximum is never below the initial delay.
+	/// Cap on the delay between reconnect attempts. Defaults to 5s; zero leaves it uncapped.
+	///
+	/// A cap below `initial` caps the first delay too.
 	#[usage(name = "backoff-max", long, env = "MOQ_BACKOFF_MAX", setting = "connect.backoff.max")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub max: Option<crate::cli::Duration>,
 
-	/// Maximum time to spend retrying before giving up. Defaults to 10s.
+	/// How long a session must stay up to count as healthy. Defaults to 1s; zero is refused.
+	///
+	/// A healthy session's end resets the delay and the timeout. One that ends sooner is a
+	/// failed attempt, so a peer that accepts and then drops every session still escalates
+	/// the delay and exhausts the timeout.
+	#[usage(
+		name = "backoff-healthy",
+		long,
+		env = "MOQ_BACKOFF_HEALTHY",
+		setting = "connect.backoff.healthy"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub healthy: Option<crate::cli::Duration>,
+
+	/// Maximum time to spend retrying before giving up. Defaults to 10s; zero retries forever.
 	///
 	/// No new walk of the peer's addresses starts once it has passed, but one under way finishes:
 	/// each candidate but the last gets up to 5s, and the last runs to
 	/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout), so a handshake
 	/// slower than this still lands. Giving up can therefore take up to one whole walk longer.
 	///
-	/// Resets after a stable connection (one that outlives the initial backoff) outside a redirect
-	/// loop, so a flapping session that reconnects then immediately drops still counts toward the
-	/// timeout. Set to `Some(Duration::ZERO.into())` for unlimited retries. `None` takes the default. When this config was
-	/// parsed from the command line, a later assignment replaces its parsed value.
-	///
-	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
-	/// type's default, and only `None` tells "unset" apart from "retry forever".
+	/// Resets after a healthy session outside a redirect loop, so a flapping session that
+	/// reconnects then immediately drops still counts toward the timeout.
 	#[usage(
 		name = "backoff-timeout",
 		long,
@@ -127,25 +136,40 @@ impl Default for Backoff {
 			initial: None,
 			multiplier: DEFAULT_MULTIPLIER,
 			max: None,
+			healthy: None,
 			timeout: None,
 		}
 	}
 }
 
 impl Backoff {
-	/// The initial retry delay and healthy-session threshold, including its 50ms floor.
+	/// The configured initial retry delay, or its default; zero retries at once.
 	pub fn initial(&self) -> Duration {
-		self.initial.map(Into::into).unwrap_or(DEFAULT_INITIAL).max(MIN_BACKOFF)
+		self.initial.map(Into::into).unwrap_or(DEFAULT_INITIAL)
 	}
 
-	/// The retry-delay cap, never lower than the initial delay.
+	/// The configured retry-delay cap, or its default; zero leaves the delay uncapped.
 	pub fn max(&self) -> Duration {
-		self.max.map(Into::into).unwrap_or(DEFAULT_MAX).max(self.initial())
+		self.max.map(Into::into).unwrap_or(DEFAULT_MAX)
 	}
 
 	/// The retry deadline window, with zero meaning unlimited and unset using the default.
 	pub fn timeout(&self) -> Duration {
 		self.timeout.map(Into::into).unwrap_or(DEFAULT_TIMEOUT)
+	}
+
+	/// How long a session must last to count as healthy.
+	fn healthy(&self) -> Duration {
+		self.healthy.map(Into::into).unwrap_or(DEFAULT_HEALTHY)
+	}
+
+	/// Refuse a zero healthy threshold, which would count every session as healthy and
+	/// reset the timeout forever under a peer that drops each one on sight.
+	pub(crate) fn validate(&self) -> crate::Result<()> {
+		if self.healthy().is_zero() {
+			return Err(Error::BackoffHealthy);
+		}
+		Ok(())
 	}
 }
 
@@ -362,46 +386,46 @@ impl Default for Goaway {
 const DEFAULT_INITIAL: Duration = Duration::from_secs(1);
 const DEFAULT_MULTIPLIER: u32 = 2;
 const DEFAULT_MAX: Duration = Duration::from_secs(5);
+const DEFAULT_HEALTHY: Duration = Duration::from_secs(1);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Floor for the retry delay, which also sets the bar for calling a session
-/// healthy. Small enough to stay out of the way of a fast config, large enough
-/// that a session closed on sight never clears it.
-const MIN_BACKOFF: Duration = Duration::from_millis(50);
-
-/// The retry pacing a connection actually runs on: [`Backoff`] with the floors
-/// applied.
-///
-/// Every knob can zero the delay on its own, and a delay of zero is a dial loop
-/// that runs as fast as the runtime allows. `initial` seeds it, `multiplier`
-/// grows it, and `max` caps it, so a zero anywhere collapses the whole schedule.
-/// Resolving them once, here, keeps that from having to be re-argued at each of
-/// the three places the loop reaches for them.
+/// The retry pacing a connection actually runs on, resolved once from [`Backoff`].
 #[derive(Clone, Copy)]
 struct Pacing {
-	/// The first delay, and the bar a session must clear to count as healthy. At
-	/// zero every session looks healthy, which resets the give-up window forever.
+	/// The first delay, already under the cap.
 	initial: Duration,
-	/// Never below `initial`, so the cap cannot undo the floor on later retries.
-	max: Duration,
-	/// At least 1, since zero would shrink the delay back to nothing.
+	/// The delay cap, or `None` for uncapped.
+	max: Option<Duration>,
+	/// At least 1: a multiplier of zero means no growth, not a delay that shrinks to nothing.
 	multiplier: u32,
+	/// The bar a session must clear to count as healthy. Never zero.
+	healthy: Duration,
 }
 
 impl Pacing {
 	fn new(backoff: &Backoff) -> Self {
+		let max = Some(backoff.max()).filter(|max| !max.is_zero());
 		let initial = backoff.initial();
-		let max = backoff.max();
 		Self {
-			initial,
-			max: max.max(initial),
+			initial: max.map_or(initial, |max| initial.min(max)),
+			max,
 			multiplier: backoff.multiplier.max(1),
+			healthy: backoff.healthy(),
 		}
 	}
 
 	/// The delay for the attempt after one that waited `delay`.
 	fn next(&self, delay: Duration) -> Duration {
-		std::cmp::min(delay.saturating_mul(self.multiplier), self.max)
+		let next = delay.saturating_mul(self.multiplier);
+		self.max.map_or(next, |max| next.min(max))
+	}
+
+	/// How long a session must last to start a new run of redirects.
+	///
+	/// One that outlived the capped delay already redials no faster than the backoff would
+	/// allow. Uncapped, the healthy bar is the only rate the config names.
+	fn settled(&self) -> Duration {
+		self.max.unwrap_or(self.healthy)
 	}
 }
 
@@ -821,8 +845,7 @@ impl Connection {
 		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
 		let timeout = backoff.timeout();
-		let initial = pacing.initial;
-		let mut retry = Retry::new(initial);
+		let mut retry = Retry::new(pacing.initial);
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
 		// later drop redials wherever we were last sent. Scoped to this loop, so a
 		// fresh Connection starts from the configured addresses again.
@@ -888,7 +911,7 @@ impl Connection {
 						return Ok(());
 					}
 
-					// Two peers that each outlive the initial backoff can still bounce us between
+					// Two peers that each hold a session past the healthy bar can still bounce us between
 					// them forever. Returning to an endpoint that already sent us elsewhere in this
 					// run of migrations skips the healthy-session reset, so the backoff escalates and
 					// the retry window still applies. A one-way rolling restart never revisits one,
@@ -896,7 +919,7 @@ impl Connection {
 					// counts. A session that outlived the capped delay already redials no faster
 					// than the backoff would allow, so it starts a new run: rolling restarts days
 					// apart never add up to a loop.
-					if matches!(ended, Ended::Closed(_)) || tenure >= pacing.max {
+					if matches!(ended, Ended::Closed(_)) || tenure >= pacing.settled() {
 						redirects.reset();
 					}
 					// Only an accepted redirect is a move: an empty or ignored one reconnects in place.
@@ -906,9 +929,9 @@ impl Connection {
 						to != from && redirects.depart(from, &to)
 					});
 
-					// A session that stayed up past the initial backoff is healthy; one that
+					// A session that stayed up past the healthy bar is healthy; one that
 					// ended sooner, or carried on a redirect loop, counts as a failed attempt.
-					let healthy = !looped && retry.settle(tenure, initial);
+					let healthy = !looped && retry.settle(tenure, &pacing);
 
 					if let Ended::Goaway(msg) = &ended {
 						// An accepted redirect is an assignment: keep dialing it from here on, and
@@ -1315,12 +1338,11 @@ impl Retry {
 		}
 	}
 
-	/// Score how long a session served: past `initial` is healthy and starts a fresh
-	/// retry window.
-	fn settle(&mut self, tenure: Duration, initial: Duration) -> bool {
-		let healthy = tenure >= initial;
+	/// Score how long a session served: past the healthy bar starts a fresh retry window.
+	fn settle(&mut self, tenure: Duration, pacing: &Pacing) -> bool {
+		let healthy = tenure >= pacing.healthy;
 		if healthy {
-			*self = Self::new(initial);
+			*self = Self::new(pacing.initial);
 		}
 		healthy
 	}
@@ -1664,12 +1686,14 @@ mod tests {
 		parsed.backoff.initial = Some((Duration::from_secs(7)).into());
 		parsed.backoff.multiplier = 5;
 		parsed.backoff.max = Some((Duration::from_secs(11)).into());
+		parsed.backoff.healthy = Some((Duration::from_secs(2)).into());
 		parsed.backoff.timeout = Some((Duration::ZERO).into());
 		parsed.update_from(&[]);
 
 		assert_eq!(parsed.backoff.initial, Some((Duration::from_secs(7)).into()));
 		assert_eq!(parsed.backoff.multiplier, 5);
 		assert_eq!(parsed.backoff.max, Some((Duration::from_secs(11)).into()));
+		assert_eq!(parsed.backoff.healthy, Some((Duration::from_secs(2)).into()));
 		assert_eq!(parsed.backoff.timeout(), Duration::ZERO, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the typed defaults.
@@ -1677,7 +1701,8 @@ mod tests {
 		assert_eq!(parsed.backoff.multiplier, DEFAULT_MULTIPLIER);
 		let pacing = Pacing::new(&parsed.backoff);
 		assert_eq!(pacing.initial, DEFAULT_INITIAL);
-		assert_eq!(pacing.max, DEFAULT_MAX);
+		assert_eq!(pacing.max, Some(DEFAULT_MAX));
+		assert_eq!(pacing.healthy, DEFAULT_HEALTHY);
 		assert_eq!(parsed.backoff.timeout(), DEFAULT_TIMEOUT);
 
 		// And a flag still lands where the merge can see it.
@@ -1990,47 +2015,58 @@ mod tests {
 		);
 	}
 
-	/// Every pacing knob can zero the retry delay on its own, and a zero delay is a
-	/// dial loop bounded by nothing. The floors are what keep a degenerate config
-	/// (or a binding that passes zeros) from turning unlimited retries into a spin.
+	/// Each knob means one thing at zero: no wait, no cap, no growth. None of them touches
+	/// the healthy bar, which is what keeps an immediate close a failed attempt.
 	#[test]
-	fn pacing_floors_every_degenerate_knob() {
-		// A zero initial would also make every session look healthy, resetting the
-		// give-up window forever.
+	fn zero_turns_each_pacing_knob_off() {
 		let pacing = Pacing::new(&Backoff {
 			initial: Some((Duration::ZERO).into()),
 			..Default::default()
 		});
-		assert_eq!(pacing.initial, MIN_BACKOFF);
-		assert!(pacing.next(pacing.initial) >= MIN_BACKOFF);
+		assert_eq!(pacing.initial, Duration::ZERO);
+		assert_eq!(pacing.next(pacing.initial), Duration::ZERO, "zero initial never waits");
+		assert_eq!(pacing.healthy, DEFAULT_HEALTHY);
 
-		// A cap below the floor would clamp the delay straight back down.
 		let pacing = Pacing::new(&Backoff {
 			max: Some((Duration::ZERO).into()),
 			..Default::default()
 		});
-		assert_eq!(pacing.max, pacing.initial);
-		assert_eq!(pacing.next(pacing.initial), pacing.initial);
-
-		// A zero multiplier would shrink it to nothing on the second attempt.
-		let pacing = Pacing::new(&Backoff {
-			multiplier: 0,
-			..Default::default()
-		});
-		assert_eq!(pacing.next(pacing.initial), pacing.initial);
-
-		// All at once: still paced.
-		let pacing = Pacing::new(&Backoff {
-			initial: Some((Duration::ZERO).into()),
-			max: Some((Duration::ZERO).into()),
-			multiplier: 0,
-			..Default::default()
-		});
+		assert_eq!(pacing.max, None);
 		let mut delay = pacing.initial;
 		for _ in 0..10 {
 			delay = pacing.next(delay);
-			assert!(delay >= MIN_BACKOFF, "the retry delay collapsed to {delay:?}");
 		}
+		assert_eq!(delay, DEFAULT_INITIAL * 1024, "zero max leaves the delay uncapped");
+		assert_eq!(pacing.settled(), DEFAULT_HEALTHY);
+
+		let pacing = Pacing::new(&Backoff {
+			multiplier: 0,
+			..Default::default()
+		});
+		assert_eq!(
+			pacing.next(pacing.initial),
+			pacing.initial,
+			"zero multiplier never grows"
+		);
+
+		// A cap below the first delay caps it too.
+		let pacing = Pacing::new(&Backoff {
+			max: Some((Duration::from_millis(300)).into()),
+			..Default::default()
+		});
+		assert_eq!(pacing.initial, Duration::from_millis(300));
+	}
+
+	/// A zero healthy bar would count every session healthy, so it is refused at build.
+	#[test]
+	fn a_zero_healthy_bar_is_refused() {
+		let mut config = crate::connect::Config::default();
+		config.backoff.healthy = Some((Duration::ZERO).into());
+		let err = config
+			.init(Default::default())
+			.err()
+			.expect("zero healthy built a client");
+		assert!(matches!(err, Error::BackoffHealthy), "{err}");
 	}
 
 	/// A sane config is left alone: the delay doubles up to the cap and stays there.
@@ -2044,6 +2080,7 @@ mod tests {
 		});
 
 		assert_eq!(pacing.initial, Duration::from_millis(100));
+		assert_eq!(pacing.settled(), Duration::from_millis(400));
 		assert_eq!(pacing.next(Duration::from_millis(100)), Duration::from_millis(200));
 		assert_eq!(pacing.next(Duration::from_millis(200)), Duration::from_millis(400));
 		assert_eq!(pacing.next(Duration::from_millis(400)), Duration::from_millis(400));
@@ -2174,6 +2211,9 @@ mod tests {
 	}
 
 	const WALK_TIMEOUT: Duration = Duration::from_secs(30);
+
+	/// A retry delay and healthy bar short enough to stay out of a test's way.
+	const FAST: Duration = Duration::from_millis(50);
 
 	fn url(value: &str) -> Url {
 		value.parse().expect("valid url")
@@ -2416,8 +2456,8 @@ mod tests {
 		crate::resolve::hosts::point(HOST, failing);
 
 		let mut config = crate::connect::Config::default();
-		config.backoff.initial = Some((MIN_BACKOFF).into());
-		config.backoff.max = Some((MIN_BACKOFF).into());
+		config.backoff.initial = Some((FAST).into());
+		config.backoff.max = Some((FAST).into());
 		config.backoff.timeout = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).unwrap();
 		let mut connection = client.connect(url(&format!("tcp://{HOST}:1/")));
@@ -2458,8 +2498,8 @@ mod tests {
 		// A held port, not a released one: another test's server could claim a
 		// released port, and the dial would connect instead of failing.
 		let mut config = crate::connect::Config::default();
-		config.backoff.initial = Some((MIN_BACKOFF).into());
-		config.backoff.max = Some((MIN_BACKOFF).into());
+		config.backoff.initial = Some((FAST).into());
+		config.backoff.max = Some((FAST).into());
 		config.backoff.timeout = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).unwrap();
 		let connection = client.connect(dead().await);
@@ -2752,9 +2792,10 @@ mod tests {
 		let subscriber = crate::origin::spawn();
 		let mut config = crate::connect::Config::default();
 		config.goaway.handover = Some((HANDOVER).into());
-		// A session younger than the initial delay counts as redirected immediately and
+		// A session younger than the healthy bar counts as redirected immediately and
 		// waits out a backoff, which this test is not about.
-		config.backoff.initial = Some((MIN_BACKOFF).into());
+		config.backoff.initial = Some((FAST).into());
+		config.backoff.healthy = Some((FAST).into());
 		let client = config
 			.init(Default::default())
 			.unwrap()
@@ -2831,7 +2872,8 @@ mod tests {
 
 		let subscriber = crate::origin::spawn();
 		let mut config = crate::connect::Config::default();
-		config.backoff.initial = Some(MIN_BACKOFF);
+		config.backoff.initial = Some((FAST).into());
+		config.backoff.healthy = Some((FAST).into());
 		let client = config
 			.init(Default::default())
 			.unwrap()
@@ -2871,6 +2913,241 @@ mod tests {
 			.await
 			.expect("never redialed after the close")
 			.unwrap();
+	}
+
+	/// What a flapping peer does with each session the moment it is up.
+	#[cfg(feature = "tcp")]
+	#[derive(Clone)]
+	enum Flap {
+		/// Drop it, closing the session.
+		Close,
+		/// Send a GOAWAY naming this URI, empty for a restart, and keep serving.
+		Goaway(String),
+	}
+
+	/// A client with the given pacing whose dials reach in-memory peers instead of a
+	/// transport, so the paused clock only moves once every task waits on a timer.
+	///
+	/// The peer at each URL ends every session as its [`Flap`] says, and reports the
+	/// URL and instant each session came up on the returned channel.
+	#[cfg(feature = "tcp")]
+	fn flapping(
+		initial: Duration,
+		max: Duration,
+		timeout: Duration,
+		peers: Vec<(Url, Flap)>,
+	) -> (
+		Client,
+		tokio::sync::mpsc::UnboundedReceiver<(Url, tokio::time::Instant)>,
+	) {
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Some(initial.into());
+		config.backoff.max = Some(max.into());
+		config.backoff.timeout = Some(timeout.into());
+		let mut client = config.init(Default::default()).expect("build client");
+
+		let (accepted, accepts) = tokio::sync::mpsc::unbounded_channel();
+		client.dialer = Some(std::sync::Arc::new(move |addr: crate::connect::Addr| {
+			let url = addr.url().clone();
+			let (_, flap) = peers
+				.iter()
+				.find(|(peer, _)| *peer == url)
+				.expect("an unknown peer")
+				.clone();
+			let accepted = accepted.clone();
+			Box::pin(async move {
+				let session = flap_once(flap).await;
+				let _ = accepted.send((url, tokio::time::Instant::now()));
+				Ok(crate::client::Dialed {
+					session,
+					transport: crate::Transport::Tcp,
+				})
+			})
+		}));
+		(client, accepts)
+	}
+
+	/// Run one in-memory MoQ handshake whose server side then ends the session as `flap` says.
+	#[cfg(feature = "tcp")]
+	async fn flap_once(flap: Flap) -> moq_net::Session {
+		let versions = moq_net::Versions::from("moq-lite-07-wip".parse::<moq_net::Version>().unwrap());
+		let config = || {
+			let mut config = qmux::Config::new(qmux::Version::QMux01);
+			config.protocol = qmux::Protocol::Negotiate(versions.alpns().iter().map(|alpn| alpn.to_string()).collect());
+			config
+		};
+		let stream = |io| qmux::transport::Stream::new(io, qmux::Version::QMux01, config().max_record_size);
+		let (client, server) = tokio::io::duplex(64 * 1024);
+		let (client, server) = tokio::try_join!(
+			qmux::Session::connect(stream(client), config()),
+			qmux::Session::accept(stream(server), config())
+		)
+		.unwrap();
+		let now = moq_net::time::now();
+		let client = async {
+			let (session, driver) = moq_net::Client::new()
+				.with_versions(versions.clone())
+				.connect(now, client)
+				.await
+				.unwrap();
+			tokio::spawn(moq_net::time::run(driver));
+			session
+		};
+		let server = async {
+			let request = moq_net::Server::new()
+				.with_versions(versions.clone())
+				.accept_request(now, server)
+				.await
+				.unwrap();
+			let (session, driver) = request.ok().await.unwrap();
+			tokio::spawn(moq_net::time::run(driver));
+			session
+		};
+		let (client, server) = tokio::join!(client, server);
+		match flap {
+			Flap::Close => drop(server),
+			Flap::Goaway(uri) => {
+				let goaway = match uri.is_empty() {
+					true => moq_net::goaway::Goaway::new(),
+					false => moq_net::goaway::Goaway::redirect(uri),
+				};
+				server.drain().send(goaway).unwrap();
+				tokio::spawn(async move {
+					server.closed().await;
+				});
+			}
+		}
+		client
+	}
+
+	/// Check each gap between consecutive sessions against the jittered delay it should
+	/// have waited: between half of `delay` and all of it, starting at `initial` and
+	/// doubling up to `max`.
+	#[cfg(feature = "tcp")]
+	fn assert_paced(accepts: &[(Url, tokio::time::Instant)], initial: Duration, max: Duration) {
+		let mut delay = initial;
+		for (index, pair) in accepts.windows(2).enumerate() {
+			let gap = pair[1].1 - pair[0].1;
+			assert!(
+				gap >= delay / 2 && gap <= delay,
+				"retry {index} waited {gap:?}, outside the jittered {delay:?}"
+			);
+			delay = (delay * 2).min(max);
+		}
+	}
+
+	#[cfg(feature = "tcp")]
+	const INITIAL: Duration = Duration::from_millis(100);
+	#[cfg(feature = "tcp")]
+	const MAX: Duration = Duration::from_millis(400);
+
+	/// A peer that accepts and then closes every session at once never earns the healthy
+	/// reset: the delay escalates to the cap, and the timeout ends the loop.
+	#[cfg(feature = "tcp")]
+	#[tokio::test(start_paused = true)]
+	async fn an_immediate_close_loop_escalates_until_the_timeout() {
+		const TIMEOUT: Duration = Duration::from_secs(2);
+		let peer = url("tcp://peer:1/");
+		let (client, mut accepted) = flapping(INITIAL, MAX, TIMEOUT, vec![(peer.clone(), Flap::Close)]);
+
+		let started = tokio::time::Instant::now();
+		let err = client
+			.connect(peer)
+			.closed()
+			.await
+			.expect_err("a flapping peer kept the connection");
+		assert!(matches!(err, Error::Reconnect(_)), "{err}");
+		assert_eq!(started.elapsed(), TIMEOUT, "the timeout did not end the loop");
+
+		let mut accepts = Vec::new();
+		while let Ok(accept) = accepted.try_recv() {
+			accepts.push(accept);
+		}
+		assert!(accepts.len() >= 6, "only {} sessions", accepts.len());
+		assert_paced(&accepts, INITIAL, MAX);
+	}
+
+	/// A peer restarting with an empty-URI GOAWAY on every session paces the redials like
+	/// failures, yet never spends the timeout: each drained session still served.
+	#[cfg(feature = "tcp")]
+	#[tokio::test(start_paused = true)]
+	async fn an_immediate_restart_loop_escalates_without_giving_up() {
+		const TIMEOUT: Duration = Duration::from_millis(500);
+		let peer = url("tcp://peer:1/");
+		let (client, mut accepted) = flapping(INITIAL, MAX, TIMEOUT, vec![(peer.clone(), Flap::Goaway(String::new()))]);
+		let connection = client.connect(peer);
+
+		let mut accepts = Vec::new();
+		for _ in 0..10 {
+			accepts.push(accepted.recv().await.expect("the dialer dropped"));
+		}
+		assert!(
+			accepts[9].1 - accepts[0].1 > TIMEOUT * 2,
+			"the redials outran the backoff"
+		);
+		assert!(
+			futures::FutureExt::now_or_never(connection.closed()).is_none(),
+			"a restarting peer ended the connection"
+		);
+		assert_paced(&accepts, INITIAL, MAX);
+	}
+
+	/// Two peers that redirect to each other the moment a session is up are failed attempts:
+	/// the delay escalates across both, and the timeout ends the loop.
+	#[cfg(feature = "tcp")]
+	#[tokio::test(start_paused = true)]
+	async fn an_immediate_redirect_loop_escalates_until_the_timeout() {
+		const TIMEOUT: Duration = Duration::from_secs(2);
+		let a = url("tcp://peer:1/");
+		let b = url("tcp://peer:2/");
+		let peers = vec![
+			(a.clone(), Flap::Goaway(b.to_string())),
+			(b.clone(), Flap::Goaway(a.to_string())),
+		];
+		let (client, mut accepted) = flapping(INITIAL, MAX, TIMEOUT, peers);
+
+		let started = tokio::time::Instant::now();
+		let err = client
+			.connect(a.clone())
+			.closed()
+			.await
+			.expect_err("a redirect loop kept the connection");
+		assert!(
+			matches!(&err, Error::Reconnect(reason) if reason.contains("redirect")),
+			"{err}"
+		);
+		assert_eq!(started.elapsed(), TIMEOUT, "the timeout did not end the loop");
+
+		let mut accepts = Vec::new();
+		while let Ok(accept) = accepted.try_recv() {
+			accepts.push(accept);
+		}
+		assert!(accepts.len() >= 6, "only {} sessions", accepts.len());
+		for (index, (peer, _)) in accepts.iter().enumerate() {
+			assert_eq!(
+				*peer,
+				if index % 2 == 0 { a.clone() } else { b.clone() },
+				"session {index}"
+			);
+		}
+		assert_paced(&accepts, INITIAL, MAX);
+	}
+
+	/// A zero `initial` turns retry waiting off: every redial follows the close at once.
+	#[cfg(feature = "tcp")]
+	#[tokio::test(start_paused = true)]
+	async fn a_zero_initial_redials_at_once() {
+		const TIMEOUT: Duration = Duration::from_secs(1);
+		let peer = url("tcp://peer:1/");
+		let (client, mut accepted) = flapping(Duration::ZERO, MAX, TIMEOUT, vec![(peer.clone(), Flap::Close)]);
+		let connection = client.connect(peer);
+
+		let first = accepted.recv().await.expect("the dialer dropped").1;
+		for _ in 0..10 {
+			let at = accepted.recv().await.expect("the dialer dropped").1;
+			assert_eq!(at, first, "a zero initial waited before a retry");
+		}
+		drop(connection);
 	}
 
 	#[test]
@@ -2931,16 +3208,24 @@ mod duration_tests {
 		Backoff,
 		initial,
 		"--backoff-initial",
-		|c: &Backoff| Pacing::new(c).initial,
-		|d: Duration| d.max(MIN_BACKOFF)
+		|c: &Backoff| c.initial(),
+		|d| d
 	);
 	crate::cli::duration::test_config_duration!(
 		max_set_in_code_beats_parser_default,
 		Backoff,
 		max,
 		"--backoff-max",
-		|c: &Backoff| Pacing::new(c).max,
-		|d: Duration| d.max(DEFAULT_INITIAL)
+		|c: &Backoff| c.max(),
+		|d| d
+	);
+	crate::cli::duration::test_config_duration!(
+		healthy_set_in_code_beats_parser_default,
+		Backoff,
+		healthy,
+		"--backoff-healthy",
+		|c: &Backoff| c.healthy(),
+		|d| d
 	);
 	crate::cli::duration::test_config_duration!(
 		timeout_set_in_code_beats_parser_default,

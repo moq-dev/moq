@@ -195,17 +195,18 @@ pub struct MoqWebSocketConfig {
 ///
 /// The delay starts at `initial_us`, multiplies by `multiplier` after each failed attempt,
 /// and caps at `max_us`. After `timeout_us` of consecutive failures the connection gives up
-/// for good; the window resets whenever a session stays up past `initial_us`. Each null
-/// field uses moq-tokio's default: 1s, x2, 5s, and a 10s window.
+/// for good; the window resets whenever a session stays up past 1s. Each null field uses
+/// moq-tokio's default: 1s, x2, 5s, and a 10s window. Zero means off: no wait, no growth,
+/// no cap, or no give-up.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqBackoff {
-	/// Delay before the first reconnect attempt, in microseconds.
+	/// Delay before the first reconnect attempt, in microseconds. 0 retries at once.
 	#[uniffi(default = None)]
 	pub initial_us: Option<u64>,
 	/// Multiplier applied to the delay after each failure.
 	#[uniffi(default = None)]
 	pub multiplier: Option<u32>,
-	/// Maximum delay between reconnect attempts, in microseconds.
+	/// Maximum delay between reconnect attempts, in microseconds. 0 leaves it uncapped.
 	#[uniffi(default = None)]
 	pub max_us: Option<u64>,
 	/// Time spent retrying before giving up, in microseconds. 0 retries forever.

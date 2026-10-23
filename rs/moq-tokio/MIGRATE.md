@@ -12,6 +12,70 @@ and clear `server.listen.tls`. The constructor retains `root` and `peers` verifi
 and refuses `cert`, `key`, `generate`, or `identity`, which would hide a certificate source.
 A shared `server.tls` and configured `listen.tls` remain mutually exclusive.
 
+### Key logging takes an explicit path ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+`SSLKEYLOGFILE` alone no longer writes session secrets. Set `quic.keylog = Some(path)`
+or `--quic-keylog /private/keys.log` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = "/private/keys.log"`).
+The native QUIC backend opens the file during initialization. New Unix files use mode 0600;
+an existing mode-0644 log is refused without changing its permissions. Make the file private explicitly.
+Iroh currently refuses an explicit path when enabled because its pinned API supports only process-wide environment logging.
+It also refuses explicit zero `keep_alive`: its pinned API cannot clear the default heartbeat.
+Omit that setting or use a positive interval for Iroh; other backends retain zero-off support.
+`tls::KeyLog::open(path)` provides the same explicit logger for custom rustls configurations.
+
+### Accepted sessions are supervised internally ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+`server::Request::ok()` returns a `Session`. Read `session.closed()` for its terminal
+cause, including a driver panic; there is no task handle to retain or await.
+The protocol driver records a panic before unwinding, so an executor that catches
+it cannot turn its later drop into ordinary cancellation.
+
+### Backoff knobs each do one job, and zero turns them off ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+`backoff.initial` is only the first retry delay: zero now retries at once instead of
+waiting 50ms. `backoff.max` is only the cap: zero leaves the delay uncapped, and a cap
+below `initial` caps the first delay too, where both used to be raised to `initial`.
+A multiplier of 0 or 1 keeps the delay constant.
+The healthy-session bar is the new `backoff.healthy` (`--backoff-healthy`,
+`MOQ_BACKOFF_HEALTHY`, `[connect.backoff] healthy`), defaulting to 1s; it used to follow
+`initial`. A session that ends sooner is a failed attempt, so an immediate close still
+spends `backoff.timeout`. Zero is refused with `Error::BackoffHealthy`.
+If you raised `initial` to slow redials after flapping sessions, set `healthy` to the same value.
+
+### Config durations use one human-readable value ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+Set connect `race`, `resolution_delay`, `timeout`; listen `timeout`; QUIC `idle_timeout`,
+`keep_alive`; backoff `initial`, `max`, `timeout`; GOAWAY `handover`; and WebSocket `delay`
+with `Some(std_duration.into())`, or parse a `moq_tokio::cli::Duration` from `"500ms"`.
+`None` uses the runtime default, including values built with `Default::default()`.
+TOML keys stay unchanged and take human-readable strings. A later typed assignment
+replaces a parsed CLI value instead of losing to a hidden shadow field.
+`websocket::Options.timeout = None` uses the ten-second handshake default;
+use `Some(std::time::Duration::ZERO)` to wait indefinitely.
+`Backoff::initial()`, `max()`, and `timeout()` report the configured or default
+retry values, including the defaults used by foreign settings UIs.
+
+`connect::Config.quic` and `listen::Config.quic` are private legacy parsing fields.
+Supply shared transport tuning through the `quic` argument to `Config::init`
+or `server::Config.quic`.
+
+### Reconnect policy belongs to each client clone ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+Set `client.with_reconnect(false)` for a one-shot native dial, or `true` to redial.
+The duplicate `connect.once` field and `--connect-once` / `MOQ_CONNECT_ONCE` are removed.
+Released `--client-reconnect` / `MOQ_CLIENT_RECONNECT` and TOML `reconnect` are refused
+with this native API guidance. CLI clients always reconnect and no longer offer
+an operator override. Foreign bindings retain their existing `once` setting.
+
+### QUIC-LB settings have one path ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+
+Move `listen.lb_id` / `listen.lb_nonce` or `listen.load_balancer` to `[listen.lb]`
+with `id` and optional `nonce` (default 8). In Rust set `config.lb.id` and `config.lb.nonce`.
+The duplicate public `quic::LoadBalancer` runtime record and `Config::load_balancer()` are private;
+configure or inspect `listen::LoadBalancer` through `config.lb`.
+The `--listen-quic-lb-id` / `--listen-quic-lb-nonce` flags and their environment variables
+keep their names and update those same fields. A nonce without an ID is refused.
+
 ### The connection receive window is 128 MiB, and has a floor (#5878)
 
 `quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.
@@ -52,17 +116,6 @@ The `Args` and `Config` derives now implement usage-rs 7 traits, and `cli::usage
 A CLI that flattens these types depends on `usage-rs = "7"` under its own name: the derives emit `::usage_rs` paths and no longer read `Cargo.toml`.
 Rename a `usage = { package = "usage-rs" }` alias to `usage-rs`, or add `#[usage(crate = usage)]` to each derive.
 
-### Key logging takes an explicit path ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-`SSLKEYLOGFILE` alone no longer writes session secrets. Set `quic.keylog = Some(path)`
-or `--quic-keylog /private/keys.log` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = "/private/keys.log"`).
-The native QUIC backend opens the file during initialization. New Unix files use mode 0600;
-an existing mode-0644 log is refused without changing its permissions. Make the file private explicitly.
-Iroh currently refuses an explicit path when enabled because its pinned API supports only process-wide environment logging.
-It also refuses explicit zero `keep_alive`: its pinned API cannot clear the default heartbeat.
-Omit that setting or use a positive interval for Iroh; other backends retain zero-off support.
-`tls::KeyLog::open(path)` provides the same explicit logger for custom rustls configurations.
-
 ### QUIC limits are `moq_quic::Limits`, set through `Request::quic` (#5871)
 
 `server::Request::set_quic_limits` and `Error::QuicLimits` are gone.
@@ -97,40 +150,6 @@ let mut workers = moq_tokio::worker::Config::new(8);
 workers.pin = true;
 ```
 
-### Accepted sessions are supervised internally ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-`server::Request::ok()` returns a `Session`. Read `session.closed()` for its terminal
-cause, including a driver panic; there is no task handle to retain or await.
-The protocol driver records a panic before unwinding, so an executor that catches
-it cannot turn its later drop into ordinary cancellation.
-
-### Config durations use one human-readable value ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-Set connect `race`, `resolution_delay`, `timeout`; listen `timeout`; QUIC `idle_timeout`,
-`keep_alive`; backoff `initial`, `max`, `timeout`; GOAWAY `handover`; and WebSocket `delay`
-with `Some(std_duration.into())`, or parse a `moq_tokio::cli::Duration` from `"500ms"`.
-`None` uses the runtime default, including values built with `Default::default()`.
-TOML keys stay unchanged and take human-readable strings. A later typed assignment
-replaces a parsed CLI value instead of losing to a hidden shadow field.
-`websocket::Options.timeout = None` uses the ten-second handshake default;
-use `Some(std::time::Duration::ZERO)` to wait indefinitely.
-`Backoff::initial()`, `max()`, and `timeout()` report the effective retry values,
-including the defaults used by foreign settings UIs. Backoff retains its existing
-50ms pacing floor and cap-at-least-initial semantics;
-zero `timeout` disables the retry deadline.
-
-`connect::Config.quic` and `listen::Config.quic` are private legacy parsing fields.
-Supply shared transport tuning through the `quic` argument to `Config::init`
-or `server::Config.quic`.
-
-### Reconnect policy belongs to each client clone ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-Set `client.with_reconnect(false)` for a one-shot native dial, or `true` to redial.
-The duplicate `connect.once` field and `--connect-once` / `MOQ_CONNECT_ONCE` are removed.
-Released `--client-reconnect` / `MOQ_CLIENT_RECONNECT` and TOML `reconnect` are refused
-with this native API guidance. CLI clients always reconnect and no longer offer
-an operator override. Foreign bindings retain their existing `once` setting.
-
 ### Rotating TLS identities are a `tls::Serve` (#5312)
 
 `tls::Listen::server_config_reloading` and `tls::ReloadingServerConfig` are gone; load once with `tls::Listen::load` and read each handshake's config from the returned `tls::Serve` with `config(alpns)`.
@@ -140,15 +159,6 @@ A TLS trust-root watcher that fails to register now fails client and server cons
 ### "Epoch" means only the publisher epoch (#5146)
 
 The reconnect counter is `connects()`; rename `epoch()` calls.
-
-### QUIC-LB settings have one path ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-Move `listen.lb_id` / `listen.lb_nonce` or `listen.load_balancer` to `[listen.lb]`
-with `id` and optional `nonce` (default 8). In Rust set `config.lb.id` and `config.lb.nonce`.
-The duplicate public `quic::LoadBalancer` runtime record and `Config::load_balancer()` are private;
-configure or inspect `listen::LoadBalancer` through `config.lb`.
-The `--listen-quic-lb-id` / `--listen-quic-lb-nonce` flags and their environment variables
-keep their names and update those same fields. A nonce without an ID is refused.
 
 ### Settings no listener reads stop startup (#5006)
 

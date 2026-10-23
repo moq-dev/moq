@@ -2036,10 +2036,10 @@ impl Cluster {
 		// through backoff and eventually gives up instead of migrating forever.
 		// Downstream sessions never see a GOAWAY of their own.
 		//
-		// Forced on regardless of `--client-reconnect`: that flag is about the
-		// relay's own upstream dial, and a cluster peer link that stopped following
-		// GOAWAY would break rolling handoff, redialing the drained URL after the
-		// old session finally closed instead of migrating to the replacement.
+		// Forced on, whatever the template client says: a cluster peer link that
+		// stopped following GOAWAY would break rolling handoff, redialing the drained
+		// URL after the old session finally closed instead of migrating to the
+		// replacement.
 		//
 		// A GOAWAY naming no URI is a relay draining to restart. A peer URL names
 		// that one node, so a redial would only reach the draining process again

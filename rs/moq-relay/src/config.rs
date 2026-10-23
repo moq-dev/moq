@@ -1438,5 +1438,4 @@ ws = false
 		let err = Config::parse_and_merge(["moq-relay"]).expect_err("env nonce without id");
 		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
 	}
-
 }

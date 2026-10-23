@@ -1182,16 +1182,15 @@ pub struct moq_client_config {
 	/// The length in bytes of `tls_key`.
 	pub tls_key_len: usize,
 
-	/// Reconnect pacing. Each must leave a non-zero delay or retrying would
-	/// spin, which is rejected at dial.
+	/// The first reconnect delay in microseconds; zero retries at once.
 	pub backoff_initial_us: u64,
 	/// Whether `backoff_initial_us` is present.
 	pub has_backoff_initial: bool,
-	/// The factor by which the reconnect delay increases.
+	/// The factor by which the reconnect delay increases; 0 or 1 keeps it constant.
 	pub backoff_multiplier: u32,
 	/// Whether `backoff_multiplier` is present.
 	pub has_backoff_multiplier: bool,
-	/// The maximum reconnect delay in microseconds.
+	/// The maximum reconnect delay in microseconds; zero leaves it uncapped.
 	pub backoff_max_us: u64,
 	/// Whether `backoff_max_us` is present.
 	pub has_backoff_max: bool,
