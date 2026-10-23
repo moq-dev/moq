@@ -183,11 +183,7 @@ pub struct Config {
 	/// QUIC uses the smaller of both ends' timeouts, so either side can shorten it.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub idle_timeout: Option<Duration>,
 
 	/// Idle timeout before an inactive connection is dropped. Defaults to 10s.
@@ -207,11 +203,7 @@ pub struct Config {
 	/// interval above 5s still sends those path pings, and `0s` leaves both at 5s.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub keep_alive: Option<Duration>,
 
 	/// Keep-alive ping interval. Defaults to 3s; 0s disables it.

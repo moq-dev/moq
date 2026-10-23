@@ -115,7 +115,7 @@ pub struct Config {
 	/// immediately. Zero closes them at once, with no GOAWAY
 	/// they would have no time to act on. Defaults to 10 seconds.
 	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_duration")]
+	#[serde(with = "humantime_serde")]
 	pub drain_timeout: std::time::Duration,
 
 	#[usage(
@@ -125,7 +125,7 @@ pub struct Config {
 		setting = "drain_timeout"
 	)]
 	#[serde(default, rename = "__cli_drain_timeout", skip_serializing_if = "Option::is_none")]
-	drain_timeout_arg: Option<crate::duration::Duration>,
+	drain_timeout_arg: Option<moq_tokio::cli::Duration>,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
@@ -210,9 +210,7 @@ pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
 impl Config {
 	/// Resolve the shutdown grace period after command-line overrides.
 	pub(crate) fn drain_timeout(&self) -> std::time::Duration {
-		self.drain_timeout_arg
-			.map(crate::duration::Duration::into_std)
-			.unwrap_or(self.drain_timeout)
+		self.drain_timeout_arg.map(Into::into).unwrap_or(self.drain_timeout)
 	}
 
 	/// Parses configuration from CLI arguments, optionally merging with a

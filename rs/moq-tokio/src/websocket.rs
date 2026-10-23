@@ -228,11 +228,7 @@ pub struct Config {
 	/// race. Defaults to 200ms, and drops to zero for a server WebSocket already won.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub delay: Option<time::Duration>,
 
 	/// Head start given to the QUIC dial before the WebSocket fallback joins the race. Defaults to 200ms.

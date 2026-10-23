@@ -411,11 +411,11 @@ pub struct Serve {
 
 	/// How often the relay re-checks each grant. Off by default; needs `--expires`.
 	#[usage(long)]
-	revalidate: Option<crate::duration::Duration>,
+	revalidate: Option<moq_tokio::cli::Duration>,
 
 	/// How long a grant with no bound of its own lasts: anonymous sessions, tokens without `exp`, certificates without one. Off by default.
 	#[usage(long)]
-	expires: Option<crate::duration::Duration>,
+	expires: Option<moq_tokio::cli::Duration>,
 
 	/// The most live sessions presenting one token. Needs `--revalidate`.
 	#[usage(long)]
@@ -429,8 +429,8 @@ pub struct Serve {
 impl Serve {
 	/// The policy these flags describe, refusing a cadence the relay would spin on.
 	fn policy(&self) -> anyhow::Result<Policy> {
-		let revalidate = self.revalidate.map(|cadence| cadence.into_std());
-		let expires = self.expires.map(|bound| bound.into_std());
+		let revalidate = self.revalidate.map(std::time::Duration::from);
+		let expires = self.expires.map(Into::into);
 		if revalidate.is_some_and(|cadence| cadence.is_zero()) {
 			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
 		}

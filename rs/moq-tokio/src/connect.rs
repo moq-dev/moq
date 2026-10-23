@@ -533,11 +533,7 @@ pub struct Config {
 	/// bounds that call as a whole.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub race: Option<std::time::Duration>,
 
 	/// Delay before also dialing the next resolved address. Defaults to 250ms; 0s dials every address at once.
@@ -564,11 +560,7 @@ pub struct Config {
 	/// Defaults to 50ms; `0s` dials as soon as any address resolves.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub resolution_delay: Option<std::time::Duration>,
 
 	/// Delay before dialing IPv4 while the full DNS answer is outstanding. Defaults to 50ms.
@@ -592,11 +584,7 @@ pub struct Config {
 	/// retry loop indefinitely.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<std::time::Duration>,
 
 	/// Maximum time for one connect, covering the dial and the MoQ handshake. Defaults to 30s; 0s waits forever.
