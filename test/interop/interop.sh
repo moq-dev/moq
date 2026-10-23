@@ -355,6 +355,7 @@ SWAPPED_TONE="660,440"
 # except the browser's, whose capture clock is not tied to its WAV. The native-JS subscriber hands
 # WebCodecs raw Opus without the OpusHead, as the player does, which keeps the pre-skip for the
 # player to trim, and its libav fallback stamps milliseconds.
+# shellcheck disable=SC2329  # reached from run_cell, which 'harness_spawn' invokes
 phase_checked() {
     [[ "$1" != js* && "$2" != js-native-* ]]
 }
