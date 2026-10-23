@@ -90,6 +90,10 @@ Rejected in planning:
 - [Transport config](/quest/m1/api-audit/transport-config.md) - moq-tokio and moq-quic configs have one meaning for unset, enums for modes, no order-dependent setters, and no leftover features
 - [Relay config](/quest/m1/api-audit/relay-config.md) - moq-relay and its embedders load config through one path that refuses old spellings, under names that do not collide
 - [Auth and clock names](/quest/m1/api-audit/auth-clock-names.md) - refusal and reason types have distinct names, and the Rust and JS clocks mirror each other
+- [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) - no public moq-net item exists only for moq-transport, and a client names its request target once as a URL
+- [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
+- [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror
+- [Request handlers are named requests](/quest/m1/api-audit/requests.md) - `dynamic()` and `Dynamic` become `requests()` and `Requests` at every layer
 
 ## Related
 

@@ -1,4 +1,4 @@
-# [S] moq-net exports with a consumer
+# [M] moq-net exports with a consumer
 
 ## Goal
 
@@ -51,5 +51,22 @@ JS (`js/net/src/`):
   changed every method that takes it.
 - Stale docs: `{@link update}` and `{@link accept}` in `origin.ts`, `dynamic`
   serving "tracks", undocumented `Timed`, `SessionCode`, `StreamCode`.
+
+Added 2026-10-23 (API audit follow-up, maintainer):
+
+- `Epoch::time` and FFI `moq_epoch_time_ms` with its wrappers: only binding
+  tests read them. `moq_mint_epoch` stays.
+- `announce::Consumer::is_synced` (tests only) goes test-only, and
+  `announce::Consumer::synced` goes; `poll_synced` stays for `Follow`.
+- `varint::MAX_QUIC`: `pub(crate)`.
+- `track::Producer::drop_groups` and JS `Track.Producer.dropGroups`: internal.
+  Dropping a range publicly belongs on `track::Fill`
+  ([dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)).
+- JS `Group.Demand` and `ConnectProps`/`AcceptProps.extensions`: `@internal`.
+- Dead code: `Error::TooManyParameters` is never constructed; delete it.
+
+Kept, so the next audit skips them: `transport::memory` stays public and
+ungated, since an in-process transport is real API that other crates' tests
+use.
 
 Public API: removals and renames in moq-net and `@moq/net`. Wire: none.

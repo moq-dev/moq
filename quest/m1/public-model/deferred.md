@@ -42,7 +42,11 @@ the prerequisites will have deleted or renamed most of these.
   shape Rust settled in
   [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111): `finish_at`
   and `close` on a `received()` copy, and `start_at` after
-  `track::Request::request_start`.
+  `track::Request::request_start`. Mirror the names
+  [lifecycle](/quest/m1/api-audit/lifecycle.md) and
+  [net names](/quest/m1/api-audit/net-names.md) settle: `close` becomes
+  `abort`, `received()` becomes `set_received()`, and `request_start`
+  becomes `with_floor`.
 
 Tests: as in the other children, mock time in each language, with the
 built-in sessions moved onto the public calls.
