@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Await session shutdown
+
+`Session.shutdown()` changes from a synchronous call to an async operation. Use `await session.shutdown()` and handle its error; an un-awaited call does not initiate shutdown.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast finish returns a linger handle
+
+`BroadcastProducer.finish()` returns a `BroadcastFinish` handle instead of no value.
+Keep it and await `wait()` to serve finished tracks until their media is stale.
+Use `BroadcastProducer.close()` for an immediate end.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `SnapshotProducer(delta_ratio=...)` is replaced by `deltas: bool = True`.
@@ -197,6 +211,8 @@ A string passed where a list of strings belongs (`tls_roots="ca.pem"`) raises `T
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 A frame read from an untimed track has `timestamp` set to `None`.
 Raw writes no longer default to zero, so a write to a timed track without a timestamp raises `TimestampMismatch`; whole-frame media writes require one.
 Pass `timestamp=` on every write to a timed track.
@@ -229,10 +245,6 @@ Check for both where you meant any QUIC session.
 A `VideoDecodedFrame`'s fields are methods: `timestamp_us()`, `width()`, `height()`, and `pixels(format)` replacing `data` and `format`.
 `VideoDecoderOutput.format` is gone; set `surface=True` to keep the decoder's native surface.
 Read `frame.pixels(moq.VideoPixelFormat.RGBA)` instead of `frame.data`.
-
-### `BroadcastProducer.finish()` is removed (#4152)
-
-Call `broadcast.close()` instead.
 
 ## 0.4 -> 0.5
 

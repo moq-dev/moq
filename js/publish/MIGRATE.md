@@ -9,10 +9,8 @@ How to update your code for each breaking change, newest first.
 Code that builds a complete `BroadcastInput` adds `linger`, such as `new Signal(false)` to keep turning `announce` off unannouncing at once.
 `new Broadcast({ ... })` defaults it to `false`, so constructor calls need no change.
 
-### `Encoder.cut()` is not rate limited, and video tracks advertise refresh (#6048)
+### Video tracks advertise refresh (#6048)
 
-`Encoder.cut()` no longer spaces keyframes 500 ms apart: every call forces one on the next frame, so frequent calls produce all-keyframe video.
-Debounce your own calls if you relied on the spacing.
 Every `Broadcast.video()` track now advertises a refresh ratio of 2, so a producer registered there must open a group with a keyframe whenever `track.demand().wanted` passes the largest group.
 The bundled `Encoder` already does; a custom producer has to as well.
 

@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Native frame imports use platform and format roles
+
+`frame::macos` is `frame::apple`.
+`frame::vulkan::Channels` is `Format`. `Image` exposes `device`, `memory`, `size`, `allocation_size`, and `format` as fields; replace `device_uuid()` with `device.device_uuid`, `size()` with `size`, `allocation_size()` with `allocation_size`, and `channels()` with `format`.
+Construct `Handles { memory, timeline }` directly instead of calling `Handles::new`.
+
 ### `Control::cut` is not rate limited, and capture advertises refresh (#6048)
 
 `encode::Control::cut` no longer spaces keyframes 500 ms apart: every request forces one on the next frame, so frequent calls produce all-keyframe video.

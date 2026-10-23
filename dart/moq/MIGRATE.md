@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Await shutdown and client close
+
+`Session.shutdown()` is asynchronous and can fail rather than returning immediately. Await it to initiate and finish the drain. `Moq.close()` now returns `Future<void>`; await that future to finish client cleanup.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast finish returns a linger handle
+
+`BroadcastProducer.finish()` returns a `BroadcastFinish` handle instead of no value.
+Keep it and await `wait()` to serve finished tracks until their media is stale.
+Use `BroadcastProducer.close()` for an immediate end.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio` is replaced by `bool deltas` (default `true`).
@@ -189,6 +203,8 @@ final stream = media.ContainerProducer(broadcast: broadcast, init: media.Contain
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 `Frame.timestampUs` and `Datagram.timestampUs` are nullable, null on a frame read from an untimed track, and so are their `timestamp` getters.
 A raw write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `media.CatalogProducer.now()` samples the broadcast clock for local-event stamps.
@@ -217,7 +233,3 @@ Replace `!video.stalled` with `video.enabled`.
 ### Routes have one cost (#4661)
 
 `MoqRoute.cold` is removed; drop the `cold` argument.
-
-### `BroadcastProducer.finish()` is removed (#4152)
-
-Call `close()` instead.

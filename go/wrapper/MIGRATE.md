@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shutdown takes a context and returns an error
+
+`Session.Shutdown()` is `Shutdown(ctx) error`. Pass the drain context and handle the returned error. `Client.Close()` now waits for the session drain rather than only requesting it; allow for that wait in cleanup.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast finish returns a linger handle
+
+`BroadcastProducer.Finish()` returns a `BroadcastFinish` handle instead of no value.
+Keep it and await `Wait(ctx)` to serve finished tracks until their media is stale.
+Use `BroadcastProducer.Close()` for an immediate end.
+
 ### JSON snapshot `DeltaRatio` is `Deltas`
 
 `json.SnapshotOptions.DeltaRatio *uint32` and `json.DefaultDeltaRatio` are replaced by `Deltas *bool` (nil enables deltas).
@@ -202,6 +216,8 @@ A frame timestamp is a `*time.Duration`, `nil` on a frame read from an untimed t
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 A raw write to a timed track without a timestamp fails with `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `media.CatalogProducer.Now()` samples the broadcast clock for local-event stamps.
 Set `Timestamp` on every write to a timed track.
@@ -234,10 +250,6 @@ Read `Enabled` where you read `!Stalled`.
 `VideoDecodedFrame` is a handle with `TimestampUs()`, `Width()`, `Height()`, `Pixels(format)`, `Surface()`, and `Close()`.
 `VideoDecoderOutput.Format` is gone; set `Surface: true` to keep the decoder's native surface.
 Call `frame.Pixels(moq.VideoPixelFormatRgba)` instead of reading `frame.Data`, and `Close()` the frame when done.
-
-### `BroadcastProducer.Finish()` is removed (#4152)
-
-Call `Close()` instead.
 
 ## 0.5 -> 0.7
 

@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast finish returns a linger handle
+
+`BroadcastProducer.finish()` returns a `BroadcastFinish` handle instead of no value.
+Keep it and await `wait()` to serve finished tracks until their media is stale.
+Use `BroadcastProducer.close()` for an immediate end.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `Json.SnapshotProducer(deltaRatio:)` and `MoqJsonSnapshotConfig.deltaRatio` are replaced by `deltas: Bool` (default `true`).
@@ -204,6 +214,8 @@ let stream = try Media.ContainerProducer(broadcast: broadcast, initData: Media.C
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 Raw `writeFrame(_:timestampUs:)` takes a `UInt64?` defaulting to `nil`, and a frame read from an untimed track has a `nil` `timestampUs`.
 A write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `Media.CatalogProducer.now()` samples the broadcast clock for local-event stamps.
@@ -237,10 +249,6 @@ Read `enabled` where you read `!stalled`.
 `VideoDecodedFrame` has `timestampUs()`, `width()`, `height()`, `pixels(format:)`, and `surface()` instead of stored fields.
 `VideoDecoderOutput.format` is gone; set `surface: true` to keep the decoder's native surface.
 Call `try frame.pixels(format: .rgba)` instead of reading `frame.data`.
-
-### `BroadcastProducer.finish()` is `close()` (#4152)
-
-Close the broadcast instead; tracks already subscribed carry on to their own end.
 
 ## 0.4 -> 0.5
 

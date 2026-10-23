@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Transport failures keep their meaning
+
+Handle `Error::IdleTimeout` separately from `Error::Transport`. A local transport close is session cancellation, not clean end-of-content.
+Converting a transport failure to `StreamError` now gives `Unroutable` rather than `Internal`, so retry or re-resolve that route where you classified stream errors.
+
+### Track ends use positions
+
+`track::Producer::finish_at` takes a `track::Position` instead of an exclusive group sequence.
+Pass `Position::group(n)` where you passed `n`, or a position within the last group to end after a frame.
+`Producer::final_sequence()` is `end()` and returns `Option<Position>`; `Subscriber::finished()` and the ordered reader return `Position` instead of `u64`.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
@@ -235,7 +246,7 @@ A track received over moq-lite-05/06 arrives untimed, since its timestamps may b
 One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
 
-### `broadcast::Producer::finish` is back, and lingers (#5795)
+### Broadcast `finish` returns a linger handle (#5795)
 
 `finish()` ends the broadcast cleanly and returns a `Finish` that keeps its finished tracks servable until their media is stale.
 Dropping the `Finish` closes the broadcast, so `close()` still ends it now.
@@ -416,10 +427,10 @@ let client = Client::new().with_limits(session::Limits { subscriptions: 100_000,
 Broadcast identity is the path, whatever the publisher or first hop.
 A publisher that restarts its group numbering must publish under a new broadcast name.
 
-### Broadcast `finish` and `abort` are removed (#4152)
+### Broadcast `abort` is removed (#4152)
 
-Close a broadcast with `close()`; its end carries no cause.
-`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`.
+`broadcast::Producer::abort` is removed; use `close()` for an immediate end without a cause.
+`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`; the broadcast end carries no cause.
 
 ### No `VarInt`
 

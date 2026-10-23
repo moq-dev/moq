@@ -5,6 +5,21 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Session shutdown is asynchronous
+
+`MoqSession::shutdown()` changes from a synchronous request returning `()` to an async operation returning `Result<(), MoqError>`. Await it to initiate and complete the graceful drain, and handle failure. Calling it without polling the returned future does not request shutdown.
+
+### Media track naming moves out of init
+
+`MoqAudioInit::track` and `MoqVideoInit::track` are removed.
+Pass that name through `MoqMediaTarget::Named { name }` when constructing `MoqMediaTrackProducer::audio` or `video`; init records describe the codec and media only.
+
+### Broadcast `finish` returns a linger handle
+
+`MoqBroadcastProducer::finish()` returns `MoqBroadcastFinish` instead of `()`.
+Keep that handle and await `wait()` to serve finished tracks until their media is stale, or close the handle to end that service.
+Call `MoqBroadcastProducer::close()` for an immediate end.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `MoqJsonSnapshotConfig::delta_ratio` is replaced by `deltas: bool` (default `true`).
@@ -60,13 +75,6 @@ It defaults to `false` in every generated binding; a Rust struct literal adds `c
 
 `MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.
 `MoqTrackConsumer::update` now returns `Result<(), MoqError>`, failing with `TimestampMismatch` on a time anchor an untimed track can't serve.
-
-### Regenerate bindings after the API documentation update
-
-The new documentation on `MoqAudioProducer::write` and `finish` changes their
-UniFFI metadata checksums, even though their signatures and behavior are unchanged.
-Regenerate each language's bindings from the rebuilt library and update them together.
-Older generated bindings with active checksum guards reject this library during initialization.
 
 ### JSON consumers return `MoqJsonValue` (#5677)
 
@@ -226,7 +234,8 @@ The Display text is unchanged.
 
 `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` are optional, null on a frame read from an untimed track, and default to null.
 `MoqTrackInfo.timescale` is null on a received untimed track, and a null timescale on publish makes the track untimed.
-A raw track you publish is timed by default, so a raw write without a timestamp fails with `TimestampMismatch` instead of going out at 0.
+A raw track you publish is now untimed by default: a null `timescale` no longer selects microseconds.
+Set `timescale: Some(1_000_000)` to keep the released default, and provide a timestamp on each timed write.
 Data operations take an optional timestamp in microseconds, and whole-frame media writes require one.
 `MoqMediaCatalogProducer::now()` samples the broadcast clock for local-event stamps.
 Wrap raw frame timestamps in `Some`.
@@ -254,10 +263,6 @@ An exhaustive match needs one more arm, and a `Quic` check that meant any QUIC s
 `MoqVideoConsumer::next` returns an `Arc<MoqVideoDecodedFrame>` object with `timestamp_us()`, `width()`, `height()`, `pixels(format)`, and `surface()`.
 `MoqVideoDecoderOutput.format` is gone; set `surface: true` to keep the decoder's native surface, readable as a `MoqVideoSurface`.
 Read RGBA with `pixels(MoqVideoPixelFormat::Rgba)` instead of `data`.
-
-### Broadcast `finish` is removed (#4152)
-
-`MoqBroadcastProducer::finish()` is gone; close the broadcast instead.
 
 ### The `android-logcat` feature is removed (#4608)
 

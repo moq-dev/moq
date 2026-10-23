@@ -4,6 +4,15 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### Iroh is opt-in
+
+The default source-build features no longer include `iroh`. Add `--features iroh` when building a binary that must use Iroh endpoints.
+
+### Non-restartable exports refuse linger
+
+`export fmp4`, `mkv`, `flv`, `h264`, and `h265` refuse a nonzero `--linger` that release accepted.
+Drop the option or pass `--linger 0s`; use `export ts` or `export srt` when a restart must be marked in the output.
+
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 
 Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.

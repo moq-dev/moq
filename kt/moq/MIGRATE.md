@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shutdown suspends until drained
+
+`Session.shutdown()` is now a suspending operation that can throw, rather than a synchronous request. Call it from a coroutine and handle failure.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast finish returns a linger handle
+
+`BroadcastProducer.finish()` returns a `BroadcastFinish` handle instead of no value.
+Keep it and await `wait()` to serve finished tracks until their media is stale.
+Use `BroadcastProducer.end()` for an immediate end; `close()` releases the binding object.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio: UInt` is replaced by `deltas: Boolean` (default `true`).
@@ -201,6 +215,8 @@ val stream = ContainerProducer(broadcast, ContainerInit(ContainerFormat.FMP4, by
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 `Frame.timestamp` and `Datagram.timestamp` are `Duration?`, null on a frame read from an untimed track.
 A raw write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `CatalogProducer.now()` samples the broadcast clock for local-event stamps.
@@ -235,10 +251,6 @@ Replace `!video.stalled` with `video.enabled`.
 `VideoDecodedFrame` is a closeable handle with `width()`, `height()`, `pixels(format)`, and `surface()`.
 `VideoDecoderOutput.format` is gone; set `surface = true` to keep the decoder's native surface.
 Replace `frame.data` with `frame.use { it.pixels(VideoPixelFormat.RGBA) }`.
-
-### `BroadcastProducer.finish()` is removed (#4152)
-
-Call `end()` to finish the broadcast and keep the handle, or `close()` to release it.
 
 ## 0.4 -> 0.5
 
