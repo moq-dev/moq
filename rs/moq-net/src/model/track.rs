@@ -16189,7 +16189,10 @@ mod test {
 		};
 		assert_eq!(fill.next(), Some(0));
 		let _writing = fill.accept(0, None).unwrap();
-		assert!(subscriber.poll_recv_group(&waiter).is_ready(), "the accepted group is read");
+		assert!(
+			subscriber.poll_recv_group(&waiter).is_ready(),
+			"the accepted group is read"
+		);
 		assert!(fill.is_wanted(0));
 
 		subscriber.update(ascending(8..)).unwrap();
@@ -16224,7 +16227,11 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the group range misses its groups");
 		};
-		assert_eq!((fill.start().group, fill.end()), (0, 2), "nothing below 10 for the time start");
+		assert_eq!(
+			(fill.start().group, fill.end()),
+			(0, 2),
+			"nothing below 10 for the time start"
+		);
 		while let Some(sequence) = fill.next() {
 			write_filled(fill.accept(sequence, None), sequence);
 		}
