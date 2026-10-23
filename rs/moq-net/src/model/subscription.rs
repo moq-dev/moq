@@ -309,7 +309,6 @@ impl Subscription {
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
 	#[cfg(any(feature = "async", test))]
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn start(&self) -> Option<Position> {
 		let mut floor: Option<Position> = None;
 		for range in &self.ranges {
@@ -326,7 +325,6 @@ impl Subscription {
 	///
 	/// The form a wire without ranges carries, alongside [`Self::start`].
 	#[cfg(any(feature = "async", test))]
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn end(&self) -> Option<Position> {
 		let mut end = Some(Position::default());
 		for range in &self.ranges {
@@ -341,7 +339,6 @@ impl Subscription {
 	/// Replace the ranges with one from `start` (or [`Range::oldest`]'s) to `end`: the form
 	/// a wire without ranges carries.
 	#[cfg(any(feature = "async", test))]
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn set_bounds(&mut self, start: Option<Position>, end: Option<Position>) {
 		self.ranges = vec![Range {
 			start: start.map_or(Range::oldest().start, Anchor::Absolute),
@@ -351,7 +348,6 @@ impl Subscription {
 
 	/// Replace the start of [`Self::set_bounds`]'s one range, keeping its end.
 	#[cfg(feature = "async")]
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn with_start(mut self, start: impl Into<Option<Position>>) -> Self {
 		self.set_bounds(start.into(), self.end());
 		self
@@ -359,7 +355,6 @@ impl Subscription {
 
 	/// Replace the end of [`Self::set_bounds`]'s one range, keeping its start.
 	#[cfg(any(feature = "async", test))]
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn with_end(mut self, end: impl Into<Option<Position>>) -> Self {
 		self.set_bounds(self.start(), end.into());
 		self
@@ -526,7 +521,6 @@ impl Position {
 	}
 
 	/// The first group this exclusive end excludes whole, `None` past the last group.
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn final_sequence(self) -> Option<u64> {
 		self.group.checked_add(u64::from(self.frame != 0))
 	}
@@ -538,7 +532,6 @@ impl Position {
 /// before 5, `..=5` reads through it, and `..` removes the cap. A [`Bound`] converts
 /// too, for callers holding one (a decoded wire field, or [`Position::group_end`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// pending: /quest/m1/public-model/serve.md
 pub(crate) struct Cap(Option<u64>);
 
 impl Cap {

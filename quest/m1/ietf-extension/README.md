@@ -10,7 +10,10 @@ Tracks advertising DYNAMIC_GROUPS relay NEW_GROUP_REQUEST back to the
 original publisher, with redundant requests coalesced. Across the cluster,
 refresh demand carries them on native lite-07.
 moxygen's moq-test conformance (sections 1-7, except cases that use a
-subgroup other than 0) passes through moq-relay in a nightly CI job.
+subgroup other than 0) passes through moq-relay in a nightly CI job under the
+relay conformance profile. The profile accepts the track's publisher priority
+on every group and an END_OF_TRACK directly after the last object. It still
+checks forwarded object IDs, properties, END_OF_GROUP and FIRST_OBJECT.
 
 Boundaries:
 
@@ -59,10 +62,9 @@ cannot answer unambiguously is refused.
   are present. Draft 17 is a separate family because it forbids 7-byte varints.
   Rewriting them would violate immutability; forwarding unchanged
   across those families would change their meaning.
-- **Public model carve-out.** These fields stay crate-private on purpose,
-  an exception to [a public model](/quest/m1/public-model/README.md). A
-  third-party relay built on the public model drops them, as plain lite
-  does.
+- **Crate-private on purpose.** These fields never become public API
+  ([moq-transport stays private](/quest/m1/api-audit/ietf-private.md)); a
+  relay that is not moq-relay drops them, as plain lite does.
 - **Verification:** Rust integration tests per feature in each child, plus
   the nightly moxygen job owned here.
 
@@ -76,13 +78,58 @@ Work owned by this README, after the children land:
   END_OF_GROUP status object, and a FIRST_OBJECT bit that differs. Every child must
   preserve these byte for byte.
 - Check routing first. Sections 1-7 send a SUBSCRIBE for a 16-field namespace
-  under the announced `moq-test-00` prefix. Whether `origin.dynamic` routes it
-  is unverified. If it does not, bring the routing decision to the maintainer
-  before working around it.
+  under the announced `moq-test-00` prefix. Mock-clock integration tests now
+  prove that path on drafts 16 and 18, through one relay and through two relays
+  joined by lite-07; the live harness reaches the publisher too.
 - FETCH cases are skipped upstream. Section 8 stays out while PUBLISH is
   declined.
+
+### Conformance profile and remaining work
+
+Decided with the maintainer on 2026-10-23: keep the relay's track-level egress
+priority and its END_OF_TRACK, and verify under a relay conformance profile
+instead of the literal upstream suite. Changing per-group priority transport or
+terminal representation to satisfy one verifier would cost scheduling and wire
+complexity for no behavioral gain.
+
+The pinned harness is in
+[`test/ietf-conformance`](../../../test/ietf-conformance/README.md), with Moxygen
+`c27ae6358df62a1195da479b2e07c50dd8174279` and its matching dependency revisions.
+It keeps all selected case arguments and deadlines, excludes only the agreed
+nonzero-subgroup cases, and fails on client crashes or publisher reconnects.
+`nix/moxygen-profile.patch` applies the profile to the client verifier: it also
+accepts the track's advertised priority on every group, and one END_OF_TRACK
+directly after the last object, whose stream ends no payload group. All other
+upstream checks stay, including object IDs, properties, END_OF_GROUP and
+FIRST_OBJECT.
+
+Measured on the profile over six runs: the direct-origin controls and the
+single-relay cells pass 29/29 on drafts 16 and 18, and the nightly job gates on
+them. Two-relay cells failed 29/29 before media, so the harness does not run
+them yet. Remaining, in order:
+
+- **A publisher that answers metadata queries.** Cluster cells fail because the
+  edge's TRACK_INFO query becomes TRACK_STATUS upstream, and the pinned
+  MoQTestPublisher inherits NOT_SUPPORTED. Preserve that refusal: widening
+  query-only demand into a SUBSCRIBE is not an authorized fallback.
+  [Range widening](/quest/m1/compress/ietf-range-widen.md), claimed by
+  [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465), owns that
+  separate cold-metadata boundary. Needs a Moxygen revision whose test
+  publisher answers TRACK_STATUS; then bump the pins, rebase the profile, and
+  add the two-relay cell back to `test/ietf-conformance/run.sh` (it ran in
+  [d96126c65a](https://github.com/moq-dev/moq/commit/d96126c65a52027820884cee7cb9741e79fb674b)).
+- **The direct draft-18 control.** One checkpoint run failed upstream's "Large
+  scale: Many groups and objects" with `Group Mismatch: Actual=1 Expected=0`
+  without any relay; it has not recurred in six runs since. The verifier
+  expects groups in order although each arrives on its own stream, which its
+  own comment calls a spurious failure. Resolve it at the verifier, not with a
+  retry.
+
+Then run both direct-origin controls and all four relay cells, fix any
+independently justified forwarding failures at source, and keep the nightly
+gate passing before deleting this README.
 
 ## Related
 
 - [#4926](https://github.com/moq-dev/moq/issues/4926) - the declined request for an object-level API; this carries the fields for relays only
-- [A public model](/quest/m1/public-model/README.md) - these fields are its deliberate exception
+- [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) - no public moq-net item exists only for moq-transport

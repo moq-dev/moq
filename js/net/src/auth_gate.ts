@@ -2,7 +2,6 @@ import type { Dispose, Getter } from "@moq/signals";
 import type { Grant } from "./auth.ts";
 import type * as Path from "./path.ts";
 
-// private: plumbing
 /** Whether our grant still lets us serve one incoming request, built when it is dispatched. @internal */
 export class Gate {
 	#grant?: Getter<Grant | undefined>;

@@ -238,12 +238,13 @@ ceiling that backends with live bitrate control lower to fit the connection.
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.
 
-On Wayland, bare `--window` asks the system portal to choose one window;
-there is no window id to look up or supply. An explicit `--window <id>` still
-selects a native window, including XWayland windows through their X11 ids.
-The portal may reuse its grant when capture reopens within the same process;
-a new process shows the picker again. Bare `--window` requires a Linux build
-with `pipewire`; other builds require an explicit window id.
+On Wayland, bare `--window` and bare `--display` ask the system portal to
+choose one window or screen; there is no id to look up or supply. An explicit
+`--window <id>` or `--display <id>` still selects a native source, including
+XWayland's through their `x11:` ids, and any other id fails rather than opening
+the picker. The portal may reuse its grant when capture reopens within the same
+process; a new process shows the picker again. Bare `--window` requires a Linux
+build with `pipewire`; other builds require an explicit window id.
 
 Requires the `capture` feature, plus `openh264` on a host without a hardware
 encoder. On Linux the microphone needs the ALSA
