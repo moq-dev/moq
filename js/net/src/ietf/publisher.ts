@@ -265,9 +265,12 @@ type StreamCount = { opened: number; terminalSent?: boolean };
 /** A PUBLISH's state across every pause and resume. */
 interface Published {
 	streams: StreamCount;
-	unlisted: Once<true>;
+	unlisted: Once<Unlisted>;
 	answer: boolean;
 }
+
+/** How a listed track left the listing: it finished, or it left unfinished. */
+type Unlisted = "finished" | "removed";
 
 /** Stop forwarding without ending the subscription. */
 class Paused extends Error {
@@ -955,13 +958,14 @@ export class Publisher {
 					revoked,
 					...(published ? [published.unlisted] : []),
 				]);
-				if (end === true) throw new NotFound("track no longer listed");
+				if (end === "removed") throw new NotFound("track no longer listed");
 				if (end === "revoked") {
 					console.info(`subscription no longer authorized: broadcast=${name} track=${track.name}`);
 					unauthorized = true;
 					unsubscribe();
 				}
-				ended = end === served;
+				// A track that finished leaves the listing with TRACK_ENDED, like one served to its end.
+				ended = end === served || end === "finished";
 			} catch (err: unknown) {
 				publishError = error(err);
 				// Stop forwarding at once: a pause answers only after every data stream closed.
@@ -1336,7 +1340,6 @@ export class Publisher {
 			streams.opened += 1;
 			if (sequence !== undefined) ranking.add(stream, sequence, object);
 
-			await stream.u53(FetchHeader.type);
 			await new FetchHeader({ requestId }).encode(stream, version);
 
 			if (fill.kind !== "group") {
@@ -2453,7 +2456,7 @@ export class Publisher {
 		changed: Signal<number>;
 	}) {
 		const namespace = Path.join(msg.prefix, suffix);
-		const listed = new Map<string, Once<true>>();
+		const listed = new Map<string, Once<Unlisted>>();
 		const skipped = new Map<string, symbol>();
 		const tasks = new Set<Promise<void>>();
 		const cancel = adding.subscribe((active) => {
@@ -2468,8 +2471,8 @@ export class Publisher {
 				const event = await untilAborted(listing.next(), hold.signal);
 				if (!event) break;
 				if (event.kind === "synced") continue;
-				if (event.kind === "removed") {
-					listed.get(event.name)?.set(true);
+				if (event.kind === "removed" || event.kind === "finished") {
+					listed.get(event.name)?.set(event.kind);
 					listed.delete(event.name);
 					const key = skipped.get(event.name);
 					if (key) skips.delete(key);
@@ -2487,7 +2490,7 @@ export class Publisher {
 					changed.update((n) => n + 1);
 					continue;
 				}
-				const unlisted = new Once<true>();
+				const unlisted = new Once<Unlisted>();
 				listed.set(event.name, unlisted);
 				const key = JSON.stringify([namespace, event.name]);
 				if (this.#session.version === Version.DRAFT_18) this.#trackClaims.set(key, "publish");
@@ -2515,7 +2518,7 @@ export class Publisher {
 		} finally {
 			cancel();
 			listing?.close();
-			for (const entry of listed.values()) entry.set(true);
+			for (const entry of listed.values()) entry.set("removed");
 			for (const key of skipped.values()) skips.delete(key);
 			await Promise.all(tasks);
 		}
@@ -2535,7 +2538,7 @@ export class Publisher {
 		source: broadcast.Consumer;
 		name: string;
 		info: Info;
-		unlisted: Once<true>;
+		unlisted: Once<Unlisted>;
 		adding: Signal<boolean>;
 	}) {
 		const version = this.#session.version;
@@ -2543,7 +2546,13 @@ export class Publisher {
 		const stop = adding.subscribe((active) => {
 			if (!active) hold.abort();
 		});
-		const removed = unlisted.subscribe(() => hold.abort());
+		// The peer lists the track once its PUBLISH arrives, which may be before the write
+		// returns, so a track that finishes from then on sees the PUBLISH through to its answer
+		// and ends with TRACK_ENDED; a reset would fail the peer's listing.
+		let publishing = false;
+		const removed = unlisted.subscribe((how) => {
+			if (how === "removed" || (how === "finished" && !publishing)) hold.abort();
+		});
 		const cancelled = () => request?.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
 		hold.signal.addEventListener("abort", cancelled);
 		let request: RequestStream | undefined;
@@ -2585,6 +2594,7 @@ export class Publisher {
 				parameters.subscriptionFilter = subscription.filter;
 			}
 			const largest = wireOf(source).largest(name);
+			publishing = true;
 			await Message.write(
 				request.writer,
 				Publish.id,
@@ -2614,6 +2624,7 @@ export class Publisher {
 			// Once sent, the PUBLISH survives cancellation of its listing.
 			const state: Published = { streams: { opened: 0 }, unlisted, answer: false };
 			const answer = await untilAborted(request.next(), hold.signal);
+			publishing = false;
 			if (!answer) throw new ProtocolViolation("PUBLISH ended without an answer");
 			if (answer.type === RequestError.id) {
 				await RequestError.decode(answer.reader, version).catch((err) => {
@@ -2640,9 +2651,11 @@ export class Publisher {
 						request.writer,
 						PublishDone.id,
 						new PublishDone({
-							statusCode: this.#gate.allows(namespace)
-								? PublishDoneStatus.INTERNAL_ERROR
-								: PublishDoneStatus.UNAUTHORIZED,
+							statusCode: !this.#gate.allows(namespace)
+								? PublishDoneStatus.UNAUTHORIZED
+								: unlisted.peek() === "finished"
+									? PublishDoneStatus.TRACK_ENDED
+									: PublishDoneStatus.INTERNAL_ERROR,
 							streamCount: BigInt(state.streams.opened),
 							reasonPhrase: "track no longer listed or granted",
 						}),
@@ -2694,20 +2707,22 @@ export class Publisher {
 				}
 				const revoked = new Once<true>();
 				const gate = this.#gate.watch(namespace, () => revoked.set(true));
-				let next: Framed | undefined | true;
+				let next: Framed | undefined | true | Unlisted;
 				try {
 					next = await race([request.next(), unlisted, revoked, ended]);
 				} finally {
 					gate.dispose();
 				}
-				if (next === true) {
+				if (next === true || next === "finished" || next === "removed") {
 					await Message.write(
 						request.writer,
 						PublishDone.id,
 						new PublishDone({
 							statusCode: revoked.peek()
 								? PublishDoneStatus.UNAUTHORIZED
-								: PublishDoneStatus.INTERNAL_ERROR,
+								: next === "finished"
+									? PublishDoneStatus.TRACK_ENDED
+									: PublishDoneStatus.INTERNAL_ERROR,
 							streamCount: BigInt(state.streams.opened),
 							reasonPhrase: "track no longer listed or granted",
 						}),

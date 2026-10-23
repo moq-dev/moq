@@ -34,7 +34,6 @@ from .publish import (
     BroadcastDynamic,
     BroadcastFinish,
     BroadcastProducer,
-    GroupDemand,
     GroupProducer,
     GroupRequest,
     TrackDemand,
@@ -51,6 +50,7 @@ from .subscribe import (
 )
 from .types import (
     Anchor,
+    AnnounceRoute,
     AudioCodec,
     AudioEncoderInput,
     AudioSampleFormat,
@@ -87,6 +87,7 @@ __all__ = [
     "AnnounceEventRestart",
     "AnnounceEventStart",
     "AnnounceEventUpdate",
+    "AnnounceRoute",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
@@ -113,7 +114,6 @@ __all__ = [
     "FetchGroupOptions",
     "Grant",
     "GroupConsumer",
-    "GroupDemand",
     "GroupRequest",
     "GroupProducer",
     "OriginConsumer",

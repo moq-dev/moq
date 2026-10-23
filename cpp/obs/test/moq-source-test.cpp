@@ -533,7 +533,7 @@ public:
 				TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init),
 				       "audio producer");
 		}
-		TestOk(broadcast->announce(moq::Route{}), "announce");
+		TestOk(broadcast->announce(moq::AnnounceRoute{}), "announce");
 	}
 
 	~Publisher() { (void)broadcast->close(); }

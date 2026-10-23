@@ -145,7 +145,7 @@ impl Applied {
 	/// A report that `preset` took effect through `controls`.
 	#[cfg_attr(
 		not(any(feature = "openh264", feature = "nvidia", feature = "vaapi", target_os = "macos")),
-		allow(dead_code)
+		allow(dead_code, reason = "only the encoder backends report a preset")
 	)]
 	pub(crate) fn new(preset: Preset, controls: impl Into<String>) -> Self {
 		Self {
@@ -563,7 +563,10 @@ impl Encoder {
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
 
 	use super::*;
 
