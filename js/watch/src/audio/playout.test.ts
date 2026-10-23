@@ -2,15 +2,13 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { Micro, Milli } from "@moq/clock";
 import * as Container from "@moq/hang/container";
 import { Group, Time, Track, Varint } from "@moq/net";
-import { AUTO_MAX_DELAY, ringCapacity, target } from "./latency";
+import { AUTO_MAX_DELAY, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
-import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 
-// Replay recorded-shape arrival traces through both rings and count what a listener would hear:
-// quanta rendered short (an underrun) and samples the ring threw away (a skip). Both rings are
-// driven through the same harness, since the postMessage fallback is the path every page without
-// cross-origin isolation takes. Each ring's floor is the target the estimator settles on, measured
-// through the transport subscription and container consumer the decoder reads.
+// Replay recorded-shape arrival traces through the ring and count what a listener would hear:
+// quanta rendered short (an underrun) and samples the ring threw away (a skip). The ring is sized
+// from the target the estimator settles on, measured through the transport subscription and
+// container consumer the decoder reads.
 
 const RATE = 48000;
 const QUANTUM = 128; // an AudioWorklet render quantum
@@ -129,29 +127,9 @@ async function settled(t: Arrival[]): Promise<number> {
 	return targets[targets.length - 1];
 }
 
-/** The two rings behind one interface, since the harness drives them identically. */
-interface Ring {
-	insert(timestamp: Micro, data: Float32Array[]): void;
-	read(output: Float32Array[]): number;
-	readonly length: number;
-}
-
-function shared(latencyMs: number): Ring {
-	const samples = Math.ceil((RATE * latencyMs) / 1000);
-	const ring = new SharedRingBuffer(allocSharedRingBuffer(1, ringCapacity(RATE), RATE));
-	ring.setLatency(samples);
-	return ring;
-}
-
-function post(latencyMs: number): Ring {
-	const ring = new AudioRingBuffer({ rate: RATE, channels: 1, latency: latencyMs as Milli });
-	return {
-		insert: (timestamp, data) => ring.write(timestamp, data),
-		read: (output) => ring.read(output),
-		get length() {
-			return ring.length;
-		},
-	};
+/** The worklet's ring at `latencyMs`. */
+function build(latencyMs: number): AudioRingBuffer {
+	return new AudioRingBuffer({ rate: RATE, channels: 1, latency: latencyMs as Milli });
 }
 
 interface Result {
@@ -165,7 +143,7 @@ interface Result {
  * Play `t` through `ring` in real time: insert every frame the moment it arrives, and pull one
  * render quantum every quantum's worth of wall time, which is what the AudioWorklet does.
  */
-function replay(ring: Ring, t: Arrival[], warmupMs: number): Result {
+function replay(ring: AudioRingBuffer, t: Arrival[], warmupMs: number): Result {
 	const step = (QUANTUM / RATE) * 1000;
 	const output = [new Float32Array(QUANTUM)];
 	const end = t[t.length - 1].arrival;
@@ -179,7 +157,7 @@ function replay(ring: Ring, t: Arrival[], warmupMs: number): Result {
 
 	for (let now = 0; now < end; now += step) {
 		while (next < t.length && t[next].arrival <= now) {
-			ring.insert(Micro.fromMilli(t[next].media as Milli), [new Float32Array(CHUNK).fill(0.5)]);
+			ring.write(Micro.fromMilli(t[next].media as Milli), [new Float32Array(CHUNK).fill(0.5)]);
 			inserted += CHUNK;
 			next++;
 		}
@@ -199,12 +177,7 @@ function replay(ring: Ring, t: Arrival[], warmupMs: number): Result {
 	};
 }
 
-const RINGS: Array<[string, (latencyMs: number) => Ring]> = [
-	["shared", shared],
-	["post", post],
-];
-
-describe.each(RINGS)("%s ring replay", (_name, build) => {
+describe("ring replay", () => {
 	it("plays an evenly paced sender without underruns or skips", async () => {
 		const t = trace(600, 1, 10);
 		expect(replay(build(await settled(t)), t, 2000)).toEqual({ underruns: 0, skipped: 0 });

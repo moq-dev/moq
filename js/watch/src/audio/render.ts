@@ -1,17 +1,11 @@
 import type { Micro, Milli } from "@moq/clock";
-import type { SharedRingBufferInit } from "./shared-ring-buffer";
 
 /** Everything the main thread sends the render worklet over its port. */
-export type Message = InitShared | InitPost | Data | Latency | Park | Reset | Truncate;
+export type Message = Init | Data | Latency | Park | Reset | Truncate;
 
-/** Init message when SharedArrayBuffer is available. */
-export interface InitShared extends SharedRingBufferInit {
-	type: "init-shared";
-}
-
-/** Init message for the postMessage fallback path. */
-export interface InitPost {
-	type: "init-post";
+/** Create the worklet's ring. */
+export interface Init {
+	type: "init";
 	channels: number;
 	rate: number;
 	latency: Milli;
@@ -20,43 +14,46 @@ export interface InitPost {
 	buffered: boolean;
 }
 
-/** Flush the buffer and re-stall (fallback path only; shared path resets via Atomics). */
+/** Flush the buffer and re-stall. */
 export interface Reset {
 	type: "reset";
+	// Echoed in every later state message, so the main thread can tell state from before the reset.
+	epoch: number;
 }
 
-/**
- * Drop buffered samples at or after `timestamp`, keeping what is already due (fallback path only;
- * the shared path truncates via Atomics).
- */
+/** Hold playback until the next data message, keeping what is buffered. */
+export interface Park {
+	type: "park";
+	// Echoed like a reset's, so state from before the park cannot report the ring playing.
+	epoch: number;
+}
+
+/** Drop buffered samples at or after `timestamp`, keeping what is already due. */
 export interface Truncate {
 	type: "truncate";
 	timestamp: Micro;
 }
 
-/** Audio samples sent via postMessage (fallback path only). */
+/** Audio samples, with their buffers transferred. */
 export interface Data {
 	type: "data";
 	data: Float32Array[];
 	timestamp: Micro;
 }
 
-/** Latency update sent via postMessage (fallback path only): the floor held as decoded PCM. */
+/** Latency update: the floor held as decoded PCM. */
 export interface Latency {
 	type: "latency";
 	latency: Milli;
 }
 
-/** Hold playback until the next data message (fallback path only; shared path parks via Atomics). */
-export interface Park {
-	type: "park";
-}
-
-/** State update from the worklet back to main thread (fallback path only). */
+/** State update from the worklet back to the main thread. */
 export interface State {
 	type: "state";
 	timestamp: Micro;
 	stalled: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;
+	// The epoch of the last reset or park the worklet applied.
+	epoch: number;
 }

@@ -35,7 +35,9 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// Route is the publisher Epoch a broadcast is announced under (nil when unknown), the hop chain it takes to reach an origin, and its static production and link cost (lower wins).
+	// AnnounceRoute is how a broadcast advertises its exact path: its static production Cost (lower wins) and the publisher Epoch it serves (nil when unknown).
+	AnnounceRoute = ffi.MoqAnnounceRoute
+	// Route is an observed route: the publisher Epoch it serves (nil when unknown), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
@@ -194,7 +196,7 @@ func LogLevel(level string) error {
 }
 
 // MintEpoch mints a fresh publisher epoch from the wall clock and secure randomness,
-// ordered newest last. Mint one per publisher run and announce it in Route.Epoch, so
+// ordered newest last. Mint one per publisher run and announce it in AnnounceRoute.Epoch, so
 // viewers see a restart as a new broadcast instead of a stalled one.
 func MintEpoch() string {
 	return ffi.MoqMintEpoch()
