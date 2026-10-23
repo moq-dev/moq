@@ -2459,8 +2459,10 @@ mod tests {
 		};
 		assert!(matches!(err, Error::MoqNet(moq_net::Error::Timeout)), "{err}");
 		assert_eq!(start.elapsed(), timeout);
-		// moq-net closes with the negotiated version's timeout code.
-		assert!(peer.closed.lock().unwrap().is_some(), "the peer was never told");
+		assert_eq!(
+			*peer.closed.lock().unwrap(),
+			Some(moq_net::SessionError::Timeout.to_code())
+		);
 		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
 		assert_eq!(failed.count(moq_net::stats::Failure::Application), 1, "{failed:?}");
 	}

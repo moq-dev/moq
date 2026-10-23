@@ -13,7 +13,7 @@ A context shared across reconnects fails only if its last session did.
 To count a SETUP reply the peer never takes, bound it with `Handshake::with_deadline` instead of dropping the `ok` future.
 
 `Session::closed()`, and the error from `Session::close()`, is `Error::Cancel` for every clean close by either side, where a peer's was `Error::Session(SessionError::Cancel)`.
-When the transport reports only that this side closed it, the error is this side's reason, the `abort` error or the protocol failure, where it was a clean close.
+When the transport reports only that this side closed it, the error is this side's reason, such as the `abort` error, the protocol failure, or `GoawayTimeout`, where it was always a clean close.
 Match `Error::Cancel` alone for a clean end.
 
 ### A listing says whether a removed track finished (#6399)
