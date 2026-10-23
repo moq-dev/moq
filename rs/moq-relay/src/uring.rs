@@ -903,7 +903,6 @@ mod tests {
 
 	/// `quic.mtu_discovery` reaches the workers as it does the tokio backends: off unless set.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn mtu_discovery_is_applied() {
 		let mut quic = moq_tokio::quic::Config::default();
 		assert!(!transport(&quic.resolve()).expect("default").mtu_discovery);
