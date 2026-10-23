@@ -153,7 +153,7 @@ pub struct Filter {
 	pub remote: Option<Remote>,
 	/// The relay's local socket, exact including port.
 	pub local: Option<SocketAddr>,
-	/// SNI or the host the client addressed.
+	/// The SNI that selected the relay's certificate; sessions without one never match.
 	pub server_name: Option<String>,
 	/// Negotiated application protocol.
 	pub alpn: Option<String>,
