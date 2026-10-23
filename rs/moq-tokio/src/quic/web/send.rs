@@ -34,12 +34,16 @@ impl SendStream {
 		Self { stream, close, header }
 	}
 
-	/// Decode the peer's stop code, and report a session error as the session's close reason.
+	/// Decode the peer's stop code, and report a session error, or a stop for a session
+	/// that is gone, as the session's close reason.
 	fn map_error(&self, e: crate::quic::driver::WriteError) -> WriteError {
 		match e {
 			crate::quic::driver::WriteError::Stopped(code) => match self.close.decode_stream_code(code) {
 				Some(code) => WriteError::Stopped(code),
-				None => WriteError::InvalidStopped(code),
+				None => match self.close.session_gone(code) {
+					Some(err) => WriteError::SessionError(err),
+					None => WriteError::InvalidStopped(code),
+				},
 			},
 			e => match WriteError::from(e) {
 				WriteError::SessionError(e) => WriteError::SessionError(self.close.map(e)),
@@ -70,7 +74,10 @@ impl SendStream {
 	/// supported.
 	pub async fn stopped(&self) -> Result<Option<u32>, SessionError> {
 		match self.stream.stopped().await {
-			Ok(Some(code)) => Ok(self.close.decode_stream_code(code)),
+			Ok(Some(code)) => match self.close.session_gone(code) {
+				Some(err) => Err(err),
+				None => Ok(self.close.decode_stream_code(code)),
+			},
 			Ok(None) => Ok(None),
 			Err(crate::quic::driver::StoppedError::ConnectionLost(conn_err)) => Err(self.close.map(conn_err.into())),
 			Err(crate::quic::driver::StoppedError::ZeroRttRejected) => unreachable!("0-RTT not supported"),

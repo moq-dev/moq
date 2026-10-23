@@ -138,6 +138,17 @@ export function encodeVarint(v: number | bigint, version: StreamVersion): Uint8A
 	return encodeTo(new ArrayBuffer(9), parts.hi, lo, version);
 }
 
+/** The parts joined into one buffer, so they can go out in one write. */
+export function concat(parts: Uint8Array[]): Uint8Array {
+	const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+	let offset = 0;
+	for (const part of parts) {
+		out.set(part, offset);
+		offset += part.byteLength;
+	}
+	return out;
+}
+
 /**
  * The `WebTransportSendStream` that every outgoing stream is, narrowed to the one attribute
  * this package uses. The DOM types available here still describe them as plain
@@ -806,6 +817,23 @@ export class Writer {
 
 	reset(reason: unknown) {
 		this.#writer.abort(withCode(reason, this.version)).catch(() => void 0);
+	}
+
+	/** Run `f` against a Writer that buffers in memory, returning everything it wrote as one chunk. */
+	static async collect(version: StreamVersion, f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
+		const chunks: Uint8Array[] = [];
+		// Copied, since each primitive reuses the Writer's scratch buffer.
+		const w = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(chunk.slice()) }),
+			version,
+		);
+		try {
+			await f(w);
+		} finally {
+			w.close();
+		}
+		await w.closed;
+		return concat(chunks);
 	}
 
 	/**

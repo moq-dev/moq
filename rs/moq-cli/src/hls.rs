@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use axum::http::Method;
+use futures::FutureExt;
 use hang::moq_net;
 use url::Url;
 
@@ -77,29 +78,45 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 
 	importer.init().await?;
 	notify_ready();
-	{
-		let run = importer.run();
-		tokio::pin!(run);
-		tokio::select! {
-			res = &mut run => {
-				res?;
-				anyhow::bail!("the playlist ended before it declared a track");
-			}
-			catalog = listed.next() => {
-				anyhow::ensure!(catalog?.is_some(), "the playlist ended before it declared a track");
-				producer
-					.announce(moq_net::origin::Route::default().with_epoch(epoch))
-					.context("failed to announce broadcast")?;
-			}
-		}
-		run.await?;
-	}
+	run_announced(&mut importer, &mut listed, &mut producer, epoch).await?;
 
 	// The playlist ended: serve the finished broadcast until its media is stale, so
 	// subscribers still catching up drain the tail. An interrupt drops it at once.
 	let finish = importer.finish()?;
 	tracing::info!(linger = ?finish.linger(), "playlist ended; serving the finished broadcast until its media is stale");
 	finish.wait().await;
+	Ok(())
+}
+
+/// Run the import to the playlist's end, announcing the broadcast as its catalog first goes out.
+///
+/// Fails when the playlist ends without the catalog ever naming a track.
+async fn run_announced(
+	importer: &mut moq_hls::import::Import,
+	listed: &mut moq_mux::catalog::hang::Consumer,
+	producer: &mut moq_net::broadcast::Producer,
+	epoch: moq_net::Epoch,
+) -> anyhow::Result<()> {
+	let run = importer.run();
+	tokio::pin!(run);
+	let mut ended = false;
+	let catalog = tokio::select! {
+		catalog = listed.next() => catalog?,
+		res = &mut run => {
+			res?;
+			ended = true;
+			// A finite playlist can publish its catalog and end in the same poll, so take what it
+			// published rather than reading the end as empty.
+			listed.next().now_or_never().transpose()?.flatten()
+		}
+	};
+	anyhow::ensure!(catalog.is_some(), "the playlist ended before it declared a track");
+	producer
+		.announce(moq_net::origin::Route::default().with_epoch(epoch))
+		.context("failed to announce broadcast")?;
+	if !ended {
+		run.await?;
+	}
 	Ok(())
 }
 
@@ -146,4 +163,107 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 	notify_ready();
 
 	crate::web::serve(listener, app, tls).await
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	/// Write bbb's init and fragments to `media.mp4` in `dir`, and a `media.m3u8` listing the first
+	/// `segments` of them, ended with `EXT-X-ENDLIST` or not. The media file is the same whatever
+	/// `segments`, so rewriting the playlist models a live window that ends.
+	fn write_playlist(dir: &std::path::Path, segments: usize, end_list: bool) {
+		let data = include_bytes!("../../moq-mux/src/container/fmp4/test_data/bbb.mp4");
+		let mut moofs = Vec::new();
+		let mut position = 0usize;
+		while position + 8 <= data.len() {
+			let size = u32::from_be_bytes(data[position..position + 4].try_into().unwrap()) as usize;
+			if size < 8 || position + size > data.len() {
+				break;
+			}
+			if &data[position + 4..position + 8] == b"moof" {
+				moofs.push(position);
+			}
+			position += size;
+		}
+		let init = moofs[0];
+		let mut playlist = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n".to_string();
+		if segments > 0 {
+			playlist += &format!("#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{init}@0\"\n");
+		}
+		for window in moofs.windows(2).take(segments) {
+			playlist += &format!(
+				"#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n",
+				window[1] - window[0],
+				window[0]
+			);
+		}
+		if end_list {
+			playlist += "#EXT-X-ENDLIST\n";
+		}
+
+		std::fs::write(dir.join("media.mp4"), &data[..]).unwrap();
+		std::fs::write(dir.join("media.m3u8"), playlist).unwrap();
+	}
+
+	/// An importer initialized on a live playlist of `segments`, which then ends without adding
+	/// any, the catalog it lists, and its broadcast. Import refuses a playlist that had already
+	/// ended when it joined, so a finite run joins live first.
+	async fn joined_then_ended(
+		segments: usize,
+	) -> anyhow::Result<(
+		tempfile::TempDir,
+		moq_hls::import::Import,
+		moq_mux::catalog::hang::Consumer,
+		moq_net::broadcast::Producer,
+	)> {
+		let dir = tempfile::tempdir()?;
+		write_playlist(dir.path(), segments, false);
+		let playlist = Url::from_file_path(dir.path().join("media.m3u8")).unwrap();
+
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let mut producer = origin.create_broadcast("hls")?;
+		let catalog = moq_mux::catalog::Producer::new(&mut producer, moq_mux::catalog::Config::default())?;
+		let listed = catalog.consume()?;
+		let mut importer =
+			moq_hls::import::Import::new(producer.clone(), catalog, moq_hls::import::Config::new(playlist))?;
+		importer.init().await?;
+
+		write_playlist(dir.path(), segments, true);
+		Ok((dir, importer, listed, producer))
+	}
+
+	/// A finite playlist can publish its catalog and end in one poll, which the race between
+	/// the run and the catalog sees either way round; both must announce. `select!` picks its
+	/// first branch at random, so this repeats.
+	#[tokio::test]
+	async fn an_ended_playlist_announces_its_catalog() {
+		for _ in 0..32 {
+			let (_dir, mut importer, mut listed, mut producer) = joined_then_ended(1).await.unwrap();
+			run_announced(&mut importer, &mut listed, &mut producer, moq_net::Epoch::mint())
+				.await
+				.unwrap();
+			assert!(producer.route().is_some(), "the finished playlist was not announced");
+		}
+	}
+
+	/// What `run_announced` relies on when the run wins: a run that ended has already published
+	/// the catalog it declared, so the listing is ready without waiting.
+	#[tokio::test]
+	async fn a_finished_run_has_published_its_catalog() {
+		let (_dir, mut importer, mut listed, _producer) = joined_then_ended(1).await.unwrap();
+		importer.run().await.unwrap();
+		let catalog = listed.next().now_or_never().expect("published before the run ended");
+		assert!(catalog.unwrap().is_some());
+	}
+
+	/// A playlist that ends having declared nothing still fails, and announces nothing.
+	#[tokio::test]
+	async fn an_empty_playlist_fails_unannounced() {
+		let (_dir, mut importer, mut listed, mut producer) = joined_then_ended(0).await.unwrap();
+		let result = run_announced(&mut importer, &mut listed, &mut producer, moq_net::Epoch::mint()).await;
+		assert!(producer.route().is_none(), "an empty playlist was announced");
+		result.expect_err("an empty playlist imports nothing");
+	}
 }

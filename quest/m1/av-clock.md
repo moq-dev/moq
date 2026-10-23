@@ -62,6 +62,7 @@ Recommendations for the implementation:
 
 ## Required
 
+- [One audio ring](/quest/m1/watch-audio-one-ring.md) - removes the SharedArrayBuffer ring, so this is written once against the postMessage ring
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the estimator this sits on, and the per-track targets this shape carries
 
 ## Related
