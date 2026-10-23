@@ -109,7 +109,7 @@ video, _ := moqvideo.NewProducer(catalogProducer,
 )
 _ = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 epoch := moq.MintEpoch() // a fresh epoch per run
-_ = broadcast.Announce(moq.Route{Epoch: &epoch})
+_ = broadcast.Announce(moq.AnnounceRoute{Epoch: &epoch})
 _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
