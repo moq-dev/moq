@@ -38,7 +38,10 @@ mod entropy;
 pub mod fuzz;
 mod range_set;
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests read the host clock directly"
+)]
 mod tests;
 pub mod transport_parameters;
 mod varint;
