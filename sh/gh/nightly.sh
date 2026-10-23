@@ -33,11 +33,13 @@ if [[ -n ${MOQ_BENCH_BASE:-} ]]; then
             exit 1
         fi
     fi
-    # A shallow CI checkout has only its own commit.
-    if ! git cat-file -e "$MOQ_BENCH_BASE^{commit}" 2>/dev/null; then
+    # A shallow CI checkout has only its own commit. Fetching a branch name only updates
+    # FETCH_HEAD, so the base is exported as the commit it resolved to.
+    if ! base=$(git rev-parse --verify --quiet "$MOQ_BENCH_BASE^{commit}"); then
         git fetch --no-tags --depth=1 origin "$MOQ_BENCH_BASE"
+        base=$(git rev-parse --verify 'FETCH_HEAD^{commit}')
     fi
-    export MOQ_BENCH_BASE
+    export MOQ_BENCH_BASE=$base
 fi
 
 if [[ -n $report ]]; then

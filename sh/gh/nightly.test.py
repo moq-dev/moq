@@ -50,6 +50,10 @@ class NightlyTest(unittest.TestCase):
         result, _ = self.run_group("rust-uring", MOQ_BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2", NIGHTLY_RUNS=runs)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.bases, {head})
+        # A named revision reaches the runner as its commit.
+        result, _ = self.run_group("rust-uring", MOQ_BENCH_BASE="HEAD~1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.bases, {parent})
         result, calls = self.run_group("rust-uring", MOQ_BENCH_BASE="previous-nightly", GITHUB_RUN_ID="1",
                                        NIGHTLY_RUNS=json.dumps([{"databaseId": 1, "headSha": head}]))
         self.assertEqual(result.returncode, 1)
