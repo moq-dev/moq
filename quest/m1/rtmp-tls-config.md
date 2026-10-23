@@ -15,7 +15,8 @@ Decided 2026-10-23 (maintainer interview):
   plaintext RTMP is still served on the same port. Without `with_tls`, the
   server is plaintext only.
 - `with_plaintext` is deleted. Breaking for moq-rtmp: add a `MIGRATE.md`
-  entry.
-- No caller in the repo sets either today; the
+  entry, and update the RTMPS example and prose in `rs/moq-rtmp/README.md`
+  and the `server.rs` module docs, which describe both methods.
+- No code in the repo calls either today; the
   [one-port listener](/quest/m2/one-port/README.md) is RTMPS's planned
   consumer.

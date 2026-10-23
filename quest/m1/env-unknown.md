@@ -14,9 +14,11 @@ Decided 2026-10-23 (maintainer interview):
 
 - Every binary, as an error. A shell holding one tool's `MOQ_*` variables
   while running another trips it; that is accepted.
-- One helper in `moq_tokio::cli` compares `std::env::vars()` with the `MOQ_*`
-  names the binary's usage spec declares, plus any it reads directly, and
-  each binary calls it after parsing. usage-rs has no unknown-env check yet;
+- One helper in `moq_tokio::cli` compares the environment's `MOQ_*` names
+  with those the binary's usage spec declares, plus any it reads directly,
+  and each binary calls it after parsing. It scans `std::env::vars_os()`,
+  since `vars()` panics on any non-UTF-8 entry, even an unrelated one.
+  usage-rs has no unknown-env check yet;
   [the upstream option](/quest/m2/usage-unknown-env.md) replaces this helper
   once released.
 - Turns the nix module's unit-test guard from
