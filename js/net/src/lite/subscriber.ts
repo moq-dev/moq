@@ -1251,9 +1251,6 @@ export class Subscriber {
 			});
 			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
-			if (!hasTrackStream(this.version)) {
-				throw new Error("fetch group requires moq-lite-05 or newer");
-			}
 
 			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
 			// Subscriber.close() closing the group releases every caller at any stage, and resets
