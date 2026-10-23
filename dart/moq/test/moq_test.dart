@@ -564,7 +564,7 @@ void main() {
           format: moq_video.PixelFormat.rgba,
           width: 320,
           height: 240,
-          framerate: moq_video.Rate(numerator: 30000, denominator: 1001),
+          framerate: moq_video.FrameRate(numerator: 30000, denominator: 1001),
         ),
         output: moq_video.EncoderOutput(
           codec: moq_video.Codec.h264,

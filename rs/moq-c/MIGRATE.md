@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Exact encoder rates and publication options
 
-`moq_video_encoder_input.framerate` is now `moq_video_rate { numerator,
+`moq_video_encoder_input.framerate` is now `moq_video_frame_rate { numerator,
 denominator }`, changing the C ABI layout. Replace `30` with `{30, 1}` or use
 `{30000, 1001}` for an exact fractional rate. Both components must be nonzero;
 rates above 1,000,000 fps are refused. Recompile callers with the generated header

@@ -76,7 +76,7 @@ Moq.connect("https://relay.example.com").use { moq ->
 
     val video = dev.moq.video.Producer(
         CatalogProducer(broadcast),
-        dev.moq.video.ProducerOptions(input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = dev.moq.video.Rate(30000u, 1001u)),
+        dev.moq.video.ProducerOptions(input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = dev.moq.video.FrameRate(30000u, 1001u)),
         output = VideoEncoderOutput(codec = VideoCodec.H264, bitrate = null, gop = null, kind = autoEncoder), track = "camera"),
     )
     video.write(VideoFrame(timestampUs = pts, data = rgba))

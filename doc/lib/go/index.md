@@ -103,7 +103,7 @@ _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 track := "camera"
 catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
 video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
-    Input: moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: moqvideo.Rate{Numerator: 30000, Denominator: 1001}},
+    Input: moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
     Output: moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.AutoEncoder()},
     Track: &track,
 })

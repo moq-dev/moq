@@ -93,4 +93,4 @@ extension VideoDecoderOutputDuration on MoqVideoDecoderOutput {
 typedef ProducerOptions = MoqVideoProducerOptions;
 
 /// An exact video frame rate in frames per second.
-typedef Rate = MoqVideoRate;
+typedef FrameRate = MoqVideoFrameRate;

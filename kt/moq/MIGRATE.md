@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Exact encoder rates and publication options
 
 Raw video input framerates are exact numerator/denominator records, not integers.
-Use `video.Rate(30000u, 1001u)` and construct producers with `(catalog, ProducerOptions(input, output, track, bandwidth))` under the matching audio/video namespace.
+Use `video.FrameRate(30000u, 1001u)` and construct producers with `(catalog, ProducerOptions(input, output, track, bandwidth))` under the matching audio/video namespace.
 The codec-only output records no longer contain track naming. Rebuild against
 the matching generated bindings and native library.
 

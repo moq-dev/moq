@@ -29,4 +29,4 @@ typealias EncoderKind = uniffi.moq.MoqVideoEncoderKind
 typealias ProducerOptions = uniffi.moq.MoqVideoProducerOptions
 
 /** An exact video frame rate in frames per second. */
-typealias Rate = uniffi.moq.MoqVideoRate
+typealias FrameRate = uniffi.moq.MoqVideoFrameRate

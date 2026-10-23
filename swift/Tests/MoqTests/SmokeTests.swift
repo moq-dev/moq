@@ -594,7 +594,7 @@ final class SmokeTests: XCTestCase {
         let broadcast = try origin.createBroadcast(path: "video-decode-frame")
         let video = try Video.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
-            input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: Video.Rate(numerator: 30000, denominator: 1001)),
+            input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
             output: VideoEncoderOutput(codec: .h264, kind: .software),
             track: "camera"
         )

@@ -4008,7 +4008,7 @@ class MoqVideoEncoderInput {
   final MoqVideoPixelFormat format;
   final int width;
   final int height;
-  final MoqVideoRate framerate;
+  final MoqVideoFrameRate framerate;
   MoqVideoEncoderInput({
     required this.format,
     required this.width,
@@ -4039,7 +4039,7 @@ class FfiConverterMoqVideoEncoderInput {
     );
     final height = height_lifted.value;
     new_offset += height_lifted.bytesRead;
-    final framerate_lifted = FfiConverterMoqVideoRate.read(
+    final framerate_lifted = FfiConverterMoqVideoFrameRate.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final framerate = framerate_lifted.value;
@@ -4060,7 +4060,7 @@ class FfiConverterMoqVideoEncoderInput {
         FfiConverterMoqVideoPixelFormat.allocationSize(value.format) +
         FfiConverterUInt32.allocationSize(value.width) +
         FfiConverterUInt32.allocationSize(value.height) +
-        FfiConverterMoqVideoRate.allocationSize(value.framerate) +
+        FfiConverterMoqVideoFrameRate.allocationSize(value.framerate) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -4081,7 +4081,7 @@ class FfiConverterMoqVideoEncoderInput {
       value.height,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterMoqVideoRate.write(
+    new_offset += FfiConverterMoqVideoFrameRate.write(
       value.framerate,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -4092,7 +4092,7 @@ class FfiConverterMoqVideoEncoderInput {
     return FfiConverterMoqVideoPixelFormat.allocationSize(value.format) +
         FfiConverterUInt32.allocationSize(value.width) +
         FfiConverterUInt32.allocationSize(value.height) +
-        FfiConverterMoqVideoRate.allocationSize(value.framerate) +
+        FfiConverterMoqVideoFrameRate.allocationSize(value.framerate) +
         0;
   }
 }
@@ -4245,6 +4245,65 @@ class FfiConverterMoqVideoFrame {
   static int allocationSize(MoqVideoFrame value) {
     return FfiConverterUInt64.allocationSize(value.timestampUs) +
         FfiConverterUint8List.allocationSize(value.data) +
+        0;
+  }
+}
+
+class MoqVideoFrameRate {
+  final int numerator;
+  final int denominator;
+  MoqVideoFrameRate({required this.numerator, required this.denominator});
+}
+
+class FfiConverterMoqVideoFrameRate {
+  static MoqVideoFrameRate lift(RustBuffer buf) {
+    return FfiConverterMoqVideoFrameRate.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqVideoFrameRate> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final numerator_lifted = FfiConverterUInt32.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final numerator = numerator_lifted.value;
+    new_offset += numerator_lifted.bytesRead;
+    final denominator_lifted = FfiConverterUInt32.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final denominator = denominator_lifted.value;
+    new_offset += denominator_lifted.bytesRead;
+    return LiftRetVal(
+      MoqVideoFrameRate(numerator: numerator, denominator: denominator),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqVideoFrameRate value) {
+    final total_length =
+        FfiConverterUInt32.allocationSize(value.numerator) +
+        FfiConverterUInt32.allocationSize(value.denominator) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqVideoFrameRate value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterUInt32.write(
+      value.numerator,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterUInt32.write(
+      value.denominator,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqVideoFrameRate value) {
+    return FfiConverterUInt32.allocationSize(value.numerator) +
+        FfiConverterUInt32.allocationSize(value.denominator) +
         0;
   }
 }
@@ -4413,65 +4472,6 @@ class FfiConverterMoqVideoProducerOptions {
         FfiConverterMoqVideoEncoderOutput.allocationSize(value.output) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterOptionalMoqBandwidth.allocationSize(value.bandwidth) +
-        0;
-  }
-}
-
-class MoqVideoRate {
-  final int numerator;
-  final int denominator;
-  MoqVideoRate({required this.numerator, required this.denominator});
-}
-
-class FfiConverterMoqVideoRate {
-  static MoqVideoRate lift(RustBuffer buf) {
-    return FfiConverterMoqVideoRate.read(buf.asUint8List()).value;
-  }
-
-  static LiftRetVal<MoqVideoRate> read(Uint8List buf) {
-    int new_offset = buf.offsetInBytes;
-    final numerator_lifted = FfiConverterUInt32.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final numerator = numerator_lifted.value;
-    new_offset += numerator_lifted.bytesRead;
-    final denominator_lifted = FfiConverterUInt32.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final denominator = denominator_lifted.value;
-    new_offset += denominator_lifted.bytesRead;
-    return LiftRetVal(
-      MoqVideoRate(numerator: numerator, denominator: denominator),
-      new_offset - buf.offsetInBytes,
-    );
-  }
-
-  static RustBuffer lower(MoqVideoRate value) {
-    final total_length =
-        FfiConverterUInt32.allocationSize(value.numerator) +
-        FfiConverterUInt32.allocationSize(value.denominator) +
-        0;
-    final buf = Uint8List(total_length);
-    write(value, buf);
-    return toRustBuffer(buf);
-  }
-
-  static int write(MoqVideoRate value, Uint8List buf) {
-    int new_offset = buf.offsetInBytes;
-    new_offset += FfiConverterUInt32.write(
-      value.numerator,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    new_offset += FfiConverterUInt32.write(
-      value.denominator,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    return new_offset - buf.offsetInBytes;
-  }
-
-  static int allocationSize(MoqVideoRate value) {
-    return FfiConverterUInt32.allocationSize(value.numerator) +
-        FfiConverterUInt32.allocationSize(value.denominator) +
         0;
   }
 }

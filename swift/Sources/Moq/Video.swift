@@ -3,7 +3,7 @@ import MoqFFI
 /// Native video encoding, publication, and decoding.
 public enum Video {
     /// An exact video frame rate in frames per second.
-    public typealias Rate = MoqFFI.MoqVideoRate
+    public typealias FrameRate = MoqFFI.MoqVideoFrameRate
 
     /// The raw frame layout, resolution, and framerate the caller writes.
     public typealias EncoderInput = VideoEncoderInput

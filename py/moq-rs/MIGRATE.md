@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Exact encoder rates and publication options
 
 Raw video input framerates are exact numerator/denominator records, not integers.
-Use `video.Rate(numerator=30000, denominator=1001)` and move `track=` from encoder output to `audio.Producer` / `video.Producer`.
+Use `video.FrameRate(numerator=30000, denominator=1001)` and move `track=` from encoder output to `audio.Producer` / `video.Producer`.
 The codec-only output records no longer contain track naming. Rebuild against
 the matching generated bindings and native library.
 

@@ -1454,7 +1454,7 @@ async def test_decode_video_frame():
             format=moq.VideoPixelFormat.RGBA,
             width=320,
             height=240,
-            framerate=moq.video.Rate(numerator=30000, denominator=1001),
+            framerate=moq.video.FrameRate(numerator=30000, denominator=1001),
         ),
         # Software so the encode is deterministic everywhere. uniffi nests each
         # variant inside the enum without declaring it a subclass, so the cast is

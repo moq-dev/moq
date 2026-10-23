@@ -14,7 +14,7 @@ from moq_ffi import (
     MoqVideoProducer,
     MoqVideoProducerOptions,
 )
-from moq_ffi import MoqVideoRate as Rate
+from moq_ffi import MoqVideoFrameRate as FrameRate
 
 from ._records import _from_us, _opt_us, _to_us
 from ._stream import _Stream
@@ -202,5 +202,5 @@ __all__ = [
     "Packet",
     "PixelFormat",
     "Producer",
-    "Rate",
+    "FrameRate",
 ]

@@ -75,7 +75,7 @@ pub enum moq_video_encoder_kind {
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(non_camel_case_types)]
-pub struct moq_video_rate {
+pub struct moq_video_frame_rate {
 	/// Frames per second numerator; must be nonzero.
 	pub numerator: u32,
 	/// Frames per second denominator; must be nonzero.
@@ -96,7 +96,7 @@ pub struct moq_video_encoder_input {
 	pub height: u32,
 	/// Nominal frames per second, used for the codec time base and the default
 	/// bitrate and keyframe interval. Must be non-zero.
-	pub framerate: moq_video_rate,
+	pub framerate: moq_video_frame_rate,
 }
 
 /// Codec-side configuration for [`moq_encode_video`]. Every knob spells

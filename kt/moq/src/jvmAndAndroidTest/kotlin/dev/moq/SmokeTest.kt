@@ -7,7 +7,7 @@ import dev.moq.audio.ProducerOptions as AudioProducerOptions
 import dev.moq.video.Consumer as VideoConsumer
 import dev.moq.video.Producer as VideoProducer
 import dev.moq.video.ProducerOptions as VideoProducerOptions
-import dev.moq.video.Rate as VideoRate
+import dev.moq.video.FrameRate as VideoFrameRate
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
@@ -746,7 +746,7 @@ class SmokeTest {
                 val video = VideoProducer(
                     CatalogProducer(broadcast),
                     VideoProducerOptions(
-                        input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoRate(30000u, 1001u)),
+                        input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoFrameRate(30000u, 1001u)),
                         output = VideoEncoderOutput(codec = VideoCodec.H264,  kind = softwareEncoder),
                         track = "camera",
                         bandwidth = null,

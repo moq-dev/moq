@@ -76,7 +76,7 @@ try audio.cut() // audio has no keyframes, so this is what gives it groups
 
 let video = try Video.Producer(
     catalog: Media.CatalogProducer(broadcast: broadcast),
-    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: Video.Rate(numerator: 30000, denominator: 1001)),
+    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
     output: VideoEncoderOutput(codec: .h264, kind: .auto),
     track: "camera"
 )

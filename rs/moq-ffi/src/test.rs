@@ -3182,7 +3182,7 @@ async fn video_raw_publish_consume() {
 				format: MoqVideoPixelFormat::Rgba,
 				width: 320,
 				height: 240,
-				framerate: crate::video::MoqVideoRate {
+				framerate: crate::video::MoqVideoFrameRate {
 					numerator: 30_000,
 					denominator: 1001,
 				},
@@ -3307,7 +3307,7 @@ async fn video_decode_frame_ownership() {
 				format: MoqVideoPixelFormat::Rgba,
 				width: 320,
 				height: 240,
-				framerate: crate::video::MoqVideoRate {
+				framerate: crate::video::MoqVideoFrameRate {
 					numerator: 30,
 					denominator: 1,
 				},
@@ -3459,7 +3459,7 @@ async fn video_raw_publish_from_many_threads() {
 				format: MoqVideoPixelFormat::Rgba,
 				width: 320,
 				height: 240,
-				framerate: crate::video::MoqVideoRate {
+				framerate: crate::video::MoqVideoFrameRate {
 					numerator: 30,
 					denominator: 1,
 				},
@@ -3538,7 +3538,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 		format: MoqVideoPixelFormat::Rgba,
 		width,
 		height,
-		framerate: crate::video::MoqVideoRate {
+		framerate: crate::video::MoqVideoFrameRate {
 			numerator: 30,
 			denominator: 1,
 		},
@@ -3556,7 +3556,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 			&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 			crate::video::MoqVideoProducerOptions {
 				input: MoqVideoEncoderInput {
-					framerate: crate::video::MoqVideoRate {
+					framerate: crate::video::MoqVideoFrameRate {
 						numerator: 0,
 						denominator: 1
 					},
@@ -6323,7 +6323,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 				format: MoqVideoPixelFormat::Rgba,
 				width: 320,
 				height: 240,
-				framerate: crate::video::MoqVideoRate {
+				framerate: crate::video::MoqVideoFrameRate {
 					numerator: 30,
 					denominator: 1,
 				},
@@ -6381,7 +6381,7 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 			format: MoqVideoPixelFormat::Rgba,
 			width: 320,
 			height: 240,
-			framerate: crate::video::MoqVideoRate {
+			framerate: crate::video::MoqVideoFrameRate {
 				numerator: 30,
 				denominator: 1,
 			},

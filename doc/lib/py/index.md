@@ -78,7 +78,7 @@ async def main():
         catalog_producer = moq.media.CatalogProducer(broadcast)
         video = moq.video.Producer(
             catalog_producer,
-            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=moq.video.Rate(numerator=30000, denominator=1001)),
+            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=moq.video.FrameRate(numerator=30000, denominator=1001)),
             moq.VideoEncoderOutput(
                 codec=moq.VideoCodec.H264,
                 kind=moq.VideoEncoderKind.AUTO(),  # pyright: ignore[reportArgumentType]

@@ -21,8 +21,8 @@ type PixelFormat = ffi.MoqVideoPixelFormat
 // EncoderKind selects the encoder backend; build one with moq.AutoEncoder and friends.
 type EncoderKind = ffi.MoqVideoEncoderKind
 
-// Rate is an exact video frame rate in frames per second.
-type Rate = ffi.MoqVideoRate
+// FrameRate is an exact video frame rate in frames per second.
+type FrameRate = ffi.MoqVideoFrameRate
 
 // EncoderInput declares the pixel layout, resolution, and framerate of written frames.
 type EncoderInput = ffi.MoqVideoEncoderInput

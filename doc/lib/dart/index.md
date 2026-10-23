@@ -84,7 +84,7 @@ final encoder = video.Producer(
       format: video.PixelFormat.rgba,
       width: 1280,
       height: 720,
-      framerate: video.Rate(numerator: 30000, denominator: 1001),
+      framerate: video.FrameRate(numerator: 30000, denominator: 1001),
     ),
     output: video.EncoderOutput(
       codec: video.Codec.h264,

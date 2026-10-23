@@ -89,17 +89,17 @@ impl From<MoqVideoEncoderKind> for moq_video::encode::Kind {
 
 /// An exact video frame rate in frames per second.
 #[derive(Clone, Copy, uniffi::Record)]
-pub struct MoqVideoRate {
+pub struct MoqVideoFrameRate {
 	/// Frames per second numerator; must be nonzero.
 	pub numerator: u32,
 	/// Frames per second denominator; must be nonzero.
 	pub denominator: u32,
 }
 
-impl TryFrom<MoqVideoRate> for moq_video::Rate {
+impl TryFrom<MoqVideoFrameRate> for moq_video::Rate {
 	type Error = MoqError;
 
-	fn try_from(rate: MoqVideoRate) -> Result<Self, Self::Error> {
+	fn try_from(rate: MoqVideoFrameRate) -> Result<Self, Self::Error> {
 		Self::new(rate.numerator, rate.denominator).map_err(|err| MoqError::Video {
 			reason: format!("invalid framerate: {err}"),
 		})
@@ -119,7 +119,7 @@ pub struct MoqVideoEncoderInput {
 	pub height: u32,
 	/// Nominal frames per second, used for the codec time base and the default
 	/// bitrate and keyframe interval. Must be non-zero.
-	pub framerate: MoqVideoRate,
+	pub framerate: MoqVideoFrameRate,
 }
 
 /// Codec-side configuration.
@@ -1071,7 +1071,7 @@ mod finish_tests {
 					format: MoqVideoPixelFormat::I420,
 					width: 64,
 					height: 48,
-					framerate: MoqVideoRate { numerator, denominator },
+					framerate: MoqVideoFrameRate { numerator, denominator },
 				},
 				&output,
 			)
@@ -1085,7 +1085,7 @@ mod finish_tests {
 					format: MoqVideoPixelFormat::I420,
 					width: 64,
 					height: 48,
-					framerate: MoqVideoRate { numerator, denominator },
+					framerate: MoqVideoFrameRate { numerator, denominator },
 				},
 				&output,
 			)
@@ -1105,7 +1105,7 @@ mod finish_tests {
 				format: MoqVideoPixelFormat::I420,
 				width,
 				height,
-				framerate: crate::video::MoqVideoRate {
+				framerate: crate::video::MoqVideoFrameRate {
 					numerator: 30_000,
 					denominator: 1001,
 				},
@@ -1151,7 +1151,7 @@ mod finish_tests {
 			format: MoqVideoPixelFormat::Rgba,
 			width: 320,
 			height: 240,
-			framerate: crate::video::MoqVideoRate {
+			framerate: crate::video::MoqVideoFrameRate {
 				numerator: 30,
 				denominator: 1,
 			},

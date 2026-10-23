@@ -4081,7 +4081,7 @@ fn video_raw_publish_consume() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: moq_video_rate {
+		framerate: moq_video_frame_rate {
 			numerator: 30_000,
 			denominator: 1001,
 		},
@@ -4250,7 +4250,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: moq_video_rate {
+		framerate: moq_video_frame_rate {
 			numerator: 30,
 			denominator: 1,
 		},
@@ -4366,7 +4366,7 @@ fn video_raw_publish_from_many_threads() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: moq_video_rate {
+		framerate: moq_video_frame_rate {
 			numerator: 30,
 			denominator: 1,
 		},
@@ -4440,7 +4440,7 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: moq_video_rate {
+		framerate: moq_video_frame_rate {
 			numerator: 30,
 			denominator: 1,
 		},
@@ -4522,7 +4522,7 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: moq_video_rate {
+		framerate: moq_video_frame_rate {
 			numerator: 30,
 			denominator: 1,
 		},
@@ -4563,7 +4563,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 320,
 		height: 240,
-		framerate: moq_video_rate {
+		framerate: moq_video_frame_rate {
 			numerator: 30,
 			denominator: 1,
 		},
@@ -4587,7 +4587,7 @@ fn video_raw_publish_rejects_invalid_config() {
 	assert!(unsafe { moq_encode_video(broadcast, &bad_format, &valid_output, 0) } < 0);
 
 	let zero_framerate = moq_video_encoder_input {
-		framerate: moq_video_rate {
+		framerate: moq_video_frame_rate {
 			numerator: 0,
 			denominator: 1,
 		},
@@ -4595,7 +4595,7 @@ fn video_raw_publish_rejects_invalid_config() {
 	};
 	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output, 0) } < 0);
 	let zero_denominator = moq_video_encoder_input {
-		framerate: moq_video_rate {
+		framerate: moq_video_frame_rate {
 			numerator: 30_000,
 			denominator: 0,
 		},
@@ -5525,7 +5525,7 @@ fn encode_video_bitrate_caps_the_reservation() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: moq_video_rate {
+		framerate: moq_video_frame_rate {
 			numerator: 30,
 			denominator: 1,
 		},

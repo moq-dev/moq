@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Exact encoder rates and publication options
 
 Encoder configuration is breaking: `MoqVideoEncoderInput.framerate` is now a
-`MoqVideoRate { numerator, denominator }` (use `{30, 1}` for 30 fps or
+`MoqVideoFrameRate { numerator, denominator }` (use `{30, 1}` for 30 fps or
 `{30000, 1001}` for NTSC). Zero components and rates above 1,000,000 fps are
 refused. `track` moves out of both encoder output records into
 `MoqAudioProducerOptions` / `MoqVideoProducerOptions`, alongside `input`,
