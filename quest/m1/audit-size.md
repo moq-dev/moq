@@ -19,9 +19,9 @@ Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
-Checkpointed 2026-10-21, a day after the m0 run, with nothing to plan but
-the quests below. The run finishes after
-[moq-net compiles once](/quest/m1/net-erase-transport.md) lands, so the audit
+Checkpointed 2026-10-21, a day after the m0 run, with nothing to plan. The
+run waited for moq-net to compile once, which landed in
+[moq-dev/moq#6176](https://github.com/moq-dev/moq/pull/6176), so the audit
 before the breaking cut sees its result and the rest of m1.
 
 What to check first: whether the nightly `sizes` job (`sh/size/`) has run.
@@ -30,7 +30,7 @@ The Linux release-link fix
 2026-10-22 UTC; verify the first scheduled Nightly after it before treating
 the sizes history as available. Once it runs, its history replaces the local
 method below. Then
-re-attribute the native rows for the erasure quest, and measure `@moq/net`
+re-attribute the native rows after the erasure, and measure `@moq/net`
 with the track compression codec in `js/net`.
 
 ### Baselines
@@ -66,13 +66,14 @@ run's FFI (31.86 MiB) and CLI (48.14 MiB) figures for it do not reproduce.
   from the message parameter codec (`parameters.ts`, `filter.ts`), so a lite
   session never loads them. First load fell 5.1 to 5.5 KB gzip in every
   bundle; the same test fails if SETUP reaches `parameters.ts` again.
-- Planned: [moq-net compiles once](/quest/m1/net-erase-transport.md). On
-  7d2a91fe66, `moq-net` is 9.5 MiB of the relay's text and 7.7 MiB of the FFI
-  library's; one copy of each function would be about 2.5 MiB in both, so the
-  ceiling is about 7.0 and 5.2 MiB. In the relay, the binary crate (a 16-line
-  `main.rs`) instantiates 3.1 MiB of it, `moq-tokio` 3.2 MiB and the library
-  1.9 MiB; identical instantiations repeated across crates are 5.0 MiB. They
-  are not byte-identical after LTO: `-Wl,--icf=all` saves only 0.23 MiB.
+- Fixed: moq-net boxes the transport, so its session drivers compile once
+  instead of per transport and per instantiating crate
+  ([moq-dev/moq#6176](https://github.com/moq-dev/moq/pull/6176)). Stripped
+  profiling builds fell 31.8 to 22.5 MiB (relay), 49.1 to 42.5 MiB (CLI),
+  28.0 to 21.8 MiB (`libmoq_ffi.so`), 254.6 to 207.8 MiB (unstripped
+  `libmoq.a`) and 862 to 786 KB gzipped (`@moq/wasm`). Before it, the relay
+  binary crate, `moq-tokio` and the library each instantiated their own copy;
+  `-Wl,--icf=all` saved only 0.23 MiB, since the copies differ after LTO.
 - Planned: [the catalog publish path compiles once](/quest/m2/catalog-publish-once.md)
   (`moq-json`'s diff serializer, +0.14 MiB of the CLI this run).
 - Explained, no action: native growth since 2b28f5eac is `moq-net` features
@@ -101,10 +102,6 @@ Method: `nm` symbol attribution by crate path and by instantiating crate (the
 v0 mangling suffix) on local `profiling` builds of both revisions, the wasm
 name section from a `wasm-release` build with `CARGO_PROFILE_WASM_RELEASE_STRIP=none`,
 and esbuild metafiles from `sh/size/bundles.ts` for JS.
-
-## Required
-
-- [moq-net compiles once](/quest/m1/net-erase-transport.md) - re-measure the native rows once the drivers compile once
 
 ## Related
 

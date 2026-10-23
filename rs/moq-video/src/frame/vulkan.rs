@@ -65,7 +65,10 @@ pub struct Handles {
 }
 
 impl Handles {
-	#[cfg_attr(not(feature = "nvidia"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "nvidia"),
+		allow(dead_code, reason = "only the `nvidia` feature uses it")
+	)]
 	fn try_clone(&self) -> Result<Self, Error> {
 		Ok(Self {
 			memory: self.memory.try_clone().map_err(|e| Error::Codec(e.into()))?,
@@ -153,7 +156,10 @@ impl Timeline {
 	}
 }
 
-#[cfg_attr(not(feature = "nvidia"), allow(dead_code))]
+#[cfg_attr(
+	not(feature = "nvidia"),
+	allow(dead_code, reason = "only the `nvidia` feature uses it")
+)]
 struct Allocation {
 	handles: Handles,
 	image: Image,
@@ -339,7 +345,10 @@ impl Frame {
 }
 
 pub(crate) trait Reader: Send + Sync {
-	#[cfg_attr(not(feature = "nvidia"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "nvidia"),
+		allow(dead_code, reason = "only the `nvidia` feature uses it")
+	)]
 	fn wait(&self, value: u64) -> Result<(), Error>;
 	fn finish(&self, value: u64, completion: Box<dyn Complete>);
 }

@@ -168,11 +168,10 @@ impl View {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::args::{Command, Invocation};
-	use crate::test_env::EnvGuard;
 	use std::time::Duration;
 	use tokio::io::{AsyncBufReadExt, BufReader, DuplexStream, Lines};
 
@@ -305,7 +304,9 @@ mod tests {
 	/// What is already announced as `+` lines, then a `-` when a publisher leaves.
 	#[tokio::test]
 	async fn prints_the_replay_then_changes() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let mut fixture = Fixture::new().await;
 
 		let (mut lines, task) = fixture.follow(&["demo"]);
@@ -322,7 +323,9 @@ mod tests {
 	/// Each `--json` line is `{"path", "active"}`.
 	#[tokio::test]
 	async fn json_lines_parse() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let mut fixture = Fixture::new().await;
 
 		let (mut lines, task) = fixture.follow(&["other", "--json"]);
@@ -337,7 +340,9 @@ mod tests {
 	/// It fails once the relay goes away rather than waiting forever.
 	#[tokio::test]
 	async fn fails_when_the_session_ends() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let fixture = Fixture::new().await;
 
 		let (mut lines, task) = fixture.follow(&["other"]);
@@ -397,7 +402,9 @@ mod tests {
 	/// `announced` follows a prefix, so a `--broadcast` is refused rather than ignored.
 	#[test]
 	fn only_connect_is_accepted() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let cli = Invocation::try_parse_from(["moq", "--connect", "http://relay", "--broadcast", "demo", "announced"])
 			.expect("parse");
 		let err = cli.dial_only("announced", &[]).unwrap_err().to_string();
@@ -407,7 +414,9 @@ mod tests {
 	/// The one-shot listing is gone, with no alias or flag left behind for it.
 	#[test]
 	fn ls_and_follow_are_unknown() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		assert!(Invocation::try_parse_from(["moq", "--connect", "http://relay", "ls"]).is_err());
 		assert!(Invocation::try_parse_from(["moq", "--connect", "http://relay", "announced", "--follow"]).is_err());
 	}
