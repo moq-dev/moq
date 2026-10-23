@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Closing a derived origin handle no longer closes the origin (#6502)
+
+A handle from `Origin.Producer.scope()` or `withPreference()` borrows the origin: its `close()` withdraws only the broadcasts and routes registered through it, and later `createBroadcast` calls on it throw.
+Only the `new Origin.Producer()` handle closes the origin.
+If you kept just the derived handle and closed it to shut everything down, keep the owner handle alive too and close that instead.
+
 ### Stage a requested track before subscribers see it (#6111)
 
 `Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.

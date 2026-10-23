@@ -1147,6 +1147,10 @@ export class Producer implements Table {
 	#preference = Preference.default;
 	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
 
+	// Set on a derived handle, which borrows the origin: what it registered, so its close
+	// releases only that. The owner has none, since its close ends the whole origin.
+	#borrowed?: { releases: Set<Dispose>; closed: boolean };
+
 	// The reader backing the passthroughs, so holding a Producer never requires the
 	// consume().x() stutter for everyday reads. One instance, so `discovery` keeps its
 	// identity across reads.
@@ -1178,15 +1182,12 @@ export class Producer implements Table {
 		});
 	}
 
-	/** Narrow this handle to patterns beneath root, presenting paths relative to that root. */
+	/**
+	 * Narrow this handle to patterns beneath root, presenting paths relative to that root.
+	 * The result borrows the origin; see {@link close}.
+	 */
 	scope(root: Path.Valid, patterns: Path.Patterns): Producer {
-		const scope = this.#scope.narrow(root, patterns);
-		const producer = new Producer();
-		producer.#state = this.#state;
-		producer.#scope = scope;
-		producer.#preference = this.#preference;
-		producer.#reader = makeConsumer(this.#state, scope);
-		return producer;
+		return this.#derive(this.#scope.narrow(root, patterns), this.#preference);
 	}
 
 	/**
@@ -1201,11 +1202,18 @@ export class Producer implements Table {
 	 * `origin::Producer::with_preference` in rs/moq-net.
 	 */
 	withPreference(preference: Preference): Producer {
+		return this.#derive(this.#scope, preference);
+	}
+
+	// A handle borrowing this origin: closing it releases what it registered, never the origin.
+	#derive(scope: Scope, preference: Preference): Producer {
+		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
 		const producer = new Producer();
 		producer.#state = this.#state;
-		producer.#scope = this.#scope;
+		producer.#scope = scope;
 		producer.#preference = preference;
-		producer.#reader = makeConsumer(this.#state, this.#scope);
+		producer.#reader = makeConsumer(this.#state, scope);
+		producer.#borrowed = { releases: new Set(), closed: false };
 		return producer;
 	}
 
@@ -1233,6 +1241,7 @@ export class Producer implements Table {
 	 */
 	createBroadcast(path: Path.Valid): broadcast.Producer {
 		path = this.#scope.path(path);
+		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
 		const created = this.#state.created;
 		if (!created) throw new Error("origin is closed");
 
@@ -1256,9 +1265,16 @@ export class Producer implements Table {
 			previous.close();
 		}
 
+		const release = () => {
+			this.#retractExact(path, front);
+			front.close();
+		};
+		this.#borrowed?.releases.add(release);
+
 		// Drop it when the broadcast closes, unless a recreate already replaced it: a
 		// stale broadcast closing must not unpublish the live one.
 		void front.closed.then(() => {
+			this.#borrowed?.releases.delete(release);
 			this.#retractExact(path, front);
 			if (this.#state.created?.get(path) === front) this.#state.created.delete(path);
 		});
@@ -1357,16 +1373,18 @@ export class Producer implements Table {
 		};
 		server.onReject = (path, err) => this.#state.refuse(path, entry, err);
 
-		let closed = false;
-		this.#state.routes.mutate((routes) => {
-			if (!routes) {
-				closed = true;
-				return;
-			}
-			const entries = routes.get(prefix);
-			if (entries) entries.unshift(entry);
-			else routes.set(prefix, [entry]);
-		});
+		let closed = this.#borrowed?.closed ?? false;
+		if (!closed) {
+			this.#state.routes.mutate((routes) => {
+				if (!routes) {
+					closed = true;
+					return;
+				}
+				const entries = routes.get(prefix);
+				if (entries) entries.unshift(entry);
+				else routes.set(prefix, [entry]);
+			});
+		}
 		if (closed) {
 			server.close();
 			return makeDynamic(prefix, entry, this.#state, () => {}, publishes ? this : undefined);
@@ -1375,6 +1393,7 @@ export class Producer implements Table {
 		this.#state.refreshPrefix(prefix);
 
 		const retract = () => {
+			this.#borrowed?.releases.delete(retract);
 			this.#state.routes.mutate((routes) => {
 				const entries = routes?.get(prefix);
 				if (!entries) return;
@@ -1388,6 +1407,7 @@ export class Producer implements Table {
 			this.#state.refreshPrefix(prefix);
 		};
 
+		this.#borrowed?.releases.add(retract);
 		return makeDynamic(prefix, entry, this.#state, retract, publishes ? this : undefined);
 	}
 
@@ -1514,8 +1534,22 @@ export class Producer implements Table {
 		return this.#reader.announced(scope, options);
 	}
 
-	/** Close the origin, every broadcast it still routes, and its announcement streams. Idempotent. */
+	/**
+	 * Close the origin, every broadcast it still routes, and its announcement streams. Idempotent.
+	 *
+	 * A handle from {@link scope} or {@link withPreference} borrows the origin: closing it
+	 * withdraws only the broadcasts and routes registered through it and refuses new ones,
+	 * ignoring `abort`. Only the handle made with `new Producer()` closes the origin.
+	 */
 	close(abort?: Error) {
+		const borrowed = this.#borrowed;
+		if (borrowed) {
+			if (borrowed.closed) return;
+			borrowed.closed = true;
+			for (const release of [...borrowed.releases]) release();
+			borrowed.releases.clear();
+			return;
+		}
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.closed.set(abort ?? null);
 		for (const watch of this.#state.watchers.values()) watch.version.update((n) => n + 1);

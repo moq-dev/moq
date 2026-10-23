@@ -2089,6 +2089,44 @@ test("a rooted producer shares the table and enforces its pattern union", async 
 	origin.close();
 });
 
+test("closing a derived handle releases only what it registered", async () => {
+	const origin = new Producer();
+	const owned = publish(origin, Path.from("lobby"));
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room"))]));
+	const preferred = origin.withPreference(Preference(1));
+	const inside = publish(scoped, Path.from("room/alice"));
+	const claim = scoped.dynamic(Path.from("room/claim"));
+	const ranked = preferred.dynamic(Path.from("ranked"));
+	const peer = serve(scoped, Path.from("room/peer"), provider(new BroadcastProducer()));
+
+	scoped.close();
+	preferred.close();
+
+	expect(origin.closed.peek()).toBeUndefined();
+	expect(owned.closed.peek()).toBeUndefined();
+	expect(inside.closed.peek()).toBeNull();
+	const routes = (await announcedView(origin)).peek();
+	expect([...routes.keys()]).toEqual([Path.from("lobby")]);
+
+	// A released handle refuses new work, so a borrower notices instead of publishing into nothing.
+	expect(() => scoped.createBroadcast(Path.from("room/late"))).toThrow("origin handle is closed");
+	scoped.dynamic(Path.from("room/late")).close();
+	expect((await announcedView(origin)).peek().has(Path.from("room/late"))).toBe(false);
+
+	// The owner and fresh handles keep working.
+	const again = publish(origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()])), Path.from("room/bob"));
+	expect((await announcedView(origin)).peek().has(Path.from("room/bob"))).toBe(true);
+
+	// Closing what was already released is a no-op.
+	claim.close();
+	ranked.close();
+	peer();
+	scoped.close();
+	again.close();
+	origin.close();
+	expect(owned.closed.peek()).toBeNull();
+});
+
 test("a scoped dynamic only serves allowed paths and presents relative requests", async () => {
 	const origin = new Producer();
 	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
