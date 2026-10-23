@@ -1,11 +1,11 @@
 //! Stream send and scheduling: one client writes many streams to a server that reads them all.
 //!
-//! Each iteration opens fresh unidirectional streams on a long-lived connection, writes and
-//! finishes them, then exchanges packets until the server has read every stream to its end and
-//! the path is idle, so the cost covers the scheduler, packetization, the receiver, and the ACKs
-//! that free it all.
+//! Throughput cases open fresh unidirectional streams on a long-lived connection, write and
+//! finish them, then exchange packets until the server has read them and the path is idle.
+//! The zero-credit case isolates blocked writes and resets across live-writer counts, with
+//! connection setup and dropping the remaining state outside the CPU measurement.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_quic::Dir;
 
 #[allow(dead_code)]
@@ -82,9 +82,62 @@ fn bench_write_size(c: &mut Criterion<ThreadCpu>) {
     group.finish();
 }
 
+/// Keep `live` writers blocked while `churn` others block and reset, with MAX_DATA held at zero.
+/// A fresh connection per sample bounds even the unfixed implementation's retained history.
+fn bench_connection_blocked(c: &mut Criterion<ThreadCpu>) {
+    let mut group = c.benchmark_group("connection_blocked");
+    for live in [1, 64, 1024] {
+        for churn in [16, 256] {
+            group.throughput(Throughput::Elements(churn));
+            group.bench_function(
+                BenchmarkId::new(format!("live_{live}"), format!("churn_{churn}")),
+                |b| {
+                    b.iter_batched(
+                        || {
+                            let mut pair = Pair::new(Setup {
+                                server_receive_window: 0u32.into(),
+                                ..Setup::default()
+                            });
+                            for _ in 0..live {
+                                let id = pair
+                                    .client()
+                                    .streams()
+                                    .open(Dir::Uni, Default::default())
+                                    .unwrap();
+                                assert_eq!(
+                                    pair.client().send_stream(id).write(b"x"),
+                                    Err(moq_quic::WriteError::Blocked)
+                                );
+                            }
+                            pair
+                        },
+                        |mut pair| {
+                            for _ in 0..churn {
+                                let id = pair
+                                    .client()
+                                    .streams()
+                                    .open(Dir::Uni, Default::default())
+                                    .unwrap();
+                                let mut stream = pair.client().send_stream(id);
+                                assert_eq!(stream.write(b"x"), Err(moq_quic::WriteError::Blocked));
+                                stream.reset(0u32.into()).unwrap();
+                            }
+                            // The peer never grants credit. Packet exchange and dropping the live
+                            // table are outside the measured insert/write/reset path.
+                            pair
+                        },
+                        BatchSize::PerIteration,
+                    )
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::config();
-    targets = bench_priority, bench_write_size
+    targets = bench_priority, bench_write_size, bench_connection_blocked
 }
 criterion_main!(benches);

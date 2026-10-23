@@ -23,7 +23,7 @@ pub(crate) async fn serve_ws(
 	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
 	mtls: Option<Extension<MtlsPeer>>,
-	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
+	ConnectInfo(remote): ConnectInfo<std::net::SocketAddr>,
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	admission: Option<Extension<crate::listener::Admission>>,
 	Extension(versions): Extension<moq_net::Versions>,
@@ -43,7 +43,9 @@ pub(crate) async fn serve_ws(
 		.or_else(|| state.shutdown.activity.enter())
 		.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 	let alpns = versions.alpns();
-	let ws = negotiate_subprotocol(ws, &alpns)?;
+	// The socket buffers a message whole before qmux sees it, so it reads no more than a record.
+	let max = moq_tokio::websocket::max_message_size();
+	let ws = negotiate_subprotocol(ws.max_message_size(max).max_frame_size(max), &alpns)?;
 
 	let host = uri
 		.authority()
@@ -59,7 +61,7 @@ pub(crate) async fn serve_ws(
 		.with_versions(versions)
 		.with_extensions(extensions);
 	let mut options = moq_tokio::websocket::Options::new(url, server, active);
-	options.link.remote = Some(remote.0);
+	options.link.remote = Some(remote);
 	options.link.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
 	options.identity = mtls.map(|Extension(MtlsPeer(identity))| identity);
 	options.socket_stats = socket_stats.map(|Extension(stats)| stats.0);

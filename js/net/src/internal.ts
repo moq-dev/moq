@@ -405,6 +405,13 @@ export const hooks: {
 	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
+	// pending: /quest/m1/public-model/deferred.md
+	/**
+	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
+	 * locally: a dead route, not finished content, so a resumed reader's replacement route
+	 * continues past it. Mirrors the Rust `close` on a `received()` copy; assigned by `track.ts`.
+	 */
+	releaseTrack: (producer: Producer) => void;
 	// private: capability gap
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Location | undefined>;
@@ -584,6 +591,9 @@ export const hooks: {
 	stampUnlisted: (target: BroadcastConsumer) => void;
 } = {
 	endTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	releaseTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	producerLargest: () => {

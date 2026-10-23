@@ -88,8 +88,8 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// A join wants one once the open group's deltas outweigh the track's
 	/// [`refresh`](moq_net::track::Info::refresh) ratio times its snapshot (see
-	/// [`Demand::wanted`](moq_net::track::Demand::wanted)), so that joiner reads the value without
-	/// downloading them. The snapshot carries the newest timestamp written, so the new group never starts before the last.
+	/// [`Demand::wanted`](moq_net::track::Demand::wanted)). It is a soft trigger: that joiner still
+	/// reads the cached group, then the new one. The snapshot carries the newest timestamp written, so the new group never starts before the last.
 	/// Nothing happens before the first update, or on a track without a ratio.
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it

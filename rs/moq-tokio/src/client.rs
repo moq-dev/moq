@@ -5,7 +5,7 @@
 //! accept side is [`crate::server`].
 
 use crate::connection::Goaway;
-use crate::{Addrs, Backoff, Connection, Error};
+use crate::{Addrs, Backoff, Connection, Error, Restart};
 #[cfg(all(feature = "websocket", feature = "quic"))]
 use std::future::Future;
 use url::Url;
@@ -56,6 +56,7 @@ pub struct Client {
 	pub(crate) reconnect: bool,
 	pub(crate) backoff: Backoff,
 	pub(crate) goaway: Goaway,
+	pub(crate) restart: Restart,
 	/// Whether the TLS config pins a certificate fingerprint, which only verifies
 	/// the configured host, so a GOAWAY may not redirect elsewhere.
 	pub(crate) pinned: bool,
@@ -144,6 +145,7 @@ impl Client {
 			reconnect: !config.once.unwrap_or(false),
 			backoff: config.backoff,
 			goaway: config.goaway,
+			restart: Restart::default(),
 			pinned: !config.tls.fingerprint.is_empty(),
 			#[cfg(feature = "tcp")]
 			failover_delay,
@@ -241,6 +243,12 @@ impl Client {
 	/// Defaults to true, unless [`crate::connect::Config::once`] turned it off.
 	pub fn with_reconnect(mut self, reconnect: bool) -> Self {
 		self.reconnect = reconnect;
+		self
+	}
+
+	/// Choose what a GOAWAY naming no URI does. Defaults to [`Restart::Redial`].
+	pub fn with_restart(mut self, restart: Restart) -> Self {
+		self.restart = restart;
 		self
 	}
 
