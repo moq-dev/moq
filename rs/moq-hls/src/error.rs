@@ -51,8 +51,8 @@ pub enum Error {
 	#[error("requested range is unavailable: {0}")]
 	RangeUnavailable(String),
 
-	/// A resource uses an unsupported scheme or requires unauthorized filesystem access.
-	#[error("resource is outside the import input policy")]
+	/// An import resource or redirect hop left the playlist's origin, or the playlist uses an unsupported scheme.
+	#[error("resource is outside the playlist's origin")]
 	ResourceRefused,
 
 	/// A `file://` URL could not be turned back into a filesystem path.

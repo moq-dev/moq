@@ -76,8 +76,7 @@ indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
 reordered-frame timestamps and missing EOF output. Each owning quest records
 the reproduction's limits. JS reader and publisher datagram paths now enforce
 subscription bounds; the OBS quest retains ownership of its findings.
-Go reservation disposal remains an investigation, and
-the security-sensitive HLS admission item is deliberately a public pointer.
+Go reservation disposal remains an investigation.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
 
@@ -88,11 +87,10 @@ work, because obs-moq ships on its own schedule.
 
 ## Required
 
-The entries comprise reproduced or source-confirmed findings,
-contract/lifetime investigations, and one security-review pointer. Each
+The entries comprise reproduced or source-confirmed findings
+and contract/lifetime investigations. Each
 child records whether its behavior is new on main or inherited from release.
 
-- [Hold HLS resources to the playlist origin](/quest/m1/release-audit/hls-admission.md) - playlist references and redirect hops cannot leave the playlist's scheme and authority
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
 - [Decode order](/quest/m1/ts-reliability/decode-order.md) - the exporters' decode clock holds at most the declared reorder depth, so flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
 - [Refuse partial lite groups in JS](/quest/m1/release-audit/js-partial-group.md) - a nonzero `frameStart` closes the session as a protocol violation, not a renumbered complete group
