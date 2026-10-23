@@ -68,7 +68,9 @@ struct Forwarder {
 
 impl Forwarder {
 	async fn spawn() -> Self {
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind forwarder");
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+			.await
+			.expect("bind forwarder");
 		let forwarder = Self {
 			port: listener.local_addr().expect("local addr").port(),
 			target: Default::default(),
@@ -170,7 +172,10 @@ async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
 	// B drains for its whole window: its peers hold their sessions to the end.
 	trigger.start();
 	pass(&clock, DRAIN).await;
-	within("B exits after its drain", b_run).await.expect("relay task").expect("relay run");
+	within("B exits after its drain", b_run)
+		.await
+		.expect("relay task")
+		.expect("relay run");
 	assert_eq!(forward_a.sessions(b_addr), 1, "A redialed the draining relay");
 	assert_eq!(forward_c.sessions(b_addr), 1, "C redialed the draining relay");
 
@@ -187,7 +192,10 @@ async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
 	// Each peer reconnects within the capped backoff.
 	let mut waited = Duration::ZERO;
 	while forward_a.sessions(b2_addr) == 0 || forward_c.sessions(b2_addr) == 0 {
-		assert!(waited < Duration::from_secs(120), "a peer never reconnected to the replacement");
+		assert!(
+			waited < Duration::from_secs(120),
+			"a peer never reconnected to the replacement"
+		);
 		pass(&clock, STEP).await;
 		waited += STEP;
 	}
@@ -196,6 +204,14 @@ async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
 
 	// And reconnects exactly once.
 	pass(&clock, Duration::from_secs(30)).await;
-	assert_eq!(forward_a.sessions(b2_addr), 1, "A dialed the replacement more than once");
-	assert_eq!(forward_c.sessions(b2_addr), 1, "C dialed the replacement more than once");
+	assert_eq!(
+		forward_a.sessions(b2_addr),
+		1,
+		"A dialed the replacement more than once"
+	);
+	assert_eq!(
+		forward_c.sessions(b2_addr),
+		1,
+		"C dialed the replacement more than once"
+	);
 }

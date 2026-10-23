@@ -2902,7 +2902,11 @@ mod tests {
 			connection.draining().and_then(|goaway| goaway.peek()).is_some(),
 			"the GOAWAY never arrived"
 		);
-		assert_eq!(connection.status().now_or_never().transpose().unwrap(), None, "the loop left the session");
+		assert_eq!(
+			connection.status().now_or_never().transpose().unwrap(),
+			None,
+			"the loop left the session"
+		);
 		assert!(accepted.try_recv().is_err(), "redialed while the session served");
 
 		session.abort(moq_net::Error::GoawayTimeout);
