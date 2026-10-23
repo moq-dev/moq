@@ -307,7 +307,6 @@ impl Subscription {
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
 	#[cfg(any(feature = "async", test))]
-	// private: capability gap
 	pub(crate) fn start(&self) -> Option<Position> {
 		let mut floor: Option<Position> = None;
 		for range in &self.ranges {
@@ -324,7 +323,6 @@ impl Subscription {
 	///
 	/// The form a wire without ranges carries, alongside [`Self::start`].
 	#[cfg(any(feature = "async", test))]
-	// private: capability gap
 	pub(crate) fn end(&self) -> Option<Position> {
 		let mut end = Some(Position::default());
 		for range in &self.ranges {
@@ -339,7 +337,6 @@ impl Subscription {
 	/// Replace the ranges with one from `start` (or [`Range::oldest`]'s) up to [`Self::end`],
 	/// returning `self` for chaining: the form a wire without ranges carries.
 	#[cfg(feature = "async")]
-	// private: capability gap
 	pub(crate) fn with_start(self, start: impl Into<Option<Position>>) -> Self {
 		let end = self.end();
 		self.with_span(start.into(), end)
@@ -348,7 +345,6 @@ impl Subscription {
 	/// Replace the ranges with one from [`Self::start`] up to the exclusive `end`, or onward
 	/// for `None`, returning `self` for chaining: the form a wire without ranges carries.
 	#[cfg(any(feature = "async", test))]
-	// private: capability gap
 	pub(crate) fn with_end(self, end: impl Into<Option<Position>>) -> Self {
 		let start = self.start();
 		self.with_span(start, end.into())
@@ -524,7 +520,6 @@ impl Position {
 
 	/// The first group this exclusive end excludes whole, `None` past the last group: the
 	/// boundary a wire that cannot name a frame carries as the track's end.
-	// private: capability gap
 	pub(crate) fn final_sequence(self) -> Option<u64> {
 		self.group.checked_add(u64::from(self.frame != 0))
 	}

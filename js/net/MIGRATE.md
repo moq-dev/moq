@@ -17,6 +17,12 @@ subscriber.setGroups({ end: { excluded: 10 } });
 subscriber.withRange({ start: { included: floor }, end: { excluded: 10 } });
 ```
 
+### Published names refuse navigation segments
+
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Path normalization, relative references, and subscription paths retain their semantics.
+
 ### A listing says whether a removed track finished (#6399)
 
 `Broadcast.TracksEvent` gains `{ kind: "finished", name }`: the track left the listing because it finished. `{ kind: "removed", name }` now means it left unfinished. Handle both where you matched `"removed"`.

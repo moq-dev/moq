@@ -12,12 +12,10 @@
 //! runnable), so "the test terminates" is itself the assertion. Anything else is
 //! asserted directly.
 //!
-//! Know the boundary before trusting a pass: only kio's primitives are swapped for
-//! loom's (see `kio/src/sync.rs`). moq-net's bare `std::sync::atomic` counters and
-//! `std::sync::Mutex`es, like the ones in `model/cache.rs`, still execute under
-//! loom (its threads are cooperative) but loom does not permute around them. So
-//! these models cover the kio handoff every handle is built on, not every
-//! critical section moq-net owns.
+//! The model mutexes and kio's primitives use Loom's locks, so a contending thread
+//! yields to its scheduler. Reference counts that need weak pointers and moq-net's
+//! bare atomic counters still use std: these models cover the locking and wakeup
+//! handoffs, not every possible reordering of the cache's counters.
 //!
 //! Unlike kio's own models, these are bounded (see [`model`]): each one composes
 //! dozens of kio operations, so an exhaustive search grows exponentially with every
@@ -45,6 +43,12 @@ const PREEMPTION_BOUND: usize = 3;
 /// number of operations on a path rather than exponential.
 fn model<F: Fn() + Sync + Send + 'static>(f: F) {
 	let mut builder = loom::model::Builder::new();
+	// The origin models include setup and teardown in each execution. Their finite
+	// paths exceed Loom's default 1,000 branches; this raises the execution budget,
+	// not the number of schedules or preemptions explored.
+	if std::env::var_os("LOOM_MAX_BRANCHES").is_none() {
+		builder.max_branches = 10_000;
+	}
 	builder.preemption_bound.get_or_insert(PREEMPTION_BOUND);
 	builder.check(f);
 }

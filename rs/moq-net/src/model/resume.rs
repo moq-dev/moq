@@ -27,9 +27,10 @@
 //! sequence its [`track::Subscriber`] already handed out, the same record that keeps a
 //! direct reader from taking a re-created group twice.
 
+use crate::sync::{Mutex, MutexGuard};
 use std::collections::{BTreeSet, VecDeque};
 use std::ops::Bound;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, PoisonError, Weak};
 use std::task::{Poll, ready};
 use std::time::Duration;
 

@@ -143,7 +143,6 @@ export interface Info {
 	 */
 	refresh?: number;
 	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
-	// private: passthrough
 	ietf?: IetfVersion;
 }
 
@@ -171,7 +170,6 @@ function priorityValue(value: number): number {
 	return value;
 }
 
-// private: passthrough
 /** The timescale a moq-lite hop serves a track at: none for an {@link Info.ietf} one. @internal */
 export function liteTimescale(info: Info): Timescale | undefined {
 	return info.ietf === undefined ? (info.timescale ?? undefined) : undefined;
@@ -2314,7 +2312,6 @@ export class Subscriber {
 		return undefined;
 	}
 
-	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * An independent subscriber to the same track, with its own cursor and its own replay of
 	 * the retained window.
