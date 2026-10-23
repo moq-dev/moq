@@ -1591,6 +1591,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Flush any buffered PES and finish every track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
+		self.demux.finish();
 		for pid in self.headers.keys().copied().collect::<Vec<_>>() {
 			self.damage(pid, &anyhow::anyhow!("PES header truncated at end of input"))?;
 		}
@@ -2977,8 +2978,15 @@ impl<E: catalog::Catalog> Stream<E> {
 			// Only the self-describing audio holds a frame back for a successor to confirm.
 			Stream::Aac(stream) => return stream.finish(),
 			Stream::Legacy(stream) => return stream.finish(),
-			Stream::H264 { import, .. } => import.finish()?,
-			Stream::H265 { import, .. } => import.finish()?,
+			// Each PES flushed its access unit, so the splitter holds only input storage.
+			Stream::H264 { split, import } => {
+				*split = Default::default();
+				import.finish()?
+			}
+			Stream::H265 { split, import } => {
+				*split = Default::default();
+				import.finish()?
+			}
 			Stream::Opus(stream) => stream.finish()?,
 			Stream::PesPacket(stream) => stream.finish()?,
 			Stream::Clock | Stream::Ignored => {}

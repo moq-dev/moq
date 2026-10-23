@@ -43,7 +43,3 @@ Tests use the generated `fixture::Mux` builder: a PMT PID move, and a
 `--program all` MPTS whose PAT adds a program, drops one and later restores
 it: the other program runs uninterrupted, and the returning one publishes a
 new epoch.
-
-## Related
-
-- [PMT export](/quest/m1/ts-reliability/pmt-export.md) - the export follows a moved PMT PID with a new PAT

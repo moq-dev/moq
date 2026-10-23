@@ -224,6 +224,7 @@ impl Programs {
 	/// until its media is stale; dropping one closes that program.
 	/// Fails when the input ended before its PAT listed a program or any program declared a track.
 	pub fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Finish>> {
+		self.demux.finish();
 		anyhow::ensure!(!self.programs.is_empty(), "input ended before its PAT listed a program");
 		let mut announced = false;
 		let mut finished = Vec::with_capacity(self.programs.len());

@@ -131,6 +131,11 @@ impl Demux {
 		self.off = 0;
 	}
 
+	/// No input follows: release the storage that held a partial packet for the next push.
+	pub fn finish(&mut self) {
+		self.scratch = Vec::new();
+	}
+
 	/// `pid` changed route: its next packet starts a fresh chain.
 	pub fn restart(&mut self, pid: u16) {
 		self.health.restart(pid);
