@@ -14,6 +14,10 @@ It could read `true` while a local `dynamic()` claim still held the request.
 Follow `active` for what serves the path, and `closed` for a refusal, an origin shutdown, or a pinned instance that stopped serving.
 A request on a closed origin now settles `closed` at once.
 
+### A listing says whether a removed track finished (#6399)
+
+`Broadcast.TracksEvent` gains `{ kind: "finished", name }`: the track left the listing because it finished. `{ kind: "removed", name }` now means it left unfinished. Handle both where you matched `"removed"`.
+
 ### `Track.Producer.largest()` is a getter
 
 `Track.Producer.largest()` returns the track's largest location synchronously, `undefined` before any, instead of a promise for the next newer one.

@@ -98,7 +98,7 @@ class TruckSession:
         location: str | None,
         map_name: str | None,
         clock: Clock,
-        route: moq.Route,
+        route: moq.AnnounceRoute,
     ) -> None:
         self._truck = truck
         self._video = video

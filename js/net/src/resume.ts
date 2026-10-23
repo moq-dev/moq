@@ -1351,7 +1351,7 @@ export class Front {
 				if (this.#concluded) {
 					// No route will serve it again, so nothing more will be listed.
 					stop();
-					lister.finish();
+					lister.end();
 					continue;
 				}
 				listing ??= { listed: new Set(), stale: new Set() };
@@ -1401,16 +1401,19 @@ export class Front {
 						listing.reader = undefined;
 					} else {
 						stop();
-						lister.finish();
+						lister.end();
 					}
 				} else if (event.kind === "added") {
 					if (!listing.stale.delete(event.name) && !listing.listed.has(event.name)) {
 						listing.listed.add(event.name);
 						lister.add(event.name, event.info);
 					}
-				} else if (event.kind === "removed") {
+				} else if (event.kind === "removed" || event.kind === "finished") {
+					// Forwarded as the source reported it, finished or not.
 					listing.stale.delete(event.name);
-					if (listing.listed.delete(event.name)) lister.remove(event.name);
+					if (!listing.listed.delete(event.name)) continue;
+					if (event.kind === "finished") lister.finish(event.name);
+					else lister.remove(event.name);
 				} else {
 					// What the new source still lacks at its SYNCED is gone.
 					for (const name of listing.stale) {

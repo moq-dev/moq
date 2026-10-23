@@ -3126,7 +3126,7 @@ impl Producer {
 	/// sequence, and lower-numbered groups may still be written afterwards.
 	pub fn abort(self, err: Error) -> Result<()> {
 		// Unlisted first, so the track leaves the listing before its name is free again.
-		self.alive.unlist();
+		self.alive.unlist(false);
 		commit_abort(self.modify()?, err).abort();
 		Ok(())
 	}
@@ -3162,7 +3162,7 @@ impl Producer {
 		}
 		// After the track's own lock is released; a later track of the name, listed in
 		// between, keeps its listing.
-		self.alive.unlist();
+		self.alive.unlist(false);
 		Ok(())
 	}
 
@@ -3578,10 +3578,13 @@ impl Alive {
 		*self.listed.lock() = Some(unlist);
 	}
 
-	/// Withdraw the track from its broadcast's listing. Never under the broadcast's lock.
-	fn unlist(&self) {
+	/// Withdraw the track from its broadcast's listing, as one that `finished` or left
+	/// unfinished. Never under the broadcast's lock.
+	fn unlist(&self, finished: bool) {
 		let unlist = self.listed.lock().take();
-		drop(unlist);
+		if let Some(unlist) = unlist {
+			unlist.unlist(finished);
+		}
 	}
 
 	/// Note that a [`Producer`] was minted from this track, optionally under a tagged
@@ -3600,8 +3603,9 @@ impl Alive {
 impl Drop for Alive {
 	fn drop(&mut self) {
 		// Withdrawn before the state closes, so the track leaves the listing before a
-		// later one can take its name.
-		self.unlist();
+		// later one can take its name. It finished if its producer declared its end.
+		let finished = self.state.read().end.is_some();
+		self.unlist(finished);
 		// A request nobody accepted was never publishing; there's nothing to tear down.
 		if !self.published.load(Ordering::Relaxed) {
 			return;
