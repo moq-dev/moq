@@ -4070,6 +4070,49 @@ test("a SUBSCRIBE pauses without demand and resumes right after the last object 
 	}
 });
 
+// The track has no max age, so only the pause itself can release a write parked on flow control.
+test("a pause resets a group stream parked on flow control", async () => {
+	const fx = fixture(V20);
+	let writing!: () => void;
+	const parked = new Promise<void>((resolve) => {
+		writing = resolve;
+	});
+	let reset = false;
+	const stalled = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+			});
+		},
+		write() {
+			writing();
+			return new Promise<void>(() => {});
+		},
+	});
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			filter: { kind: "nextObject" },
+		}),
+	);
+	try {
+		track.appendGroup().writeFrame({ payload: new TextEncoder().encode("parked"), timestamp: Timestamp.now() });
+		await parked;
+		await forwardUpdate(client, V20, 2n, false);
+		expect(reset).toBe(true);
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
 test("an initially paused SUBSCRIBE holds no demand until it resumes", async () => {
 	for (const version of [Version.DRAFT_16, V20]) {
 		const fx = fixture(version);

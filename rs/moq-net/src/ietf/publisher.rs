@@ -578,6 +578,10 @@ struct Forwarding<'a, S: crate::transport::poll::Session> {
 /// Where a pausable request stands. A pause freezes it and a resume continues right after
 /// it, never at the live edge: whatever expired meanwhile is skipped as the subscription
 /// catches back up.
+///
+/// An object counts once its stream took it whole. The pause's reset may still discard one
+/// the peer had not acknowledged; counting only acknowledged streams would replay an open
+/// group's prefix on every pause instead.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Cursor {
 	/// The next Location to serve.

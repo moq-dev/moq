@@ -284,6 +284,10 @@ interface Pausable {
  * Where a pausable request stands. A pause freezes it and a resume continues right after it,
  * never at the live edge: whatever expired meanwhile is skipped as the subscription catches
  * back up.
+ *
+ * An object counts once its stream took it whole. The pause's reset may still discard one the
+ * peer had not acknowledged; counting only acknowledged streams would replay an open group's
+ * prefix on every pause instead.
  */
 interface Cursor {
 	/** The next Location to serve. */
@@ -1251,8 +1255,17 @@ export class Publisher {
 				},
 			});
 
+			// A pause or the subscriber leaving resets the stream, even mid-write: a write
+			// parked on flow control would otherwise hold the pause's answer indefinitely.
+			let left = false;
+			const cancelled = unsubscribed.then(() => {
+				left = true;
+				return undefined;
+			});
+
 			try {
-				await hooks.guardGroup(group, () => header.encode(stream, this.#session.version));
+				await race([hooks.guardGroup(group, () => header.encode(stream, this.#session.version)), cancelled]);
+				if (left) throw new Error("unsubscribed while serving the group");
 				// The first written object goes on the wire as its absolute id, so a trimmed
 				// head shows the true numbering rather than a silently renumbered group.
 				let first = true;
@@ -1271,7 +1284,11 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await race([hooks.readGroupFrame(group, slice.skip), stream.closed]);
+					const read = await race([hooks.readGroupFrame(group, slice.skip), stream.closed, cancelled]);
+					if (left) {
+						read?.complete();
+						throw new Error("unsubscribed while serving the group");
+					}
 					if (!read) {
 						exhausted = slice.until === undefined;
 						break;
@@ -1286,9 +1303,13 @@ export class Publisher {
 						const obj = new Frame({ payload: read.frame.payload, timestamp: read.frame.timestamp });
 						const delta = first ? read.sequence : 0;
 						first = false;
-						await hooks.guardGroup(group, () =>
-							obj.encode(stream, header.flags, timescale, this.#session.version, delta),
-						);
+						await race([
+							hooks.guardGroup(group, () =>
+								obj.encode(stream, header.flags, timescale, this.#session.version, delta),
+							),
+							cancelled,
+						]);
+						if (left) throw new Error("unsubscribed while serving the group");
 						advance(cursor, { group: BigInt(group.sequence), object: BigInt(read.sequence) });
 					} finally {
 						read.complete();
