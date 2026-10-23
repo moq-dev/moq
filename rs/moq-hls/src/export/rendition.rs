@@ -706,7 +706,7 @@ impl Rendition {
 	}
 
 	/// Fail if a timeline this rendition lists failed (see [`failure`](Self::failure)).
-	fn check(&self) -> Result<()> {
+	pub(crate) fn check(&self) -> Result<()> {
 		if let Some(err) = self.live.failure() {
 			return Err(err);
 		}
@@ -838,6 +838,11 @@ impl Rendition {
 	/// any later row will resolve.
 	pub(crate) fn is_failed(&self, row: &segments::Row) -> bool {
 		self.resolve(row) == Content::Failed
+	}
+
+	/// Why this rendition's own timeline failed, whether or not that fails its listings.
+	pub(crate) fn own_failure(&self) -> Option<crate::Error> {
+		self.spans.failure().map(|failure| failure.err)
 	}
 
 	/// Whether the playlist has anything to serve yet (at least one segment, or the broadcast
@@ -1232,11 +1237,6 @@ fn listed_tag(rows: &[segments::Row]) -> String {
 
 #[cfg(test)]
 impl Rendition {
-	/// Whether this rendition's own timeline failed, whether or not that fails its listings.
-	pub(crate) fn own_failure(&self) -> bool {
-		self.spans.failure().is_some()
-	}
-
 	/// Fetch the listed segment numbered `segment`, under the tag its rows carry.
 	pub(crate) async fn listed_segment(&self, segment: u64) -> Result<Option<Bytes>> {
 		let tag = listed_tag(&self.live.window().segments);
