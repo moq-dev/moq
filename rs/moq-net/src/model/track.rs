@@ -4084,6 +4084,18 @@ enum Source {
 }
 
 impl Consumer {
+	/// Whether these handles resolve to the same cached track, without subscribing.
+	pub(super) fn same_channel(&self, other: &Self) -> bool {
+		self.with_state(|left| {
+			other.with_state(|right| left.zip(right).is_some_and(|(left, right)| left.same_channel(right)))
+		})
+	}
+
+	/// An already declared end, without resolving a pending subscription or registering a wake.
+	pub(super) fn declared_end(&self) -> Option<Position> {
+		self.with_state(|state| state?.read().end)
+	}
+
 	fn new(name: Arc<str>, state: kio::ConsumerWeak<TrackState>) -> Self {
 		let broadcast = state.read().broadcast.clone();
 		Self {

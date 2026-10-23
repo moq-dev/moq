@@ -3166,9 +3166,10 @@ mod tests {
 		);
 	}
 
-	/// Receive group 5 stamped 500ms over `version` into the copy a subscriber makes there,
-	/// whose group 4 started at 1000ms, returning the stream's result and the track.
-	async fn receive_rewind(version: Version) -> (Result<(), Error>, track::Producer) {
+	/// Receive group 5 over `version`, one frame per millisecond timestamp delta, into the
+	/// copy a subscriber makes there, whose group 4 started at 1000ms, returning the stream's
+	/// result and the track.
+	async fn receive_group(version: Version, deltas: &[i64]) -> (Result<(), Error>, track::Producer) {
 		use crate::transport::poll::Session as _;
 
 		let mut script = Vec::new();
@@ -3180,9 +3181,11 @@ mod tests {
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
-		// Frame 0 at 500ms: the first delta is absolute.
-		encoder.varint(crate::coding::varint::zigzag(500)).unwrap();
-		encoder.bytes(b"rewound").unwrap();
+		// The first delta is absolute.
+		for delta in deltas {
+			encoder.varint(crate::coding::varint::zigzag(*delta)).unwrap();
+			encoder.bytes(b"frame").unwrap();
+		}
 		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -3233,14 +3236,15 @@ mod tests {
 	#[moq_clock::test]
 	async fn lite06_timestamps_are_dropped() {
 		for version in [Version::Lite05, Version::Lite06] {
-			let (res, track) = receive_rewind(version).await;
+			// Frame 0 at 500ms, before group 4's 1000ms.
+			let (res, track) = receive_group(version, &[500]).await;
 			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
 			assert!(track.closed().now_or_never().is_none(), "{version}");
 			let mut consumer = track.subscribe(None);
 			let mut group = consumer.recv_group().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(group.sequence, 5, "{version}");
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-			assert_eq!(frame.payload.as_ref(), b"rewound", "{version}");
+			assert_eq!(frame.payload.as_ref(), b"frame", "{version}");
 			assert_eq!(frame.timestamp, None, "{version}");
 		}
 	}
@@ -3249,8 +3253,30 @@ mod tests {
 	/// write and one that rewinds is refused.
 	#[moq_clock::test]
 	async fn a_lite07_rewind_is_refused() {
-		let (res, _track) = receive_rewind(Version::Lite07).await;
+		let (res, _track) = receive_group(Version::Lite07, &[500]).await;
 		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
+	}
+
+	/// A received timestamp past 2^61 - 1 is refused at every version, so a relay never
+	/// holds one that lite-05/06 could not carry as a group's first frame. lite-06 reaches
+	/// it with a second delta, lite-07 with a first frame its 64-bit varint can encode.
+	/// lite-05/06 drop the timestamp, but a stream carrying one past the bound is still malformed.
+	#[moq_clock::test]
+	async fn a_received_timestamp_past_2_61_is_refused() {
+		let max: i64 = (1 << 61) - 1;
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let (res, track) = receive_group(version, &[max]).await;
+			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
+			let mut group = track.consume().peek_group(5).unwrap();
+			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			let kept = version.has_media_time().then_some(max as u64);
+			assert_eq!(frame.timestamp.map(Timestamp::value), kept, "{version}");
+
+			let (res, _) = receive_group(version, &[max, 1]).await;
+			assert!(matches!(res, Err(Error::BoundsExceeded(_))), "{version}: {res:?}");
+		}
+		let (res, _) = receive_group(Version::Lite07, &[max + 1]).await;
+		assert!(matches!(res, Err(Error::BoundsExceeded(_))), "{res:?}");
 	}
 
 	/// An idle copy that resubscribes gets its newest cached group again. That stream only

@@ -19,6 +19,13 @@ Dropping a fill with groups unanswered names them dropped, where the live feed w
 The default stays `Some(Duration::ZERO)`, and `with_max_delay` takes `impl Into<Option<Duration>>`, so `with_max_delay(delay)` still compiles; reads and assignments of the field need the `Option`.
 A lite SUBSCRIBE carries `None` as the largest delay the wire allows.
 
+### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
+
+On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
+Readers accept both forms and set End Of Track to the sequence after the fetched group.
+An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 20 and later, whose inclusive End Location is unchanged.
+No Rust API changes.
+
 ### Receive streams are read through leases (#5878)
 
 `transport::poll::RecvStream` now has `poll_lease(cx, want)`, `set_priority`, and `stop`, plus the provided `poll_read_chunk` and `read_chunk`.
@@ -116,6 +123,12 @@ moq-transport sessions, and moq-lite-03/04 sessions (whose announce streams mark
 `frame::Frame` gains a private arrival stamp, read with `Frame::arrived()`, so it can no longer be built with a struct literal.
 Replace `Frame { timestamp, payload }` with `Frame::new(timestamp, payload)`.
 `timestamp` and `payload` stay public fields.
+
+### Timestamps stop at 2^61 - 1 (#6168)
+
+`Timestamp::new`, its `from_*` constructors, `convert`, `checked_add`, and `TryFrom<Duration>` return `TimeOverflow` past `2^61 - 1` instead of `2^62 - 1`, the most lite-05/06 can carry as a group's first frame.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `(1 << 61) - 1`.
 
 ### A dropped or cut group ends its reader with an error (#6143)
 
