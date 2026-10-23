@@ -13,26 +13,34 @@ use crate::jitter::{self, Target};
 use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Format, Frame, Layout};
 
-/// Decoded PCM and encoder ends in delivery order.
+/// One item of a [`Consumer`] read, in delivery order: decoded PCM, or a break in it.
 ///
-/// `discontinuity` goes up wherever the decoded timeline breaks: at the fresh
-/// encoder after an [`End`](Self::End), or at a loss. A bump with no `End`
-/// before it is a loss, and the hole runs from the previous frame's end to the
-/// new frame's timestamp.
+/// The decoded counterpart of [`moq_mux::container::Read`], and the same shape
+/// `moq_video::decode::Read` has, so a player handles loss and ends alike for
+/// every media type.
 #[derive(Clone, Debug)]
 pub enum Read {
-	/// Decoded PCM, including the drained tail before a discontinuity.
-	Frame {
-		/// The decoded timeline these samples belong to; only changes matter.
-		discontinuity: u64,
-		/// The decoded samples and their presentation time.
-		frame: Frame,
+	/// Decoded PCM.
+	Frame(Frame),
+	/// Media after what was already read was lost: a group was skipped or never arrived,
+	/// or a packet's timestamp did not continue the previous one. What follows does not
+	/// continue what came before, and every sample decoded before the loss precedes it.
+	///
+	/// The span is an upper bound, in the scale of the frame that follows.
+	Gap {
+		/// The furthest presentation point already read.
+		timestamp: moq_net::Timestamp,
+		/// How long until the next frame resumes.
+		duration: moq_net::Timestamp,
 	},
-	/// The publisher stopped this encoder; its final PCM may still follow.
+	/// The publisher stopped its encoder: it paused, switched source, or finished.
+	///
+	/// Every sample decoded before the marker precedes it. Frames that follow and start
+	/// before `end` are the stopped encoder's codec drain, already trimmed at `end`; the
+	/// first frame at or past `end` comes from a fresh encoder, since a timeline only
+	/// moves forward.
 	End {
-		/// The decoded timeline holding the stopped encoder's final samples.
-		discontinuity: u64,
-		/// Samples at or past this point are padding and are trimmed.
+		/// Where the stopped encoder's media stops.
 		end: moq_net::Timestamp,
 	},
 }
@@ -118,8 +126,6 @@ pub struct Consumer {
 	/// Frames decoded and not yet handed back, so a gap's tail can be returned
 	/// ahead of the packet that exposed it.
 	ready: VecDeque<Read>,
-	/// Stable across all groups and the resampler tail of one decoded timeline.
-	discontinuity: u64,
 	/// Codec activity spans the resampler's buffered output still covers.
 	spans: VecDeque<ActivitySpan>,
 	/// Activity of the last span the output ran past, for the rounding samples the
@@ -238,7 +244,6 @@ impl Consumer {
 			resolved_layout: layout,
 			next_start: None,
 			ready: VecDeque::new(),
-			discontinuity: 0,
 			spans: VecDeque::new(),
 			trailing: Activity::Active,
 			epoch: None,
@@ -312,31 +317,32 @@ impl Consumer {
 					// own group carries the stopped encoder's final packets, trimmed below.
 					if self.end.is_some() && group != self.end_group {
 						self.restart()?;
-						self.discontinuity += 1;
 					}
 					frame
 				}
-				// The loss shows as the next frame's discontinuity, with no end before it.
-				Some(Encoded::Gap { .. }) => {
+				// Behind whatever the resampler held from before the loss.
+				Some(Encoded::Gap { timestamp, duration }) => {
 					self.restart()?;
-					self.discontinuity += 1;
 					self.warmup_pending = !self.warmup.is_zero();
+					self.ready.push_back(Read::Gap { timestamp, duration });
 					continue;
 				}
+				// What the resampler holds arrived before the marker, so it comes out ahead
+				// of the end now rather than when a fresh encoder resumes, which also keeps
+				// it clear of an `end` stamped short of the media.
 				Some(Encoded::End { group, end }) => {
+					if let Some(frame) = self.drain()? {
+						self.ready.push_back(Read::Frame(frame));
+					}
+					self.spans.clear();
 					self.end = Some(end);
 					self.end_group = group;
 					self.frames_decoded = 0;
 					self.terminal_start = None;
-					return Ok(Some(Read::End {
-						discontinuity: self.discontinuity,
-						end,
-					}));
+					self.ready.push_back(Read::End { end });
+					continue;
 				}
-				None => {
-					let discontinuity = self.discontinuity;
-					return Ok(self.flush()?.map(|frame| Read::Frame { discontinuity, frame }));
-				}
+				None => return Ok(self.flush()?.map(Read::Frame)),
 			};
 
 			// Every packet the container hands over is an arrival, including one the
@@ -359,17 +365,19 @@ impl Consumer {
 			// phase reconstructs each batch's time from the marker rather than
 			// reading it off the packet, so there is nothing left to compare.
 			if self.end.is_none()
-				&& self
-					.next_start
-					.is_some_and(|next| discontinuous(next, mux_frame.timestamp))
+				&& let Some(next) = self.next_start
+				&& discontinuous(next, timestamp)
 			{
 				if let Some(frame) = self.gap()? {
-					self.ready.push_back(Read::Frame {
-						discontinuity: self.discontinuity,
-						frame,
-					});
+					self.ready.push_back(Read::Frame(frame));
 				}
-				self.discontinuity += 1;
+				// From where the timeline should have continued to where it did, which an
+				// overlap leaves empty.
+				let start = next.convert(timestamp.scale())?.min(timestamp);
+				self.ready.push_back(Read::Gap {
+					timestamp: start,
+					duration: timestamp.checked_sub(start)?,
+				});
 			}
 
 			let rate = self.decoder.sample_rate();
@@ -471,10 +479,7 @@ impl Consumer {
 			// Queued rather than returned, so a tail drained at a gap earlier in this
 			// same iteration still comes out first. The next turn of the loop pops it.
 			if let Some(frame) = self.frame(pcm, timestamp, activity)? {
-				self.ready.push_back(Read::Frame {
-					discontinuity: self.discontinuity,
-					frame,
-				});
+				self.ready.push_back(Read::Frame(frame));
 			}
 		}
 	}
@@ -486,10 +491,7 @@ impl Consumer {
 	/// as their own frame first rather than filtered together with what follows it.
 	fn restart(&mut self) -> Result<(), Error> {
 		if let Some(frame) = self.drain()? {
-			self.ready.push_back(Read::Frame {
-				discontinuity: self.discontinuity,
-				frame,
-			});
+			self.ready.push_back(Read::Frame(frame));
 		}
 		self.next_start = None;
 		self.spans.clear();
@@ -701,8 +703,8 @@ mod tests {
 	async fn next_frame(consumer: &mut Consumer) -> Result<Option<Frame>, Error> {
 		loop {
 			match consumer.read().await? {
-				Some(Read::Frame { frame, .. }) => return Ok(Some(frame)),
-				Some(Read::End { .. }) => {}
+				Some(Read::Frame(frame)) => return Ok(Some(frame)),
+				Some(Read::Gap { .. } | Read::End { .. }) => {}
 				None => return Ok(None),
 			}
 		}
@@ -1144,7 +1146,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn an_undeclared_timestamp_hole_is_a_discontinuity() {
+	async fn an_undeclared_timestamp_hole_is_a_gap() {
 		tokio::time::pause();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1174,17 +1176,21 @@ mod tests {
 				.unwrap();
 		}
 		producer.finish().unwrap();
-		let mut timelines = Vec::new();
+		let mut reads = Vec::new();
 		while let Some(event) = consumer.read().await.unwrap() {
-			if let Read::Frame { discontinuity, frame } = event {
-				timelines.push((frame.timestamp.as_micros(), discontinuity));
-			}
+			reads.push(match event {
+				Read::Frame(frame) => format!("frame {}", frame.timestamp.as_micros()),
+				Read::Gap { timestamp, duration } => format!("gap {}+{}", timestamp.as_micros(), duration.as_micros()),
+				Read::End { end } => format!("end {}", end.as_micros()),
+			});
 		}
-		assert_eq!(timelines, [(0, 0), (20_000, 0), (500_000, 1)]);
+		assert_eq!(reads, ["frame 0", "frame 20000", "gap 40000+460000", "frame 500000"]);
 	}
 
+	/// What the resampler holds when a marker arrives comes out ahead of the end, so
+	/// nothing after the end belongs to the stopped encoder unless it starts before `end`.
 	#[tokio::test]
-	async fn decoded_segments_keep_resampler_tails_before_fresh_encoder_frames() {
+	async fn a_marker_drains_the_resampler_ahead_of_its_end() {
 		tokio::time::pause();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1224,26 +1230,24 @@ mod tests {
 			}
 		}
 		producer.finish().unwrap();
+		let mut before = Vec::new();
 		let mut ended = None;
-		let mut tail = false;
-		let mut resumed = false;
+		let mut after = Vec::new();
 		while let Some(event) = consumer.read().await.unwrap() {
 			match event {
-				Read::End { discontinuity, .. } if ended.is_none() => ended = Some(discontinuity),
-				Read::Frame { discontinuity, .. } if ended == Some(discontinuity) => {
-					assert!(!resumed);
-					tail = true;
-				}
-				Read::Frame { discontinuity, .. } if ended.is_some_and(|old| old != discontinuity) => resumed = true,
-				_ => {}
+				Read::Frame(frame) if ended.is_none() => before.push(frame.timestamp),
+				Read::Frame(frame) => after.push(frame.timestamp),
+				Read::End { end } => ended = Some(end),
+				Read::Gap { .. } => panic!("nothing was lost"),
 			}
 		}
-		assert!(
-			tail,
-			"the old resampler tail must follow its End without looking like a new encoder"
-		);
-		assert!(resumed, "a later group opens a fresh decoded timeline");
+		let end = ended.expect("the marker reads as an end");
+		assert_eq!(before.len(), 2, "the stopped encoder's body and resampler tail: {before:?}");
+		assert!(before.iter().all(|timestamp| *timestamp < end), "{before:?} past {end:?}");
+		assert!(!after.is_empty(), "a later group opens a fresh decoded timeline");
+		assert!(after.iter().all(|timestamp| *timestamp >= end), "{after:?} before {end:?}");
 	}
+
 
 	/// A packet whose sample count isn't a multiple of the resampler's chunk leaves
 	/// samples buffered, and the next output starts with those. Stamping that

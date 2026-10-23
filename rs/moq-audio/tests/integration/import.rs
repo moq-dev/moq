@@ -66,8 +66,8 @@ async fn ts_surround_opus_decodes() {
 async fn next_frame(consumer: &mut decode::Consumer) -> Result<Option<moq_audio::Frame>, moq_audio::Error> {
 	loop {
 		match consumer.read().await? {
-			Some(decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
-			Some(decode::Read::End { .. }) => {}
+			Some(decode::Read::Frame(frame)) => return Ok(Some(frame)),
+			Some(decode::Read::Gap { .. } | decode::Read::End { .. }) => {}
 			None => return Ok(None),
 		}
 	}
