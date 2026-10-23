@@ -8,8 +8,9 @@ is fixed. Cost that pays for a feature `main` deliberately added is accepted,
 and the reason is written here.
 
 This epic's own work: once every child has landed, run the full main against
-release comparison again with `just bench origin/release`, and confirm nothing
-new regressed. Then add a release-baseline step to the recurring
+release comparison again with `just bench origin/release`, plus the JS frame
+path in Chromium with `bench/browser/micro.ts`, and confirm nothing new
+regressed. Then add a release-baseline step to the recurring
 [performance audit](/quest/m2/audit-perf.md), so every later cut
 repeats this comparison.
 
@@ -109,7 +110,14 @@ and 12% less on fanout, with the same delivery.
 - kio `contended_notify` and `contended_log` at 16 threads: 4 to 5x. These
   are contention benches on a busy host, so they are likely noise.
 - JS `net/bench/frames.ts` on bun: lite rows 1.2 to 1.3x, IETF rows 1.3 to
-  2.2x ([JS frames](/quest/m1/release-perf/js-frames.md)).
+  2.2x. Fixed in Chromium:
+  [#6296](https://github.com/moq-dev/moq/pull/6296) removed a retained-history
+  scan, and [#6479](https://github.com/moq-dev/moq/pull/6479) stopped
+  releasing a finished stream's reader lock, which built a `TypeError` per
+  group stream. Every row then sits within the A/A spread of release.
+  The group write/read microbench stays 3 to 12% above release against an
+  A/A of 3 to 8% on the same host. Decided 2026-10-23 (maintainer): browser
+  parity accepted on this evidence; the final re-run above checks it again.
 
 The raw report lived in a scratch directory that has since been removed.
 `just bench <base>` now pairs full Criterion IDs; point `MOQ_BENCH_ARTIFACTS`
@@ -118,9 +126,8 @@ outside the worktree to keep the next one.
 ## Required
 
 - [Re-check](/quest/m1/release-perf/recheck.md) - the screen-only moves are re-measured with instruction counts, and the ones that hold are fixed or accepted
-- [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
 
 ## Related
 
 - [Performance audit](/quest/m2/audit-perf.md) - compares nightly to nightly; this epic compares main to release
-- [Nightly benchmark regressions](/quest/m1/bench-ci.md) - paired nightly-to-nightly comparison on one runner
+- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - noise floor of the paired nightly-to-nightly comparison on one runner

@@ -1913,6 +1913,12 @@ impl<S: crate::transport::poll::Session> TracksRecv<S> {
 					}
 					source.lister.remove(&name)?;
 				}
+				lite::TracksEvent::Finished { name } => {
+					if self.listed.remove(name.as_ref()).is_none() {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					source.lister.finish(&name)?;
+				}
 				lite::TracksEvent::Synced => {
 					// This hop synced its readers when the listing began; only the order matters here.
 					if std::mem::replace(&mut self.synced, true) {
@@ -1987,7 +1993,7 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 					// end the listing and let go of what it listed.
 					Poll::Ready(Ok(())) => {
 						listing = None;
-						self.lister.finish();
+						self.lister.end();
 					}
 					Poll::Ready(Err(err)) => {
 						let err = lite::error::control(&mut self.subscriber.session.clone(), err);

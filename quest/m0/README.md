@@ -46,3 +46,4 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
 - [Release fixed delay](/quest/m0/release-fixed-delay.md) - a fixed latency on `release`, which moq.dev runs, ignores the catalog's jitter and delay as `main` already does
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
+- [MIGRATE.md at the cut](/quest/m0/migrate-at-cut.md) - PRs stop conflicting on `MIGRATE.md`: breaking PRs carry their migration note in the PR, and the breaking cut writes the guides

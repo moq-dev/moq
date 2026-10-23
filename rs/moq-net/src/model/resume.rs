@@ -833,7 +833,7 @@ struct Reader {
 	groups: (u64, Cap),
 	/// Whether groups were ever asked for; until then the reader keeps no replaced copy.
 	groups_read: bool,
-	/// The groups handed out while copies overlap, by sequence, held while each is read.
+	/// The groups handed out, by sequence, held while each is read.
 	out: Vec<(u64, Weak<()>)>,
 }
 
@@ -1181,18 +1181,15 @@ impl Reader {
 		let sequence = group.sequence;
 		self.newest = self.newest.max(Some(sequence));
 		// Another copy holding the group, now or once it lands there, is where a failure
-		// continues it, so it stays while the group is read; see [`Copy::retains`]. Only
-		// while copies overlap: a passthrough read has none.
-		let out = (self.copies.len() > 1).then(|| {
-			// Sweep the groups no longer read once the list fills, so it tracks the live count.
-			if self.out.len() == self.out.capacity() {
-				self.out.retain(|(_, out)| out.strong_count() > 0);
-				self.out.reserve(self.out.len().max(1));
-			}
-			let out = Arc::new(());
-			self.out.push((sequence, Arc::downgrade(&out)));
-			out
-		});
+		// continues it, so it stays while the group is read; see [`Copy::retains`]. Recorded
+		// even with one copy, since a later route's copy may come to hold it.
+		// Sweep the groups no longer read once the list fills, so it tracks the live count.
+		if self.out.len() == self.out.capacity() {
+			self.out.retain(|(_, out)| out.strong_count() > 0);
+			self.out.reserve(self.out.len().max(1));
+		}
+		let out = Arc::new(());
+		self.out.push((sequence, Arc::downgrade(&out)));
 		let copy = &self.copies[index];
 		let handoff = group.handoff();
 		group.with_recover(Recover {
@@ -1204,7 +1201,7 @@ impl Reader {
 			copy: copy.track.clone(),
 			handoff,
 			lease: Some(copy.lease.clone()),
-			out,
+			out: Some(out),
 			logical: None,
 			fetch: None,
 		})
@@ -2840,6 +2837,50 @@ mod test {
 			dynamic.requested_group().now_or_never().is_some(),
 			"the head was not kept"
 		);
+	}
+
+	/// A group first read while only one copy existed is still backed by a later copy that
+	/// holds it, so a failure continues from that copy instead of waiting out the budget.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_group_read_from_a_single_route_keeps_its_backup() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+		// B holds the whole group, then its route fails, keeping it.
+		let b = copy();
+		let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
+		whole.write_frame(ts(0), b"a".as_ref()).unwrap();
+		whole.write_frame(ts(1), b"b".as_ref()).unwrap();
+		whole.finish().unwrap();
+		routes.serve(b.consume());
+		assert!(
+			sub.poll_recv_group(&kio::Waiter::noop()).is_pending(),
+			"B replays only group 0"
+		);
+		b.abort(Error::SessionClosed).unwrap();
+
+		// C lacks the group; reading a later one from it lets go of what nothing needs.
+		let c = copy();
+		let mut later = c.create_group(group::Info { sequence: 1 }).unwrap();
+		later.write_frame(ts(2), b"c".as_ref()).unwrap();
+		later.finish().unwrap();
+		routes.serve(c.consume());
+		assert_eq!(recv(&mut sub).sequence, 1);
+		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
+
+		open.abort(Error::SessionClosed).unwrap();
+		a.abort(Error::SessionClosed).unwrap();
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		assert_eq!(read(&mut reading), None);
 	}
 
 	#[test]

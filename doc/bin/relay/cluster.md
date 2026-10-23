@@ -277,8 +277,11 @@ needs an auth server that grants the cluster CA, such as
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer`. An
 accepted peer counts as a cluster peer only when its grant sets `peer: true`,
 as `--mtls-peer` does; otherwise what it announces counts as ingest here, like
-a client's. Dials retry forever with jittered backoff capped at 30s, so a rejected
-peer is loud in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls).
+a client's, and it lists [hidden](/concept/moq-lite#hidden-broadcasts) routes
+only by asking, which a relay below moq-lite-07-wip, or on moq-transport
+without the hidden extension, cannot. Dials retry forever with jittered backoff
+capped at 30s, so a rejected peer is loud in the logs rather than fatal. See
+[Authentication](/bin/relay/auth#mtls).
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
 this relay dialed and holds a session with.
