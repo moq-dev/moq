@@ -1057,9 +1057,9 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 
 /// Build an auth request from the path, credential, and role carried in SETUP.
 #[cfg(any(feature = "test-support", all(target_os = "linux", feature = "_uring")))]
-pub(crate) fn request_for_setup<S: moq_net::transport::poll::Session>(
+pub(crate) fn request_for_setup(
 	auth: &Auth,
-	setup: &moq_net::server::Handshake<S>,
+	setup: &moq_net::server::Handshake,
 	transport: moq_auth::Transport,
 ) -> Request {
 	let (path, query) = match setup.path().split_once('?') {

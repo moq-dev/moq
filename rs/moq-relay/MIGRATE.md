@@ -55,6 +55,10 @@ Upgrade any client that still speaks only `webtransport` over WebSocket before t
 `uring::Workers::serve(cluster, auth, shutdown, sessions)` is now `spawn` with the same arguments, which sets every worker up without accepting, followed by `serve()`, which starts them accepting.
 Install anything that must be in place before the first session (`Relay::run` installs its signal handlers) between the two.
 
+### `Accepted` takes any transport's handshake (#6176)
+
+`Accepted` loses its transport type parameter, since `moq_net::server::Handshake` has none: write `Accepted` instead of `Accepted<S>`.
+
 ### `supervise` takes a `Serving` guard (#6144)
 
 `moq_relay::supervise` takes the `shutdown::Serving` from `Observer::serve` in place of the `Observer`.
