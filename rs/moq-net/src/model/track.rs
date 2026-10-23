@@ -16138,6 +16138,32 @@ mod test {
 		assert_eq!(asked, [(4, 6), (0, 2)]);
 	}
 
+	/// A descending reader's miss split by a fill already in flight queues its newer fragment
+	/// first too.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_descending_reader_asks_its_newest_fragment_first() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let mut middle = producer.subscribe(replay().with_groups(5..6));
+		producer.start_at(8).unwrap();
+		write_group(&producer, 8);
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = middle.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(taken)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("group 5 is a miss");
+		};
+		assert_eq!((taken.start().group, taken.end()), (5, 6));
+
+		let mut subscriber = producer.subscribe(replay().with_groups(0..).with_order(Order::Descending));
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let mut asked = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			asked.push((fill.start().group, fill.end()));
+		}
+		assert_eq!(asked, [(6, 8), (0, 5)]);
+	}
+
 	/// A group the handler refused that still arrives live is delivered.
 	#[test]
 	#[cfg(feature = "async")]

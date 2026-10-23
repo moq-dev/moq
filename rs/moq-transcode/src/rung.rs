@@ -525,9 +525,9 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 	// came from (the live encoder, or an earlier fetch), so its tail cannot
 	// continue that head. Refuse it so the reader moves on to the next group
 	// boundary instead of decoding a splice.
-	let start = fill.start();
-	if start.group == sequence && start.frame != 0 {
-		tracing::debug!(sequence, frame = start.frame, "refusing a fetch that starts mid-group");
+	let frame = fill.frame_start(sequence);
+	if frame != 0 {
+		tracing::debug!(sequence, frame, "refusing a fetch that starts mid-group");
 		reject();
 		return Ok(());
 	}
@@ -894,7 +894,7 @@ mod tests {
 
 	/// A group every reader narrowed past releases the fill's one-at-a-time fetch, so the
 	/// groups the fill still owes are fetched rather than waiting behind it.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	#[allow(clippy::disallowed_methods)]
 	async fn a_group_nobody_reads_releases_its_fill() {
 		use std::task::Poll;

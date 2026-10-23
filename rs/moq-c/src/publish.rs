@@ -40,17 +40,6 @@ struct GroupRequest {
 	_pending: oneshot::Sender<()>,
 }
 
-impl GroupRequest {
-	/// Where the group starts: the fill's start frame for its first group.
-	fn frame_start(&self) -> u64 {
-		let start = self.fill.start();
-		match start.group == self.sequence {
-			true => start.frame,
-			false => 0,
-		}
-	}
-}
-
 /// What a request handler serves.
 enum Dynamic {
 	/// Track requests on a broadcast, remembered so media can be published onto them.
@@ -884,7 +873,11 @@ impl Publish {
 	/// The sequence, priority, and first frame of a requested group.
 	pub fn group_request_info(&self, request: Id) -> Result<(u64, i8, u64), Error> {
 		let request = self.group_request.get(request).ok_or(Error::NotFound)?;
-		Ok((request.sequence, request.fill.priority(), request.frame_start()))
+		Ok((
+			request.sequence,
+			request.fill.priority(),
+			request.fill.frame_start(request.sequence),
+		))
 	}
 
 	/// Accept a group request, returning a group handle like [`Self::track_group`].

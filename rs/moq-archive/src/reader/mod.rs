@@ -379,15 +379,6 @@ async fn serve_timeline<T: ObjectStore>(shared: Arc<Shared<T>>, requests: Timeli
 	.await;
 }
 
-/// Where group `sequence` of `fill` starts.
-fn frame_start(fill: &track::Fill, sequence: u64) -> u64 {
-	let start = fill.start();
-	match start.group == sequence {
-		true => start.frame,
-		false => 0,
-	}
-}
-
 async fn serve_timeline_group<T: ObjectStore>(
 	shared: &Shared<T>,
 	name: &str,
@@ -434,7 +425,7 @@ async fn serve_timeline_group<T: ObjectStore>(
 			return;
 		}
 	};
-	let start = frame_start(fill, sequence);
+	let start = fill.frame_start(sequence);
 	let Some(stored) = object.groups.iter().find(|group| group.sequence == sequence) else {
 		reject();
 		return;
@@ -539,7 +530,7 @@ async fn serve_group<T: ObjectStore>(
 	fill: &track::Fill,
 	sequence: u64,
 ) {
-	let start = frame_start(fill, sequence);
+	let start = fill.frame_start(sequence);
 	let mut changed = shared.changed.subscribe();
 	let mut spans = shared.index.lock().unwrap().group(track, sequence);
 

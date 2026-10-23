@@ -298,7 +298,11 @@ impl FillState {
 			.overlapping(&span)
 			.map(|(groups, id)| (groups.start.max(span.start)..groups.end.min(span.end), *id))
 			.collect();
-		let gaps: Vec<ops::Range<u64>> = self.covers.gaps(&span).collect();
+		let mut gaps: Vec<ops::Range<u64>> = self.covers.gaps(&span).collect();
+		// Queued in the reader's order, so a descending reader's newest fragment goes first.
+		if ask.order == Order::Descending {
+			gaps.reverse();
+		}
 		for (groups, id) in covered {
 			let pending = self
 				.pending
@@ -547,6 +551,12 @@ impl Fill {
 	/// The first group to fill, and the frame within it to start from.
 	pub fn start(&self) -> Position {
 		self.inner.start
+	}
+
+	/// The frame group `sequence` starts from: [`start`](Self::start)'s frame for the first
+	/// group, 0 for the rest.
+	pub fn frame_start(&self, sequence: u64) -> u64 {
+		self.inner.frame_start(sequence)
 	}
 
 	/// The exclusive end group.
