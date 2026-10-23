@@ -16,6 +16,21 @@ set working-directory := '.'
 # Where cargo puts the in-tree qmux interop examples `just test qmux` runs.
 qmux_examples := absolute_path(env("CARGO_TARGET_DIR", source_directory() / ".." / "target")) / "debug" / "examples"
 
+harness_browser_tests := '''
+    ./capture-channel-count.browser.ts
+    ./harness.browser.ts
+    ./open-gop.browser.ts
+    ./publish-ui.browser.ts
+    ./signals-dom.browser.ts
+    ./src/contract.test.ts
+    ./src/resume.test.ts
+'''
+
+harness_compat_tests := '''
+    test/interop/compat/claims.test.ts
+    test/interop/compat/resolve.test.ts
+'''
+
 # List the cross-language suites.
 default:
     @just --justfile {{ quote(justfile()) }} --list test
@@ -28,9 +43,9 @@ harness:
     ./interop/relay-log.test.sh
     python3 interop/report.test.py
     python3 interop/tone.test.py
-    cd .. && bun test test/interop/compat/resolve.test.ts test/interop/compat/claims.test.ts
+    cd .. && bun test {{ replace(harness_compat_tests, "\n", " ") }}
     cd .. && bun install --frozen-lockfile
-    cd interop/clients/js && bun test ./harness.browser.ts ./signals-dom.browser.ts ./publish-ui.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
+    cd interop/clients/js && bun test {{ replace(harness_browser_tests, "\n", " ") }}
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -40,15 +55,19 @@ harness:
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Finite track tails run too; `--tail` selects just the CLI FETCH close and Rust/Node/Bun tail checks.
 # `--versions ietf` reruns them with every client pinned to each even moq-transport draft.
-# Both runs first check js/net's varints against moq-net's encoder at every size boundary,
-# and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
-# moq-transport OBJECT_DATAGRAMs both ways and the JS answer to TRACK_STATUS on every
-# draft, Lite AUTH_ERROR NOT_SUPPORTED after a grant, Lite padding, and lite-07 TRACKS
-# listings, each in both directions.
+# Both runs first check the Rust/JS wire and session interop suites, in both directions.
 [positional-arguments]
 interop *args:
     cd .. && bun install --frozen-lockfile
-    just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop ietf_compression_fallback_interop auth_unsupported_interop padding_interop tracks_interop --run-ignored all
+    just rs test -p moq-net --lib \
+        auth_unsupported_interop \
+        ietf_compression_fallback_interop \
+        ietf_datagram_interop \
+        ietf_track_status_interop \
+        padding_interop \
+        tracks_interop \
+        varint_interop \
+        --run-ignored all
     ./interop/interop.sh "$@"
 
 # The harnesses append one record per case to MOQ_TEST_RESULTS; flags link the page to its

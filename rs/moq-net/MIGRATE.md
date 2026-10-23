@@ -12,6 +12,12 @@ Every session now takes a `transport::poll::Boxable` transport, whose streams mu
 A `!Send` transport wraps itself in a type that checks the thread on use, such as `moq_uring::transport::Local`.
 `Client::connect` and `Server::accept_request` are plain functions returning `impl Future`, so call them as before with `.await`.
 
+### `track::Producer::largest()` is a getter
+
+`track::Producer::largest(&self)` returns the track's largest location now, `None` before any, instead of streaming each newer one; `track::Producer::poll_largest` is gone.
+Replace `poll_largest(&kio::Waiter::noop())` and `largest().await` on a producer with `largest()`.
+To wait for each newer one, keep a reader and follow its stream: `let mut reader = producer.consume();`, then `reader.largest().await`.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
@@ -200,7 +206,7 @@ Handle it like any other skipped group.
 ### Track readers follow `largest()` instead of reading `latest()` (#5725)
 
 `latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.
-Await `largest()` and read `.group` where you used the sequence; where you read the edge without waiting, poll `poll_largest` once with `kio::Waiter::noop()`.
+Await `largest()` and read `.group` where you used the sequence; on a `Producer`, `largest()` reads the edge without waiting.
 It streams the newest location, the current one at once and then each newer one, and `None` once the track ends.
 A new group or datagram raises it at frame 0 before any frame lands, and it can name a frame the publisher reported before its group arrives.
 

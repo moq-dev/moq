@@ -26,7 +26,7 @@ const dispose = count.subscribe(n => console.log(n)); // subscribe to changes ma
 ```
 
 Updates are batched, coalescing multiple updates into a single microtask.
-The old and new values are then compared with deep equality ([dequal](https://github.com/lukeed/dequal)) to avoid unnecessary wakeups.
+The old and new values are then compared to avoid unnecessary wakeups: plain objects and arrays by their keys, length, and contents, everything else like a `Set` would (class instances by identity, `NaN` equal to itself).
 It's possible to skip this check, but please benchmark it first...
 
 ### Effect
