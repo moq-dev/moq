@@ -94,7 +94,10 @@ enum Codecs {
 pub struct Producer<E: CatalogExt = ()> {
 	codecs: Codecs,
 	/// The published track, read for its largest group.
-	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "capture"),
+		allow(dead_code, reason = "only the `capture` feature uses it")
+	)]
 	track: moq_net::track::Producer,
 	_ext: std::marker::PhantomData<fn() -> E>,
 }
@@ -531,7 +534,7 @@ pub async fn publish_capture<E: CatalogExt>(
 /// the future ever regains a `!Send` component. Apple platforms are exempt (the inline encoder and objc
 /// capture session are `!Send`).
 #[cfg(all(feature = "capture", not(apple)))]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "a compile-time `Send` assertion, never called")]
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
@@ -823,8 +826,18 @@ fn map_capture_timestamp(epoch_micros: u64, timestamp: Timestamp) -> Result<Time
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
-	#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
+	#![cfg_attr(
+		all(feature = "capture", feature = "openh264"),
+		expect(
+			clippy::disallowed_methods,
+			clippy::disallowed_types,
+			reason = "the capture tests read the host clock directly"
+		)
+	)]
 
 	use moq_mux::catalog::Stream as _;
 
@@ -1815,9 +1828,10 @@ mod tests {
 		/// A keyframe request the backend cannot force is refused to the caller, and the capture
 		/// carries on at its cadence rather than ending or dropping the request without a word.
 		#[tokio::test]
-		// The guard only keeps other tests out of the process-wide probe log, and this runtime has
-		// one thread, so holding it across an await blocks nothing.
-		#[allow(clippy::await_holding_lock)]
+		#[expect(
+			clippy::await_holding_lock,
+			reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+		)]
 		async fn a_cut_the_backend_cannot_force_is_refused() {
 			let _probe = probe::exclusive();
 

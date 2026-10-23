@@ -11,6 +11,11 @@ How to update your code for each breaking change, newest first.
 is removed. Enable `client` for HTTP lease scheduling or `serve` for the server;
 `Key::from_file_async` remains available with either.
 
+### `Key` and `KeySet` parse through `FromStr` (#6471)
+
+The inherent `Key::from_str` and `KeySet::from_str` are replaced by `impl FromStr`, with the same `Error`.
+Call `text.parse::<Key>()`, or bring `std::str::FromStr` into scope to keep calling `Key::from_str`.
+
 ### `Client::connect` has no timeout of its own (#5765)
 
 `Client::connect` waits on the auth server for as long as its caller does, and dropping the future drops the request.

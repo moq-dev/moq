@@ -114,7 +114,8 @@ name = "wire"
 harness = false
 required-features = ["fuzz"]
 
-# quinn's workspace lints, kept so upstream code stays clean against them.
+# quinn's workspace lints, kept so upstream code stays clean against them. Cargo
+# can't extend the workspace table per crate, so its suppression rule is repeated.
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
 unnameable_types = "warn"
@@ -122,6 +123,7 @@ unreachable_pub = "warn"
 unused_qualifications = "warn"
 
 [lints.clippy]
+allow_attributes_without_reason = "warn"
 manual_let_else = "warn"
 or_fun_call = "warn"
 use_self = "warn"

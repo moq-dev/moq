@@ -8,8 +8,8 @@
  * session is WebTransport through the shaper, or nothing.
  *
  *     bun driver.ts --url http://127.0.0.1:4501 --fingerprint http://127.0.0.1:4500/certificate.sha256 \
- *         --broadcast tone-opus.hang --page dist --ring plain --delay auto --duration 60 \
- *         --tag chromium-opus-48000-mild-plain --out <run dir>
+ *         --broadcast tone-opus.hang --page dist --delay auto --duration 60 \
+ *         --tag chromium-opus-48000-mild --out <run dir>
  *
  * Writes `<tag>.ndjson` (the samples, appended as they are drained) and `<tag>.page.json` (the
  * environment, console notes, and voids). `--capture` also writes `<tag>.arrivals.ndjson`, with
@@ -22,7 +22,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Page } from "playwright";
 import { launch, sleep } from "../../../interop/clients/js/harness.ts";
-import type { Arrival, Environment, Ring, Void } from "./src/schema.ts";
+import type { Arrival, Environment, Void } from "./src/schema.ts";
 
 const { values } = parseArgs({
 	options: {
@@ -30,7 +30,6 @@ const { values } = parseArgs({
 		fingerprint: { type: "string" },
 		broadcast: { type: "string" },
 		page: { type: "string" },
-		ring: { type: "string" },
 		delay: { type: "string", default: "auto" },
 		duration: { type: "string", default: "60" },
 		tag: { type: "string" },
@@ -42,7 +41,6 @@ const { values } = parseArgs({
 
 const { url, fingerprint, broadcast, page: pageDir, tag, out } = values;
 const durationMs = Number.parseFloat(values.duration) * 1000;
-const ring = values.ring as Ring;
 if (
 	!url ||
 	!fingerprint ||
@@ -52,11 +50,10 @@ if (
 	!out ||
 	!Number.isFinite(durationMs) ||
 	durationMs <= 0 ||
-	(ring !== "plain" && ring !== "isolated") ||
 	(values.trace && !values.capture)
 ) {
 	console.error(
-		"usage: driver.ts --url U --fingerprint F --broadcast B --page DIR --ring plain|isolated --tag T --out DIR [--delay auto] [--duration S>0] [--capture] [--trace]",
+		"usage: driver.ts --url U --fingerprint F --broadcast B --page DIR --tag T --out DIR [--delay auto] [--duration S>0] [--capture] [--trace]",
 	);
 	process.exit(2);
 }
@@ -75,26 +72,20 @@ const hash = await fetch(fingerprint).then((r) => {
 	return r.text();
 });
 
-// Cross-origin isolation is a property of the document, not the bundle, so one build served under
-// two prefixes runs both rings. `/plain` is the production path: most viewers are not isolated, and
-// get the postMessage ring.
 const root = resolve(pageDir);
-const isolation = { "cross-origin-opener-policy": "same-origin", "cross-origin-embedder-policy": "require-corp" };
 const server = Bun.serve({
 	port: 0,
 	hostname: "127.0.0.1",
 	async fetch(req) {
-		const path = new URL(req.url).pathname;
-		const match = path.match(/^\/(isolated|plain)\/(.*)$/);
-		if (!match) return new Response("not found", { status: 404 });
-		const file = Bun.file(join(root, match[2] || "index.html"));
+		const path = new URL(req.url).pathname.slice(1);
+		const file = Bun.file(join(root, path || "index.html"));
 		if (!(await file.exists())) return new Response("not found", { status: 404 });
-		return new Response(file, { headers: match[1] === "isolated" ? isolation : undefined });
+		return new Response(file);
 	},
 });
 
 const query = new URLSearchParams({ url, broadcast, delay: values.delay, capture: String(values.capture) });
-const pageUrl = `http://127.0.0.1:${server.port}/${ring}/?${query}`;
+const pageUrl = `http://127.0.0.1:${server.port}/?${query}`;
 console.log(`page: ${pageUrl}`);
 
 const samplesFile = join(out, `${tag}.ndjson`);
@@ -177,9 +168,6 @@ try {
 	});
 	if (environment.transport !== "webtransport") {
 		refuse("transport", `negotiated ${environment.transport}, which never crosses the UDP shaper`);
-	}
-	if (environment.crossOriginIsolated !== (ring === "isolated")) {
-		refuse("ring", `asked for ${ring}, but crossOriginIsolated is ${environment.crossOriginIsolated}`);
 	}
 
 	// The row's duration is audio played, not startup: the window starts once the ring does.

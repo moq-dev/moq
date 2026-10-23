@@ -8,6 +8,7 @@ use p256::elliptic_curve::pkcs8::EncodePrivateKey;
 use rsa::BigUint;
 use rsa::pkcs1::EncodeRsaPrivateKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::str::FromStr;
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
 
@@ -246,7 +247,7 @@ impl Jwk {
 ///
 /// The fields are fixed at construction: derived crypto material is cached on first use, so a key
 /// that could be mutated would sign with stale material. Build one from a [`Jwk`], from
-/// [`Key::generate`], or by parsing with [`Key::from_str`], then use the builders to derive a new
+/// [`Key::generate`], or by parsing a string with [`str::parse`], then use the builders to derive a new
 /// key rather than editing an existing one.
 #[derive(Clone)]
 pub struct Key {
@@ -313,18 +314,11 @@ impl fmt::Debug for Key {
 	}
 }
 
-impl Key {
-	/// The serializable [`Jwk`] behind this key, cloned so editing it can't reach the original.
-	///
-	/// The inverse of [`Jwk::import`]. Use it to derive a variant: export, edit, import again.
-	/// Reading a single field needs no clone, since a [`Key`] derefs to its [`Jwk`].
-	pub fn export(&self) -> Jwk {
-		self.jwk.clone()
-	}
+impl FromStr for Key {
+	type Err = crate::Error;
 
 	/// Parse a key from a string, auto-detecting JSON or base64url encoding.
-	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> crate::Result<Self> {
+	fn from_str(s: &str) -> crate::Result<Self> {
 		let s = s.trim();
 		if s.starts_with('{') {
 			Ok(serde_json::from_str(s)?)
@@ -334,18 +328,26 @@ impl Key {
 			Ok(serde_json::from_str(&json)?)
 		}
 	}
+}
+
+impl Key {
+	/// The serializable [`Jwk`] behind this key, cloned so editing it can't reach the original.
+	///
+	/// The inverse of [`Jwk::import`]. Use it to derive a variant: export, edit, import again.
+	/// Reading a single field needs no clone, since a [`Key`] derefs to its [`Jwk`].
+	pub fn export(&self) -> Jwk {
+		self.jwk.clone()
+	}
 
 	/// Load a key from a file, auto-detecting JSON or base64url encoding.
 	pub fn from_file<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
-		let contents = std::fs::read_to_string(&path)?;
-		Self::from_str(&contents)
+		std::fs::read_to_string(&path)?.parse()
 	}
 
 	/// Async version of [`from_file`](Self::from_file), using `tokio::fs`.
 	#[cfg(any(feature = "client", feature = "serve"))]
 	pub async fn from_file_async<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
-		let contents = tokio::fs::read_to_string(path).await?;
-		Self::from_str(&contents)
+		tokio::fs::read_to_string(path).await?.parse()
 	}
 
 	/// Encode the key as base64url-encoded JSON.
@@ -699,7 +701,7 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 

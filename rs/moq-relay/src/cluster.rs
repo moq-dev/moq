@@ -736,6 +736,15 @@ pub struct Config {
 	)]
 	pub id: Option<u64>,
 
+	/// Longest hop path accepted or forwarded, from 1 to 32 (default 32).
+	#[usage(
+		name = "cluster-max-hops",
+		long = "cluster-max-hops",
+		env = "MOQ_CLUSTER_MAX_HOPS",
+		setting = "cluster.max_hops"
+	)]
+	pub max_hops: Option<usize>,
+
 	/// Connect to one or more other cluster nodes. Each entry is a full URL, e.g.
 	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`, `egress`,
 	/// `token`, and `upstream`; see [`Peer`]. A bare host or `host:port` is refused; pass the
@@ -1220,6 +1229,9 @@ impl Cluster {
 		peer.quic.validate()?;
 		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
+		if let Some(max) = config.max_hops {
+			origin_config.max_hops = origin::HopLimit::new(max).context("--cluster-max-hops must be from 1 to 32")?;
+		}
 		if let Some(cache) = cache {
 			origin_config.pool = cache.pool;
 			origin_config.cache_duration = cache.duration;
@@ -1306,7 +1318,7 @@ impl Cluster {
 			admitted.subscriber = self.subscriber(&bound).map(|origin| {
 				origin
 					.consume()
-					.with_hidden(request.tls.is_some() || Self::is_lan_path(&request.path))
+					.with_hidden(bound.peer)
 					.with_stats(admitted.stats.clone())
 			});
 		}
@@ -1344,15 +1356,15 @@ impl Cluster {
 			Some(moq_auth::Role::Subscriber) => None,
 			_ => publisher.map(|origin| origin.with_stats(stats.clone())),
 		};
-		// An authenticated cluster peer (a verified client certificate or the LAN
-		// credential) discovers hidden routes whether or not it asks. A peer that
-		// predates the hidden opt-in (below moq-lite-07-wip, or moq-transport without
-		// MoQ Hidden) would otherwise lose every dot path during a rolling upgrade.
+		// A cluster peer (a `peer` grant, which the LAN credential also gets) discovers
+		// hidden routes whether or not it asks. A peer that predates the hidden opt-in
+		// (below moq-lite-07-wip, or moq-transport without MoQ Hidden) would otherwise
+		// lose every dot path during a rolling upgrade. A client certificate alone is a
+		// fact for the auth server, never this exemption.
 		// TODO: drop the exemption once deployed peers all opt in.
-		let cluster_peer = request.tls.is_some() || Self::is_lan_path(&request.path);
 		let subscriber = match request.role {
 			Some(moq_auth::Role::Publisher) => None,
-			_ => subscriber.map(|origin| origin.consume().with_hidden(cluster_peer).with_stats(stats.clone())),
+			_ => subscriber.map(|origin| origin.consume().with_hidden(token.peer).with_stats(stats.clone())),
 		};
 		Ok(Admitted {
 			lease: lease.with_stats(stats.clone()),
@@ -2330,7 +2342,7 @@ fn remote_status(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
@@ -2358,6 +2370,41 @@ mod tests {
 			let lease = auth::Lease::new("/.cluster/untrusted", consumer);
 			let limits = cluster.limits(&lease);
 			assert_eq!((limits.announces, limits.subscriptions, limits.fetches), expected);
+		}
+	}
+
+	/// A verified certificate is a fact for the auth server: only a `peer` grant
+	/// discovers hidden routes without asking, on both scoping paths.
+	#[tokio::test]
+	async fn only_a_peer_grant_discovers_hidden_routes() {
+		let cluster = new_cluster(Config::default()).expect("cluster");
+		let _hidden = cluster.origin.publish(".stats/node", origin::Route::default());
+		let _visible = cluster.origin.publish("room", origin::Route::default());
+		let mut request = moq_auth::Request::new("test", moq_auth::Transport::Quic, "/");
+		request.tls = Some(moq_auth::Peer {
+			name: "edge0".into(),
+			fingerprint: "ab".repeat(32),
+			expires: None,
+			issuer: "CN=cluster".into(),
+		});
+		for peer in [false, true] {
+			for session in [false, true] {
+				let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+				grant.peer = peer;
+				let lease = auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant));
+				let admitted = match session {
+					true => cluster.scope_session(lease, &request),
+					false => cluster.scope(lease, &request),
+				}
+				.expect("admitted");
+				let mut announced = admitted.subscriber.expect("subscribe grant").announced();
+				let mut seen = Vec::new();
+				while let Some(route) = try_next_announced(&mut announced) {
+					seen.push(route.prefix.to_string());
+				}
+				let expected: &[&str] = if peer { &[".stats/node", "room"] } else { &["room"] };
+				assert_eq!(seen, expected, "peer={peer}, session={session}");
+			}
 		}
 	}
 
@@ -3000,7 +3047,7 @@ mod tests {
 
 		#[derive(Debug, serde::Deserialize)]
 		struct Doc {
-			#[allow(dead_code)]
+			#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 			connect: Vec<Peer>,
 		}
 		let err = toml::from_str::<Doc>("connect = [{ url = \"https://peer.example/\", cost = \"cheap\" }]")
@@ -3166,6 +3213,31 @@ mod tests {
 			.err()
 			.expect("should error");
 			assert!(format!("{err}").contains("--cluster-id"), "got: {err}");
+		}
+	}
+
+	#[tokio::test]
+	async fn cluster_hop_limit_reaches_the_shared_origin() {
+		assert_eq!(
+			new_cluster(Config::default()).unwrap().origin.config().max_hops.get(),
+			32
+		);
+		for cap in [1, 6, 32] {
+			let cluster = new_cluster(Config {
+				max_hops: Some(cap),
+				..Default::default()
+			})
+			.unwrap();
+			assert_eq!(cluster.origin.config().max_hops.get(), cap);
+		}
+		for cap in [0, 33, usize::MAX] {
+			let err = new_cluster(Config {
+				max_hops: Some(cap),
+				..Default::default()
+			})
+			.err()
+			.unwrap();
+			assert!(err.to_string().contains("--cluster-max-hops"), "{err}");
 		}
 	}
 

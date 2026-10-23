@@ -1,8 +1,15 @@
 //! Encoded retention cost and peak memory, swept over delay and bitrate.
 //! Run with `cargo bench -p moq-cli --bench play_buffer`.
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "host time measures benchmark throughput"
+)]
 
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 #[path = "../src/play/buffer.rs"]
 mod buffer;
 

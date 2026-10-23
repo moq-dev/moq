@@ -178,3 +178,5 @@ required-features = ["net"]
 name = "integration"
 path = "tests/integration/main.rs"
 required-features = ["net"]
+[lints]
+workspace = true

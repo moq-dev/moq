@@ -10,16 +10,16 @@ and a divergence between the two players shows up as one failing where the other
 just test audio-quality                                        # the whole matrix, 60s a row
 just test audio-quality --list                                 # what it would run
 just test audio-quality --profiles mild --codecs opus --duration 20
-just test audio-quality --rings plain                          # the browser's production path only
-just test audio-quality --rings pulse                          # the native player only
+just test audio-quality --runtimes chromium                    # the browser player and the replays
+just test audio-quality --runtimes native                      # the native player only
 just test audio-quality --out ~/runs/after                     # keep the run directory
 just test audio-quality --enforce                              # fail on the budgets
 just test audio-quality --profiles bursty --capture --out ~/runs/burst # keep arrival evidence
 just test audio-quality --replays                              # the replays only, in seconds
 ```
 
-The matrix is codec x profile x ring: 24 browser rows and 12 [native rows](#native-rows), about 45
-minutes, plus 8 [replay rows](#traces) of recorded arrivals. `--profiles`, `--rings`, and `--codecs` take comma-separated
+The matrix is runtime x codec x profile: 12 browser rows and 12 [native rows](#native-rows), about 30
+minutes, plus 4 [replay rows](#traces) of recorded arrivals. `--profiles`, `--runtimes`, and `--codecs` take comma-separated
 lists; `--seed` replays a given impairment. The table prints either way, and only `--enforce` (which
 the nightly job passes) turns a breach into a failed run.
 
@@ -27,13 +27,9 @@ the nightly job passes) turns a breach into a failed run.
 
 | Axis | Values |
 | --- | --- |
+| runtime | `chromium` for `@moq/watch`, `native` for `moq play`; the recorded traces replay through the browser player |
 | codec | `opus` at 48 kHz over fMP4, `aac` at 44.1 kHz over MPEG-TS |
 | profile | see below |
-| ring | `isolated` (SharedArrayBuffer, cross-origin isolated page) and `plain` (postMessage) in Chromium; `pulse` for `moq play` |
-
-`plain` is the production path: most pages are not cross-origin isolated. One build is served under
-`/isolated/` with COOP and COEP and under `/plain/` without, and the page's `crossOriginIsolated`
-decides which ring ran.
 
 | Profile | Path | Delay |
 | --- | --- | --- |
@@ -75,7 +71,7 @@ fallback cannot connect: the session is WebTransport through the shaper, or the 
 
 ## Native rows
 
-The `pulse` ring is the shipped binary, `moq play --no-video`, through the same shaper on the same
+The `native` runtime is the shipped binary, `moq play --no-video`, through the same shaper on the same
 profiles, writing [`--metrics`](../../doc/bin/cli.md#play) samples in the `Sample` shape below, which
 the same analyzer reduces and the same budget file grades. It plays through the production
 ALSA/cpal output into a private PulseAudio null sink ([`../lib/pulse.py`](../lib/pulse.py)), one per
@@ -146,7 +142,7 @@ duration cannot be determined; timestamp gaps never stand in for missing packet 
 receives it, with the same transport, container, and codec-duration readers over WebTransport. It stamps before the consumer's in-order delivery, whose waits and skips depend
 on the delay, so the replay decides those again.
 
-`replay.ts` plays a trace through the player's own `Container.Consumer` and rings on a simulated
+`replay.ts` plays a trace through the player's own `Container.Consumer` and ring on a simulated
 clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at the "auto" delay a
 real `Sync` resolves from the playout target that consumer measures, and reads each quantum through
 the tap's classifier. The consumer makes the player's group ordering, max delay skips, and
@@ -245,7 +241,6 @@ replay row crosses no shaper, so the `shaper` void does not apply to it.
 | --- | --- |
 | `shaper` | It exited nonzero (a configured impairment never acted), left no report, or forwarded nothing to the player. |
 | `transport` | The session negotiated something other than WebTransport. |
-| `ring` | `crossOriginIsolated` does not match the row's ring, so the other ring ran. Browser only. |
 | `clock` | The render clock (the AudioContext's, or the native device's) was unreadable or ran more than 1% off the viewer's from first audio on. |
 | `window` | No audio after the warmup. |
 | `driver` | The player never reached a session and first audio within 20 s, failed mid-row, did not exit cleanly on Ctrl-C (which includes `--metrics` falling behind its device), or the driver threw. |
@@ -253,7 +248,7 @@ replay row crosses no shaper, so the `shaper` void does not apply to it.
 ## Budgets
 
 `budgets.json` holds a ceiling per graded key per row, keyed by the whole row: runtime, codec, rate,
-profile, and ring. Under `--enforce` a run fails on a breach, a budgeted key the run left
+and profile. Under `--enforce` a run fails on a breach, a budgeted key the run left
 unmeasured, a void row, or a row with no budget. Tightening a ceiling is a visible diff; loosening
 one needs a reason in review. The file's `note` says how the current ceilings were measured: the
 browser rows come from several nightly runs, not a developer machine; the native rows are provisional,

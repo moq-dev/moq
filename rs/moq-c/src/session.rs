@@ -16,7 +16,8 @@ struct TaskEntry {
 enum Link {
 	/// A dialed connection: a loop that redials, so it is offline between connections.
 	Dialed {
-		connection: moq_tokio::Connection,
+		/// Boxed so the accepted variant does not carry its size.
+		connection: Box<moq_tokio::Connection>,
 		/// Reads live connection stats, reporting `None` while reconnecting.
 		monitor: moq_tokio::connection::Monitor,
 	},
@@ -92,7 +93,7 @@ impl Session {
 		// before moving it into the spawned task.
 		let reconnect = client.connect(url);
 		let link = Link::Dialed {
-			connection: reconnect.clone(),
+			connection: Box::new(reconnect.clone()),
 			monitor: reconnect.monitor(),
 		};
 

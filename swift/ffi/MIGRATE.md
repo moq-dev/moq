@@ -11,6 +11,11 @@ configuration is adapted, creates new Unix logs with mode 0600, and refuses an
 existing group/other-accessible file (for example mode 0644) without changing it.
 Make an existing log private before enabling key logging.
 
+### `announce` takes a `MoqAnnounceRoute`
+
+`MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
+`MoqRoute` is only what announcements report, and the `InvalidRoute` error is gone.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.resolve(reference:epoch:)` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
@@ -28,7 +33,7 @@ Regenerate the bindings for the changed `request_broadcast` checksum.
 ### Catalog references carry their epoch
 
 `MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names; the memberwise initializer defaults it to `nil`.
-`MoqBroadcastConsumer.resolve(reference:)` requires `epoch:` too; pass the rendition's `epoch` alongside, or `nil` to resolve whichever instance answers.
+`MoqBroadcastConsumer.resolve(reference:)` becomes `resolve(rendition:)`, taking the catalog `MoqRendition` and reading its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, throw `MoqError.Mux` for a rendition whose broadcast is proven to serve another epoch.
 Regenerate the Swift sources and rebuild the matching XCFramework, then rebuild callers.
 

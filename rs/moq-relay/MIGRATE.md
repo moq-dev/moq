@@ -20,6 +20,16 @@ ACME `timeout`, stats `interval` and `linger`, and cache `duration` use the same
 adapter. TOML and CLI duration strings retain their names. Later Rust assignments
 replace parsed values directly; there are no hidden CLI shadow fields.
 
+### Auth `server_name` is the SNI only (#6509)
+
+The auth request's `server_name` no longer falls back to the HTTP `Host` header, `:authority`, or the WebTransport CONNECT host: it is absent over plain `http://` and `ws://` and for an IP-literal dial, while HTTPS and `wss://` report the SNI.
+An auth server that scopes tenants by hostname must see them over TLS, and still binds the tenant to the credential.
+
+### A client certificate alone lists no hidden routes (#6509)
+
+Only a grant with `peer: true` lists `.`-named routes to a session that did not ask for them.
+Have the auth server mark cluster peers as `peer` (`moq auth serve --mtls-peer`) before upgrading, or a peer below moq-lite-07-wip loses those paths.
+
 ### `stats.interval` is a duration (#6472)
 
 `stats.interval`, `--stats-interval`, and `MOQ_STATS_INTERVAL` take a duration such as `"1s"` or `"500ms"` instead of a bare number of seconds, and a zero interval refuses to start.

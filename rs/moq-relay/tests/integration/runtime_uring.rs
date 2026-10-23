@@ -298,7 +298,8 @@ async fn uring_workers_serve_every_configured_version() {
 
 /// A session the workers accept reports its peer address, the listener's
 /// address, and the name the client dialed, as the tokio listener does: the
-/// SNI on raw QUIC and WebTransport alike.
+/// SNI on raw QUIC and WebTransport alike, and none for an IP-literal dial, which
+/// sends no SNI, rather than the WebTransport CONNECT host.
 #[tokio::test]
 async fn uring_workers_report_link_facts() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -316,18 +317,22 @@ async fn uring_workers_report_link_facts() {
 
 	let mut connections = Vec::new();
 	for scheme in ["moql", "https"] {
-		let url: url::Url = format!("{scheme}://localhost:{port}/link").parse().expect("parse url");
-		connections.push(connect(client(), url).await);
+		for host in ["localhost", "127.0.0.1"] {
+			let url: url::Url = format!("{scheme}://{host}:{port}/link/{host}")
+				.parse()
+				.expect("parse url");
+			connections.push(connect(client(), url).await);
+		}
 	}
 
 	// A client can see its session established before the relay lists it.
 	let deadline = std::time::Instant::now() + TIMEOUT;
 	let views = loop {
 		let views = sessions.list(&Default::default());
-		if views.len() == 2 {
+		if views.len() == 4 {
 			break views;
 		}
-		assert!(std::time::Instant::now() < deadline, "expected 2 sessions: {views:?}");
+		assert!(std::time::Instant::now() < deadline, "expected 4 sessions: {views:?}");
 		tokio::time::sleep(Duration::from_millis(25)).await;
 	};
 	for view in &views {
@@ -335,7 +340,8 @@ async fn uring_workers_report_link_facts() {
 		assert!(remote.ip().is_loopback() && remote.port() != 0, "peer address {remote}");
 		assert_ne!(remote, local, "the peer is not the listener");
 		assert_eq!(view.local, Some(local), "listener address");
-		assert_eq!(view.server_name.as_deref(), Some("localhost"), "dialed name");
+		let sni = view.path.ends_with("/localhost").then_some("localhost");
+		assert_eq!(view.server_name.as_deref(), sni, "dialed name of {}", view.path);
 	}
 
 	drop(connections);

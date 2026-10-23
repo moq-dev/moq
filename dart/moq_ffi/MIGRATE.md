@@ -11,6 +11,11 @@ configuration is adapted, creates new Unix logs with mode 0600, and refuses an
 existing group/other-accessible file (for example mode 0644) without changing it.
 Make an existing log private before enabling key logging.
 
+### `announce` takes a `MoqAnnounceRoute`
+
+`MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
+`MoqRoute` is only what announcements report, and the `InvalidRoute` error is gone.
+
 ### Native futures support operation cancellation
 
 Generated async calls return `UniffiRustFuture<T>`, which implements `Future<T>` and adds `Future<void> cancel()`.
@@ -45,7 +50,7 @@ Regenerate the bindings for the changed `request_broadcast` checksum.
 ### Catalog references carry their epoch
 
 `MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names.
-`MoqBroadcastConsumer.resolve(reference:)` requires `epoch:` too; pass the rendition's `epoch` alongside, or `null` to resolve whichever instance answers.
+`MoqBroadcastConsumer.resolve(reference:)` becomes `resolve(rendition:)`, taking the catalog `MoqRendition` and reading its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `MuxMoqException`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
