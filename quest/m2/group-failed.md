@@ -36,7 +36,3 @@ distinct failed groups with no consumer reading keeps the track's retained
 state constant.
 
 Public API: new, mirrored across Rust and JS. Wire: none.
-
-## Related
-
-- [An evicted group is judged stale](/quest/m1/evicted-group-stale.md) - more stalled groups reset as `Old`, which this would surface

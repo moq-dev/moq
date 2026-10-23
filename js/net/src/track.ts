@@ -1786,6 +1786,10 @@ type Drift = {
 	end?: number;
 };
 
+// The successor a handed-out group was last judged by, so the group stays judgeable once the
+// cache evicts both. Each reader keeps its own, so the memory is bounded by the groups held.
+type Superseded = { successor?: GroupConsumer };
+
 /**
  * The read side of a live track subscription, mirroring the Rust `Subscriber`.
  *
@@ -1917,16 +1921,15 @@ export class Subscriber {
 	// The wall clock judges it too: a group is also stale once its successor arrived a full
 	// budget ago, so a peer whose timestamps stop advancing, an untimed track, or an empty
 	// successor that never presents cannot pin a superseded group. The successor is re-read,
-	// not latched, like the reach. The newest group has no successor, so neither clock ever
-	// convicts it. `wake` arms a timer for the wall deadline, for a held read that waits on it.
-	#isStale(group: GroupConsumer, drift: Drift, wake = false): boolean {
-		if (this.#state.timeline[timelineIndex(this.#state.timeline, group.sequence)] !== group) return false;
-		return this.#staleAt(group.sequence, drift, wake);
-	}
-
-	// The drift verdict for `sequence` by its successor alone, whether or not this track holds it.
-	#staleAt(sequence: number, drift: Drift, wake = false): boolean {
-		const arrival = this.#arrival(sequence, drift.end);
+	// not latched, like the reach, except by a reader holding the group: it passes `held`, so
+	// the wall clock outlives the successor's eviction (see {@link #supersededBy}). The newest
+	// group has no successor, so neither clock ever convicts it. `wake` arms a timer for the
+	// wall deadline, for a held read that waits on it.
+	//
+	// Judged by its successor alone, so the group need not be in this track: evicted, or held
+	// from another copy.
+	#staleAt(sequence: number, drift: Drift, wake = false, held?: Superseded): boolean {
+		const arrival = this.#supersededBy(this.#arrival(sequence, drift.end), drift, held);
 		if (!arrival) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
 		const deadline = hooks.groupArrived(arrival) + drift.budget * 1_000_000;
@@ -1942,6 +1945,26 @@ export class Subscriber {
 			reach !== undefined &&
 			drift.presentation.timestamp.asMillis() - reach >= drift.budget
 		);
+	}
+
+	// The successor whose arrival starts the wall clock: the cached `arrival`, or once the one
+	// `held` recorded leaves the timeline, that one, unless a group landed between them since.
+	// Otherwise an evicted successor restarts the clock at whichever newer group the cache
+	// still holds, which a budget past the cache window never reaches. One still in the
+	// timeline but aborted hands the clock on, as a re-read does.
+	#supersededBy(arrival: GroupConsumer | undefined, drift: Drift, held?: Superseded): GroupConsumer | undefined {
+		if (!held) return arrival;
+		const evicted = held.successor;
+		if (
+			evicted &&
+			this.#state.timeline[timelineIndex(this.#state.timeline, evicted.sequence)] !== evicted &&
+			(drift.end === undefined || evicted.sequence < drift.end) &&
+			(!arrival || arrival.sequence > evicted.sequence)
+		) {
+			return evicted;
+		}
+		held.successor = arrival;
+		return arrival;
 	}
 
 	// Bump {@link #wall} at `at`, unless a wakeup is already armed sooner. Each held read
@@ -1966,8 +1989,9 @@ export class Subscriber {
 	}
 
 	#guard(group: GroupConsumer): GroupConsumer {
+		const held: Superseded = {};
 		hooks.expireGroup(group, {
-			expired: () => this.#isStale(group, this.#drift(), true),
+			expired: () => this.#staleAt(group.sequence, this.#drift(), true, held),
 			changed: this.#expiryChanged(),
 		});
 		return group;
@@ -2077,10 +2101,13 @@ export class Subscriber {
 				!hooks.hasUnreadGroup(subscriber, start, end, delivered)
 			);
 		};
-		hooks.staleAt = (subscriber, sequence) => ({
-			expired: () => subscriber.#staleAt(sequence, subscriber.#drift(), true),
-			changed: subscriber.#expiryChanged(),
-		});
+		hooks.staleAt = (subscriber, sequence) => {
+			const held: Superseded = {};
+			return {
+				expired: () => subscriber.#staleAt(sequence, subscriber.#drift(), true, held),
+				changed: subscriber.#expiryChanged(),
+			};
+		};
 		hooks.cachedGroup = (subscriber, sequence) => {
 			const producer = subscriber.#state.producer;
 			return producer && cachedMirror(producer, sequence);
@@ -2456,7 +2483,7 @@ export class Subscriber {
 				group.close();
 				continue;
 			}
-			if (this.#isStale(group, drift)) {
+			if (this.#staleAt(group.sequence, drift)) {
 				group.close();
 				const dropped = report(group.sequence, group.sequence + 1, old());
 				if (dropped) return dropped;
@@ -2632,7 +2659,7 @@ export class Subscriber {
 		for (const group of this.#state.groups.peek()) {
 			if (group.sequence < start) continue;
 			if (cursor.end !== undefined && group.sequence >= cursor.end) return undefined;
-			if (!this.#delivered.has(group.sequence) && !this.#isStale(group, drift)) return group.sequence;
+			if (!this.#delivered.has(group.sequence) && !this.#staleAt(group.sequence, drift)) return group.sequence;
 		}
 		return undefined;
 	}
@@ -2654,7 +2681,7 @@ export class Subscriber {
 			this.#nextSequence = group.sequence + 1;
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
-			if (this.#isStale(group, drift)) {
+			if (this.#staleAt(group.sequence, drift)) {
 				group.close();
 				continue;
 			}
