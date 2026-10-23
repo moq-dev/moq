@@ -51,12 +51,6 @@ class Moq internal constructor(
      */
     suspend fun requestBroadcast(path: String): BroadcastConsumer = session.consume().requestBroadcast(path)
 
-    /** Read one coherent connection lifecycle snapshot. */
-    fun state(): ConnectionState = session.state()
-
-    /** Wait for a revision different from [after], without sharing a watcher cursor. */
-    suspend fun stateChanged(after: ULong): ConnectionState = session.stateChanged(after)
-
     /**
      * The session's bandwidth allocator.
      *

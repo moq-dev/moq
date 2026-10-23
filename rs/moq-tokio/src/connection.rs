@@ -836,15 +836,17 @@ impl Connection {
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
+		// Own final-state publication before spawning: aborting an unpolled task
+		// must still drop Shared and publish its terminal revision.
+		let shared = Shared {
+			state: producer,
+			send_bw,
+			recv_bw,
+			closed: task_closed,
+		};
 
 		let task = tokio::spawn(async move {
 			let reconnect = client.reconnect;
-			let shared = Shared {
-				state: producer,
-				send_bw,
-				recv_bw,
-				closed: task_closed,
-			};
 			// Isolated inside `shared`, so a panic still records a terminal error
 			// instead of closing the channels as if the caller had stopped it.
 			let res = crate::panic::isolate(Self::run(&shared, client, addrs))
@@ -2411,6 +2413,24 @@ mod tests {
 		let first = monitor.state_changed(revision).await.unwrap();
 		let second = monitor.state_changed(revision).await.unwrap();
 		assert_eq!(first.revision, second.revision);
+	}
+
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn aborting_before_the_loop_is_polled_publishes_its_final_snapshot() {
+		// The current-thread runtime cannot poll the spawned loop before our first await.
+		let connection = Connection::new(
+			client(),
+			Addrs::collect([Url::parse("http://127.0.0.1:1").unwrap()]).unwrap(),
+		);
+		let monitor = connection.monitor();
+		let initial = monitor.state();
+		connection.abort(moq_net::Error::Cancel);
+		connection.closed().await.unwrap();
+		let final_state = monitor.state_changed(initial.revision).await.unwrap();
+		assert_eq!(final_state.phase, Phase::Closed);
+		assert_eq!(final_state.connects, 0);
+		assert!(monitor.state_changed(final_state.revision).await.is_err());
 	}
 
 	fn shared() -> Shared {

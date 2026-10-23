@@ -283,7 +283,7 @@ void MoQOutput::OnState(const std::shared_ptr<Attempt> &current, moq::expected<m
 	current->revision = state.revision;
 	current->live = state.phase == moq::ConnectionPhase::kConnected ||
 			state.phase == moq::ConnectionPhase::kMigrating;
-	if (state.phase == moq::ConnectionPhase::kConnected && !current->connected) {
+	if (state.connects > 0 && !current->connected) {
 		auto elapsed = std::chrono::steady_clock::now() - current->started;
 		auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 		connect_time_ms = ms > 0 ? static_cast<int>(ms) : 1;

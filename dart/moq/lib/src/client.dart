@@ -243,13 +243,6 @@ final class Moq {
   Future<BroadcastConsumer> requestBroadcast(String path) =>
       session.consume().requestBroadcast(path: path);
 
-  /// Read one coherent connection lifecycle snapshot.
-  ConnectionState state() => session.state();
-
-  /// Wait for a revision different from [after], without sharing a watcher cursor.
-  Future<ConnectionState> stateChanged(int after) =>
-      session.stateChanged(after: after);
-
   /// The session's bandwidth allocator.
   ///
   /// Every call returns a handle to the same registry. [Bandwidth.reserve]
