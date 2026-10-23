@@ -8,26 +8,33 @@ or closing a shared owner that remains in use.
 
 ## Plan
 
-P2 lifecycle defect at main 1d43c096e0. `AnnounceConsumer.updates()` in
-`dart/moq/lib/src/client.dart` awaits `next()` inside an async generator and
-only calls native cancel/dispose in finally. Dart defers generator
-cancellation through that pending Future, so the cleanup that would release
-the native read cannot run. `Auth.grants()` awaits `grantChanged()` and
-`MoqServer.requests()` in server.dart awaits `accept()` with the same issue.
-Announcements and server requests are inherited; AUTH grants adds a new
-instance in 026030acd3.
+Implementation checkpoint is on [draft PR6420](https://github.com/moq-dev/moq/pull/6420). The unchanged announcement
+async generator reproduced the deadlock with a deterministic pending read:
+subscription cancellation and native cleanup stayed unfinished until an
+external event completed the read. The generated bridge returned plain
+Futures despite UniFFI exporting per-operation cancellation already.
 
-The unchanged updates() body reproduced this with a deterministic pending
-native stub on Dart 3.13.0: after subscription.cancel() and an event-loop
-turn, cancellation, native cancel, and native disposal were all unfinished.
-Completing next() externally allowed all three to finish. This proves the
-Dart control flow; the other wrappers were source-inspected, and no full
-generated/native Dart integration test ran.
+The proposed generator-source patch, carried beside the existing Nix Dart
+generator patch, returns `UniffiRustFuture<T> implements Future<T>`, adds
+`cancel()`, and reports `UniffiCancelledException` when cancellation wins.
+It polls cancellation through completion and frees the native operation once,
+keeping its native callback alive through cleanup. Generated bindings come
+from that patched generator. No Rust API, C ABI, checksum, or wire change.
 
-Provide cancellation ownership for the pending operation rather than relying
-on finally after an uncancellable Future. Audit the generated future bridge
-and handwritten wrappers together; dispose only the operation where auth or
-listener ownership is shared. Exercise idle cancellation, cancellation
-concurrent with delivery, errors, and exactly-once cleanup without sleeps.
-Keep any generated-runtime fix in its generator. Report Dart/API or FFI
-changes and add migration guidance if necessary; no wire change is expected.
+One internal single-listener stream owns its pending read and at most one
+paused result. Cancellation awaits cleanup; announcements then release their
+owned cursor, while grants and requests retain their shared Auth or Server.
+A request delivered concurrently with cancellation is cancelled and disposed.
+
+Nine stream tests cover idle cancellation, delivery and error races,
+backpressure, and exactly-once cleanup. Five bridge tests cover duplicate
+cancellation, queued wakes, already-ready results, cleanup callbacks, and a
+real announcement cursor reused after cancellation. A real server accepts a
+new connection after cancelling an idle request subscription. No sleeps.
+
+Remaining: settle the generated public cancellation API on the draft. Prefer
+the Future subtype because current callers can keep awaiting calls while
+stream wrappers retain cancellation ownership. An explicit operation handle
+with a separate `future` field would make ownership clearer but require all
+async callers to change. Keep the PR draft until the maintainer chooses;
+final validation results and any environment limitations are in its body.
