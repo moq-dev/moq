@@ -9,9 +9,9 @@
 //! only the runs it is sure of: past the slot it joined or last jumped at, whose clock and
 //! tables flag the break where a leg laying it in turn does not, and holding no lane position
 //! another leg may fill ([`Laid::unsure`](super::lane::Laid::unsure)). The rest are withheld,
-//! so another leg's copy is the one that arrives. That includes a run the export ends inside:
-//! a leg still receiving the broadcast, or this one once its publisher returns, fills the rest
-//! of it, so a short or padded copy would put a second datagram under its sequence number.
+//! so another leg's copy is the one that arrives. A run the media ends inside is sent whole once
+//! every source finished: past that end every leg lays the same slots, so the export lays on
+//! until the run is complete.
 
 use std::sync::Arc;
 
@@ -100,6 +100,16 @@ impl Packetizer {
 			}
 		}
 		out
+	}
+
+	/// The run the slots so far leave open, while this leg is sure of it.
+	pub fn open(&self) -> Option<u128> {
+		self.run.as_ref().filter(|run| run.sure).map(|run| run.index)
+	}
+
+	/// Drop the run in progress: what fills the rest of it is no longer alike on every leg.
+	pub fn close(&mut self) {
+		self.run = None;
 	}
 
 	fn datagram(&self, run: Run) -> Bytes {

@@ -1726,6 +1726,26 @@ where
 			if !self.schedule.is_empty() || !self.queue.is_empty() {
 				return Poll::Pending;
 			}
+			// Every lane is known past a clean end ([`Self::know`]), so the slots after it are
+			// alike on every leg: lay them until the datagram the media ended inside is whole.
+			if self.catalog_ended
+				&& let Some(run) = self.packetizer.as_ref().and_then(|rtp| rtp.open())
+			{
+				while self.packetizer.as_ref().and_then(|rtp| rtp.open()) == Some(run)
+					&& let Some(next) = self.schedule.sync().and_then(|grid| grid.index())
+				{
+					self.lay(Some(next + 1))?;
+				}
+				if let Some(rtp) = &mut self.packetizer {
+					rtp.close();
+				}
+				if let Some(out) = self.pop(waiter) {
+					return Poll::Ready(Ok(Some(out)));
+				}
+				if !self.queue.is_empty() {
+					return Poll::Pending;
+				}
+			}
 			// SI emission rides media frames, so a snapshot that arrived behind the
 			// last one gets one trailing flush before the stream ends.
 			if self.catalog_ended && !self.si_flushed && !self.sync {
@@ -2168,7 +2188,9 @@ where
 			.filter(|_| self.packetizer.is_some() || self.schedule.queued() || self.packing() || finished)
 			.map(|(_, at)| at);
 		let paced = self.queue.front().and_then(|(_, _, due)| *due);
-		self.jitter.next_deadline().into_iter().chain(slot).chain(paced).min()
+		// A frame held for the next generation waits on the paced tail, not on the jitter buffer.
+		let jitter = self.jitter.next_deadline().filter(|_| self.held.is_none());
+		jitter.into_iter().chain(slot).chain(paced).min()
 	}
 
 	/// The discontinuity counter of the most recently returned output frame.

@@ -1724,21 +1724,26 @@ async fn rtp_refuses_a_zero_delay() {
 }
 
 /// A restart that opens a new generation while the old one's last datagrams are still paced out
-/// sends them before adopting it. With the video ended, the old timeline's last slots hold runs
-/// the leg is sure of beside the audio lane the restart leaves unknown, paced across the slot
-/// after each.
+/// sends them before adopting it, and the slots it flushes then keep the old clock's pace. With
+/// the video ended, the old timeline's last slots hold runs the leg is sure of beside the audio
+/// lane the restart leaves unknown.
 #[tokio::test(start_paused = true)]
 async fn an_rtp_leg_sends_its_paced_tail_before_a_restart() {
 	let epoch = moq_net::Epoch::mint();
 	let restart = 4_000_000;
+	// Past the minute a restarted grid runs on across ([`super::lane::Grid::index`]), so the new
+	// timeline lays no slots between the two.
+	let by = 120_000_000;
 	for lag in LAGS {
 		let mut live = Live::new(1.0, lag).await;
+		// Room for runs clear of the audio lane in every slot.
+		live.rate = 4 * MUX_RATE;
 		live.rtp(&epoch).await;
 		let mut leg = live.join(Duration::ZERO).await;
 		live.run(4 * GOP, &mut [&mut leg], |_| false).await;
 		live.end_video();
 		live.run_audio(restart, &mut [&mut leg]).await;
-		live.restart_audio(10_000_000);
+		live.restart_audio(by);
 		live.run_audio(restart + 2_000_000, &mut [&mut leg]).await;
 		assert_eq!(
 			leg.export.discontinuity(),
@@ -1748,14 +1753,91 @@ async fn an_rtp_leg_sends_its_paced_tail_before_a_restart() {
 		let last = datagrams(&leg, 0)
 			.into_keys()
 			.map(|(at, _)| at)
-			.filter(|at| *at < 10_000_000)
+			.filter(|at| *at < by)
 			.max();
 		let slot = PCR_INTERVAL.as_micros() as u64;
 		assert!(
 			last >= Some(restart - slot),
 			"lag {lag}: the old timeline's datagrams stop at {last:?} µs, short of {restart} µs"
 		);
+		// Each slot's datagrams go out across the slot after it, so no instant sends two slots'.
+		let mut sent: std::collections::BTreeMap<Instant, Vec<u64>> = Default::default();
+		for (at, frame) in &leg.out {
+			let slot = frame.timestamp.as_micros() as u64;
+			if (2_000_000..by).contains(&slot) {
+				sent.entry(*at).or_default().push(slot);
+			}
+		}
+		for slots in sent.values() {
+			assert!(
+				slots.len() <= 2 && slots.iter().all(|slot| *slot == slots[0]),
+				"lag {lag}: old datagrams went out at once: {slots:?}"
+			);
+		}
 	}
+}
+
+/// Once every source and the catalog finished, an RTP leg lays on past the last slot until the
+/// run it ends inside is whole, wherever on a datagram's seven packets that end falls, and sends
+/// it: the same datagram a later joiner sends, holding what a plain synced leg rendered there.
+#[tokio::test(start_paused = true)]
+async fn a_clean_end_sends_the_run_the_timeline_ends_inside() {
+	let epoch = moq_net::Epoch::mint();
+	let mut phases = std::collections::BTreeSet::new();
+	for end in 6 * GOP..7 * GOP {
+		let mut live = Live::new(1.0, 0).await;
+		live.rtp(&epoch).await;
+		let mut a = live.join(Duration::ZERO).await;
+		live.rtp = false;
+		let mut plain = live.join(Duration::ZERO).await;
+		live.rtp = true;
+		live.run(JOIN, &mut [&mut a, &mut plain], |_| false).await;
+		let mut b = live.join(Duration::from_millis(100)).await;
+		live.run(end, &mut [&mut a, &mut plain, &mut b], |_| false).await;
+		live.catalog.finish().unwrap();
+		live.finish(&mut [&mut a, &mut plain, &mut b]).await;
+
+		// The plain leg's timeline, packet by packet: 34 to a slot at this rate.
+		let slot = PCR_INTERVAL.as_micros() as u64;
+		let timeline: std::collections::BTreeMap<u64, &[u8]> = plain
+			.out
+			.iter()
+			.flat_map(|(_, frame)| {
+				let first = frame.timestamp.as_micros() as u64 / slot * 34;
+				(first..).zip(frame.payload.chunks(188))
+			})
+			.collect();
+		let media = |packet: &[u8]| matches!(pid(packet), VIDEO_PID | AUDIO_PID);
+		let last = *timeline.keys().next_back().unwrap();
+		phases.insert(last % 7);
+
+		let (x, y) = (datagrams(&a, 0), datagrams(&b, 0));
+		let run = (last / 7) as u16;
+		let find = |sent: &std::collections::BTreeMap<(u64, u16), Bytes>| {
+			sent.values().find(|datagram| seq(datagram) == run).cloned()
+		};
+		let tail = find(&x).unwrap_or_else(|| panic!("end {end}: the run holding the last packet {last} was withheld"));
+		for (position, packet) in (u64::from(run) * 7..).zip(tail[12..].chunks(188)) {
+			match timeline.get(&position) {
+				Some(rendered) => assert_eq!(packet, *rendered, "end {end}: position {position} differs"),
+				None => assert!(
+					!media(packet),
+					"end {end}: position {position} holds media past the end"
+				),
+			}
+		}
+		assert_eq!(find(&y), Some(tail), "end {end}: the joiner sent another last run");
+		assert!(same_datagrams(&x, &y) > 0);
+	}
+	assert_eq!(
+		phases.len(),
+		7,
+		"the timeline ended at too few places in a run: {phases:?}"
+	);
+}
+
+fn seq(datagram: &[u8]) -> u16 {
+	u16::from_be_bytes([datagram[2], datagram[3]])
 }
 
 /// A group ending in a burst still fills its lane at the next group's release, so a leg holding

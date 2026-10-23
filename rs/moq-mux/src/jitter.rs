@@ -137,9 +137,11 @@ pub(crate) struct Buffer<K, T> {
 	replay: bool,
 	/// The clock every frame is pushed under.
 	clock: Option<Clock>,
-	/// The generation before it, for a track the restart has not reached yet, until the
-	/// current generation's first frame goes out.
+	/// The generation before it, which times that generation's tail ([`Self::at`]) and, until
+	/// [`Self::crossed`], takes the frames of a track the restart has not reached yet.
 	previous: Option<Clock>,
+	/// The current generation's first frame went out, so the previous one takes no more frames.
+	crossed: bool,
 	/// The next generation's frames, held while its clock is acquired.
 	acquire: Option<Acquire<K, T>>,
 	tracks: BTreeMap<K, Track<T>>,
@@ -351,6 +353,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			replay: false,
 			clock: None,
 			previous: None,
+			crossed: false,
 			acquire: None,
 			tracks: BTreeMap::new(),
 			horizon: None,
@@ -435,7 +438,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// on that clock, and due no later than the current generation's first frame, so the
 	/// generations still go out in turn.
 	fn lagging(&self, key: &K, arrival: &Arrival<T>) -> Option<Clock> {
-		let previous = self.previous?;
+		let previous = self.previous.filter(|_| !self.crossed)?;
 		let track = self.tracks.get(key)?;
 		let deadline = self.deadline(&previous, arrival.decode);
 		let lags = track.generation == previous.generation
@@ -535,6 +538,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			clock.anchor += horizon - kept;
 		}
 		self.previous = self.clock.replace(clock);
+		self.crossed = false;
 		self.steer = Steer::default();
 		for (key, frame) in acquire.frames {
 			let (deadline, stale) = self.judge(&clock, &frame, acquiring);
@@ -890,7 +894,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				self.released = true;
 				// A previous-generation frame queued now would go out after this one.
 				if self.clock.is_some_and(|clock| clock.generation == generation) {
-					self.previous = None;
+					self.crossed = true;
 				}
 				return Poll::Ready(Ready {
 					track: key.clone(),
