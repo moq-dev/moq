@@ -345,12 +345,15 @@ export class Decoder {
 			};
 			decoder.configure(decoderConfig);
 
+			// The newest frame sent to the decoder since it was last reset.
+			let newest: Time.Micro | undefined;
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 				if (this.#onNext(next)) {
 					decoder.reset();
 					decoder.configure(decoderConfig);
+					newest = undefined;
 				}
 				if (next.end !== undefined) {
 					continue;
@@ -366,6 +369,13 @@ export class Decoder {
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
+
+				// Decode in timestamp order. A subscription's head groups arrive after the live edge served
+				// alongside them, and the ring, anchored at the first decoded frame, cannot place audio
+				// before it. Chrome's AudioDecoder would also stamp every later output from its first
+				// input, shifting the rest of the track by the reorder and overflowing a buffered ring.
+				if (newest !== undefined && (frame.timestamp as Time.Micro) < newest) continue;
+				newest = frame.timestamp as Time.Micro;
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
@@ -436,6 +446,8 @@ export class Decoder {
 			};
 			decoder.configure(decoderConfig);
 
+			// The newest frame sent to the decoder since it was last reset.
+			let newest: Time.Micro | undefined;
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
@@ -444,6 +456,7 @@ export class Decoder {
 				if (this.#onNext(next)) {
 					decoder.reset();
 					decoder.configure(decoderConfig);
+					newest = undefined;
 				}
 
 				const { frame } = next;
@@ -455,6 +468,13 @@ export class Decoder {
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
+
+				// Decode in timestamp order. A subscription's head groups arrive after the live edge served
+				// alongside them, and the ring, anchored at the first decoded frame, cannot place audio
+				// before it. Chrome's AudioDecoder would also stamp every later output from its first
+				// input, shifting the rest of the track by the reorder and overflowing a buffered ring.
+				if (newest !== undefined && frame.timestamp < newest) continue;
+				newest = frame.timestamp;
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
