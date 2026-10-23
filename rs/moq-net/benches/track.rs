@@ -155,6 +155,7 @@ const FETCH_HISTORY: [usize; 3] = [1, 32, 512];
 
 struct FetchReaders {
 	_broadcast: broadcast::Producer,
+	_track: track::Producer,
 	_open: moq_net::group::Producer,
 	readers: Vec<moq_net::group::Consumer>,
 	waiters: Vec<kio::Waiter>,
@@ -192,6 +193,7 @@ impl FetchReaders {
 		}
 		Self {
 			_broadcast: broadcast,
+			_track: track,
 			_open: open,
 			readers: fetched,
 			waiters: (0..readers).map(|_| kio::Waiter::noop()).collect(),
