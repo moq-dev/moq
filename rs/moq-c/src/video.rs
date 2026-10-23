@@ -74,7 +74,6 @@ pub enum moq_video_encoder_kind {
 /// An exact video frame rate in frames per second.
 #[repr(C)]
 #[derive(Clone, Copy)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_frame_rate {
 	/// Frames per second numerator; must be nonzero.
 	pub numerator: u32,

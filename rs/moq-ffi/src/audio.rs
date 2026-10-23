@@ -726,21 +726,23 @@ mod tests {
 		for index in 0..4 {
 			let audio = MoqAudioProducer::new(
 				&catalog,
-				MoqAudioEncoderInput {
-					format: MoqAudioSampleFormat::F32,
-					sample_rate: 48_000,
-					channels: 1,
-				},
-				MoqAudioEncoderOutput {
-					codec: MoqAudioCodec::opus(),
+				MoqAudioProducerOptions {
+					input: MoqAudioEncoderInput {
+						format: MoqAudioSampleFormat::F32,
+						sample_rate: 48_000,
+						channels: 1,
+					},
+					output: MoqAudioEncoderOutput {
+						codec: MoqAudioCodec::opus(),
+						sample_rate: None,
+						channels: None,
+						bitrate: None,
+						frame_duration_us: 0,
+						preset: None,
+					},
 					track: Some(format!("audio-{index}")),
-					sample_rate: None,
-					channels: None,
-					bitrate: None,
-					frame_duration_us: 0,
-					preset: None,
+					bandwidth: None,
 				},
-				None,
 			)
 			.unwrap();
 			// A partial codec frame makes finish publish the final packet and lookahead.
