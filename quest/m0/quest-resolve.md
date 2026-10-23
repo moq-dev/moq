@@ -15,6 +15,8 @@ mostly `quest/m1/README.md`'s Required list. Git's `merge=union` was rejected
 because it resurrects lines for quests `main` had deleted.
 
 Bump the `quest` input in `flake.nix` to a revision with `quest resolve`, then
-run `quest init` and commit the `.gitattributes` line it writes. GitHub's own
+run `quest init` and commit the `.gitattributes` line it writes. Other clones
+need no setup: any `quest` command registers `merge.quest.driver` in a clone
+whose `.gitattributes` names it, and the dev shell puts `quest` on PATH. GitHub's own
 merges ignore drivers, so a PR still shows as conflicting until a local merge
 from `main` is pushed; that merge then resolves itself.
