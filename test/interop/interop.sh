@@ -322,9 +322,10 @@ COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
 # AUDIO_MS of it for tone.py (the browser: its page) to check against the publisher's list. This
 # is the one place the tones are chosen. A stereo publisher sends a different tone per channel, so a
 # channel swap fails too. A run that swaps in released CLIs or JS clients (the wire-compat lanes)
-# skips audio, and the bindings' clients, which always check it, refuse to run there.
+# checks audio only in its decoding media lanes, and the bindings' clients, which always check it,
+# refuse to run in the rest.
 AUDIO=1
-[[ -z "${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" ]] || AUDIO=0
+[[ -z "${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" || "${INTEROP_DECODE:-0}" == 1 ]] || AUDIO=0
 if [[ "$AUDIO" -eq 0 ]]; then
     for sub in "${SUB_LIST[@]}"; do
         case "$sub" in
@@ -333,7 +334,7 @@ if [[ "$AUDIO" -eq 0 ]]; then
             *) sub_needs_audio="$sub" ;;
         esac
         if [[ -n "${sub_needs_audio:-}" ]]; then
-            echo "error: the $sub subscriber always checks audio, which a run with MOQ_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off" >&2
+            echo "error: the $sub subscriber always checks audio, which a run with MOQ_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off without INTEROP_DECODE" >&2
             exit 2
         fi
     done
@@ -426,6 +427,22 @@ plan_pass() {
         needs "$runtime" || continue
         record "not run" case=tail publisher=rust subscriber="$runtime"
         record "not run" case=tail publisher="$runtime" subscriber=rust
+        if [[ "$VERSION" == moq-transport-* ]]; then
+            record "not run" case=datagram publisher=rust subscriber="$runtime"
+            record "not run" case=datagram publisher="$runtime" subscriber=rust
+            record "not run" case="wire track status" publisher=rust subscriber="$runtime"
+            record "not run" case=goaway publisher=rust subscriber="$runtime"
+            [[ "$runtime" != js-native-bun ]] || record "not run" case=goaway publisher="$runtime" subscriber=rust
+            case "$VERSION" in
+                moq-transport-14 | moq-transport-16)
+                    record "not run" case="request credit" publisher="$runtime" subscriber=rust
+                    [[ "$runtime" != js-native-bun ]] || record "not run" case="request credit" publisher="$runtime" subscriber="$runtime"
+                    ;;
+                *)
+                    record "not run" case="track status" publisher="$runtime" subscriber=rust
+                    ;;
+            esac
+        fi
     done
     [[ "$VERSION" == auto ]] || return 0
     for runtime in js-native-node js-native-bun; do
@@ -511,7 +528,7 @@ build_relay_cli() {
         exit 1
     }
     if [[ "$MEDIA" -eq 0 ]]; then
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-audio --example interop-finish)
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-audio --example interop-control --example interop-goaway --example interop-goaway-client --example interop-finish)
     fi
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
     # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
@@ -944,7 +961,7 @@ run_publisher() {
     case "$lang" in
         rust)
             # A finished import stays up for its max-age; `stop_publisher` allows 10 s to close.
-            # Released CLIs (the wire-compat lanes) keep the video-only Annex-B input.
+            # The wire-compat FETCH lanes keep the video-only Annex-B input.
             if [[ "$AUDIO" -eq 1 ]]; then
                 ffmpeg_fmp4 "$tone" | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
                     --broadcast "$broadcast" import --max-age 1s fmp4
@@ -1158,11 +1175,42 @@ PYCODE
                 return
             fi
             if [[ "${INTEROP_DECODE:-0}" == 1 ]]; then
-                # ffmpeg actually decodes the exported media; mux headers alone cannot pass.
+                # ffmpeg actually decodes the exported media; mux headers alone cannot pass. The
+                # first $AUDIO_MS of audio from its first decoded sample (atrim, unlike -t, ignores
+                # where video starts) lands in a WAV, and the encoder's input stats log each decoded
+                # frame's timestamp and length for tone.py. The outputs are the verdict: a CLI may
+                # exit on EPIPE with a plain error once ffmpeg has what it needs.
                 (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
                     ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
-                    ffmpeg -hide_banner -loglevel error -i - -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw"
-                [[ -s "$HARNESS_RUN/$broadcast.raw" ]]
+                    ffmpeg -hide_banner -loglevel error -i - \
+                        -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw" \
+                        -map 0:a:0 -af "atrim=duration=${AUDIO_MS}ms" -c:a pcm_f32le \
+                        -stats_enc_pre "$audio_out.stats" -stats_enc_pre_fmt '{tb} {pts} {samp}' -f wav "$audio_out.wav"
+                [[ -s "$HARNESS_RUN/$broadcast.raw" ]] || return
+                python3 - "$audio_out" <<'PYCODE'
+import struct, sys
+out = sys.argv[1]
+wav = open(f"{out}.wav", "rb").read()
+assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE", "ffmpeg wrote no WAV"
+pos, rate, pcm = 12, None, None
+while pos + 8 <= len(wav):
+    chunk, size = wav[pos : pos + 4], struct.unpack_from("<I", wav, pos + 4)[0]
+    if chunk == b"fmt ":
+        tag, channels, rate = struct.unpack_from("<HHI", wav, pos + 8)
+        bits = struct.unpack_from("<H", wav, pos + 22)[0]
+        assert (tag, bits) == (3, 32), f"WAV is not f32 (format {tag}, {bits} bits)"
+    elif chunk == b"data":
+        pcm = wav[pos + 8 : pos + 8 + size]
+    pos += 8 + size + (size & 1)
+assert rate and pcm is not None, "WAV has no fmt or data chunk"
+lines = [f"{rate} {channels}"]
+for line in open(f"{out}.stats"):
+    tb, pts, samples = line.split()
+    num, den = (int(v) for v in tb.split("/"))
+    lines.append(f"{round(int(pts) * num * 1_000_000 / den)} {samples}")
+open(f"{out}.pcm", "wb").write(pcm)
+open(f"{out}.txt", "w").write("\n".join(lines) + "\n")
+PYCODE
                 return
             fi
             # The CLI has no PCM output, so moq-audio decodes the audio in a client of its own,
@@ -1666,23 +1714,35 @@ run_tail_publisher() {
     run_tail_client "$@" <"$fifo" 9>&-
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via harness_spawn
+run_tail_subscriber() {
+    local fifo="$1"
+    shift
+    run_tail_client "$@" >"$fifo" 8>&-
+}
+
 run_tail_pair() {
-    # run_tail_pair <pub> <sub> [<mode> <version>]: a mode pins its own version, like a drop lane.
-    local pub="$1" sub="$2" mode="${3:-}" version="${4:-}" pid subscriber_pid started=$SECONDS from read
-    local name="tail-$1-$2${mode:+-$mode-$version}" label="${mode:-tail}${version:+ $version}"
-    local fifo="$LOGS/tail-ack" broadcast="tail-$1-$2-$$-$RANDOM" want='tail clean end=4 groups=0,1,2,3 bytes=1048576'
-    local cell=(case="${mode:-tail}" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
-    if [[ -n "$mode" ]]; then
-        cell+=(version="$version")
-    else
-        version=$(pinned_version)
-        # moq-net subscribes over moq-transport from the largest group, which can be past group 0 by
-        # the time the relay answers, so the reader takes any contiguous run through the last group.
-        if [[ "$version" == moq-transport-* ]]; then
-            mode="join"
-            want='tail join clean end=4 groups=[0-3](,[0-3])*'
-        fi
+    local pub="$1" sub="$2" kind="${3:-tail}" version="${4:-}" pid subscriber_pid started=$SECONDS from read
+    local name="${kind// /-}-$1-$2${4:+-$4}" label="$kind${4:+ $4}"
+    local fifo="$LOGS/tail-ack" broadcast="$name-$$-$RANDOM" mode="" want='tail clean end=4 groups=0,1,2,3 bytes=1048576'
+    [[ -n "$version" ]] || version=$(pinned_version)
+    # moq-net subscribes over moq-transport from the largest group, which can be past group 0 by
+    # the time the relay answers, so the reader takes any contiguous run through the last group.
+    if [[ "$version" == moq-transport-* ]]; then
+        mode="join"
+        want='tail join clean end=4 groups=[0-3](,[0-3])*'
     fi
+    if [[ "$kind" == datagram ]]; then
+        mode=datagram
+        want='datagram clean groups=0,1,2,3 bytes=3600'
+    elif [[ "$kind" == "track status" ]]; then
+        mode=status
+        want="track status answered"
+    elif [[ "$kind" == compress ]]; then
+        mode="compress"
+    fi
+    local cell=(case="$kind" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    [[ -z "${4:-}" ]] || cell+=(version="$version")
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
@@ -1696,18 +1756,36 @@ run_tail_pair() {
     # Each side's token grants this broadcast alone, like a media round's.
     harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
     pid="$HARNESS_PID"
-    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
-    subscriber_pid="$HARNESS_PID"
+    if [[ "$mode" == datagram ]]; then
+        # Subscription metadata, on the clients' serialized task runtimes, confirms the alias is bound. An acknowledgement
+        # per datagram avoids testing a best-effort receive buffer's burst capacity.
+        mkfifo "$LOGS/datagram-ack"
+        exec 8<>"$LOGS/datagram-ack"
+        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$LOGS/datagram-ack" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+        subscriber_pid="$HARNESS_PID"
+        local ack sequence
+        if read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram ready" ]]; then
+            for sequence in 0 1 2 3; do
+                printf 'datagram %s\n' "$sequence" >&9
+                read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram $sequence" ]] || break
+            done
+        fi
+        exec 8>&-
+        rm "$LOGS/datagram-ack"
+    else
+        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+        subscriber_pid="$HARNESS_PID"
+    fi
     harness_wait "$subscriber_pid" || true
     # Like run_native, a verified data result survives the NAPI addon's exit crash.
-    if read=$(grep -xE "$want" "$LOGS/$name-sub.log"); then
+    if read=$(grep -xE "$want" "$LOGS/$name-sub.log") && { [[ "$mode" != status ]] || grep -qx "track status answered" "$LOGS/$name-sub.log"; }; then
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         if [[ -n "$version" ]] && ! check_versions "$label $pub -> $sub" "$from" "$version"; then
             record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="a relay connection negotiated another version"
             overall=1
         elif grep -qx 'tail acknowledged' "$LOGS/$name-pub.log"; then
-            echo "  PASS  $label $pub -> $sub (${read#tail })"
+            echo "  PASS  $kind $pub -> $sub (${read#tail })"
             record pass "${cell[@]}" seconds=$((SECONDS - started))
         else
             echo "  FAIL  $label $pub -> $sub (publisher did not acknowledge)"
@@ -1906,7 +1984,44 @@ run_matrix() {
     fi
 }
 
-# This checkout's CLI FETCH and finite track tails in this pass, then the lite compress and drop lanes.
+# Standalone control peers use the same pinned draft, with OS-assigned endpoint ports.
+run_control_case() {
+    local runtime="$1" kind="$2" version name="$2-$1" started=$SECONDS
+    local cell=(case="$kind" publisher=rust subscriber="$runtime" log="$LOGS/$name.log")
+    version=$(pinned_version)
+    local command=("$TARGET_BASE/$PROFILE/examples/interop-control" "$kind" "$version" "${runtime##*-}")
+    case "$kind" in
+        status) cell=(case="wire track status" publisher=rust subscriber="$runtime" log="$LOGS/$name.log") ;;
+        credit) cell=(case="request credit" publisher="$runtime" subscriber=rust log="$LOGS/$name.log") ;;
+        goaway) command=("$TARGET_BASE/$PROFILE/examples/interop-goaway" "$version" "${runtime##*-}") ;;
+        reverse-goaway)
+            command=("$TARGET_BASE/$PROFILE/examples/interop-goaway-client" "$version")
+            cell=(case=goaway publisher="$runtime" subscriber=rust log="$LOGS/$name.log")
+            ;;
+        js-credit)
+            command=(bun "$CLIENTS/js-native/server.ts" credit "$version")
+            cell=(case="request credit" publisher="$runtime" subscriber="$runtime" log="$LOGS/$name.log")
+            ;;
+    esac
+    if is_broken "$runtime"; then
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+        return
+    fi
+    # Own the Rust launcher and its JS child together, including on a deadline or failure.
+    harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" "${command[@]}"
+    if harness_wait "$HARNESS_PID"; then
+        echo "  PASS  $kind rust <-> $runtime"
+        record pass "${cell[@]}" seconds=$((SECONDS - started))
+    else
+        echo "  FAIL  $kind rust <-> $runtime"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="control peer failed"
+        cat "$LOGS/$name.log"
+        overall=1
+    fi
+}
+
+# This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
 run_tails() {
     local runtime version
     echo "=== CLI FETCH close ==="
@@ -1917,6 +2032,22 @@ run_tails() {
         if needs "$runtime"; then
             run_tail_pair rust "$runtime"
             run_tail_pair "$runtime" rust
+            if [[ "$VERSION" == moq-transport-* ]]; then
+                run_tail_pair rust "$runtime" datagram
+                run_tail_pair "$runtime" rust datagram
+                run_control_case "$runtime" status
+                run_control_case "$runtime" goaway
+                [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" reverse-goaway
+                case "$VERSION" in
+                    moq-transport-14 | moq-transport-16)
+                        run_control_case "$runtime" credit
+                        [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" js-credit
+                        ;;
+                    *)
+                        run_tail_pair "$runtime" rust "track status"
+                        ;;
+                esac
+            fi
         fi
     done
     # The compress and drop lanes pin their own lite versions.

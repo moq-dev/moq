@@ -380,10 +380,8 @@ export type Sample = {
 	stalled?: boolean;
 	/** `sync.out.delay`: the resolved playout target. Natively, the target the speaker is held on. */
 	delay?: Ms;
-	/** The current connection PROBE round trip, before Sync keeps its minimum. */
+	/** The current connection PROBE round trip. */
 	rtt?: Ms;
-	/** `sync.out.jitter`: the network portion in auto mode, or the configured fixed delay. */
-	networkJitter?: Ms;
 	/** The selected rendition's advertised jitter at this sample. */
 	jitter?: Ms;
 	/** The selected rendition's advertised delay at this sample. */

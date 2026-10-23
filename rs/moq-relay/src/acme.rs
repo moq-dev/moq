@@ -465,5 +465,9 @@ impl rustls_acme::AccountCache for Cache {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests;

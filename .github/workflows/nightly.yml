@@ -176,6 +176,11 @@ jobs:
           - name: OBS
             recipe: obs ci
             shell: .#obs
+          # The OBS unit tests under ThreadSanitizer, against stubbed libobs, so
+          # the plain shell suffices. A loaded run of moq-output-test can take
+          # 60 to 90 s instead of about 8; the suite took 2 to 4.5 min locally.
+          - name: OBS TSan
+            recipe: obs test
           - name: moq-c C fixtures
             recipe: rs c-tests
 
@@ -348,6 +353,10 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: nightly
+      - name: Add a second IPv6 loopback address
+        if: matrix.recipe == 'rs uring'
+        # moq-uring's local address test reaches a wildcard socket on it.
+        run: sudo ip -6 addr add fd6d:6f71::2/128 dev lo nodad
       - name: Test
         run: nix develop --command just ${{ matrix.recipe }}
         env:

@@ -221,7 +221,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 			const { timestamp, arrival } = next.frame;
 			const media = Milli.fromMicro(timestamp);
-			const late = sync.received(media, "audio", arrival);
+			const late = sync.received(media, arrival);
 			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
 			const entry = recorded.get(timestamp);
 			if (!entry) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);

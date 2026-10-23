@@ -26,7 +26,6 @@ import {
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
-	spreadHash,
 } from "./internal.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
@@ -315,19 +314,17 @@ interface Candidate extends Advertised {
 }
 
 /**
- * Orders advertisements at `prefix`: the better route, then a local broadcast on a tie, then
- * fewer hops, then the lower {@link spreadHash} of the prefix, matching `route_order` in rs/moq-net.
+ * Orders advertisements at a prefix: the better route, then a local broadcast on a tie, then
+ * fewer hops. A remaining tie is left to the table's newest-first order; see
+ * {@link compareRouteCandidates}.
  */
-function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): number {
-	const order =
+function compareCandidates(a: Candidate, b: Candidate): number {
+	return (
 		compareLinks(a.route, b.route, a.preference, b.preference) ||
 		compareRoutes(a.route, b.route) ||
 		Number(b.exact) - Number(a.exact) ||
-		a.route.hops.length - b.route.hops.length;
-	if (order !== 0) return order;
-	const ha = spreadHash(prefix, a.route.hops);
-	const hb = spreadHash(prefix, b.route.hops);
-	return ha < hb ? -1 : ha > hb ? 1 : 0;
+		a.route.hops.length - b.route.hops.length
+	);
 }
 
 /**
@@ -340,12 +337,12 @@ function compareLinks(a: Route, b: Route, aPreference: Preference, bPreference: 
 }
 
 /**
- * The preferred of `entries` (newest first) for resolving `path`, not skipped: the best route,
- * then fewest hops, then the lowest {@link spreadHash}, then newest. `path` is the requested
- * path for a request, or the prefix itself for an advertisement.
+ * The preferred of `entries` (newest first, at `prefix`) for resolving `path`, not skipped:
+ * see {@link compareRouteCandidates}, then newest.
  */
 function preferredEntry(
 	path: Path.Valid,
+	prefix: Path.Valid,
 	entries: readonly RouteEntry[],
 	skip?: (entry: RouteEntry) => boolean,
 ): RouteEntry | undefined {
@@ -358,7 +355,8 @@ function preferredEntry(
 		}
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		const order = compareLinks(a, b, entry.preference, best.preference) || compareRouteCandidates(path, a, b);
+		const order =
+			compareLinks(a, b, entry.preference, best.preference) || compareRouteCandidates(path, prefix, a, b);
 		if (order < 0) best = entry;
 	}
 	return best;
@@ -577,9 +575,9 @@ class OriginState {
 			if (list) list.push(local);
 			else out.set(path, [local]);
 		}
-		for (const [prefix, list] of out) {
+		for (const list of out.values()) {
 			// Stable, so equal routes keep the table's newest-first order.
-			if (list.length > 1) list.sort((a, b) => compareCandidates(prefix, a, b));
+			if (list.length > 1) list.sort(compareCandidates);
 		}
 		return out;
 	}
@@ -1012,6 +1010,7 @@ class OriginState {
 			if (!entries) continue;
 			const entry = preferredEntry(
 				path,
+				prefix,
 				entries,
 				(candidate) => !candidate.scope.matches(path) || (skip?.(candidate) ?? false),
 			);

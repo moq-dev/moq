@@ -185,7 +185,7 @@ pub async fn connect_import(
 	notify_ready();
 
 	let client = moq_srt::Client::new(addr, resource)
-		.with_latency(latency)
+		.with_max_delay(latency)
 		.with_max_age(target.max_age)
 		.with_bandwidth(target.bandwidth)
 		.with_program(program);
@@ -204,7 +204,7 @@ pub async fn connect_export(
 	notify_ready();
 
 	let client = moq_srt::Client::new(addr, resource)
-		.with_latency(args.endpoint.latency.into())
+		.with_max_delay(args.endpoint.latency.into())
 		.with_linger(args.linger.into())
 		.with_stitch(args.stitch);
 	Ok(client.publish(&origin, &name).await?)
@@ -270,7 +270,7 @@ mod tests {
 		let err = format!("{err:#}");
 		assert!(err.contains("--program") && err.contains("programs (1, 2)"), "{err}");
 
-		let err = format!("{:#}", suggest_program(moq_srt::Error::ListenerClosed));
+		let err = format!("{:#}", suggest_program(moq_srt::Error::InvalidResource("a=b".into())));
 		assert!(!err.contains("--program"), "{err}");
 	}
 

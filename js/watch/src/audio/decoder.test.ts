@@ -326,6 +326,65 @@ it("decodes an audio packet inside a group after a gap", async () => {
 	}
 });
 
+// A subscription's head arrives newest-first, one group per frame. Chrome's AudioDecoder stamps every
+// output from its first input, so decoding the older frames after it shifts the rest of the track.
+for (const cmaf of [false, true]) {
+	it(`decodes a ${cmaf ? "CMAF" : "legacy"} buffered subscription head in timestamp order`, async () => {
+		const playback = await play(Milli(100), true, cmaf);
+		try {
+			for (const ms of [140, 120, 100, 80, 60, 40, 20, 0]) {
+				frameTimestamp = (ms - 20) * 1000;
+				playback.push({ ...frame(), group: ms / 20 });
+				await microtasks();
+			}
+			expect(playback.inserted()).toEqual([]);
+
+			// The live edge moves on, so the head is complete and plays from its oldest frame.
+			frameTimestamp = 140_000;
+			playback.push({ ...frame(), group: 8 });
+			await microtasks();
+			expect(playback.inserted()).toEqual([0, 20_000, 40_000, 60_000, 80_000, 100_000]);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
+	// A fresh encoder after a declared end may restart its timeline below the old one, and the decoder
+	// resets for it before anything is judged out of order.
+	it(`decodes a ${cmaf ? "CMAF" : "legacy"} fresh encoder below the timeline it replaced`, async () => {
+		const playback = await play(Milli(100), false, cmaf);
+		try {
+			frameTimestamp = 480_000;
+			playback.push({ ...frame(), group: 0 });
+			await microtasks();
+			playback.push({ kind: "end", group: 0, end: Micro(520_000) });
+			frameTimestamp = 0;
+			playback.push({ ...frame(), group: 1 });
+			await microtasks();
+			expect(playback.inserted()).toEqual([500_000, 20_000]);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
+	it(`skips a ${cmaf ? "CMAF" : "legacy"} live subscription head older than its live edge`, async () => {
+		const playback = await play(Milli(100), false, cmaf);
+		try {
+			for (const ms of [140, 120, 100, 80, 60, 40, 20, 0, 160]) {
+				frameTimestamp = (ms - 20) * 1000;
+				playback.push({ ...frame(), group: ms / 20 });
+				await microtasks();
+			}
+			expect(playback.inserted()).toEqual([140_000, 160_000]);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+}
+
 describe("Decoder across a broadcast disable", () => {
 	it("releases the graph when its broadcast is disabled and rebuilds on return", async () => {
 		const playback = await play(Milli(100));
