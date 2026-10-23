@@ -32,6 +32,10 @@ impl PacketBuilder {
     ///
     /// Marks the connection drained and returns `None` if the confidentiality limit would be
     /// violated, or an Initial token leaves insufficient space for frames.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "private plumbing; a single-use argument struct would only rename the parameters"
+    )]
     pub(super) fn new(
         now: Instant,
         space_id: SpaceId,

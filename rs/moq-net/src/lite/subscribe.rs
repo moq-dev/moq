@@ -53,6 +53,7 @@ impl Version {
 }
 
 impl Message for Subscribe<'_> {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
@@ -268,6 +269,7 @@ pub struct SubscribeOk {
 }
 
 impl Message for SubscribeOk {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 => {
@@ -337,6 +339,7 @@ pub struct SubscribeStart {
 }
 
 impl Message for SubscribeStart {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
@@ -381,6 +384,7 @@ pub struct SubscribeEnd {
 }
 
 impl Message for SubscribeEnd {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
@@ -418,6 +422,7 @@ pub struct SubscribeUpdate {
 }
 
 impl Message for SubscribeUpdate {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {
@@ -534,6 +539,7 @@ impl SubscribeDrop {
 }
 
 impl Message for SubscribeDrop {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Subscribe);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {

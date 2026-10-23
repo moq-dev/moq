@@ -58,16 +58,19 @@ impl Message for SubscribeTracks<'_> {
 		encode_namespace(w, &self.prefix)?;
 		// Absent means 1, so only a paused listing writes it.
 		let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
-		// Draft-18 allows only AUTHORIZATION_TOKEN and FORWARD here.
+		// Draft-18 allows only AUTHORIZATION_TOKEN and FORWARD here. Draft-22 section 9.18
+		// lists GROUP_ORDER but no longer SUBSCRIBER_PRIORITY, LOCATION_FILTER,
+		// FILL_PARAMETERS, or NEW_GROUP_REQUEST, which a resuming REQUEST_UPDATE carries.
 		let defaults = version != Version::Draft18;
+		let subscription = defaults && version != Version::Draft22;
 		encode_params!(w, version,
 			0x03 => self.authorization_token.clone(),
 			0x10 => (!self.forward).then_some(false),
-			0x20 => self.subscriber_priority.filter(|_| defaults),
-			0x21 => self.filter.filter(|_| defaults),
+			0x20 => self.subscriber_priority.filter(|_| subscription),
+			0x21 => self.filter.filter(|_| subscription),
 			0x22 => self.group_order.filter(|_| defaults),
-			0x23 => self.fill.filter(|_| Filter::is_draft20(version)),
-			0x32 => self.new_group.filter(|_| defaults),
+			0x23 => self.fill.filter(|_| subscription && Filter::is_draft20(version)),
+			0x32 => self.new_group.filter(|_| subscription),
 			0x35 => include_properties,
 		);
 		Ok(())
@@ -267,6 +270,37 @@ mod tests {
 		let bytes = [0x04, 0x01, 0x04, b'r', b'o', b'o', b'm', 0x01, 0x20, 0x07];
 		assert!(decode::<SubscribeTracks>(&bytes, Version::Draft19).is_ok());
 		assert!(decode::<SubscribeTracks>(&bytes, Version::Draft18).is_err());
+	}
+
+	/// Draft-22 section 9.18 no longer lists SUBSCRIBER_PRIORITY, LOCATION_FILTER,
+	/// FILL_PARAMETERS, or NEW_GROUP_REQUEST, so none is sent there; GROUP_ORDER still is.
+	/// Section 3.6.2 still allows any subscription parameter, so one received is read.
+	#[test]
+	fn draft_22_sends_only_its_listed_parameters() {
+		let listing = SubscribeTracks {
+			subscriber_priority: Some(7),
+			filter: Some(Filter::NextObject),
+			fill: Some(super::super::Fill {
+				filter: Some(Filter::NextObject),
+				range_filters: false,
+			}),
+			new_group: Some(0),
+			..paused()
+		};
+		let ordered = SubscribeTracks {
+			group_order: Some(GroupOrder::Ascending),
+			..paused()
+		};
+		let with_order = SubscribeTracks {
+			group_order: Some(GroupOrder::Ascending),
+			..listing.clone()
+		};
+		let version = Version::Draft22;
+		assert_eq!(encode(&listing, version), encode(&paused(), version));
+		assert_eq!(encode(&with_order, version), encode(&ordered, version));
+		let decoded: SubscribeTracks = decode(&encode(&listing, Version::Draft21), version).unwrap();
+		assert_eq!(decoded.subscriber_priority, Some(7));
+		assert_eq!(decoded.new_group, Some(0));
 	}
 
 	#[test]

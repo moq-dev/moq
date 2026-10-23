@@ -19,7 +19,11 @@ pub struct Config {
 	pub compression: Compression,
 
 	/// Maximum bytes in an inflated frame or the compact JSON of the reconstructed value.
-	/// Unset preserves the DEFLATE decoder's default frame cap and leaves state size unlimited.
+	///
+	/// Unset, the group budget is the only bound: a compressed group inflates to at most
+	/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), the most a plain one carries, so the
+	/// reconstructed value costs no more than an uncompressed track's. Set it to hold a smaller
+	/// document, at the cost of re-measuring the value after every delta.
 	pub max_size: Option<usize>,
 }
 

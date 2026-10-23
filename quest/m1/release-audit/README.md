@@ -74,50 +74,44 @@ Targeted reproductions confirmed a finite HLS startup race, retained HLS
 server state after final drop, idle Dart stream cancellation, empty expiry
 indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
 reordered-frame timestamps and missing EOF output. Each owning quest records
-the reproduction's limits. The JS datagram range defect moved from the JS
-ranges quest into [JS subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md)
-on 2026-10-22; the OBS quest retains ownership of its findings. Go reservation disposal remains an investigation, and
+the reproduction's limits. JS reader and publisher datagram paths now enforce
+subscription bounds; the OBS quest retains ownership of its findings.
+Go reservation disposal remains an investigation, and
 the security-sensitive HLS admission item is deliberately a public pointer.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
 
+The 2026-10-22 binding and OBS audit at main
+[1f5caa7026](https://github.com/moq-dev/moq/commit/1f5caa7026) added the
+rate recovery child. Its two OBS findings went to m2 next to the other OBS
+work, because obs-moq ships on its own schedule.
+
 ## Required
 
-The 20 children comprise 16 reproduced or source-confirmed findings, three
+The entries comprise reproduced or source-confirmed findings,
 contract/lifetime investigations, and one security-review pointer. Each
 child records whether its behavior is new on main or inherited from release.
 
 - [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
-- [Bound export reorder storage](/quest/m1/release-audit/export-reorder.md) - flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
-- [Validate CMAF header fields](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count, and a zero timescale is refused
-- [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
-- [JS honors subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md) - each reader and each datagram stays inside its own subscription's group bounds, not the aggregate's
+- [Decode order](/quest/m1/ts-reliability/decode-order.md) - the exporters' decode clock holds at most the declared reorder depth, so flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
 - [Refuse partial lite groups in JS](/quest/m1/release-audit/js-partial-group.md) - a nonzero `frameStart` closes the session as a protocol violation, not a renumbered complete group
-- [Announce finite HLS imports](/quest/m1/release-audit/hls-startup.md) - a completed valid source cannot race its ready catalog and fail startup
-- [Cancel Dart stream reads](/quest/m1/release-audit/dart-cancellation.md) - listener cancellation releases pending native operations without an unrelated event
 - [Release AUTH wake listeners](/quest/m1/release-audit/auth-listeners.md) - session churn does not retain one terminal promise reaction per change
 - [Report fatal watch ingestion failures](/quest/m1/release-audit/watch-errors.md) - failed audio/video reads reach the existing error output and tear down their resources
-- [Accept reordered HTTP/3 streams](/quest/m1/release-audit/webtransport-streams.md) - QPACK or a stalled header before SETTINGS does not reject or block a valid handshake
-- [Constrain auth credential redirects](/quest/m1/release-audit/auth-redirects.md) - JSON credentials cannot silently follow redirects to another origin
-- [Release finished FFI codecs](/quest/m1/release-audit/ffi-finished.md) - preserving finished tracks does not preserve drained encoders and scratch buffers
-- [Release HLS server state](/quest/m1/release-audit/hls-shutdown.md) - final server drop retires its watchers while publishers remain live
+- [Finish bitrate recovery](/quest/m1/release-audit/rate-recovery.md) - a quiet bandwidth grant no longer strands moq-video, moq-ffi, and moq-c encoders partway up the ramp
+- [Release finished importer scratch](/quest/m1/release-audit/finished-import-scratch.md) - finished video/importer publications release obsolete parser storage while retaining tracks and catalog renditions
 - [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets
-- [Preserve IETF timestamps](/quest/m1/release-audit/ietf-timestamps.md) - JS encoding uses exact same-scale conversion and rejects unsupported values before sending
-- [Settle Go reservation release](/quest/m1/release-audit/go-reservation.md) - investigate prompt allocation release through the public wrapper
 - [Settle finite HLS import](/quest/m1/release-audit/hls-finite.md) - initially ended playlists have an explicit and tested start position
-- [Settle HLS timestamp resets](/quest/m1/release-audit/hls-discontinuity.md) - unchanged-map discontinuities preserve timeline identity or are explicitly refused
 
 ## Related
 
 - [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - range lists and frame offsets build on the bounds fixed here
 - [OBS video source](/quest/m2/obs-moq-video/source.md) - reproduced inherited timing and EOF defects remain with the decoder replacement owner
-- [Receive memory](/quest/m1/quic/receive-memory.md) - incomplete reliable input remains a separate connection-credit concern
 - [QPACK dependency fix](/quest/m0/web-transport-proto-0.6.3.md) - decoded header expansion is already tracked
 - [Compressed tracks](/quest/m1/compress/README.md) - mid-group widening and application migration have existing owners
 - [Archive consumer](/quest/m1/archive/consumer.md) - current producer and CLI reader still need the new-format roundtrip
 - [Measured release performance](/quest/m1/release-perf/README.md) - existing paired benchmark regressions and their confirmation runs
-- [Transport performance audit](/quest/m1/audit-perf.md) - congestion-control coverage remains outstanding
+- [Transport performance audit](/quest/m2/audit-perf.md) - congestion-control coverage remains outstanding
 - [Binding timestamps](/quest/m1/binding-timestamps.md) - exact timestamps across language APIs
 - [Dependency audit](/quest/m2/audit-deps.md) - existing advisory inventory
 - [Release gates](/quest/m0/ci/release-gates.md) - post-cut ruleset verification

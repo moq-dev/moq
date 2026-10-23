@@ -88,7 +88,10 @@ export class AudioRingBuffer {
 		if (latencySamples > this.#latencySamples) this.#stalled = true;
 		this.#latencySamples = latencySamples;
 
-		const newCapacity = this.#capacityFor(this.#latencySamples);
+		// A live ring sheds what a lower floor no longer covers, keeping the newest. Buffered mode
+		// plays through everything, so its ring keeps the whole unread span; backpressure holds new
+		// frames until playback drains it below the new floor.
+		const newCapacity = Math.max(this.#capacityFor(this.#latencySamples), this.#buffered ? this.length : 0);
 		if (newCapacity !== this.capacity) this.#reallocate(newCapacity);
 
 		// Resume a refill that the buffer already covers, which `write` would only notice on the

@@ -6,6 +6,8 @@
 // and a callback fires as each frame arrives. Once a non-empty video frame has
 // landed and --audio-ms of audio has been decoded to --audio-out (for tone.py to
 // judge) we close and drain every registration, then return 0; a timeout exits 1.
+// --finish instead verifies the complete finite tail, clean media/catalog EOF,
+// withdrawal, and a live session.
 // Publishing isn't wired up: the raw-stream importer that the other clients use
 // to publish isn't part of this subscribe-only client.
 //
@@ -15,6 +17,8 @@
 // --version offers only that version, through moq_client_config.
 #include <moq.h>
 
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -25,9 +29,19 @@
 #include <unistd.h>
 
 typedef struct {
+    int enabled, failed, announce_end, done_announce, done_health_wait, done_health;
+    unsigned expected, frames, health_frames;
+    int connected;
+    int32_t frame_end, catalog_end, health_end;
+    int32_t announcements, health_wait, health_broadcast;
+    const char *path;
+} finish_t;
+
+typedef struct {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     int got; // a non-empty frame arrived
+    finish_t finish;
     int32_t origin;
     int32_t session;
     int32_t broadcast_wait;
@@ -44,7 +58,7 @@ typedef struct {
     int audio_got;
 
     // One flag per registration handed &ctx, set by that registration's terminal
-    // (<= 0) callback. main returns only once all five are set: that terminal is
+    // (<= 0) callback. main returns only once every registration is done: that terminal is
     // moq-c's documented last touch of user_data, so it is what makes main's
     // frame safe to destroy.
     int done_status, done_broadcast, done_catalog, done_frame, done_audio;
@@ -66,23 +80,40 @@ static void done(ctx_t *c, int *flag) {
 static void on_status(void *ud, int32_t code) {
     ctx_t *c = (ctx_t *)ud;
     fprintf(stderr, "session status: %d\n", code);
+    if (c->finish.enabled && code > 0) {
+        pthread_mutex_lock(&c->mu);
+        c->finish.connected = code;
+        if (code > 1) c->finish.failed = 1;
+        pthread_cond_broadcast(&c->cv);
+        pthread_mutex_unlock(&c->mu);
+    }
     if (code <= 0) done(c, &c->done_status);
 }
 
 static void on_frame(void *ud, int32_t frame) {
     ctx_t *c = (ctx_t *)ud;
     if (frame <= 0) { // 0 = ended, negative = error
+        pthread_mutex_lock(&c->mu);
+        c->finish.frame_end = frame;
+        if (c->finish.enabled && frame < 0) {
+            fprintf(stderr, "finish media error: %d %s\n", frame, moq_error());
+            c->finish.failed = 1;
+        }
+        pthread_mutex_unlock(&c->mu);
         done(c, &c->done_frame);
         return;
     }
     moq_frame f;
     memset(&f, 0, sizeof(f));
-    if (moq_consume_frame((uint32_t)frame, &f) == 0 && f.payload_size > 0) {
-        pthread_mutex_lock(&c->mu);
+    int32_t read = moq_consume_frame((uint32_t)frame, &f);
+    pthread_mutex_lock(&c->mu);
+    if (read < 0 && c->finish.enabled) c->finish.failed = 1;
+    if (read == 0 && f.payload_size > 0) {
         c->got = 1;
-        pthread_cond_broadcast(&c->cv);
-        pthread_mutex_unlock(&c->mu);
+        if (c->finish.enabled && ++c->finish.frames > c->finish.expected) c->finish.failed = 1;
     }
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
     moq_consume_frame_free((uint32_t)frame);
 }
 
@@ -120,6 +151,12 @@ static void on_audio(void *ud, int32_t frame) {
 static void on_broadcast(void *ud, int32_t broadcast) {
     ctx_t *c = (ctx_t *)ud;
     if (broadcast <= 0) { // 0 = ended, negative = error
+        if (c->finish.enabled) {
+            if (broadcast < 0) fprintf(stderr, "finish broadcast error: %d %s\n", broadcast, moq_error());
+            pthread_mutex_lock(&c->mu);
+            c->finish.failed = 1;
+            pthread_mutex_unlock(&c->mu);
+        }
         done(c, &c->done_broadcast);
         return;
     }
@@ -130,19 +167,35 @@ static void on_broadcast(void *ud, int32_t broadcast) {
         pthread_cond_broadcast(&c->cv);
     }
     pthread_mutex_unlock(&c->mu);
-    if (!first) moq_consume_close((uint32_t)broadcast);
+    if (!first) {
+        if (c->finish.enabled) {
+            pthread_mutex_lock(&c->mu);
+            c->finish.failed = 1; // A replacement instance cannot finish this fixture.
+            pthread_cond_broadcast(&c->cv);
+            pthread_mutex_unlock(&c->mu);
+        }
+        moq_consume_close((uint32_t)broadcast);
+    }
 }
 
 static void on_catalog(void *ud, int32_t catalog) {
     ctx_t *c = (ctx_t *)ud;
     if (catalog <= 0) {
+        pthread_mutex_lock(&c->mu);
+        c->finish.catalog_end = catalog;
+        if (c->finish.enabled && (catalog < 0 || c->video_track <= 0)) {
+            if (catalog < 0) fprintf(stderr, "finish catalog error: %d %s\n", catalog, moq_error());
+            c->finish.failed = 1;
+        }
+        pthread_mutex_unlock(&c->mu);
         done(c, &c->done_catalog);
         return;
     }
 
     pthread_mutex_lock(&c->mu);
     int start = c->video_track <= 0;
-    int start_audio = c->audio_track <= 0;
+    // A finish reader checks the video tail alone.
+    int start_audio = !c->finish.enabled && c->audio_track <= 0;
     pthread_mutex_unlock(&c->mu);
 
     if (start_audio) {
@@ -180,10 +233,93 @@ static void on_catalog(void *ud, int32_t catalog) {
                 pthread_mutex_lock(&c->mu);
                 c->video_track = track;
                 pthread_mutex_unlock(&c->mu);
+            } else if (c->finish.enabled) {
+                fprintf(stderr, "finish video registration error: %d %s\n", track, moq_error());
+                pthread_mutex_lock(&c->mu);
+                c->finish.failed = 1;
+                pthread_cond_broadcast(&c->cv);
+                pthread_mutex_unlock(&c->mu);
             }
         }
     }
     moq_consume_catalog_free((uint32_t)catalog);
+}
+
+// An END is a route withdrawal, not the terminal of the announcement listener.
+static void on_finish_announce(void *ud, int32_t event) {
+    ctx_t *c = ud;
+    if (event <= 0) {
+        if (event < 0) {
+            fprintf(stderr, "finish announcement error: %d %s\n", event, moq_error());
+            pthread_mutex_lock(&c->mu);
+            c->finish.failed = 1;
+            pthread_mutex_unlock(&c->mu);
+        }
+        done(c, &c->finish.done_announce);
+        return;
+    }
+    moq_announce_event info;
+    int32_t read = moq_origin_announced_info((uint32_t)event, &info);
+    pthread_mutex_lock(&c->mu);
+    if (read < 0) c->finish.failed = 1;
+    else if (info.prefix_len == strlen(c->finish.path) &&
+             memcmp(info.prefix, c->finish.path, info.prefix_len) == 0 &&
+             info.kind == MOQ_ANNOUNCE_KIND_END) c->finish.announce_end = 1;
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
+    moq_origin_announced_free((uint32_t)event);
+}
+
+static void on_finish_health_frame(void *ud, int32_t frame) {
+    ctx_t *c = ud;
+    if (frame <= 0) {
+        pthread_mutex_lock(&c->mu);
+        c->finish.health_end = frame;
+        if (frame < 0) {
+            fprintf(stderr, "finish health error: %d %s\n", frame, moq_error());
+            c->finish.failed = 1;
+        }
+        pthread_mutex_unlock(&c->mu);
+        done(c, &c->finish.done_health);
+        return;
+    }
+    moq_frame info;
+    int32_t read = moq_consume_track_frame((uint32_t)frame, &info);
+    const char payload[] = "session-alive";
+    pthread_mutex_lock(&c->mu);
+    if (read < 0 || info.payload_size != sizeof(payload) - 1 ||
+        memcmp(info.payload, payload, sizeof(payload) - 1) != 0 ||
+        info.timestamp_present || ++c->finish.health_frames != 1) c->finish.failed = 1;
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
+    moq_consume_track_frame_free((uint32_t)frame);
+}
+
+static void on_finish_health(void *ud, int32_t broadcast) {
+    ctx_t *c = ud;
+    if (broadcast <= 0) {
+        if (broadcast < 0) fprintf(stderr, "finish health broadcast error: %d %s\n", broadcast, moq_error());
+        pthread_mutex_lock(&c->mu);
+        c->finish.failed = 1;
+        pthread_mutex_unlock(&c->mu);
+        done(c, &c->finish.done_health_wait);
+        return;
+    }
+    pthread_mutex_lock(&c->mu);
+    int first = c->finish.health_broadcast == 0;
+    if (first) c->finish.health_broadcast = broadcast;
+    else c->finish.failed = 1;
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
+    if (!first) {
+        moq_consume_close((uint32_t)broadcast);
+        return;
+    }
+    int32_t track = moq_consume_track((uint32_t)broadcast, "live", 4, NULL, on_finish_health_frame, ud);
+    pthread_mutex_lock(&c->mu);
+    if (track <= 0) c->finish.failed = 1;
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
 }
 
 // The context whose session a failure closes, once connected.
@@ -218,6 +354,40 @@ static _Noreturn void fail(const char *fmt, ...) {
     _exit(1);
 }
 
+// These assertions precede every local cancel, which would also produce terminal 0.
+static void finish(ctx_t *c, const struct timespec *deadline) {
+    pthread_mutex_lock(&c->mu);
+    while (!c->finish.failed && !c->done_status && !c->finish.done_announce &&
+           !(c->done_frame && c->done_catalog && c->finish.announce_end)) {
+        if (pthread_cond_timedwait(&c->cv, &c->mu, deadline) != 0) break;
+    }
+    int ok = !c->finish.failed && !c->done_status && !c->finish.done_announce &&
+             c->done_frame && c->done_catalog &&
+             c->finish.frame_end == 0 && c->finish.catalog_end == 0 && c->finish.announce_end &&
+             c->finish.frames == c->finish.expected;
+    unsigned frames = c->finish.frames;
+    pthread_mutex_unlock(&c->mu);
+    if (!ok) fail("error: finish did not drain naturally (frames=%u expected=%u)\n", frames, c->finish.expected);
+
+    size_t length = strlen(c->finish.path) + sizeof(".health");
+    char *path = malloc(length);
+    if (!path) fail("error: cannot allocate health path\n");
+    snprintf(path, length, "%s.health", c->finish.path);
+    c->finish.health_wait = moq_origin_announced_broadcast((uint32_t)c->origin, path, strlen(path), on_finish_health, c);
+    free(path);
+    if (c->finish.health_wait <= 0) fail("error: health registration failed\n");
+
+    pthread_mutex_lock(&c->mu);
+    while (!c->finish.failed && !c->done_status && !c->finish.done_health) {
+        if (pthread_cond_timedwait(&c->cv, &c->mu, deadline) != 0) break;
+    }
+    ok = !c->finish.failed && !c->done_status && c->finish.done_health &&
+         c->finish.health_end == 0 && c->finish.health_frames == 1;
+    pthread_mutex_unlock(&c->mu);
+    if (!ok) fail("error: session health failed after broadcast finish\n");
+    fprintf(stderr, "finish clean frames=%u catalog=eof announce=end health=ok\n", frames);
+}
+
 // Close every registration holding &ctx and wait for each one's terminal
 // callback. Only then may main return: main's frame is ctx's storage, and
 // exit()'s own call frames reuse those addresses, so a callback that arrives
@@ -232,15 +402,21 @@ static void drain(ctx_t *c) {
     pthread_mutex_lock(&c->mu);
     int32_t track = c->video_track;
     int32_t audio = c->audio_track;
+    int cancel_frame = !c->finish.enabled || !c->done_frame;
+    int cancel_catalog = !c->finish.enabled || !c->done_catalog;
     // A track that was never started registered nothing, so it owes no terminal.
     if (track <= 0) c->done_frame = 1;
     if (audio <= 0) c->done_audio = 1;
     pthread_mutex_unlock(&c->mu);
 
-    if (track > 0) moq_consume_video_cancel((uint32_t)track);
+    if (track > 0 && cancel_frame) moq_consume_video_cancel((uint32_t)track);
     if (audio > 0) moq_decode_audio_cancel((uint32_t)audio);
-    moq_consume_catalog_cancel((uint32_t)c->catalog);
+    if (cancel_catalog) moq_consume_catalog_cancel((uint32_t)c->catalog);
     moq_origin_announced_broadcast_cancel((uint32_t)c->broadcast_wait);
+    if (c->finish.enabled) {
+        moq_origin_announced_cancel((uint32_t)c->finish.announcements);
+        moq_origin_announced_broadcast_cancel((uint32_t)c->finish.health_wait);
+    }
     moq_session_close((uint32_t)c->session);
 
     struct timespec deadline;
@@ -248,10 +424,12 @@ static void drain(ctx_t *c) {
     deadline.tv_sec += 10;
 
     pthread_mutex_lock(&c->mu);
-    while (!(c->done_frame && c->done_audio && c->done_catalog && c->done_broadcast && c->done_status)) {
+    while (!(c->done_frame && c->done_audio && c->done_catalog && c->done_broadcast && c->done_status &&
+             (!c->finish.enabled || (c->finish.done_announce && c->finish.done_health_wait && c->finish.done_health)))) {
         if (pthread_cond_timedwait(&c->cv, &c->mu, &deadline) != 0) break; // timed out
     }
-    int ok = c->done_frame && c->done_audio && c->done_catalog && c->done_broadcast && c->done_status;
+    int ok = c->done_frame && c->done_audio && c->done_catalog && c->done_broadcast && c->done_status &&
+             (!c->finish.enabled || (c->finish.done_announce && c->finish.done_health_wait && c->finish.done_health));
     int f = c->done_frame, a = c->done_audio, ct = c->done_catalog, b = c->done_broadcast, s = c->done_status;
     pthread_mutex_unlock(&c->mu);
 
@@ -264,6 +442,8 @@ static void drain(ctx_t *c) {
 int main(int argc, char **argv) {
     const char *url = NULL, *broadcast = NULL, *version = NULL, *audio_out = NULL;
     double timeout_s = 20.0;
+    int finish_mode = 0;
+    unsigned frames = 0;
     long audio_ms = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--url") && i + 1 < argc) url = argv[++i];
@@ -272,28 +452,41 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--version") && i + 1 < argc) version = argv[++i];
         else if (!strcmp(argv[i], "--audio-out") && i + 1 < argc) audio_out = argv[++i];
         else if (!strcmp(argv[i], "--audio-ms") && i + 1 < argc) audio_ms = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--finish")) finish_mode = 1;
+        else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
+            char *end;
+            errno = 0;
+            unsigned long value = strtoul(argv[++i], &end, 10);
+            if (errno || !*argv[i] || argv[i][0] == '-' || *end || value == 0 || value > UINT_MAX) return 2;
+            frames = (unsigned)value;
+        }
         // a leading "subscribe" positional (and anything else) is ignored.
     }
-    if (!url || !broadcast || !audio_out || audio_ms <= 0) {
-        fprintf(stderr, "usage: c-interop subscribe --url U --broadcast B --audio-out PREFIX --audio-ms MS [--timeout S] [--version V]\n");
+    if (!url || !broadcast || (finish_mode ? frames == 0 || audio_out != NULL : frames != 0 || !audio_out || audio_ms <= 0)) {
+        fprintf(stderr, "usage: c-interop subscribe --url U --broadcast B (--audio-out PREFIX --audio-ms MS | --finish --frames N) [--timeout S] [--version V]\n");
         return 2;
     }
 
     ctx_t c;
     memset(&c, 0, sizeof(c));
+    c.finish.enabled = finish_mode;
+    c.finish.expected = frames;
+    c.finish.path = broadcast;
     pthread_mutex_init(&c.mu, NULL);
     pthread_cond_init(&c.cv, NULL);
 
-    char path[4096];
-    snprintf(path, sizeof(path), "%s.txt", audio_out);
-    c.audio_log = fopen(path, "w");
-    snprintf(path, sizeof(path), "%s.pcm", audio_out);
-    c.audio_pcm = fopen(path, "wb");
-    if (!c.audio_log || !c.audio_pcm) {
-        fprintf(stderr, "error: cannot write %s.{txt,pcm}\n", audio_out);
-        return 1;
+    if (!finish_mode) {
+        char path[4096];
+        snprintf(path, sizeof(path), "%s.txt", audio_out);
+        c.audio_log = fopen(path, "w");
+        snprintf(path, sizeof(path), "%s.pcm", audio_out);
+        c.audio_pcm = fopen(path, "wb");
+        if (!c.audio_log || !c.audio_pcm) {
+            fprintf(stderr, "error: cannot write %s.{txt,pcm}\n", audio_out);
+            return 1;
+        }
+        c.audio_ms = (uint64_t)audio_ms;
     }
-    c.audio_ms = (uint64_t)audio_ms;
 
     c.origin = moq_origin_create();
     if (c.origin <= 0) {
@@ -326,6 +519,33 @@ int main(int argc, char **argv) {
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += (time_t)timeout_s;
 
+    if (finish_mode) {
+        pthread_mutex_lock(&c.mu);
+        while (!c.finish.connected && !c.done_status && !c.finish.failed) {
+            if (pthread_cond_timedwait(&c.cv, &c.mu, &deadline) != 0) break;
+        }
+        int ready = c.finish.connected == 1 && !c.done_status && !c.finish.failed;
+        pthread_mutex_unlock(&c.mu);
+        if (!ready) fail("error: finish reader did not establish its first session\n");
+        puts("finish reader ready");
+        fflush(stdout);
+        char command[16];
+        if (!fgets(command, sizeof(command), stdin) || strcmp(command, "read\n")) {
+            fail("error: finish reader expected read command\n");
+        }
+        // Cold reader startup precedes publication; only the released read spends the linger.
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += (time_t)timeout_s;
+
+        moq_announce_config announce;
+        memset(&announce, 0, sizeof(announce));
+        announce.prefix = broadcast;
+        announce.prefix_len = strlen(broadcast);
+        announce.filter = ""; // Exact path only, excluding the health sibling.
+        c.finish.announcements = moq_origin_announced((uint32_t)c.origin, &announce, on_finish_announce, &c);
+        if (c.finish.announcements <= 0) fail("error: finish announcement registration failed\n");
+    }
+
     // The broadcast arrives over the network after connect, so wait for it to be
     // announced. moq_origin_announced_broadcast resolves via on_broadcast once it's
     // available; we block on the condvar until then (or the deadline).
@@ -350,27 +570,33 @@ int main(int argc, char **argv) {
         fail("error: moq_consume_catalog failed: %d\n", c.catalog);
     }
 
-    pthread_mutex_lock(&c.mu);
-    while (!c.got || !c.audio_got) {
-        if (pthread_cond_timedwait(&c.cv, &c.mu, &deadline) != 0) break; // timed out
-    }
-    int got = c.got, audio_got = c.audio_got;
-    pthread_mutex_unlock(&c.mu);
+    if (finish_mode) finish(&c, &deadline);
+    else {
+        pthread_mutex_lock(&c.mu);
+        while (!c.got || !c.audio_got) {
+            if (pthread_cond_timedwait(&c.cv, &c.mu, &deadline) != 0) break; // timed out
+        }
+        int got = c.got, audio_got = c.audio_got;
+        pthread_mutex_unlock(&c.mu);
 
-    if (!got || !audio_got) {
-        fail("error: timed out waiting for data (video=%d audio=%d)\n", got, audio_got);
-    }
+        if (!got || !audio_got) {
+            fail("error: timed out waiting for data (video=%d audio=%d)\n", got, audio_got);
+        }
 
-    fprintf(stderr, "received a frame and %llu audio samples from %s\n", (unsigned long long)c.audio_samples,
-            broadcast);
+        fprintf(stderr, "received a frame and %llu audio samples from %s\n", (unsigned long long)c.audio_samples,
+                broadcast);
+    }
 
     // The data path succeeded, which is all this interop client verifies. Returning
     // (rather than _exit) is the other half of what it verifies: an embedder that
     // closes and drains gets a clean process exit, with moq-c's runtime thread
     // still live behind its LazyLock.
     drain(&c);
-    fclose(c.audio_log);
-    fclose(c.audio_pcm);
+    if (finish_mode) moq_consume_close((uint32_t)c.finish.health_broadcast);
+    else {
+        fclose(c.audio_log);
+        fclose(c.audio_pcm);
+    }
     moq_consume_close((uint32_t)bc);
     moq_origin_close((uint32_t)c.origin);
     fflush(stderr);
