@@ -7198,8 +7198,15 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 		shutdown_ready(&track, &reader).await;
 		let receiving = tokio::spawn(async move { reader.read_frame().await });
 		let start = moq_clock::Instant::now();
+		let mut closed = Box::pin(publisher.closed());
+		assert!(
+			closed
+				.as_mut()
+				.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+				.is_pending()
+		);
 		publisher.shutdown();
-		let err = tokio::time::timeout(TIMEOUT, publisher.closed())
+		let err = tokio::time::timeout(TIMEOUT, closed)
 			.await
 			.expect("shutdown")
 			.expect_err("unfinished track must time out");

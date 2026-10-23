@@ -931,6 +931,7 @@ impl Accepted {
 }
 
 /// An owned drain; dropping its waiter or the foreign session cannot cancel it.
+#[derive(Clone)]
 struct Shutdown {
 	result: kio::Consumer<Option<Result<(), MoqError>>>,
 	task: crate::ffi::Background,
@@ -957,7 +958,7 @@ impl Shutdown {
 #[derive(uniffi::Object)]
 pub struct MoqSession {
 	inner: Inner,
-	shutdown: std::sync::OnceLock<Shutdown>,
+	shutdown: std::sync::Mutex<Option<Shutdown>>,
 	/// Serializes `closed()` calls onto the FFI runtime; holds its own `Inner` clone
 	/// so a parked `closed()` doesn't block the rest of the surface.
 	closed: Task<Inner>,
@@ -1054,7 +1055,7 @@ impl Drop for MoqSession {
 		// lingering CLOSE task, which panics if no reactor is in context. We can't leave this to the last `Session` clone's drop: clones
 		// live in the `closed`/`status` tasks and the connection state, released after
 		// this guard, off-runtime. Close-once dedup then makes those trailing drops no-ops.
-		if self.shutdown.get().is_none() {
+		if self.shutdown.get_mut().unwrap().is_none() {
 			self.teardown(moq_net::Error::Cancel);
 		}
 	}
@@ -1081,7 +1082,10 @@ impl MoqSession {
 				}
 			}))
 			.await;
-		match self.shutdown.get() {
+		// The client loop can stop as soon as the drain starts. Serialize this read
+		// with publication so an existing waiter cannot miss the drain's result.
+		let shutdown = self.shutdown.lock().unwrap().clone();
+		match shutdown {
 			Some(shutdown) => shutdown.finished().await,
 			None => terminal,
 		}
@@ -1144,31 +1148,33 @@ impl MoqSession {
 	/// A drain that takes longer than one second ends with a delivery timeout.
 	pub fn shutdown(&self) {
 		let _guard = crate::ffi::enter();
-		self.shutdown.get_or_init(|| {
-			let result = kio::Producer::new(None);
-			let receiver = result.consume();
-			let inner = self.inner.clone();
-			// Keep the origins, not just the connection, alive through the drain.
-			let publisher = self.publisher.clone();
-			let consumer = self.consumer.clone();
-			let task = crate::ffi::spawn(async move {
-				let completed = match inner {
-					#[cfg(not(target_arch = "wasm32"))]
-					Inner::Connection(connection) => connection.close().await.map_err(map_closed_error),
-					Inner::Session(session) => session.close().await,
-				};
-				let completed = publisher
-					.inner()
-					.driver
-					.check()
-					.and(consumer.driver.check())
-					.and(completed);
-				*result
-					.write()
-					.unwrap_or_else(|_| unreachable!("the drain owns its completion")) = Some(completed);
-			});
-			Shutdown { result: receiver, task }
+		let mut shutdown = self.shutdown.lock().unwrap();
+		if shutdown.is_some() {
+			return;
+		}
+		let result = kio::Producer::new(None);
+		let receiver = result.consume();
+		let inner = self.inner.clone();
+		// Keep the origins, not just the connection, alive through the drain.
+		let publisher = self.publisher.clone();
+		let consumer = self.consumer.clone();
+		let task = crate::ffi::spawn(async move {
+			let completed = match inner {
+				#[cfg(not(target_arch = "wasm32"))]
+				Inner::Connection(connection) => connection.close().await.map_err(map_closed_error),
+				Inner::Session(session) => session.close().await,
+			};
+			let completed = publisher
+				.inner()
+				.driver
+				.check()
+				.and(consumer.driver.check())
+				.and(completed);
+			*result
+				.write()
+				.unwrap_or_else(|_| unreachable!("the drain owns its completion")) = Some(completed);
 		});
+		*shutdown = Some(Shutdown { result: receiver, task });
 	}
 
 	/// The publish-side origin: where local broadcasts get advertised
