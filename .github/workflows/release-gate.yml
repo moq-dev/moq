@@ -30,6 +30,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       android: ${{ steps.filter.outputs.android }}
+      api-diff: ${{ steps.filter.outputs.api-diff }}
       audio-quality: ${{ steps.filter.outputs.audio-quality }}
       cpp: ${{ steps.filter.outputs.cpp }}
       interop: ${{ steps.filter.outputs.interop }}
@@ -82,6 +83,19 @@ jobs:
               - "Cargo.lock"
               - "rust-toolchain.toml"
               - ".github/workflows/android.yml"
+            # Anything a published API is built from, including the lockfiles,
+            # since a bumped dependency can change a re-exported type.
+            api-diff:
+              - "rs/**"
+              - "js/**"
+              - "Cargo.toml"
+              - "Cargo.lock"
+              - "package.json"
+              - "bun.lock"
+              - "cpp/moq/uniffi.toml"
+              - "sh/api-diff/**"
+              - "justfile"
+              - ".github/workflows/release-gate.yml"
             audio-quality:
               - "js/watch/**"
               # The container consumer decides what a replay delivers, waits for, and skips, on the
@@ -313,6 +327,13 @@ jobs:
     if: needs.scope.outputs.android == 'true'
     uses: ./.github/workflows/android.yml
 
+  api-diff:
+    name: API diff
+    needs: scope
+    if: needs.scope.outputs.api-diff == 'true'
+    uses: ./.github/workflows/api-diff.yml
+    secrets: inherit
+
   audio-quality:
     name: Audio quality
     needs: scope
@@ -464,6 +485,7 @@ jobs:
       - platform
       - features
       - android
+      - api-diff
       - audio-quality
       - cpp
       - interop

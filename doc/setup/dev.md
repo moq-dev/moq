@@ -20,6 +20,7 @@ match CI. `just check` and `just fix` refuse to run outside it; set
 | `just ci` | Run the merge queue's gate locally, strictly. PRs into `main` get no other CI, so run it before every push. |
 | `just gate` | `just ci` over every package, as nightly and release PRs run it. |
 | `just fix --all`, `just check --all` | The same, over every package. |
+| `just api-diff` | Diff every published API against its last release. PRs into `release` run it; `--deny` fails a backport on any break. |
 | `just pub bbb <url>` | Publish Big Buck Bunny (also `tos`, `clock`, `gst`, `hls`). |
 | `just sub gst bbb <url>` | Play a broadcast through GStreamer. |
 | `just relay` | Run a local relay on its own. |
