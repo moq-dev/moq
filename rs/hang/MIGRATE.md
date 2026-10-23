@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 `catalog::Section` and `catalog::deserialize_section` are internal to the catalog's own sections.
 An application section decodes through its own serde impl; copy the fallback if it needs one.
 
+### `Catalog` parses through `FromStr` (#6471)
+
+The inherent `Catalog::from_str` is replaced by `impl FromStr for Catalog`, with the same `Error`.
+Call `json.parse::<Catalog>()`, or bring `std::str::FromStr` into scope to keep calling `Catalog::from_str`.
+
 ### Priorities are signed (#6142)
 
 `catalog::Priorities` fields and `container::track_info`'s priority are `i8`, higher first, with 0 unset.

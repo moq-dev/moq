@@ -1216,8 +1216,8 @@ impl Producer {
 			return Err(Error::FrameTooLarge);
 		}
 
-		let track = self.first_frame_track();
-		let track = track.as_ref().map(|track| track.read());
+		let producer = self.first_frame_track();
+		let track = producer.as_ref().map(|track| track.read());
 		let neighbors = track
 			.as_ref()
 			.and_then(|track| track.neighbors(self.handle.info.sequence));
@@ -1265,7 +1265,7 @@ impl Producer {
 			track.first_frame(self.handle.info.sequence, bound);
 		}
 		drop(track);
-		self.handle.start();
+		self.handle.start(producer);
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -1299,8 +1299,8 @@ impl Producer {
 
 		let count = frames.len();
 		let bytes: u64 = frames.filled().iter().map(|frame| frame.payload.len() as u64).sum();
-		let track = self.first_frame_track();
-		let track = track.as_ref().map(|track| track.read());
+		let producer = self.first_frame_track();
+		let track = producer.as_ref().map(|track| track.read());
 		let neighbors = track
 			.as_ref()
 			.and_then(|track| track.neighbors(self.handle.info.sequence));
@@ -1371,7 +1371,7 @@ impl Producer {
 		}
 		drop(track);
 		if count > 0 {
-			self.handle.start();
+			self.handle.start(producer);
 		}
 
 		self.handle.cache.settle(now);
@@ -1451,8 +1451,8 @@ impl Producer {
 		let scratch = self.handle.track.compress && header.inflated.is_none();
 		let inflated = header.inflated.unwrap_or(frame.size);
 
-		let track = self.first_frame_track();
-		let track = track.as_ref().map(|track| track.read());
+		let producer = self.first_frame_track();
+		let track = producer.as_ref().map(|track| track.read());
 		let neighbors = track
 			.as_ref()
 			.and_then(|track| track.neighbors(self.handle.info.sequence));
@@ -1510,7 +1510,7 @@ impl Producer {
 			track.first_frame(self.handle.info.sequence, bound);
 		}
 		drop(track);
-		self.handle.start();
+		self.handle.start(producer);
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -1626,7 +1626,7 @@ impl Producer {
 		}
 		drop(state);
 		// An empty group counts as content once it ends.
-		self.handle.start();
+		self.handle.start(None);
 		// A finished group can no longer raise the track's largest, which may end its stream.
 		self.handle.cache.finish_largest(self.sequence);
 		Ok(())
@@ -1814,7 +1814,7 @@ impl Handle {
 		}
 		let now = state.charge.add(payload + metadata + growth);
 		drop(state);
-		self.start();
+		self.start(None);
 		self.cache.settle(now);
 	}
 
@@ -1980,11 +1980,14 @@ impl Handle {
 	/// The first frame opened or the group finished: tell the track once, so it re-judges
 	/// the reads that skipped this group while it was frameless. Called with the group
 	/// lock released, since the track's is taken first.
-	fn start(&self) {
+	///
+	/// `track` is the track a first frame already reached, so stamping a group upgrades
+	/// its link once.
+	fn start(&self, track: Option<kio::Producer<track::TrackState>>) {
 		if self.alive.started.swap(true, Ordering::Relaxed) {
 			return;
 		}
-		let Some(track) = self.cache.track() else {
+		let Some(track) = track.or_else(|| self.cache.track()) else {
 			return;
 		};
 		let answers = track.read().reveal(self);

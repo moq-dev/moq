@@ -5673,15 +5673,16 @@ impl Cursor {
 			// subsequent delivery stays in arrival order, including late datagrams.
 			let newest = state.datagrams.iter().filter_map(|datagram| datagram.timestamp).max();
 			let start = newest.map_or(0, |newest| {
+				// Every datagram carries the track's scale: convert the cutoff into it once,
+				// rounded up, rather than each timestamp into a `Duration` (a 128-bit division).
 				let cutoff = Duration::from(newest).saturating_sub(preferences.max_delay);
+				let scale = newest.scale().as_u64() as u128;
+				let cutoff = (cutoff.as_nanos() * scale).div_ceil(1_000_000_000) as u64;
+				let cutoff = Timestamp::new(cutoff, newest.scale()).expect("at most the newest");
 				state
 					.datagrams
 					.iter()
-					.position(|datagram| {
-						datagram
-							.timestamp
-							.is_none_or(|timestamp| Duration::from(timestamp) >= cutoff)
-					})
+					.position(|datagram| datagram.timestamp.is_none_or(|timestamp| timestamp >= cutoff))
 					.expect("the newest datagram is within max delay")
 			});
 			let filter = Filter {
@@ -8617,6 +8618,24 @@ mod test {
 			.append_datagram(Timestamp::from_millis(0).unwrap(), b"later".as_slice())
 			.unwrap();
 		assert_eq!(recv_datagram(&mut subscriber).sequence, 6);
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn datagram_replay_cutoff_between_track_units() {
+		// A 90 kHz unit doesn't divide the nanosecond cutoff, which lands inside unit 89_995.
+		let info = Info::default().with_timescale(Timescale::new(90_000).unwrap());
+		let mut producer = track_producer("video", info);
+		for units in [89_995, 89_996, 90_000] {
+			producer
+				.append_datagram(Timestamp::from_scale(units, 90_000).unwrap(), b"x".as_slice())
+				.unwrap();
+		}
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_micros(50)));
+		for sequence in [1, 2] {
+			assert_eq!(recv_datagram(&mut subscriber).sequence, sequence);
+		}
+		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
 	}
 
 	#[test]
