@@ -828,6 +828,17 @@ where
 		self.origin.clone().excluding(self.exclude(peer))
 	}
 
+	/// `origin` as advertised to this peer: never its own routes back (split horizon),
+	/// and under MoQ Cluster only the routes with room for our hop under the origin's
+	/// cap, so selection falls back to a shorter route instead of withdrawing.
+	fn advertising(&self, origin: origin::Consumer, peer: &cluster::Peer) -> origin::Consumer {
+		let origin = origin.excluding(self.exclude(peer));
+		match peer.negotiated() {
+			true => origin.forwardable(),
+			false => origin,
+		}
+	}
+
 	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
 	///
 	/// A peer that declared an identity supplies its own; otherwise fall back to the one
@@ -3995,7 +4006,7 @@ where
 		// Split horizon, as the solicited loop applies it: never advertise a route back
 		// to the peer it came from.
 		let origin = self
-			.excluding(&peer)
+			.advertising(self.origin.clone(), &peer)
 			.discovery(!self.peer_setup.get().await.hidden || self.origin.includes_hidden());
 
 		let mut ns = Namespaces::new(peer, Target::Requests(None));
@@ -4063,7 +4074,7 @@ where
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
-		let origin = origin.excluding(self.exclude(&peer));
+		let origin = self.advertising(origin, &peer);
 
 		// Peers that declared MoQ Hidden filter namespaces unless they opted in. A publish
 		// origin that already opted in (the caller's choice for this peer) keeps them.
@@ -4366,10 +4377,7 @@ where
 							.origin
 							.scope(&prefix, &scope)
 							.unwrap_or_else(|_| self.origin.empty());
-						announced = origin
-							.excluding(self.exclude(&ns.peer))
-							.discovery(ns.hidden)
-							.announced();
+						announced = self.advertising(origin, &ns.peer).discovery(ns.hidden).announced();
 						retry_at = None;
 						retry_delay = RETRY_BASE;
 					}

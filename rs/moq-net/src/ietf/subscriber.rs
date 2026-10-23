@@ -1067,7 +1067,7 @@ where
 			});
 		};
 
-		if advert.loops(self.self_origin) {
+		if advert.loops(self.self_origin) || advert.hops.hops().len() > self.origin.max_hops().get() {
 			return None;
 		}
 

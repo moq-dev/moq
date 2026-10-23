@@ -83,6 +83,25 @@ For a full mesh, list every other relay, or serve the list from `api.url`.
 A session carries both directions, so one dial per pair is enough; listing a
 pair on both sides opens a redundant second session.
 
+`cluster.max_hops` bounds the hop path this relay accepts or forwards, from 1
+to 32, with 32 as the default. Set it near the mesh's diameter after any single
+link or node failure, plus a margin, to cut off long detours during withdrawal
+path hunting. Count the publisher's hop too. A cap below that diameter can
+partition the mesh; a lower cap only drops longer paths and preserves route
+selection among the remaining paths. A peer hears the best route with room
+for this relay's hop, even when a cheaper route at the cap serves locally.
+
+```toml
+[cluster]
+max_hops = 6
+```
+
+The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. It covers
+moq-lite-03 through moq-lite-07-wip and moq-transport drafts 17 through 22 when
+the MoQ Cluster extension is negotiated. A forwarded path counts this relay's
+own hop even when its peer appends it on receipt. Older versions and peers
+without hop paths hide their depth, which this setting cannot bound.
+
 ## Upstream links
 
 Mark a link `upstream` and this relay never offers it a route learned on

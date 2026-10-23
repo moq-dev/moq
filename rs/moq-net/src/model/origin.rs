@@ -101,6 +101,14 @@ pub struct Config {
 	/// detection and shortest-path routing.
 	pub hop: Hop,
 
+	/// Longest hop path a session using this origin accepts or forwards (default 32).
+	///
+	/// Applies to moq-lite-03+ hop paths and the negotiated MoQ Cluster extension on
+	/// moq-transport. A forwarded path counts this origin's own hop too, including
+	/// when the receiving peer reconstructs that hop from the announce handshake.
+	/// Protocols without a hop path cannot reveal or bound the depth they hide.
+	pub max_hops: HopLimit,
+
 	/// The cache pool broadcasts under this origin charge their groups into. It flows
 	/// down the ownership chain (origin -> broadcast -> track -> group): a track opens
 	/// an account against it, and its groups charge through that. It has no byte target
@@ -157,6 +165,7 @@ impl Default for Config {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		Self {
 			hop: Hop::random(),
+			max_hops: HopLimit::default(),
 			pool,
 			cache_duration: Duration::MAX,
 			update_hold: DEFAULT_UPDATE_HOLD,
@@ -211,6 +220,32 @@ impl<V> Decode<V> for Hop {
 /// diameter; appending past this limit returns [`InvalidHop::TooMany`] rather than
 /// silently truncating.
 pub(super) const MAX_HOPS: usize = 32;
+
+/// The longest advertised hop path an origin accepts or forwards, from 1 to 32.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HopLimit(usize);
+
+impl HopLimit {
+	/// A hop-path cap from 1 to 32, or `None` outside that range.
+	pub const fn new(max: usize) -> Option<Self> {
+		if max == 0 || max > MAX_HOPS {
+			None
+		} else {
+			Some(Self(max))
+		}
+	}
+
+	/// The maximum number of hops in an advertised path.
+	pub const fn get(self) -> usize {
+		self.0
+	}
+}
+
+impl Default for HopLimit {
+	fn default() -> Self {
+		Self(MAX_HOPS)
+	}
+}
 
 /// Bounded, loop-free list of [`Hop`] entries: the hop chain of a broadcast.
 ///
@@ -1372,12 +1407,18 @@ struct Horizon {
 	/// Hide the routes learned on an upstream link, because this reader is one
 	/// ([`Producer::upstream`]): a relay never transits between two upstreams.
 	upstream: bool,
+	/// Hide the routes with no room for our hop under this cap, because this reader
+	/// forwards them ([`Consumer::forwardable`]). Selection then falls back to a
+	/// shorter route instead of withdrawing a prefix an in-cap path still reaches.
+	max_hops: Option<HopLimit>,
 }
 
 impl Horizon {
 	/// Whether `entry` may be observed or served through this horizon.
 	fn admits(&self, entry: &RouteEntry) -> bool {
-		self.admits_link(entry.link) && entry.visible_to(self.exclude)
+		self.admits_link(entry.link)
+			&& entry.visible_to(self.exclude)
+			&& self.max_hops.is_none_or(|max| entry.hops.len() < max.get())
 	}
 
 	/// Whether routes arriving on `link` may be observed through this horizon.
@@ -1394,10 +1435,17 @@ impl Horizon {
 	/// front on its next request, while what it already reads stays on the plain
 	/// front. That cannot loop, since the peer serves our requests through its own
 	/// split horizon, which never routes back through us.
+	///
+	/// The hop cap bounds what is advertised, not what serves a request, so it never
+	/// applies here.
 	fn effective(self, routes: &RouteTable, path: &Path) -> Self {
-		match self.exclude {
-			Some(peer) if routes.covering(path).any(|entry| !entry.visible_to(Some(peer))) => self,
-			_ => Self { exclude: None, ..self },
+		let horizon = Self { max_hops: None, ..self };
+		match horizon.exclude {
+			Some(peer) if routes.covering(path).any(|entry| !entry.visible_to(Some(peer))) => horizon,
+			_ => Self {
+				exclude: None,
+				..horizon
+			},
 		}
 	}
 }
@@ -1886,6 +1934,7 @@ pub struct Producer {
 	// Identity for this origin. Appended to route hops when re-announcing so
 	// downstream relays can detect loops and prefer the shortest path.
 	hop: Hop,
+	max_hops: HopLimit,
 
 	// The absolute patterns this handle may publish under.
 	scope: OriginScope,
@@ -1945,6 +1994,7 @@ impl Producer {
 		let pool = config.pool.clone();
 		let producer = Self {
 			hop: config.hop,
+			max_hops: config.max_hops,
 			scope: scope.clone(),
 			root: PathOwned::default(),
 			shared: shared.clone(),
@@ -2038,6 +2088,7 @@ impl Producer {
 	pub fn config(&self) -> Config {
 		Config {
 			hop: self.hop,
+			max_hops: self.max_hops,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			update_hold: self.shared.lock().update_hold,
@@ -2047,6 +2098,13 @@ impl Producer {
 	/// This origin's hop identity.
 	pub fn hop(&self) -> Hop {
 		self.hop
+	}
+
+	// Sessions enforce the policy configured once on the origin.
+	// private: tuning
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn max_hops(&self) -> HopLimit {
+		self.max_hops
 	}
 
 	/// A producer with *no* allowed prefixes: it can't publish anything and
@@ -2062,6 +2120,7 @@ impl Producer {
 		Self {
 			hop,
 			scope: OriginScope::empty(),
+			max_hops: HopLimit::default(),
 			root: PathOwned::default(),
 			shared: SendCell::new(kio::Shared::new(OriginState::new(
 				DEFAULT_UPDATE_HOLD,
@@ -2346,6 +2405,7 @@ impl Producer {
 		let scope = self.scope.narrow(&rooted).ok_or(Error::Unauthorized)?;
 		Ok(Producer {
 			hop: self.hop,
+			max_hops: self.max_hops,
 			scope,
 			root,
 			shared: self.shared.clone(),
@@ -3949,10 +4009,17 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							let _ = lister.add(name, info);
 						}
 					}
+					// Forwarded as the source reported it, finished or not.
 					Ok(Some(broadcast::TracksEvent::Removed { name })) => {
 						state.stale.remove(&name);
 						if state.listed.remove(&name) {
 							let _ = lister.remove(&name);
+						}
+					}
+					Ok(Some(broadcast::TracksEvent::Finished { name })) => {
+						state.stale.remove(&name);
+						if state.listed.remove(&name) {
+							let _ = lister.finish(&name);
 						}
 					}
 					Ok(Some(broadcast::TracksEvent::Synced)) => {
@@ -3975,7 +4042,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					// once its broadcast ended: so does the front's, and a later reader asks again.
 					Ok(None) => {
 						listing = None;
-						lister.finish();
+						lister.end();
 					}
 					Err(err) => {
 						// Its readers fail, and a later reader asks again.
@@ -4442,16 +4509,10 @@ impl RouteNode {
 					if let Ok(mut selected) = watch.write() {
 						let change = match routes {
 							Some((routes, hold)) => {
-								let best = routes.best_route(
-									&selected.path,
-									Horizon {
-										exclude: None,
-										local: false,
-										upstream: false,
-									},
-									&HashSet::new(),
-									|entry| entry.via == selected.via,
-								);
+								let best =
+									routes.best_route(&selected.path, Horizon::default(), &HashSet::new(), |entry| {
+										entry.via == selected.via
+									});
 								selected.change(best, hold)
 							}
 							None => selected.current.is_some().then_some(Change::End),
@@ -5334,35 +5395,17 @@ impl Dynamic {
 		if table.closed {
 			return None;
 		}
-		let entry = table.best_route(
-			path,
-			Horizon {
-				exclude: None,
-				local: false,
-				upstream: false,
-			},
-			&HashSet::new(),
-			|entry| {
-				entry
-					.server
-					.as_ref()
-					.is_some_and(|server| server.same_channel(&self.state))
-			},
-		)?;
+		let entry = table.best_route(path, Horizon::default(), &HashSet::new(), |entry| {
+			entry
+				.server
+				.as_ref()
+				.is_some_and(|server| server.same_channel(&self.state))
+		})?;
 		let via = entry.via;
 		let instance = entry.instance();
 		let prefix = entry.prefix.clone();
 		let active = table
-			.best_route(
-				path,
-				Horizon {
-					exclude: None,
-					local: false,
-					upstream: false,
-				},
-				&HashSet::new(),
-				|entry| entry.via == via,
-			)
+			.best_route(path, Horizon::default(), &HashSet::new(), |entry| entry.via == via)
 			.is_some_and(|entry| entry.instance() == instance);
 		let producer = kio::Producer::new(Selected {
 			path: path.to_owned(),
@@ -5938,6 +5981,7 @@ impl Consume<track::Consumer> for track::Consumer {
 pub struct Consumer {
 	// Identity of the origin this consumer was derived from.
 	hop: Hop,
+	max_hops: HopLimit,
 	scope: OriginScope,
 
 	// A prefix that is automatically stripped from all paths.
@@ -5986,6 +6030,7 @@ impl Consumer {
 	fn from_producer(producer: &Producer, stats: stats::Session) -> Self {
 		Self {
 			hop: producer.hop,
+			max_hops: producer.max_hops,
 			scope: producer.scope.clone(),
 			root: producer.root.clone(),
 			shared: producer.shared.clone(),
@@ -6019,6 +6064,16 @@ impl Consumer {
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.horizon.exclude = Some(peer);
+		self
+	}
+
+	/// A clone whose announcements skip the routes this origin cannot forward: a
+	/// chain already at [`Config::max_hops`] has no room for our hop. Sessions whose
+	/// wire carries the hop path apply this to the routes they advertise.
+	// private: tuning
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn forwardable(mut self) -> Self {
+		self.horizon.max_hops = Some(self.max_hops);
 		self
 	}
 
@@ -7126,6 +7181,25 @@ impl ProduceTest for Hop {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn hop_limit_refuses_values_outside_the_wire_bound() {
+		for invalid in [0, 33, usize::MAX] {
+			assert_eq!(HopLimit::new(invalid), None);
+		}
+		for valid in [1, 6, 32] {
+			assert_eq!(HopLimit::new(valid).unwrap().get(), valid);
+		}
+		assert_eq!(HopLimit::default().get(), 32);
+		let config = Config {
+			max_hops: HopLimit::new(6).unwrap(),
+			..Default::default()
+		};
+		let (producer, _driver) = Producer::new(config);
+		let scoped = producer.scope("room", &Patterns::from(Pattern::all())).unwrap();
+		assert_eq!(scoped.config().max_hops.get(), 6);
+		assert_eq!(scoped.consume().forwardable().horizon.max_hops, HopLimit::new(6));
+	}
 	#[cfg(feature = "async")]
 	use crate::model::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
@@ -8716,6 +8790,7 @@ mod tests {
 		match tracks.next().await {
 			Ok(Some(broadcast::TracksEvent::Added { name, .. })) => format!("+{name}"),
 			Ok(Some(broadcast::TracksEvent::Removed { name })) => format!("-{name}"),
+			Ok(Some(broadcast::TracksEvent::Finished { name })) => format!("~{name}"),
 			Ok(Some(broadcast::TracksEvent::Synced)) => "synced".into(),
 			Ok(None) => "end".into(),
 			Err(err) => format!("error: {err}"),
@@ -8762,7 +8837,7 @@ mod tests {
 		assert_eq!(listed(&mut tracks).await, "+video");
 		assert_eq!(listed(&mut tracks).await, "synced");
 
-		lister.finish();
+		lister.end();
 		assert_eq!(listed(&mut tracks).await, "end");
 		assert!(!front.is_closed(), "the listing's end is not the broadcast's");
 	}
