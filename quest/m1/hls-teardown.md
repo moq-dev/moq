@@ -4,10 +4,12 @@
 
 moq-hls's recorder cursors (`export::renditions::Consumer` and
 `export::segments::Consumer`) return `Ok(None)` only for a complete
-recording. Every other way a window closes, such as a retired rendition or a
-broadcaster closed without finishing, ends the cursor with an error, as does
-a segment the cursor misses because it fell behind. Each path is covered by
-a test.
+recording. Every other way a window closes, such as a broadcaster closed
+without finishing, ends the cursor with an error, as does a segment the
+cursor misses because it fell behind. A rendition the catalog removes or
+reconfigures is a supported transition, not an error: its cursor drains and
+ends cleanly, and the renditions cursor reports `Removed`. Each path is
+covered by a test.
 
 ## Plan
 
