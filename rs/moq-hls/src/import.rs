@@ -769,7 +769,8 @@ impl Import {
 		Ok(self.sink.broadcast.clone().finish())
 	}
 
-	/// Abort every rendition's importer with `err` so subscribers see the real cause.
+	/// Abort every rendition's importer and the catalog with `err` so subscribers see the real
+	/// cause.
 	///
 	/// Call this when the import is torn down with a known error; simply dropping the
 	/// [`Import`] instead lets its tracks end as [`moq_net::Error::Dropped`]. Consumes
@@ -785,6 +786,7 @@ impl Import {
 		{
 			importer.abort(err.clone());
 		}
+		self.sink.catalog.clone().abort(err);
 	}
 
 	/// Perform a single import step for all active tracks.
