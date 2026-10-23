@@ -1144,6 +1144,10 @@ where
 		Some(track)
 	}
 
+	pub(super) fn stats(&self) -> &crate::stats::Session {
+		self.origin.stats()
+	}
+
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
@@ -1161,6 +1165,11 @@ where
 		prefix: PathOwned,
 		snapshot: crate::model::Snapshot,
 	) -> Result<(), Error> {
+		stream = if self.version == Version::Draft16 {
+			stream.with_stats(self.origin.stats())
+		} else {
+			super::request_stream::with_stats(stream, self.origin.stats(), self.version)
+		};
 		// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
 		// peer into the origin and each local reader opts in on its own. The parameter
 		// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
@@ -2885,7 +2894,7 @@ where
 				})
 				.await
 				{
-					Ok(stream) => stream,
+					Ok(stream) => super::request_stream::with_stats(stream, self.origin.stats(), self.version),
 					Err(err) => {
 						target.fail(err);
 						return None;
@@ -3897,6 +3906,7 @@ where
 					Stream::poll_open(&mut opening, this.version, &mut waiter.context())
 				})
 				.await?;
+				stream = super::request_stream::with_stats(stream, this.origin.stats(), this.version);
 				let mut timeout = crate::time::Deadline::after(&this.runtime, Control::REQUEST_ID_TIMEOUT);
 				let fetch_id = kio::wait(|waiter| {
 					validity.check(waiter)?;
@@ -4098,6 +4108,7 @@ where
 				return None;
 			}
 		};
+		stream = super::request_stream::with_stats(stream, self.origin.stats(), self.version);
 		let mut timeout = crate::time::Deadline::after(&self.runtime, Control::REQUEST_ID_TIMEOUT);
 		let request_id = match kio::wait(|waiter| {
 			if gate.poll_denied(waiter).is_ready() {
@@ -5194,6 +5205,7 @@ where
 			Ok(stream) => stream,
 			Err(err) => return request.reject(err),
 		};
+		stream = super::request_stream::with_stats(stream, self.origin.stats(), self.version);
 		let mut timeout = crate::time::Deadline::after(&self.runtime, Control::REQUEST_ID_TIMEOUT);
 		let fetch_id = match kio::wait(|waiter| {
 			validity.check(waiter)?;

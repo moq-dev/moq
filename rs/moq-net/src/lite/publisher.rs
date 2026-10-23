@@ -237,6 +237,7 @@ where
 		loop {
 			match Stream::poll_accept(&mut self.accept, self.shared.version, &mut cx) {
 				Poll::Ready(Ok(stream)) => {
+					let stream = stream.with_stats(self.shared.origin.stats());
 					self.children.push(Control {
 						shared: self.shared.clone(),
 						runtime: self.runtime.clone(),

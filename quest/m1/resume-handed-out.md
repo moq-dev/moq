@@ -26,11 +26,4 @@ read group 1; A's partial group 0 fails. B was dropped, so group 0 stalls.
   single copy, so the per-group record's cost shows up.
 - Regression test on a mocked clock for the reproduction above.
 
-Lands after [#6224](https://github.com/moq-dev/moq/pull/6224), which edits the
-same reader, so it does not widen a PR under review.
-
 Public API: behavior only. Wire: none.
-
-## Required
-
-- [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - lands first; it edits the same reader
