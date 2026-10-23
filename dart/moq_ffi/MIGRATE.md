@@ -15,6 +15,10 @@ refused. `track` moves out of both encoder output records into
 codec-only encoders keep their input/output arguments and take no publication
 settings. Regenerate bindings and rebuild the native library together.
 
+### Video rendition preference
+
+`MoqVideo` gains `preference`, defaulting to `0`. Regenerate bindings and rebuild with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.

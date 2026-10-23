@@ -11,6 +11,10 @@ Use `video.FrameRate(numerator=30000, denominator=1001)` and move `track=` from 
 The codec-only output records no longer contain track naming. Rebuild against
 the matching generated bindings and native library.
 
+### Video rendition preference
+
+`moq.media.Video` gains `preference`, defaulting to `0`. Prefer keyword construction and upgrade `moq-ffi` alongside the wrapper. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes an `AnnounceRoute`
 
 `BroadcastProducer.announce` takes `moq.AnnounceRoute(cost=..., epoch=...)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.

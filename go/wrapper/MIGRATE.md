@@ -11,6 +11,10 @@ Use `video.FrameRate{Numerator: 30000, Denominator: 1001}` and construct produce
 The codec-only output records no longer contain track naming. Rebuild against
 the matching generated bindings and native library.
 
+### Video rendition preference
+
+`media.Video` gains `Preference int32`. Update unkeyed struct literals or use keyed fields, leaving `Preference: 0` for the default ranking. Upgrade the matching FFI module too. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `Announce` takes an `AnnounceRoute`
 
 `BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.

@@ -11,6 +11,10 @@ Use `Video.FrameRate(numerator: 30000, denominator: 1001)` and move `track:` fro
 The codec-only output records no longer contain track naming. Rebuild against
 the matching generated bindings and native library.
 
+### Video rendition preference
+
+`Media.Video` gains `preference: Int32`, defaulting to `0`. Rebuild with the matching MoqFFI package. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes an `AnnounceRoute`
 
 `BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:epoch:)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
