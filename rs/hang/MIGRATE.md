@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `catalog::Section` is private
+
+`catalog::Section` and `catalog::deserialize_section` are internal to the catalog's own sections.
+An application section decodes through its own serde impl; copy the fallback if it needs one.
+
 ### Priorities are signed (#6142)
 
 `catalog::Priorities` fields and `container::track_info`'s priority are `i8`, higher first, with 0 unset.

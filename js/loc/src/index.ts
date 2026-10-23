@@ -1,5 +1,5 @@
 /**
- * Low Overhead Container (LOC): encode and decode codec bitstreams framed with
+ * Low Overhead Container (LOC): decode codec bitstreams framed with
  * per-frame timestamp and timescale metadata for MoQ.
  *
  * @module
@@ -7,7 +7,6 @@
 
 import type { Micro } from "@moq/clock";
 import * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 
 /** A decoded LOC frame: the codec bitstream plus its timing metadata. */
 export interface Frame {
@@ -104,131 +103,5 @@ export class Format {
 		const micros = Math.round((timestamp * DEFAULT_TIMESCALE) / activeTimescale) as Micro;
 
 		return [{ payload, timestamp: micros, keyframe: false }];
-	}
-}
-
-/** A payload that can be copied into a buffer without first materializing a Uint8Array. */
-export interface Source {
-	/** Size in bytes of the payload. */
-	byteLength: number;
-	/** Copy the payload into the provided buffer. */
-	copyTo(buffer: Uint8Array): void;
-}
-
-/**
- * Encoder that packages frames as LOC and writes them to a moq-net track.
- *
- * Each call to {@link encode} produces one moq-net frame containing a
- * property block with the 0x10 timestamp (in microseconds) and the codec
- * bitstream payload. A keyframe starts a group. The group it closes, and the
- * group still open at {@link close}, ends with an empty frame at the exclusive
- * end of the last sample: the same duration marker `moq-mux` writes.
- * Use it for video only: a data reader would see the marker as an empty object.
- */
-export class Producer {
-	#track: Moq.Track.Producer;
-	#group?: Moq.Group.Producer;
-	// Last timestamp in the open group. The next keyframe is this group's end unless it lands earlier.
-	#previous?: Micro;
-	// Furthest timestamp in the open group. The tail marker estimates from this, not decode order.
-	#end?: Micro;
-	// Gap between the last two increasing timestamps. Kept across groups so a clean close can bound the tail.
-	#interval?: Micro;
-	// A frame's timestamp preceded the one before it. That group's presentation end does not bound its tail.
-	#reordered = false;
-
-	constructor(track: Moq.Track.Producer) {
-		this.#track = track;
-	}
-
-	/**
-	 * Encode one frame and write it to the track.
-	 * A keyframe ends the open group with a duration marker, then starts the next.
-	 */
-	encode(data: Uint8Array | Source, timestamp: Micro, keyframe: boolean) {
-		if (keyframe) {
-			// A keyframe before the previous frame overlaps that frame, so it is not the group's end.
-			const overlaps = this.#previous !== undefined && timestamp < this.#previous;
-			this.#closeGroup(overlaps ? undefined : timestamp);
-			if (overlaps) this.#interval = undefined;
-			this.#group = this.#track.appendGroup();
-		} else if (!this.#group) {
-			throw new Error("must start with a keyframe");
-		}
-
-		this.#group?.writeFrame({
-			payload: this.#encode(data, timestamp),
-			timestamp: Time.Timestamp.fromMicros(timestamp),
-		});
-
-		this.#reordered ||= this.#previous !== undefined && timestamp < this.#previous;
-		if (this.#previous !== undefined && timestamp > this.#previous) {
-			this.#interval = (timestamp - this.#previous) as Micro;
-		}
-		this.#previous = timestamp;
-		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
-	}
-
-	#encode(source: Uint8Array | Source, timestamp: Micro): Uint8Array {
-		const propTypeBytes = Moq.Varint.encode(PROP_TIMESTAMP);
-		const propValueBytes = Moq.Varint.encode(timestamp);
-		const propsLen = propTypeBytes.byteLength + propValueBytes.byteLength;
-
-		const propsLenBytes = Moq.Varint.encode(propsLen);
-
-		const payloadSize = source.byteLength;
-		const total = propsLenBytes.byteLength + propsLen + payloadSize;
-		const out = new Uint8Array(total);
-
-		let offset = 0;
-		out.set(propsLenBytes, offset);
-		offset += propsLenBytes.byteLength;
-		out.set(propTypeBytes, offset);
-		offset += propTypeBytes.byteLength;
-		out.set(propValueBytes, offset);
-		offset += propValueBytes.byteLength;
-
-		const payloadView = out.subarray(offset);
-		if (source instanceof Uint8Array) {
-			payloadView.set(source);
-		} else {
-			source.copyTo(payloadView);
-		}
-
-		return out;
-	}
-
-	// End the open group. `end` is the next keyframe when one is already in hand; otherwise the
-	// last gap estimates where the tail stops. A reordered group omits the marker: its presentation
-	// end does not bound the last frame in decode order.
-	#closeGroup(end?: Micro) {
-		const group = this.#group;
-		if (!group) return;
-
-		let marker = this.#reordered ? undefined : end;
-		if (marker === undefined && !this.#reordered && this.#end !== undefined && this.#interval !== undefined) {
-			marker = (this.#end + this.#interval) as Micro;
-		}
-		if (marker !== undefined) {
-			group.writeFrame({
-				payload: this.#encode(new Uint8Array(), marker),
-				timestamp: Time.Timestamp.fromMicros(marker),
-			});
-		}
-		group.close();
-		this.#group = undefined;
-		this.#previous = undefined;
-		this.#end = undefined;
-		this.#reordered = false;
-	}
-
-	/**
-	 * Close the current group and the underlying track.
-	 * A clean close writes the duration marker; an error does not.
-	 */
-	close(err?: Error) {
-		if (!err) this.#closeGroup();
-		this.#group?.close();
-		this.#track.close(err);
 	}
 }

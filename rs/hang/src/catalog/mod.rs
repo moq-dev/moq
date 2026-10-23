@@ -69,7 +69,7 @@ where
 ///
 /// The associated [`MAP`](Self::MAP) is what tells a real section apart from an application's own
 /// value under the same name. See [`deserialize_section`].
-pub trait Section: Default + serde::de::DeserializeOwned {
+pub(crate) trait Section: Default + serde::de::DeserializeOwned {
 	/// The key holding the section's map of tracks.
 	const MAP: &'static str;
 }
@@ -85,7 +85,7 @@ pub trait Section: Default + serde::de::DeserializeOwned {
 /// else's. A value that *is* a section but carries a malformed entry still fails, since swallowing
 /// that would hide a publisher bug (a data track with no `mode`) behind the silence that exists to
 /// protect an unrelated key.
-pub fn deserialize_section<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+pub(crate) fn deserialize_section<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
 	D: serde::Deserializer<'de>,
 	T: Section,

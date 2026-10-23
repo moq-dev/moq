@@ -4946,11 +4946,16 @@ mod tests {
 			video0.push(&span(sequence, sequence * 40, 40, sequence)).unwrap();
 			settle().await;
 		}
-		// The publisher rolls its timeline group, so a joiner reads only the checkpoint and on.
-		video0.flush().unwrap();
-		video0.push(&span(1_000, 40_000, 40, 1_000)).unwrap();
-
+		// A joiner wants a fresh group, so the next push restates the window and the joiner reads
+		// only that checkpoint and on.
 		let late = early.join();
+		settle().await;
+		video0.push(&span(1_000, 40_000, 40, 1_000)).unwrap();
+		assert!(
+			fresh_join_reads(&early, "video0").await < 1_000,
+			"the push rolled the group"
+		);
+
 		let joined = late.listed("video0", 1_000).await;
 		let followed = early.listed("video0", 1_000).await;
 		assert_eq!(joined.segments.len(), segments::MAX_SEGMENTS);

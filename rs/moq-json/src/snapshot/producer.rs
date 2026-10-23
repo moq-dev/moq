@@ -122,9 +122,9 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// ```no_run
 	/// # fn example(producer: &mut moq_json::snapshot::Producer<serde_json::Value>) -> moq_json::Result<()> {
-	/// producer.mutate(None, |catalog| {
+	/// producer.mutate(|catalog| {
 	///     catalog["scte35"] = serde_json::json!({ "id": 1 });
-	/// })
+	/// }, None)
 	/// # }
 	/// ```
 	///
@@ -132,7 +132,7 @@ impl<T: Serialize> Producer<T> {
 	/// from the latest value, so their sections compose instead of clobbering one another. This is
 	/// [`modify`](Self::modify) opened and committed for you; take the guard to hold the lock across
 	/// several edits, and [`update`](Self::update) to replace the whole value.
-	pub fn mutate(&mut self, at: Option<moq_net::Timestamp>, f: impl FnOnce(&mut T)) -> Result<()>
+	pub fn mutate(&mut self, f: impl FnOnce(&mut T), at: Option<moq_net::Timestamp>) -> Result<()>
 	where
 		T: Default + DeserializeOwned,
 	{
