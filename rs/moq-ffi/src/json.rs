@@ -20,14 +20,14 @@ use moq_mux::catalog::hang::Extra;
 /// Options for a JSON snapshot track (lossy latest-value mode).
 ///
 /// The same config is passed to both the producer and the consumer, but the consumer reads only
-/// [`compression`](Self::compression); [`delta_ratio`](Self::delta_ratio) is producer-only.
+/// [`compression`](Self::compression); [`deltas`](Self::deltas) is producer-only.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonSnapshotConfig {
-	/// How aggressively the producer emits deltas instead of full snapshots. `0` disables deltas
-	/// (one snapshot per group); a positive value allows roughly that many snapshots' worth of
-	/// deltas before rolling a new group. Ignored by the consumer.
-	#[uniffi(default = 8)]
-	pub delta_ratio: u32,
+	/// Encode updates as deltas against the group's snapshot. When off, each update opens a new
+	/// group with a full snapshot. How long a group runs is set by the track's `refresh` ratio
+	/// instead. Ignored by the consumer.
+	#[uniffi(default = true)]
+	pub deltas: bool,
 
 	/// DEFLATE-compress each group. Must match on the producer and consumer.
 	#[uniffi(default = false)]
@@ -45,7 +45,7 @@ fn compression(on: bool) -> moq_json::Compression {
 impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::Config {
 	fn from(config: MoqJsonSnapshotConfig) -> Self {
 		let mut out = moq_json::snapshot::Config::default();
-		out.delta_ratio = config.delta_ratio;
+		out.deltas = config.deltas;
 		out.compression = compression(config.compression);
 		out
 	}
@@ -85,7 +85,7 @@ mod tests {
 	#[test]
 	fn record_defaults_match_moq_json() {
 		let snapshot = moq_json::snapshot::Config::default();
-		assert_eq!(snapshot.delta_ratio, 8, "update #[uniffi(default)] on delta_ratio");
+		assert!(snapshot.deltas, "update #[uniffi(default)] on deltas");
 		assert_eq!(
 			snapshot.compression,
 			moq_json::Compression::None,
@@ -102,9 +102,51 @@ mod tests {
 // ---- Snapshot ----
 
 /// Publishes a JSON value that consumers see as a single latest state.
+///
+/// A join that finds more deltas than the track's `refresh` ratio allows gets the value restated
+/// in a fresh group, by a task this producer runs until it is finished or dropped. That joiner
+/// still reads the cached group first.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotProducer {
-	inner: std::sync::Mutex<Option<moq_mux::json::Snapshot<Value, Extra>>>,
+	inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value, Extra>>>>,
+
+	/// Closed on finish or drop, which stops the refresh task.
+	alive: kio::Producer<()>,
+}
+
+impl MoqJsonSnapshotProducer {
+	/// Answer joiners until the producer is finished or dropped, or a refresh fails.
+	///
+	/// A failed restatement only stops the refreshes: the error that caused it (a closed track, a
+	/// rejected write) reaches the caller through its next update.
+	async fn refresh(
+		inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value, Extra>>>>,
+		alive: kio::Consumer<()>,
+	) {
+		loop {
+			let stop = kio::wait(|waiter| {
+				if alive.poll_closed(waiter).is_ready() {
+					return std::task::Poll::Ready(true);
+				}
+				match inner.lock().unwrap().as_ref() {
+					Some(producer) => producer.poll_refresh(waiter).map(|res| res.is_err()),
+					None => std::task::Poll::Ready(true),
+				}
+			})
+			.await;
+			if stop {
+				return;
+			}
+		}
+	}
+}
+
+impl Drop for MoqJsonSnapshotProducer {
+	fn drop(&mut self) {
+		// The refresh task shares `inner`, so drop the producer here rather than whenever the task
+		// next wakes: dropping it retires the catalog entry.
+		self.inner.lock().unwrap().take();
+	}
 }
 
 #[uniffi::export]
@@ -127,12 +169,13 @@ impl MoqJsonSnapshotProducer {
 		let _guard = crate::ffi::enter();
 		let config = moq_mux::json::Config::default()
 			.with_compression(config.compression)
-			.with_delta_ratio(config.delta_ratio);
+			.with_deltas(config.deltas);
 		let producer = track
 			.adopt(|track| broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config)?)))?;
-		Ok(Arc::new(Self {
-			inner: std::sync::Mutex::new(Some(producer)),
-		}))
+		let inner = Arc::new(std::sync::Mutex::new(Some(producer)));
+		let alive = kio::Producer::new(());
+		crate::ffi::spawn(Self::refresh(inner.clone(), alive.consume()));
+		Ok(Arc::new(Self { inner, alive }))
 	}
 
 	/// Publish a new value, encoded as a snapshot or delta automatically. `value` is a JSON
@@ -161,6 +204,7 @@ impl MoqJsonSnapshotProducer {
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let _ = self.alive.close();
 		producer.finish()?;
 		Ok(())
 	}

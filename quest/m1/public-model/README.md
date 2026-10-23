@@ -64,7 +64,7 @@ Inventory on `main` at b4eab0db1:
   only inside `model/`.
 - The 106 split into ingest (landed in [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111)),
   [serving](/quest/m1/public-model/serve.md),
-  [routes and answering](/quest/m1/public-model/answer.md), and the
+  [answering](/quest/m1/public-model/answer.md) (with [routes](/quest/m1/public-model/routes.md) split out later), and the
   passthrough carve-out (listed in each child where it shares a type).
 - The 16 test-only items (`group::Info::produce`, `group::Producer::is_aborted`
   and `is_finished`, `track::Info::timed`, `track::Producer::new`,
@@ -104,7 +104,8 @@ Work owned by this README, after the children land:
 
 - [Claim request type](/quest/m1/public-model/claim-request-type.md) - accepting an application claim's request fails to compile instead of panicking
 - [Public serving](/quest/m1/public-model/serve.md) - a custom publisher reads a track's start, cursor, and group expiry for its wire through public calls
-- [Public routes and answering](/quest/m1/public-model/answer.md) - a custom relay ingests routes, answers broadcast and track requests on demand, and advertises without echoing a peer's routes back
+- [Public answering](/quest/m1/public-model/answer.md) - a custom relay answers broadcast and track requests on demand and closes them once unused
+- [Public routes](/quest/m1/public-model/routes.md) - a custom relay ingests routes under a peer's identity and advertises without echoing them back, once cluster routing lands
 - [Public model after ranges, handover, and the JS tail](/quest/m1/public-model/deferred.md) - fetch and track-info answering, the cache peeks, JS `fork`/`mirror`, and JS `endTrack`, once the quests that reshape them land
 
 ## Related

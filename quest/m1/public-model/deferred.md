@@ -5,8 +5,9 @@
 The hidden model items that other quests reshape are public, unnecessary,
 or marked private once those quests land: fetch ingest and answering, the
 IETF cache peeks, JS `Track.Subscriber.fork` and `Group.Producer.mirror`,
-and JS `hooks.endTrack`. A custom session then answers fetches and track
-info, and declares a received end in JS, through public calls only.
+and JS `hooks.endTrack` and `hooks.releaseTrack`. A custom session then
+answers fetches and track info, and declares or withholds a received end in
+JS, through public calls only.
 
 ## Plan
 
@@ -36,10 +37,12 @@ the prerequisites will have deleted or renamed most of these.
   answered through the public `Track.Request` and `Track.Dynamic` range
   requests that Model ranges defines, completing the answering quest's
   `Broadcast.requested` decision.
-- JS `hooks.endTrack` and `hooks.startTrack` (the JS `finish_at_pending` and
-  `start_at`): public under the received-end shape Rust settled in
+- JS `hooks.endTrack`, `hooks.releaseTrack`, and `hooks.startTrack` (the JS
+  `finish_at_pending`, `close`, and `start_at`): public under the received-end
+  shape Rust settled in
   [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111): `finish_at`
-  on a `received()` copy, and `start_at` after `track::Request::request_start`.
+  and `close` on a `received()` copy, and `start_at` after
+  `track::Request::request_start`.
 
 Tests: as in the other children, mock time in each language, with the
 built-in sessions moved onto the public calls.
@@ -48,4 +51,4 @@ built-in sessions moved onto the public calls.
 
 - [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - replaces per-group fetch requests, the peeks, and `fork`
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - the JS `Track.Request`/`Track.Dynamic` range requests that answer track info and fetches
-- [Public routes and answering](/quest/m1/public-model/answer.md) - the public `Broadcast.requested` handout this completes
+- [Public answering](/quest/m1/public-model/answer.md) - the public `Broadcast.requested` handout this completes

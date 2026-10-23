@@ -60,6 +60,7 @@
 		"test/interop/clients/js",
 		"test/interop/clients/js-native",
 		"test/drain",
+		"test/receive-credit",
 		"test/video",
 		"test/p2p",
 		"test/qmux",

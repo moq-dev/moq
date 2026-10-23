@@ -17,11 +17,11 @@
 //! Kept close to upstream (its own tests included), so the whole module opts out
 //! of the workspace's `-D warnings` clippy/rustdoc gate rather than churning the
 //! vendor to satisfy our lints.
-#![allow(warnings)]
-#![allow(clippy::all)]
-#![allow(clippy::pedantic)]
-#![allow(clippy::nursery)]
-#![allow(rustdoc::all)]
+#![allow(warnings, reason = "vendored rml code")]
+#![allow(clippy::all, reason = "vendored rml code")]
+#![allow(clippy::pedantic, reason = "vendored rml code")]
+#![allow(clippy::nursery, reason = "vendored rml code")]
+#![allow(rustdoc::all, reason = "vendored rml code")]
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 pub mod amf0;

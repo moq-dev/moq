@@ -16,6 +16,21 @@ set working-directory := '.'
 # Where cargo puts the in-tree qmux interop examples `just test qmux` runs.
 qmux_examples := absolute_path(env("CARGO_TARGET_DIR", source_directory() / ".." / "target")) / "debug" / "examples"
 
+harness_browser_tests := '''
+    ./capture-channel-count.browser.ts
+    ./harness.browser.ts
+    ./open-gop.browser.ts
+    ./publish-ui.browser.ts
+    ./signals-dom.browser.ts
+    ./src/contract.test.ts
+    ./src/resume.test.ts
+'''
+
+harness_compat_tests := '''
+    test/interop/compat/claims.test.ts
+    test/interop/compat/resolve.test.ts
+'''
+
 # List the cross-language suites.
 default:
     @just --justfile {{ quote(justfile()) }} --list test
@@ -27,9 +42,10 @@ harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
     python3 interop/report.test.py
-    cd .. && bun test test/interop/compat/resolve.test.ts test/interop/compat/claims.test.ts
+    python3 interop/tone.test.py
+    cd .. && bun test {{ replace(harness_compat_tests, "\n", " ") }}
     cd .. && bun install --frozen-lockfile
-    cd interop/clients/js && bun test ./harness.browser.ts ./signals-dom.browser.ts ./publish-ui.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
+    cd interop/clients/js && bun test {{ replace(harness_browser_tests, "\n", " ") }}
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -39,15 +55,19 @@ harness:
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Finite track tails run too; `--tail` selects just the CLI FETCH close and Rust/Node/Bun tail checks.
 # `--versions ietf` reruns them with every client pinned to each even moq-transport draft.
-# Both runs first check js/net's varints against moq-net's encoder at every size boundary,
-# and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
-# moq-transport OBJECT_DATAGRAMs both ways and the JS answer to TRACK_STATUS on every
-# draft, Lite AUTH_ERROR NOT_SUPPORTED after a grant, Lite padding, and lite-07 TRACKS
-# listings, each in both directions.
+# Both runs first check the Rust/JS wire and session interop suites, in both directions.
 [positional-arguments]
 interop *args:
     cd .. && bun install --frozen-lockfile
-    just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop ietf_compression_fallback_interop auth_unsupported_interop padding_interop tracks_interop --run-ignored all
+    just rs test -p moq-net --lib \
+        auth_unsupported_interop \
+        ietf_compression_fallback_interop \
+        ietf_datagram_interop \
+        ietf_track_status_interop \
+        padding_interop \
+        tracks_interop \
+        varint_interop \
+        --run-ignored all
     ./interop/interop.sh "$@"
 
 # The harnesses append one record per case to MOQ_TEST_RESULTS; flags link the page to its
@@ -115,9 +135,9 @@ native-play:
 
 # Plays a tone in headless Chromium and the native `moq play` through moq-shaper and grades
 # what the listener heard (underruns, skip-aheads, silence, the resolved delay) against
-# audio-quality/budgets.json. The full matrix is 36 rows at 60 s; nightly runs it with
-# --enforce. Narrow it with `--profiles mild --codecs opus --rings plain --duration 20`;
-# `--rings pulse` is the native player alone.
+# audio-quality/budgets.json. The full matrix is 24 rows at 60 s; nightly runs it with
+# --enforce. Narrow it with `--profiles mild --codecs opus --runtimes chromium --duration 20`;
+# `--runtimes native` is the native player alone.
 # `--replays` grades only the recorded traces, in seconds, as nightly and release PRs touching the player do.
 # See audio-quality/README.md.
 
@@ -165,6 +185,7 @@ ts *args:
     python3 ./ts/holes.test.py
     python3 ./ts/passthrough.test.py
     python3 ./ts/klv.test.py
+    python3 ./ts/revision.test.py
     python3 ./ts/clockless.test.py
     ./ts/run.sh "$@"
 
@@ -220,6 +241,11 @@ video:
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
     cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
+
+# A JavaScript sender exhausts each native receiver's connection credit, which recovers.
+receive-credit:
+    cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
+    cargo nextest run --locked -p moq-uring --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:

@@ -33,6 +33,7 @@ the new `/quest/m1/README.md`, and the cut also requires both reviews. Only
 ## Required
 
 - [Breaking release readiness](/quest/m1/README.md) - code, protocol and package proofs
-- [API-diff check](/quest/m2/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
+- [Migration audit](/quest/m2/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m2/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m2/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
+- [Claim new npm names](/quest/m2/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package

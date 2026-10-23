@@ -20,8 +20,6 @@ import * as Cluster from "./cluster.ts";
 import type { RequestKind } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
-import * as Message from "./message.ts";
-import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
@@ -34,6 +32,7 @@ import {
 	SubscribeNamespaceLegacy,
 	SubscribeOptions,
 } from "./subscribe_namespace.ts";
+import { SubscribeTracks } from "./subscribe_tracks.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusRequest } from "./track.ts";
@@ -440,16 +439,9 @@ export class Connection implements Established {
 				if (this.#session.version < Version.DRAFT_18) {
 					throw new ProtocolViolation("SUBSCRIBE_TRACKS before draft-18");
 				}
-				const request = await Message.decode(stream.reader, async (reader) => {
-					const requestId = await reader.u62();
-					const namespace = await Namespace.decode(reader);
-					await reader.readAll();
-					return { requestId, namespace };
-				}).catch((err: unknown) => {
-					throw malformed(err, "subscribe_tracks");
-				});
-				this.#session.spendRequest(request.requestId);
-				await handed(this.#publisher.runSubscribeTracks(stream, request.namespace));
+				const decoded = SubscribeTracks.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "subscribe_namespace", decoded);
+				if (msg) await handed(this.#publisher.runSubscribeTracks(msg, stream));
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {

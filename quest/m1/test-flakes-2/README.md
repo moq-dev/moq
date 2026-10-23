@@ -1,4 +1,4 @@
-# [S] More tests hold up under load
+# More tests hold up under load
 
 ## Goal
 
@@ -32,12 +32,18 @@ times on a loaded machine, as the first round did.
 The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
 fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
-Added 2026-10-21 (maintainer): small flakes from the m0/m1 merge run, kept
-in one child.
+Added 2026-10-21 and 2026-10-22 (maintainer): failures from the m0/m1
+merge runs, one child each.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Union renewal](/quest/m1/test-flakes-2/auth-union-renewal.md) - the JS subscriber never leaves a torn REQUEST_UPDATE on the stream
+- [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
+- [Interop cpp to js budget](/quest/m1/test-flakes-2/interop-cpp-js.md) - the cpp -> js cell finishes inside its 30 s budget, fixed at its cause
+- [Relay tests in one process](/quest/m1/test-flakes-2/relay-one-process.md) - moq-relay's integration binary passes under plain `cargo test`, not only nextest
 
 ## Related
 
 - [Controlled time](/quest/m1/time/README.md) - the systemic fix these rules ask for: every crate on a controlled clock
-- [Publish channel count](/quest/m1/publish-audio-channel-count.md) - tracks the media fixture's cold-start audio-tone flake, a player stall it shares with the mono pin

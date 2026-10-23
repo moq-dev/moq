@@ -21,12 +21,6 @@ SMOKE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REGISTRY="${RELAYS_REGISTRY:-https://raw.githubusercontent.com/englishm/moq-interop-runner/main/implementations.json}"
 REQUIRED="moq-dev-rs"
 REQUIRED_EXPLICIT=0 # set by --required; the default only gates when --only selects it
-# Public endpoints the registry doesn't list (yet): key, display name, URL. They
-# merge with the registry by URL, so an upstream registration supersedes these.
-EXTRA_ENDPOINTS=(
-    $'moq-rs\tmoq-rs (draft-16)\thttps://draft-16.cloudflare.mediaoverquic.com/moq'
-    $'moq-rs\tmoq-rs (draft-16)\tmoqt://draft-16.cloudflare.mediaoverquic.com:443'
-)
 # Relays that speak moq-dev's WebSocket binding. Each of their http(s) endpoints
 # gains a ws(s) twin. Add a key here when that implementation actually serves it.
 WEBSOCKET_KEYS="moq-dev-rs"
@@ -121,16 +115,14 @@ seen_url() {
 # One row per endpoint: key, display name, url. Deduplicated by URL (an entry
 # can list the same URL twice under different transport labels); the transport
 # is taken from the URL scheme rather than the registry's label.
-{
-    # The registry is third-party data: fall back to the key for a missing name,
-    # and drop entries without a usable URL.
-    jq -r '.implementations | to_entries[] | .key as $k |
-        (.value.name | if type == "string" and . != "" then . else $k end) as $n |
-        (.value.roles.relay.remote // [])[] |
-        select((.url | type) == "string" and (.url | test("^[a-z][a-z0-9+.-]*://"))) |
-        [$k, $n, .url] | @tsv' "$TMP/registry.json"
-    printf '%s\n' "${EXTRA_ENDPOINTS[@]}"
-} | awk -F'\t' '!seen[$3]++' >"$TMP/endpoints.tsv"
+# The registry is third-party data: fall back to the key for a missing name,
+# and drop entries without a usable URL.
+jq -r '.implementations | to_entries[] | .key as $k |
+    (.value.name | if type == "string" and . != "" then . else $k end) as $n |
+    (.value.roles.relay.remote // [])[] |
+    select((.url | type) == "string" and (.url | test("^[a-z][a-z0-9+.-]*://"))) |
+    [$k, $n, .url] | @tsv' "$TMP/registry.json" |
+    awk -F'\t' '!seen[$3]++' >"$TMP/endpoints.tsv"
 
 relay_args=()
 : >"$TMP/selected.tsv"

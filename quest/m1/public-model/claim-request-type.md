@@ -8,7 +8,7 @@ Rust and to typecheck in TypeScript, instead of panicking (Rust) or throwing
 only `prepare` and `reject`; the session-forwarded claim from
 `dynamic_route` / `dynamicRoute` keeps `accept`. Behavior is otherwise
 unchanged: the escape hatches stay hidden until
-[Public routes and answering](/quest/m1/public-model/answer.md) gives them a
+[Public routes](/quest/m1/public-model/routes.md) gives them a
 public shape.
 
 ## Plan
@@ -38,4 +38,4 @@ change.
 
 ## Related
 
-- [Public routes and answering](/quest/m1/public-model/answer.md) - later removes the hidden peer-claim API this quest narrows
+- [Public routes](/quest/m1/public-model/routes.md) - later removes the hidden peer-claim API this quest narrows

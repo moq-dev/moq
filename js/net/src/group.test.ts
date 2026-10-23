@@ -337,7 +337,7 @@ test("a group that ends on its own abandons the replacement it asked for", async
 	expect(signal?.aborted).toBe(true);
 });
 
-test("a group that ends as its replacement arrives ends rather than adopting it", async () => {
+test.each([false, true])("a group ending beside its replacement discards it (consumer close: %p)", async (close) => {
 	const producer = new Producer(0);
 	const consumer = producer.mirror();
 	const route = new Signal(0);
@@ -345,12 +345,18 @@ test("a group that ends as its replacement arrives ends rather than adopting it"
 	let resolve: ((value: Replacement) => void) | undefined;
 	let adopted = false;
 	let discarded = false;
+	let released = 0;
+	const requested = Promise.withResolvers<void>();
 	hooks.recoverGroup(consumer, {
 		changed: route,
+		close: () => {
+			released++;
+		},
 		wants: (failed) => failed !== undefined || route.peek() > 0,
 		replace: () =>
 			new Promise((r) => {
 				resolve = r;
+				requested.resolve();
 			}),
 	});
 	producer.writeFrame({ payload: new Uint8Array([0]) });
@@ -358,7 +364,7 @@ test("a group that ends as its replacement arrives ends rather than adopting it"
 
 	route.set(1);
 	const read = consumer.readFrame();
-	await new Promise((r) => setTimeout(r, 0));
+	await requested.promise;
 	// Both land before the read looks again.
 	resolve?.({
 		group: replacement.mirror(),
@@ -370,7 +376,13 @@ test("a group that ends as its replacement arrives ends rather than adopting it"
 			discarded = true;
 		},
 	});
-	producer.close();
+	if (close) {
+		consumer.close();
+		consumer.close();
+		expect(released).toBe(1);
+	} else {
+		producer.close();
+	}
 	expect(await read).toBeUndefined();
 	expect(adopted).toBe(false);
 	expect(discarded).toBe(true);

@@ -50,6 +50,8 @@ import { type Capabilities, missing, probe, type Role } from "./src/capabilities
 import {
 	type CaptureState,
 	FAULTS,
+	LONG_FRAMES,
+	type LongFrame,
 	leakedPlayerStarted,
 	reachesLive,
 	SAMPLE_MS,
@@ -294,7 +296,146 @@ async function measurePlayback(player: Page, playerErrors: BrowserErrors, label:
 		description: `${label}: the audio buffer to fill to the player's delay and play`,
 		predicate: (state) => state.audioContext === "running" && !state.audioStalled,
 	});
-	assertMedia(await collect(player, playerErrors, WINDOW_MS), label);
+	await (await observe(player, playerErrors, label)).grade();
+}
+
+/**
+ * Collect one window while the host is watched, so a window that fails `grade`, whether on a
+ * caller's own transition checks or on {@link assertMedia}, also prints what stalled the pages.
+ */
+async function observe(
+	player: Page,
+	playerErrors: BrowserErrors,
+	label: string,
+): Promise<{ samples: Sample[]; grade: (checks?: () => void) => Promise<void> }> {
+	const host = watchHost(label);
+	const start = Date.now();
+	const samples = await collect(player, playerErrors, WINDOW_MS);
+	const bounds = { start, end: Date.now() };
+	const grade = async (checks?: () => void) => {
+		try {
+			checks?.();
+			assertMedia(samples, label);
+		} catch (err) {
+			await explainStalls(player, bounds, label, host);
+			throw err;
+		} finally {
+			host?.process.kill();
+		}
+	};
+	return { samples, grade };
+}
+
+/**
+ * How long a failed window waits for each page to report its long animation frames. Playwright puts
+ * no timeout on an evaluate, so a page whose main thread never returns would otherwise hold the
+ * failure, the other page's evidence, the host's and the browser cleanup until the job times out.
+ */
+const STALL_READ_MS = 2000;
+
+/** How often the host's busiest processes are read during a window. */
+const HOST_INTERVAL_S = 0.5;
+
+/**
+ * Read the host's busiest processes for the length of one window, on Linux, where `top` has a batch
+ * mode. A page's main thread stopping for hundreds of milliseconds is either the page's own work or a
+ * starved host, and only the host can say which.
+ */
+function watchHost(
+	label: string,
+): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string> } | undefined {
+	if (process.platform !== "linux") return undefined;
+	const iterations = Math.ceil(WINDOW_MS / 1000 / HOST_INTERVAL_S) + 1;
+	// Evidence only: a host without `top` loses this part of a failure's explanation, not the window.
+	try {
+		const top = Bun.spawn(
+			["top", "-b", "-c", "-w", "512", "-d", String(HOST_INTERVAL_S), "-n", String(iterations)],
+			{ stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+		);
+		return { process: top, output: new Response(top.stdout).text() };
+	} catch (err) {
+		console.error(`  ${label}: host processes unavailable: ${err}`);
+		return undefined;
+	}
+}
+
+// A process as `top -c` prints it, cut to what tells the processes apart: the binary, plus the type of
+// a Chromium child (renderer, gpu-process, utility), whose binaries all share one name.
+function processName(command: string): string {
+	const [binary = "", ...args] = command.split(/\s+/);
+	const type = args.find((arg) => arg.startsWith("--type="))?.slice("--type=".length);
+	const name = binary.split("/").pop() ?? binary;
+	return type ? `${name}:${type}` : name;
+}
+
+/**
+ * Print what stopped the pages' main threads during a failed window: each page's long animation
+ * frames with the scripts that ran in them, and the host's busiest processes.
+ *
+ * Evidence only. A page that cannot be read leaves its part out rather than masking the failure.
+ */
+async function explainStalls(
+	player: Page,
+	bounds: { start: number; end: number },
+	label: string,
+	host: ReturnType<typeof watchHost>,
+): Promise<void> {
+	// The window has already failed, so a plain evaluate's user activation can no longer skew it, and
+	// unlike `inspect` it reads a non-Chromium player too. The bounds come from the driver's clock,
+	// which the pages' epoch timestamps share, so each page reports on its own and one that cannot be
+	// read, or does not answer within STALL_READ_MS, leaves the other's evidence intact.
+	const { start, end } = bounds;
+	for (const [name, page] of [
+		["player", player],
+		["fixture", fixturePage],
+	] as const) {
+		if (!page) continue;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const unanswered = new Promise<never>((_, reject) => {
+				timer = setTimeout(
+					() => reject(new Error(`no answer within ${STALL_READ_MS}ms, so its main thread is still blocked`)),
+					STALL_READ_MS,
+				);
+			});
+			const frames = await Promise.race([
+				page.evaluate(
+					({ key, from, to }) =>
+						((globalThis as unknown as Record<string, LongFrame[] | undefined>)[key] ?? []).filter(
+							(frame) => frame.at + frame.duration >= from && frame.at <= to,
+						),
+					{ key: LONG_FRAMES, from: start, to: end },
+				),
+				unanswered,
+			]);
+			console.error(`  ${label}: ${name} long animation frames: ${frames.length}`);
+			for (const frame of frames) {
+				console.error(
+					`    +${((frame.at - start) / 1000).toFixed(2)}s ${frame.duration}ms (blocking ${frame.blocking}ms) ${frame.scripts}`,
+				);
+			}
+		} catch (err) {
+			console.error(`  ${label}: ${name} long animation frames unavailable: ${err}`);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	if (!host) return;
+	host.process.kill();
+	const snapshots = (await host.output).split(/^top - /m).slice(1);
+	console.error(`  ${label}: busiest host processes every ${HOST_INTERVAL_S}s from the window's start`);
+	for (const [index, snapshot] of snapshots.entries()) {
+		const lines = snapshot.split("\n");
+		const idle = lines.find((line) => line.startsWith("%Cpu"))?.match(/([\d.]+) id/)?.[1];
+		const header = lines.findIndex((line) => /^\s*PID\s/.test(line));
+		const busiest = lines
+			.slice(header + 1, header + 7)
+			.map((line) => line.trim().split(/\s+/))
+			.filter((fields) => fields.length >= 12)
+			.map((fields) => `${processName(fields.slice(11).join(" "))} ${fields[8]}%`);
+		console.error(`    +${(index * HOST_INTERVAL_S).toFixed(1)}s idle ${idle ?? "?"}%: ${busiest.join(", ")}`);
+	}
 }
 
 // One sample as a line: elapsed time, the frame on the canvas, the tone step heard against the one
@@ -439,6 +580,9 @@ async function capabilities(browser: Browser, engine: Engine, role: Role): Promi
 }
 
 const server = serve();
+
+/** The fixture publisher, whose stalls {@link explainStalls} reports beside the player's. */
+let fixturePage: Page | undefined;
 const browsers: Browser[] = [];
 
 // One browser per role. Chromium's default autoplay behavior varies with engagement and when the
@@ -592,6 +736,7 @@ try {
 		pageUrl(server.origin, "fixture", { url: relay, broadcast, fault }),
 		"fixture",
 	);
+	fixturePage = publisher;
 
 	console.error("=== publisher readiness ===");
 	const beforePublisherGesture = await readFixtureState(publisher);
@@ -673,25 +818,28 @@ try {
 		console.error("=== codec identity and coded-size changes ===");
 		const before = await readPlayerState(player);
 		await command(publisher, "changeVideoCodec");
-		const changed = await collect(player, playerErrors, WINDOW_MS);
+		const change = await observe(player, playerErrors, "codec rename");
+		const changed = change.samples;
 		const first = changed.findIndex(
 			(sample) =>
 				sample.generation === 1 &&
 				sample.videoCodec?.startsWith("vp8") &&
 				sample.videoTrack !== before.videoTrack,
 		);
-		check(first >= 0, "codec rename", () => `no renamed VP8 picture: ${JSON.stringify(changed.at(-1))}`);
-		check(
-			changed.slice(first).every((sample) => sample.frameId === undefined || sample.generation === 1),
-			"old track picture",
-			() => "a pre-switch picture appeared after the new codec's first picture",
-		);
-		assertMedia(changed, "codec rename");
+		await change.grade(() => {
+			check(first >= 0, "codec rename", () => `no renamed VP8 picture: ${JSON.stringify(changed.at(-1))}`);
+			check(
+				changed.slice(first).every((sample) => sample.frameId === undefined || sample.generation === 1),
+				"old track picture",
+				() => "a pre-switch picture appeared after the new codec's first picture",
+			);
+		});
 		const renamed = changed[first].videoTrack;
 		await measurePlayback(player, playerErrors, "after codec rename");
 
 		await command(publisher, "resizeVideo");
-		const resized = await collect(player, playerErrors, WINDOW_MS);
+		const resize = await observe(player, playerErrors, "coded-size growth");
+		const resized = resize.samples;
 		const grown = resized.findIndex(
 			(sample) =>
 				sample.generation === 2 &&
@@ -700,18 +848,23 @@ try {
 				sample.videoCodedWidth === Pattern.WIDTH * 2 &&
 				sample.videoCodedHeight === Pattern.HEIGHT * 2,
 		);
-		check(grown >= 0, "coded-size growth", () => `no larger presented picture: ${JSON.stringify(resized.at(-1))}`);
-		check(
-			resized.every((sample) => sample.videoTrack === renamed && sample.videoCodec?.startsWith("vp8")),
-			"resize keeps identity",
-			() => `VP8 resize changed track: ${JSON.stringify(resized.at(-1))}`,
-		);
-		check(
-			resized.slice(grown).every((sample) => sample.frameId === undefined || sample.generation === 2),
-			"old track picture",
-			() => "a pre-resize picture appeared after the first larger picture",
-		);
-		assertMedia(resized, "coded-size growth");
+		await resize.grade(() => {
+			check(
+				grown >= 0,
+				"coded-size growth",
+				() => `no larger presented picture: ${JSON.stringify(resized.at(-1))}`,
+			);
+			check(
+				resized.every((sample) => sample.videoTrack === renamed && sample.videoCodec?.startsWith("vp8")),
+				"resize keeps identity",
+				() => `VP8 resize changed track: ${JSON.stringify(resized.at(-1))}`,
+			);
+			check(
+				resized.slice(grown).every((sample) => sample.frameId === undefined || sample.generation === 2),
+				"old track picture",
+				() => "a pre-resize picture appeared after the first larger picture",
+			);
+		});
 		await measurePlayback(player, playerErrors, "after coded-size growth");
 	}
 

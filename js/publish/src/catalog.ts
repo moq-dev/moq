@@ -83,7 +83,7 @@ export class CatalogProducer {
 		const output = new Json.Snapshot.Producer<Catalog.Root>({
 			track,
 			compression: opts?.compression ? "deflate" : "none",
-			deltaRatio: 0,
+			deltas: false,
 		});
 		output.update({ value: this.#value, at: Time.Timestamp.now() });
 

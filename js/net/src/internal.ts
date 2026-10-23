@@ -209,6 +209,8 @@ export interface TrackSequence {
 	next: number;
 	/** Open producers writing through this namespace. */
 	holders: number;
+	/** The open producer the name's newest claim went to; a later claim supersedes it. */
+	owner?: Producer;
 	/**
 	 * The highest-sequence checked group start any producer of the name wrote, which bounds a
 	 * replacement's groups the way the eviction watermark bounds a track's own.
@@ -279,6 +281,8 @@ export interface Expiry {
  * touches it. The counterpart of the Rust `resume::Recover`.
  */
 export interface GroupRecover {
+	/** Release the route held by this group when its consumer closes. */
+	close?(): void;
 	/**
 	 * Whether to look past the copy being read: it failed with `failed` and that is no verdict
 	 * on the group, or (with none) it stalled while a newer route serves.
@@ -351,7 +355,7 @@ export interface ResumeSource {
 	latest(): number | undefined;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
 	start(): number | "pending" | undefined;
-	/** The serving copy's declared exclusive end. */
+	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Location | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
 	finished(): Promise<Location>;
@@ -403,6 +407,13 @@ export const hooks: {
 	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
+	// pending: /quest/m1/public-model/deferred.md
+	/**
+	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
+	 * locally: a dead route, not finished content, so a resumed reader's replacement route
+	 * continues past it. Mirrors the Rust `close` on a `received()` copy; assigned by `track.ts`.
+	 */
+	releaseTrack: (producer: Producer) => void;
 	// private: capability gap
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Location | undefined>;
@@ -469,6 +480,11 @@ export const hooks: {
 	tryRecvDatagram: (subscriber: Subscriber) => RecvDatagram;
 	/** Whether a buffered group in `[start, end)` that `delivered` lacks still waits to be read. */
 	hasUnreadGroup: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
+	/**
+	 * Whether a subscriber's track ended and it holds nothing left to read: no datagram within its
+	 * cursor, and no group in `[start, end)` that `delivered` lacks.
+	 */
+	spent: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
@@ -579,6 +595,9 @@ export const hooks: {
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
+	releaseTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
 	producerLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -640,6 +659,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	hasUnreadGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	spent: () => {
 		throw new Error("track.ts not loaded");
 	},
 	staleAt: () => {
@@ -800,10 +822,16 @@ export function compareRoutes(a: Route, b: Route): number {
 	);
 }
 
-/** Order same-prefix routes by preference, hop count, and the origin's stable spread hash. */
-export function compareRouteCandidates(path: Path.Valid, a: Route, b: Route): number {
+/**
+ * Order routes at `prefix` resolving `path` by preference, hop count, and the stable spread
+ * hash. The hash only spreads a prefix's paths: at the prefix itself a tie is left for the
+ * newest to win, so a publisher that reconnects under a new hop takes over from its lingering
+ * session at once, matching `route_order` in rs/moq-net for routes a node did not get from a
+ * cluster peer, which is every route here.
+ */
+export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: Route, b: Route): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
-	if (order !== 0) return order;
+	if (order !== 0 || path === prefix) return order;
 	const ha = spreadHash(path, a.hops);
 	const hb = spreadHash(path, b.hops);
 	return ha < hb ? -1 : ha > hb ? 1 : 0;

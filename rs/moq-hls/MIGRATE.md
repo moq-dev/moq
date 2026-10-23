@@ -4,13 +4,28 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Import resource admission follows the entry URL
+### HLS import stays on the playlist's origin
 
-HTTP(S) entry playlists now refuse filesystem resources with `Error::ResourceRefused`.
-A resource admission failure ends the import immediately.
-Use a local file entry playlist when importing local media. HTTP(S) resources still
-use the configured `import::Config::client`, including its redirect policy.
-Other URL schemes are refused when constructing the import or fetching a resource.
+`import::Import` fetches only resources with the entry playlist's scheme, host, and port, and refuses a reference or redirect hop to any other origin with the new `Error::ResourceRefused`, which ends the import.
+Serve every playlist, init segment, and media segment from the playlist's origin, rather than referencing a separate CDN host.
+A `file://` playlist reads only local files, and other URL schemes are refused when constructing the import.
+
+`import::Config::client` is removed: the importer builds its own HTTP client so it can hold redirects to the playlist's origin.
+Drop the field; there is no replacement for a custom client.
+
+### A failed timeline fails the segment cursor
+
+`export::segments::Consumer::next` returns `Err(Error::TimelineFailed { .. })` once a failed timeline's covered segments drain, instead of `Ok(None)`.
+`Ok(None)` now means only a clean end, so finalize a recording there, and mark it truncated on the error.
+
+```rust
+match cursor.next().await {
+	Ok(Some(segment)) => { /* store it */ }
+	Ok(None) => { /* complete: finalize the recording */ }
+	Err(Error::TimelineFailed { .. }) => { /* truncated: every later call fails the same */ }
+	Err(err) => { /* a fetch failed: call next() again to retry it */ }
+}
+```
 
 ### HLS import unwraps fMP4 to Legacy (#6250)
 
@@ -26,6 +41,12 @@ Call `Import::finish` then, and keep the returned `broadcast::Finish` (or await 
 import.run().await?;
 import.finish()?.wait().await;
 ```
+
+### A timestamp rewind ends the import (#6426)
+
+`import::Import::init` and `run` fail with the new `Error::Rewind` when a rendition's timestamps go backwards, such as a reset at an `EXT-X-DISCONTINUITY` under the same `EXT-X-MAP`.
+`run` used to retry it, then evict the rendition and rejoin it as fresh tracks.
+Treat the error as final and import the restarted source as a new broadcast.
 
 ### A failed timeline fails its listings
 
