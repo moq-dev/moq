@@ -125,6 +125,21 @@ const WINDOW_MS = 4000;
 /** How long a state change (pause, unsubscribe, republish) has to take effect. */
 const SETTLE_MS = 6000;
 
+/** The replacement case's fixed player delay, so the switch bound below can count it. */
+const REPLACEMENT_DELAY_MS = 50;
+
+/**
+ * How long a following player may take to present a replacement or fallback once the new route is
+ * ready or the old one withdrawn. Routing: the relay holds a route change for its update hold
+ * (moq-net's `origin::DEFAULT_UPDATE_HOLD`; the JS origin holds none), and the announcement plus
+ * the catalog and track subscriptions take five loopback round trips, each charged at QUIC's 1 ms
+ * timer granularity. Presentation: a keyframe interval of codec cadence, one frame to decode, and
+ * the player's delay. Observation: one page sample and one driver poll.
+ */
+const SWITCH_MS = Math.ceil(
+	300 + 5 + KEYFRAME_INTERVAL_MS + 1000 / Pattern.FPS + REPLACEMENT_DELAY_MS + SAMPLE_MS + POLL_INTERVAL_MS,
+);
+
 /** Fraction of a window's samples that must be readable, carry a tone, and be in sync. */
 const AGREEMENT = 0.9;
 
@@ -1051,7 +1066,7 @@ try {
 				});
 				const [watch, watchErrors] = await subscriber(name, `replacement-${version}`, {
 					versions: version,
-					delay: "50ms",
+					delay: `${REPLACEMENT_DELAY_MS}ms`,
 				});
 				viewer = watch;
 				await gesture(watch);
@@ -1078,22 +1093,22 @@ try {
 					`new-${version}`,
 				);
 				next = replacement;
-				const started = Date.now();
 				await gesture(replacement);
-				await waitForFixture(replacement, replacementErrors, {
+				const { readyAt: ready } = await waitForFixture(replacement, replacementErrors, {
 					deadline: Date.now() + timeoutMs,
 					assertion: "replacement ready",
 					description: "the replacement catalog and clock",
 					predicate: (s) => s.ready && s.frameId > 0,
 				});
-				const preparationMs = Date.now() - started;
+				// The page shares the host clock, so timing from its own readiness skips the driver's poll lag.
+				if (ready === undefined) throw new Error("a ready fixture reports when it became ready");
 				const switched = await waitForState(watch, watchErrors, {
-					deadline: Date.now() + timeoutMs,
+					deadline: ready + SWITCH_MS,
 					assertion: "live replacement plays",
-					description: "the new run while its incumbent stays open",
+					description: `the new run within ${SWITCH_MS}ms while its incumbent stays open`,
 					predicate: (s) => s.generation === 1 && !s.audioStalled,
 				});
-				const replacementMs = Date.now() - started;
+				const replacementMs = Date.now() - ready;
 				if (version !== "moq-lite-06")
 					check(switched.broadcastEpoch !== first.broadcastEpoch, "replacement has a fresh epoch", () =>
 						JSON.stringify(switched),
@@ -1110,9 +1125,9 @@ try {
 				const withdrawn = Date.now();
 				await command(replacement, "stop");
 				const back = await waitForState(watch, watchErrors, {
-					deadline: Date.now() + timeoutMs,
+					deadline: withdrawn + SWITCH_MS,
 					assertion: "live incumbent fallback plays",
-					description: "the still-live older run after the newest withdraws",
+					description: `the still-live older run within ${SWITCH_MS}ms of the newest withdrawing`,
 					predicate: (s) => s.generation === 0 && !s.audioStalled,
 				});
 				const fallbackMs = Date.now() - withdrawn;
@@ -1121,15 +1136,7 @@ try {
 				);
 				await measurePlayback(watch, watchErrors, `fallback ${version}`);
 				console.error(
-					JSON.stringify({
-						version,
-						preparationMs,
-						replacementMs,
-						fallbackMs,
-						keyframeIntervalMs: KEYFRAME_INTERVAL_MS,
-						playbackDelayMs: 50,
-						sampleIntervalMs: SAMPLE_MS,
-					}),
+					`  ${version}: replacement ${replacementMs}ms, fallback ${fallbackMs}ms, bound ${SWITCH_MS}ms`,
 				);
 			} finally {
 				await viewer?.context().close();

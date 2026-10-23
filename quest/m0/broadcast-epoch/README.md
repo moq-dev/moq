@@ -92,15 +92,23 @@ the IETF resume point and lite-05/06 `widen_frame_bounds` still serve any
 mid-group start: a public `Subscription::with_start` or a downstream Frame
 Start a relay forwards upstream.
 
-This README owns an end-to-end relay test: republish a name under a new
-epoch while the old publisher's session stays open. A lite-07 viewer and a lite-06 or IETF viewer
-that follow the announce `Restart` (or END then START) both reach the new
-epoch within one RTT-scale bound rather than the idle timeout, and killing the
-newest epoch falls back to a still-live older one.
-The same test drives the real players (decided 2026-10-09, from #5154):
-`moq play` and a browser `@moq/watch`, the latter through the `just test
-media` lane, both show the new run within that bound, without a manual
-republish against a live relay.
+The end-to-end gate republishes a name under a new epoch while the old
+publisher's session stays open, then closes the newest so the still-live older
+one wins again. The real relay (the CLI integration suite's `epochs` cases) and
+both real players (decided 2026-10-09, from #5154: `moq play` through `just test
+native-play` and a browser `@moq/watch` through `just test media`) run it on
+lite-07, lite-06, and IETF, holding A's catalog and media across B's takeover.
+
+Decided 2026-10-23 (maintainer, on
+[PR 6548](https://github.com/moq-dev/moq/pull/6548)): the gate's "RTT-scale
+bound" means announcement-following readers observe the replacement within the
+protocol round trips plus the configured announcement hold, independent of the
+idle timeout, and real players present it within those routing delays plus
+their configured codec cadence, decoding, and playback delays. A player cannot
+show a new run sooner than its keyframe cadence and playback delay allow, and
+the hold is a deliberate routing setting, so neither is a stall; the gate
+exists to exclude waiting on the old session's idle timeout. Each gate enforces
+the bound derived from its own configuration rather than a hang watchdog.
 
 When the release cut carries stats epochs, drop
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed and
@@ -116,28 +124,3 @@ players and exporters, distinguishing announcement followers from readers
 that retain lifetime pins. Wall-clock expiry, live DROP dispositions,
 FETCH budgets and seamless JS handover remain m1; the IETF extension landed
 independently.
-
-Extend the line's relay/media tests to hold catalog and media from A while B
-replaces it, exercise later metadata/subscription/FETCH operations, and prove
-that replacing the catalog starts fresh pins. A followed sibling replacement
-restarts that sibling while preserving the catalog's explicit epoch
-constraints; it never mixes instances through an old handle. Check
-exact and covering routes, matching/different/absent epochs, and legacy
-End+Start. The child quests own their focused regressions.
-
-The remaining acceptance question is the real-player phrase "within that
-bound" above. The real relay and player gates in
-[PR 6548](https://github.com/moq-dev/moq/pull/6548) keep the incumbent open,
-observe replacement and fallback, and distinguish catalog-lifetime pins from
-fresh readers. Their network watchdogs detect hangs; they do not establish the
-original RTT-scale decoded-playback bound. The browser fixture has a 500 ms
-GOP and an explicitly configured 50 ms playback delay; native playback uses
-the same delay and a 400 ms decoded-PCM observation window.
-
-Proposed clarification, pending maintainer acceptance: announcement-following
-readers observe replacement within the protocol round trips and configured
-announcement hold, independently of the idle timeout. Real players then
-present the replacement within those routing delays plus their explicitly
-configured codec cadence, decoding, and playback delays. Keep this release
-gate open until that clarification and a derived performance bound are
-accepted and enforced, or the original decoded-playback requirement is met.

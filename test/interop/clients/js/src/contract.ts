@@ -36,6 +36,8 @@ export type FixtureState = {
 	audioState: AudioContextState;
 	/** True once the broadcast is announced with both a video and an audio config in its catalog. */
 	ready: boolean;
+	/** The page's `Date.now()` when {@link ready} first held, so a driver can time from it without its poll lag. */
+	readyAt?: number;
 	/** True while a subscriber is pulling video, i.e. the encoder's demand gate is open. */
 	videoActive: boolean;
 	/** True while a subscriber is pulling audio. */

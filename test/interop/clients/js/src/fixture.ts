@@ -183,14 +183,18 @@ export class Fixture {
 		unlock();
 		begin();
 
+		let readyAt: number | undefined;
 		this.#signals.run((effect) => {
+			const ready =
+				effect.get(connection.status) === "connected" &&
+				effect.get(video.out.catalog) !== undefined &&
+				effect.get(audio.out.catalog) !== undefined;
+			if (ready) readyAt ??= Date.now();
 			const state: FixtureState = {
 				frameId: effect.get(this.#frameId),
 				audioState: effect.get(this.#audioState),
-				ready:
-					effect.get(connection.status) === "connected" &&
-					effect.get(video.out.catalog) !== undefined &&
-					effect.get(audio.out.catalog) !== undefined,
+				ready,
+				readyAt,
 				videoActive: effect.get(video.out.active),
 				audioActive: effect.get(audio.out.active),
 				encodedFrames: effect.get(video.out.stats).frames,

@@ -12,11 +12,12 @@ Every audio-server socket and configuration belongs to the harness run
 settings are untouched. Nix supplies the server and client tools; the test runs
 in the nightly audio job.
 
-Each phase uses nonoverlapping 400 ms windows from the interop tone judge. A
-window straddling the switch may fail the tone check before the next complete
-window proves the new source. Logged switch times include that observation
-cadence, encoder/container startup for B, and the
-player's explicitly configured 50 ms delay. The 30 second watchdog detects a
-hang; it is not an RTT performance budget. The `pulse` rows of the
+Each phase uses nonoverlapping 400 ms windows from the interop tone judge. Each
+switch must be heard within a bound derived from its parts, counted from B's
+connection (its encoder already running) or B's exit: the relay's and the
+player's 300 ms announcement holds, five loopback round trips at QUIC's 1 ms
+timer granularity, one 20 ms Opus frame, the 50 ms playback delay, the
+monitor's 20 ms latency, and two judge windows, since one may straddle the
+switch. Cold start only has a hang guard. The `pulse` rows of the
 [audio quality lane](../audio-quality/README.md#native-rows) grade the same
 player on the same device against budgets.

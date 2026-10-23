@@ -5,8 +5,15 @@ use std::time::{Duration, Instant};
 use hang::moq_net::{self, Epoch, Timestamp, announce, broadcast, origin, track};
 use moq_mux::catalog::Stream;
 
-const TIMEOUT: Duration = Duration::from_secs(30);
 const LITE_07: &str = "moq-lite-07-wip";
+
+/// A loopback round trip, charged at QUIC's timer granularity (RFC 9002's kGranularity).
+const ROUND_TRIP: Duration = Duration::from_millis(1);
+
+/// How long an announcement-following reader may take to see a replacement or a fallback: the
+/// relay's and the reader's origins may each hold the route change for their update hold, and
+/// the announcement crosses both links in one round trip. The idle timeout never enters it.
+const ROUTING: Duration = origin::DEFAULT_UPDATE_HOLD.saturating_mul(2).saturating_add(ROUND_TRIP);
 
 struct Relay {
 	url: url::Url,
@@ -97,6 +104,14 @@ fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 	}
 }
 
+/// Finish a route change within [`ROUTING`] of `started`.
+async fn within<T>(started: Instant, change: impl Future<Output = T>) -> T {
+	let deadline = tokio::time::Instant::from_std(started + ROUTING);
+	tokio::time::timeout_at(deadline, change)
+		.await
+		.unwrap_or_else(|_| panic!("route change took longer than {ROUTING:?}"))
+}
+
 /// Ignore same-instance metadata updates, but keep the actual replacement representation.
 async fn changed(follow: &mut announce::Follow) -> bool {
 	loop {
@@ -178,15 +193,17 @@ async fn replacement(version: &str) {
 		.sibling
 		.create_track("late", track::Info::default().with_priority(17))
 		.unwrap();
-	let catalog_restart = changed(&mut catalog_follow).await;
-	let media_restart = changed(&mut media_follow).await;
+	let (catalog_restart, media_restart) = within(started, async {
+		(changed(&mut catalog_follow).await, changed(&mut media_follow).await)
+	})
+	.await;
 	assert_eq!(
 		catalog_restart,
 		version != "moq-lite-06" && version != "moq-transport-14"
 	);
 	assert_eq!(media_restart, catalog_restart);
 	println!(
-		"{version}: relay replacement observed in {:?} (publisher already connected)",
+		"{version}: relay replacement observed in {:?} of {ROUTING:?} (publisher already connected)",
 		started.elapsed()
 	);
 
@@ -251,27 +268,32 @@ async fn replacement(version: &str) {
 	assert!(new_frame.starts_with("B:"), "fresh subscription read {new_frame}");
 
 	// A still serves its held reader. Withdrawing B reveals A to fresh readers too.
+	let started = Instant::now();
 	second_connection.abort(moq_net::Error::Cancel);
 	drop(second);
 	drop(second_origin);
-	let started = Instant::now();
-	changed(&mut catalog_follow).await;
-	changed(&mut media_follow).await;
+	within(started, async {
+		changed(&mut catalog_follow).await;
+		changed(&mut media_follow).await;
+	})
+	.await;
 	let returned = viewer.request_broadcast("live/media", None).await.unwrap();
 	let mut returned = returned.track("audio").unwrap().subscribe(None).await.unwrap();
 	write(&first.media, "A:3");
 	let returned_frame = read(&mut returned).await;
 	assert!(returned_frame.starts_with("A:"), "fallback read {returned_frame}");
 	assert_eq!(read(&mut subscription).await, "A:3");
-	println!("{version}: relay fallback observed in {:?}", started.elapsed());
+	println!(
+		"{version}: relay fallback observed in {:?} of {ROUTING:?}",
+		started.elapsed()
+	);
 }
 
 macro_rules! versions {
 	($($name:ident: $version:literal),+ $(,)?) => {$(
 		#[tokio::test]
 		async fn $name() {
-			// A network/process hang guard, not an RTT performance budget.
-			tokio::time::timeout(TIMEOUT, replacement($version)).await.expect("real relay replacement hung");
+			replacement($version).await;
 		}
 	)+};
 }
