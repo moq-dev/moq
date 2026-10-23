@@ -251,7 +251,14 @@ fn interleaved_runs(c: &mut Criterion) {
 	let payload = payload(4096);
 	let frames = 16;
 	for tracks in [1, 4] {
-		let (source, stream, fixture) = runtime.block_on(prepare(tracks, 1, &payload));
+		let (source, stream, fixture) = runtime.block_on(prepare(
+			Video {
+				tracks,
+				frames: 1,
+				frames_per_group: 1,
+			},
+			&payload,
+		));
 		let init = runtime.block_on(export("cmaf", source, stream, true));
 		drop(fixture);
 		for runs in [1, 16] {

@@ -914,6 +914,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::NoMoov.into());
 		}
 
+		let mut claimed = sample::Claimed::default();
+
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
 			let track_id = traf.tfhd.track_id;
@@ -924,6 +926,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						data: &payload,
 						moof_size,
 						header_size,
+						claimed: &mut claimed,
 					},
 					&mut self.timebase,
 				)?;
@@ -938,6 +941,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			};
 
 			let run = track.run(traf, moof_size, header_size, payload.len())?;
+			for sample in &run.samples {
+				claimed.take(sample.range.clone())?;
+			}
 
 			// Shift onto the catalog clock. Anchor before releasing the reservation, so the first
 			// snapshot carries the final clock; the moov declared every track, so any track's

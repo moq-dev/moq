@@ -673,6 +673,74 @@ async fn separated_runs_keep_their_samples() {
 	}
 }
 
+/// A run pointing at bytes an earlier sample took is refused, passthrough or unwrapped, whether
+/// that sample is in the same track or another, rather than copying or publishing those bytes once
+/// per run: a moof of many such runs would multiply its mdat.
+#[tokio::test]
+async fn shared_sample_bytes_are_refused() {
+	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
+	let traf = |track_id, scale: moq_net::Timescale, runs| mp4_atom::Traf {
+		tfhd: mp4_atom::Tfhd {
+			track_id,
+			default_sample_duration: Some(1024),
+			default_sample_size: Some(4),
+			..Default::default()
+		},
+		tfdt: Some(mp4_atom::Tfdt {
+			base_media_decode_time: scale.as_u64(),
+		}),
+		trun: (0..runs)
+			.map(|_| mp4_atom::Trun {
+				data_offset: Some(0),
+				entries: vec![Default::default()],
+			})
+			.collect(),
+		..Default::default()
+	};
+
+	// Each traf with its runs' offsets into an 8-byte mdat of 4-byte samples.
+	let cases = [
+		vec![(traf(video_id, video_scale, 2), vec![0, 0])],
+		vec![
+			(traf(video_id, video_scale, 1), vec![0]),
+			(traf(audio_id, audio_scale, 1), vec![2]),
+		],
+	];
+	for trafs in cases {
+		let mut moof = mp4_atom::Moof {
+			mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+			traf: trafs.iter().map(|(traf, _)| traf.clone()).collect(),
+		};
+		let mut buf = Vec::new();
+		moof.encode(&mut buf).unwrap();
+		let data = buf.len() as i32 + 8;
+		for (traf, (_, offsets)) in moof.traf.iter_mut().zip(&trafs) {
+			for (trun, offset) in traf.trun.iter_mut().zip(offsets) {
+				trun.data_offset = Some(data + offset);
+			}
+		}
+		let mut fragment = Vec::new();
+		moof.encode(&mut fragment).unwrap();
+		mp4_atom::Mdat { data: vec![0xA5; 8] }.encode(&mut fragment).unwrap();
+
+		for passthrough in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+			let mut fmp4 =
+				crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+			fmp4.decode(&init).unwrap();
+			let err = fmp4.decode(&fragment).unwrap_err();
+			assert!(
+				matches!(
+					err,
+					crate::Error::Cmaf(crate::container::fmp4::Error::InvalidDataOffset)
+				),
+				"passthrough {passthrough}: {err:?}"
+			);
+		}
+	}
+}
+
 /// An unwrapped sample presents at `tfdt + the durations before it + its composition offset`, so
 /// reordered (B-frame) samples keep decode order on the wire with their own presentation times,
 /// and only the sync sample opens a group.
