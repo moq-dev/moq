@@ -569,7 +569,7 @@ async fn residual_random_meshes() {
 #[moq_clock::test]
 async fn capped_random_meshes_hunt_less() {
 	let capped = withdrawal_counts(true).await;
-	assert_eq!(capped, (177, 2, 185));
+	assert_eq!(capped, (151, 1, 154));
 }
 
 fn diameter(edges: &[Link]) -> usize {
@@ -690,6 +690,68 @@ async fn hop_limit_bounds_receive_and_send() {
 			ended.get("short").and_then(|kinds| kinds.last()),
 			Some(&Kind::End),
 			"{name}: {ended:?}"
+		);
+	}
+}
+
+/// A cheaper route at the cap wins locally but cannot be forwarded, so the relay
+/// advertises the pricier in-cap route instead of withdrawing the prefix, and
+/// withdraws only once no in-cap route is left.
+#[moq_clock::test]
+async fn hop_limit_falls_back_to_a_forwardable_route() {
+	// Only wires carrying a route cost can rank a longer route first.
+	for name in [
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-17",
+		"moq-transport-18",
+		"moq-transport-19",
+		"moq-transport-20",
+		"moq-transport-21",
+		"moq-transport-22",
+	] {
+		let version = name.parse().unwrap();
+		let near = produce_origin(1);
+		let far = produce_origin(4);
+		let mut config = origin::Config::new(Hop::new(2).unwrap());
+		config.max_hops = origin::HopLimit::new(3).unwrap();
+		config.pool = cache::Pool::unbounded();
+		let (relay, driver) = origin::Producer::new(config);
+		support::harness::spawn(driver);
+		let sink = produce_origin(3);
+		let _near = peer(version, &near, &relay).await;
+		let _far = peer(version, &far, &relay).await;
+		let _downstream = peer(version, &relay, &sink).await;
+		let mut sent = watch(sink.consume().announced());
+		moq_clock::sim::idle().await;
+
+		let route = |first: u64, count: u64, cost: u64| {
+			origin::Route::default()
+				.with_hops(
+					moq_net::Hops::try_from((first..first + count).map(|id| Hop::new(id).unwrap()).collect::<Vec<_>>())
+						.unwrap(),
+				)
+				.with_cost(origin::Cost::new(cost))
+		};
+		// Three hops at the relay once the sender is appended: in the cap, but full.
+		let _cheap = far.dynamic_route("room", route(100, 2, 1)).unwrap();
+		// Two hops at the relay, so it has room for the relay's own.
+		let pricey = near.dynamic_route("room", route(200, 1, 50)).unwrap();
+		moq_clock::sim::idle().await;
+		let started = drain(&mut sent);
+		assert_eq!(
+			started.get("room").and_then(|kinds| kinds.last()),
+			Some(&Kind::Start),
+			"{name}: withdrew a prefix an in-cap route reaches: {started:?}"
+		);
+
+		drop(pricey);
+		moq_clock::sim::idle().await;
+		let ended = drain(&mut sent);
+		assert_eq!(
+			ended.get("room").and_then(|kinds| kinds.last()),
+			Some(&Kind::End),
+			"{name}: forwarded a route at the cap: {ended:?}"
 		);
 	}
 }

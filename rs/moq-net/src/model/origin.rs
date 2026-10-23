@@ -223,7 +223,7 @@ impl<V> Decode<V> for Hop {
 pub(super) const MAX_HOPS: usize = 32;
 
 /// The longest advertised hop path an origin accepts or forwards, from 1 to 32.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HopLimit(usize);
 
 impl HopLimit {
@@ -1287,12 +1287,18 @@ struct Horizon {
 	/// Hide the routes learned on an upstream link, because this reader is one
 	/// ([`Producer::upstream`]): a relay never transits between two upstreams.
 	upstream: bool,
+	/// Hide the routes with no room for our hop under this cap, because this reader
+	/// forwards them ([`Consumer::forwardable`]). Selection then falls back to a
+	/// shorter route instead of withdrawing a prefix an in-cap path still reaches.
+	max_hops: Option<HopLimit>,
 }
 
 impl Horizon {
 	/// Whether `entry` may be observed or served through this horizon.
 	fn admits(&self, entry: &RouteEntry) -> bool {
-		self.admits_link(entry.link) && entry.visible_to(self.exclude)
+		self.admits_link(entry.link)
+			&& entry.visible_to(self.exclude)
+			&& self.max_hops.is_none_or(|max| entry.hops.len() < max.get())
 	}
 
 	/// Whether routes arriving on `link` may be observed through this horizon.
@@ -1309,10 +1315,14 @@ impl Horizon {
 	/// front on its next request, while what it already reads stays on the plain
 	/// front. That cannot loop, since the peer serves our requests through its own
 	/// split horizon, which never routes back through us.
+	///
+	/// The hop cap bounds what is advertised, not what serves a request, so it never
+	/// applies here.
 	fn effective(self, routes: &RouteTable, path: &Path) -> Self {
-		match self.exclude {
-			Some(peer) if routes.covering(path).any(|entry| !entry.visible_to(Some(peer))) => self,
-			_ => Self { exclude: None, ..self },
+		let horizon = Self { max_hops: None, ..self };
+		match horizon.exclude {
+			Some(peer) if routes.covering(path).any(|entry| !entry.visible_to(Some(peer))) => horizon,
+			_ => Self { exclude: None, ..horizon },
 		}
 	}
 }
@@ -4342,11 +4352,7 @@ impl RouteNode {
 							Some((routes, hold)) => {
 								let best = routes.best_route(
 									&selected.path,
-									Horizon {
-										exclude: None,
-										local: false,
-										upstream: false,
-									},
+									Horizon::default(),
 									&HashSet::new(),
 									|entry| entry.via == selected.via,
 								);
@@ -5236,11 +5242,7 @@ impl Dynamic {
 		}
 		let entry = table.best_route(
 			path,
-			Horizon {
-				exclude: None,
-				local: false,
-				upstream: false,
-			},
+			Horizon::default(),
 			&HashSet::new(),
 			|entry| {
 				entry
@@ -5255,11 +5257,7 @@ impl Dynamic {
 		let active = table
 			.best_route(
 				path,
-				Horizon {
-					exclude: None,
-					local: false,
-					upstream: false,
-				},
+				Horizon::default(),
 				&HashSet::new(),
 				|entry| entry.via == via,
 			)
@@ -5910,13 +5908,6 @@ impl Consumer {
 		self.hop
 	}
 
-	// Sessions enforce the policy configured once on the origin.
-	// private: tuning
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn max_hops(&self) -> HopLimit {
-		self.max_hops
-	}
-
 	/// A clone that never serves the given peer its own data: routes whose hop
 	/// chain contains `peer`, or whose announcing session is `peer`, are invisible
 	/// and never resolved from, matching what the announce loop advertises to them.
@@ -5928,6 +5919,15 @@ impl Consumer {
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.horizon.exclude = Some(peer);
+		self
+	}
+
+	/// A clone whose announcements skip the routes this origin cannot forward: a
+	/// chain already at [`Config::max_hops`] has no room for our hop. Sessions whose
+	/// wire carries the hop path apply this to the routes they advertise.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn forwardable(mut self) -> Self {
+		self.horizon.max_hops = Some(self.max_hops);
 		self
 	}
 
@@ -7065,7 +7065,7 @@ mod tests {
 		let (producer, _driver) = Producer::new(config);
 		let scoped = producer.scope("room", &Patterns::from(Pattern::all())).unwrap();
 		assert_eq!(scoped.config().max_hops.get(), 6);
-		assert_eq!(scoped.consume().max_hops().get(), 6);
+		assert_eq!(scoped.consume().forwardable().horizon.max_hops, HopLimit::new(6));
 	}
 	#[cfg(feature = "async")]
 	use crate::model::test_tracing::count_drop_warnings;

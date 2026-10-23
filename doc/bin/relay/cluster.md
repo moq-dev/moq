@@ -88,7 +88,8 @@ to 32, with 32 as the default. Set it near the mesh's diameter after any single
 link or node failure, plus a margin, to cut off long detours during withdrawal
 path hunting. Count the publisher's hop too. A cap below that diameter can
 partition the mesh; a lower cap only drops longer paths and preserves route
-selection among the remaining paths.
+selection among the remaining paths. A peer hears the best route with room
+for this relay's hop, even when a cheaper route at the cap serves locally.
 
 ```toml
 [cluster]
