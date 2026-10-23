@@ -1,12 +1,12 @@
-# [M] The QUIC driver's waits poll without leaking
+# [M] The QUIC drivers' waits poll without leaking
 
 ## Goal
 
 The stream, datagram, close, and accept waits in `moq_tokio::quic::driver`
 have `poll_*` forms that leak nothing: `Connection::poll_open_uni`, `poll_open_bi`, `poll_accept_uni`,
 `poll_accept_bi`, `poll_recv_datagram` and `poll_closed`,
-`SendStream::poll_closed` (today's `stopped`), and `Endpoint::poll_accept`.
-`SendStream::poll_acked`, which [poll_acked](/quest/m2/quic-ack-hook.md)
+`send::Stream::poll_closed` (today's `stopped`), and `Endpoint::poll_accept`.
+`send::Stream::poll_acked`, which [poll_acked](/quest/m2/quic-ack-hook.md)
 adds, uses the same mechanism. The names follow moq-uring's driver, which
 already follows moq-net's `transport::poll` traits; return types stay the
 driver's own. A waiter that polls once and is dropped leaves nothing alive:
@@ -14,11 +14,19 @@ no live registration and no task.
 
 ## Plan
 
+Moved to m1 into the [moq-quic API](/quest/m1/quic-api/README.md) epic
+(maintainer, 2026-10-23): an async-only driver is quinn's shape, and it forces
+moq-tokio's async-to-poll adapter (a boxed future per operation, a copy per
+write, deferred finish and reset, an emulated `closed()`). Poll forms are the
+primary surface, the async methods thin wrappers. `send::Finished`
+implements `Future`, resolving when every byte is acknowledged or the peer
+stops the stream. moq-uring's driver gets the same signatures.
+
 The driver's waits are futures over `tokio::sync::Notify`: the connection's
 `Shared` fields, the per-stream `stopped` map, and the endpoint's `incoming`.
 `Notify` cannot hold a bare waker, so a poll-based caller has to keep the
 future, and moq-tokio's `transport::Session` adapter boxes one per pending
-operation. [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md)
+operation. [Native WebTransport](/quest/m1/quic-api/native-web.md)
 wants a native `poll::Session` on the QUIC backend, and
 [poll_acked](/quest/m2/quic-ack-hook.md) wants a real poll method. Both need
 these.
@@ -41,12 +49,12 @@ and kio stays private.
 
 ```rust
 impl Connection {
-    pub fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, ConnectionError>>;
-    pub fn poll_open_uni(&mut self, cx: &mut Context<'_>, options: SendOptions<'_>) -> Poll<Result<SendStream, ConnectionError>>;
-    pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<ConnectionError>;
+    pub fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<recv::Stream, connection::Error>>;
+    pub fn poll_open_uni(&mut self, cx: &mut Context<'_>, options: send::Options<'_>) -> Poll<Result<send::Stream, connection::Error>>;
+    pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<connection::Error>;
 }
-impl SendStream {
-    pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, StoppedError>>;
+impl send::Stream {
+    pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, send::Error>>;
 }
 ```
 
@@ -83,10 +91,14 @@ condition is ever signalled, so release on drop is what passes it, not the
 next wake. Also, on paused time: two handles waiting on each condition both
 wake; one handle polled 100 times holds one live registration; a clone's poll
 leaves the original's registration in place. Report the public API: new poll
-methods on `Connection`, `SendStream` and `Endpoint`, with the async forms
+methods on `Connection`, `send::Stream` and `Endpoint`, with the async forms
 unchanged.
+
+## Required
+
+- [Streams](/quest/m1/quic-api/streams.md) - the `send::`/`recv::` names and `send::Finished` these signatures use
 
 ## Related
 
-- [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) - its native QUIC `poll::Session` calls these
-- [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - adds `SendStream::poll_acked` in this shape
+- [Native WebTransport](/quest/m1/quic-api/native-web.md) - its native QUIC `poll::Session` calls these
+- [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - adds `send::Stream::poll_acked` in this shape
