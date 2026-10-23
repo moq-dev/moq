@@ -503,7 +503,13 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 	}
 }
 
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+	target_pointer_width = "64",
+	expect(
+		clippy::large_enum_variant,
+		reason = "one per stream, so boxing a variant would add an allocation per stream to save bytes nothing holds in bulk"
+	)
+)]
 pub enum AdapterRecv<S: crate::transport::poll::Session> {
 	Real(S::RecvStream),
 	Virtual(crate::transport::poll::Buffered<VirtualRecvStream>),

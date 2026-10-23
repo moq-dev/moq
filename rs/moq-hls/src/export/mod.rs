@@ -28,7 +28,7 @@
 //!   storage.
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod archive_tests;
 mod history;
 pub mod master;
@@ -129,9 +129,13 @@ impl Default for Config {
 
 /// All renditions of one broadcast, kept in sync with its catalog.
 pub struct Broadcaster {
-	// Read only by the serve path's `is_closed`/`closed` (server-gated); a recording consumer
-	// observes close through its `renditions()` cursor ending instead.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(
+			dead_code,
+			reason = "read only by the serve path's `is_closed`/`closed` (server-gated); a recording consumer observes close through its `renditions()` cursor ending instead"
+		)
+	)]
 	broadcast: moq_net::broadcast::Consumer,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
@@ -200,7 +204,10 @@ impl Broadcaster {
 	}
 
 	/// Resolve once the master playlist lists at least one rendition.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn advertised(&self) {
 		self.renditions.advertised().await;
 	}
@@ -349,7 +356,10 @@ impl Broadcaster {
 
 	/// Build every rendition's init segment, so the manifest can name each by its hash. A
 	/// rendition whose init can't be built yet is left out of the render.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn build_inits(&self) {
 		for rendition in self.renditions.snapshot() {
 			if let Err(err) = rendition.init().await {
@@ -362,7 +372,10 @@ impl Broadcaster {
 	/// already-ended timeline). Every rendition's window is fed from the same timeline, so the
 	/// first rendition's readiness stands in for the broadcast's. Bounding the wait is the
 	/// caller's policy.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn playable(&self) {
 		if let Some(rendition) = self.renditions.snapshot().into_iter().next() {
 			rendition.playable().await;
@@ -370,7 +383,10 @@ impl Broadcaster {
 	}
 
 	/// Whether the current catalog contains no servable renditions (serve path).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) fn is_empty(&self) -> bool {
 		self.renditions.is_empty()
 	}
@@ -603,7 +619,11 @@ async fn watch(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -625,7 +645,10 @@ mod tests {
 
 	use super::*;
 
-	#[allow(clippy::large_enum_variant)]
+	#[allow(
+		clippy::large_enum_variant,
+		reason = "a test fixture built once per case; only large when extra features grow the video config"
+	)]
 	enum TestConfig {
 		Video(hang::catalog::VideoConfig),
 		Audio(hang::catalog::AudioConfig),
@@ -4105,21 +4128,19 @@ mod tests {
 		assert_eq!(second.segment, 1);
 		assert_eq!(second.discontinuity, 0, "consecutive segments are continuous");
 
-		// Tear down the publisher mid-group. The track ends abruptly (the cursor drains the
-		// segments it already saw and ends; the still-open live-edge group is NOT finalized,
-		// since a reset can't vouch that its media is complete), and the broadcast closes.
-		// (Clean-end finalization of the
-		// live edge is covered by segments::tests::next_after_walks_finalized_segments.)
+		// Tear down the publisher mid-group. The timeline ends abruptly, so the cursor fails
+		// rather than finalize the open live-edge group (a reset can't vouch that its media is
+		// complete) or end as if the recording were complete.
 		drop((catalog, media, registration));
 		broadcast.close();
 
 		let end = tokio::time::timeout(Duration::from_secs(5), segments.next())
 			.await
-			.expect("segment cursor resolves after the source is lost")
-			.unwrap();
+			.expect("segment cursor resolves after the source is lost");
 		assert!(
-			end.is_none(),
-			"an abrupt end does not finalize the open live-edge group"
+			matches!(end, Err(crate::Error::TimelineFailed { .. })),
+			"an abrupt end fails the recording: {:?}",
+			end.map(|segment| segment.map(|segment| segment.segment))
 		);
 
 		// The renditions cursor also ends once the source closes.
@@ -4141,7 +4162,7 @@ mod tests {
 	}
 
 	/// Renditions over hand-published timelines, reconciled and watched the way `watch_catalog`
-	/// does. Nothing serves the media, so a segment fetch is a miss.
+	/// does. A segment fetch misses unless [`media`](Timelines::media) published its groups.
 	struct Timelines {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::hang::Catalog,
@@ -4216,6 +4237,24 @@ mod tests {
 			(track, timeline)
 		}
 
+		/// Publish `name`'s media: one keyframe group per [`gop`] record `0..groups`, so a cursor
+		/// fetches real segments.
+		fn media(&self, name: &str, groups: u64) -> moq_net::track::Producer {
+			let track = self.broadcast.create_track(name, timed()).unwrap();
+			for sequence in 0..groups {
+				let mut group = track.append_group().unwrap();
+				let frame = vp8_frame(sequence * 2_000_000, true);
+				hang::container::Frame {
+					timestamp: frame.timestamp,
+					payload: frame.payload,
+				}
+				.write_to(&mut group)
+				.unwrap();
+				group.finish().unwrap();
+			}
+			track
+		}
+
 		fn rendition(&self, name: &str) -> Arc<Rendition> {
 			self.renditions
 				.get(Kind::Video, name)
@@ -4252,14 +4291,34 @@ mod tests {
 			failed(&self.rendition(name)).await
 		}
 
-		/// Drain `name`'s recording cursor, which must end rather than park.
-		async fn drain(&self, name: &str) {
+		/// Drain `name`'s recording cursor, which must end rather than park, returning the
+		/// segments it yielded and how it ended.
+		async fn drain(&self, name: &str) -> (Vec<u64>, crate::Result<()>) {
 			let mut segments = self.rendition(name).segments();
-			let drained = tokio::time::timeout(Duration::from_secs(5), async {
-				while segments.next().await.unwrap().is_some() {}
+			let mut drained = Vec::new();
+			let end = tokio::time::timeout(Duration::from_secs(5), async {
+				loop {
+					match segments.next().await {
+						Ok(Some(segment)) => drained.push(segment.segment),
+						Ok(None) => return Ok(()),
+						Err(err) => return Err(err),
+					}
+				}
 			})
-			.await;
-			assert!(drained.is_ok(), "{name}'s cursor parked");
+			.await
+			.unwrap_or_else(|_| panic!("{name}'s cursor parked"));
+			if end.is_err() {
+				assert!(segments.next().await.is_err(), "{name}'s cursor ended after failing");
+			}
+			(drained, end)
+		}
+
+		/// Drain `name`'s recording cursor, which must answer a timeline failure once drained,
+		/// returning the segments it yielded first.
+		async fn drain_failed(&self, name: &str) -> Vec<u64> {
+			let (drained, end) = self.drain(name).await;
+			assert!(matches!(end, Err(crate::Error::TimelineFailed { .. })), "{end:?}");
+			drained
 		}
 	}
 
@@ -4298,6 +4357,7 @@ mod tests {
 		let test = Timelines::new();
 		let (_reference, mut video0) = test.publish("video0");
 		let (track, mut video1) = test.publish("video1");
+		let _media = test.media("video1", 4);
 		for sequence in 0..4 {
 			video0.push(&gop(sequence)).unwrap();
 			video1.push(&gop(sequence)).unwrap();
@@ -4327,7 +4387,8 @@ mod tests {
 				filter: None,
 			})
 		);
-		test.drain("video1").await;
+		// So does the cursor, once it drains what the timeline covers.
+		assert_eq!(test.drain_failed("video1").await, [0, 1, 2, 3]);
 
 		let reference = test.listed("video0", 6).await;
 		assert!(!reference.finished, "the other renditions go on");
@@ -4336,13 +4397,14 @@ mod tests {
 
 	// A rendition that failed while the reference was live stays failed once the reference
 	// finishes, even when its records cover every listed row. One failing only after the
-	// reference finished loses nothing it covers, so its playlist still ends as complete.
+	// reference finished loses nothing it covers, so its playlist and cursor still end as complete.
 	#[tokio::test(start_paused = true)]
 	async fn a_rendition_failure_counts_only_before_the_reference_finishes() {
 		for early in [true, false] {
 			let test = Timelines::new();
 			let (_reference, mut video0) = test.publish("video0");
 			let (track, mut video1) = test.publish("video1");
+			let _media = test.media("video1", 6);
 			for sequence in 0..4 {
 				video0.push(&gop(sequence)).unwrap();
 			}
@@ -4364,27 +4426,32 @@ mod tests {
 			if let Some((track, video1)) = publisher {
 				test.finished("video1").await;
 				cut(track, video1);
-				while !rendition.own_failure() {
+				while rendition.own_failure().is_none() {
 					tokio::time::sleep(Duration::from_millis(10)).await;
 				}
 				let snapshot = rendition.snapshot();
 				assert!(snapshot.finished, "a covered late failure loses nothing");
 				assert_eq!(numbers(&snapshot), [0, 1, 2, 3]);
+				let (drained, end) = test.drain("video1").await;
+				assert_eq!(drained, [0, 1, 2, 3]);
+				assert!(end.is_ok(), "the recording is complete: {end:?}");
 			} else {
 				settle().await;
 				assert!(rendition.try_snapshot().is_err(), "the failure is sticky");
 				assert!(rendition.failed_alone());
+				assert_eq!(test.drain_failed("video1").await, [0, 1, 2, 3]);
 			}
 		}
 	}
 
 	// A failed reference timeline is not retried. Every playlist answers the error instead of
-	// ending as if complete or freezing live, and recording cursors end.
+	// ending as if complete or freezing live, and recording cursors answer it once drained.
 	#[tokio::test(start_paused = true)]
 	async fn a_reference_timeline_error_fails_every_playlist() {
 		let test = Timelines::new();
 		let (track, mut video0) = test.publish("video0");
 		let (_track, mut video1) = test.publish("video1");
+		let _media = [test.media("video0", 4), test.media("video1", 5)];
 		for sequence in 0..4 {
 			video0.push(&gop(sequence)).unwrap();
 			video1.push(&gop(sequence)).unwrap();
@@ -4400,10 +4467,10 @@ mod tests {
 		// A rendition created after the failure starts failed.
 		let late = test.join();
 		late.failed("video1").await;
-		test.drain("video0").await;
+		assert_eq!(test.drain_failed("video0").await, [0, 1, 2, 3]);
 		// The cursor still waits for the listed segment its own timeline has not passed.
 		video1.push(&gop(4)).unwrap();
-		test.drain("video1").await;
+		assert_eq!(test.drain_failed("video1").await, [0, 1, 2, 3]);
 	}
 
 	// A playlist request waiting for its first row answers a timeline that fails before one,
@@ -4860,7 +4927,7 @@ mod tests {
 
 		test.broadcast.close();
 		test.failed("video0").await;
-		test.drain("video0").await;
+		assert!(test.drain_failed("video0").await.is_empty());
 	}
 
 	/// Record `sequence` covering group `group` from `pts_ms` for `duration_ms`, starting on a sync

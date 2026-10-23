@@ -40,9 +40,11 @@ Public API: none. Wire: none.
 ## Required
 
 - [Union renewal](/quest/m1/test-flakes-2/auth-union-renewal.md) - the JS subscriber never leaves a torn REQUEST_UPDATE on the stream
-- [One process](/quest/m1/test-flakes-2/one-process.md) - no test writes process-wide env or unwraps the crypto provider install
 - [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
-- [Interop cpp to js budget](/quest/m1/test-flakes-2/interop-cpp-js.md) - the cpp -> js cell finishes inside its 30 s budget, fixed at its cause
+- [Tone check grace](/quest/m1/test-flakes-2/tone-grace.md) - the interop tone check charges its grace only for audible playback, so a refilling ring under CPU starvation is not a failure
+- [Relay tests in one process](/quest/m1/test-flakes-2/relay-one-process.md) - moq-relay's integration binary passes under plain `cargo test`, not only nextest
+- [Interop timestamp gap](/quest/m1/test-flakes-2/interop-timestamp-gap.md) - `rust -> js-native-node` audio has no gap under load
+- [Go reservation grant](/quest/m1/test-flakes-2/go-reservation-grant.md) - the Go reservation test waits for its grant
 
 ## Related
 

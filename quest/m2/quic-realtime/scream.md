@@ -3,7 +3,7 @@
 ## Goal
 
 The SCReAMv2 (RFC 8298bis) delay-based path runs as a
-`congestion::Controller` in `moq-quic`, fed by receive timestamps, and reports
+controller in `moq-congestion`, fed by receive timestamps, and reports
 its queuing delay, throughput, and reaction time on the shared moq-shaper
 uplink presets.
 
@@ -22,4 +22,5 @@ BSD-licensed reference (EricssonResearch/scream) to check behavior.
 
 ## Required
 
+- [Portable controller trait](/quest/m1/congestion/trait.md) - followers land in `moq-congestion` on its trait
 - [Receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) - the per-packet receive instants and the shared presets

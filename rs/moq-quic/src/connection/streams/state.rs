@@ -6,7 +6,8 @@ use std::{
 };
 
 use bytes::BufMut;
-use rustc_hash::{FxHashMap, FxHashSet};
+use indexmap::IndexSet;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tracing::{debug, trace};
 
 use super::{
@@ -121,8 +122,8 @@ pub(crate) struct StreamsState {
     pub(super) events: VecDeque<StreamEvent>,
     /// Streams blocked on connection-level flow control or stream window space
     ///
-    /// Streams are only added to this list when a write fails.
-    pub(super) connection_blocked: Vec<StreamId>,
+    /// Deduplicated waiters with constant-time removal. Cancellation may change wake order.
+    pub(super) connection_blocked: IndexSet<StreamId, FxBuildHasher>,
     /// Connection-level flow control budget dictated by the peer
     pub(super) max_data: u64,
     /// The initial receive window
@@ -213,7 +214,7 @@ impl StreamsState {
             send_streams: 0,
             pending: Schedule::new(),
             events: VecDeque::new(),
-            connection_blocked: Vec::new(),
+            connection_blocked: IndexSet::default(),
             max_data: 0,
             receive_window: receive_window.into(),
             local_max_data: receive_window.into(),
@@ -498,6 +499,7 @@ impl StreamsState {
         };
         let stream = stream_opt.get_or_insert_with(|| Send::new(max_send_data));
 
+        self.connection_blocked.swap_remove(&id);
         if stream.try_stop(error_code) {
             self.events
                 .push_back(StreamEvent::Stopped { id, error_code });
@@ -777,9 +779,10 @@ impl StreamsState {
     ///
     /// `payload` is the packet's frame space in `buf`, which may already hold control frames.
     /// A datagram cannot be split, so one too large for the room left ends the packet and
-    /// leads the next one. Only when it would leave the packet empty, which a packet clamped
-    /// below the path MTU can, does it step aside for what fits behind it, since
-    /// [`Self::can_send_frames`] promised a frame.
+    /// leads the next one. One too large for even an empty packet, which a packet clamped
+    /// below the path MTU can be, steps aside for what fits behind it instead, since
+    /// [`Self::can_send_frames`] promised a frame and control frames alone would leave the
+    /// packet short.
     pub(crate) fn write_frames(
         &mut self,
         buf: &mut Vec<u8>,
@@ -797,7 +800,7 @@ impl StreamsState {
                 Some(Next::Datagram(group)) => {
                     let (_, frame) = self.pending.datagram(group);
                     if buf.len() + frame > max_buf_size {
-                        if buf.len() > payload.start {
+                        if payload.start + frame <= max_buf_size {
                             break;
                         }
                         self.pending.defer_datagram(group);
@@ -831,13 +834,7 @@ impl StreamsState {
             trace!(id = %meta.id, off = meta.offsets.start, len = meta.offsets.end - meta.offsets.start, fin = meta.fin, "STREAM");
             meta.encode(encode_length, buf);
 
-            // The range might not be retrievable in a single `get` if it is
-            // stored in noncontiguous fashion. Therefore this loop iterates
-            // until the range is fully copied into the frame.
-            let mut offsets = meta.offsets.clone();
-            while offsets.start != offsets.end {
-                let data = stream.pending.get(offsets.clone());
-                offsets.start += data.len() as u64;
+            for data in stream.pending.get(meta.offsets.clone()) {
                 buf.put_slice(data);
             }
 
@@ -982,16 +979,16 @@ impl StreamsState {
 
     /// Wake the writer of a stream whose flow control limit just rose past what it has written
     fn send_unblocked(&mut self, id: StreamId) {
+        let stream = self.send.get(&id).and_then(|s| s.as_ref()).unwrap();
+        if !stream.is_writable() || stream.stop_reason.is_some() {
+            return;
+        }
         if self.write_limit() > 0 {
             self.events.push_back(StreamEvent::Writable { id });
             return;
         }
         // Still blocked on the connection window, so wait in the list that wakes when it relaxes
-        let ss = self.send.get_mut(&id).and_then(|s| s.as_mut()).unwrap();
-        if !ss.connection_blocked {
-            ss.connection_blocked = true;
-            self.connection_blocked.push(id);
-        }
+        self.connection_blocked.insert(id);
     }
 
     /// Whether the local send buffer prevents the application from writing more data.
@@ -1019,12 +1016,12 @@ impl StreamsState {
                     continue;
                 };
 
-                debug_assert!(stream.connection_blocked);
-                stream.connection_blocked = false;
-
                 // If it's no longer sensible to write to a stream (even to detect an error) then don't
                 // report it.
-                if stream.is_writable() && stream.max_data > stream.offset() {
+                if stream.is_writable()
+                    && stream.stop_reason.is_none()
+                    && stream.max_data > stream.offset()
+                {
                     return Some(StreamEvent::Writable { id });
                 }
             }
@@ -1229,6 +1226,7 @@ impl StreamsState {
             }
         }
         if half == StreamHalf::Send {
+            self.connection_blocked.swap_remove(&id);
             self.send_streams -= 1;
         }
     }
@@ -1263,7 +1261,11 @@ pub(super) fn get_or_insert_recv(opt: &mut Option<StreamRecv>, initial_max_data:
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "tests read the host clock directly"
+)]
 mod tests {
     use super::*;
     use crate::{
@@ -1281,6 +1283,211 @@ mod tests {
             (1024 * 1024u32).into(),
             (1024 * 1024u32).into(),
         )
+    }
+
+    #[test]
+    fn connection_blocked_reset_churn_is_bounded() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_uni: 512u32.into(),
+            initial_max_stream_data_uni: 1024u32.into(),
+            initial_max_data: 0u32.into(),
+            ..TransportParameters::default()
+        });
+        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+        for _ in 0..512 {
+            let id = Streams {
+                state: &mut server,
+                conn_state: &state,
+            }
+            .open(Dir::Uni, Default::default())
+            .unwrap();
+            let mut stream = SendStream {
+                id,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &state,
+            };
+            assert_eq!(stream.write(b"blocked"), Err(WriteError::Blocked));
+            assert_eq!(stream.write(b"blocked"), Err(WriteError::Blocked));
+            assert_eq!(stream.state.connection_blocked.len(), 1);
+            stream.reset(0u32.into()).unwrap();
+            assert!(
+                stream.state.connection_blocked.is_empty(),
+                "reset writer no longer waits for credit"
+            );
+            assert_eq!(stream.write(b"blocked"), Err(WriteError::ClosedStream));
+            server.reset_acked(id, 0);
+            assert!(server.send.is_empty());
+            assert!(server.connection_blocked.is_empty());
+        }
+        assert_eq!(server.write_limit(), 0);
+    }
+
+    #[test]
+    fn connection_blocked_finished_stream_is_freed_without_credit() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_uni: 1u32.into(),
+            initial_max_stream_data_uni: 1024u32.into(),
+            ..TransportParameters::default()
+        });
+        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+        let id = Streams {
+            state: &mut server,
+            conn_state: &state,
+        }
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+        let mut stream = SendStream {
+            id,
+            state: &mut server,
+            pending: &mut pending,
+            conn_state: &state,
+        };
+        assert_eq!(stream.write(b"blocked"), Err(WriteError::Blocked));
+        stream.finish().unwrap();
+        assert_eq!(stream.write(b"closed"), Err(WriteError::ClosedStream));
+        server.received_ack_of(frame::StreamMeta {
+            id,
+            offsets: 0..0,
+            fin: true,
+        });
+        assert!(server.send.is_empty());
+        assert!(server.connection_blocked.is_empty());
+        assert_eq!(server.write_limit(), 0);
+    }
+
+    #[test]
+    fn connection_blocked_writer_observes_stop_with_a_held_window() {
+        for peer_credit in [false, true] {
+            let mut server = make(Side::Server);
+            server.send_window = 1;
+            server.set_params(&TransportParameters {
+                initial_max_streams_uni: 2u32.into(),
+                initial_max_stream_data_uni: 1024u32.into(),
+                initial_max_data: if peer_credit {
+                    1u32.into()
+                } else {
+                    1024u32.into()
+                },
+                ..TransportParameters::default()
+            });
+            let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+            let holder = Streams {
+                state: &mut server,
+                conn_state: &state,
+            }
+            .open(Dir::Uni, Default::default())
+            .unwrap();
+            assert_eq!(
+                SendStream {
+                    id: holder,
+                    state: &mut server,
+                    pending: &mut pending,
+                    conn_state: &state
+                }
+                .write(b"x"),
+                Ok(1)
+            );
+            let id = Streams {
+                state: &mut server,
+                conn_state: &state,
+            }
+            .open(Dir::Uni, Default::default())
+            .unwrap();
+            let mut stream = SendStream {
+                id,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &state,
+            };
+            assert_eq!(stream.write(b"blocked"), Err(WriteError::Blocked));
+            let code = 7u32.into();
+            stream.state.received_stop_sending(id, code).unwrap();
+            assert_eq!(
+                stream.state.poll(),
+                Some(StreamEvent::Stopped {
+                    id,
+                    error_code: code
+                })
+            );
+            assert_eq!(stream.write(b"stopped"), Err(WriteError::Stopped(code)));
+            assert_eq!(stream.write(&[]), Err(WriteError::Stopped(code)));
+            let mut chunks = [Bytes::from_static(b"stopped")];
+            assert_eq!(
+                stream.write_chunks(&mut chunks),
+                Err(WriteError::Stopped(code))
+            );
+            assert_eq!(chunks[0], b"stopped"[..]);
+            assert!(stream.state.connection_blocked.is_empty());
+            assert_eq!(stream.state.write_limit(), 0);
+            assert_eq!(
+                stream.state.send[&holder]
+                    .as_ref()
+                    .unwrap()
+                    .pending
+                    .buffered(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn connection_blocked_credit_wakes_only_live_writers_once() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_uni: 4u32.into(),
+            initial_max_stream_data_uni: 1024u32.into(),
+            ..TransportParameters::default()
+        });
+        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+        let ids: Vec<_> = (0..4)
+            .map(|_| {
+                let id = Streams {
+                    state: &mut server,
+                    conn_state: &state,
+                }
+                .open(Dir::Uni, Default::default())
+                .unwrap();
+                let mut stream = SendStream {
+                    id,
+                    state: &mut server,
+                    pending: &mut pending,
+                    conn_state: &state,
+                };
+                assert_eq!(stream.write(b"x"), Err(WriteError::Blocked));
+                assert_eq!(stream.write(b"x"), Err(WriteError::Blocked));
+                id
+            })
+            .collect();
+        server.received_stop_sending(ids[0], 9u32.into()).unwrap();
+        SendStream {
+            id: ids[1],
+            state: &mut server,
+            pending: &mut pending,
+            conn_state: &state,
+        }
+        .reset(0u32.into())
+        .unwrap();
+        SendStream {
+            id: ids[2],
+            state: &mut server,
+            pending: &mut pending,
+            conn_state: &state,
+        }
+        .finish()
+        .unwrap();
+        // Late stream credit must not register a terminal writer again.
+        for &id in &ids[..3] {
+            server.received_max_stream_data(id, 2048).unwrap();
+        }
+        server.events.clear();
+        assert_eq!(server.connection_blocked.len(), 1);
+        server.received_max_data(1024u32.into());
+        assert_eq!(server.poll(), Some(StreamEvent::Writable { id: ids[3] }));
+        assert!(server.connection_blocked.is_empty());
+        assert_eq!(server.poll(), None);
     }
 
     #[test]

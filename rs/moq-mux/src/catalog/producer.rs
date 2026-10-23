@@ -443,13 +443,8 @@ impl<E: CatalogExt> Producer<E> {
 		let hangz = moq_json::snapshot::Producer::new(hangz_track, json_config);
 
 		let timeline = crate::timeline::Timelines::new(broadcast);
-		#[allow(clippy::arc_with_non_send_sync)]
 		let catalog_timeline = Arc::new(Mutex::new(CatalogTimeline::default()));
 
-		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
-		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
-		// both targets is worth the unused atomics on the single-threaded one.
-		#[allow(clippy::arc_with_non_send_sync)]
 		Ok(Self {
 			outputs: Outputs {
 				hang,
@@ -1447,6 +1442,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 mod test {
 	use std::collections::BTreeMap;
 
+	use std::str::FromStr;
 	use std::task::Poll;
 
 	use bytes::Bytes;

@@ -4,8 +4,14 @@
 //!
 //! You should not use this module directly; see [crate] for the high-level API.
 
-// Private codec entry points remain testable when their session callers are absent.
-#![cfg_attr(not(feature = "async"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+	not(feature = "async"),
+	allow(
+		dead_code,
+		unused_imports,
+		reason = "private codec entry points remain testable when their session callers are absent"
+	)
+)]
 
 #[macro_use]
 mod parameters;

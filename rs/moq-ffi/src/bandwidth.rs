@@ -6,8 +6,7 @@ use std::sync::Arc;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 
-/// Divides one connection's send estimate among the tracks sharing it, and sets
-/// what the session probes for.
+/// Divides one connection's send estimate among the tracks sharing it.
 ///
 /// Minted by [`MoqSession::bandwidth`](crate::session::MoqSession::bandwidth).
 /// Clones share one reservation registry, so two handles from the same session
@@ -47,16 +46,6 @@ impl MoqBandwidth {
 	pub fn reserve(&self, demand: &MoqTrackDemand, max_bps: u64) -> Arc<MoqReservation> {
 		let _guard = crate::ffi::enter();
 		self.reserve_demand(demand.inner(), max_bps)
-	}
-
-	/// Probe up to `target_bps` instead of the sum of the reservations, or `None` to follow them again.
-	///
-	/// The session probes for what its reservations add up to by default, so the
-	/// estimate can rise to fund them. `Some(0)` turns probing off.
-	pub fn set_target(&self, target_bps: Option<u64>) {
-		let _guard = crate::ffi::enter();
-		self.allocator
-			.set_target(target_bps.map(moq_net::bandwidth::Rate::from_bps));
 	}
 }
 
@@ -271,8 +260,8 @@ impl MoqBandwidthConsumer {
 
 #[uniffi::export]
 impl MoqBandwidthConsumer {
-	/// Read the current estimate in bits per second, or None while unavailable.
-	pub fn peek(&self) -> Option<u64> {
+	/// The current estimate in bits per second, or None while unavailable.
+	pub fn rate(&self) -> Option<u64> {
 		self.inner
 			.lock()
 			.unwrap()
@@ -281,8 +270,9 @@ impl MoqBandwidthConsumer {
 			.map(moq_net::bandwidth::Rate::as_bps)
 	}
 
-	/// Wait for the estimate to change, returning an error when its producer closes.
-	pub async fn changed(&self) -> Result<Option<u64>, MoqError> {
+	/// Wait for the estimate to change and return the new [`rate`](Self::rate), erroring when
+	/// its producer closes.
+	pub async fn rate_changed(&self) -> Result<Option<u64>, MoqError> {
 		self.changed
 			.run(|_guard| async move {
 				moq_net::kio::wait(|waiter| {
@@ -315,12 +305,12 @@ mod consumer_tests {
 	};
 
 	#[tokio::test]
-	async fn owned_consumer_peeks_while_waiting_and_cancel_releases_demand() {
+	async fn owned_consumer_reads_while_waiting_and_cancel_releases_demand() {
 		tokio::time::pause();
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
 		assert!(producer.is_used());
-		let mut changed = std::pin::pin!(consumer.changed());
+		let mut changed = std::pin::pin!(consumer.rate_changed());
 		assert!(
 			changed
 				.as_mut()
@@ -328,9 +318,9 @@ mod consumer_tests {
 				.is_pending()
 		);
 		producer.set(Some(moq_net::bandwidth::Rate::from_bps(123))).unwrap();
-		assert_eq!(consumer.peek(), Some(123));
+		assert_eq!(consumer.rate(), Some(123));
 		assert_eq!(changed.await.unwrap(), Some(123));
-		let mut changed = std::pin::pin!(consumer.changed());
+		let mut changed = std::pin::pin!(consumer.rate_changed());
 		assert!(
 			changed
 				.as_mut()
@@ -339,7 +329,7 @@ mod consumer_tests {
 		);
 		consumer.cancel();
 		assert!(!producer.is_used());
-		assert_eq!(consumer.peek(), None);
+		assert_eq!(consumer.rate(), None);
 		assert!(matches!(changed.await, Err(MoqError::Cancelled)));
 	}
 
@@ -358,6 +348,6 @@ mod consumer_tests {
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
 		producer.abort(moq_net::Error::Cancel).unwrap();
-		assert!(matches!(consumer.changed().await, Err(MoqError::Cancelled)));
+		assert!(matches!(consumer.rate_changed().await, Err(MoqError::Cancelled)));
 	}
 }

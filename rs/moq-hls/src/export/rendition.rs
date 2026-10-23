@@ -103,8 +103,10 @@ struct Run {
 }
 
 /// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
-// One per rendition, so the variant sizes never add up to an allocation's worth.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per rendition, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
+)]
 enum Config {
 	Video(VideoConfig),
 	Audio(AudioConfig),
@@ -508,7 +510,10 @@ impl Rendition {
 	}
 
 	/// The generation every segment URL currently carries.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) fn generation(&self) -> Option<Arc<str>> {
 		self.run().generation
 	}
@@ -677,7 +682,7 @@ impl Rendition {
 	}
 
 	/// Fail if a timeline this rendition lists failed (see [`failure`](Self::failure)).
-	fn check(&self) -> Result<()> {
+	pub(crate) fn check(&self) -> Result<()> {
 		if let Some(err) = self.live.failure() {
 			return Err(err);
 		}
@@ -811,6 +816,11 @@ impl Rendition {
 		self.resolve(row) == Content::Failed
 	}
 
+	/// Why this rendition's own timeline failed, whether or not that fails its listings.
+	pub(crate) fn own_failure(&self) -> Option<crate::Error> {
+		self.spans.failure().map(|failure| failure.err)
+	}
+
 	/// Whether the playlist has anything to serve yet (at least one segment, or the broadcast
 	/// already ended).
 	pub(crate) fn is_playable(&self) -> bool {
@@ -942,7 +952,10 @@ impl Rendition {
 	/// Fetch and transmux the segment of the reference tagged `tag` whose timeline `pts` is
 	/// `time`, in the timeline's timescale (DASH `$Time$` addressing of the same bytes
 	/// [`segment`](Self::segment) serves by aligned number).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn segment_at(&self, tag: &str, time: u64) -> Result<Option<Bytes>> {
 		self.media.sync(&self.live);
 		let Some(segment) = self.live.segment_number_at(tag, time, self.timescale()) else {
@@ -1026,7 +1039,10 @@ impl Rendition {
 
 	/// The init segment served at `init.{hash}.mp4`: `None` when `hash` names any other bytes,
 	/// so a URL never serves an init it does not describe.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn init_versioned(&self, hash: &str) -> Result<Option<Bytes>> {
 		let init = self.load_init().await?;
 		Ok(init.filter(|init| init.hash == hash).map(|init| init.bytes.clone()))
@@ -1203,11 +1219,6 @@ fn listed_tag(rows: &[segments::Row]) -> String {
 
 #[cfg(test)]
 impl Rendition {
-	/// Whether this rendition's own timeline failed, whether or not that fails its listings.
-	pub(crate) fn own_failure(&self) -> bool {
-		self.spans.failure().is_some()
-	}
-
 	/// Fetch the listed segment numbered `segment`, under the tag its rows carry.
 	pub(crate) async fn listed_segment(&self, segment: u64) -> Result<Option<Bytes>> {
 		let tag = listed_tag(&self.live.window().segments);

@@ -76,9 +76,18 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 
 	tracing::info!(%name, "importing HLS");
 
-	importer.init().await?;
-	notify_ready();
-	run_announced(&mut importer, &mut listed, &mut producer, epoch).await?;
+	let ran = match importer.init().await {
+		Ok(()) => {
+			notify_ready();
+			run_announced(&mut importer, &mut listed, &mut producer, epoch).await
+		}
+		Err(err) => Err(err.into()),
+	};
+	if let Err(err) = ran {
+		// Subscribers see why the import failed rather than a dropped producer.
+		importer.abort(moq_net::Error::Transport(format!("{err:#}")));
+		return Err(err);
+	}
 
 	// The playlist ended: serve the finished broadcast until its media is stale, so
 	// subscribers still catching up drain the tail. An interrupt drops it at once.
@@ -169,9 +178,10 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 mod test {
 	use super::*;
 
-	/// bbb's init and its first `segments` fragments in `media.mp4`, and a `media.m3u8` listing
-	/// them with `EXT-X-ENDLIST`, or listing nothing for no segments.
-	fn ended_playlist(segments: usize) -> (tempfile::TempDir, Url) {
+	/// Write bbb's init and fragments to `media.mp4` in `dir`, and a `media.m3u8` listing the first
+	/// `segments` of them, ended with `EXT-X-ENDLIST` or not. The media file is the same whatever
+	/// `segments`, so rewriting the playlist models a live window that ends.
+	fn write_playlist(dir: &std::path::Path, segments: usize, end_list: bool) {
 		let data = include_bytes!("../../moq-mux/src/container/fmp4/test_data/bbb.mp4");
 		let mut moofs = Vec::new();
 		let mut position = 0usize;
@@ -197,23 +207,29 @@ mod test {
 				window[0]
 			);
 		}
-		playlist += "#EXT-X-ENDLIST\n";
+		if end_list {
+			playlist += "#EXT-X-ENDLIST\n";
+		}
 
-		let dir = tempfile::tempdir().unwrap();
-		std::fs::write(dir.path().join("media.mp4"), &data[..]).unwrap();
-		std::fs::write(dir.path().join("media.m3u8"), playlist).unwrap();
-		let url = Url::from_file_path(dir.path().join("media.m3u8")).unwrap();
-		(dir, url)
+		std::fs::write(dir.join("media.mp4"), &data[..]).unwrap();
+		std::fs::write(dir.join("media.m3u8"), playlist).unwrap();
 	}
 
-	/// An initialized importer of `playlist`, the catalog it lists, and its broadcast.
-	async fn importer(
-		playlist: Url,
+	/// An importer initialized on a live playlist of `segments`, which then ends without adding
+	/// any, the catalog it lists, and its broadcast. Import refuses a playlist that had already
+	/// ended when it joined, so a finite run joins live first.
+	async fn joined_then_ended(
+		segments: usize,
 	) -> anyhow::Result<(
+		tempfile::TempDir,
 		moq_hls::import::Import,
 		moq_mux::catalog::hang::Consumer,
 		moq_net::broadcast::Producer,
 	)> {
+		let dir = tempfile::tempdir()?;
+		write_playlist(dir.path(), segments, false);
+		let playlist = Url::from_file_path(dir.path().join("media.m3u8")).unwrap();
+
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let mut producer = origin.create_broadcast("hls")?;
@@ -222,7 +238,9 @@ mod test {
 		let mut importer =
 			moq_hls::import::Import::new(producer.clone(), catalog, moq_hls::import::Config::new(playlist))?;
 		importer.init().await?;
-		Ok((importer, listed, producer))
+
+		write_playlist(dir.path(), segments, true);
+		Ok((dir, importer, listed, producer))
 	}
 
 	/// A finite playlist can publish its catalog and end in one poll, which the race between
@@ -230,9 +248,8 @@ mod test {
 	/// first branch at random, so this repeats.
 	#[tokio::test]
 	async fn an_ended_playlist_announces_its_catalog() {
-		let (_dir, playlist) = ended_playlist(1);
 		for _ in 0..32 {
-			let (mut importer, mut listed, mut producer) = importer(playlist.clone()).await.unwrap();
+			let (_dir, mut importer, mut listed, mut producer) = joined_then_ended(1).await.unwrap();
 			run_announced(&mut importer, &mut listed, &mut producer, moq_net::Epoch::mint())
 				.await
 				.unwrap();
@@ -244,8 +261,7 @@ mod test {
 	/// the catalog it declared, so the listing is ready without waiting.
 	#[tokio::test]
 	async fn a_finished_run_has_published_its_catalog() {
-		let (_dir, playlist) = ended_playlist(1);
-		let (mut importer, mut listed, _producer) = importer(playlist).await.unwrap();
+		let (_dir, mut importer, mut listed, _producer) = joined_then_ended(1).await.unwrap();
 		importer.run().await.unwrap();
 		let catalog = listed.next().now_or_never().expect("published before the run ended");
 		assert!(catalog.unwrap().is_some());
@@ -254,16 +270,83 @@ mod test {
 	/// A playlist that ends having declared nothing still fails, and announces nothing.
 	#[tokio::test]
 	async fn an_empty_playlist_fails_unannounced() {
-		let (_dir, playlist) = ended_playlist(0);
-		let result = match importer(playlist).await {
-			Ok((mut importer, mut listed, mut producer)) => {
-				let result = run_announced(&mut importer, &mut listed, &mut producer, moq_net::Epoch::mint()).await;
-				assert!(producer.route().is_none(), "an empty playlist was announced");
-				result
-			}
-			Err(err) => Err(err),
-		};
+		let (_dir, mut importer, mut listed, mut producer) = joined_then_ended(0).await.unwrap();
+		let result = run_announced(&mut importer, &mut listed, &mut producer, moq_net::Epoch::mint()).await;
+		assert!(producer.route().is_none(), "an empty playlist was announced");
 		let err = result.expect_err("an empty playlist imports nothing");
 		assert!(format!("{err:#}").contains("before it declared a track"), "{err:#}");
+	}
+
+	/// The next group a subscriber reads after the import stopped: the error it ended with.
+	async fn ended_with(track: &mut moq_net::track::Subscriber) -> moq_net::Error {
+		loop {
+			match track.recv_group().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => panic!("the track finished cleanly"),
+				Err(err) => return err,
+			}
+		}
+	}
+
+	/// An announced import that fails, here on a timestamp reset, aborts its tracks and catalog
+	/// with the cause, so subscribers see the failure rather than a dropped producer.
+	#[tokio::test]
+	async fn a_failed_import_aborts_its_tracks() {
+		use moq_mux::container::{Frame, fmp4::Muxer};
+
+		let dir = tempfile::tempdir().unwrap();
+		let muxer = Muxer::audio(&hang::catalog::AudioConfig::new(
+			hang::catalog::AudioCodec::Opus,
+			48_000,
+			2,
+		))
+		.unwrap();
+		std::fs::write(dir.path().join("init.mp4"), muxer.init().unwrap().unwrap()).unwrap();
+		for (index, micros) in [5_000_000, 0].into_iter().enumerate() {
+			let frame = Frame {
+				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+				duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),
+				payload: bytes::Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
+				keyframe: true,
+			};
+			let fragment = muxer.fragment(index as u32, &[frame]).unwrap();
+			std::fs::write(dir.path().join(format!("{index}.m4s")), fragment).unwrap();
+		}
+		let live = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n";
+		let playlist = dir.path().join("media.m3u8");
+		std::fs::write(&playlist, live).unwrap();
+
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+		let target = ImportTarget {
+			origin,
+			name: "hls".to_string(),
+			max_age: None,
+			bandwidth: Default::default(),
+		};
+		let args = ImportArgs {
+			playlist: playlist.to_str().unwrap().to_string(),
+			passthrough: false,
+		};
+		let importing = tokio::spawn(import(target, args, moq_net::Epoch::mint()));
+
+		announced.next().await.expect("announced");
+		let broadcast = consumer.request_broadcast("hls", None).await.unwrap();
+		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
+		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let name = catalog.audio.renditions.keys().next().expect("an audio rendition");
+		let mut media = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
+		let mut listing = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
+
+		// The source restarts at zero under the same init segment.
+		std::fs::write(&playlist, format!("{live}#EXT-X-DISCONTINUITY\n#EXTINF:1,\n1.m4s\n")).unwrap();
+		let err = importing.await.unwrap().expect_err("a reset fails the import");
+		assert!(format!("{err:#}").contains("rewound"), "{err:#}");
+
+		for track in [&mut media, &mut listing] {
+			let ended = ended_with(track).await;
+			assert!(matches!(ended, moq_net::Error::Transport(_)), "{ended:?}");
+		}
 	}
 }

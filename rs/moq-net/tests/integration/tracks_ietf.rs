@@ -45,6 +45,7 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 	{
 		Ok(Some(TracksEvent::Added { name, .. })) => format!("+{name}"),
 		Ok(Some(TracksEvent::Removed { name })) => format!("-{name}"),
+		Ok(Some(TracksEvent::Finished { name })) => format!("~{name}"),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
@@ -476,13 +477,13 @@ async fn a_listing_past_the_announces_cap_is_reset() {
 	}
 }
 
-/// Only TRACK_ENDED removes a listed track. Our answerer cannot tell a track that finished
-/// from one that left the listing and may go on elsewhere, so it ends either's PUBLISH in
-/// error: the listing fails loudly instead of removing the track quietly, and a reader
+/// Only TRACK_ENDED removes a listed track, and our answerer sends it only for a track that
+/// finished: that one leaves the listing quietly. One that left unfinished may go on
+/// elsewhere, so its PUBLISH ends in error, which fails the listing loudly, and a reader
 /// listing again sees what is still listed.
 #[moq_clock::test]
-async fn an_unlisted_track_fails_the_listing() {
-	for finish in [false, true] {
+async fn a_track_leaves_the_listing_as_it_ended() {
+	for finish in [true, false] {
 		for version in DRAFTS {
 			let publisher = produce_origin(1);
 			let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -498,17 +499,16 @@ async fn an_unlisted_track_fails_the_listing() {
 			listed.sort();
 			assert_eq!(listed, ["+a", "+b"], "{version}");
 
-			match finish {
-				true => {
-					a.finish().unwrap();
-					drop(a);
-				}
-				false => {
-					let _ = a.abort(moq_net::Error::Cancel);
-				}
+			if finish {
+				a.finish().unwrap();
+				drop(a);
+				assert_eq!(next(&mut tracks).await, "~a", "{version}");
+				assert!(quiet(&mut tracks).await, "{version}: the listing stands");
+				continue;
 			}
+			let _ = a.abort(moq_net::Error::Cancel);
 			let failed = next(&mut tracks).await;
-			assert!(failed.starts_with("error:"), "{version} finish={finish}: {failed}");
+			assert!(failed.starts_with("error:"), "{version}: {failed}");
 
 			let mut again = remote.tracks().unwrap();
 			assert_eq!(next(&mut again).await, "synced", "{version}");

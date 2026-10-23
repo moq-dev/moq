@@ -650,7 +650,8 @@ struct IncomingNamespace<'a> {
 /// What authorized one advertisement.
 enum Admit {
 	/// The session, so the limit holds it back while it does not cover the namespace.
-	Session,
+	/// Carries the announce slot its stream already took, when it took one.
+	Session(Option<crate::auth::Hold>),
 	/// Its own request token, which stands in for the limit. Carries the announce slot
 	/// taken before verification, when the namespace was not attached yet.
 	Token(Option<crate::auth::Hold>),
@@ -693,6 +694,9 @@ struct Advertisement {
 	id: Option<u64>,
 	/// The publisher instance it names: a repeat may name another, but not gain or lose one.
 	epoch: Option<crate::Epoch>,
+	/// Counts it against the session's announce cap until its NAMESPACE_DONE, attached or
+	/// not; the namespace's route shares it rather than taking a second.
+	slot: crate::auth::Hold,
 }
 
 /// What a PUBLISH_NAMESPACE stream advertises, kept current across its updates.
@@ -861,7 +865,10 @@ impl<S> Subscriber<S>
 where
 	S: crate::transport::poll::Boxable,
 {
-	#[allow(clippy::too_many_arguments)]
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
 	pub fn new(
 		runtime: crate::time::Deadlines,
 		session: S,
@@ -1060,7 +1067,7 @@ where
 			});
 		};
 
-		if advert.loops(self.self_origin) {
+		if advert.loops(self.self_origin) || advert.hops.hops().len() > self.origin.max_hops().get() {
 			return None;
 		}
 
@@ -1295,7 +1302,10 @@ where
 	/// `live` tracks the suffixes this stream has advertised, so a repeat is recognized
 	/// as an update rather than a second advertisement, and the caller can release
 	/// whatever is still held when the stream ends.
-	#[allow(clippy::too_many_arguments)]
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
 	async fn run_namespace_entries<T: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<T, Version>,
@@ -1331,14 +1341,23 @@ where
 					initial.initial = initial.initial.saturating_sub(1);
 					let path = prefix.join(&msg.suffix);
 					let params = msg.params.unwrap_or_default();
-					// A repeat under another epoch replaces the instance in place, but one that
-					// gains or loses an epoch skipped the NAMESPACE_DONE it needs.
-					if let Some(held) = live.get(&path)
-						&& held.epoch.is_some() != params.epoch.is_some()
-					{
-						tracing::warn!(%path, "namespace repeated gaining or losing an epoch");
-						return Err(Error::ProtocolViolation);
-					}
+					let held = match live.entry(path.clone()) {
+						// A repeat under another epoch replaces the instance in place, but one that
+						// gains or loses an epoch skipped the NAMESPACE_DONE it needs.
+						Entry::Occupied(entry) if entry.get().epoch.is_some() != params.epoch.is_some() => {
+							tracing::warn!(%path, "namespace repeated gaining or losing an epoch");
+							return Err(Error::ProtocolViolation);
+						}
+						Entry::Occupied(entry) => entry.into_mut(),
+						// The peer holds the namespace until its NAMESPACE_DONE whatever we make
+						// of it, so it takes its announce slot before the decision.
+						Entry::Vacant(entry) => entry.insert(Advertisement {
+							id: None,
+							epoch: None,
+							slot: std::sync::Arc::new(self.acquire_announce()?),
+						}),
+					};
+					held.epoch = params.epoch.clone();
 					let Some(advert) = self.route(params.cluster.as_ref(), peer) else {
 						// Looped back through us: forwarding it would extend the loop and
 						// subscribing through it would route us back to ourselves.
@@ -1349,10 +1368,6 @@ where
 						//
 						// The advertisement itself stays live on the wire, epoch and all.
 						tracing::debug!(%path, "dropping reflected namespace");
-						let held = live
-							.entry(path.clone())
-							.or_insert(Advertisement { id: None, epoch: None });
-						held.epoch = params.epoch;
 						if let Some(id) = held.id.take() {
 							let _ = self.stop_announce(path, id, false);
 						}
@@ -1361,25 +1376,23 @@ where
 					let advert = advert.with_epoch(params.epoch.clone());
 
 					tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, epoch = ?params.epoch, "namespace");
-					let held = live
-						.entry(path.clone())
-						.or_insert(Advertisement { id: None, epoch: None });
-					held.epoch = params.epoch;
 					match held.id {
 						// A repeat replaces the advertisement atomically; nothing is torn
 						// down merely because an update arrived, and another epoch restarts
 						// the route without it ever going absent.
 						Some(id) => self.update_announce(path, id, advert)?,
-						None => match self.start_announce(path.clone(), advert, Admit::Session) {
-							Ok(id) => held.id = Some(id),
-							// The interest names a pattern's literal head, so the peer
-							// legitimately advertises namespaces beneath it that the
-							// scope excludes; those are filtered here, not fatal.
-							Err(Error::Unauthorized) => {
-								tracing::debug!(%path, "namespace outside the subscribe scope; ignoring");
+						None => {
+							match self.start_announce(path.clone(), advert, Admit::Session(Some(held.slot.clone()))) {
+								Ok(id) => held.id = Some(id),
+								// The interest names a pattern's literal head, so the peer
+								// legitimately advertises namespaces beneath it that the
+								// scope excludes; those are filtered here, not fatal.
+								Err(Error::Unauthorized) => {
+									tracing::debug!(%path, "namespace outside the subscribe scope; ignoring");
+								}
+								Err(err) => return Err(err),
 							}
-							Err(err) => return Err(err),
-						},
+						}
 					}
 				}
 				// Only NAMESPACE may come before the counted set is in.
@@ -1623,7 +1636,7 @@ where
 			_ => None,
 		};
 		let (admit, token_grant) = match token {
-			None => (Admit::Session, None),
+			None => (Admit::Session(None), None),
 			Some(token) => {
 				// Counted against the cap while the application verifies, unless the
 				// namespace already holds a slot.
@@ -2035,7 +2048,7 @@ where
 								// The grant still holds the slot it was admitted with, so reuse it.
 								let admit = match &token_grant {
 									Some(grant) => Admit::Token(grant.hold()),
-									None => Admit::Session,
+									None => Admit::Session(None),
 								};
 								self.start_announce(path.clone(), advert, admit)
 									.map(|id| *attached = Some(id))
@@ -2255,7 +2268,7 @@ where
 	fn start_announce(&mut self, path: PathOwned, advert: Advertised, admit: Admit) -> Result<u64, Error> {
 		let mut state = self.state.lock();
 		let (token, slot) = match admit {
-			Admit::Session => (false, None),
+			Admit::Session(slot) => (false, slot),
 			Admit::Token(slot) => (true, slot),
 		};
 		let id = state.next_advert;
@@ -3350,7 +3363,6 @@ where
 		enum End {
 			Idle,
 			Revoked,
-			Unjoined(Error),
 			Done(Result<ietf::PublishDone<'static>, Error>),
 			Fetch(group::Request),
 			Update(Update),
@@ -3380,8 +3392,7 @@ where
 		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15);
 
 		let mut fetch_done = fetching.is_none();
-		// Our grant stopped covering the track, or its join failed: it is aborted rather than
-		// kept lingering.
+		// Our grant stopped covering the track: it is aborted rather than kept lingering.
 		let mut failed = false;
 		// How the upstream subscription ended, which ends a listing entry it held.
 		let mut ended: Option<Result<(), Error>> = None;
@@ -3406,7 +3417,7 @@ where
 					{
 						fetch_done = true;
 						if let Err(err) = res {
-							return Poll::Ready(End::Unjoined(err));
+							tracing::debug!(%err, "joining FETCH failed, joining at the next whole group");
 						}
 					}
 					// An error is the track closing, which the arms below report.
@@ -3503,13 +3514,6 @@ where
 						ended = Some(Err(Error::Unauthorized));
 						break true;
 					}
-					End::Unjoined(err) => {
-						tracing::debug!(%err, "joining FETCH failed");
-						let _ = track.clone().abort(err.clone());
-						failed = true;
-						ended = Some(Err(err));
-						break true;
-					}
 					End::Fetch(request) => {
 						let fetch = self.clone().run_group_fetch(
 							broadcast_path.to_owned(),
@@ -3545,7 +3549,6 @@ where
 									.subscribes
 									.get(&request_id)
 									.map(|held| (held.tail.consume(), held.fill.clone()));
-								let mut unjoined = None;
 								if let Some((tail, fill)) = held {
 									let mut settle = Settle::new(&self.runtime, tail);
 									kio::wait(|waiter| {
@@ -3555,8 +3558,7 @@ where
 										{
 											fetch_done = true;
 											if let Err(err) = res {
-												unjoined = Some(err);
-												return Poll::Ready(());
+												tracing::debug!(%err, "joining FETCH failed, joining at the next whole group");
 											}
 										}
 										poll_settled(&mut settle, waiter, &fill, count)
@@ -3568,14 +3570,9 @@ where
 										fill.end();
 									}
 								}
-								if let Some(err) = unjoined {
-									tracing::debug!(%err, "joining FETCH failed");
-									let _ = track.clone().abort(err);
-								} else {
-									// A no-op once an END_OF_TRACK declared the end, whose readers wait
-									// for a missing group only as long as the grace.
-									let _ = track.finish();
-								}
+								// A no-op once an END_OF_TRACK declared the end, whose readers wait
+								// for a missing group only as long as the grace.
+								let _ = track.finish();
 							}
 							Err(err) => {
 								tracing::debug!(%err, "subscribe ended with error");
@@ -3639,7 +3636,7 @@ where
 			})
 			.await;
 		}
-		// A session abort took the copy too, and a revoked grant or a failed join ended it.
+		// A session abort took the copy too, and a revoked grant ended it.
 		if aborted || failed {
 			return None;
 		}
@@ -3883,7 +3880,9 @@ where
 	/// it: a publisher serves one group per FETCH, so an earlier start's groups are left to
 	/// group FETCHes of their own. The subscribe's request id names the FETCH. The data
 	/// arrives on its own fetch stream and [`Self::recv_fill`] stitches it. A refusal or a
-	/// failed send is an error, since the head it owes is never coming.
+	/// failed send settles the fill as [`Fill::Done`], as a failed draft-20 fill does: only
+	/// the head is lost, and a whole group still stands alone. A malformed answer closes
+	/// the session.
 	fn start_joining_fetch(&self, subscribe_id: RequestId, track: &track::Producer) -> Option<JoiningTask> {
 		let fill = self.state.lock().subscribes.get(&subscribe_id)?.fill.clone();
 		let track = track.clone();
@@ -3966,10 +3965,21 @@ where
 				this.finish_joining_fetch(stream, progress).await
 			}
 			.await;
-			// Release a mid-group tail parked on the head.
+			// A refusal costs only the head, but a malformed answer is the peer breaking the
+			// protocol, which closes the session as it would on any request.
+			if let Err(err) = &res
+				&& is_protocol_violation(err)
+			{
+				this.session.close(
+					super::error::to_session_code(&SessionError::from(err)),
+					err.to_string().as_ref(),
+				);
+			}
+			// Release a mid-group tail parked on the head, including one still being written:
+			// a request that failed after FETCH_OK cannot be trusted to finish its stream.
 			if res.is_err()
 				&& let Ok(mut state) = fill.write()
-				&& matches!(*state, Fill::Requested | Fill::Serving(_))
+				&& matches!(*state, Fill::Requested | Fill::Serving(_) | Fill::Active)
 			{
 				*state = Fill::Done;
 			}
@@ -6487,6 +6497,94 @@ mod tests {
 		}
 	}
 
+	/// A namespace the peer holds on a SUBSCRIBE_NAMESPACE stream takes an announce slot
+	/// whatever we make of it, so reflected ones the origin never sees still exhaust the
+	/// session's budget, and a NAMESPACE_DONE gives the slot back.
+	#[moq_clock::test]
+	async fn a_reflected_namespace_holds_an_announce_slot() {
+		const VERSION: Version = Version::Draft18;
+		let us = crate::Hop::new(5).unwrap();
+
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+		writer.varint(ietf::RequestOk::ID).await.unwrap();
+		writer
+			.encode(&ietf::RequestOk {
+				largest: None,
+				request_id: None,
+				active: None,
+			})
+			.await
+			.unwrap();
+		let namespace = |suffix| ietf::Namespace {
+			suffix: crate::Path::new(suffix),
+			params: Some(ietf::AdvertParams {
+				cluster: Some(cluster::Advert {
+					hops: hop_path(&[7, 5, 9]),
+					cost: 0,
+				}),
+				epoch: None,
+			}),
+		};
+		writer.varint(ietf::Namespace::ID).await.unwrap();
+		writer.encode(&namespace("a")).await.unwrap();
+		writer.varint(ietf::NamespaceDone::ID).await.unwrap();
+		writer
+			.encode(&ietf::NamespaceDone {
+				suffix: crate::Path::new("a"),
+			})
+			.await
+			.unwrap();
+		for suffix in ["b", "c"] {
+			writer.varint(ietf::Namespace::ID).await.unwrap();
+			writer.encode(&namespace(suffix)).await.unwrap();
+		}
+		let script = log.writes.lock().unwrap().clone();
+
+		let origin = crate::origin::Config::new(us).produce();
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			cluster: cluster::Peer {
+				hop: Some(crate::Hop::new(9).unwrap()),
+				cost: None,
+			},
+			..Default::default()
+		});
+		let mut subscriber = Subscriber::new(
+			crate::time::sim(),
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			peer_setup,
+			us,
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+		subscriber.announces = crate::session::Slots::new(1);
+
+		let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let mut run =
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
+		let mut result = None;
+		for _ in 0..100 {
+			if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {
+				result = Some(done);
+				break;
+			}
+			settle().await;
+		}
+		assert!(
+			matches!(result, Some(Err(Error::TooManyRequests))),
+			"the second namespace held at once fit a budget of one: {result:?}",
+		);
+	}
+
 	/// MoQ Active Count is negotiated, so a REQUEST_OK that breaks the negotiation
 	/// either way is the peer's fault: a count we cannot rely on, or one missing where we
 	/// would otherwise wait on it forever.
@@ -8585,10 +8683,14 @@ mod tests {
 			advert(&subscriber),
 			advert(&subscriber),
 		);
-		let first = subscriber.start_announce(a.clone(), first, Admit::Session).unwrap();
-		let repeat = subscriber.start_announce(a.clone(), repeat, Admit::Session).unwrap();
+		let first = subscriber
+			.start_announce(a.clone(), first, Admit::Session(None))
+			.unwrap();
+		let repeat = subscriber
+			.start_announce(a.clone(), repeat, Admit::Session(None))
+			.unwrap();
 		assert!(matches!(
-			subscriber.start_announce(b.clone(), over, Admit::Session),
+			subscriber.start_announce(b.clone(), over, Admit::Session(None)),
 			Err(Error::TooManyRequests)
 		));
 		assert_eq!(
@@ -8601,7 +8703,7 @@ mod tests {
 
 		subscriber.stop_announce(a.clone(), first, false).unwrap();
 		subscriber.stop_announce(a, repeat, false).unwrap();
-		subscriber.start_announce(b, last, Admit::Session).unwrap();
+		subscriber.start_announce(b, last, Admit::Session(None)).unwrap();
 	}
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
@@ -8631,7 +8733,7 @@ mod tests {
 
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
 		subscriber
-			.start_announce(crate::Path::new("room/host").to_owned(), advert, Admit::Session)
+			.start_announce(crate::Path::new("room/host").to_owned(), advert, Admit::Session(None))
 			.unwrap();
 
 		let mut announced = consumer.announced();
@@ -8691,7 +8793,7 @@ mod tests {
 		);
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
 		subscriber
-			.start_announce(crate::Path::new("room/host").to_owned(), advert, Admit::Session)
+			.start_announce(crate::Path::new("room/host").to_owned(), advert, Admit::Session(None))
 			.unwrap();
 
 		// No announce churn: the upstream route stays the best one, on both cursors.
@@ -8731,7 +8833,7 @@ mod tests {
 			);
 			let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
 			subscriber
-				.start_announce(crate::Path::new("room/host").to_owned(), advert, Admit::Session)
+				.start_announce(crate::Path::new("room/host").to_owned(), advert, Admit::Session(None))
 				.unwrap();
 			subscriber
 		};
@@ -8824,7 +8926,11 @@ mod tests {
 
 		let mut subscriber = subscriber;
 		subscriber
-			.start_announce(crate::Path::new("room/host").to_owned(), advertised, Admit::Session)
+			.start_announce(
+				crate::Path::new("room/host").to_owned(),
+				advertised,
+				Admit::Session(None),
+			)
 			.unwrap();
 
 		let route = routed_now(&consumer, "room/host").expect("routed");
@@ -9033,7 +9139,9 @@ mod tests {
 
 		let path = crate::Path::new("room/host").to_owned();
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
-		let id = subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
+		let id = subscriber
+			.start_announce(path.clone(), advert, Admit::Session(None))
+			.unwrap();
 		settle().await;
 
 		subscriber.stop_announce(path, id, false).unwrap();
@@ -9301,7 +9409,11 @@ mod tests {
 		let mut ids = Vec::new();
 		for _ in 0..2 {
 			let advert = subscriber.route(None, &peer).expect("route");
-			ids.push(subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap());
+			ids.push(
+				subscriber
+					.start_announce(path.clone(), advert, Admit::Session(None))
+					.unwrap(),
+			);
 		}
 		settle().await;
 
@@ -9395,7 +9507,9 @@ mod tests {
 				.with_hops(hop_path(&[7, 9]).hops().clone())
 				.with_cost(4),
 		};
-		let id = subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
+		let id = subscriber
+			.start_announce(path.clone(), first, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// A new chain and cost: the route updates in place.
@@ -9447,7 +9561,7 @@ mod tests {
 			)
 			.expect("route");
 		let id = subscriber
-			.start_announce(path.clone(), advertised, Admit::Session)
+			.start_announce(path.clone(), advertised, Admit::Session(None))
 			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
@@ -9489,12 +9603,16 @@ mod tests {
 		let epoch_now = || routed_now(&consumer, "room/host").and_then(|route| route.epoch);
 
 		let first = advert(&subscriber, &old);
-		let first = subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
+		let first = subscriber
+			.start_announce(path.clone(), first, Admit::Session(None))
+			.unwrap();
 		assert_eq!(epoch_now(), Some(old.clone()));
 
 		// The replacement's PUBLISH_NAMESPACE beats the old one's PUBLISH_NAMESPACE_DONE.
 		let second = advert(&subscriber, &new);
-		let second = subscriber.start_announce(path.clone(), second, Admit::Session).unwrap();
+		let second = subscriber
+			.start_announce(path.clone(), second, Admit::Session(None))
+			.unwrap();
 		assert_eq!(epoch_now(), Some(new.clone()));
 
 		// A late update to the old advertisement changes nothing.
@@ -9533,10 +9651,12 @@ mod tests {
 		let epoch_now = || routed_now(&consumer, "room/host").and_then(|route| route.epoch);
 
 		let inline = advert(&subscriber, &old);
-		let inline = subscriber.start_announce(path.clone(), inline, Admit::Session).unwrap();
+		let inline = subscriber
+			.start_announce(path.clone(), inline, Admit::Session(None))
+			.unwrap();
 		let request = advert(&subscriber, &old);
 		let request = subscriber
-			.start_announce(path.clone(), request, Admit::Session)
+			.start_announce(path.clone(), request, Admit::Session(None))
 			.unwrap();
 		assert_eq!(epoch_now(), Some(old.clone()));
 
@@ -9572,11 +9692,15 @@ mod tests {
 		let advert = cluster::Advert { hops, cost: 0 };
 
 		let first = subscriber.route(Some(&advert), &peer).expect("route");
-		let first = subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
+		let first = subscriber
+			.start_announce(path.clone(), first, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		let second = subscriber.route(Some(&advert), &peer).expect("route");
-		let second = subscriber.start_announce(path.clone(), second, Admit::Session).unwrap();
+		let second = subscriber
+			.start_announce(path.clone(), second, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
@@ -9600,12 +9724,16 @@ mod tests {
 
 		// What a PUBLISH_NAMESPACE with no cluster parameters resolves to.
 		let first = subscriber.route(None, &peer).expect("route");
-		let first = subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
+		let first = subscriber
+			.start_announce(path.clone(), first, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The NAMESPACE for the same namespace arrives second.
 		let second = subscriber.route(None, &peer).expect("route");
-		let second = subscriber.start_announce(path.clone(), second, Admit::Session).unwrap();
+		let second = subscriber
+			.start_announce(path.clone(), second, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
@@ -9634,7 +9762,9 @@ mod tests {
 			cost: 0,
 		};
 		let advert = subscriber.route(Some(&clean), &peer).expect("route");
-		let id = subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
+		let id = subscriber
+			.start_announce(path.clone(), advert, Admit::Session(None))
+			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The peer re-advertises the namespace over a path that now flows through us.
@@ -9718,7 +9848,7 @@ mod tests {
 
 		let path = crate::Path::new("room/host").to_owned();
 		let advert = subscriber.route(Some(attached), peer).expect("route");
-		let id = subscriber.start_announce(path, advert, Admit::Session).unwrap();
+		let id = subscriber.start_announce(path, advert, Admit::Session(None)).unwrap();
 		assert_eq!(id, 0, "the harness advertisement is the first");
 		assert!(routed_now(&consumer, "room/host").is_some(), "attached to start with");
 
@@ -10252,7 +10382,9 @@ mod tests {
 		for path in ["room/a", "room/b"] {
 			let path = crate::Path::new(path).to_owned();
 			let advert = subscriber.route(None, &peer).expect("route");
-			let id = subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
+			let id = subscriber
+				.start_announce(path.clone(), advert, Admit::Session(None))
+				.unwrap();
 			live.insert(path, id);
 		}
 		assert!(routed_now(&consumer, "room/a").is_some());
@@ -15674,6 +15806,28 @@ mod joining_fetch_tests {
 		revoked_child_fetch(true).await;
 	}
 
+	/// From draft 18 the joining FETCH's request stays open after FETCH_OK. Its failure while
+	/// the head is still being written settles the fill, so a mid-group tail is not parked
+	/// on a head that may never finish.
+	#[moq_clock::test]
+	async fn a_request_failing_mid_head_settles_the_fill() {
+		for version in [Version::Draft18, Version::Draft19] {
+			let session = ScriptedSession::per_stream_reset(vec![fetch_ok(version)]);
+			let (subscriber, track, _tasks) = pending_join(session, version);
+			let fill = subscriber.state.lock().subscribes[&RequestId(99)].fill.clone();
+			// A fetch stream is writing the head.
+			if let Ok(mut state) = fill.write() {
+				*state = Fill::Active;
+			}
+			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
+			assert!(
+				kio::wait(|waiter| joining.poll(waiter)).await.is_err(),
+				"{version}: the reset request fails"
+			);
+			assert!(matches!(*fill.read(), Fill::Done), "{version}: the head is released");
+		}
+	}
+
 	#[moq_clock::test]
 	async fn invalid_joining_open_is_refused() {
 		for version in JOINING_DRAFTS {
@@ -15855,10 +16009,12 @@ mod joining_fetch_tests {
 		}
 	}
 
-	/// The peer refusing the joining FETCH fails the subscription with its reason, rather
-	/// than leaving readers waiting on a head that is never coming.
+	/// A publisher that serves no FETCH refuses the joining FETCH. That costs the head of
+	/// the Largest group and nothing more, as a failed draft-20 fill does: the fill settles,
+	/// so a stream starting mid-group no longer waits on it, and the subscription keeps
+	/// delivering whole groups.
 	#[moq_clock::test]
-	async fn a_refused_fetch_fails_the_subscription() {
+	async fn a_refused_fetch_joins_at_the_next_whole_group() {
 		let largest = Some(ietf::Location { group: 4, object: 1 });
 		for version in JOINING_DRAFTS {
 			let mut run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_error(version)).await;
@@ -15867,12 +16023,31 @@ mod joining_fetch_tests {
 				.expect("SUBSCRIBE_OK accepted the track")
 				.unwrap();
 			assert!(
-				matches!(received.finished().now_or_never(), Some(Err(Error::Unsupported))),
-				"{version}"
+				received.finished().now_or_never().is_none(),
+				"{version}: the track is still live"
 			);
+			assert!(!run.fill_outstanding(), "{version}: no head is coming");
+			assert!(run.session.log.closes().is_empty(), "{version}: the session stays up");
+		}
+	}
+
+	/// A malformed answer to the joining FETCH is not a refusal: the peer broke the
+	/// protocol, so the session closes.
+	#[moq_clock::test]
+	async fn a_malformed_fetch_answer_closes_the_session() {
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		for version in JOINING_DRAFTS {
+			// A SUBSCRIBE_OK where FETCH_OK or a refusal belongs.
+			let run = JoinRun::start(
+				version,
+				None,
+				subscribe_ok(version, largest),
+				subscribe_ok(version, largest),
+			)
+			.await;
 			assert!(
-				run.subscriber.state.lock().subscribes.is_empty(),
-				"{version}: the subscription is cancelled upstream"
+				!run.session.log.closes().is_empty(),
+				"{version}: an unexpected answer closes the session"
 			);
 		}
 	}

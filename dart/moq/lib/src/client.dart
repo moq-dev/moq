@@ -1,6 +1,7 @@
 import 'package:moq_ffi/moq_ffi.dart';
 
 import 'aliases.dart';
+import 'stream.dart';
 
 /// Scope for discovering announcements.
 final class AnnounceOptions {
@@ -281,20 +282,9 @@ extension AuthGrants on Auth {
   /// The current grant, then each change, null while there is none.
   ///
   /// Listens on one [Auth] share its place in the changes, so a second watcher
-  /// takes its own from [Moq.auth]. Ends when the session shuts down, and errors with its close reason otherwise.
-  Stream<Grant?> grants() async* {
-    yield grant();
-    while (true) {
-      final Grant? next;
-      try {
-        next = await grantChanged();
-      } on MoqException catch (e) {
-        if (e is CancelledMoqException || e is ClosedMoqException) return;
-        rethrow;
-      }
-      yield next;
-    }
-  }
+  /// takes its own from [Moq.auth]. Cancelling releases only its pending read.
+  /// Ends when the session shuts down, and errors with its close reason otherwise.
+  Stream<Grant?> grants() => _Grants(this);
 }
 
 /// A [Stream] view over an announcement cursor.
@@ -303,16 +293,40 @@ extension AnnounceConsumerUpdates on AnnounceConsumer {
   ///
   /// Listen once: the cursor is cancelled and released when the subscription
   /// ends.
-  Stream<AnnounceEvent> updates() async* {
+  Stream<AnnounceEvent> updates() => _Updates(this).cast<AnnounceEvent>();
+}
+
+final class _Grants extends NativeStream<Grant?> {
+  final Auth auth;
+  _Grants(this.auth);
+
+  @override
+  Iterable<Grant?> initial() => [auth.grant()];
+
+  @override
+  UniffiRustFuture<Grant?> read() => auth.grantChanged();
+
+  @override
+  bool ended(Object error) =>
+      error is CancelledMoqException || error is ClosedMoqException;
+}
+
+final class _Updates extends NativeStream<AnnounceEvent?> {
+  final AnnounceConsumer cursor;
+  _Updates(this.cursor);
+
+  @override
+  UniffiRustFuture<AnnounceEvent?> read() => cursor.next();
+
+  @override
+  bool finished(AnnounceEvent? value) => value == null;
+
+  @override
+  void release() {
     try {
-      while (true) {
-        final event = await next();
-        if (event == null) return;
-        yield event;
-      }
+      cursor.cancel();
     } finally {
-      cancel();
-      dispose();
+      cursor.dispose();
     }
   }
 }

@@ -9,6 +9,15 @@ How to update your code for each breaking change, newest first.
 `shutdown()` requests a drain synchronously; `try await closed()` waits for its result and reports delivery failures. Regenerate bindings and link the matching native library together. See the [core migration guide](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md) for the core contract.
 When upgrading from the release-line additive async `drain()` backport, replace the release-line async `drain()` with `shutdown()` followed by `try await closed()`; `main` has no separate `drain()` method.
 
+### Video rendition preference
+
+`MoqVideo` gains `preference: Int32`, defaulting to `0`. Regenerate the bindings and rebuild against the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
+### `announce` takes a `MoqAnnounceRoute`
+
+`MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
+`MoqRoute` is only what announcements report, and the `InvalidRoute` error is gone.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.resolve(reference:epoch:)` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
@@ -26,7 +35,7 @@ Regenerate the bindings for the changed `request_broadcast` checksum.
 ### Catalog references carry their epoch
 
 `MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names; the memberwise initializer defaults it to `nil`.
-`MoqBroadcastConsumer.resolve(reference:)` requires `epoch:` too; pass the rendition's `epoch` alongside, or `nil` to resolve whichever instance answers.
+`MoqBroadcastConsumer.resolve(reference:)` becomes `resolve(rendition:)`, taking the catalog `MoqRendition` and reading its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, throw `MoqError.Mux` for a rendition whose broadcast is proven to serve another epoch.
 Regenerate the Swift sources and rebuild the matching XCFramework, then rebuild callers.
 
