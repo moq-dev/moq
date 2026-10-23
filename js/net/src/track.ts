@@ -2643,12 +2643,6 @@ export class Subscriber {
 			const recv = this.#tryNextGroup();
 			switch (recv.kind) {
 				case "group":
-					// One cursor: the frame helpers must not keep draining a group this
-					// read just moved past, or interleaved reads would run backwards.
-					if (this.#frameGroup && this.#frameGroup.sequence < recv.group.sequence) {
-						this.#frameGroup.close();
-						this.#frameGroup = undefined;
-					}
 					return recv.group;
 				case "done":
 					return undefined;
@@ -2675,7 +2669,17 @@ export class Subscriber {
 
 	// The synchronous half of #nextGroup.
 	#tryNextGroup(): Recv {
-		if (this.#resume) return this.#tryResumed(true);
+		const recv = this.#resume ? this.#tryResumed(true) : this.#tryNextBuffered();
+		// One cursor: the frame helpers must not keep draining a group this read just
+		// moved past, or interleaved reads would run backwards.
+		if (recv.kind === "group" && this.#frameGroup && this.#frameGroup.sequence < recv.group.sequence) {
+			this.#frameGroup.close();
+			this.#frameGroup = undefined;
+		}
+		return recv;
+	}
+
+	#tryNextBuffered(): Recv {
 		const groups = this.#state.groups.peek();
 		const cursor = this.#cursor.peek();
 		const start = Math.max(cursor.start, this.#nextSequence);

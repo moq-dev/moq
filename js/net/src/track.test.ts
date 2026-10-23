@@ -685,38 +685,40 @@ test("ordered frame reads follow the budget", async () => {
 	expect(await live.readString()).toBe("2000");
 });
 
-// Interleaving nextGroup with the frame helpers is still one cursor: a nextGroup that
+// Interleaving a group take with the frame helpers is still one cursor: a take that
 // moves past the group the frame helpers were draining abandons it, so a later frame
 // read never runs backwards.
-test("nextGroup abandons the frame helpers' group when it passes it", async () => {
-	const producer = new TrackProducer("test");
-	const track = producer.subscribe({ maxDelay: Milli(5000) }).ordered();
+for (const take of ["nextGroup", "tryNextGroup"] as const) {
+	test(`${take} abandons the frame helpers' group when it passes it`, async () => {
+		const producer = new TrackProducer("test");
+		const track = producer.subscribe({ maxDelay: Milli(5000) }).ordered();
 
-	const zero = new GroupProducer(0);
-	zero.writeFrame(textFrame("0.0"));
-	zero.writeFrame(textFrame("0.1"));
-	zero.close();
-	producer.writeGroup(zero);
+		const zero = new GroupProducer(0);
+		zero.writeFrame(textFrame("0.0"));
+		zero.writeFrame(textFrame("0.1"));
+		zero.close();
+		producer.writeGroup(zero);
 
-	const one = new GroupProducer(1);
-	one.writeFrame(textFrame("1.0"));
-	one.close();
-	producer.writeGroup(one);
+		const one = new GroupProducer(1);
+		one.writeFrame(textFrame("1.0"));
+		one.close();
+		producer.writeGroup(one);
 
-	const two = new GroupProducer(2);
-	two.writeFrame(textFrame("2.0"));
-	two.close();
-	producer.writeGroup(two);
+		const two = new GroupProducer(2);
+		two.writeFrame(textFrame("2.0"));
+		two.close();
+		producer.writeGroup(two);
 
-	// The frame path enters group 0; a direct nextGroup then takes group 1.
-	expect((await track.readFrame())?.group).toBe(0);
-	expect((await track.nextGroup())?.sequence).toBe(1);
+		// The frame path enters group 0; a direct take then claims group 1.
+		expect((await track.readFrame())?.group).toBe(0);
+		expect((await track[take]())?.sequence).toBe(1);
 
-	// The frame path must not resume group 0 behind the cursor: it continues at 2.
-	const next = await track.readFrame();
-	expect(next?.group).toBe(2);
-	expect(dec.decode(next?.payload)).toBe("2.0");
-});
+		// The frame path must not resume group 0 behind the cursor: it continues at 2.
+		const next = await track.readFrame();
+		expect(next?.group).toBe(2);
+		expect(dec.decode(next?.payload)).toBe("2.0");
+	});
+}
 
 // The frame helpers ride the same sequence cursor as nextGroup: a lower group arriving
 // after a higher one was read is skipped, never fed to the caller backwards.
