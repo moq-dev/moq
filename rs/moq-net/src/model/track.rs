@@ -13,6 +13,7 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
+use crate::sync::Mutex;
 use crate::{Error, Result, StreamError, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
 
@@ -34,8 +35,8 @@ use std::{
 	ops::{self, Bound, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
+	sync::PoisonError,
 	sync::atomic::{AtomicBool, AtomicU64, Ordering},
-	sync::{Mutex, PoisonError},
 	task::{Poll, ready},
 	time::Duration,
 };

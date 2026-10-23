@@ -108,6 +108,7 @@ mod priority;
 #[cfg(feature = "async")]
 mod recv;
 pub mod setup;
+mod sync;
 #[cfg(feature = "async")]
 mod tail;
 #[cfg(all(test, feature = "async"))]

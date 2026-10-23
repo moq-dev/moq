@@ -45,6 +45,11 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
 
+# Model-layer locks must yield to Loom whenever kio does. This is compiled only
+# by `just rs loom`, never in production builds.
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
 futures = { workspace = true }
@@ -55,11 +60,6 @@ serde_json = { workspace = true }
 # The benches run on tokio. test-util (tokio::time::pause/advance) is test-only and
 # is NOT supported on wasm, so it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["rt", "test-util", "time"] }
-
-# Model checks for the kio-backed model layer (tests/loom.rs). `cfg(loom)` is only
-# set by `just rs loom`, and the whole test file compiles away without it.
-[target.'cfg(loom)'.dev-dependencies]
-loom = { workspace = true }
 
 # wasm model-layer tests (tests/wasm.rs). getrandom's wasm backend is enabled
 # only here (dev), so it isn't forced on downstream consumers. They select
