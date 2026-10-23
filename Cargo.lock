@@ -5056,6 +5056,7 @@ dependencies = [
  "fastbloom",
  "getrandom 0.4.3",
  "hex-literal",
+ "indexmap 2.14.2",
  "lru-slab",
  "moq-clock",
  "moq-quic",

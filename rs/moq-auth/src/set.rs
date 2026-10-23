@@ -147,8 +147,8 @@ mod tests {
 	fn create_test_claims() -> Claims {
 		Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]).into(),
-			subscribe: patterns(&["test-sub/**"]).into(),
+			publish: patterns(&["test-pub/**"]),
+			subscribe: patterns(&["test-sub/**"]),
 			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
 			issued: Some(moq_clock::wall()),
 			not_before: None,

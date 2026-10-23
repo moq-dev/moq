@@ -11,6 +11,14 @@ Use `epoch.time()?` and convert with `SystemTime::from` only at a third-party AP
 Every canonical UUIDv7 remains a valid identity, including one whose 48-bit timestamp is later than Wall's year 2554 limit; only its wall-time view fails.
 Epoch text, ordering, bytes, and protocol acceptance are unchanged.
 
+### Sessions box their transport (#6176)
+
+`Driver` and `server::Handshake` lose their transport type parameter: write `moq_net::Driver` and `moq_net::server::Handshake`.
+`Client::connect_lite`, `Server::accept_lite`, and `Server::accept_request_lite` are gone; call `connect`, `accept`, or `accept_request`, which accept every ALPN.
+Every session now takes a `transport::poll::Boxable` transport, whose streams must also be `Sync` on native.
+A `!Send` transport wraps itself in a type that checks the thread on use, such as `moq_uring::transport::Local`.
+`Client::connect` and `Server::accept_request` are plain functions returning `impl Future`, so call them as before with `.await`.
+
 ### `track::Producer::largest()` is a getter
 
 `track::Producer::largest(&self)` returns the track's largest location now, `None` before any, instead of streaming each newer one; `track::Producer::poll_largest` is gone.

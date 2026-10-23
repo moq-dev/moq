@@ -790,6 +790,7 @@ export class Producer {
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
+		hooks.releaseTrack = (producer) => producer.#close(undefined, false);
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
 			producer.#owe();
@@ -1708,13 +1709,19 @@ export class Producer {
 	 * them.
 	 */
 	close(abort?: Error) {
+		this.#close(abort, true);
+	}
+
+	// `declare` is false for a received copy whose session closed locally: a dead route, not
+	// finished content, so a clean close there leaves the end undeclared.
+	#close(abort: Error | undefined, declare: boolean) {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
 		if (abort && this.#tailPending) this.#arrivals.expire(now(), this.#grace());
 		if (abort && this.#settled()) abort = undefined;
 		// A replacement continues its name's timeline: ending below an earlier producer's
 		// groups would contradict the ones subscribers already received.
-		if (abort === undefined && this.#state.end.peek() === undefined) {
+		if (declare && abort === undefined && this.#state.end.peek() === undefined) {
 			this.#declareEnd({ group: this.#liveEdge(), frame: 0 });
 		}
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.

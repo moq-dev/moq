@@ -1,5 +1,5 @@
-use crate::Access;
 use moq_clock::Wall;
+use moq_pattern::Patterns;
 use serde::{Deserialize, Serialize};
 use serde_with::{DurationSeconds, serde_as};
 use std::collections::BTreeMap;
@@ -17,13 +17,13 @@ use std::time::Duration;
 #[serde(default)]
 #[non_exhaustive]
 pub struct Grant {
-	/// Publish paths and an optional upload cap, relative to the root.
-	#[serde(skip_serializing_if = "Access::is_default")]
-	pub publish: Access,
+	/// Patterns the session may publish, relative to the root.
+	#[serde(skip_serializing_if = "Patterns::is_empty")]
+	pub publish: Patterns,
 
-	/// Subscribe paths and an optional download cap, relative to the root.
-	#[serde(skip_serializing_if = "Access::is_default")]
-	pub subscribe: Access,
+	/// Patterns the session may subscribe to, relative to the root.
+	#[serde(skip_serializing_if = "Patterns::is_empty")]
+	pub subscribe: Patterns,
 
 	/// The path the patterns are relative to, replacing the dialed one. This is how a
 	/// server aliases a slug to a canonical id. Absent means the dialed path.
@@ -62,8 +62,8 @@ pub struct Grant {
 }
 
 impl Grant {
-	/// A grant of these paths and bitrate caps, with no other restrictions.
-	pub fn new(publish: impl Into<Access>, subscribe: impl Into<Access>) -> Self {
+	/// A grant of these patterns, with no other restrictions.
+	pub fn new(publish: impl Into<Patterns>, subscribe: impl Into<Patterns>) -> Self {
 		Self {
 			publish: publish.into(),
 			subscribe: subscribe.into(),
@@ -112,7 +112,7 @@ impl Grant {
 mod tests {
 	use super::*;
 
-	fn patterns(texts: &[&str]) -> Access {
+	fn patterns(texts: &[&str]) -> Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
@@ -163,7 +163,7 @@ mod tests {
 
 	#[test]
 	fn mounts_round_trip_as_an_object() {
-		let mut grant = Grant::new(Access::default(), patterns(&["**"]));
+		let mut grant = Grant::new(Patterns::default(), patterns(&["**"]));
 		grant.mounts.insert(".svc".into(), ".svc/pid".into());
 		let json = serde_json::to_string(&grant).unwrap();
 		assert_eq!(json, r#"{"subscribe":["**"],"mounts":{".svc":".svc/pid"}}"#);
@@ -172,7 +172,7 @@ mod tests {
 
 	#[test]
 	fn empty_fields_are_omitted_and_defaulted() {
-		let grant = Grant::new(patterns(&["**"]), Access::default());
+		let grant = Grant::new(patterns(&["**"]), Patterns::default());
 		assert_eq!(serde_json::to_string(&grant).unwrap(), r#"{"publish":["**"]}"#);
 		assert_eq!(serde_json::from_str::<Grant>(r#"{"publish":["**"]}"#).unwrap(), grant);
 	}
@@ -181,7 +181,7 @@ mod tests {
 	async fn validate_refuses_nothing_unbounded_and_expired() {
 		assert!(matches!(Grant::default().validate(), Err(crate::Error::UselessGrant)));
 
-		let mut grant = Grant::new(patterns(&["**"]), Access::default());
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		grant.validate().unwrap();
 
 		grant.revalidate = Some(Duration::from_secs(1));
@@ -210,7 +210,7 @@ mod tests {
 
 	#[test]
 	fn validate_refuses_an_upstream_that_is_not_a_peer() {
-		let mut grant = Grant::new(patterns(&["**"]), Access::default());
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		grant.upstream = true;
 		assert!(matches!(grant.validate(), Err(crate::Error::UpstreamWithoutPeer)));
 		grant.peer = true;
@@ -219,7 +219,7 @@ mod tests {
 
 	#[test]
 	fn validate_refuses_an_invalid_stats_label() {
-		let mut grant = Grant::new(patterns(&["**"]), Access::default());
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		grant.label = Some("project/*".into());
 		assert!(matches!(grant.validate(), Err(crate::Error::InvalidLabel(_))));
 	}
@@ -230,7 +230,7 @@ mod tests {
 	async fn deadline_is_the_exact_expiry() {
 		let start = moq_clock::now();
 		let now = moq_clock::wall();
-		let mut grant = Grant::new(patterns(&["**"]), Access::default());
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		assert_eq!(grant.deadline(), None);
 
 		grant.expires = Some(now + Duration::from_secs(10));
@@ -259,16 +259,5 @@ mod tests {
 		assert_eq!(far.expires, Some(Wall::UNIX_EPOCH.saturating_add(Duration::MAX)));
 		far.validate().unwrap();
 		far.deadline();
-	}
-
-	#[test]
-	fn capped_role_roundtrips() {
-		let wire = serde_json::json!({
-			"publish": { "path": "alice/**", "rate": 8_000_000 }
-		});
-		let grant: Grant = serde_json::from_value(wire).unwrap();
-		let encoded = serde_json::to_value(grant).unwrap();
-		assert_eq!(encoded["publish"]["rate"], 8_000_000);
-		assert!(encoded.get("put").is_none());
 	}
 }
