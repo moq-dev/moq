@@ -130,4 +130,4 @@ outside the worktree to keep the next one.
 ## Related
 
 - [Performance audit](/quest/m2/audit-perf.md) - compares nightly to nightly; this epic compares main to release
-- [Nightly benchmark regressions](/quest/m1/bench-ci.md) - paired nightly-to-nightly comparison on one runner
+- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - noise floor of the paired nightly-to-nightly comparison on one runner
