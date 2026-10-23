@@ -28,7 +28,3 @@ legitimately be an integer; an absolute media timestamp may not.
 Test: a waiter one second ahead stays pending at a timestamp past 2^31 and
 2^32 microseconds and resolves once the playhead reaches it, on a stubbed
 playhead. No API or wire change.
-
-## Related
-
-- [Audio playout memory](/quest/m1/audio-playout-memory.md) - generalizes the same `Backpressure`; land this first, it is independent

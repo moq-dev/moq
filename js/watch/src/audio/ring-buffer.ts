@@ -1,4 +1,5 @@
 import { Micro, type Milli, Second } from "@moq/clock";
+import { ringCapacity } from "./latency";
 
 export class AudioRingBuffer {
 	#buffer: Float32Array[];
@@ -40,21 +41,17 @@ export class AudioRingBuffer {
 		this.channels = props.channels;
 		this.#buffered = props.buffered ?? false;
 
-		// The ring holds the latency floor as PCM, with headroom above it. Sizing capacity to the
-		// floor exactly makes the ring physically incapable of holding the slack the overflow band
-		// wants, so every chunk that arrives while the ring is on target drops the oldest samples.
-		// In buffered mode the headroom is also what keeps the backpressure-paced decode loop (on
-		// the main thread) from overflow-dropping; the rest of the lookahead stays encoded upstream.
-		const capacity = this.#capacityFor(this.#latencySamples);
+		// The ring holds the latency floor as PCM, with headroom above it, at a capacity the receiver
+		// fixes rather than the target: whatever of the target is above the floor stays encoded
+		// upstream (the main thread holds it back). The headroom tolerates a chunk above the floor in
+		// live mode, and in buffered mode keeps the paced decode loop from overflow-dropping.
+		const capacity = ringCapacity(this.rate);
+		if (this.#latencySamples > capacity) throw new Error("latency exceeds capacity");
 
 		this.#buffer = [];
 		for (let i = 0; i < this.channels; i++) {
 			this.#buffer[i] = new Float32Array(capacity);
 		}
-	}
-
-	#capacityFor(latencySamples: number): number {
-		return latencySamples * 2;
 	}
 
 	get stalled(): boolean {
@@ -78,8 +75,11 @@ export class AudioRingBuffer {
 		return this.#buffer[0]?.length;
 	}
 
-	resize(latency: Milli): void {
+	/** Move the floor, which never exceeds the fixed capacity. */
+	setLatency(latency: Milli): void {
 		const latencySamples = Math.ceil(this.rate * Second.fromMilli(latency));
+		if (latencySamples <= 0) throw new Error("empty buffer");
+		if (latencySamples > this.capacity) throw new Error("latency exceeds capacity");
 
 		// A deeper floor parks playback until it refills. Video holds the extra delay on its own, so
 		// audio that kept draining at the old depth would run ahead by the difference. Parking keeps
@@ -88,42 +88,20 @@ export class AudioRingBuffer {
 		if (latencySamples > this.#latencySamples) this.#stalled = true;
 		this.#latencySamples = latencySamples;
 
-		const newCapacity = this.#capacityFor(this.#latencySamples);
-		if (newCapacity !== this.capacity) this.#reallocate(newCapacity);
-
 		// Resume a refill that the buffer already covers, which `write` would only notice on the
 		// next frame, never for a source that has stopped.
-		if (latencySamples > 0 && this.length >= latencySamples) this.#stalled = false;
+		if (this.length >= latencySamples) this.#stalled = false;
 	}
 
-	#reallocate(newCapacity: number): void {
-		if (newCapacity === 0) throw new Error("empty buffer");
-
-		const newBuffer: Float32Array[] = [];
-		for (let i = 0; i < this.channels; i++) {
-			newBuffer[i] = new Float32Array(newCapacity);
-		}
-
-		// Copy existing data, preserving the most recent samples
-		const samplesToKeep = Math.min(this.length, newCapacity);
-		if (samplesToKeep > 0) {
-			// Copy the most recent samples (closest to writeIndex)
-			const copyStart = this.#writeIndex - samplesToKeep;
-			for (let channel = 0; channel < this.channels; channel++) {
-				const src = this.#buffer[channel];
-				const dst = newBuffer[channel];
-				for (let i = 0; i < samplesToKeep; i++) {
-					const srcPos = (copyStart + i) % src.length;
-					const dstPos = (copyStart + i) % dst.length;
-					dst[dstPos] = src[srcPos];
-				}
-			}
-		}
-
-		// Update state for the new buffer, only stall if empty.
-		this.#buffer = newBuffer;
-		this.#readIndex = this.#writeIndex - samplesToKeep;
-		if (samplesToKeep === 0) this.#stalled = true;
+	/**
+	 * Hold playback until the next write, keeping what is buffered.
+	 *
+	 * For a rise in the part of the target held encoded upstream: the ring already covers its floor,
+	 * so only the main thread knows when the received media covers the rest, and it releases the next
+	 * frame exactly then.
+	 */
+	park(): void {
+		this.#stalled = true;
 	}
 
 	write(timestamp: Micro, data: Float32Array[]): void {

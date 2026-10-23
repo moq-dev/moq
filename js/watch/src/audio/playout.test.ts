@@ -2,14 +2,14 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { Micro, Milli } from "@moq/clock";
 import * as Container from "@moq/hang/container";
 import { Group, Time, Track, Varint } from "@moq/net";
-import { AUTO_MAX_DELAY, target } from "./latency";
+import { AUTO_MAX_DELAY, ringCapacity, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 
 // Replay recorded-shape arrival traces through both rings and count what a listener would hear:
 // quanta rendered short (an underrun) and samples the ring threw away (a skip). Both rings are
 // driven through the same harness, since the postMessage fallback is the path every page without
-// cross-origin isolation takes. Each ring is sized from the target the estimator settles on, measured
+// cross-origin isolation takes. Each ring's floor is the target the estimator settles on, measured
 // through the transport subscription and container consumer the decoder reads.
 
 const RATE = 48000;
@@ -138,7 +138,7 @@ interface Ring {
 
 function shared(latencyMs: number): Ring {
 	const samples = Math.ceil((RATE * latencyMs) / 1000);
-	const ring = new SharedRingBuffer(allocSharedRingBuffer(1, Math.max(RATE, samples * 2), RATE));
+	const ring = new SharedRingBuffer(allocSharedRingBuffer(1, ringCapacity(RATE), RATE));
 	ring.setLatency(samples);
 	return ring;
 }

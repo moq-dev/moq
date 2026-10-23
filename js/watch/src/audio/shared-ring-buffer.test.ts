@@ -790,42 +790,21 @@ describe("i32 wrapping", () => {
 	});
 });
 
-describe("SharedRingBuffer.resize", () => {
-	it("preserves the unread window when growing capacity", () => {
-		const src = create({ rate: 1000, channels: 2, capacity: 64, latency: 30 });
-		insert(src, 0, 30, { value: 3.5 });
-		expect(src.stalled).toBe(false);
+describe("park", () => {
+	it("holds a covered ring until the next insert, keeping what it buffered", () => {
+		const buffer = create({ rate: 1000, channels: 1, capacity: 128, latency: 32 });
+		insert(buffer, 0, 64, { channels: 1, value: 1 });
+		expect(read(buffer, 16, 1)[0].length).toBe(16);
 
-		const dst = src.resize(256);
-		expect(dst.capacity).toBe(256);
-		expect(dst.channels).toBe(2);
-		expect(dst.rate).toBe(1000);
+		buffer.park();
+		expect(buffer.stalled).toBe(true);
+		expect(read(buffer, 16, 1)[0].length).toBe(0);
 
-		// The 30 unread samples should be readable from the new buffer.
-		const out = read(dst, 30);
-		expect(out[0].length).toBe(30);
-		for (let i = 0; i < 30; i++) {
-			expect(out[0][i]).toBe(3.5);
-			expect(out[1][i]).toBe(3.5);
-		}
-		// Unstalled state carried across.
-		expect(dst.stalled).toBe(false);
-	});
-
-	it("truncates to the newest samples when shrinking below the unread span", () => {
-		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
-		// Fill [0, 48) with value 1, then [48, 64) with value 2.
-		insert(src, 0, 48, { channels: 1, value: 1.0 });
-		insert(src, 48, 16, { channels: 1, value: 2.0 });
-
-		const dst = src.resize(16);
-		expect(dst.capacity).toBe(16);
-
-		// Only the most recent 16 samples fit.
-		const out = read(dst, 16, 1);
-		for (let i = 0; i < 16; i++) {
-			expect(out[0][i]).toBe(2.0);
-		}
+		// The main thread releases the next frame only once the media it holds encoded covers the
+		// target, so that insert is what resumes playback.
+		insert(buffer, 64, 16, { channels: 1, value: 2 });
+		expect(buffer.stalled).toBe(false);
+		expect(read(buffer, 16, 1)[0]).toEqual(new Float32Array(16).fill(1));
 	});
 });
 
@@ -1020,101 +999,6 @@ describe("truncate races the reader", () => {
 });
 
 describe("packed state", () => {
-	it("does not replay samples consumed while the replacement message is in flight", () => {
-		// What the resize handoff exists for: the reader keeps draining the source until the
-		// message arrives, and the replacement must not start where the snapshot left off.
-		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
-		insert(src, 0, 64, { channels: 1, value: 1 });
-
-		const dst = src.resize(256);
-		read(src, 16, 1);
-
-		const replacement = new SharedRingBuffer(dst.init, src);
-		expect(replacement.length).toBe(48);
-	});
-
-	it("carries the consumed cursor across a replacement truncate", () => {
-		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
-		src.insert(0 as Micro, [Float32Array.from({ length: 64 }, (_, i) => i + 1)]);
-		const dst = src.resize(256);
-		expect(read(src, 16, 1)[0]).toEqual(Float32Array.from({ length: 16 }, (_, i) => i + 1));
-		dst.truncate(Micro.fromMilli(48 as Milli));
-
-		const replacement = new SharedRingBuffer(dst.init, src);
-		expect(replacement.length).toBe(32);
-		expect(read(replacement, 64, 1)[0]).toEqual(Float32Array.from({ length: 32 }, (_, i) => i + 17));
-		expect(read(replacement, 64, 1)[0].length).toBe(0);
-	});
-
-	for (const operation of ["truncate", "re-anchor"] as const) {
-		for (const point of ["state", "timeline", "exchange"] as const) {
-			it(`preserves the timeline when ${operation} races handoff at ${point}`, () => {
-				const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
-				insert(src, 0, 64, { channels: 1, value: 1 });
-				const dst = src.resize(256);
-				read(src, 16, 1);
-				let fired = false;
-				const mutate = () => {
-					fired = true;
-					if (operation === "truncate") {
-						dst.truncate(Micro.fromMilli(48 as Milli));
-					} else {
-						dst.reset();
-						insert(dst, 1000, 64, { channels: 1, value: 2 });
-					}
-				};
-				const realLoad = Atomics.load;
-				const realExchange = Atomics.compareExchange;
-				const atomics = Atomics as { load: unknown; compareExchange: unknown };
-				atomics.load = (arr: Int32Array | BigInt64Array, idx: number) => {
-					const value = realLoad(arr as Int32Array, idx);
-					if (
-						!fired &&
-						((point === "state" && arr.buffer === dst.init.state) ||
-							(point === "timeline" && arr.buffer === dst.init.control && idx === 3))
-					)
-						mutate();
-					return value;
-				};
-				atomics.compareExchange = (arr: BigInt64Array, idx: number, expected: bigint, next: bigint) => {
-					if (!fired && point === "exchange" && arr.buffer === dst.init.state) mutate();
-					return realExchange(arr, idx, expected, next);
-				};
-				let replacement: SharedRingBuffer;
-				try {
-					replacement = new SharedRingBuffer(dst.init, src);
-				} finally {
-					atomics.load = realLoad;
-					atomics.compareExchange = realExchange;
-				}
-				expect(fired).toBe(true);
-				const count = operation === "truncate" ? 32 : 64;
-				expect(replacement.length).toBe(count);
-				expect(read(replacement, 64, 1)[0]).toEqual(
-					new Float32Array(count).fill(operation === "truncate" ? 1 : 2),
-				);
-				expect(read(replacement, 64, 1)[0].length).toBe(0);
-			});
-		}
-	}
-
-	it("drops the carried cursor when the replacement re-anchored first", () => {
-		// A different timeline: the cursor describes audio the replacement has never played.
-		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
-		insert(src, 10_000, 64, { channels: 1, value: 1 });
-		const worklet = new SharedRingBuffer(src.init);
-		read(worklet, 64, 1);
-
-		const dst = src.resize(256);
-		dst.setLatency(64);
-		dst.reset();
-		insert(dst, 30_000, 64, { channels: 1, value: 2 });
-
-		const replacement = new SharedRingBuffer(dst.init, worklet);
-		expect(replacement.length).toBe(64);
-		expect(read(replacement, 64, 1)[0]).toEqual(new Float32Array(64).fill(2));
-	});
-
 	// The reader samples the word, copies, then publishes, and the writer can rebase anywhere in
 	// between. Sweeping the re-anchor across every load covers the windows a fixed pause point
 	// misses. Because the publish is one exchange over epoch and cursor together, a rebase makes

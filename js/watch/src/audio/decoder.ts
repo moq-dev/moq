@@ -21,7 +21,7 @@ import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
-import { AUTO_MAX_DELAY, ringSamples, target } from "./latency";
+import { AUTO_MAX_DELAY, target } from "./latency";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -264,13 +264,11 @@ export class Decoder {
 			});
 			effect.cleanup(() => worklet.disconnect());
 
-			// Initial ring depth in samples.
 			const delay = this.sync.out.delay.peek();
-			const latencySamples = ringSamples(sampleRate, delay);
 			const buffered = this.sync.out.buffered.peek();
 
 			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
-			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples, buffered);
+			const ring = createAudioBuffer(worklet, channelCount, sampleRate, delay, buffered);
 			effect.cleanup(() => ring.close());
 			effect.set(this.#ring, ring);
 
@@ -321,11 +319,10 @@ export class Decoder {
 		const ring = effect.get(this.#ring);
 		if (!ring) return;
 
-		// A rise parks playback until the ring refills to the new floor, which is what keeps audio in
-		// step with video. The measured target moves a bucket at a time, and a rise the buffered
-		// slack already covers costs no silence at all.
-		const delay = effect.get(this.sync.out.delay);
-		ring.setLatency(ringSamples(ring.rate, delay));
+		// A rise parks playback until the queued media covers the new target, which is what keeps
+		// audio in step with video. The measured target moves a bucket at a time, and a rise the
+		// buffered slack already covers costs no silence at all.
+		ring.setLatency(effect.get(this.sync.out.delay));
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -644,6 +641,18 @@ export class Decoder {
 			const network = inner.get(consumer.buffered);
 			const decode = inner.get(this.#decodeBuffered);
 			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
+		});
+
+		// What has arrived but not been decoded is what covers the part of the target held encoded, so
+		// the decode loop's held frame is released once enough is queued behind it.
+		effect.run((inner) => {
+			const ring = inner.get(this.#ring);
+			if (!ring) return;
+			let newest: Milli | undefined;
+			for (const { end } of inner.get(consumer.buffered)) {
+				if (newest === undefined || end > newest) newest = end;
+			}
+			ring.queued(newest === undefined ? undefined : Micro.fromMilli(newest));
 		});
 
 		// Feed the arrival estimate into the playout target. It outlives this consumer, so the target

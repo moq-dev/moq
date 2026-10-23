@@ -2,7 +2,7 @@ import type { Micro, Milli } from "@moq/clock";
 import type { SharedRingBufferInit } from "./shared-ring-buffer";
 
 /** Everything the main thread sends the render worklet over its port. */
-export type Message = InitShared | InitPost | Data | Latency | Reset | Truncate;
+export type Message = InitShared | InitPost | Data | Latency | Park | Reset | Truncate;
 
 /** Init message when SharedArrayBuffer is available. */
 export interface InitShared extends SharedRingBufferInit {
@@ -15,8 +15,8 @@ export interface InitPost {
 	channels: number;
 	rate: number;
 	latency: Milli;
-	// Buffered mode: anchor to the first frame and play through; the ring is sized to the floor and
-	// the lookahead above it is held back upstream (the main thread applies the backpressure).
+	// Buffered mode: anchor to the first frame and play through. The ring holds the floor; the
+	// lookahead above it is held back upstream (the main thread applies the backpressure).
 	buffered: boolean;
 }
 
@@ -41,10 +41,15 @@ export interface Data {
 	timestamp: Micro;
 }
 
-/** Latency update sent via postMessage (fallback path only). */
+/** Latency update sent via postMessage (fallback path only): the floor held as decoded PCM. */
 export interface Latency {
 	type: "latency";
 	latency: Milli;
+}
+
+/** Hold playback until the next data message (fallback path only; shared path parks via Atomics). */
+export interface Park {
+	type: "park";
 }
 
 /** State update from the worklet back to main thread (fallback path only). */

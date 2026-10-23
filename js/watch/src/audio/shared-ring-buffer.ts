@@ -14,13 +14,11 @@ const LATENCY = 1;
  * raise is correct on its face: the samples are there.
  */
 const STALLED = 2;
-// Timeline identity changes only on re-anchor, independently of the packed mutation epoch.
-const TIMELINE = 3;
 // The size of the most recent insert, i.e. one decoded chunk. See `read`.
-const CHUNK = 4;
+const CHUNK = 3;
 // How many times the reader ran dry mid-playback. Diagnostics only.
-const UNDERRUN = 5;
-const CONTROL_SLOTS = 6;
+const UNDERRUN = 4;
+const CONTROL_SLOTS = 5;
 
 /**
  * The playhead and its mutation epoch, packed into one 64-bit word: epoch in the high
@@ -128,7 +126,6 @@ export class SharedRingBuffer {
 	readonly capacity: number;
 	readonly rate: number;
 	readonly buffered: boolean;
-	readonly init: SharedRingBufferInit;
 
 	#control: Int32Array;
 	#state: BigInt64Array;
@@ -151,20 +148,12 @@ export class SharedRingBuffer {
 	#position = 0;
 	#lastRead = 0;
 
-	/**
-	 * Wrap the shared memory described by `init`.
-	 *
-	 * Pass `previous` in the worklet when this ring replaces one already being read. `resize`
-	 * snapshots the playhead on the main thread and hands the replacement over by message, so the
-	 * reader keeps draining the old ring in the meantime. Carrying its cursor across means those
-	 * samples are not played twice.
-	 */
-	constructor(init: SharedRingBufferInit, previous?: SharedRingBuffer) {
+	/** Wrap the shared memory described by `init`. */
+	constructor(init: SharedRingBufferInit) {
 		this.channels = init.channels;
 		this.capacity = init.capacity;
 		this.rate = init.rate;
 		this.buffered = init.buffered;
-		this.init = init;
 
 		this.#control = new Int32Array(init.control);
 		this.#state = new BigInt64Array(init.state);
@@ -173,32 +162,6 @@ export class SharedRingBuffer {
 			this.#samples.push(
 				new Float32Array(init.samples, i * this.capacity * Float32Array.BYTES_PER_ELEMENT, this.capacity),
 			);
-		}
-
-		if (previous !== undefined) this.#handoff(previous);
-	}
-
-	/**
-	 * Carry `source`'s playhead across, if the replacement is still the timeline it belongs to.
-	 *
-	 * Truncation changes the mutation epoch but preserves timeline identity. Sample state before
-	 * identity: a re-anchor publishes identity first, then replaces state. Either the identity
-	 * check rejects the old cursor, the exchange fails, or the re-anchor overwrites the carried
-	 * cursor. A truncate only forces a retry, preserving audio consumed since the resize.
-	 */
-	#handoff(source: SharedRingBuffer): void {
-		if (source.channels !== this.channels || source.rate !== this.rate) return;
-
-		const timeline = Atomics.load(source.#control, TIMELINE);
-		const from = Atomics.load(source.#state, 0);
-
-		for (;;) {
-			const state = Atomics.load(this.#state, 0);
-			if (Atomics.load(this.#control, TIMELINE) !== timeline) return;
-			if (((readOf(from) - readOf(state)) | 0) <= 0) return;
-
-			const next = pack(epochOf(state), readOf(from));
-			if (Atomics.compareExchange(this.#state, 0, state, next) === state) return;
 		}
 	}
 
@@ -250,8 +213,6 @@ export class SharedRingBuffer {
 			// One store rebases both halves, so a reader's compare-exchange against the old word
 			// cannot land afterwards. Two, because odd epochs belong to `truncate`.
 			const epoch = epochOf(Atomics.load(this.#state, 0));
-			// Publish identity first so a handoff cannot apply an old cursor to the new state.
-			Atomics.add(this.#control, TIMELINE, 1);
 			Atomics.store(this.#state, 0, pack((epoch + 2) | 0, 0));
 			Atomics.store(this.#control, WRITE, 0);
 			this.#anchored = true;
@@ -424,19 +385,29 @@ export class SharedRingBuffer {
 	 * already covers the new floor.
 	 */
 	setLatency(samples: number): void {
+		if (samples <= 0 || samples > this.capacity) throw new Error("invalid latency");
 		const previous = Atomics.exchange(this.#control, LATENCY, samples);
-		if (previous > 0 && samples > previous) {
-			Atomics.store(this.#control, STALLED, 1);
-			// A reader already past the STALLED check would still publish its quantum. Moving the
-			// word fails its exchange, and one that snapshots after this sees STALLED. Two keeps the
-			// epoch even, since odd belongs to `truncate`.
-			this.#step(2);
-		}
+		if (previous > 0 && samples > previous) this.park();
 
 		// Parked, the playhead holds still, so this measures exactly what is buffered. It also
 		// resumes a refill that a shallower floor has already covered, which `insert` would only
 		// notice on the next frame, never for a source that has stopped.
 		this.#resume();
+	}
+
+	/**
+	 * Hold playback until the next insert, keeping what is buffered. Main thread only.
+	 *
+	 * For a rise in the part of the target held encoded upstream: the ring already covers its floor,
+	 * so only the main thread knows when the received media covers the rest, and it releases the next
+	 * frame exactly then.
+	 */
+	park(): void {
+		Atomics.store(this.#control, STALLED, 1);
+		// A reader already past the STALLED check would still publish its quantum. Moving the word
+		// fails its exchange, and one that snapshots after this sees STALLED. Two keeps the epoch
+		// even, since odd belongs to `truncate`.
+		this.#step(2);
 	}
 
 	/**
@@ -480,72 +451,14 @@ export class SharedRingBuffer {
 	}
 
 	/**
-	 * Allocate a new ring with `newCapacity` samples and copy the unread window
-	 * [READ, WRITE) plus control state into it. Used when growing capacity so
-	 * we don't drop buffered audio. If `newCapacity` is smaller than the unread
-	 * span, the oldest samples are truncated.
-	 *
-	 * Main thread only. `resize()` reads from the source `SharedRingBuffer` and
-	 * writes into a freshly allocated buffer from `allocSharedRingBuffer`, so it
-	 * relies on the same invariant as `insert()`: no concurrent main-thread
-	 * writers. The AudioWorklet reader is tolerated via the CAS discipline used
-	 * by READ/WRITE elsewhere.
+	 * Fold the current READ into `#position`, so the returned offset keeps counting up across the
+	 * i32 wrap. Idempotent: folding an unchanged READ adds a zero delta.
 	 */
-	resize(newCapacity: number): SharedRingBuffer {
-		const init = allocSharedRingBuffer(this.channels, newCapacity, this.rate, this.buffered);
-		const dst = new SharedRingBuffer(init);
-		dst.#anchored = this.#anchored;
-		dst.#anchor = this.#anchor;
-
-		const state = Atomics.load(this.#state, 0);
-		const read = readOf(state);
-		const write = Atomics.load(this.#control, WRITE);
-		const latency = Atomics.load(this.#control, LATENCY);
-		const stalled = Atomics.load(this.#control, STALLED);
-
-		const available = (write - read) | 0;
-		const copyCount = Math.max(0, Math.min(available, dst.capacity));
-		const copyStart = (write - copyCount) | 0;
-
-		for (let channel = 0; channel < this.channels; channel++) {
-			const src = this.#samples[channel];
-			const out = dst.#samples[channel];
-			for (let i = 0; i < copyCount; i++) {
-				const idx = (copyStart + i) | 0;
-				out[slot(idx, dst.capacity)] = src[slot(idx, this.capacity)];
-			}
-		}
-
-		Atomics.store(dst.#control, TIMELINE, Atomics.load(this.#control, TIMELINE));
-		Atomics.store(dst.#state, 0, pack(epochOf(state), copyStart));
-		Atomics.store(dst.#control, WRITE, write);
-		Atomics.store(dst.#control, LATENCY, latency);
-		Atomics.store(dst.#control, STALLED, stalled);
-		Atomics.store(dst.#control, CHUNK, Atomics.load(this.#control, CHUNK));
-		Atomics.store(dst.#control, UNDERRUN, Atomics.load(this.#control, UNDERRUN));
-
-		// Carry the unwrapped playhead over, rebased onto dst's READ. Fold the same `read`
-		// snapshot the copy used so both sides agree on one observation; `copyStart` is at or
-		// ahead of it whenever the copy dropped the oldest samples.
-		dst.#position = this.#foldRead(read) + ((copyStart - read) | 0);
-		dst.#lastRead = copyStart;
-
-		return dst;
-	}
-
-	/**
-	 * Fold an observed READ into `#position`, so the returned offset keeps counting up across
-	 * the i32 wrap. Idempotent: folding the same value twice adds a zero delta.
-	 */
-	#foldRead(read: number): number {
+	#unwrapRead(): number {
+		const read = readOf(Atomics.load(this.#state, 0));
 		this.#position += (read - this.#lastRead) | 0;
 		this.#lastRead = read;
 		return this.#position;
-	}
-
-	/** `#foldRead` against the current READ. */
-	#unwrapRead(): number {
-		return this.#foldRead(readOf(Atomics.load(this.#state, 0)));
 	}
 
 	/**
