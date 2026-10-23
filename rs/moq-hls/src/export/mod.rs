@@ -360,11 +360,7 @@ impl Drop for Broadcaster {
 	}
 }
 
-async fn watch_catalog(
-	source: moq_mux::Source,
-	renditions: renditions::Producer,
-	timeline_watcher: TimelineWatcher,
-) {
+async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer, timeline_watcher: TimelineWatcher) {
 	// The source's catalog broadcast, so the catalog, the timeline subscription, and the closed
 	// check below all refer to the one broadcast it was built from.
 	let broadcast = &source.broadcast();
@@ -3300,12 +3296,7 @@ mod tests {
 		renditions.sync(&upstream, &snapshot);
 		let fanout = renditions.fanout();
 		let reference = Arc::new((Kind::Video, "video0".to_string(), "video0".to_string()));
-		let watcher = tokio::spawn(watch_timeline(
-			upstream.broadcast(),
-			archive,
-			reference,
-			fanout.clone(),
-		));
+		let watcher = tokio::spawn(watch_timeline(upstream.broadcast(), archive, reference, fanout.clone()));
 		let rendition = renditions.get(Kind::Video, "video0").unwrap();
 		accept_sibling(&old_server, &old_media).await;
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
@@ -3386,12 +3377,7 @@ mod tests {
 		renditions.sync(&upstream, &snapshot);
 		let fanout = renditions.fanout();
 		let reference = Arc::new((Kind::Video, "video0".to_string(), "video0".to_string()));
-		let watcher = tokio::spawn(watch_timeline(
-			upstream.broadcast(),
-			archive,
-			reference,
-			fanout.clone(),
-		));
+		let watcher = tokio::spawn(watch_timeline(upstream.broadcast(), archive, reference, fanout.clone()));
 		let rendition = renditions.get(Kind::Video, "video0").unwrap();
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await

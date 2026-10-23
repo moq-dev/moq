@@ -682,7 +682,6 @@ async fn audio_raw_publish_from_many_threads() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us: 20_000,
-		preset: None,
 	};
 	let audio = MoqAudioProducer::new(
 		&catalog,
@@ -767,7 +766,6 @@ async fn audio_raw_publish_rejects_bad_frames() {
 			channels: None,
 			bitrate: None,
 			frame_duration_us: 20_000,
-			preset: None,
 		},
 		None,
 	)
