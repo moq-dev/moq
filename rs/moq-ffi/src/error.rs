@@ -339,13 +339,6 @@ pub enum MoqError {
 	#[error("already committed to another way of reading")]
 	AlreadyCommitted,
 
-	/// A route carried an invalid hop id or too many hops.
-	#[error("invalid route: {reason}")]
-	InvalidRoute {
-		/// A diagnostic message describing the failure.
-		reason: String,
-	},
-
 	/// A path pattern was empty, had a doubled slash, or used a reserved segment form.
 	#[error("invalid pattern: {reason}")]
 	InvalidPattern {

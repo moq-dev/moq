@@ -11,6 +11,10 @@ A track that replaces an ended one, created or requested, appends from 0 instead
 A producer removed with `removeTrack` stays writable after a replacement claims the name; its writes reach only its own subscribers.
 A publisher that recreates a name continues past the groups it already wrote with `writeGroup` at an explicit sequence, such as a timestamp.
 
+### A listing says whether a removed track finished (#6399)
+
+`Broadcast.TracksEvent` gains `{ kind: "finished", name }`: the track left the listing because it finished. `{ kind: "removed", name }` now means it left unfinished. Handle both where you matched `"removed"`.
+
 ### `Track.Producer.largest()` is a getter
 
 `Track.Producer.largest()` returns the track's largest location synchronously, `undefined` before any, instead of a promise for the next newer one.
