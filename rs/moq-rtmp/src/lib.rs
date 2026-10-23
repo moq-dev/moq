@@ -20,21 +20,12 @@
 //! this crate only translates the RTMP transport. On the play path, enhanced
 //! codecs are sent only to clients that advertised the matching FourCC support.
 //!
-//! Two entry points, depending on how much control you need over each request:
-//!
-//! - **[`run`]**: the unauthenticated convenience. Build a [`Config`] and hand it
-//!   plus an origin to [`run`]; it accepts every publisher and player and routes
-//!   by prefix + app/key (publishes into the origin, plays out of it). A relay
-//!   embeds this with `run(cluster.origin.clone(), config)`.
-//! - **[`Server`] / [`Request`]**: bring your own auth. Loop on
-//!   [`Server::accept`], inspect [`Request::app`] / [`Request::stream_key`] (treat
-//!   the stream key as a token if you like), then match on the [`Request`]: accept
-//!   a [`Publish`] into an origin, or accept a [`Play`] out of one, at a path of
-//!   your choosing (or reject it). This is how an embedder (e.g. a relay verifying
-//!   a JWT and scoping the origin per token) plugs its policy in, with no
-//!   callback. It mirrors `moq-tokio`'s `Server` / `Request`. Claim each
-//!   publish's resolved path on an [`ActivePaths`] to keep [`run`]'s
-//!   first-publisher-wins rule.
+//! Loop on [`Server::accept`], inspect [`Request::app`] / [`Request::stream_key`]
+//! (treat the stream key as a token if you like), then match on the [`Request`]:
+//! accept a [`Publish`] into an origin, or accept a [`Play`] out of one, at a path
+//! of your choosing (or reject it). This is how an embedder (e.g. a relay verifying
+//! a JWT and scoping the origin per token) plugs its policy in, with no callback.
+//! It mirrors `moq-tokio`'s `Server` / `Request`.
 //!
 //! Beyond the listener, [`Client`] is the *dial-out* (client) role: connect to a
 //! remote RTMP server and either [`publish`](Client::publish) a MoQ broadcast to
@@ -48,12 +39,11 @@
 //!
 //! RTMPS (RTMP over TLS) is supported two ways:
 //!
-//! - **Let the gateway terminate TLS** (the default `tls` feature): set
-//!   `Config::tls` (or call `Server::with_tls`) with a `rustls::ServerConfig`,
-//!   and the listener serves `rtmps://` alongside `rtmp://` on the same port,
-//!   telling them apart by the client's first byte. Set [`Config::plaintext`] to `false` (or call
-//!   [`Server::with_plaintext`]) to refuse the plaintext clients and serve
-//!   `rtmps://` only.
+//! - **Let the gateway terminate TLS** (the default `tls` feature): call
+//!   `Server::with_tls` with a `rustls::ServerConfig`, and the listener serves
+//!   `rtmps://` alongside `rtmp://` on the same port, telling them apart by the
+//!   client's first byte. Call [`Server::with_plaintext`] with `false` to refuse
+//!   the plaintext clients and serve `rtmps://` only.
 //! - **Bring your own transport**: accept the connection and complete the TLS
 //!   handshake yourself (any [`Stream`]: a `tokio_rustls` stream, a custom
 //!   socket, a test pipe), then hand the established stream to [`accept_stream`].
@@ -73,25 +63,19 @@ use std::time::Duration;
 mod dial;
 mod error;
 mod flv;
-mod listen;
 mod metadata;
 // Vendored forks of rml_rtmp and rml_amf0; see the module docs.
 mod rml;
 mod server;
 
 /// Default FLV release delay and stalled-group budget.
-///
-/// Frames are released in decode order after this delay; late video resumes at
-/// its next keyframe. Override per request with [`Play::with_max_delay`] /
-/// [`Client::with_export_max_delay`] or via [`Config::export_max_delay`].
-pub const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(2);
+const DEFAULT_MAX_DELAY: Duration = Duration::from_millis(500);
 
 pub use dial::Client;
 pub use error::{Error, Result};
-pub use listen::{ActivePaths, Config, PathGuard, run};
 pub use server::{Conn, PUBLISH_IDLE_TIMEOUT, Play, Publish, Request, Server, Stream, accept_stream, configure_socket};
 
-/// Re-export of the `rustls` version this crate builds [`Config::tls`] against,
+/// Re-export of the `rustls` version [`Server::with_tls`] takes,
 /// so consumers construct a matching [`rustls::ServerConfig`] (a major `rustls`
 /// bump is a breaking change). Only available with the `tls` feature.
 #[cfg(feature = "tls")]

@@ -20,7 +20,7 @@ export function unsupportedIndicator(parent: Effect, watch: MoqWatch): HTMLEleme
 			return;
 		}
 
-		const unsupported = effect.get(watch.video.source.out.error) === "unsupported";
+		const unsupported = effect.get(watch.video.source.out.error)?.name === "NotSupportedError";
 		const show = unsupported && (status === "loading" || status === "live");
 		container.style.display = show ? "" : "none";
 		if (!show) return;

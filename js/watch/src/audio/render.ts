@@ -1,17 +1,11 @@
 import type { Micro, Milli } from "@moq/clock";
-import type { SharedRingBufferInit } from "./shared-ring-buffer";
 
 /** Everything the main thread sends the render worklet over its port. */
-export type Message = InitShared | InitPost | Data | Latency | Reset | Truncate;
+export type Message = Init | Data | Latency | Reset | Truncate;
 
-/** Init message when SharedArrayBuffer is available. */
-export interface InitShared extends SharedRingBufferInit {
-	type: "init-shared";
-}
-
-/** Init message for the postMessage fallback path. */
-export interface InitPost {
-	type: "init-post";
+/** Create the worklet's ring. */
+export interface Init {
+	type: "init";
 	channels: number;
 	rate: number;
 	latency: Milli;
@@ -20,38 +14,39 @@ export interface InitPost {
 	buffered: boolean;
 }
 
-/** Flush the buffer and re-stall (fallback path only; shared path resets via Atomics). */
+/** Flush the buffer and re-stall. */
 export interface Reset {
 	type: "reset";
+	// Echoed in every later state message, so the main thread can tell state from before the reset.
+	epoch: number;
 }
 
-/**
- * Drop buffered samples at or after `timestamp`, keeping what is already due (fallback path only;
- * the shared path truncates via Atomics).
- */
+/** Drop buffered samples at or after `timestamp`, keeping what is already due. */
 export interface Truncate {
 	type: "truncate";
 	timestamp: Micro;
 }
 
-/** Audio samples sent via postMessage (fallback path only). */
+/** Audio samples, with their buffers transferred. */
 export interface Data {
 	type: "data";
 	data: Float32Array[];
 	timestamp: Micro;
 }
 
-/** Latency update sent via postMessage (fallback path only). */
+/** Latency update. */
 export interface Latency {
 	type: "latency";
 	latency: Milli;
 }
 
-/** State update from the worklet back to main thread (fallback path only). */
+/** State update from the worklet back to the main thread. */
 export interface State {
 	type: "state";
 	timestamp: Micro;
 	stalled: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;
+	// The epoch of the last reset the worklet applied.
+	epoch: number;
 }

@@ -16,12 +16,13 @@ import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
+import { ObjectDatagram } from "./datagram.ts";
 import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
-import { PublishDone } from "./publish.ts";
+import { PublishDone, PublishDoneStatus } from "./publish.ts";
 import {
 	PublishNamespace,
 	PublishNamespaceCancel,
@@ -453,7 +454,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 });
 
 // Legal requests we don't serve are refused NOT_SUPPORTED one at a time.
-test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
+test("FETCH gets NOT_SUPPORTED", async () => {
 	const refusal = async (version: IetfVersion, run: (pub: Publisher, stream: Stream) => Promise<void>) => {
 		const pair = createMockTransportPair(ALPN.DRAFT_19);
 		const session = new NativeSession(pair.server, version, true);
@@ -479,21 +480,6 @@ test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
 		// FETCH_ERROR on draft-14, REQUEST_ERROR after; the code follows the Length and any Request ID.
 		expect(fetch[0]).toBe(version === Version.DRAFT_14 ? 0x19 : 0x05);
 		expect(fetch[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
-
-		const paused = await refusal(version, (pub, stream) =>
-			pub.runSubscribe(
-				new Subscribe({
-					requestId: 7n,
-					trackNamespace: Path.from("test"),
-					trackName: "video",
-					subscriberPriority: 0,
-					forward: false,
-				}),
-				stream,
-			),
-		);
-		expect(paused[0]).toBe(0x05);
-		expect(paused[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
 	}
 });
 
@@ -2641,7 +2627,10 @@ const ALPNS: Record<IetfVersion, string> = {
  * The uni reader is taken up front: a group stream opened before the test asks for one still
  * queues, but taking the reader late races the publisher rather than the test.
  */
-function fixture(version: IetfVersion = V20): {
+function fixture(
+	version: IetfVersion = V20,
+	grant?: Signal<Grant | undefined>,
+): {
 	pair: ReturnType<typeof createMockTransportPair>;
 	pub: Publisher;
 	broadcast: BroadcastProducer;
@@ -2651,7 +2640,7 @@ function fixture(version: IetfVersion = V20): {
 } {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const session = new NativeSession(pair.server, version, false);
-	const { pub, origin } = publisher(pair.server, { session });
+	const { pub, origin } = publisher(pair.server, { session, grant });
 	const broadcast = publish(origin, Path.from("test"));
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
@@ -2856,6 +2845,48 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 		client.close();
 	}
 });
+
+test.each([Version.DRAFT_20, Version.DRAFT_22])(
+	"IETF %s: datagrams honor the absolute object range",
+	async (version) => {
+		using clock = manual();
+		const fx = fixture(version);
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				filter: { kind: "absolute", startGroup: 0n, startObject: 1n, endGroup: 1n, endObject: 0n },
+			}),
+		);
+		const reader = fx.pair.client.datagrams.readable.getReader();
+		const received: number[] = [];
+		const reading = (async () => {
+			for (;;) {
+				const next = await reader.read();
+				if (next.done) return;
+				const datagram = await ObjectDatagram.decode(next.value, version);
+				expect(datagram.trackAlias).toBe(7n);
+				expect(datagram.objectId ?? 0).toBe(0);
+				received.push(datagram.groupId);
+			}
+		})();
+		try {
+			for (let sequence = 0; sequence < 3; sequence++)
+				track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+			await clock.advance(Nano.zero);
+			expect(received).toEqual([1]);
+		} finally {
+			await reader.cancel();
+			await reading;
+			client.close();
+			fx.close();
+		}
+	},
+);
 
 /** An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the refresh ratio. */
 test("draft-20: an absolute subscribe is no join", async () => {
@@ -3375,9 +3406,8 @@ test("draft-20: an inline terminal reset after its FIN falls back to a standalon
 
 /**
  * A bounded filter does not end the subscription (draft-20 removed that), so the publisher
- * keeps serving until the track does. Groups published above the end are dropped rather
- * than held: parking them would leave the serving loop waiting for a cap that never rises,
- * and PUBLISH_DONE would never go out.
+ * keeps serving until the track does. Groups held above the end cannot delay PUBLISH_DONE
+ * once the track finishes: the filter is fixed, so its terminal boundary ends serving.
  */
 test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DONE", async () => {
 	using clock = manual();
@@ -3926,13 +3956,151 @@ test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async 
 		}),
 	);
 	try {
-		await client.writer.write(new Uint8Array([0x02, 0, 4, 2, 1, 0x10, 0]));
+		// NEW_GROUP_REQUEST (0x32), on a track without DYNAMIC_GROUPS.
+		await client.writer.write(new Uint8Array([0x02, 0, 4, 2, 1, 0x32, 0]));
 		expect(await client.reader.u53()).toBe(RequestError.id);
 		const refusal = await RequestError.decode(client.reader, fx.version);
 		expect(refusal.errorCode).toBe(0x03);
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, fx.version);
 		expect(done.statusCode).toBe(0x08);
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
+// FORWARD=0 drops the subscription, and its upstream demand, while the request stays; FORWARD=1
+// subscribes again as a new SUBSCRIBE would, at the live edge.
+test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async () => {
+	for (const startPaused of [false, true]) {
+		const fx = fixture(V20);
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const write = (text: string) => {
+			const group = track.appendGroup();
+			group.writeFrame({ payload: new TextEncoder().encode(text), timestamp: Timestamp.now() });
+			group.close();
+		};
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				filter: { kind: "nextObject" },
+				forward: !startPaused,
+			}),
+		);
+		const forward = async (requestId: bigint, on: boolean) => {
+			const parameters = new Parameters();
+			parameters.forward = on;
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId, parameters }).encode(client.writer, V20);
+			expect(await client.reader.u53()).toBe(RequestOk.id);
+			return RequestOk.decode(client.reader, V20);
+		};
+		try {
+			write("before");
+			if (!startPaused) {
+				const before = await nextUni(fx.uni);
+				if (!before) throw new Error("the subscription served nothing");
+				expect((await readGroup(before)).objects).toEqual([{ id: 0, payload: "before" }]);
+				await forward(2n, false);
+			}
+			while (track.subscription.peek() !== undefined) await track.subscription.changed();
+			write("paused");
+
+			const resumed = await forward(4n, true);
+			expect(resumed.parameters.largest).toEqual({ groupId: 1n, objectId: 0n });
+			write("after");
+			for (;;) {
+				const stream = await nextUni(fx.uni);
+				if (!stream) throw new Error("the resumed subscription served nothing");
+				const group = await readGroup(stream);
+				const payloads = group.objects.map((object) => object.payload);
+				expect(payloads).not.toContain("paused");
+				expect(payloads).not.toContain("before");
+				if (group.sequence === 2) {
+					expect(group.objects).toEqual([{ id: 0, payload: "after" }]);
+					break;
+				}
+			}
+		} finally {
+			client.close();
+			track.close();
+			fx.close();
+		}
+	}
+});
+
+test("a paused SUBSCRIBE ends once its grant is revoked", async () => {
+	const grant = new Signal<Grant | undefined>(undefined);
+	const fx = fixture(V20, grant);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			filter: { kind: "nextObject" },
+			forward: false,
+		}),
+	);
+	try {
+		grant.set({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		expect((await PublishDone.decode(client.reader, V20)).statusCode).toBe(PublishDoneStatus.UNAUTHORIZED);
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
+// The track has no max age, so only the pause itself can release a write parked on flow control.
+test("a pause resets a group stream parked on flow control", async () => {
+	const fx = fixture(V20);
+	let writing!: () => void;
+	const parked = new Promise<void>((resolve) => {
+		writing = resolve;
+	});
+	let reset = false;
+	const stalled = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+			});
+		},
+		write() {
+			writing();
+			return new Promise<void>(() => {});
+		},
+	});
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			filter: { kind: "nextObject" },
+		}),
+	);
+	try {
+		track.appendGroup().writeFrame({ payload: new TextEncoder().encode("parked"), timestamp: Timestamp.now() });
+		await parked;
+		const parameters = new Parameters();
+		parameters.forward = false;
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, V20);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		expect(reset).toBe(true);
 	} finally {
 		client.close();
 		track.close();
