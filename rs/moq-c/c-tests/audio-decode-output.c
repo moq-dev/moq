@@ -120,11 +120,13 @@ int main(void) {
     wait_until(&c, &c.catalog);
     pthread_mutex_unlock(&c.mutex);
 
+    // Each decode reads the finished track from the start. Its budget is the track's whole
+    // retention, since the budget ages groups by wall clock and a stalled host would skip them.
     const uint32_t formats[] = {MOQ_AUDIO_SAMPLE_FORMAT_F32, MOQ_AUDIO_SAMPLE_FORMAT_F32_PLANAR, MOQ_AUDIO_SAMPLE_FORMAT_S16};
     for (size_t format = 0; format < sizeof(formats) / sizeof(formats[0]); format++) {
         for (uint32_t channels = 1; channels <= 2; channels++) {
             c.format = formats[format]; c.channels = channels; c.frames = 0; c.decode_done = 0;
-            moq_audio_decoder_output decoded = {c.format, 48000, channels, 1000000};
+            moq_audio_decoder_output decoded = {c.format, 48000, channels, 30000000};
             int32_t decoder = moq_decode_audio((uint32_t)c.catalog, 0, &decoded, on_frame, &c);
             CHECK(decoder > 0);
             pthread_mutex_lock(&c.mutex);

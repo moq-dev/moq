@@ -702,7 +702,9 @@ async fn audio_raw_publish_from_many_threads() {
 		"tone".into(),
 		snapshot.audio["tone"].clone(),
 		MoqAudioDecoderOutput {
-			max_delay_us: Some(1_000_000),
+			// The track's whole retention: reading starts only after finish, and the budget
+			// ages groups by wall clock, so a stalled host would otherwise skip the start.
+			max_delay_us: Some(30_000_000),
 			..audio_output()
 		},
 	)
