@@ -76,9 +76,18 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 
 	tracing::info!(%name, "importing HLS");
 
-	importer.init().await?;
-	notify_ready();
-	run_announced(&mut importer, &mut listed, &mut producer, epoch).await?;
+	let ran = match importer.init().await {
+		Ok(()) => {
+			notify_ready();
+			run_announced(&mut importer, &mut listed, &mut producer, epoch).await
+		}
+		Err(err) => Err(err.into()),
+	};
+	if let Err(err) = ran {
+		// Subscribers see why the import failed rather than a dropped producer.
+		importer.abort(moq_net::Error::Transport(format!("{err:#}")));
+		return Err(err);
+	}
 
 	// The playlist ended: serve the finished broadcast until its media is stale, so
 	// subscribers still catching up drain the tail. An interrupt drops it at once.
@@ -265,5 +274,78 @@ mod test {
 		};
 		let err = result.expect_err("an empty playlist imports nothing");
 		assert!(format!("{err:#}").contains("before it declared a track"), "{err:#}");
+	}
+
+	/// The next group a subscriber reads after the import stopped: the error it ended with.
+	async fn ended_with(track: &mut moq_net::track::Subscriber) -> moq_net::Error {
+		loop {
+			match track.recv_group().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => panic!("the track finished cleanly"),
+				Err(err) => return err,
+			}
+		}
+	}
+
+	/// An announced import that fails, here on a timestamp reset, aborts its tracks and catalog
+	/// with the cause, so subscribers see the failure rather than a dropped producer.
+	#[tokio::test]
+	async fn a_failed_import_aborts_its_tracks() {
+		use moq_mux::container::{Frame, fmp4::Muxer};
+
+		let dir = tempfile::tempdir().unwrap();
+		let muxer = Muxer::audio(&hang::catalog::AudioConfig::new(
+			hang::catalog::AudioCodec::Opus,
+			48_000,
+			2,
+		))
+		.unwrap();
+		std::fs::write(dir.path().join("init.mp4"), muxer.init().unwrap().unwrap()).unwrap();
+		for (index, micros) in [5_000_000, 0].into_iter().enumerate() {
+			let frame = Frame {
+				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+				duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),
+				payload: bytes::Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
+				keyframe: true,
+			};
+			let fragment = muxer.fragment(index as u32, &[frame]).unwrap();
+			std::fs::write(dir.path().join(format!("{index}.m4s")), fragment).unwrap();
+		}
+		let live = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n";
+		let playlist = dir.path().join("media.m3u8");
+		std::fs::write(&playlist, live).unwrap();
+
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+		let target = ImportTarget {
+			origin,
+			name: "hls".to_string(),
+			max_age: None,
+			bandwidth: Default::default(),
+		};
+		let args = ImportArgs {
+			playlist: playlist.to_str().unwrap().to_string(),
+			passthrough: false,
+		};
+		let importing = tokio::spawn(import(target, args, moq_net::Epoch::mint()));
+
+		announced.next().await.expect("announced");
+		let broadcast = consumer.request_broadcast("hls", None).await.unwrap();
+		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
+		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let name = catalog.audio.renditions.keys().next().expect("an audio rendition");
+		let mut media = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
+		let mut listing = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
+
+		// The source restarts at zero under the same init segment.
+		std::fs::write(&playlist, format!("{live}#EXT-X-DISCONTINUITY\n#EXTINF:1,\n1.m4s\n")).unwrap();
+		let err = importing.await.unwrap().expect_err("a reset fails the import");
+		assert!(format!("{err:#}").contains("rewound"), "{err:#}");
+
+		for track in [&mut media, &mut listing] {
+			let ended = ended_with(track).await;
+			assert!(matches!(ended, moq_net::Error::Transport(_)), "{ended:?}");
+		}
 	}
 }

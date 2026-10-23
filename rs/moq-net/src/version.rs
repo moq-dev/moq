@@ -211,15 +211,6 @@ impl Version {
 		}
 	}
 
-	/// Whether this version uses SETUP version-code negotiation
-	/// (as opposed to ALPN-only).
-	pub fn uses_setup_negotiation(&self) -> bool {
-		matches!(
-			self,
-			Self::Lite(lite::Version::Lite01 | lite::Version::Lite02) | Self::Ietf(ietf::Version::Draft14)
-		)
-	}
-
 	/// Whether this is a lite protocol version.
 	pub fn is_lite(&self) -> bool {
 		match self {

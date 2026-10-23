@@ -208,7 +208,7 @@ struct Stats {
 	prefix: Option<String>,
 
 	#[usage(env = "MOQ_STATS_INTERVAL", cli("--stats-interval"))]
-	interval: Option<u64>,
+	interval: Option<String>,
 
 	#[usage(env = "MOQ_STATS_NODE", cli("--stats-node"))]
 	node: Option<String>,

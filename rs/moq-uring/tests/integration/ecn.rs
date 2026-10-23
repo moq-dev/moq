@@ -41,12 +41,9 @@ fn round_trip(bind: &str, config: udp::Config, ecn: Option<udp::Ecn>, datagrams:
 			let mut buf = tx.acquire().await.expect("acquire");
 			let len = SEGMENT * datagrams;
 			buf.resize(len, 0xAB);
-			buf.send(udp::Transmit {
-				to,
-				segment: SEGMENT,
-				ecn,
-			})
-			.expect("send");
+			let mut transmit = udp::Transmit::new(to, SEGMENT);
+			transmit.ecn = ecn;
+			buf.send(transmit).expect("send");
 
 			let mut packets = Vec::new();
 			let mut received = 0;
