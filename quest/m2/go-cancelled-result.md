@@ -19,16 +19,21 @@ result is lifted into a Go object anyway, then dropped behind
 `ctx.Err()`. The object has a finalizer, so it is reclaimed eventually but
 not promptly.
 
-The wrapper cannot close this. `bridge.CallHandle` gives the binding a
-context that never cancels, so the Rust future keeps running after the
-caller leaves. For `Server.Accept` that future would take the next incoming
-request, which the release then destroys: a real connection lost.
+The wrapper cannot close this. `bridge.CallHandle` releases a late handle
+only when the call has its own `cancel` (as `Request.Accept` does), because
+it then gives the binding a context that never cancels. These calls have no
+such `cancel`, so the Rust future would keep running after the caller
+leaves. For `Server.Accept` that future would take the next incoming
+request, which the release then destroys: a real connection lost. With a nil
+`cancel`, `CallHandle` passes ctx through, so `Auth.Add` leaks the same way.
 
 Fix it in the generator: when the call was cancelled, run the result type's
 destroyer instead of returning nothing. The generator already emits a
 destroyer per type, including records and optionals that hold objects. Then
 the wrapper's direct ctx calls (`Server.Accept`, `SubscribeTrack`,
-`FetchGroup`, `Resolve`, `RequestBroadcast`) are correct as they are. Check
+`FetchGroup`, `Resolve`, `RequestBroadcast`) and `Auth.Add` are correct as
+they are. A binding that destroys the result returns `ctx.Err()`, which
+`run` never releases, so nothing is destroyed twice. Check
 whether `bridge.CallHandle` still covers anything once the binding releases
 these results itself. If the
 [generator hard fork](/quest/m2/uniffi-fork.md) has landed, the change goes
