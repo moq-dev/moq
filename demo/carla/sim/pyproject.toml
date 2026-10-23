@@ -42,6 +42,7 @@ pythonpath = ["."]
 # change there fails the gate instead of crashing at runtime. carla exists only
 # in the CARLA venv; typings/ stands in for it.
 [tool.pyright]
+reportUnnecessaryTypeIgnoreComment = "error"
 include = ["moq_carla_sim"]
 extraPaths = ["../../../py/moq-rs"]
 pythonVersion = "3.12"

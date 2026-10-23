@@ -59,7 +59,7 @@ def test_catalog_now_uses_a_weak_broadcast_handle():
     catalog = moq.media.CatalogProducer(broadcast)
     assert catalog.now() >= timedelta(0)
     broadcast.close()
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Closed):
         catalog.now()
 
 
@@ -76,8 +76,9 @@ def test_whole_media_frames_require_the_callers_timestamp():
     producer = moq.media.TrackProducer.audio(
         broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=head)
     )
-    with pytest.raises(moq.Error.Codec, match="timestamp"):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Codec, match="timestamp"):
         producer._inner.write_frame(moq_ffi.MoqFrame(payload=b"opus frame", timestamp_us=None))
+    # Exercise the runtime refusal when a caller omits the required timestamp.
     with pytest.raises(TypeError):
         producer.write_frame(b"opus frame")  # type: ignore[call-arg]
     producer.finish()

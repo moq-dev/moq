@@ -25,6 +25,7 @@ docs = { requires-python = ">=3.12" }
 asyncio_mode = "auto"
 
 [tool.pyright]
+reportUnnecessaryTypeIgnoreComment = "error"
 pythonVersion = "3.10"
 include = ["py"]
 # Skip uniffi-bindgen output: it's regenerated on every build and isn't
