@@ -9,6 +9,7 @@
 mod auth_embedder;
 mod auth_lifetime;
 mod cluster_close;
+mod cluster_drain;
 mod cluster_idle;
 mod cluster_unknown;
 mod connection;
