@@ -9,6 +9,13 @@ How to update your code for each breaking change, newest first.
 Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
 Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
 
+### Published names refuse navigation segments
+
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Rust reports `Error::NavigationSegment`; the existing protocol error codes carry the refusal to a peer.
+Path normalization, relative references, and subscription paths retain their semantics.
+
 ### A listing says whether a removed track finished (#6399)
 
 `broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
