@@ -25,7 +25,7 @@ check:
     bun sh/gh/check-runs.ts
     python3 bench/relay.test.py
 
-# Tests of repository tooling; nightly, not on every pull request.
+# Tests of repository tooling; every `just check` and `just ci` runs them.
 test:
     python3 sh/coverage.test.py
     python3 sh/size/report.test.py

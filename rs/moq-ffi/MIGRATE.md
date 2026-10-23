@@ -17,6 +17,10 @@ A fill also arrives for history a subscription covers that the cache lacks, not 
 
 `max_delay_us` is now nullable, where null leaves the publisher's max age alone to bound delivery. It still defaults to 0.
 
+### Video rendition preference
+
+`MoqVideo` gains `preference: i32`. Set it to `0` in record literals to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Regenerate bindings and rebuild them with the matching native library.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.

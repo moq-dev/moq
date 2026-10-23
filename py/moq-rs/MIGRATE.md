@@ -12,6 +12,10 @@ A reader narrowing its ranges can leave a single group while the fill stays used
 A refusal carries no application code: `drop_groups` fails the waiting fetches with `moq.Error.NotFound`.
 `Subscription.max_delay` also accepts `None`, leaving the publisher's max age alone to bound delivery.
 
+### Video rendition preference
+
+`moq.media.Video` gains `preference`, defaulting to `0`. Prefer keyword construction and upgrade `moq-ffi` alongside the wrapper. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes an `AnnounceRoute`
 
 `BroadcastProducer.announce` takes `moq.AnnounceRoute(cost=..., epoch=...)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.

@@ -14,6 +14,10 @@ A fill also arrives for history a subscription covers that the cache lacks, not 
 `MoqSubscription.MaxDelayUs` is `*uint64`, where `nil` leaves the publisher's max age alone to bound delivery.
 Regenerate the bindings for the changed types and checksums.
 
+### Video rendition preference
+
+`MoqVideo` gains `Preference int32`. Update unkeyed struct literals or use keyed fields, leaving `Preference: 0` for the default ranking. Regenerate bindings with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
