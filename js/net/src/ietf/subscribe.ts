@@ -80,7 +80,7 @@ export class Subscribe {
 	/** Whether the subscriber wants Track Properties on the response (INCLUDE_PROPERTIES). */
 	propertiesWanted: boolean;
 
-	/** Whether Objects are forwarded (FORWARD). We only serve forwarding subscriptions. */
+	/** Whether Objects are forwarded (FORWARD); a paused subscription forwards none until resumed. */
 	forward: boolean;
 
 	/** Whether the request carried a Range Filter, which we refuse. Never encoded. */

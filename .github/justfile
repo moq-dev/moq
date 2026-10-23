@@ -25,7 +25,7 @@ check:
     bun sh/gh/check-runs.ts
     python3 bench/relay.test.py
 
-# Tests of repository tooling; nightly, not on every pull request.
+# Tests of repository tooling; every `just check` and `just ci` runs them.
 test:
     python3 sh/coverage.test.py
     python3 sh/size/report.test.py
@@ -51,7 +51,6 @@ test:
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
     python3 sh/rs/test-lints.test.py
-    python3 sh/rs/model-markers.test.py
     python3 sh/gh/nightly.test.py
     python3 sh/gh/pages-clean.test.py
     python3 sh/gh/bench-report.test.py

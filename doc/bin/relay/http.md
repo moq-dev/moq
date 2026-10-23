@@ -42,10 +42,23 @@ listen = "127.0.0.1:9101"
 
 ### GET /metrics
 
-Prometheus text: bytes, frames, groups, announces, subscriptions, viewers, requests,
-and sessions split by `tier` and `role`, plus accept-loop counters per TCP listener. Traffic
-counters accumulate for the node's lifetime and leave out the stats feed's own
-traffic. Host CPU and memory belong to a node exporter.
+Prometheus text: payload bytes, frames, groups, announces, subscriptions, and
+viewers split by `tier` and `role`; requests and sessions by `tier`; and
+accept-loop counters per TCP listener. Payload counters accumulate for the
+node's lifetime and leave out the stats feed's own traffic. Host CPU and memory
+belong to a node exporter.
+
+`moq_relay_wire_tx_bytes_total` and `moq_relay_wire_rx_bytes_total` sum the
+per-session [transport counters](/concept/stats#sessions) by `tier`, including
+internal sessions and the stats feed. Compare them with payload to spot
+transport overhead and idle traffic. Transports that do not report them
+contribute zero.
+
+`moq_relay_control_tx_bytes_total` and `moq_relay_control_rx_bytes_total`
+count control-message bytes by `tier` and `class` (`session`, `announce`, `track_info`, `subscribe`, `fetch`,
+`probe`, `auth`, `goaway`, `other`) to spot control-heavy sessions. They
+include message size prefixes but leave out media payload and transport
+overhead such as QUIC framing, ACKs, and retransmissions.
 
 A few worth alerting on:
 
