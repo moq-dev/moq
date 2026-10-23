@@ -414,7 +414,7 @@
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             rev = "v${version}";
-            hash = "sha256-mXCNFHbAwMOvjAAwt099LQESFSdGjUL8Nyx4yrr1zt8=";
+            hash = "sha256-r0O/iAad2Z82KhG+6AOvqESAktaR7THQQVoR2CyP+ok=";
           };
 
           cargoHash = "sha256-0YWQF8eSUsemU0Y3jgZh7Kgtno/58zBAxPYpcBwPRuk=";
