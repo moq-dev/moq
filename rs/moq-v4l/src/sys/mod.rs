@@ -2,9 +2,9 @@
 //! via `bindgen.sh` and checked in. The output is plain C-ABI struct, enum, and
 //! constant definitions with no layout tests, and `timeval` / `timespec` come
 //! from `libc`, so one file serves every Linux target.
-#![allow(clippy::all)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
-#![allow(non_upper_case_globals)]
+#![allow(clippy::all, reason = "bindgen output")]
+#![expect(non_camel_case_types, reason = "bindgen output")]
+#![expect(non_snake_case, reason = "bindgen output")]
+#![expect(non_upper_case_globals, reason = "bindgen output")]
 
 include!("videodev2.rs");

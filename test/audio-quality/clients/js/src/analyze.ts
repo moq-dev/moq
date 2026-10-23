@@ -43,8 +43,8 @@ export type Input = {
 /**
  * A gap that starts this close to a stall is the stall, not an underrun.
  *
- * The page learns of a stall after the ring does: up to five quanta late on the postMessage ring,
- * one poll late on the isolated one.
+ * The page learns of a stall after the ring does: up to five quanta late, in the worklet's next
+ * state message.
  */
 export const STALL_SLACK_MS = 60;
 
