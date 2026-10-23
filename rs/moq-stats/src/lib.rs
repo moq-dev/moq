@@ -21,7 +21,7 @@
 //! (default prefix `.stats`), or one per group of leading broadcast-path
 //! segments at `<prefix>/<group>/node/<node>`; parse announce paths back with
 //! [`parse_node_path`]. Each announcement carries a fresh
-//! [`Epoch`](moq_net::Epoch) on its route, so a restarted node or a group
+//! [`Epoch`] on its route, so a restarted node or a group
 //! returning from idle is a new broadcast at the same path; a reader tells
 //! them apart by the announced route's epoch. Every broadcast carries a
 //! `totals.json` track of each [`Tier`]'s [`Totals`] for the epoch, each tier

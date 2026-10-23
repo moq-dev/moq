@@ -1357,22 +1357,23 @@ impl GroupPublisher {
 		let mut sessions = TrackFamily::new(sequence.clone());
 		let tiers = task.layout == Layout::Broadcast;
 
-		// The totals and the default tier's tracks always exist, even while idle.
-		let tier = Tier::default();
-		for role in [Role::Publisher, Role::Subscriber].into_iter().filter(|_| tiers) {
-			let name = traffic_track(&tier, role, false);
-			match TrackPair::create(&broadcast, &name, sequence.clone()) {
-				Ok(pair) => {
-					traffic.tracks.insert(name, pair);
-				}
-				Err(err) => {
-					tracing::warn!(?err, name, "stats: failed to create track");
-					return None;
+		// The totals and, outside the track layout, the default tier's tracks
+		// always exist, even while idle.
+		if tiers {
+			let tier = Tier::default();
+			for role in [Role::Publisher, Role::Subscriber] {
+				let name = traffic_track(&tier, role, false);
+				match TrackPair::create(&broadcast, &name, sequence.clone()) {
+					Ok(pair) => {
+						traffic.tracks.insert(name, pair);
+					}
+					Err(err) => {
+						tracing::warn!(?err, name, "stats: failed to create track");
+						return None;
+					}
 				}
 			}
-		}
-		let name = sessions_track(&tier, false);
-		if tiers {
+			let name = sessions_track(&tier, false);
 			match TrackPair::create(&broadcast, &name, sequence.clone()) {
 				Ok(pair) => {
 					sessions.tracks.insert(name, pair);
@@ -3666,6 +3667,40 @@ mod tests {
 		frame.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 		assert_eq!(serde_json::to_vec(&frame).unwrap(), serde_json::to_vec(&map).unwrap());
 		assert_eq!(serde_json::to_vec(&Frame::<Traffic>::default()).unwrap(), b"{}");
+	}
+
+	#[test]
+	fn group_body_serializes_like_a_group_frame() {
+		let mut usage = Usage::default();
+		usage.subscriber.bytes = 5;
+		let mut presence = Presence::default();
+		presence.sessions_started = 2;
+		let mut tier = GroupTier::default();
+		tier.folded.publisher.bytes = 99;
+		tier.totals.publisher.bytes = 7;
+		tier.totals.sessions.sessions_started = 2;
+		tier.paths.entries.push((PathOwned::from("acme/live"), usage));
+		tier.labels.entries.push((PathOwned::from("acme"), presence));
+		let body = GroupBody {
+			epoch: Epoch::mint(),
+			tiers: Frame {
+				entries: vec![(PathOwned::from(""), tier)],
+			},
+		};
+
+		let mut group = crate::Group::default();
+		group.publisher.bytes = 7;
+		group.sessions.sessions_started = 2;
+		group.paths.insert("acme/live".into(), usage);
+		group.labels.insert("acme".into(), presence);
+		let frame: crate::GroupFrame = serde_json::from_slice(&serde_json::to_vec(&body).unwrap()).unwrap();
+		assert_eq!(frame.epoch, body.epoch);
+		assert_eq!(frame.tiers, BTreeMap::from([(String::new(), group)]));
+		assert_eq!(
+			serde_json::to_vec(&frame).unwrap(),
+			serde_json::to_vec(&body).unwrap(),
+			"the producer writes what the public type reads, folded totals left out"
+		);
 	}
 
 	/// Counts this thread's allocations, so the test below measures only its
