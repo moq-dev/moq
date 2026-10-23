@@ -22,8 +22,10 @@ Namespace plus a match kind. Why: one grammar and one codec, so the two
 wires can't drift.
 
 - draft-lcurley-moq-auth-01: AUTH_OK's Publish and Subscribe entries become
-  patterns, with a changelog bullet. Per the lite-first wire-compat rule, no
-  -00 compatibility is kept.
+  patterns, with a changelog bullet. The -00 codec is not kept, but -01 takes
+  a new AUTH Setup Option code point so a -00 peer simply doesn't negotiate
+  the extension instead of misparsing AUTH_OK; it falls back to the SETUP or
+  URL token as any peer without AUTH does.
 - `rs/moq-net/src/ietf/auth.rs` encodes and decodes patterns. The refusal for
   a grant that is not a union of subtrees goes away; the refusal for a grant
   too large for one AUTH_OK stays, never trimmed.
@@ -31,7 +33,8 @@ wires can't drift.
 - Test: the #6566 matrix (exact and subtree grants, drafts 16 and 18) admits
   every cell.
 
-Public API: none. Wire: AUTH_OK in draft-lcurley-moq-auth changes shape.
+Public API: none. Wire: AUTH_OK in draft-lcurley-moq-auth changes shape under a
+new AUTH Setup Option code point.
 
 ## Closes
 

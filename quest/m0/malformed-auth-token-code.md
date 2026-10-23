@@ -1,4 +1,4 @@
-# [XS] MALFORMED_AUTH_TOKEN session code
+# [S] MALFORMED_AUTH_TOKEN session code
 
 ## Goal
 
@@ -17,12 +17,18 @@ encoded and decoded, rather than leave it unknown. Why: its neighbours 0x13,
 - Add it to the round-trip table in `rs/moq-net/src/error.rs`, mirror it in
   `js/net`, and add the row to draft-lcurley-moq-lite's session-code table
   with a changelog bullet.
-- Find where moq-net refuses an unparseable SETUP or URL token and close with
-  this code there; keep `Unauthorized` for a well-formed token that grants
-  nothing.
+- Sending needs the auth contract to say why: moq-net treats the SETUP token
+  as opaque, `moq auth serve` already tells `Refusal::InvalidToken` apart but
+  `Refusal::body` collapses it into `Reason::Refused`, and the relay's
+  `refuse` maps that to `Unauthorized`. Add a malformed `refusal::Reason`
+  (older relays still read it as `Refused` through `#[serde(other)]`), map
+  `InvalidToken` to it, and have moq-relay close with this code; keep
+  `Unauthorized` for a well-formed token that grants nothing. Follow the
+  Cross-Package Sync row for `rs/moq-auth` (`js/auth`,
+  `doc/bin/relay/auth.md`).
 
-Public API: one additive variant on a `#[non_exhaustive]` enum, and its JS
-mirror. Wire: a newly assigned moq-lite session code with moq-transport's
+Public API: additive variants on `SessionError` and `moq_auth::refusal::Reason`,
+and their JS mirrors. Wire: a newly assigned moq-lite session code with moq-transport's
 meaning.
 
 ## Closes
