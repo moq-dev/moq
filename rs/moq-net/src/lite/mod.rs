@@ -16,6 +16,9 @@ pub(crate) mod error;
 mod fetch;
 mod goaway;
 mod group;
+#[cfg(test)]
+#[path = "identity.fixture.rs"]
+mod identity_fixture;
 pub(crate) mod ietf;
 mod info;
 pub mod message;
