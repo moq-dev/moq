@@ -43,7 +43,9 @@ pub(crate) async fn serve_ws(
 		.or_else(|| state.shutdown.activity.enter())
 		.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 	let alpns = versions.alpns();
-	let ws = negotiate_subprotocol(ws, &alpns)?;
+	// The socket buffers a message whole before qmux sees it, so it reads no more than a record.
+	let max = moq_tokio::websocket::max_message_size();
+	let ws = negotiate_subprotocol(ws.max_message_size(max).max_frame_size(max), &alpns)?;
 
 	let host = uri
 		.authority()

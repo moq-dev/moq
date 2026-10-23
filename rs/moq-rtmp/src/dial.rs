@@ -68,13 +68,13 @@ pub struct Client<S = TcpStream> {
 	/// The `<app>` this client connected to, logged in place of the stream key.
 	app: String,
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
-	/// before skipping. Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY).
-	export_max_delay: Duration,
+	/// before skipping.
+	max_delay: Duration,
 	/// Retention declared on the media tracks [`pull`](Self::pull) publishes, or `None`
 	/// for hang's own default.
-	import_max_age: Option<Duration>,
-	/// Connection allocator each ingested track claims its peak-hold bitrate on.
-	import_bandwidth: moq_net::bandwidth::Allocator,
+	max_age: Option<Duration>,
+	/// Connection allocator each track [`pull`](Self::pull) ingests claims its peak-hold bitrate on.
+	bandwidth: moq_net::bandwidth::Allocator,
 	/// Script data [`pull`](Self::pull) discards, including any sent before Play.Start.
 	metadata: crate::metadata::Dropped,
 }
@@ -155,18 +155,20 @@ impl<S: Stream> Client<S> {
 			session,
 			work,
 			app: app.to_string(),
-			export_max_delay: crate::DEFAULT_MAX_DELAY,
-			import_max_age: None,
-			import_bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			max_delay: crate::DEFAULT_MAX_DELAY,
+			max_age: None,
+			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			metadata: Default::default(),
 		})
 	}
 
 	/// Set the FLV release delay and stalled-group budget for [`publish`](Self::publish).
-	/// Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); zero releases
-	/// available frames immediately without deadline drops.
-	pub fn with_export_max_delay(mut self, max_delay: Duration) -> Self {
-		self.export_max_delay = max_delay;
+	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
+	///
+	/// The publish (egress) direction only; [`pull`](Self::pull) takes
+	/// [`with_max_age`](Self::with_max_age) instead.
+	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
@@ -180,9 +182,9 @@ impl<S: Stream> Client<S> {
 	/// and the memory matters.
 	///
 	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
-	/// someone else declared, and takes [`with_export_max_delay`](Self::with_export_max_delay) instead.
-	pub fn with_import_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
-		self.import_max_age = max_age.into();
+	/// someone else declared, and takes [`with_max_delay`](Self::with_max_delay) instead.
+	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
+		self.max_age = max_age.into();
 		self
 	}
 
@@ -194,8 +196,8 @@ impl<S: Stream> Client<S> {
 	///
 	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a
 	/// broadcast someone else declared.
-	pub fn with_import_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
-		self.import_bandwidth = bandwidth;
+	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
+		self.bandwidth = bandwidth;
 		self
 	}
 
@@ -235,7 +237,7 @@ impl<S: Stream> Client<S> {
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
-		let mut export = FlvExport::new(source, catalog).with_delay(self.export_max_delay);
+		let mut export = FlvExport::new(source, catalog).with_delay(self.max_delay);
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 
@@ -310,8 +312,8 @@ impl<S: Stream> Client<S> {
 		self.await_event(Direction::Play).await?;
 
 		let config = moq_mux::catalog::Config::default()
-			.with_max_age(self.import_max_age)
-			.with_bandwidth(self.import_bandwidth.clone());
+			.with_max_age(self.max_age)
+			.with_bandwidth(self.bandwidth.clone());
 		let mut publisher = Publisher::new(origin, path.as_str(), config)?;
 
 		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
@@ -633,9 +635,9 @@ mod tests {
 			session,
 			work,
 			app: "live".into(),
-			export_max_delay: crate::DEFAULT_MAX_DELAY,
-			import_max_age: None,
-			import_bandwidth: Default::default(),
+			max_delay: crate::DEFAULT_MAX_DELAY,
+			max_age: None,
+			bandwidth: Default::default(),
 			metadata: crate::metadata::Dropped::new("metadata"),
 		};
 		let origin = moq_tokio::origin::spawn();
@@ -718,7 +720,7 @@ mod tests {
 				match push {
 					true => client.publish("cam0", exported, "live/cam0").await.unwrap(),
 					false => client
-						.with_import_max_age(max_age)
+						.with_max_age(max_age)
 						.pull("cam0", &pulled, "live/cam0")
 						.await
 						.unwrap(),
