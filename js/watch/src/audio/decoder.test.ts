@@ -326,6 +326,25 @@ it("decodes an audio packet inside a group after a gap", async () => {
 	}
 });
 
+// A subscription's head arrives newest-first. Chrome's AudioDecoder stamps every output from its
+// first input, so decoding the older frames after it shifts the rest of the track.
+for (const cmaf of [false, true]) {
+	it(`decodes a ${cmaf ? "CMAF" : "legacy"} subscription head in timestamp order`, async () => {
+		const playback = await play(Milli(100), true, cmaf);
+		try {
+			for (const ms of [140, 120, 100, 80, 60, 40, 20, 0, 160]) {
+				frameTimestamp = (ms - 20) * 1000;
+				playback.push(frame());
+				await microtasks();
+			}
+			expect(playback.inserted()).toEqual([140_000, 160_000]);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+}
+
 describe("Decoder across a broadcast disable", () => {
 	it("releases the graph when its broadcast is disabled and rebuilds on return", async () => {
 		const playback = await play(Milli(100));

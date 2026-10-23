@@ -47,8 +47,8 @@ ci preset="":
     ../../sh/obs/unit.sh
 
 # Unit-test the plugin sources against stubbed libobs and ffmpeg and the real
-# moq-ffi, under ThreadSanitizer. Manual; `just obs ci` runs them without the
-# sanitizer.
+# moq-ffi, under ThreadSanitizer. Nightly runs it; `just obs ci` runs them
+# without the sanitizer.
 test:
     ../../sh/obs/test.sh
 
