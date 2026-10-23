@@ -648,13 +648,21 @@ fn fnv_key(name: &str, origins: impl IntoIterator<Item = Hop>) -> u64 {
 /// of the prefix and chain so every node converges on the same winner, and finally
 /// the newest announcement, so a reconnect under an otherwise identical route wins
 /// the moment it lands instead of after the transport retires the old session.
+///
+/// Only a route a cluster peer forwarded is hashed. One that entered here is ranked
+/// by no other node, and a restarted publisher announces under a new first hop (its
+/// own random id, or this relay's stamp), so a hash would keep its dead session
+/// winning half the time until the transport times out.
 fn route_order(prefix: &Path, entry: &RouteEntry) -> (bool, Cost, bool, usize, u64, Reverse<u64>) {
 	(
 		entry.is_anonymous(),
 		entry.cost,
 		!entry.local,
 		entry.hops.len(),
-		fnv_key(prefix.as_str(), entry.hops.iter().copied()),
+		match entry.peer {
+			true => fnv_key(prefix.as_str(), entry.hops.iter().copied()),
+			false => 0,
+		},
 		Reverse(entry.id),
 	)
 }
@@ -7350,6 +7358,34 @@ mod tests {
 			remaining.withdrawn();
 			announced.assert_next_ended("room");
 			assert!(producer.shared.lock().withdrawn.is_empty());
+		}
+	}
+
+	/// A publisher that reconnects before its old session times out announces under a
+	/// new first hop: a random id when it names itself, or this relay's stamp when it
+	/// does not. The new session wins whichever chain hashes lower.
+	#[tokio::test(start_paused = true)]
+	async fn a_reconnect_under_a_new_hop_wins_over_the_old_session() {
+		for (old, new) in [
+			(&[10][..], &[11][..]),
+			(&[11], &[10]),
+			(&[10, 0], &[11, 0]),
+			(&[11, 0], &[10, 0]),
+		] {
+			let producer = origin(1).produce();
+			let mut announced = producer.consume().announced();
+			tokio::time::sleep(Duration::from_millis(1)).await;
+
+			let _old = producer.dynamic("room", Route::default().with_hops(hops(old))).unwrap();
+			assert_eq!(announced.assert_next_active("room").hops, hops(old));
+
+			let _new = producer.dynamic("room", Route::default().with_hops(hops(new))).unwrap();
+			let update = tokio::time::timeout(DEFAULT_UPDATE_HOLD * 2, announced.next())
+				.await
+				.unwrap_or_else(|_| panic!("{new:?} never took over from {old:?}"))
+				.unwrap();
+			assert_eq!(update.kind, AnnounceKind::Updated);
+			assert_eq!(update.route.hops, hops(new));
 		}
 	}
 
