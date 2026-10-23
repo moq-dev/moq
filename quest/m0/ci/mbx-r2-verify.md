@@ -19,7 +19,7 @@ and record the numbers in the PR that closes this:
   `infra/mbx/lifecycle.json`. Shorten or lengthen it from that.
 
 Use scheduled Nightly runs on `main` only (`gh run list --workflow
-nightly.yml --branch main`), never a dispatch on a branch.
+nightly.yml --branch main --event schedule`), never a dispatch on a branch.
 
 ## Plan
 
