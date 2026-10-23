@@ -15,6 +15,10 @@ Cluster peer-list flags are now `--cluster-api-url` and `--cluster-api-tls-root`
 the matching environment variables are `MOQ_CLUSTER_API_URL` and
 `MOQ_CLUSTER_API_TLS_ROOT`. TOML uses `[cluster.api] url` and `tls.root`.
 
+### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
+
+Enable `nvidia` instead; the old names were aliases for it.
+
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 
 Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.

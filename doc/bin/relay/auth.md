@@ -162,7 +162,9 @@ it; it never joins the union. A `PUBLISH_NAMESPACE` grant must cover the whole
 namespace: `room/**`, not just `room`. A session verifies at most
 128 tokens at once, counting
 checks still running past the admission timeout. Later tokens wait their turn
-rather than being refused. A waiting token the peer withdraws never reaches the
+rather than being refused. Each HTTP request is admitted on its own, so an
+HTTP/2 connection carries at most as many requests at once, and the client
+queues the rest. A waiting token the peer withdraws never reaches the
 auth server. The ten-second admission timeout counts from a token's arrival, so
 one that times out while waiting is refused without being sent. A sent check
 always runs to completion, so the connection's `end` stays its last request and

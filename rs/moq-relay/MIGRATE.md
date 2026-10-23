@@ -39,6 +39,12 @@ and consuming `shutdown` on that value. A merely bound worker group cannot serve
 `Cluster::admit`, `cluster::Admitted`, and `auth::hold` are private; real admissions
 use the existing `Auth::embedded` / `Admissions` and `Lease` lifecycle.
 
+### `stats.interval` is a duration (#6472)
+
+`stats.interval`, `--stats-interval`, and `MOQ_STATS_INTERVAL` take a duration such as `"1s"` or `"500ms"` instead of a bare number of seconds, and a zero interval refuses to start.
+Write `interval = 5` as `interval = "5s"`.
+In Rust, `stats::Config::interval` is a `Duration`, and `stats::Config::build` returns a `Result`.
+
 ### `receive_window` has a floor (#5878)
 
 The `[quic]` and `[limits.peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.

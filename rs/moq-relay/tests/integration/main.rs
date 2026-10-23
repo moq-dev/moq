@@ -8,6 +8,7 @@
 
 mod auth_lifetime;
 mod cluster_close;
+mod cluster_drain;
 mod cluster_idle;
 mod cluster_unknown;
 #[cfg(feature = "test-support")]

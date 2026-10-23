@@ -993,8 +993,9 @@ mod tests {
 	#[test]
 	#[allow(clippy::field_reassign_with_default)]
 	fn bind_refuses_a_keylog_without_sslkeylogfile() {
-		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
+			return;
+		}
 		let mut server = moq_tokio::server::Config::default();
 		server.quic.keylog = Some(true);
 		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))

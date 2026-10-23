@@ -188,7 +188,7 @@ async fn embedded_expired_refusals_keep_verified_root_and_tier() {
 		enabled: true,
 		..Default::default()
 	};
-	let producer = config.build(cluster.origin.clone());
+	let producer = config.build(cluster.origin.clone()).unwrap();
 	let registry = producer.registry().clone();
 	let cluster = cluster.with_stats(producer);
 	let (auth, mut admissions) = auth::Auth::embedded("edge");

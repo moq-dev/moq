@@ -104,7 +104,8 @@ pub struct Config {
 	pub(crate) tls: Option<serde::de::IgnoredAny>,
 }
 
-/// Maximum in-band token verifications one session may hold at its decider.
+/// Maximum in-band token verifications one session, or requests one HTTP/2
+/// connection, may hold at its decider.
 const VERIFICATIONS: usize = 128;
 
 /// The `--auth-*` flags 0.14 had and #3688 removed, with their env vars: a relay
@@ -864,13 +865,14 @@ impl Auth {
 	}
 
 	#[cfg(test)]
-	fn with_verifications(mut self, verifications: usize) -> Self {
+	pub(crate) fn with_verifications(mut self, verifications: usize) -> Self {
 		assert!(verifications > 0);
 		self.verifications = verifications;
 		self
 	}
 
-	fn verifications(&self) -> usize {
+	/// How many credentials one session, or one HTTP/2 connection, may have the decider verifying at once.
+	pub(crate) fn verifications(&self) -> usize {
 		#[cfg(test)]
 		return self.verifications;
 		#[cfg(not(test))]

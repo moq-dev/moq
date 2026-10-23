@@ -59,13 +59,6 @@ open stdin pipe does not keep the process alive afterward. Admission is part of
 the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission without
 a deadline.
 
-Add `--stats-enabled` before the first stage to publish accepted-session and
-traffic counters with the relay's `--stats-*` settings. An export-only listener
-publishes nothing to its sessions, so they cannot read these stats. These
-listener settings require a MoQ listener. Grants still scope which broadcasts
-each session can publish or subscribe to, including stats; see the relay's
-[statistics configuration](/bin/relay/config#stats).
-
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
 one; every flag is documented there. Flags renamed between releases are listed in
 [MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md).
@@ -483,11 +476,11 @@ default version every return is a replacement. An export that fails while the br
 a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
 so the other formats refuse `--linger`.
 
-## Stats and feedback
+## Reports and feedback
 
-`import --stats` names a stats track in the catalog and reports what each
-rendition has written, about once a second while someone subscribes, with the
-connection's RTT, estimated send rate, and loss. It covers the stdin imports;
+`import --report` names a track in the catalog's `stats` section and reports
+what each rendition has written, about once a second while someone subscribes,
+with the connection's RTT, estimated send rate, and loss. It covers the stdin imports;
 capture, the gateways, `archive`, and `ts --program all` refuse it.
 
 `export --echo <name>` answers a publisher that solicits feedback: under the
@@ -496,15 +489,15 @@ the export reads has received and its newest arrival, until the export ends.
 It covers the stdout container exports and needs a hang catalog, so MSF
 refuses it.
 
-The `stats` and `echo` sinks print reports as JSON lines. `export stats`
-follows one broadcast's stats track until the broadcast ends; `export echo`
+The `report` and `echo` sinks print reports as JSON lines. `export report`
+follows one broadcast's report track until the broadcast ends; `export echo`
 prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
 `--broadcast` as they come and go, reading one that ends for 5 s more for its
 final report. Either sink stops reading a report that grows past 1 MiB.
 
 ```bash
-moq ... --broadcast event import --stats ts < feed.ts
-moq ... --broadcast event export stats
+moq ... --broadcast event import --report ts < feed.ts
+moq ... --broadcast event export report
 moq ... --broadcast event export --echo alice ts > out.ts
 moq ... --broadcast viewers export echo
 ```
