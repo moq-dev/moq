@@ -9,6 +9,10 @@ How to update your code for each breaking change, newest first.
 A session closed cleanly by the peer now ends with `CancelledMoqException`, like one this side closed, instead of a protocol exception with a session-scoped cancel kind.
 Drop any check for that kind.
 
+### Video rendition preference
+
+`MoqVideo` gains `preference`, defaulting to `0`. Regenerate bindings and rebuild with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.

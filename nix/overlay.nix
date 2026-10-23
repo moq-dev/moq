@@ -23,9 +23,9 @@ let
     filter = filterCargoSources;
   };
 
-  # rs/kio on its own, so the dependency layer below only rebuilds when kio does.
+  # rs/kio/src on its own, so the dependency layer below only rebuilds when kio does.
   kioSource = final.lib.cleanSourceWith {
-    src = ../rs/kio;
+    src = ../rs/kio/src;
     name = "kio-source";
     filter = filterCargoSources;
   };
@@ -34,7 +34,9 @@ let
   # registry crates (web-transport-iroh) at the workspace
   # member. crane's dependency-only stage stubs every workspace crate down to an
   # empty lib.rs, so those registry crates no longer find kio's API and fail to
-  # compile. Put kio's real source back into the dummy tree.
+  # compile. Put kio's real source back into the dummy tree, but keep crane's
+  # cleaned manifest: the real one inherits `workspace.lints`, which the dummy
+  # root manifest drops.
   #
   # Skip crane's check phase: `cargo test` runs a binary's tests as threads of
   # one process, so tests that pass CI's nextest (a process per test) can
@@ -46,9 +48,9 @@ let
       // {
         doCheck = false;
         extraDummyScript = ''
-          rm -rf $out/rs/kio
-          cp -r ${kioSource} --no-target-directory $out/rs/kio
-          chmod -R +w $out/rs/kio
+          rm -rf $out/rs/kio/src
+          cp -r ${kioSource} --no-target-directory $out/rs/kio/src
+          chmod -R +w $out/rs/kio/src
         '';
       }
     );

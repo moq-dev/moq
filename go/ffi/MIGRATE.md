@@ -9,6 +9,10 @@ How to update your code for each breaking change, newest first.
 A session closed cleanly by the peer now ends with `ErrMoqErrorCancelled`, like one this side closed, instead of a protocol error with a session-scoped `MoqProtocolKindCancel`.
 Drop any check for the session-scoped cancel kind.
 
+### Video rendition preference
+
+`MoqVideo` gains `Preference int32`. Update unkeyed struct literals or use keyed fields, leaving `Preference: 0` for the default ranking. Regenerate bindings with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.

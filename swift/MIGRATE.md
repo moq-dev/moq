@@ -9,6 +9,10 @@ How to update your code for each breaking change, newest first.
 A session closed cleanly by the peer now ends with `MoqError.Cancelled`, which `isShutdown` accepts, instead of `MoqError.Protocol` with a session-scoped cancel kind.
 Drop any check for that kind.
 
+### Video rendition preference
+
+`Media.Video` gains `preference: Int32`, defaulting to `0`. Rebuild with the matching MoqFFI package. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes an `AnnounceRoute`
 
 `BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:epoch:)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.

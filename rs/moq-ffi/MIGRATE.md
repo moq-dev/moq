@@ -11,6 +11,10 @@ A session closed cleanly by the peer now ends with `MoqError::Cancelled`, like o
 When this side aborted the session, it ends with that abort's error.
 Drop any check for the session-scoped `Cancel` kind.
 
+### Video rendition preference
+
+`MoqVideo` gains `preference: i32`. Set it to `0` in record literals to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Regenerate bindings and rebuild them with the matching native library.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
