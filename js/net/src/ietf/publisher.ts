@@ -2554,7 +2554,13 @@ export class Publisher {
 		const stop = adding.subscribe((active) => {
 			if (!active) hold.abort();
 		});
-		const removed = unlisted.subscribe(() => hold.abort());
+		// The peer lists the track on its PUBLISH, so one that finishes while the answer is
+		// awaited still waits for it, then ends with TRACK_ENDED; a reset would fail the peer's
+		// listing.
+		let answering = false;
+		const removed = unlisted.subscribe((how) => {
+			if (how === "removed" || (how === "finished" && !answering)) hold.abort();
+		});
 		const cancelled = () => request?.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
 		hold.signal.addEventListener("abort", cancelled);
 		let request: RequestStream | undefined;
@@ -2624,7 +2630,9 @@ export class Publisher {
 			stop();
 			// Once sent, the PUBLISH survives cancellation of its listing.
 			const state: Published = { streams: { opened: 0 }, unlisted, answer: false };
+			answering = true;
 			const answer = await untilAborted(request.next(), hold.signal);
+			answering = false;
 			if (!answer) throw new ProtocolViolation("PUBLISH ended without an answer");
 			if (answer.type === RequestError.id) {
 				await RequestError.decode(answer.reader, version).catch((err) => {

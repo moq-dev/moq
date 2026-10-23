@@ -811,11 +811,12 @@ where
 		let mut finished = false;
 		let mut goaways = super::super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
-		// PUBLISH_OK or REQUEST_ERROR. A track unlisted before the answer has nothing to
-		// end yet, so the request is reset.
+		// PUBLISH_OK or REQUEST_ERROR. A track that left the listing unfinished before the
+		// answer has nothing to end yet, so the request is reset. One that finished waits for
+		// the answer, then ends with TRACK_ENDED, since the peer listed it on the PUBLISH.
 		let answer = kio::wait(|waiter| {
 			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready() || listed.poll_closed(waiter).is_ready() {
+			if session.poll_closed(&mut cx).is_ready() || (listed.poll_closed(waiter).is_ready() && !*listed.read()) {
 				return Poll::Ready(None);
 			}
 			goaways.poll_next(&mut stream.reader, &mut cx).map(Some)
@@ -1430,6 +1431,37 @@ mod tests {
 			assert_eq!(id, ietf::PublishDone::ID, "{version}");
 			let done: ietf::PublishDone = body.message(version).unwrap();
 			assert_eq!(done.stream_count, 0, "{version}");
+		}
+	}
+
+	/// A track that finishes while its PUBLISH awaits the answer still ends with TRACK_ENDED
+	/// once answered, since the peer listed it on the PUBLISH; a reset would fail its listing.
+	#[moq_clock::test]
+	async fn a_track_finished_before_the_answer_ends_cleanly() {
+		for version in DRAFTS {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut published = HashMap::new();
+			for _ in 0..2 {
+				let (stream, _, name, _) = h.publish().await;
+				published.insert(name, stream);
+			}
+
+			let mut video = published.remove("video").unwrap();
+			let track = h.tracks.remove("video").unwrap();
+			track.finish().unwrap();
+			drop(track);
+			moq_clock::sleep(Duration::from_millis(10)).await;
+			publish_ok(&mut video).await;
+			let (id, body) = next(&mut video).await;
+			assert_eq!(id, ietf::PublishDone::ID, "{version}");
+			let done: ietf::PublishDone = body.message(version).unwrap();
+			assert_eq!(
+				done.status_code,
+				ietf::PublishDoneStatus::TrackEnded.code(version),
+				"{version}"
+			);
 		}
 	}
 

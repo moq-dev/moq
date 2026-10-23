@@ -57,20 +57,25 @@ function fixture(version: IetfVersion, subscriptions = 10, grant = new Signal<Gr
 			tasks.push(publisher.runSubscribeTracks(new SubscribeTracks(0n, Path.from(prefix), parameters), server));
 			return client;
 		},
-		async offered() {
+		/** The next PUBLISH, answered with a paused PUBLISH_OK unless `answer` is false. */
+		async offered(answer = true) {
 			const stream = await Stream.accept(pair.client, version);
 			if (!stream) throw new Error("missing PUBLISH");
 			streams.push(stream);
 			expect(await stream.reader.u53()).toBe(Publish.id);
 			const publish = await Publish.decode(stream.reader, version);
 			expect(publish.forward).toBe(false);
-			const parameters = new Parameters();
-			if (version < Version.DRAFT_20) parameters.forward = false;
-			await stream.writer.u53(RequestOk.id);
-			await new RequestOk({ parameters }).encode(stream.writer, version);
+			if (answer) await publishOk(stream, version);
 			return { stream, publish };
 		},
 	};
+}
+
+async function publishOk(stream: Stream, version: IetfVersion) {
+	const parameters = new Parameters();
+	if (version < Version.DRAFT_20) parameters.forward = false;
+	await stream.writer.u53(RequestOk.id);
+	await new RequestOk({ parameters }).encode(stream.writer, version);
 }
 
 async function ok(stream: Stream, version: IetfVersion) {
@@ -153,6 +158,27 @@ for (const version of drafts) {
 			expect(done.statusCode).toBe(finished ? PublishDoneStatus.TRACK_ENDED : PublishDoneStatus.INTERNAL_ERROR);
 		});
 	}
+
+	// The peer listed the track on its PUBLISH, so one that finishes before the answer still
+	// ends with TRACK_ENDED once answered, rather than a reset that fails the peer's listing.
+	test(`a track finished before its PUBLISH is answered ends with TRACK_ENDED (${version})`, async () => {
+		const clock = new Manual();
+		using _installed = { [Symbol.dispose]: clock.install() };
+		const fx = fixture(version);
+		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
+		broadcast.announce();
+		const track = broadcast.createTrack("video");
+		const listing = await fx.list();
+		await ok(listing, version);
+		const { stream } = await fx.offered(false);
+		track.close();
+		broadcast.removeTrack("video");
+		await clock.advance(Nano.zero);
+		await publishOk(stream, version);
+		expect(await stream.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(stream.reader, version);
+		expect(done.statusCode).toBe(PublishDoneStatus.TRACK_ENDED);
+	});
 
 	test(`track listing skips beyond the cap and rejects overlapping prefixes (${version})`, async () => {
 		const fx = fixture(version, 1);
