@@ -127,7 +127,11 @@ impl Programs {
 			// Only a PAT or PMT moves claims or restarts a route.
 			for index in changed {
 				for pid in self.programs[index].import.restarts() {
-					demux.restart(pid);
+					// Another program still reading the PID judges its partial bytes against
+					// this chain, so only the PID's sole reader restarts it.
+					if self.readers[usize::from(pid)].iter().all(|&reader| reader == index) {
+						demux.restart(pid);
+					}
 				}
 				self.reclaim(index);
 			}
@@ -261,7 +265,7 @@ mod test {
 	use crate::catalog::hang::Container;
 	use crate::container::Consumer;
 	use crate::container::ts::import::test::{
-		corrupt, fifty_programs, pat_section, psi_packets, two_programs, two_section_pat,
+		corrupt, fifty_programs, pat_section, pmt_section, psi_packets, two_programs, two_section_pat,
 	};
 
 	#[tokio::test(start_paused = true)]
@@ -502,6 +506,35 @@ mod test {
 		programs.decode(&data).unwrap();
 		assert_eq!(programs.programs.len(), 1);
 		assert_eq!(programs.stats().crc_error, 1);
+	}
+
+	/// A second program claiming an elementary PID another already reads keeps the PID's
+	/// continuity chain, so a counter gap right after its PMT still counts.
+	#[test]
+	fn a_shared_pid_keeps_its_chain_when_another_program_claims_it() {
+		const MP2: u8 = 0x03;
+		let es = |cc: u8| {
+			let mut pkt = vec![0x47, 0x00, 0x61, 0x10 | cc];
+			pkt.resize(188, 0xff);
+			pkt
+		};
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let pmt = |program: u16| {
+			psi_packets(
+				program << 8,
+				&mut 0,
+				&[],
+				&pmt_section(program, 0, &[(MP2, 0x0061, &[])]),
+			)
+		};
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0200)]));
+		data.extend(pmt(1));
+		data.extend(es(0));
+		data.extend(pmt(2));
+		data.extend(es(2));
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.stats().continuity_count_error, 1);
 	}
 
 	/// The input is held until the PAT is whole, then each program publishes as its own

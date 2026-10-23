@@ -7226,7 +7226,7 @@ pub(super) mod test {
 	}
 
 	/// A PMT section listing `(stream_type, pid, es_descriptors)`, the clock on the first.
-	fn pmt_section(program: u16, version: u8, streams: &[(u8, u16, &[u8])]) -> Vec<u8> {
+	pub(in crate::container::ts) fn pmt_section(program: u16, version: u8, streams: &[(u8, u16, &[u8])]) -> Vec<u8> {
 		let pcr = streams.first().map_or(0x1fff, |&(_, pid, _)| pid);
 		let mut body = vec![0xe0 | (pcr >> 8) as u8, pcr as u8, 0xf0, 0x00];
 		for &(stream_type, pid, descriptors) in streams {
