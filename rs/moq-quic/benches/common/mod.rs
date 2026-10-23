@@ -233,8 +233,10 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
                 received.reset += 1;
                 break;
             }
-            // Unreachable today, but keeps the suite compiling against a rewrite's new variants.
-            #[allow(unreachable_patterns)]
+            #[allow(
+                unreachable_patterns,
+                reason = "unreachable today, but keeps the suite compiling against a rewrite's new variants"
+            )]
             Err(err) => panic!("read failed: {err}"),
         }
     }

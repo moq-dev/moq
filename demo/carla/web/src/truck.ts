@@ -141,14 +141,11 @@ export class Truck {
 		});
 		this.#signals.cleanup(() => this.videoSource.close());
 
-		// Drive-by-wire wants the equivalent of `<moq-watch latency="instant">`: a
+		// Drive-by-wire wants the equivalent of `<moq-watch delay="instant">`: a
 		// zero jitter buffer plus an unpaced decoder, so each frame paints the moment
 		// it decodes instead of waiting on the playback clock. There is no audio to
 		// keep in step.
-		this.sync = new Watch.Sync({
-			delay: "instant",
-			probe: connection.probe,
-		});
+		this.sync = new Watch.Sync({ delay: "instant" });
 		this.#signals.cleanup(() => this.sync.close());
 
 		// Keep status subscribed while idle; only an inspected camera owns video demand.

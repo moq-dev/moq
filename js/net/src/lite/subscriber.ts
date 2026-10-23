@@ -1782,8 +1782,8 @@ export class Subscriber {
 	}
 
 	/**
-	 * Ends every subscribed track: cleanly for a deliberate close, or with `err` when the
-	 * session died, since those tracks were cut off rather than ended.
+	 * Ends every subscribed track: cleanly without declaring an end for a deliberate close, or
+	 * with `err` when the session died, since those tracks were cut off rather than ended.
 	 */
 	close(err?: Error) {
 		// A fetch or setup exchange cut off by the session is incomplete even on a deliberate
@@ -1792,7 +1792,8 @@ export class Subscriber {
 		this.#closed.abort(cut);
 
 		for (const { track } of this.#subscribes.values()) {
-			track.close(err);
+			if (err) track.close(err);
+			else hooks.releaseTrack(track);
 		}
 
 		this.#subscribes.clear();

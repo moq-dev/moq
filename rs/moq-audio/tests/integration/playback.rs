@@ -14,6 +14,7 @@
 //! the mix is metered before it reaches the device.
 
 #![cfg(feature = "playback")]
+#![expect(clippy::disallowed_types, reason = "tests read the host clock directly")]
 
 use std::time::Duration;
 

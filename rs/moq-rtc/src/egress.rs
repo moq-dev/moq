@@ -261,8 +261,10 @@ fn pick(source: &moq_mux::Source, catalog: &Catalog, formats: &[Format]) -> Opti
 }
 
 /// A catalog rendition a media line can serve.
-// One per media line, so the variant sizes never add up to an allocation's worth.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per media line, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
+)]
 enum Rendition {
 	Audio(String, hang::catalog::AudioConfig),
 	Video(String, hang::catalog::VideoConfig),
@@ -558,7 +560,7 @@ pub fn dispatch(rtc: &mut str0m::Rtc, request: WriteRequest, wallclock: Instant)
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
