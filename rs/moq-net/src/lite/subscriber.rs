@@ -4308,14 +4308,20 @@ mod tests {
 		assert_eq!((msg.start_frame, msg.end_frame), (0, None));
 	}
 
-	/// A lite-07 SUBSCRIBE keeps a mid-group start: its answer carries the largest position,
-	/// which says whether what the subscriber holds is current. Lite-06's answer does not,
-	/// so it asks from the head of the group instead, and the first frame says where the
-	/// live feed is; its end keeps the frame bound.
+	/// A lite-07 SUBSCRIBE keeps a mid-group start whose prefix the copy holds: its answer
+	/// carries the largest position, which says whether what the subscriber holds is
+	/// current. Lite-06's answer does not, so it asks from the head of the group instead,
+	/// and the first frame says where the live feed is; its end keeps the frame bound.
 	#[moq_clock::test]
 	async fn a_mid_group_start_survives_only_where_the_answer_has_the_largest() {
 		for (version, start_frame) in [(Version::Lite07, 3), (Version::Lite06, 0)] {
 			let mut h = Harness::new(version);
+			let mut group = h.producer.create_group(crate::group::Info { sequence: 5 }).unwrap();
+			for frame in 0..3 {
+				group
+					.write_frame(crate::Timestamp::from_millis(frame).unwrap(), b"prefix".as_ref())
+					.unwrap();
+			}
 			let mut sub = Sub::None;
 
 			h.serve
@@ -4334,10 +4340,10 @@ mod tests {
 		}
 	}
 
-	/// A partial prefix, a tail, or a released group cannot seed the inflater. Only
-	/// a complete live prefix permits requesting the tail without widening its start.
+	/// A partial prefix, a tail, or a released group lacks frames below a mid-group start.
+	/// Only a complete live prefix permits requesting the tail without widening its start.
 	#[moq_clock::test]
-	async fn compressed_frame_bounds_require_the_entire_cached_prefix() {
+	async fn frame_bounds_require_the_entire_cached_prefix() {
 		for (first, count, aborted, expected) in [
 			(0, 0, false, 0),
 			(0, 2, false, 0),
@@ -4346,10 +4352,6 @@ mod tests {
 			(0, 3, true, 0),
 		] {
 			let mut h = Harness::new(Version::Lite07);
-			h.producer = h
-				._broadcast
-				.create_track("compressed", track::Info::timed().with_compress(true))
-				.unwrap();
 			let mut group = h.producer.create_group(crate::group::Info { sequence: 5 }).unwrap();
 			group.start_at(first).unwrap();
 			for frame in first..first + count {
@@ -6291,7 +6293,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				// The wire carries one range: the span of every range asked for, which the
 				// subscribers' own reads narrow again.
 				subscription.set_bounds(subscription.start(), subscription.end());
-				producer.widen_compressed(&mut subscription);
+				producer.widen_start(&mut subscription);
 				self.widen_frame_bounds(&mut subscription);
 				match sub {
 					Sub::None => {

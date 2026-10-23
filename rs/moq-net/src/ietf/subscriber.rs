@@ -487,14 +487,11 @@ impl Target {
 	}
 
 	/// Widen a mid-group start to the group's first frame unless the copy holds the frames
-	/// below it, so a compressed group can inflate. A request learns whether the track is
-	/// compressed only from SUBSCRIBE_OK, so with compression `negotiated` it widens every
-	/// mid-group start, and a plain track pays for that group's prefix.
-	fn widen(&self, subscription: &mut track::Subscription, negotiated: bool) {
+	/// below it.
+	fn widen_start(&self, subscription: &mut track::Subscription) {
 		match self {
-			Self::Request(request) if negotiated => request.widen_compressed(subscription),
-			Self::Request(_) => {}
-			Self::Resume(idle) => idle.track.widen_compressed(subscription),
+			Self::Request(request) => request.widen_start(subscription),
+			Self::Resume(idle) => idle.track.widen_start(subscription),
 		}
 	}
 
@@ -590,9 +587,10 @@ struct TrackState {
 
 	// Where the subscription asked to start, when the request starts partway through a
 	// group: a resumed subscription picking up after the frames a previous route
-	// delivered, or an application range. The stream for that group legitimately starts
+	// delivered, or an application range, either widened to its group's first frame unless
+	// the copy holds the frames below it. The stream for that group legitimately starts
 	// there, without a head, and its Object IDs stay pinned to the ordinals the readers'
-	// windows count in. A compressed group's start is widened to its first frame.
+	// windows count in.
 	resume: Option<track::Position>,
 
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
@@ -2828,9 +2826,8 @@ where
 	) -> Option<Idle> {
 		let validity = self.validity.start();
 		let requested = target.subscription();
-		let negotiated = self.peer_setup.get().await.flate;
 		let subscription = requested.clone().map(|mut subscription| {
-			target.widen(&mut subscription, negotiated);
+			target.widen_start(&mut subscription);
 			subscription
 		});
 		let start = subscription.as_ref().and_then(|s| s.start());

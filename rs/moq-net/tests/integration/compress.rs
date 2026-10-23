@@ -119,8 +119,8 @@ async fn relay(published: Published, hops: [&str; 2], subscription: moq_net::tra
 	}
 }
 
-/// Hops whose requester carries an application's mid-group start: lite-07, and
-/// moq-transport with compression negotiated.
+/// Hops that carry a mid-group start and negotiate compression: lite-07, and moq-transport
+/// draft-17 and later.
 const RANGED: &[&str] = &[
 	"moq-lite-07-wip",
 	"moq-transport-17",
@@ -128,11 +128,12 @@ const RANGED: &[&str] = &[
 	"moq-transport-22",
 ];
 
-/// A cold subscriber needs a compressed group's prefix, but its application sees only its
-/// requested half-open frame range across every pair of hops, whether the group began before
-/// it subscribed or after, and on a plain track too. Lite-07 hops also carry a live change.
+/// A cold subscriber asks from the group's first frame, compressed or not, but its
+/// application sees only its requested half-open frame range across every pair of hops,
+/// whether the group began before it subscribed or after. Lite-07 hops also carry a live
+/// change.
 #[moq_clock::test]
-async fn application_ranges_keep_their_filter_after_requesting_the_compressed_prefix() {
+async fn application_ranges_keep_their_filter_after_requesting_the_group_head() {
 	use moq_net::track::{Anchor, Position, Range, Subscription};
 	let range = |group, start, end: Option<u64>| {
 		Subscription::default().with_ranges([Range {
@@ -176,11 +177,8 @@ async fn application_ranges_keep_their_filter_after_requesting_the_compressed_pr
 						if lite {
 							assert_eq!(
 								fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
-								Anchor::Absolute(Position {
-									group: 5,
-									frame: if compress { 0 } else { 2 }
-								}),
-								"{case}: upstream asks for the prefix a compressed group needs"
+								Anchor::Absolute(Position::group(5)),
+								"{case}: upstream asks from the group's first frame"
 							);
 						}
 						write(&mut group, head..5);

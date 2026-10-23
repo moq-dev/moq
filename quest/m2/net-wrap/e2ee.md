@@ -58,9 +58,9 @@ the reverse (decided 2026-10-20, maintainer):
   without changing moq-net's `track(name)`; propose the encoding in the PR.
   Record it in `draft-lcurley-moq-e2ee.md`, replacing the Catalogs section's
   `.z` sibling rule.
-- Ranges: moq-net widens a range that starts mid-group on a compressed group
-  to frame 0 when the requester lacks the prefix, but it sees only the
-  uncompressed physical track. The wrapper's subscriber applies that rule
+- Ranges: moq-net widens a range that starts mid-group to frame 0 when the
+  requester lacks the prefix, but it sees only the uncompressed physical
+  track. The wrapper's subscriber applies that rule
   itself: it widens such a physical request to frame 0, inflates from
   there, and yields only the requested logical range. Test a resumed
   mid-group read, not only full round trips.

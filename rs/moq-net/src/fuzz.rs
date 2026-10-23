@@ -73,9 +73,9 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
-/// Normalize a compressed wire request for the private requesting-model benchmark.
-pub fn widen_compressed(track: &track::Producer, subscription: &mut track::Subscription) {
-	track.widen_compressed(subscription);
+/// Widen an outgoing request's mid-group starts for the private requesting-model benchmark.
+pub fn widen_start(track: &track::Producer, subscription: &mut track::Subscription) {
+	track.widen_start(subscription);
 }
 
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.

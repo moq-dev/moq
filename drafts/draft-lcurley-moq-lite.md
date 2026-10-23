@@ -1256,7 +1256,7 @@ A non-zero value is the absolute group sequence + 1.
 The index of the first frame to deliver within the `Group Start` group (see [Positions](#positions)).
 A value of 0 means from the start of that group (default), so the group is delivered whole.
 Frames before this index are not delivered, even when delivery begins at that exact group; a start resolved at a later group is always delivered from frame 0.
-A subscriber that has received no group MUST send 0, since it cannot number the frames of a group it has not seen.
+A subscriber MUST send 0 unless it already holds every frame below this index, from this publisher or another, since a Group is the unit of decodability (see [Positions](#positions)).
 
 **Frame End**:
 The last frame to deliver (inclusive) within the end group (see [Positions](#positions)).
@@ -1775,6 +1775,7 @@ The `Message Length` describes the payload size on the wire.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none. Earlier versions receive the Track inflated.
+- A SUBSCRIBE carries a non-zero `Frame Start` only when the subscriber holds every frame below it; otherwise it asks for the whole Group.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 

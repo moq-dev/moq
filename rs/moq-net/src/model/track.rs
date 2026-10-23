@@ -813,12 +813,12 @@ impl Holdings for TrackState {
 
 impl TrackState {
 	/// Start each mid-group range at its group's first frame unless a copy holds the
-	/// frames below it; see [`Producer::widen_compressed`].
+	/// frames below it; see [`Producer::widen_start`].
 	#[cfg_attr(
 		not(feature = "async"),
 		allow(dead_code, reason = "Only session adapters request upstream.")
 	)]
-	fn widen_compressed(&self, subscription: &mut Subscription) {
+	fn widen_start(&self, subscription: &mut Subscription) {
 		for range in &mut subscription.ranges {
 			if range.is_empty() {
 				continue;
@@ -3383,9 +3383,12 @@ impl Producer {
 		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
 	}
 
-	/// Widen outgoing compressed ranges that cannot inflate from a cached prefix.
-	/// Only requesters call this: the original preferences keep filtering local reads,
-	/// and a server serves the frame bounds it was actually asked for.
+	/// Start outgoing ranges at their group's first frame, unless a cached copy holds the
+	/// frames below a mid-group start, such as ones a previous route delivered. A group is
+	/// often useless without its head (a keyframe, or a compressed group's window), so a
+	/// request skips only frames a copy already holds. Only requesters call this: the
+	/// original preferences keep filtering local reads, and a server serves the frame
+	/// bounds it was actually asked for.
 	///
 	/// A range kept mid-group relies on the cached prefix, so it counts as a read of that
 	/// copy and normal eviction takes it last. Nothing pins it: a prefix still lost
@@ -3396,10 +3399,8 @@ impl Producer {
 		allow(dead_code, reason = "Only session adapters request upstream.")
 	)]
 	// private: capability gap
-	pub(crate) fn widen_compressed(&self, subscription: &mut Subscription) {
-		if self.info.compress {
-			self.state.read().widen_compressed(subscription);
-		}
+	pub(crate) fn widen_start(&self, subscription: &mut Subscription) {
+		self.state.read().widen_start(subscription);
 	}
 
 	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
@@ -7570,15 +7571,14 @@ impl Request {
 		snapshot_subscription(&subs, bound)
 	}
 
-	/// As [`Producer::widen_compressed`], for a track whose info is not known yet: the
-	/// requester calls it when the answer may declare the track compressed.
+	/// As [`Producer::widen_start`], for a track not accepted yet.
 	#[cfg_attr(
 		not(feature = "async"),
 		allow(dead_code, reason = "Only session adapters request upstream.")
 	)]
 	// private: capability gap
-	pub(crate) fn widen_compressed(&self, subscription: &mut Subscription) {
-		self.state.read().widen_compressed(subscription);
+	pub(crate) fn widen_start(&self, subscription: &mut Subscription) {
+		self.state.read().widen_start(subscription);
 	}
 
 	/// Block until the aggregate [`subscription`](Self::subscription) changes,
@@ -14922,17 +14922,12 @@ mod test {
 		assert!(consumer.peek_group(1).is_none(), "unread group is evicted instead");
 	}
 
-	/// Requesting a compressed tail from frame N reads the cached prefix it relies on, as a
-	/// FETCH hit does, so pressure evicts a never-read group first and the prefix stays to
-	/// seed the tail's inflater.
+	/// Requesting a tail from frame N reads the cached prefix it relies on, as a FETCH hit
+	/// does, so pressure evicts a never-read group first and the prefix stays to complete
+	/// the group.
 	#[test]
 	fn a_requested_prefix_survives_eviction() {
 		let (producer, pool) = pooled_producer(u64::MAX);
-		let producer = Producer::new(
-			producer.broadcast.clone(),
-			"compressed",
-			Info::timed().with_compress(true),
-		);
 		let consumer = producer.consume();
 		// Incompressible, so each group caches about its payload.
 		let mut seed = 1u32;
@@ -14960,7 +14955,7 @@ mod test {
 
 		let start = Anchor::Absolute(Position { group: 0, frame: 1 });
 		let mut request = Subscription::default().with_ranges([Range { start, end: None }]);
-		producer.widen_compressed(&mut request);
+		producer.widen_start(&mut request);
 		assert_eq!(request.ranges[0].start, start, "a held prefix keeps the request at N");
 		elapse(&producer, Duration::from_millis(500));
 
