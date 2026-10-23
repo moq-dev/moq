@@ -443,7 +443,7 @@ where
 		let Some(stream) = opened else {
 			return Ok(());
 		};
-		let mut stream = stream?;
+		let mut stream = request_stream::with_stats(stream?, self.origin.stats(), self.version);
 		// No draft with SUBSCRIBE_TRACKS has MAX_REQUEST_ID, so this never waits on credit.
 		let request_id = kio::wait(|waiter| self.control.poll_next_request_id(waiter)).await;
 		stream.writer.buffer_varint(ietf::SubscribeTracks::ID)?;
@@ -641,7 +641,7 @@ where
 		let Some(stream) = opened else {
 			return Ok(None);
 		};
-		let mut stream = stream?;
+		let mut stream = request_stream::with_stats(stream?, self.origin.stats(), self.version);
 		let request_id = kio::wait(|waiter| self.control.poll_next_request_id(waiter)).await;
 		self.state.lock().subscribes.insert(
 			request_id,
