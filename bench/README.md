@@ -337,6 +337,23 @@ Crashes, wrong bytes, missing frames, a window that presents nothing, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
 `--smoke` and keeps its run directory as the `bench-browser` artifact.
 
+The in-memory frame and retained-history paths also run directly in Chromium:
+
+```bash
+nix develop --command bun bench/browser/micro.ts --bench frames --out .scratch/frames.json base=/path/to/release current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench drift --out .scratch/drift.json before=/path/to/main current=. aa=.
+```
+
+Each variant uses its own workspace source and a persistent page, with one full
+warmup before three alternating measured rounds. `aa` must bundle identically to
+`current`. The JSON preserves every CSV sample and the browser version. `frames`
+runs the checkout's existing `js/net/bench/frames.ts`; `drift` uses the same fixture
+against every checkout, sweeping retained groups, publishers, and readers. Replay
+and group setup stay outside drift timing; each parked read checks its live
+payload. The browser smoke lane preserves one measured round of both fixtures, and drift
+also runs in the nightly JS benchmark leg. Timing is
+observational, with the A/A spread showing the host's noise floor.
+
 ## Pattern and container coverage
 
 Rust Criterion coverage includes `moq-pattern`'s
