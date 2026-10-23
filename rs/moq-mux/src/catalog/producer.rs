@@ -1442,6 +1442,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 mod test {
 	use std::collections::BTreeMap;
 
+	use std::str::FromStr;
 	use std::task::Poll;
 
 	use bytes::Bytes;

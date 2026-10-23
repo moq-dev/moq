@@ -225,10 +225,13 @@ impl<E: CatalogExt> Catalog<E> {
 	pub fn to_json(&self) -> Result<String, serde_json::Error> {
 		serde_json::to_string(self)
 	}
+}
+
+impl<E: CatalogExt> FromStr for Catalog<E> {
+	type Err = serde_json::Error;
 
 	/// Deserialize an MSF catalog from a JSON string.
-	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> Result<Self, serde_json::Error> {
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		serde_json::from_str(s)
 	}
 }

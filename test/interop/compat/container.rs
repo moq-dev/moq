@@ -3,6 +3,9 @@ use hang::{
     container::{Frame, Timestamp},
 };
 use std::{env, fs};
+// The released hang parses with an inherent `Catalog::from_str`, leaving this unused there.
+#[allow(unused_imports)]
+use std::str::FromStr;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args().collect();
