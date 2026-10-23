@@ -1412,9 +1412,14 @@ where
 						let edge;
 						(track_serve, edge) = match resumed {
 							Ok(resumed) => resumed,
+							// The resuming update is owed an answer, so it fails.
 							Err(err) => {
+								if self.version != Version::Draft14 {
+									self.write_subscribe_error(&mut stream.writer, resume, &err, "resume failed")
+										.await?;
+								}
 								return Ok(Subscribed::Served(
-									Served::Track(Err(err)),
+									Served::UpdateFailed(err),
 									opened.load(Ordering::Relaxed),
 								));
 							}
@@ -1984,6 +1989,11 @@ where
 			// A paused subscription opens no groups, so one is asked for only as it resumes.
 			None if update.new_group.is_some() && update.forward == Some(false) => {
 				Some(("NEW_GROUP_REQUEST while pausing", Error::Unsupported))
+			}
+			// The pause is answered before a renewal could be verified, which would acknowledge
+			// a token nobody checked.
+			None if update.authorization_token.is_some() && update.forward == Some(false) => {
+				Some(("AUTHORIZATION TOKEN while pausing", Error::Unsupported))
 			}
 			None => None,
 		};
@@ -7631,6 +7641,41 @@ mod serve_tests {
 		}
 	}
 
+	/// A resume that cannot subscribe again fails its update: REQUEST_ERROR answers it, then
+	/// PUBLISH_DONE says UPDATE_FAILED.
+	#[moq_clock::test]
+	async fn a_failed_resume_answers_its_update() {
+		for version in [Version::Draft16, Version::Draft22] {
+			let h = serve(version);
+			let mut request = ScriptedSession::new(Vec::new());
+			request.log = h.log.clone();
+			let stream = Stream::open(&mut request.clone(), version).await.unwrap();
+			let mut msg = subscribe(Filter::NextObject, None);
+			msg.forward = false;
+			let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+			serve_until(serve.as_mut(), "the pause", || {
+				!h.log.trail().is_empty() && h.track.subscription().is_none()
+			})
+			.await;
+
+			h.track.abort(Error::Transport("upstream failed".into())).unwrap();
+			request.push(&forward_update(version, 4, true));
+			moq_clock::timeout(std::time::Duration::from_secs(10), serve)
+				.await
+				.expect("the failed resume ends the subscription")
+				.unwrap_err();
+			let wire = Wire::read(&h.log, version);
+			let error = wire.sent(ietf::RequestError::ID).expect("the resume is answered");
+			let done = wire.sent(ietf::PublishDone::ID).expect("the subscription ends");
+			assert!(done.start() > error.end(), "{version}: {:?}", wire.messages);
+			assert_eq!(
+				wire.publish_done.map(|(status, _)| status),
+				Some(ietf::PublishDoneStatus::UpdateFailed.code(version)),
+				"{version}"
+			);
+		}
+	}
+
 	/// A REQUEST_UPDATE with Request ID `id` carrying only a NEW_GROUP_REQUEST for `value`,
 	/// framed for the subscription's stream.
 	fn new_group_update(version: Version, id: u64, value: u64) -> Vec<u8> {
@@ -11856,7 +11901,7 @@ mod serve_tests {
 	}
 
 	/// One REQUEST_UPDATE carrying a fresh AUTHORIZATION TOKEN, framed as the peer sends it.
-	async fn subscribe_update_with_token(version: Version) -> Vec<u8> {
+	async fn subscribe_update_with_token(version: Version, forward: bool) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 		let subscription_request_id = match version {
@@ -11871,7 +11916,7 @@ mod serve_tests {
 			start_location: Location { group: 0, object: 0 },
 			end_group: 0,
 			subscriber_priority: Some(128),
-			forward: Some(true),
+			forward: Some(forward),
 			filter: None,
 			authorization_token: Some(request_token()),
 			fill: None,
@@ -11936,7 +11981,7 @@ mod serve_tests {
 		const VERSION: Version = Version::Draft18;
 
 		let (auth, mut requests, _cred) = auth_covering_other();
-		let h = serve_with_auth(VERSION, auth, subscribe_update_with_token(VERSION).await);
+		let h = serve_with_auth(VERSION, auth, subscribe_update_with_token(VERSION, true).await);
 		let rt = h.publisher.runtime.clone();
 
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -12027,9 +12072,53 @@ mod serve_tests {
 		}
 	}
 
+	/// A pause is answered before a renewal riding it could be verified, so an update carrying
+	/// both fails instead of acknowledging a token nobody checked.
+	#[moq_clock::test]
+	async fn a_pause_carrying_a_token_fails_the_update() {
+		for version in [Version::Draft15, Version::Draft16] {
+			let (auth, mut requests, _cred) = auth_covering_other();
+			let h = serve_with_auth(version, auth, subscribe_update_with_token(version, false).await);
+			let rt = h.publisher.runtime.clone();
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let acceptor = async move {
+				let first = requests.next().await.unwrap();
+				let _held = first.accept(grant_all_expiring(&rt, Some(60)));
+				std::future::pending::<()>().await
+			};
+			let mut acceptor = std::pin::pin!(acceptor);
+			let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+			let mut ended = false;
+			for _ in 0..200 {
+				let _ = futures::poll!(acceptor.as_mut());
+				if futures::poll!(serving.as_mut()).is_ready() {
+					ended = true;
+					break;
+				}
+				settle().await;
+			}
+			assert!(ended, "{version:?}: the failed update ends the subscription");
+			let wire = Wire::read(&h.log, version);
+			assert!(
+				wire.sent(ietf::RequestError::ID).is_some(),
+				"{version:?}: the update is refused"
+			);
+			assert!(
+				wire.sent(ietf::RequestOk::ID).is_none(),
+				"{version:?}: nothing acknowledged it"
+			);
+			let (status, _) = wire.publish_done.expect("PUBLISH_DONE was sent");
+			assert_eq!(
+				status,
+				ietf::PublishDoneStatus::UpdateFailed.code(version),
+				"{version:?}"
+			);
+		}
+	}
+
 	async fn renews(version: Version, accept: bool) {
 		let (auth, mut requests, _cred) = auth_covering_other();
-		let h = serve_with_auth(version, auth, subscribe_update_with_token(version).await);
+		let h = serve_with_auth(version, auth, subscribe_update_with_token(version, true).await);
 		let rt = h.publisher.runtime.clone();
 
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -12680,7 +12769,7 @@ mod serve_tests {
 		const VERSION: Version = Version::Draft18;
 
 		let (auth, mut requests, _cred) = auth_covering_other();
-		let session = ScriptedSession::per_stream_eof(vec![subscribe_update_with_token(VERSION).await]);
+		let session = ScriptedSession::per_stream_eof(vec![subscribe_update_with_token(VERSION, true).await]);
 		let h = serve_on(VERSION, auth, session);
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
 		group.write_frame(timestamp(), b"frame".as_slice()).unwrap();
@@ -12745,7 +12834,7 @@ mod serve_tests {
 			// The stream carries the renewal then the UNSUBSCRIBE and never FINs, so only the
 			// message can end the request.
 			let script = [
-				subscribe_update_with_token(version).await,
+				subscribe_update_with_token(version, true).await,
 				unsubscribe_bytes(version).await,
 			]
 			.concat();
@@ -12788,7 +12877,7 @@ mod serve_tests {
 		const VERSION: Version = Version::Draft18;
 
 		let (auth, mut requests, _cred) = auth_covering_other();
-		let h = serve_with_auth(VERSION, auth, subscribe_update_with_token(VERSION).await);
+		let h = serve_with_auth(VERSION, auth, subscribe_update_with_token(VERSION, true).await);
 		let rt = h.publisher.runtime.clone();
 
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -12863,7 +12952,7 @@ mod serve_tests {
 	async fn a_slow_renewal_does_not_stall_serving() {
 		const VERSION: Version = Version::Draft18;
 		let (auth, mut requests, _cred) = auth_covering_other();
-		let h = serve_with_auth(VERSION, auth, subscribe_update_with_token(VERSION).await);
+		let h = serve_with_auth(VERSION, auth, subscribe_update_with_token(VERSION, true).await);
 		let rt = h.publisher.runtime.clone();
 
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
