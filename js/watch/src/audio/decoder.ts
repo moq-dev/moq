@@ -480,14 +480,15 @@ export class Decoder {
 	// anyway, or spans the window the relay serves.
 	#order(): Order<FrameNext> {
 		if (!this.sync.out.buffered.peek()) return new Order(undefined);
-		return new Order({
+		return new Order(() => ({
 			floor: Time.Micro.fromMilli(this.sync.out.delay.peek()),
 			maxDelay: Time.Micro.fromMilli(this.sync.out.maxAge.peek()),
-		});
+		}));
 	}
 
-	// Decode released frames in order, resetting the decoder before the first frame of a new codec
-	// epoch. The terminal sees them in decode order, so it anchors on the oldest. Reports whether to keep going.
+	// Decode released frames, resetting the decoder before the first frame of a new codec epoch and
+	// only then dropping one that is out of order. The terminal sees them in decode order, so it
+	// anchors on the oldest. Reports whether to keep going.
 	async #play(
 		effect: Effect,
 		decoder: AudioDecoder,
@@ -501,6 +502,7 @@ export class Decoder {
 				decoder.configure(config);
 				order.reset();
 			}
+			if (!order.admit(next)) continue;
 			const { frame } = next;
 
 			// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
