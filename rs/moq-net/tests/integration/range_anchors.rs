@@ -132,7 +132,9 @@ async fn each_wire_refuses_only_the_anchors_it_drops() {
 		// A wire without timestamps refuses a time anchor for that first.
 		let timed = !matches!(
 			version,
-			Some("moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-lite-06" | "moq-transport-14" | "moq-transport-16")
+			Some(
+				"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-lite-06" | "moq-transport-14" | "moq-transport-16"
+			)
 		);
 		for (range, held) in anchored() {
 			let result = read(version, range).await;
