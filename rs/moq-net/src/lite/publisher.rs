@@ -2032,6 +2032,9 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
 				name: name.to_string().into(),
 			},
+			Some(crate::broadcast::TracksEvent::Finished { name }) => lite::TracksEvent::Finished {
+				name: name.to_string().into(),
+			},
 			Some(crate::broadcast::TracksEvent::Synced) => lite::TracksEvent::Synced,
 			None => return Poll::Ready(Ok(ControlFlow::Break(()))),
 		};

@@ -59,7 +59,7 @@ func ExampleClient_CreateBroadcast() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	_ = broadcast.Announce(moq.Route{})
+	_ = broadcast.Announce(moq.AnnounceRoute{})
 
 	pts := 20 * time.Millisecond
 	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: &pts}); err != nil {

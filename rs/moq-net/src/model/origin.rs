@@ -4009,10 +4009,17 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							let _ = lister.add(name, info);
 						}
 					}
+					// Forwarded as the source reported it, finished or not.
 					Ok(Some(broadcast::TracksEvent::Removed { name })) => {
 						state.stale.remove(&name);
 						if state.listed.remove(&name) {
 							let _ = lister.remove(&name);
+						}
+					}
+					Ok(Some(broadcast::TracksEvent::Finished { name })) => {
+						state.stale.remove(&name);
+						if state.listed.remove(&name) {
+							let _ = lister.finish(&name);
 						}
 					}
 					Ok(Some(broadcast::TracksEvent::Synced)) => {
@@ -4035,7 +4042,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					// once its broadcast ended: so does the front's, and a later reader asks again.
 					Ok(None) => {
 						listing = None;
-						lister.finish();
+						lister.end();
 					}
 					Err(err) => {
 						// Its readers fail, and a later reader asks again.
@@ -8783,6 +8790,7 @@ mod tests {
 		match tracks.next().await {
 			Ok(Some(broadcast::TracksEvent::Added { name, .. })) => format!("+{name}"),
 			Ok(Some(broadcast::TracksEvent::Removed { name })) => format!("-{name}"),
+			Ok(Some(broadcast::TracksEvent::Finished { name })) => format!("~{name}"),
 			Ok(Some(broadcast::TracksEvent::Synced)) => "synced".into(),
 			Ok(None) => "end".into(),
 			Err(err) => format!("error: {err}"),
@@ -8829,7 +8837,7 @@ mod tests {
 		assert_eq!(listed(&mut tracks).await, "+video");
 		assert_eq!(listed(&mut tracks).await, "synced");
 
-		lister.finish();
+		lister.end();
 		assert_eq!(listed(&mut tracks).await, "end");
 		assert!(!front.is_closed(), "the listing's end is not the broadcast's");
 	}

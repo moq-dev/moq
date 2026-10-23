@@ -217,14 +217,14 @@ final class SmokeTests: XCTestCase {
 
         let first = mintEpoch()
         XCTAssertEqual(try epochTime("018bcfe5-6800-7000-8000-000000000000"), Date(timeIntervalSince1970: 1_700_000_000))
-        try broadcast.announce(route: Route(epoch: first))
+        try broadcast.announce(route: AnnounceRoute(epoch: first))
         guard case .start(let start) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(start.route.epoch, first)
 
         let second = mintEpoch()
-        try broadcast.announce(route: Route(epoch: second))
+        try broadcast.announce(route: AnnounceRoute(epoch: second))
         guard case .restart(let restart) = try await nextRoute(announced) else {
             return XCTFail("expected a restart")
         }
