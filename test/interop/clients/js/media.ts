@@ -976,14 +976,21 @@ try {
 	if (wants("detach")) {
 		console.error("=== detach and reattach ===");
 		const busy = await readPlayerState(player);
+		console.error(`  resources before detach: ${JSON.stringify(busy.resources)}`);
 		// Its own assertion name, not "resource baseline": the leaked-session control expects that one
 		// to fail, so sharing it would let broken instrumentation satisfy the control without the
 		// leaking detach ever running.
-		check(
-			busy.resources.transports + busy.resources.sockets > 0 && busy.resources.audioContexts > 0,
-			"resource instrumentation",
-			() => `the player holds nothing to release while playing: ${JSON.stringify(busy.resources)}`,
-		);
+		try {
+			check(
+				busy.resources.transports + busy.resources.sockets > 0 && busy.resources.audioContexts > 0,
+				"resource instrumentation",
+				() => `the player holds nothing to release before detach: ${JSON.stringify(busy)}`,
+			);
+		} catch (err) {
+			const end = Date.now();
+			await explainStalls(player, { start: end - WINDOW_MS, end }, "resource instrumentation", undefined);
+			throw err;
+		}
 
 		if (values.leak) {
 			await command(player, "startLeak");
