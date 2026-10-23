@@ -1,4 +1,7 @@
-#![cfg_attr(not(feature = "openh264"), allow(dead_code))]
+#![cfg_attr(
+	not(feature = "openh264"),
+	allow(dead_code, reason = "only the `openh264` feature uses it")
+)]
 
 //! H.264 conformance decode: bitstreams nothing in this crate produced.
 //!

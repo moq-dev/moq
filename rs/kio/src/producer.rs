@@ -411,6 +411,13 @@ impl<T> Drop for Mut<'_, T> {
 			return;
 		}
 
+		if !state.closed && state.waiters_value.is_empty() {
+			// A write nobody is parked on wakes nobody, so skip moving the list out. Drop
+			// any dead entries in place, or every later write would rescan them.
+			state.waiters_value.clear();
+			return;
+		}
+
 		// Drain wakers while holding lock, then wake after releasing.
 		// A modification that also closed the channel (e.g. `close()`) must
 		// wake the closed and consumer-count waiters too, since they resolve

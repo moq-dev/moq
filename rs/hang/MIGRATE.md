@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Catalog` parses through `FromStr` (#6471)
+
+The inherent `Catalog::from_str` is replaced by `impl FromStr for Catalog`, with the same `Error`.
+Call `json.parse::<Catalog>()`, or bring `std::str::FromStr` into scope to keep calling `Catalog::from_str`.
+
 ### Priorities are signed (#6142)
 
 `catalog::Priorities` fields and `container::track_info`'s priority are `i8`, higher first, with 0 unset.
