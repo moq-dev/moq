@@ -11,8 +11,8 @@ together, and the site stops waiting on npm releases.
 
 Decided 2026-10-20 in planning: move all three sites, not only the player
 sites, because they share one build, one deploy, and one set of packages.
-The work splits into a size cap that lands first, the move, and a follow-up
-that settles which demos survive.
+The work splits into the move and a follow-up that settles which demos
+survive.
 
 This epic's own remaining work: once the move lands and live deploys come from
 this repository, archive moq-dev/moq.dev with a README pointing at `site/`.
@@ -20,7 +20,6 @@ Its history stays there, since the move is a fresh snapshot.
 
 ## Required
 
-- [Cap committed binary size](/quest/m2/site/binary-size.md) - the merge queue rejects any binary a PR adds or grows past 500 KB
 - [Move moq.dev into site/](/quest/m2/site/move.md) - the three sites build, check, and deploy from `site/` against the in-tree packages
 - [Resolve demo and site overlap](/quest/m2/site/demo-overlap.md) - one surviving page per demo, duplicates deleted
 

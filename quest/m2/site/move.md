@@ -16,8 +16,8 @@ Decided 2026-10-20 in planning:
 - **A fresh snapshot, not history-preserving.** The old history stays in the
   archived moq.dev repository, and a history merge would carry every image
   version the size cap exists to keep out.
-- **Recompress every image to fit the [500 KB cap](/quest/m2/site/binary-size.md).**
-  Lossless first (oxipng, gifsicle), then convert or shrink whatever is still
+- **Recompress every image to fit the 500 KiB cap** that `sh/large-files.sh`
+  enforces. Lossless first (oxipng, gifsicle), then convert or shrink whatever is still
   over. As of 2026-10-20 moq.dev holds roughly 17 MB of binaries, 9 of them
   over 500 KB, the largest a 1 MB gif. OG and social covers stay PNG or JPEG,
   because the site's `scripts/check-og.ts` rejects formats social crawlers
@@ -81,10 +81,6 @@ Guidance:
 - Verify each site in the dev server and a staging deploy (with the
   maintainer's permission) before calling the move done; `just check` alone
   is not verification.
-
-## Required
-
-- [Cap committed binary size](/quest/m2/site/binary-size.md) - the cap exists before the images arrive
 
 ## Related
 

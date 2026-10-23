@@ -49,7 +49,7 @@ Decided 2026-10-20 in planning:
   ([moq-dev/moq.dev#163](https://github.com/moq-dev/moq.dev/pull/163)), so it
   traces drawn PNGs as well. Do not keep two near-duplicate pipelines. Expose
   it as a `site` just recipe, with potrace in the Nix dev shell. Hand-drawn
-  posts keep coming, and the [binary cap](/quest/m2/site/binary-size.md)
+  posts keep coming, and the binary cap in `sh/large-files.sh`
   pushes them toward SVG anyway.
 - **Docs: one line in `site/AGENTS.md`** on the drawn-PNG recipe. A doc page
   was rejected because readers of the docs site never see this.
@@ -75,4 +75,3 @@ Guidance:
 ## Related
 
 - [moq.dev in the monorepo](/quest/m2/site/README.md) - the epic this follows, kept separate so it can close without this
-- [Cap committed binary size](/quest/m2/site/binary-size.md) - why new drawings should land as SVG
