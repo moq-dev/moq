@@ -11,6 +11,11 @@ A session closed cleanly by the peer now ends with `MoqError::Cancelled`, like o
 When this side aborted the session, it ends with that abort's error.
 Drop any check for the session-scoped `Cancel` kind.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it or race it against a timeout.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `MoqJsonSnapshotConfig::delta_ratio` is replaced by `deltas: bool` (default `true`).

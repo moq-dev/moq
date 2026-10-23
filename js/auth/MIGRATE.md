@@ -4,12 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Roles carry `Access` (#5697)
+### Auth roles are patterns
 
-Parsed `Claims`, `Grant`, and `authorize`'s permissions hold `publish` and `subscribe` as `Access`: path patterns plus an optional per-connection `rate` cap.
-Read the patterns from `.path`, as in `permissions.publish.path.matches(path)`. `Key.sign` still takes pattern strings, but a hand-built `Claims` value must come from `ClaimsSchema.parse`.
-A gateway must enforce a cap or refuse the grant before admitting media.
-Released verifiers reject a capped grant, so upgrade every verifier before an issuer sets `rate`.
+Parsed `Claims` and `Grant` hold `publish` and `subscribe` as pattern string arrays, matching release; `authorize` returns `Patterns` in each role.
+Remove `Access` and `AccessSchema`; pass pattern arrays to claims and grants and call `permissions.publish.matches(path)` directly instead of using `.path`.
+Bitrate restrictions are unsupported and the whole object role is refused, including `{"path":["alice/**"],"rate":8000000}`.
+Uncapped token and grant encodings are unchanged. Use pattern arrays on the wire; the unpublished bare-string and `{path}` role shortcuts are removed too.
+
+`Key.decode` is removed. Use `Key.verify(key, token)` for MoQ tokens so signature, algorithm, key ID, strict claims, key scope, expiry, and not-before are all checked.
+Use a JWT library directly for a different application's payload and validation policy.
 
 ### A token must carry its key's `kid` (#3943)
 

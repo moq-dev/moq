@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 A session closed cleanly by the peer now ends with `MoqException.Cancelled`, which `isShutdown` accepts, instead of `MoqException.Protocol` with a session-scoped cancel kind.
 Drop any check for that kind.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel the coroutine or wrap it in `withTimeout`.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio: UInt` is replaced by `deltas: Boolean` (default `true`).

@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 A session closed cleanly by the peer now ends with `MoqError.Cancelled`, like one this side closed, instead of `MoqError.Protocol` with a session-scoped `.cancel` kind.
 Drop any check for the session-scoped cancel kind.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.resolve(reference:epoch:)` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel the task.
+Regenerate the bindings for the changed `resolve` checksum.
+
 ### A client asks only about what it watches (#6165)
 
 On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.

@@ -1,4 +1,5 @@
 use crate::origin;
+use crate::transport::poll::Session as _;
 use crate::{
 	Error, Hop, SessionError, StreamError,
 	coding::{Decode, DecodeError, Encode, Reader, Stream, Writer},
@@ -112,10 +113,7 @@ impl std::future::Future for Driver {
 	}
 }
 
-pub fn start<S>(config: Config<S>) -> Result<(Driver, crate::goaway::Handle), Error>
-where
-	S: crate::transport::poll::Boxable,
-{
+pub fn start(config: Config<crate::driver::Transport>) -> Result<(Driver, crate::goaway::Handle), Error> {
 	let Config {
 		runtime,
 		stats,
@@ -233,11 +231,14 @@ where
 				};
 				let control = Control::new(request_id_max, client).with_window(limits.requests(), client, version);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version).with_stats(&stats);
+				// Boxed like a draft-17+ transport, so the publisher and subscriber below
+				// are the same instantiation as theirs.
+				let virtual_session = crate::driver::Transport::new(adapter.clone());
 
 				// No AUTH on these drafts, but a limit still reaches both halves.
 				let mut publisher = Publisher::new(
 					runtime.clone(),
-					adapter.clone(),
+					virtual_session.clone(),
 					publish,
 					control.clone(),
 					peer_hop,
@@ -253,7 +254,7 @@ where
 
 				let mut subscriber = Subscriber::new(
 					runtime.clone(),
-					adapter.clone(),
+					virtual_session.clone(),
 					subscribe,
 					control,
 					peer_hop,
@@ -293,7 +294,7 @@ where
 				}
 				drop(tasks);
 
-				let dispatch_session = adapter.clone();
+				let dispatch_session = virtual_session.clone();
 				let sub_ns = subscriber.clone();
 				let sub_ns_adapter = adapter.clone();
 
@@ -301,7 +302,7 @@ where
 				// completion); the task set draining is the one clean exit.
 				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer, goaway.clone())));
 				let mut unis = Unis::new(
-					adapter.clone(),
+					virtual_session.clone(),
 					subscriber.clone(),
 					UniSetup {
 						peer: None,
@@ -320,7 +321,8 @@ where
 					None,
 					version
 				)));
-				let mut datagrams = std::pin::pin!(err_only(run_datagrams(adapter.clone(), subscriber.clone())));
+				let mut datagrams =
+					std::pin::pin!(err_only(run_datagrams(virtual_session.clone(), subscriber.clone())));
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
 				// see `Publisher::run_publish_namespaces`.
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
@@ -334,14 +336,20 @@ where
 								Version::Draft16 => {
 									let mut sub_ns_adapter = sub_ns_adapter;
 									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
-									let mut reader = crate::coding::Reader::new(recv, version);
+									let mut reader = crate::coding::Reader::new(
+										crate::transport::boxed::RecvStream::new(recv),
+										version,
+									);
 									reader.set_priority(crate::priority::RECV_CONTROL);
 									Stream {
-										writer: crate::coding::Writer::new(send, version),
+										writer: crate::coding::Writer::new(
+											crate::transport::boxed::SendStream::new(send),
+											version,
+										),
 										reader,
 									}
 								}
-								_ => Stream::open(&mut sub_ns_adapter.clone(), version).await?,
+								_ => Stream::open(&mut crate::driver::Transport::new(sub_ns_adapter), version).await?,
 							};
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
@@ -1615,7 +1623,7 @@ mod tests {
 					let (driver, _) = start(Config {
 						runtime: crate::time::sim(),
 						stats: Default::default(),
-						session,
+						session: crate::driver::Transport::new(session),
 						setup: None,
 						request_id_max: None,
 						limits: Default::default(),
@@ -1671,7 +1679,7 @@ mod tests {
 				let (driver, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
-					session,
+					session: crate::driver::Transport::new(session),
 					setup: None,
 					request_id_max: None,
 					limits: Default::default(),
@@ -1718,7 +1726,7 @@ mod tests {
 				let (driver, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
-					session,
+					session: crate::driver::Transport::new(session),
 					setup: None,
 					request_id_max: None,
 					limits: Default::default(),
@@ -1814,7 +1822,7 @@ mod tests {
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
-			session,
+			session: crate::driver::Transport::new(session),
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),
@@ -1878,7 +1886,7 @@ mod tests {
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
-			session,
+			session: crate::driver::Transport::new(session),
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),
@@ -1943,8 +1951,9 @@ mod tests {
 		};
 
 		let gate = kio::Producer::new(true);
-		let mut session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
+		let mut session = crate::driver::Transport::new(session);
 		let setup = Stream::open(&mut session, version)
 			.await
 			.expect("open the control stream");
@@ -2041,7 +2050,7 @@ mod tests {
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
-			session,
+			session: crate::driver::Transport::new(session),
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),
@@ -2145,7 +2154,7 @@ mod tests {
 		let (driver, goaway) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
-			session,
+			session: crate::driver::Transport::new(session),
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),
@@ -2230,7 +2239,7 @@ mod tests {
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
-			session,
+			session: crate::driver::Transport::new(session),
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),
@@ -2327,7 +2336,7 @@ mod tests {
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
-			session,
+			session: crate::driver::Transport::new(session),
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),
@@ -2417,7 +2426,7 @@ mod tests {
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
-			session,
+			session: crate::driver::Transport::new(session),
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),
@@ -2461,7 +2470,7 @@ mod tests {
 			let (driver, _goaway) = start(Config {
 				runtime: crate::time::sim(),
 				stats: Default::default(),
-				session,
+				session: crate::driver::Transport::new(session),
 				setup: None,
 				request_id_max: None,
 				limits: Default::default(),
@@ -2728,7 +2737,7 @@ mod tests {
 		start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
-			session,
+			session: crate::driver::Transport::new(session),
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),
@@ -2872,7 +2881,7 @@ mod tests {
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
-					session,
+					session: crate::driver::Transport::new(session),
 					setup: None,
 					request_id_max: None,
 					limits: Default::default(),
@@ -2941,7 +2950,7 @@ mod tests {
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
-					session,
+					session: crate::driver::Transport::new(session),
 					setup: None,
 					request_id_max: None,
 					client: false,
@@ -3034,9 +3043,10 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
-		let mut session =
+		let session =
 			crate::lite::test_transport::ScriptedSession::new(publish_namespace_then_two_withdrawals(VERSION).await);
 		let log = session.log.clone();
+		let mut session = crate::driver::Transport::new(session);
 		let setup = Stream::open(&mut session, VERSION)
 			.await
 			.expect("open the control stream");
@@ -3152,13 +3162,14 @@ mod tests {
 				),
 			] {
 				let payload = subscribe_with_token(version, token);
-				let mut session = match version {
+				let session = match version {
 					Version::Draft14 => crate::lite::test_transport::ScriptedSession::new(payload),
 					_ => {
 						crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload])
 					}
 				};
 				let log = session.log.clone();
+				let mut session = crate::driver::Transport::new(session);
 				let setup = match version {
 					Version::Draft14 => Some(Stream::open(&mut session, version).await.unwrap()),
 					_ => None,
@@ -3399,7 +3410,7 @@ mod tests {
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
-			session,
+			session: crate::driver::Transport::new(session),
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),
@@ -3502,7 +3513,7 @@ mod tests {
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
-			session,
+			session: crate::driver::Transport::new(session),
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),

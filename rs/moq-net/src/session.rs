@@ -2,6 +2,7 @@
 
 use std::{sync::Arc, task::Poll, time::Duration};
 
+use crate::transport::poll::Session as _;
 use crate::transport::{Error as _, Stats as _};
 
 use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, goaway};
@@ -343,17 +344,14 @@ pub(super) struct Handles {
 }
 
 impl Session {
-	pub(super) fn new<S>(
+	pub(super) fn new(
 		runtime: crate::time::Deadlines,
-		session: S,
+		session: crate::driver::Transport,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Weak>,
-		protocol: crate::driver::Protocol<S>,
+		protocol: crate::driver::Protocol,
 		handles: Handles,
-	) -> (Self, crate::Driver<S>)
-	where
-		S: crate::transport::poll::Session,
-	{
+	) -> (Self, crate::Driver) {
 		let Handles {
 			goaway,
 			auth,
@@ -438,17 +436,17 @@ impl Session {
 /// anyone is consuming them, and enforces GOAWAY deadlines independently of writes.
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
-pub(crate) struct Supervisor<S> {
+pub(crate) struct Supervisor {
 	goaway: Option<goaway::Deadline>,
 	version: Version,
 	closing: Arc<Closing>,
 	/// Where the session's outcome is recorded.
 	context: crate::stats::Session,
 	runtime: crate::time::Deadlines,
-	session: S,
+	session: crate::driver::Transport,
 	// A dedicated clone for the close watch, since each pending poll operation
 	// needs its own handle.
-	closed_watch: S,
+	closed_watch: crate::driver::Transport,
 	/// Handle-side close requests; `None` once one was executed (only the
 	/// first close matters, and the channel closing is the last handle
 	/// dropping).
@@ -492,7 +490,7 @@ enum SamplerMode {
 	},
 }
 
-impl<S: crate::transport::poll::Session> Supervisor<S> {
+impl Supervisor {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -872,6 +870,12 @@ impl Slots {
 		stats.track_held(cap, &self.live);
 		self.stats = Some((stats.clone(), cap));
 		self
+	}
+
+	/// How many more slots may be taken right now.
+	pub(crate) fn available(&self) -> usize {
+		self.max
+			.saturating_sub(self.live.load(std::sync::atomic::Ordering::Acquire))
 	}
 
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.

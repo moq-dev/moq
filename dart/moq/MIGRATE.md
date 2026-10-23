@@ -9,6 +9,18 @@ How to update your code for each breaking change, newest first.
 A session closed cleanly by the peer now ends with `CancelledMoqException`, like one this side closed, instead of a protocol exception with a session-scoped cancel kind.
 Drop any check for that kind.
 
+### Cancelling a stream cancels its pending read
+
+`await subscription.cancel()` on announcements, authorization grants, and server requests now waits for the pending native operation to release, even when no event arrives.
+Announcement subscriptions still own and release their cursor; cancelling a grant or request subscription keeps its shared `Auth` or `Server` usable.
+The generated async methods now return `UniffiRustFuture<T>`, a `Future<T>` with `cancel()`; existing `await` and `Future<T>` assignments work unchanged.
+Custom implementations of generated interfaces must return `UniffiRustFuture<T>` instead of a plain `Future<T>`.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: add a `.timeout` to the future.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio` is replaced by `bool deltas` (default `true`).

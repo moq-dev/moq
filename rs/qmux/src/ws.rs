@@ -24,6 +24,29 @@ pub use tokio_tungstenite;
 /// [`Error::WebSocket`] wraps a `tungstenite::Error`.
 pub use tokio_tungstenite::tungstenite;
 
+/// The largest WebSocket message or frame a session under `config` reads.
+///
+/// Each message carries one record, or one frame on draft-00, so cap a socket upgraded
+/// elsewhere (see [`Upgraded`]) at this: a larger one is refused anyway, but only after
+/// the socket buffered it whole.
+pub fn max_message_size(config: &Config) -> usize {
+	usize::try_from(config.max_record_size)
+		.unwrap_or(usize::MAX)
+		.max(crate::MAX_FRAME_SIZE)
+}
+
+/// `config` with its message and frame sizes held to [`max_message_size`] of `session`.
+fn capped(
+	config: Option<tungstenite::protocol::WebSocketConfig>,
+	session: &Config,
+) -> tungstenite::protocol::WebSocketConfig {
+	let max = max_message_size(session);
+	let mut config = config.unwrap_or_default();
+	config.max_message_size = Some(config.max_message_size.map_or(max, |size| size.min(max)));
+	config.max_frame_size = Some(config.max_frame_size.map_or(max, |size| size.min(max)));
+	config
+}
+
 /// Keep-alive configuration for WebSocket transports.
 ///
 /// WebSocket has no built-in idle timeout: when the peer's host crashes
@@ -104,9 +127,8 @@ where
 	///
 	/// The WebSocket handshake already settled the protocol, so the session starts
 	/// without awaiting the peer's transport parameters, failing later with
-	/// [`Error::HandshakeTimeout`] if they never arrive. Keep
-	/// [`max_record_size`](Config::max_record_size) within the WebSocket's
-	/// frame limit (16 MiB by default), since each record is one message.
+	/// [`Error::HandshakeTimeout`] if they never arrive. Cap the socket's message and
+	/// frame sizes at [`max_message_size`] of `config`, since each record is one message.
 	pub fn with_session_config(mut self, config: Config) -> Self {
 		self.session = config;
 		self
@@ -211,7 +233,7 @@ impl Client {
 		self
 	}
 
-	/// Set the WebSocket configuration (e.g. max message/frame sizes).
+	/// Set the WebSocket configuration, its message and frame sizes held to [`max_message_size`].
 	pub fn with_config(mut self, config: tungstenite::protocol::WebSocketConfig) -> Self {
 		self.config = Some(config);
 		self
@@ -231,9 +253,8 @@ impl Client {
 	///
 	/// The WebSocket handshake already settled the protocol, so the session starts
 	/// without awaiting the peer's transport parameters, failing later with
-	/// [`Error::HandshakeTimeout`] if they never arrive. Keep
-	/// [`max_record_size`](Config::max_record_size) within the WebSocket's
-	/// frame limit (16 MiB by default), since each record is one message.
+	/// [`Error::HandshakeTimeout`] if they never arrive. The socket's message and frame
+	/// sizes are held to [`max_message_size`] of `config`, since each record is one message.
 	pub fn with_session_config(mut self, config: Config) -> Self {
 		self.session = config;
 		self
@@ -264,15 +285,17 @@ impl Client {
 			http::HeaderValue::from_str(&protocol_value).map_err(|_| Error::InvalidProtocol(protocol_value))?,
 		);
 
+		let ws_config = capped(self.config, &self.session);
+
 		#[cfg(feature = "wss")]
 		let (ws_stream, response) = {
-			tokio_tungstenite::connect_async_tls_with_config(request, self.config, false, self.connector.clone())
+			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), false, self.connector.clone())
 				.await
 				.map_err(Error::from)?
 		};
 
 		#[cfg(not(feature = "wss"))]
-		let (ws_stream, response) = tokio_tungstenite::connect_async_with_config(request, self.config, false)
+		let (ws_stream, response) = tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false)
 			.await
 			.map_err(Error::from)?;
 
@@ -363,9 +386,8 @@ impl Server {
 	///
 	/// The WebSocket handshake already settled the protocol, so the session starts
 	/// without awaiting the peer's transport parameters, failing later with
-	/// [`Error::HandshakeTimeout`] if they never arrive. Keep
-	/// [`max_record_size`](Config::max_record_size) within the WebSocket's
-	/// frame limit (16 MiB by default), since each record is one message.
+	/// [`Error::HandshakeTimeout`] if they never arrive. The socket's message and frame
+	/// sizes are held to [`max_message_size`] of `config`, since each record is one message.
 	pub fn with_session_config(mut self, config: Config) -> Self {
 		self.session = config;
 		self
@@ -444,7 +466,8 @@ impl Server {
 				.unwrap())
 		};
 
-		let ws = tokio_tungstenite::accept_hdr_async_with_config(socket, callback, None).await?;
+		let ws = tokio_tungstenite::accept_hdr_async_with_config(socket, callback, Some(capped(None, &self.session)))
+			.await?;
 
 		let (version, protocol) = negotiated
 			.lock()
@@ -460,5 +483,39 @@ impl Server {
 		};
 		// Protocol came from the negotiated subprotocol, so no in-band wait.
 		Session::new(transport, Side::Server, config)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use moq_net::transport::poll::Session as _;
+	use tokio::io::AsyncWriteExt;
+
+	/// A frame declaring more than one record is refused at its header rather than
+	/// buffered whole, closing the session well before any timer would.
+	#[tokio::test(start_paused = true)]
+	async fn a_frame_past_one_record_is_refused_at_its_header() {
+		let (mut client, server) = tokio::io::duplex(1 << 16);
+		let accept = tokio::spawn(async move { Server::new().accept(server).await });
+		client
+			.write_all(
+				b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+				Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+				Sec-WebSocket-Protocol: qmux-01\r\n\r\n",
+			)
+			.await
+			.unwrap();
+		let mut session = accept.await.unwrap().unwrap();
+
+		// A masked binary frame declaring 1 MiB, with none of its payload sent.
+		let mut frame = vec![0x82, 0x80 | 127];
+		frame.extend_from_slice(&(1u64 << 20).to_be_bytes());
+		frame.extend_from_slice(&[0; 4]);
+		client.write_all(&frame).await.unwrap();
+
+		tokio::time::timeout(Duration::from_secs(1), session.closed())
+			.await
+			.expect("the socket waited to buffer a frame larger than a record");
 	}
 }

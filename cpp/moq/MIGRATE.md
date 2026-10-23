@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 A session closed cleanly by the peer now ends with the cancelled error, like one this side closed, instead of a protocol error with a session-scoped cancel kind.
 Drop any check for that kind.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `GroupRequest::priority()` returns one.

@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 A session closed cleanly by the peer now ends with `ErrMoqErrorCancelled`, like one this side closed, instead of a protocol error with a session-scoped `MoqProtocolKindCancel`.
 Drop any check for the session-scoped cancel kind.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.Resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: pass a `ctx` with a deadline.
+Regenerate the bindings for the changed `resolve` checksum.
+
 ### Priorities are signed (#6142)
 
 `MoqTrackInfo.Priority`, `MoqSubscription.Priority`, `MoqFetchGroupOptions.Priority`, and `MoqGroupRequest.Priority()` are `int8`, higher first, and 0 is the unset midpoint.
