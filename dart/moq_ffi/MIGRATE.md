@@ -14,6 +14,10 @@ A fill also arrives for history a subscription covers that the cache lacks, not 
 `MoqSubscription.maxDelayUs` is nullable, where null leaves the publisher's max age alone to bound delivery.
 Regenerate the bindings with `just dart generate` for the changed types and checksums.
 
+### Video rendition preference
+
+`MoqVideo` gains `preference`, defaulting to `0`. Regenerate bindings and rebuild with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.

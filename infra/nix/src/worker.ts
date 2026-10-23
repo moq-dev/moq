@@ -1,5 +1,5 @@
 // Cloudflare Worker for nix.moq.dev, the project's Nix binary cache. Serves two
-// R2 buckets as one cache, written by infra/nix/push.sh through `nix copy`:
+// R2 buckets as one cache, written by `just infra nix push` through `nix copy`:
 //
 //   nix-moq-dev      released packages, kept forever
 //   nix-ci-moq-dev   CI dev shells, expired by a lifecycle rule

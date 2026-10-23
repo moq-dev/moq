@@ -12,6 +12,10 @@ A reader narrowing its ranges can leave a single group while the fill stays used
 A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
 `Subscription.maxDelayUs` is a `ULong?` and `maxDelay` a `Duration?`, where null leaves the publisher's max age alone to bound delivery.
 
+### Video rendition preference
+
+`dev.moq.media.Video` gains `preference: Int`, defaulting to `0`. Update positional constructors and use the matching moq-ffi package. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes an `AnnounceRoute`
 
 `BroadcastProducer.announce` takes `AnnounceRoute(cost, epoch)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.

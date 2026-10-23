@@ -13,6 +13,10 @@ A refusal carries no application code: `drop_groups` fails the waiting fetches a
 A fill also arrives for history a subscription covers that the cache lacks, not only for a fetch.
 `Subscription::max_delay_us` is a `std::optional<uint64_t>` that still defaults to 0, where `std::nullopt` leaves the publisher's max age alone to bound delivery.
 
+### Video rendition preference
+
+`moq::Video` gains `int32_t preference`. Update aggregate initializers with `0` to keep the default ranking and rebuild against the matching generated headers and native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes an `AnnounceRoute`
 
 `BroadcastProducer::announce` takes `moq::AnnounceRoute{cost, epoch}` instead of a `moq::Route`: the origin builds the hop chain, so `hops` is no longer an input.

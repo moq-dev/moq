@@ -78,7 +78,6 @@ impl Info {
 	/// supplies the parent track's [`track::Info`]. This helper exists for in-crate
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
-	// private: test
 	pub(crate) fn produce(self) -> Producer {
 		Producer::new(
 			self,
@@ -503,7 +502,6 @@ enum Source {
 /// The IETF header state that cannot be inferred from a plain frame list.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 #[derive(Clone, Debug)]
-// private: passthrough
 pub(crate) struct Wire {
 	/// Object IDs differ from the public frame ordinals, so ordinal recovery cannot stitch.
 	pub sparse: bool,
@@ -959,7 +957,6 @@ pub struct Producer {
 
 /// Shared group state without permission to write frames or finish the group.
 #[derive(Clone)]
-// private: capability gap
 // Sessions need an abortable observer while public callers use Demand.
 pub(crate) struct Handle {
 	state: kio::Producer<GroupState>,
@@ -1028,13 +1025,11 @@ impl std::ops::Deref for Producer {
 
 impl Producer {
 	#[cfg(feature = "async")]
-	// private: passthrough
 	pub(crate) fn wire(&self) -> Option<Wire> {
 		self.handle.state.read().wire().cloned()
 	}
 
 	#[cfg(feature = "async")]
-	// private: passthrough
 	pub(crate) fn set_wire(&self, mut wire: Wire) -> Result<()> {
 		let mut state = modify(&self.handle.state)?;
 		// A head adopted before the header arrived holds the objects below the stream's.
@@ -1048,7 +1043,6 @@ impl Producer {
 	}
 
 	#[cfg(feature = "async")]
-	// private: passthrough
 	pub(crate) fn mark_gap(&self, id: u64, gap: Option<u64>) -> Result<()> {
 		if gap.is_some_and(|gap| gap > id) {
 			return Err(Error::MalformedTrack);
@@ -1073,7 +1067,6 @@ impl Producer {
 	}
 
 	#[cfg(feature = "async")]
-	// private: passthrough
 	pub(crate) fn set_end_object(&self, fields: super::object::Fields) -> Result<()> {
 		let mut state = modify(&self.handle.state)?;
 		if state.fin.is_some() || state.relay.as_ref().is_some_and(|relay| relay.end_object.is_some()) {
@@ -1154,7 +1147,6 @@ impl Producer {
 	/// Whether the parent track compresses, so a received frame arrives as a stored slice
 	/// with its inflated size ([`frame::Header::inflated`]).
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// private: passthrough
 	pub(crate) fn compressed(&self) -> bool {
 		self.handle.track.compress
 	}
@@ -1216,8 +1208,8 @@ impl Producer {
 			return Err(Error::FrameTooLarge);
 		}
 
-		let track = self.first_frame_track();
-		let track = track.as_ref().map(|track| track.read());
+		let producer = self.first_frame_track();
+		let track = producer.as_ref().map(|track| track.read());
 		let neighbors = track
 			.as_ref()
 			.and_then(|track| track.neighbors(self.handle.info.sequence));
@@ -1265,7 +1257,7 @@ impl Producer {
 			track.first_frame(self.handle.info.sequence, bound);
 		}
 		drop(track);
-		self.handle.start();
+		self.handle.start(producer);
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -1299,8 +1291,8 @@ impl Producer {
 
 		let count = frames.len();
 		let bytes: u64 = frames.filled().iter().map(|frame| frame.payload.len() as u64).sum();
-		let track = self.first_frame_track();
-		let track = track.as_ref().map(|track| track.read());
+		let producer = self.first_frame_track();
+		let track = producer.as_ref().map(|track| track.read());
 		let neighbors = track
 			.as_ref()
 			.and_then(|track| track.neighbors(self.handle.info.sequence));
@@ -1371,7 +1363,7 @@ impl Producer {
 		}
 		drop(track);
 		if count > 0 {
-			self.handle.start();
+			self.handle.start(producer);
 		}
 
 		self.handle.cache.settle(now);
@@ -1404,7 +1396,6 @@ impl Producer {
 
 	/// [`Self::create_frame`] with the moq-transport object fields a relay forwards.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// private: passthrough
 	pub(crate) fn create_object(mut self, frame: frame::Header) -> Result<frame::Producer> {
 		let meter = self.chunk_meter(frame.inflated);
 		let size = frame.info.size as usize;
@@ -1451,8 +1442,8 @@ impl Producer {
 		let scratch = self.handle.track.compress && header.inflated.is_none();
 		let inflated = header.inflated.unwrap_or(frame.size);
 
-		let track = self.first_frame_track();
-		let track = track.as_ref().map(|track| track.read());
+		let producer = self.first_frame_track();
+		let track = producer.as_ref().map(|track| track.read());
 		let neighbors = track
 			.as_ref()
 			.and_then(|track| track.neighbors(self.handle.info.sequence));
@@ -1510,7 +1501,7 @@ impl Producer {
 			track.first_frame(self.handle.info.sequence, bound);
 		}
 		drop(track);
-		self.handle.start();
+		self.handle.start(producer);
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -1626,7 +1617,7 @@ impl Producer {
 		}
 		drop(state);
 		// An empty group counts as content once it ends.
-		self.handle.start();
+		self.handle.start(None);
 		// A finished group can no longer raise the track's largest, which may end its stream.
 		self.handle.cache.finish_largest(self.sequence);
 		Ok(())
@@ -1654,7 +1645,6 @@ impl Producer {
 		kio::wait(|waiter| self.handle.poll_closed(waiter)).await
 	}
 	/// The non-writing observer used by the cache and built-in sessions.
-	// private: capability gap
 	// Sessions need an abortable observer while public callers use Demand.
 	pub(crate) fn handle(&self) -> Handle {
 		self.handle.clone()
@@ -1676,7 +1666,6 @@ impl Producer {
 		dead_code,
 		reason = "the answering API retains these on the writer as well as the session observer"
 	)]
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn abort_unused(&self, err: Error) -> bool {
 		self.handle.abort_unused(err)
 	}
@@ -1688,7 +1677,6 @@ impl Producer {
 	/// track lock never takes the group's. Monotone, and only ever conservative: a
 	/// concurrent abort can still read as live for the length of [`Self::abort`],
 	/// which hands out a group whose consumer then surfaces the abort.
-	// private: test
 	pub(crate) fn is_aborted(&self) -> bool {
 		self.handle.is_aborted()
 	}
@@ -1714,7 +1702,6 @@ impl Producer {
 		dead_code,
 		reason = "the answering API retains these on the writer as well as the session observer"
 	)]
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.handle.poll_unused(waiter)
 	}
@@ -1722,7 +1709,6 @@ impl Producer {
 
 impl Handle {
 	/// Abort the group without taking ownership of its writer.
-	// private: capability gap
 	// Sessions cancel a group while its writer is in a frame.
 	pub(crate) fn abort(&self, err: Error) -> Result<()> {
 		self.close_aborted(err)
@@ -1730,7 +1716,6 @@ impl Handle {
 
 	/// Abort the group with `err` unless it already holds every frame: the publisher gave
 	/// up a group still arriving, while one that finished here stays whole.
-	// private: capability gap
 	// Sessions cancel an unfinished FETCH while its writer belongs to its data stream.
 	pub(crate) fn abort_open(&self, err: Error) {
 		if let Ok(state) = self.state.write()
@@ -1814,7 +1799,7 @@ impl Handle {
 		}
 		let now = state.charge.add(payload + metadata + growth);
 		drop(state);
-		self.start();
+		self.start(None);
 		self.cache.settle(now);
 	}
 
@@ -1823,7 +1808,6 @@ impl Handle {
 	///
 	/// Counts any frames the group [started past](Producer::start_at), so it's the group's
 	/// logical length rather than the number of frames this handle holds.
-	// private: capability gap
 	// Sessions observe a group while its sole writer belongs to a frame.
 	pub(crate) fn frame_count(&self) -> usize {
 		self.state.read().next_index
@@ -1848,7 +1832,6 @@ impl Handle {
 	/// closed. Consumer creation and the check share a lock, so a reader arriving after
 	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn abort_unused(&self, err: Error) -> bool {
 		match self.state.write_unused() {
 			kio::Unused::Idle(guard) => {
@@ -1903,7 +1886,6 @@ impl Handle {
 	/// track lock never takes the group's. Monotone, and only ever conservative: a
 	/// concurrent abort can still read as live for the length of [`Self::abort`],
 	/// which hands out a group whose consumer then surfaces the abort.
-	// private: test
 	pub(crate) fn is_aborted(&self) -> bool {
 		self.alive.aborted.load(Ordering::Acquire)
 	}
@@ -1917,7 +1899,6 @@ impl Handle {
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.
-	// private: test
 	pub(crate) fn is_finished(&self) -> bool {
 		self.state.read().fin.is_some()
 	}
@@ -1980,11 +1961,14 @@ impl Handle {
 	/// The first frame opened or the group finished: tell the track once, so it re-judges
 	/// the reads that skipped this group while it was frameless. Called with the group
 	/// lock released, since the track's is taken first.
-	fn start(&self) {
+	///
+	/// `track` is the track a first frame already reached, so stamping a group upgrades
+	/// its link once.
+	fn start(&self, track: Option<kio::Producer<track::TrackState>>) {
 		if self.alive.started.swap(true, Ordering::Relaxed) {
 			return;
 		}
-		let Some(track) = self.cache.track() else {
+		let Some(track) = track.or_else(|| self.cache.track()) else {
 			return;
 		};
 		let answers = track.read().reveal(self);
@@ -2096,7 +2080,6 @@ impl Handle {
 	}
 
 	/// Create a new consumer for the group.
-	// private: capability gap
 	// Sessions observe a group while its sole writer belongs to a frame.
 	pub(crate) fn consume(&self) -> Consumer {
 		self.consumer(self.state.consume())
@@ -2151,14 +2134,12 @@ impl Handle {
 
 	/// Poll until the group is aborted, including by eviction; ready with the cause.
 	/// Finishing does not close it.
-	// private: capability gap
 	// Sessions observe a group while its sole writer belongs to a frame.
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		self.state.poll_closed(waiter).map(|()| self.abort_reason())
 	}
 
 	/// Watch reader demand without keeping the group alive.
-	// private: capability gap
 	// Sessions observe a group while its sole writer belongs to a frame.
 	pub(crate) fn demand(&self) -> Demand {
 		Demand {
@@ -2169,7 +2150,6 @@ impl Handle {
 
 	/// Poll for the group becoming unused (every consumer dropped).
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_unused(waiter).map(|_| ())
 	}
@@ -2490,7 +2470,6 @@ impl std::ops::Deref for Consumer {
 
 impl Consumer {
 	#[cfg(feature = "async")]
-	// private: passthrough
 	pub(crate) fn last_object(&self) -> Option<u64> {
 		let state = self.cursor.state.read();
 		match state.wire() {
@@ -2500,7 +2479,6 @@ impl Consumer {
 	}
 
 	#[cfg(feature = "async")]
-	// private: passthrough
 	pub(crate) fn wire(&self) -> Option<Wire> {
 		self.cursor.state.read().wire().cloned()
 	}
@@ -2515,7 +2493,6 @@ impl Consumer {
 	/// frame's inflated size beside it ([`frame::Object::inflated`],
 	/// [`frame::Consumer::inflated`]), for egress that carries compression. A no-op on a
 	/// plain group.
-	// private: passthrough
 	pub(crate) fn compressed(mut self) -> Self {
 		self.cursor.raw = true;
 		self.cursor.prefetch = Prefetch::default();
@@ -2523,20 +2500,17 @@ impl Consumer {
 	}
 
 	/// The index of the first frame the group holds (see [`Producer::start_at`]).
-	// private: passthrough
 	pub(crate) fn first_frame(&self) -> u64 {
 		self.cursor.state.read().offset as u64
 	}
 
 	#[cfg(feature = "async")]
-	// private: passthrough
 	pub(crate) fn end_object(&self) -> Option<Arc<super::object::Fields>> {
 		self.cursor.state.read().relay.as_ref()?.end_object.clone()
 	}
 
 	/// Fill a private batch without losing metadata through the public frame view.
 	#[cfg(feature = "async")]
-	// private: passthrough
 	pub(crate) fn poll_read_objects<const N: usize>(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -2671,7 +2645,6 @@ impl Consumer {
 	}
 
 	/// Check the parent subscription while a wire publisher drains detached payload.
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
 		self.poll_expired_while_pending(waiter, false)
 	}
@@ -2700,7 +2673,6 @@ impl Consumer {
 	}
 
 	/// Keep checking expiry while a wire publisher still owns buffered group data.
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn poll_expired_while_pending(&mut self, waiter: &kio::Waiter, pending: bool) -> bool {
 		if !self.expired
 			&& (pending || self.expiry_pending())
@@ -2723,7 +2695,6 @@ impl Consumer {
 	///
 	/// A machine parked on stream credit reads nothing, so without this an aborted group,
 	/// which never expires, would wait for credit it could only spend on a reset.
-	// pending: /quest/m1/public-model/serve.md
 	#[cfg(feature = "async")]
 	pub(crate) fn poll_abandoned(&mut self, waiter: &kio::Waiter, pending: bool) -> Option<Error> {
 		if self.poll_expired_while_pending(waiter, pending) {
@@ -2779,7 +2750,6 @@ impl Consumer {
 	/// The timescale a moq-lite hop serves the parent track at (see
 	/// [`track::Info::lite_timescale`]).
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// private: passthrough
 	pub(crate) fn lite_timescale(&self, ietf: bool) -> Option<Timescale> {
 		self.track.lite_timescale(ietf)
 	}
@@ -2787,7 +2757,6 @@ impl Consumer {
 	/// The draft the parent track's moq-transport publisher spoke, which serialized every
 	/// object's properties, or `None` for a moq-lite one.
 	#[cfg(feature = "async")]
-	// private: passthrough
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
 		self.track.ietf()
 	}
@@ -2820,7 +2789,6 @@ impl Consumer {
 	/// actually landed.
 	/// Only moves forward; a lower `index` is ignored, since the frames behind the
 	/// cursor may already have been handed out.
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn start_at(&mut self, index: u64) {
 		self.cursor.start_at(index);
 	}
@@ -2840,7 +2808,6 @@ impl Consumer {
 	/// no frame is delivered. Reads past the cap end cleanly (`None`), as if the group
 	/// finished there. The cap can move in either direction: raising it re-offers
 	/// frames that are still cached.
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn end_at(&mut self, end: impl Into<Cap>) {
 		let end = end.into().exclusive();
 		self.cursor.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
@@ -2900,7 +2867,6 @@ impl Consumer {
 
 	/// Read the next frame with its relay metadata, for wire egress.
 	#[cfg(feature = "async")]
-	// private: passthrough
 	pub(crate) fn poll_read_object(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Object>>> {
 		// Every frame is served through the cursor's prefetch, which holds its fields.
 		let frame = ready!(self.poll_read_frame(waiter))?;

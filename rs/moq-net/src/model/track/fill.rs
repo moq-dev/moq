@@ -94,7 +94,6 @@ impl Pending {
 
 /// What became of a fill's sequences, shared with every reader that joined it.
 #[derive(Default)]
-// pending: /quest/m1/public-model/deferred.md
 pub(crate) struct Outcome {
 	accepted: RangeSet<u64>,
 	// Why each refused run was refused; refusing a sequence again replaces why.
@@ -110,7 +109,6 @@ pub(crate) struct Outcome {
 
 impl Outcome {
 	/// Why `sequence` was refused, if it was.
-	// private: capability gap
 	pub(crate) fn refused(&self, sequence: u64) -> Option<&Error> {
 		self.refused.get(&sequence).map(|refusal| &refusal.err)
 	}
@@ -685,7 +683,6 @@ impl Fill {
 	/// Refuse every group still owed with `err`, which says nothing about whether the source
 	/// has them, so nothing is recorded dropped.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// private: capability gap
 	pub(crate) fn refuse(&self, err: Error) {
 		let unresolved = self.inner.unresolved(self.inner.start.group..self.inner.end);
 		self.inner.refuse(&unresolved, err);
@@ -693,7 +690,6 @@ impl Fill {
 
 	/// A handle on group `sequence` alone, for a session serving the fill one group at a time.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// private: capability gap
 	pub(crate) fn group(&self, sequence: u64) -> GroupFill {
 		GroupFill {
 			inner: self.inner.clone(),
@@ -908,7 +904,6 @@ impl TrackState {
 
 /// The readers of one group of a fill, outliving its [`GroupFill`].
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-// private: capability gap
 pub(crate) struct Readers {
 	fills: kio::Shared<FillState>,
 	id: u64,
@@ -920,7 +915,6 @@ pub(crate) struct Readers {
 impl Readers {
 	/// Poll until no reader waits on the group. Once the fill ends its per-group demand goes
 	/// with it, so then until none of its readers is left.
-	// private: capability gap
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		if self.outcome.poll_unused(waiter).is_ready() {
 			return Poll::Ready(());
@@ -937,7 +931,6 @@ impl Readers {
 /// One group of a [`Fill`], for a session serving it a group at a time. Answering it answers
 /// that group of the fill; dropping it unanswered leaves the group to the fill.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-// private: capability gap
 pub(crate) struct GroupFill {
 	inner: Arc<Inner>,
 	sequence: u64,
@@ -947,58 +940,49 @@ pub(crate) struct GroupFill {
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl GroupFill {
 	/// The group sequence to fetch.
-	// private: capability gap
 	pub(crate) fn sequence(&self) -> u64 {
 		self.sequence
 	}
 
 	/// The delivery priority the readers asked for.
-	// private: capability gap
 	pub(crate) fn priority(&self) -> i8 {
 		self.inner.priority
 	}
 
 	/// The widest budget among the readers, for a handler that forwards it.
-	// private: capability gap
 	pub(crate) fn max_delay(&self) -> Option<Duration> {
 		self.inner.max_delay
 	}
 
 	/// The first frame of the group the readers want; 0 is the whole group.
-	// private: capability gap
 	pub(crate) fn frame_start(&self) -> u64 {
 		self.frame_start
 	}
 
 	/// Poll until no reader waits on this group, as [`Fill::poll_unwanted`].
-	// private: capability gap
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.poll_unwanted(self.sequence, waiter)
 	}
 
 	/// Poll until the track closes, with its abort error.
-	// private: capability gap
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		TrackState::poll_closed(&self.inner.state, waiter)
 	}
 
 	/// Whether a reader still waits on the fill.
 	#[cfg(test)]
-	// private: capability gap
 	pub(crate) fn is_used(&self) -> bool {
 		self.inner.result.is_used()
 	}
 
 	/// The fill's answers, kept open as long as this handle lives.
 	#[cfg(test)]
-	// private: capability gap
 	pub(crate) fn joined(&self) -> kio::Producer<Outcome> {
 		self.inner.result.clone()
 	}
 
 	/// The group's readers, for a session still writing it once accepted. Holds the fill's
 	/// answers open, as the group does not answer its readers until they take it.
-	// private: capability gap
 	pub(crate) fn readers(&self) -> Readers {
 		Readers {
 			fills: self.inner.fills.clone(),
@@ -1010,20 +994,17 @@ impl GroupFill {
 
 	/// The track the fill serves.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// private: capability gap
 	pub(crate) fn track(&self) -> kio::Producer<TrackState> {
 		self.inner.state.clone()
 	}
 
 	/// Insert the group into the cache, as [`Fill::accept`].
-	// private: capability gap
 	pub(crate) fn accept(self, info: impl Into<Option<Info>>) -> Result<group::Producer> {
 		self.inner.accept(self.sequence, info.into())
 	}
 
 	/// Refuse the group with the source's answer. A miss names it dropped, and
 	/// [`Error::Old`] every older group of the fill too.
-	// private: capability gap
 	pub(crate) fn reject(self, err: Error) {
 		self.inner.reject(self.sequence, err);
 	}
@@ -1031,7 +1012,6 @@ impl GroupFill {
 	/// Declare the track's exclusive final sequence, as the source answering this group
 	/// reported it. A no-op once the track declared an end, or holds a later group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// private: capability gap
 	pub(crate) fn finish_track_at(&self, final_sequence: u64) {
 		if let Ok(mut state) = TrackState::modify(&self.inner.state)
 			&& state.end.is_none()

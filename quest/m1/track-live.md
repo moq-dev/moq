@@ -18,14 +18,9 @@ what an ended feed left; this quest makes the signal itself public.
   `resume` `poll_live`, and the crate-private `Producer::is_live`. Expose one
   reader-side `poll_live`/`live()` (or `is_live`) on `track::Subscriber` and
   `track::Ordered`, and decide whether the publishers' crate-private
-  `poll_live` folds into it (see
-  [Public serving](/quest/m1/public-model/serve.md)).
+  `poll_live` folds into it.
 - JS has no equivalent: a track never goes idle, so its reader is live from
   the start. Mirror the name, and the idle state if JS gains warm copies.
 - Decide what a reader does with groups served before live: keep serving
   them (today) and let the caller skip by the signal, or offer a mode that
   starts at the live edge.
-
-## Related
-
-- [Public serving](/quest/m1/public-model/serve.md) - the publishers' `poll_live` and the `largest()` decision

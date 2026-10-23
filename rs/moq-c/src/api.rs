@@ -349,6 +349,8 @@ pub struct moq_video_config {
 	pub label: *const c_char,
 	/// Length of `label` in bytes.
 	pub label_len: usize,
+	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
+	pub preference: i32,
 }
 
 /// Catalog properties shared by every video rendition.
@@ -2597,6 +2599,7 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 
 		let mut video = hang::catalog::VideoConfig::new(codec);
 		video.label = label.map(str::to_string);
+		video.preference = config.preference;
 		if !config.description.is_null() {
 			let description = unsafe { ffi::parse_slice(config.description, config.description_len)? };
 			video.description = Some(bytes::Bytes::copy_from_slice(description));
