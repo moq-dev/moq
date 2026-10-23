@@ -407,8 +407,14 @@ impl<T> Drop for Mut<'_, T> {
 	fn drop(&mut self) {
 		let mut state = self.state.take().unwrap();
 
-		// A write nobody is parked on wakes nobody, so skip draining an empty list.
-		if !self.modified || (!state.closed && state.waiters_value.is_empty()) {
+		if !self.modified {
+			return;
+		}
+
+		if !state.closed && state.waiters_value.is_empty() {
+			// A write nobody is parked on wakes nobody, so skip moving the list out. Drop
+			// any dead entries in place, or every later write would rescan them.
+			state.waiters_value.clear();
 			return;
 		}
 
