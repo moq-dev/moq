@@ -104,7 +104,7 @@ sd-notify = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 # An HTTP/2 client, so the admission bench can hold many requests on one connection.
-h2 = "0.4"
+h2 = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 # Clocks only the test moves, wall time included, so a grant's life is exact.
 moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
