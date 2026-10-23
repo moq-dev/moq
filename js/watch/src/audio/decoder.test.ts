@@ -350,6 +350,25 @@ for (const cmaf of [false, true]) {
 		}
 	});
 
+	// A fresh encoder after a declared end may restart its timeline below the old one, and the decoder
+	// resets for it before anything is judged out of order.
+	it(`decodes a ${cmaf ? "CMAF" : "legacy"} fresh encoder below the timeline it replaced`, async () => {
+		const playback = await play(Milli(100), false, cmaf);
+		try {
+			frameTimestamp = 480_000;
+			playback.push({ ...frame(), group: 0 });
+			await microtasks();
+			playback.push({ kind: "end", group: 0, end: Micro(520_000) });
+			frameTimestamp = 0;
+			playback.push({ ...frame(), group: 1 });
+			await microtasks();
+			expect(playback.inserted()).toEqual([500_000, 20_000]);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
 	it(`skips a ${cmaf ? "CMAF" : "legacy"} live subscription head older than its live edge`, async () => {
 		const playback = await play(Milli(100), false, cmaf);
 		try {
