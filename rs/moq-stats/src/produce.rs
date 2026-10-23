@@ -3870,7 +3870,7 @@ mod tests {
 				.expect("live");
 			let (name, listed) = match event {
 				broadcast::TracksEvent::Added { name, .. } => (name, true),
-				broadcast::TracksEvent::Removed { name } => (name, false),
+				broadcast::TracksEvent::Removed { name } | broadcast::TracksEvent::Finished { name } => (name, false),
 				broadcast::TracksEvent::Synced => continue,
 			};
 			if let Some(group) = crate::parse_group_track(&name) {
