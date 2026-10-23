@@ -349,5 +349,72 @@ fn queued_groups(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, containers, queued_groups);
+/// SI renewal across retained sub-table count and touched identities. Setup and
+/// teardown are outside timing, so scanning the whole retained set shows as a slope.
+fn ts_si_renewal(c: &mut Criterion) {
+	struct Import {
+		inner: moq_mux::container::ts::Import<moq_mux::container::ts::Ext>,
+		cc: u8,
+	}
+	impl Import {
+		fn new(identities: u16) -> Self {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(
+				&mut broadcast,
+				moq_mux::catalog::Config::default()
+					.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::container::ts::Ext>::default()),
+			)
+			.unwrap();
+			let mut this = Self {
+				inner: moq_mux::container::ts::Import::new(broadcast, catalog.reserve()),
+				cc: 0,
+			};
+			this.renew(identities, identities);
+			// The framer needs a second packet to confirm its initial sync byte.
+			let mut null = vec![0x47, 0x1f, 0xff, 0x10];
+			null.resize(188, 0xff);
+			this.inner.decode(&null).unwrap();
+			this
+		}
+
+		fn renew(&mut self, identities: u16, touches: u16) {
+			let mut packets = Vec::new();
+			for index in 0..touches {
+				let id = index % identities;
+				let mut section = vec![0x80, 0xb0, 9, (id >> 8) as u8, id as u8, 0xc1, 0, 0];
+				let crc = crc::Crc::<u32>::new(&crc::CRC_32_MPEG_2).checksum(&section);
+				section.extend_from_slice(&crc.to_be_bytes());
+				let mut packet = vec![0x47, 0x40, 0x12, 0x10 | self.cc, 0];
+				self.cc = (self.cc + 1) & 15;
+				packet.extend_from_slice(&section);
+				packet.resize(188, 0xff);
+				packets.extend(packet);
+			}
+			self.inner.decode(&packets).unwrap();
+		}
+	}
+	let mut group = c.benchmark_group("ts_si_renewal");
+	group.measurement_time(Duration::from_secs(1));
+	group.warm_up_time(Duration::from_millis(200));
+	group.sample_size(10);
+	for identities in [1, 64, 4096] {
+		for touches in [1, 16, 64] {
+			group.throughput(Throughput::Elements(u64::from(touches)));
+			group.bench_with_input(
+				BenchmarkId::new(identities.to_string(), touches),
+				&touches,
+				|b, touches| {
+					b.iter_batched_ref(
+						|| Import::new(identities),
+						|import| import.renew(identities, *touches),
+						BatchSize::SmallInput,
+					);
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, containers, queued_groups, ts_si_renewal);
 criterion_main!(benches);
