@@ -885,27 +885,49 @@ fn reconcile(
 
 	// A disabled rendition stays listed: its reader stops, but its pad waits idle for a re-enable,
 	// since a pipeline links pads by name (`s.video_0 ! ...`).
-	let disabled = catalog
+	let disabled: Vec<(Rendition, &dyn hang::catalog::Reference)> = catalog
 		.video
 		.renditions
 		.iter()
 		.filter(|(_, config)| !config.enabled)
-		.map(|(name, _)| (TrackKind::Video, name.clone()))
+		.map(|(name, config)| {
+			(
+				(TrackKind::Video, name.clone()),
+				config as &dyn hang::catalog::Reference,
+			)
+		})
 		.chain(
 			catalog
 				.audio
 				.renditions
 				.iter()
 				.filter(|(_, config)| !config.enabled)
-				.map(|(name, _)| (TrackKind::Audio, name.clone())),
-		);
+				.map(|(name, config)| {
+					(
+						(TrackKind::Audio, name.clone()),
+						config as &dyn hang::catalog::Reference,
+					)
+				}),
+		)
+		.collect();
 	// Listed before any follower hears of the update, so a reader it stops can't claim a pad.
-	let listed = desired.keys().cloned().chain(disabled).collect();
+	let listed = desired
+		.keys()
+		.cloned()
+		.chain(disabled.iter().map(|(rendition, _)| rendition.clone()))
+		.collect();
 	for retire in playback.pads.list(listed, cancel) {
 		tasks.spawn_on(STREAMING.scope(playback.element.clone(), retire), RUNTIME.handle());
 	}
 
-	let mut plans: HashMap<moq_net::PathOwned, Plan> = HashMap::new();
+	// A disabled rendition keeps its broadcast's follower, and with it the record of a track it
+	// finished, so a re-enable on the same instance does not replay it.
+	let mut plans: HashMap<moq_net::PathOwned, Plan> = disabled
+		.iter()
+		.filter_map(|(_, reference)| source.resolve_reference(reference.broadcast()))
+		.filter(|path| followers.contains_key(path))
+		.map(|path| (path, Plan::default()))
+		.collect();
 	for (rendition, shape) in desired {
 		let Some(path) = source.resolve_reference(shape.broadcast.as_ref()) else {
 			gst::warning!(
@@ -933,7 +955,10 @@ fn reconcile(
 		// Follow without waiting: an unavailable sibling must not park the catalog loop and hold
 		// up every other rendition. The follower resolves its instances under the run. Every
 		// instance is followed, and each rendition checks the epoch it names.
-		let shape = plan.renditions.values().next().expect("a plan names a rendition");
+		let Some(shape) = plan.renditions.values().next() else {
+			// Only disabled renditions read it, and their follower is gone.
+			continue;
+		};
 		let instances = match source.follow(shape.broadcast.as_ref(), None) {
 			Ok(instances) => instances,
 			Err(err) => {
@@ -1140,8 +1165,8 @@ impl Follower {
 				},
 			);
 		}
-		self.finished
-			.retain(|rendition, _| self.renditions.contains_key(rendition));
+		// A disabled rendition keeps its pad, and the record with it. A retired pad needs none.
+		self.finished.retain(|rendition, _| pads.is_listed(rendition));
 	}
 
 	/// Read `instance`, which took over from any before it.
@@ -1281,11 +1306,10 @@ impl Reader {
 			..
 		} = playback;
 		let (kind, name) = (rendition.0, &rendition.1);
-		let played = (rendition.clone(), shape.track.clone());
 
 		// An instance that already played this track to its end on the pad would replay its last
 		// group.
-		if finished.contains(&played, serial) {
+		if finished.contains(&rendition, &shape.track, serial) {
 			return Exit::Done;
 		}
 
@@ -1354,7 +1378,7 @@ impl Reader {
 				// The reader this one replaces records its track as finished before letting go, so
 				// one started while it was reading the end (a reshape) can't replay it. A
 				// retirement that got the pad first ended it.
-				if !pads.holds(&rendition, &owner) || finished.contains(&played, serial) {
+				if !pads.holds(&rendition, &owner) || finished.contains(&rendition, &shape.track, serial) {
 					return Exit::Done;
 				}
 				tokio::task::block_in_place(|| begin(&pad, name, &shape.caps));
@@ -1377,7 +1401,7 @@ impl Reader {
 				// finishes the track, or a reader waiting for this pad would replay it.
 				_ = cancel.changed() => {
 					if ended(&mut track) {
-						finished.insert(&played, serial);
+						finished.insert(&rendition, &shape.track, serial);
 					}
 					return Exit::Done;
 				}
@@ -1425,7 +1449,7 @@ impl Reader {
 					// Recorded while this reader still owns the pad, before any other can claim it,
 					// so a reshape on this instance does not replay it.
 					Ok(None) => {
-						finished.insert(&played, serial);
+						finished.insert(&rendition, &shape.track, serial);
 						return Exit::Done;
 					}
 					Err(err) => {
@@ -1438,27 +1462,33 @@ impl Reader {
 	}
 }
 
-/// Each of a follower's renditions with a track it played to the end, and the serial of the
-/// instance that served it. A new subscription to a finished track replays its last group, so a
-/// catalog update that still lists the rendition (a publisher's final snapshot lands after its
-/// tracks end) must not start it on that pad again. A later instance carries a new track, and a
-/// pad that never played the track joins it like any late subscriber. Shared with the readers,
-/// since a reader that replaces another on its pad learns this only once the other lets go.
+/// The track each of a follower's renditions last played to the end on its pad, and the serial of
+/// the instance that served it. A new subscription to a finished track replays its last group, so
+/// a catalog update that still lists the rendition (a publisher's final snapshot lands after its
+/// tracks end, or a disable and an enable) must not start it on that pad again. A later instance
+/// carries a new track, and a pad that never played the track joins it like any late subscriber.
+/// Shared with the readers, since a reader that replaces another on its pad learns this only once
+/// the other lets go.
 #[derive(Clone, Default)]
-struct Finished(Arc<Mutex<HashMap<(Rendition, String), u64>>>);
+struct Finished(Arc<Mutex<HashMap<Rendition, (String, u64)>>>);
 
 impl Finished {
-	/// Record that instance `serial` served `played` to its end. A reader of an earlier instance
-	/// never overwrites a later one's record.
-	fn insert(&self, played: &(Rendition, String), serial: u64) {
+	/// Record that instance `serial` served the rendition's `track` to its end. A reader of an
+	/// earlier instance never overwrites a later one's record.
+	fn insert(&self, rendition: &Rendition, track: &str, serial: u64) {
 		let mut finished = self.0.lock().unwrap();
-		let recorded = finished.entry(played.clone()).or_insert(serial);
-		*recorded = (*recorded).max(serial);
+		if finished.get(rendition).is_none_or(|(_, recorded)| *recorded <= serial) {
+			finished.insert(rendition.clone(), (track.to_string(), serial));
+		}
 	}
 
-	/// Whether instance `serial` already served `played` to its end on this pad.
-	fn contains(&self, played: &(Rendition, String), serial: u64) -> bool {
-		self.0.lock().unwrap().get(played) == Some(&serial)
+	/// Whether instance `serial` already served the rendition's `track` to its end on its pad.
+	fn contains(&self, rendition: &Rendition, track: &str, serial: u64) -> bool {
+		self.0
+			.lock()
+			.unwrap()
+			.get(rendition)
+			.is_some_and(|(finished, recorded)| finished == track && *recorded == serial)
 	}
 
 	/// Keep only the records `keep` accepts.
@@ -1466,7 +1496,7 @@ impl Finished {
 		self.0
 			.lock()
 			.unwrap()
-			.retain(|(rendition, _), serial| keep(rendition, *serial));
+			.retain(|rendition, (_, serial)| keep(rendition, *serial));
 	}
 }
 
@@ -3422,8 +3452,8 @@ mod session_tests {
 		});
 	}
 
-	/// A sibling track that finished stays finished for its instance only: a catalog update that
-	/// restarts the idle rendition, here a disable and an enable, still plays the next instance.
+	/// A sibling track that finished stays finished for its instance only: a disable and an enable
+	/// replays nothing on that instance, and the next instance still plays.
 	#[test]
 	fn a_reenabled_sibling_rendition_plays_the_next_instance_after_a_finish() {
 		let _pad_ids = pad_ids();
@@ -3431,10 +3461,11 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 		let mut room = referencing(&origin, None);
-		let _audio = room
-			.broadcast
-			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
-			.unwrap();
+		let _audio = ["audio", "again"].map(|name| {
+			room.broadcast
+				.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap()
+		});
 		let session = follow(&element, &origin);
 
 		let mut first = Publisher::sibling(&origin, Default::default());
@@ -3442,22 +3473,29 @@ mod session_tests {
 		first.video.finish().unwrap();
 		await_finished(&first);
 
-		// The catalog consumer only yields the newest snapshot, so the same update lists an audio
-		// rendition: its pad appearing proves the run acted on the disable.
+		// The catalog consumer only yields the newest snapshot, so each update lists another audio
+		// rendition: its pad appearing proves the run acted on it.
 		{
 			let mut guard = room.catalog.modify().unwrap();
 			guard.video.renditions.get_mut("video").unwrap().enabled = false;
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 		await_pad(&element, "audio_");
-		room.catalog
-			.modify()
-			.unwrap()
-			.video
-			.renditions
-			.get_mut("video")
-			.unwrap()
-			.enabled = true;
+		{
+			let mut guard = room.catalog.modify().unwrap();
+			guard.video.renditions.get_mut("video").unwrap().enabled = true;
+			let mut again = audio_rendition();
+			again.track = Some("again".into());
+			guard.audio.renditions.insert("again".to_string(), again);
+		}
+		for _ in 0..200 {
+			if pads(&element, "audio_").len() == 2 {
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		assert_eq!(pads(&element, "audio_").len(), 2, "the re-enable never landed");
+		let replayed = recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1));
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(
@@ -3467,6 +3505,14 @@ mod session_tests {
 		);
 		stop(session);
 
+		// Only the next instance starts a stream: the finished one stays finished on its pad.
+		let seen = recorder.seen();
+		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 1, "{seen:?}");
+		assert_eq!(
+			recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1)),
+			replayed,
+			"{seen:?}"
+		);
 		recorder.assert_one_pad_held();
 		drop(first);
 	}
