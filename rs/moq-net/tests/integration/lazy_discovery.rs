@@ -358,3 +358,147 @@ async fn serving_the_peer_asks_nothing() {
 		));
 	}
 }
+
+/// Every moq-transport draft. Not every one marks where an initial set ends (draft-14 and
+/// 15 answer with PUBLISH_NAMESPACE requests after the OK), so these read what arrived once
+/// everything in flight has.
+const IETF: &[&str] = &[
+	"moq-transport-14",
+	"moq-transport-15",
+	"moq-transport-16",
+	"moq-transport-17",
+	"moq-transport-18",
+	"moq-transport-19",
+	"moq-transport-20",
+	"moq-transport-21",
+	"moq-transport-22",
+];
+
+/// Apply what `announced` reports once everything in flight has arrived to `held`, and
+/// say whether any of it ended a prefix.
+async fn settled(announced: &mut announce::Consumer, held: &mut Vec<String>) -> bool {
+	moq_clock::sleep(SETTLE).await;
+	let mut ended = false;
+	while let Some(event) = announced.try_next() {
+		match event {
+			announce::Event::Start(announce) | announce::Event::Restart(announce) => {
+				held.push(announce.prefix.to_string())
+			}
+			announce::Event::End(announce) => {
+				ended = true;
+				held.retain(|prefix| *prefix != announce.prefix.as_str())
+			}
+			announce::Event::Update(_) => {}
+		}
+	}
+	held.sort();
+	held.dedup();
+	ended
+}
+
+/// Nothing watched, nothing asked: the peer's broadcasts stay undiscovered.
+#[moq_clock::test]
+async fn ietf_asks_nothing_until_watched() {
+	for version in IETF {
+		let lazy = Lazy::new(version).await;
+		assert!(!lazy.routes("a/x").await, "{version}");
+	}
+}
+
+/// A watch asks about its own prefix and nothing else.
+#[moq_clock::test]
+async fn ietf_asks_only_about_the_watched_prefix() {
+	for version in IETF {
+		let lazy = Lazy::new(version).await;
+		let mut watch = lazy.watch("a");
+		let mut held = Vec::new();
+		settled(&mut watch, &mut held).await;
+		assert_eq!(held, ["x"], "{version}");
+		assert!(lazy.routes("a/x").await, "{version}");
+		assert!(!lazy.routes("b/y").await, "{version}");
+	}
+}
+
+/// The request outlives its last watcher by the linger, then ends, and what it reported
+/// goes with it.
+#[moq_clock::test]
+async fn ietf_lingers_after_the_last_watcher() {
+	for version in IETF {
+		let lazy = Lazy::new(version).await;
+		let mut watch = lazy.watch("a");
+		settled(&mut watch, &mut Vec::new()).await;
+		drop(watch);
+
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(lazy.routes("a/x").await, "{version}: still lingering");
+
+		let again = lazy.watch("a");
+		moq_clock::sleep(LINGERED).await;
+		assert!(lazy.routes("a/x").await, "{version}: rewatched");
+
+		drop(again);
+		moq_clock::sleep(LINGERED).await;
+		assert!(!lazy.routes("a/x").await, "{version}: ended");
+	}
+}
+
+/// A broader watch after a narrower one discovers everything, and retracts nothing the
+/// narrower one holds.
+#[moq_clock::test]
+async fn ietf_a_broader_watch_retracts_nothing() {
+	for version in IETF {
+		let lazy = Lazy::new(version).await;
+		let mut narrower = lazy.watch("a");
+		let mut held = Vec::new();
+		settled(&mut narrower, &mut held).await;
+		assert_eq!(held, ["x"], "{version}");
+
+		let mut root = lazy.watch("");
+		let mut all = Vec::new();
+		settled(&mut root, &mut all).await;
+		assert_eq!(all, ["a/x", "b/y"], "{version}");
+		assert!(
+			!settled(&mut narrower, &mut held).await,
+			"{version}: retracted {held:?}"
+		);
+
+		drop(root);
+		moq_clock::sleep(LINGERED).await;
+		assert!(lazy.routes("a/x").await, "{version}: the narrower watch still holds it");
+		assert!(
+			!settled(&mut narrower, &mut held).await,
+			"{version}: retracted {held:?}"
+		);
+
+		drop(narrower);
+		moq_clock::sleep(LINGERED * 2).await;
+		assert!(!lazy.routes("a/x").await, "{version}");
+		assert!(!lazy.routes("b/y").await, "{version}");
+	}
+}
+
+/// Waiting on a path asks about it.
+#[moq_clock::test]
+async fn ietf_waiting_on_a_path_asks_about_it() {
+	for version in IETF {
+		let lazy = Lazy::new(version).await;
+		let consumer = lazy.subscriber.consume();
+		moq_clock::timeout(SETTLE, consumer.routed_broadcast("a/x"))
+			.await
+			.expect("routed in time")
+			.unwrap();
+		assert!(!lazy.routes("b/y").await, "{version}");
+	}
+}
+
+/// A relay's link still asks for everything it may.
+#[moq_clock::test]
+async fn ietf_a_relay_link_asks_for_everything() {
+	for version in IETF {
+		let relay = produce_origin(2);
+		let _lazy = Lazy::with(version, relay.clone().peer()).await;
+		for path in ["a/x", "b/y"] {
+			relay.consume().request_broadcast(path, None).await.unwrap();
+		}
+	}
+}

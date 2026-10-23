@@ -240,23 +240,40 @@ impl Message for SubscribeNamespaceError<'_> {
 	}
 }
 
-/// UnsubscribeNamespace message (0x14): v14/v15 only (v16 uses stream close)
+/// UnsubscribeNamespace message (0x14): v14/v15 only (v16 uses stream close).
+/// v14 names the prefix it subscribed, v15 the request.
 #[derive(Clone, Debug)]
-pub struct UnsubscribeNamespace {
+pub struct UnsubscribeNamespace<'a> {
+	/// v14: the Track Namespace Prefix of the SUBSCRIBE_NAMESPACE it cancels.
+	pub prefix: Path<'a>,
+	/// v15: the Request ID of the SUBSCRIBE_NAMESPACE it cancels.
 	pub request_id: RequestId,
 }
 
-impl Message for UnsubscribeNamespace {
+impl Message for UnsubscribeNamespace<'_> {
 	const ID: u64 = 0x14;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		match version {
+			Version::Draft14 => encode_namespace(w, &self.prefix)?,
+			Version::Draft15 => self.request_id.encode(w, version)?,
+			_ => return Err(EncodeError::Version),
+		}
 		Ok(())
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		Ok(Self { request_id })
+		match version {
+			Version::Draft14 => Ok(Self {
+				prefix: decode_namespace(r)?,
+				request_id: RequestId(0),
+			}),
+			Version::Draft15 => Ok(Self {
+				prefix: Path::default(),
+				request_id: RequestId::decode(r, version)?,
+			}),
+			_ => Err(DecodeError::Version),
+		}
 	}
 }
 

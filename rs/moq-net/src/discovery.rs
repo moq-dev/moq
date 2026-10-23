@@ -4,6 +4,9 @@
 //! readers want discovered, as [`origin::Producer`] reports them, and stops asking
 //! [`LINGER`] after nothing at or beneath a prefix is wanted. A relay or a server asks
 //! about everything its scope may reach, once, for the session's lifetime.
+//!
+//! moq-lite lets requests overlap. moq-transport forbids it, and a peer that enforces
+//! that refuses an overlapping request, so a session to one runs [`Discovery::exclusive`].
 
 use std::{
 	collections::{BTreeSet, HashMap, HashSet, VecDeque},
@@ -37,11 +40,14 @@ pub(crate) enum Change {
 /// narrower want rides it rather than opening a request that would later have to take
 /// its routes over. A narrower request already open when a broader one opens, wanted or
 /// lingering, stays open until the broader one goes, so neither takes the other's routes
-/// over before it has synced. Nothing here ever reopens a request that ended on its own: the next want
-/// that nothing covers does.
+/// over before it has synced. An [exclusive](Self::exclusive) session closes the narrower
+/// requests instead. Nothing here ever reopens a request that ended on its own, nor one a
+/// broader request replaced: the next want that nothing covers does.
 pub(crate) struct Discovery {
 	/// `None` for a session that asks about everything once, or once the origin closed.
 	interests: Option<Interests>,
+	/// Never hold two requests where one covers the other.
+	exclusive: bool,
 	runtime: Deadlines,
 	/// Decided but not yet handed to the session, in order.
 	changes: VecDeque<Change>,
@@ -73,6 +79,7 @@ impl Discovery {
 	pub fn new(origin: &origin::Producer, client: bool, runtime: Deadlines) -> Self {
 		let mut discovery = Self {
 			interests: None,
+			exclusive: false,
 			timer: Deadline::new(&runtime),
 			runtime,
 			changes: VecDeque::new(),
@@ -95,6 +102,15 @@ impl Discovery {
 			}
 		}
 		discovery
+	}
+
+	/// Never hold two requests where one covers the other: a broader request closes the
+	/// narrower ones beneath it before it opens, so the session can keep it off the wire
+	/// until they are. The covering set of wants and the granted heads never overlap, so
+	/// nothing else does.
+	pub fn exclusive(mut self) -> Self {
+		self.exclusive = true;
+		self
 	}
 
 	/// The next change to apply, registering `waiter` for the next one otherwise.
@@ -182,10 +198,32 @@ impl Discovery {
 
 		if want && !covered {
 			let snapshot = snapshot.expect("a wanted prefix comes with its snapshot");
-			let request = self.hold_lingering(&prefix);
+			let request = match self.exclusive {
+				true => self.replace_beneath(&prefix),
+				false => self.hold_lingering(&prefix),
+			};
 			self.requests.insert(prefix.clone(), request);
 			self.changes.push_back(Change::Open(prefix, snapshot));
 		}
+	}
+
+	/// A new request at `prefix` replaces every request open beneath it, wanted or
+	/// lingering, which closes first.
+	fn replace_beneath(&mut self, prefix: &PathOwned) -> Request {
+		let beneath: Vec<_> = self
+			.requests
+			.keys()
+			.filter(|other| *other != prefix && other.has_prefix(prefix))
+			.cloned()
+			.collect();
+		for other in beneath {
+			if let Some(Request { linger: Some(at), .. }) = self.requests.remove(&other) {
+				self.lingering.remove(&(at, other.clone()));
+			}
+			self.changes.push_back(Change::Close(other));
+		}
+		self.timer.set(self.lingering.first().map(|(at, _)| *at));
+		Request::default()
 	}
 
 	/// A new request at `prefix` holds the narrower ones still lingering beneath it, as it

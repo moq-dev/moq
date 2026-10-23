@@ -605,13 +605,17 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Lease for Adapt
 
 // === Control Stream Adapter ===
 
-/// Which side of the session advertised a namespace.
+/// Which request a namespace names: an advertisement, by the side that made it, or the
+/// peer's namespace subscription.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Direction {
 	/// We advertised it to the peer, on a stream from `open_bi`.
 	Outgoing,
 	/// The peer advertised it to us, on a stream handed to `accept_bi`.
 	Incoming,
+	/// The peer subscribed to it with SUBSCRIBE_NAMESPACE, on a stream handed to
+	/// `accept_bi`. Only draft-14's UNSUBSCRIBE_NAMESPACE names one.
+	Subscribed,
 }
 
 /// Namespace → request_id reverse lookup for the v14/v15 messages that name a
@@ -621,6 +625,8 @@ enum Direction {
 /// advertising the same namespace to each other. One map would let the second
 /// advertisement overwrite the first, and a terminal message would then tear
 /// down the stream travelling the other way while its real target stayed open.
+/// A subscription keeps a map of its own for the same reason: a peer may both
+/// advertise a namespace and subscribe to it.
 #[derive(Default)]
 struct Namespaces {
 	state: Mutex<NamespacesState>,
@@ -630,6 +636,7 @@ struct Namespaces {
 struct NamespacesState {
 	outgoing: HashMap<PathOwned, NamespaceRequests>,
 	incoming: HashMap<PathOwned, NamespaceRequests>,
+	subscribed: HashMap<PathOwned, NamespaceRequests>,
 
 	/// request_id → the namespace that request advertised, one entry per request
 	/// including queued duplicates, so [`Namespaces::forget`] removes only that
@@ -655,6 +662,7 @@ impl NamespacesState {
 		match direction {
 			Direction::Outgoing => &mut self.outgoing,
 			Direction::Incoming => &mut self.incoming,
+			Direction::Subscribed => &mut self.subscribed,
 		}
 	}
 }
@@ -1112,7 +1120,16 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 		}
 		// SubscribeNamespace on control stream (v14/v15 only)
 		ietf::SubscribeNamespaceLegacy::ID => match version {
-			Version::Draft14 | Version::Draft15 => {
+			// Draft-14's UNSUBSCRIBE_NAMESPACE names the prefix rather than the request.
+			Version::Draft14 => {
+				let mut r = Decoder::new(body, version.into());
+				let id = RequestId::decode(&mut r, version)?;
+				if let Ok(prefix) = crate::ietf::namespace::decode_namespace(&mut r) {
+					namespaces.register(Direction::Subscribed, prefix.into_owned(), id);
+				}
+				Ok(Route::NewRequest(id))
+			}
+			Version::Draft15 => {
 				let id = decode_request_id(body, version)?;
 				Ok(Route::NewRequest(id))
 			}
@@ -1260,7 +1277,11 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 			_ => Err(Error::UnexpectedMessage),
 		},
 		ietf::UnsubscribeNamespace::ID => match version {
-			Version::Draft14 | Version::Draft15 => {
+			Version::Draft14 => match lookup_namespace_request_id(body, version, namespaces, Direction::Subscribed)? {
+				Some(id) => Ok(Route::CloseStream(id)),
+				None => Ok(Route::Ignore),
+			},
+			Version::Draft15 => {
 				let id = decode_request_id(body, version)?;
 				Ok(Route::CloseStream(id))
 			}
@@ -1898,6 +1919,7 @@ mod tests {
 				let ours = advertise(&shared, namespace, version, RequestId(4)).await;
 				(ours, receive(&shared, namespace, version, RequestId(7)).await)
 			}
+			Direction::Subscribed => unreachable!("a mesh only advertises"),
 		};
 
 		(shared, ours, theirs)
@@ -2111,7 +2133,7 @@ mod tests {
 
 	#[test]
 	fn namespace_removal_preserves_links_in_every_order() {
-		for direction in [Direction::Incoming, Direction::Outgoing] {
+		for direction in [Direction::Incoming, Direction::Outgoing, Direction::Subscribed] {
 			for first in 0..4 {
 				for second in 0..4 {
 					for third in 0..4 {
@@ -2133,7 +2155,7 @@ mod tests {
 						}
 						let state = namespaces.state.lock().unwrap();
 						assert!(state.by_request.is_empty());
-						assert!(state.incoming.is_empty() && state.outgoing.is_empty());
+						assert!(state.incoming.is_empty() && state.outgoing.is_empty() && state.subscribed.is_empty());
 					}
 				}
 			}
