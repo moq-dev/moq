@@ -11,6 +11,11 @@ Use `video.FrameRate(numerator: 30000, denominator: 1001)` and pass `options: Pr
 The codec-only output records no longer contain track naming. Rebuild against
 the matching generated bindings and native library.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: add a `.timeout` to the future.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio` is replaced by `bool deltas` (default `true`).

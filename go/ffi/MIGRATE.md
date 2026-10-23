@@ -15,6 +15,12 @@ refused. `track` moves out of both encoder output records into
 codec-only encoders keep their input/output arguments and take no publication
 settings. Regenerate bindings and rebuild the native library together.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.Resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: pass a `ctx` with a deadline.
+Regenerate the bindings for the changed `resolve` checksum.
+
 ### Priorities are signed (#6142)
 
 `MoqTrackInfo.Priority`, `MoqSubscription.Priority`, `MoqFetchGroupOptions.Priority`, and `MoqGroupRequest.Priority()` are `int8`, higher first, and 0 is the unset midpoint.
