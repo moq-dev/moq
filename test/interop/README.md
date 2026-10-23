@@ -19,7 +19,8 @@ Every publisher also sends an Opus tone, one sine per channel, and every subscri
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
 fragmented MP4, as both an Opus and an AAC rendition, so AAC import and decode cross
-every subscriber. The browser encodes its fake microphone playing the tone from a WAV
+every subscriber (the wire-compat lanes send Opus alone; see
+[Released wire compatibility](#released-wire-compatibility)). The browser encodes its fake microphone playing the tone from a WAV
 file, and the Python, Go, and C++ clients encode it through `moq-ffi` at a 2.5 ms
 frame duration, so the matrix covers the FFI audio path with a non-default codec config.
 Each subscriber decodes every audio rendition with what it already has: moq-audio for Rust (the
@@ -301,7 +302,8 @@ default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
 publishers feed current readers, through both relay sources. Each reader is its
 own lane, `media-rust` and `media-js-native-node`. Each Rust CLI publishes the
-stereo interop tone from fragmented MP4 (released CLIs publish it as CMAF), and
+stereo interop tone from fragmented MP4 (released CLIs publish it as CMAF) as
+Opus alone, since the released `@moq/hang`'s libav fallback has no AAC decoder, and
 every reader must decode both a video frame and the tone, which `tone.py`
 judges as in the matrix: a garbled decode, a missing audio rendition, or a
 timestamp gap fails the lane, and the swapped-tone control must fail it. Rust

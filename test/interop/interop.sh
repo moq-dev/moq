@@ -351,10 +351,11 @@ publisher_tone() {
 # The wrong-tone control's publisher sends the stereo tone with its channels swapped.
 SWAPPED_TONE="660,440"
 # The audio renditions <lang> sends the tone in, by codec: the catalog codec up to its first `.`.
-# Every subscriber decodes each one, the native ones to <prefix>.<codec>.{txt,pcm}.
+# Every subscriber decodes each one, the native ones to <prefix>.<codec>.{txt,pcm}. The wire-compat
+# lanes send Opus alone: the released @moq/hang's libav fallback has no AAC decoder.
 publisher_codecs() {
     case "$1" in
-        rust) echo "opus,mp4a" ;;
+        rust) if [[ -n "${INTEROP_COMPAT_CLIENT:-}" ]]; then echo opus; else echo "opus,mp4a"; fi ;;
         *) echo opus ;;
     esac
 }
@@ -944,15 +945,27 @@ tone_source() {
     printf 'aevalsrc=%s:s=48000:c=%s' "${exprs[*]}" "$layout"
 }
 
-# The Rust CLI's input: the same picture plus <tone> as both Opus and AAC, all in fragmented MP4,
-# so its cells also cover moq-mux's fMP4 Opus and AAC import, and every subscriber's AAC decode.
+# ffmpeg_fmp4 <tone> <codecs>: the Rust CLI's input, the same picture plus <tone> in each of
+# <codecs> (see publisher_codecs), all in fragmented MP4, so its cells also cover moq-mux's fMP4
+# Opus and AAC import, and every subscriber's AAC decode.
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 ffmpeg_fmp4() {
+    local codec i=0 audio=()
+    for codec in ${2//,/ }; do
+        case "$codec" in
+            opus) audio+=(-map 1:a "-c:a:$i" libopus "-b:a:$i" 128k) ;;
+            mp4a) audio+=(-map 1:a "-c:a:$i" aac "-b:a:$i" 128k) ;;
+            *)
+                echo "error: ffmpeg_fmp4 cannot encode $codec" >&2
+                return 1
+                ;;
+        esac
+        i=$((i + 1))
+    done
     ffmpeg -hide_banner -loglevel error -re -f lavfi -i "testsrc=size=${SIZE}:rate=${FPS}" \
-        -re -f lavfi -i "$(tone_source "$1")" -map 0:v -map 1:a -map 1:a \
+        -re -f lavfi -i "$(tone_source "$1")" -map 0:v "${audio[@]}" \
         -c:v libx264 -profile:v baseline -preset ultrafast -pix_fmt yuv420p \
         -x264-params "keyint=${FPS}:min-keyint=${FPS}:scenecut=0" \
-        -c:a:0 libopus -b:a:0 128k -c:a:1 aac -b:a:1 128k \
         -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 -
 }
 
@@ -979,7 +992,7 @@ run_publisher() {
             # A finished import stays up for its max-age; `stop_publisher` allows 10 s to close.
             # The wire-compat FETCH lanes keep the video-only Annex-B input.
             if [[ "$AUDIO" -eq 1 ]]; then
-                ffmpeg_fmp4 "$tone" | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
+                ffmpeg_fmp4 "$tone" "$(publisher_codecs rust)" | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
                     --broadcast "$broadcast" import --max-age 1s fmp4
             else
                 ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
@@ -1225,7 +1238,12 @@ PYCODE
                 # first $AUDIO_MS of audio from its first decoded sample (atrim, unlike -t, ignores
                 # where video starts) lands in a WAV, and the encoder's input stats log each decoded
                 # frame's timestamp and length for tone.py. The outputs are the verdict: a CLI may
-                # exit on EPIPE with a plain error once ffmpeg has what it needs.
+                # exit on EPIPE with a plain error once ffmpeg has what it needs. The WAV cannot say
+                # which codec it came from, so this takes a publisher of one audio rendition.
+                if [[ "$codecs" == *,* ]]; then
+                    echo "error: the ffmpeg decode reads one audio rendition, not $codecs" >&2
+                    return 1
+                fi
                 (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
                     ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
                     ffmpeg -hide_banner -loglevel error -i - \
@@ -1233,9 +1251,9 @@ PYCODE
                         -map 0:a:0 -af "atrim=duration=${AUDIO_MS}ms" -c:a pcm_f32le \
                         -stats_enc_pre "$audio_out.stats" -stats_enc_pre_fmt '{tb} {pts} {samp}' -f wav "$audio_out.wav"
                 [[ -s "$HARNESS_RUN/$broadcast.raw" ]] || return
-                python3 - "$audio_out" <<'PYCODE'
+                python3 - "$audio_out" "$codecs" <<'PYCODE'
 import struct, sys
-out = sys.argv[1]
+out, codec = sys.argv[1:]
 wav = open(f"{out}.wav", "rb").read()
 assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE", "ffmpeg wrote no WAV"
 pos, rate, pcm = 12, None, None
@@ -1254,8 +1272,8 @@ for line in open(f"{out}.stats"):
     tb, pts, samples = line.split()
     num, den = (int(v) for v in tb.split("/"))
     lines.append(f"{round(int(pts) * num * 1_000_000 / den)} {samples}")
-open(f"{out}.pcm", "wb").write(pcm)
-open(f"{out}.txt", "w").write("\n".join(lines) + "\n")
+open(f"{out}.{codec}.pcm", "xb").write(pcm)
+open(f"{out}.{codec}.txt", "x").write("\n".join(lines) + "\n")
 PYCODE
                 return
             fi
