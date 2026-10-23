@@ -2886,6 +2886,11 @@ mod session_tests {
 				})
 				.unwrap();
 		}
+
+		/// Move the timestamps of later frames `by` ahead.
+		fn skip(&mut self, by: Duration) {
+			self.start -= by;
+		}
 	}
 
 	// A dial still running once the element reached NULL can outlive `main`, and aws-lc aborts the
@@ -3323,12 +3328,11 @@ mod session_tests {
 		let first = recorder.written(&mut old, 1);
 		let mut new = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut new, 2), first);
-		// Frames past the subscription's one second of delay, so the joining rendition starts on a
-		// later frame than `first` did.
-		for _ in 0..30 {
-			new.write(3);
-			std::thread::sleep(Duration::from_millis(50));
-		}
+		// Media past the subscription's one second of delay makes the groups before it stale, so
+		// the joining rendition starts on a later frame than `first` did.
+		recorder.written(&mut new, 3);
+		new.skip(Duration::from_secs(2));
+		recorder.written(&mut new, 4);
 
 		let mut again = room.catalog.modify().unwrap().video.renditions["video"].clone();
 		again.track = Some("video".into());
@@ -3340,10 +3344,10 @@ mod session_tests {
 			.insert("again".into(), again);
 		let mut second = None;
 		for _ in 0..200 {
-			new.write(4);
+			new.write(5);
 			std::thread::sleep(Duration::from_millis(50));
 			second = recorder.seen().into_iter().find_map(|seen| match seen {
-				Seen::Buffer(pad, 4) if pad != first => Some(pad),
+				Seen::Buffer(pad, 5) if pad != first => Some(pad),
 				_ => None,
 			});
 			if second.is_some() {
