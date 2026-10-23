@@ -145,11 +145,6 @@ export default class MoqWatch extends HTMLElement {
 
 	/** Headless playback pipeline behind this element. */
 	readonly player: Player;
-	/** Fatal media decode failure; select another source to clear it. */
-	get error() {
-		return this.player.error;
-	}
-
 	/** The broadcast being watched. */
 	broadcast: Broadcast;
 

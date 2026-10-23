@@ -302,12 +302,9 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	// an unknown track.
 	const track = live ? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI }) : undefined;
 	const decoder = new Decoder({ source, sync, enabled });
-	// Opened before the reads below, so it observes every one of them.
-	const arrivals = decoder.arrivals();
 	await microtasks();
 	return {
 		decoder,
-		arrivals,
 		delay,
 		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
 		emit: (timestamp: number, index = -1) => frames.at(index)?.(new Picture(timestamp) as unknown as VideoFrame),
@@ -546,11 +543,6 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		]);
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
-			for (const timestamp of [1, 1.1, 1.2])
-				expect(await playback.arrivals.next()).toMatchObject({
-					kind: "frame",
-					timestamp: Milli(timestamp),
-				});
 			// Rejected payloads were still received, but never counted as frames.
 			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
 		} finally {

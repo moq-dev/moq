@@ -97,8 +97,9 @@ function parsePreview(value: string | null): Preview.Mode {
 }
 
 function parseBackend(value: string | null): Preview.Backend {
-	if (value === null) return "auto";
-	if (value === "auto" || value === "webgpu" || value === "2d") return value;
+	const trimmed = value?.trim();
+	if (!trimmed) return "auto";
+	if (trimmed === "auto" || trimmed === "webgpu" || trimmed === "2d") return trimmed;
 	console.warn(`moq-publish: invalid backend="${value}", expected "auto", "webgpu", or "2d"`);
 	return "auto";
 }

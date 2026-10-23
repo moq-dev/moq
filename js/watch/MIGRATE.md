@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Time units come from `Clock`
+
+`Net.Time.Milli` and the other duration units moved to `@moq/clock`, which `@moq/watch` re-exports as `Clock`.
+Replace `Net.Time.Milli` with `Clock.Milli`, or import from `@moq/clock` directly.
+
+### `Broadcast.relativeBroadcast` is internal
+
+`relativeBroadcast` is gone from the published types; the decoders resolve each rendition's broadcast themselves.
+Read the media through `Video.Decoder` or `Audio.Decoder` instead.
+
 ### AAC decoding support is a `Level`
 
 `Support.Audio.aac` is `"full" | "partial" | "none"` like `opus`, instead of a boolean, since the libav fallback now decodes AAC where `AudioDecoder` is missing.

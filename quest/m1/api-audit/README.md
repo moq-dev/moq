@@ -86,7 +86,7 @@ Rejected in planning:
 - [Binding surface trim](/quest/m1/api-audit/binding-trim.md) - route input is separate from route observation, watch verbs are uniform, and unused binding objects are gone
 - [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - Python, Go, and Dart client options use the FFI's names and nesting
 - [One decode read](/quest/m1/api-audit/decode-read.md) - audio and video decoders yield the same `Frame`, `Gap`, `End` read as moq-mux containers
-- [Watch and publish trim](/quest/m1/api-audit/watch-trim.md) - the clock is re-exported, unused watch outputs are gone, and derived publish state is read-only
+- [Watch and publish trim](/quest/m1/api-audit/watch-trim.md) - `out.error` has one type across watch and publish sources, decoders, and the renderer
 - [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
 - [Stats names](/quest/m1/api-audit/stats-naming.md) - each stats track and reader has one name, and "stats" means one thing in the CLI
 - [Gateway crate API](/quest/m1/api-audit/gateway-api.md) - rtmp and srt drop their unused `run` entry points and share builder names, and rtc has one router path
