@@ -47,6 +47,12 @@ pub(crate) struct Params {
 	pps: Vec<Bytes>,
 }
 
+impl Params {
+	pub(crate) fn nals(&self) -> impl Iterator<Item = &Bytes> {
+		self.vps.iter().chain(&self.sps).chain(&self.pps)
+	}
+}
+
 #[derive(Default)]
 struct Au {
 	chunks: BytesMut,

@@ -328,6 +328,25 @@ fn splice(a: Vec<u8>, b: Vec<u8>, declare: bool) -> Clip {
 			_ => out.push(*packet),
 		}
 	}
+	if declare {
+		// Receive an AU boundary ahead of the discontinuity. The preceding
+		// unbounded video PES is now provably complete; the delimiter's own
+		// unfinished AU is discarded when the clock breaks.
+		let pid = payload(&a_packets[from]).0;
+		let cc = out
+			.iter()
+			.rev()
+			.find(|packet| payload(packet).0 == pid && packet[3] & 0x10 != 0)
+			.unwrap()[3]
+			.wrapping_add(1)
+			& 15;
+		let pes = [0, 0, 1, 0xe0, 0, 8, 0x80, 0, 0, 0, 0, 1, 9, 0xf0];
+		let mut packet = [0xff; 188];
+		packet[..6].copy_from_slice(&[0x47, 0x40 | (pid >> 8) as u8, pid as u8, 0x30 | cc, 169, 0]);
+		packet[174..].copy_from_slice(&pes);
+		out.push(packet);
+	}
+
 	let mut counters = std::collections::HashMap::new();
 	for packet in &out {
 		if packet[3] & 0x10 != 0 {

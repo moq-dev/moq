@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### TS video timestamps belong to access-unit starts
+
+`ts::Import` assembles H.264/H.265 across PES boundaries instead of flushing each PES.
+A PES PTS stamps the AU starting there once. Multiple AUs in one PES need anchored
+POC plus declared proportional timing: AVC's TS timing descriptor and fixed-rate SPS
+VUI, or HEVC's proportional-POC VUI. Configure the encoder/muxer to declare that
+clock, or supply each AU's PTS in its own PES. Missing timing now ends the import
+instead of repeating a timestamp. Packet loss discards the unconfirmed AU tail;
+codec-proven completed AUs remain published. Call `finish()` to drain a clean tail.
+Raw elementary, RTSP, and FFI timestamp modes are unchanged.
+
 ### `Source` waits for a sibling's first announcement (#6254)
 
 `Source::bind`, `resolve`, and `subscribe_track` now wait for a sibling nothing announces yet instead of failing with `Unroutable`, and keep the first instance they resolve: once it goes, they answer that ended broadcast rather than waiting for the next.

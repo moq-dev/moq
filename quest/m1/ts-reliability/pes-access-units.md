@@ -18,9 +18,12 @@ Decided 2026-10-22 by the maintainer:
 
 - Keep one elementary-stream assembler per PID across PES boundaries; a PES
   PTS stamps the access unit that starts in it.
-- A later access unit without a PTS of its own derives it from the POC and
-  the SPS's VUI timing when the SPS declares both; otherwise the stream is
-  refused. Never repeat the previous timestamp.
+- A later access unit without a PTS of its own derives it from anchored POC
+  and explicitly proportional timing. AVC needs the TS AVC timing/HRD
+  descriptor's fixed-frame-rate and temporal-POC flags plus fixed-rate SPS
+  VUI; fixed-frame-rate VUI alone constrains output order, not numeric POC
+  distance. HEVC needs its VUI proportional-POC flag. Otherwise refuse
+  outside recoverable packet damage. Never repeat the previous timestamp.
 
 Extend the T-STD harness's video profile beyond one access unit per PES.
 
