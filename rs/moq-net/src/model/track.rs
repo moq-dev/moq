@@ -16138,6 +16138,38 @@ mod test {
 		assert_eq!(asked, [(4, 6), (0, 2)]);
 	}
 
+	/// A reader forgets the misses it gave up once its window moves past them, as it forgets
+	/// what it judged, so a feed skipping every other group costs it only the gaps it can
+	/// still read.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_forgets_misses_behind_its_window() {
+		let mut producer = track_producer("test", Info::timed());
+		let _dynamic = producer.dynamic();
+		let ascending = |groups| Subscription::default().with_groups(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(0..));
+		producer.start_at(0).unwrap();
+		for sequence in (0..20).step_by(2) {
+			write_group(&producer, sequence);
+			drain_groups(&mut subscriber);
+			elapse(&producer, Duration::from_secs(2));
+			drain_groups(&mut subscriber);
+		}
+		let given_up = |subscriber: &Subscriber| -> Vec<(u64, u64)> {
+			let Inner::Plain(cursor) = &subscriber.inner else {
+				unreachable!("a plain subscription");
+			};
+			let misses = cursor.misses.as_ref().expect("the reader judged its misses");
+			misses.given_up().iter().map(|run| (run.start, run.end)).collect()
+		};
+		assert_eq!(given_up(&subscriber).len(), 9, "each skipped group is given up");
+
+		subscriber.update(ascending(15..)).unwrap();
+		write_group(&producer, 20);
+		drain_groups(&mut subscriber);
+		assert_eq!(given_up(&subscriber), [(15, 16), (17, 18)]);
+	}
+
 	/// A descending reader's miss split by a fill already in flight queues its newer fragment
 	/// first too.
 	#[test]

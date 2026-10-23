@@ -264,15 +264,19 @@ impl Misses {
 				span.insert((*run.start()).max(low)..(*run.end()).min(top) + 1);
 			}
 		}
-		// What left the span is forgotten, so it is judged afresh if it comes back.
-		let judged: RangeSet<u64> = self
-			.judged
-			.iter()
-			.flat_map(|run| {
-				span.overlapping(run)
-					.map(move |s| s.start.max(run.start)..s.end.min(run.end))
-			})
-			.collect();
+		// What left the span is forgotten, so it is judged afresh if it comes back, and a
+		// verdict behind the reader's floor stops costing it memory.
+		let clip = |set: &RangeSet<u64>| -> RangeSet<u64> {
+			set.iter()
+				.flat_map(|run| {
+					span.overlapping(run)
+						.map(move |s| s.start.max(run.start)..s.end.min(run.end))
+				})
+				.collect()
+		};
+		let judged = clip(&self.judged);
+		self.refused = clip(&self.refused);
+		self.given_up = clip(&self.given_up);
 		let mut candidates: RangeSet<u64> = span.iter().flat_map(|run| judged.gaps(run)).collect();
 		for run in std::mem::take(&mut self.deferred).iter() {
 			for s in span.overlapping(run) {
