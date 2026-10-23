@@ -1,15 +1,21 @@
 //! TLS session keys reach `SSLKEYLOGFILE` only when `quic.keylog` asks for them.
 //!
-//! Each test points the variable at its own file. nextest runs every test in its
-//! own process, so no other test reads the environment while one writes it.
+//! rustls reads the variable itself, so each test runs in a child process started
+//! with it naming a file in a fresh directory.
+
+/// Run the calling test in a child whose `SSLKEYLOGFILE` names a file in `dir`,
+/// returning whether this process is that child.
+fn isolate(dir: &tempfile::TempDir) -> bool {
+	test_env::Env::default()
+		.set("SSLKEYLOGFILE", dir.path().join("keys.log"))
+		.isolate()
+}
 
 /// Complete a raw QUIC handshake with the given key logging on each side, and
 /// return the key log lines both sides wrote.
 async fn handshake(server_keylog: bool, client_keylog: bool) -> Vec<String> {
-	let dir = tempfile::tempdir().unwrap();
-	let path = dir.path().join("keys.log");
-	// SAFETY: set before anything spawns a thread, in a process running this test alone.
-	unsafe { std::env::set_var("SSLKEYLOGFILE", &path) };
+	// The child's own temporary directory is not the one its parent named.
+	let path = std::env::var_os("SSLKEYLOGFILE").expect("isolate sets SSLKEYLOGFILE");
 
 	let mut server_quic = moq_tokio::quic::Config::default();
 	server_quic.keylog = Some(server_keylog);
@@ -49,6 +55,10 @@ async fn handshake(server_keylog: bool, client_keylog: bool) -> Vec<String> {
 
 #[tokio::test]
 async fn keys_are_not_logged_by_default() {
+	let dir = tempfile::tempdir().unwrap();
+	if !isolate(&dir) {
+		return;
+	}
 	let lines = handshake(false, false).await;
 	assert!(lines.is_empty(), "wrote session keys nobody asked for: {lines:?}");
 }
@@ -56,6 +66,10 @@ async fn keys_are_not_logged_by_default() {
 /// One side logging writes each secret once; both sides would write it twice.
 #[tokio::test]
 async fn server_keylog_logs_only_the_server() {
+	let dir = tempfile::tempdir().unwrap();
+	if !isolate(&dir) {
+		return;
+	}
 	let lines = handshake(true, false).await;
 	assert!(!lines.is_empty(), "quic.keylog wrote no session keys");
 	let unique: std::collections::HashSet<_> = lines.iter().collect();
@@ -64,6 +78,10 @@ async fn server_keylog_logs_only_the_server() {
 
 #[tokio::test]
 async fn client_keylog_logs_only_the_client() {
+	let dir = tempfile::tempdir().unwrap();
+	if !isolate(&dir) {
+		return;
+	}
 	let lines = handshake(false, true).await;
 	assert!(!lines.is_empty(), "quic.keylog wrote no session keys");
 	let unique: std::collections::HashSet<_> = lines.iter().collect();

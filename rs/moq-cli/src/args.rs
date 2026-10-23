@@ -217,8 +217,8 @@ impl Invocation {
 		Ok(())
 	}
 
-	/// Refuse listener, auth, stats and drain settings when nothing listens,
-	/// rather than silently ignoring them. Answered from the command line, like
+	/// Refuse listener, auth, and drain settings when nothing listens, rather
+	/// than silently ignoring them. Answered from the command line, like
 	/// [`Self::reject`].
 	pub fn unserved(&self) -> anyhow::Result<()> {
 		if self.moq.serves() {
@@ -227,7 +227,6 @@ impl Invocation {
 		let listens = |flag: &&&usage_rs::Flag<'_>| {
 			owns::<moq_tokio::listen::Config>(flag)
 				|| owns::<moq_relay::auth::Config>(flag)
-				|| owns::<moq_relay::stats::Config>(flag)
 				|| flag.longs.contains(&"drain-timeout")
 		};
 		if let Some(flags) = Self::names(self.given.iter().filter(listens)) {
@@ -306,10 +305,7 @@ impl Invocation {
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
 		if !self.stages.iter().all(Command::is_stageable) {
-			let listener_settings = self
-				.given
-				.iter()
-				.filter(|flag| owns::<moq_relay::stats::Config>(flag) || flag.longs.contains(&"drain-timeout"));
+			let listener_settings = self.given.iter().filter(|flag| flag.longs.contains(&"drain-timeout"));
 			if let Some(flags) = Self::names(listener_settings) {
 				anyhow::bail!("{flags} configure listening import/export stages");
 			}
@@ -317,10 +313,10 @@ impl Invocation {
 
 		for command in &self.stages {
 			if let Command::Import(import) = command
-				&& import.stats
-				&& let Some(reason) = import.source.stats_refusal()
+				&& import.report
+				&& let Some(reason) = import.source.report_refusal()
 			{
-				anyhow::bail!("--stats names a track in the catalog the import builds, but {reason}");
+				anyhow::bail!("--report names a track in the catalog the import builds, but {reason}");
 			}
 			let Command::Export(export) = command else {
 				continue;
@@ -482,10 +478,6 @@ pub struct MoqSide {
 	#[usage(flatten)]
 	pub auth: moq_relay::auth::Config,
 
-	/// Publish accepted-session stats with the relay's `--stats-*` settings.
-	#[usage(flatten)]
-	pub stats: moq_relay::stats::Config,
-
 	/// Drain accepted sessions for up to this long after SIGINT or SIGTERM; defaults to 10s.
 	#[usage(long, env = "MOQ_DRAIN_TIMEOUT", help_heading = "MoQ")]
 	pub drain_timeout: Option<crate::duration::Duration>,
@@ -509,9 +501,7 @@ impl MoqSide {
 	/// origin is its origin, whose Hop ID is random per run unless `--cluster-id`
 	/// names the node.
 	pub fn cluster(&self) -> anyhow::Result<moq_relay::cluster::Cluster> {
-		let cluster = moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))?;
-		let stats = self.stats.build(cluster.origin.clone());
-		Ok(cluster.with_stats(stats))
+		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
 	}
 
 	/// Whether `--cluster-lan` asked this process to mesh over the LAN.
@@ -764,10 +754,10 @@ pub struct Import {
 	#[usage(long = "latency-max", hide = true)]
 	latency_max: Option<crate::duration::Duration>,
 
-	/// Name a stats track in the catalog and fill it with what each track has written, about
-	/// once a second while subscribed. The stdin imports only.
+	/// Name a media report track in the catalog's `stats` section and fill it with what each
+	/// track has written, about once a second while subscribed. The stdin imports only.
 	#[usage(long)]
-	pub stats: bool,
+	pub report: bool,
 
 	/// The single source feeding the Origin.
 	#[usage(subcommand)]
@@ -836,9 +826,9 @@ impl ImportSource {
 		})
 	}
 
-	/// Why `--stats` can't report this source, or `None` when it can: the CLI builds the one
+	/// Why `--report` can't report this source, or `None` when it can: the CLI builds the one
 	/// catalog of a stdin import, whose tracks `moq-mux` counts.
-	fn stats_refusal(&self) -> Option<&'static str> {
+	fn report_refusal(&self) -> Option<&'static str> {
 		match self {
 			Self::Ts(args) if args.program == Some(TsProgram::All) => {
 				Some("`import ts --program all` builds a catalog per program")
@@ -1021,8 +1011,8 @@ pub enum ExportSink {
 	Rtc(crate::rtc::Args),
 	/// Record every broadcast announced under `--broadcast` into an object store.
 	Archive(crate::archive::ExportArgs),
-	/// Write the broadcast's stats snapshots to stdout as JSON lines.
-	Stats,
+	/// Write the broadcast's media reports (`import --report`) to stdout as JSON lines.
+	Report,
 	/// Write the feedback of every `.echo` broadcast under `--broadcast` to stdout as JSON lines.
 	Echo,
 }
@@ -1038,7 +1028,7 @@ impl ExportSink {
 			Self::Srt(_) => "srt",
 			Self::Rtc(_) => "rtc",
 			Self::Archive(_) => "archive",
-			Self::Stats => "stats",
+			Self::Report => "report",
 			Self::Echo => "echo",
 		})
 	}
@@ -1046,7 +1036,7 @@ impl ExportSink {
 	/// The report sink's name: these read no media, so they skip catalog discovery.
 	fn report(&self) -> Option<&'static str> {
 		match self {
-			Self::Stats => Some("stats"),
+			Self::Report => Some("report"),
 			Self::Echo => Some("echo"),
 			_ => None,
 		}
@@ -1475,9 +1465,9 @@ mod tests {
 		}
 	}
 
-	/// `--stats` goes where the CLI builds the one catalog it names a track in.
+	/// `--report` goes where the CLI builds the one catalog it names a track in.
 	#[test]
-	fn stats_needs_a_catalog_the_cli_builds() {
+	fn report_needs_a_catalog_the_cli_builds() {
 		let import = |source: &[&str]| {
 			let argv = [
 				"moq",
@@ -1486,7 +1476,7 @@ mod tests {
 				"--broadcast",
 				"room",
 				"import",
-				"--stats",
+				"--report",
 			];
 			Invocation::try_parse_from(argv.iter().chain(source).copied()).unwrap()
 		};
@@ -1506,7 +1496,7 @@ mod tests {
 			&["rtsp", "--connect", "rtsp://camera/stream"],
 		] {
 			let err = import(source).validate().unwrap_err().to_string();
-			assert!(err.contains("--stats"), "{source:?}: {err}");
+			assert!(err.contains("--report"), "{source:?}: {err}");
 		}
 	}
 
@@ -1517,7 +1507,7 @@ mod tests {
 		for sink in ["ts", "fmp4", "mkv", "flv", "h264", "h265"] {
 			export(&["--echo", "alice", sink]).unwrap().validate().unwrap();
 		}
-		for sink in [["hls", "--listen", "127.0.0.1:8080"].as_slice(), &["stats"], &["echo"]] {
+		for sink in [["hls", "--listen", "127.0.0.1:8080"].as_slice(), &["report"], &["echo"]] {
 			let err = export(&[["--echo", "alice"].as_slice(), sink].concat())
 				.unwrap()
 				.validate()
@@ -1546,7 +1536,7 @@ mod tests {
 		for name in ["", "a/b", ".", "..", "*", ".alice"] {
 			assert!(export(&["--echo", name, "fmp4"]).is_err(), "`{name}` must be refused");
 		}
-		for sink in ["stats", "echo"] {
+		for sink in ["report", "echo"] {
 			let err = export(&["--catalog-format", "hang", sink])
 				.unwrap()
 				.validate()
@@ -1813,16 +1803,13 @@ mod tests {
 	}
 
 	#[test]
-	fn listening_stats_and_drain_settings_parse() {
+	fn listening_drain_settings_parse() {
 		let cli = Invocation::try_parse_from([
 			"moq",
 			"--listen-tcp-bind",
 			"127.0.0.1:0",
 			"--auth-public",
 			"**",
-			"--stats-enabled",
-			"--stats-node",
-			"gateway",
 			"--drain-timeout",
 			"500ms",
 			"import",
@@ -1831,36 +1818,35 @@ mod tests {
 		.unwrap();
 		cli.validate().unwrap();
 		cli.unserved().unwrap();
-		assert!(cli.moq.stats.enabled);
-		assert_eq!(cli.moq.stats.node.as_deref(), Some("gateway"));
 		assert_eq!(cli.moq.drain_timeout.unwrap().into_std(), Duration::from_millis(500));
-		for flags in [&["--stats-enabled"][..], &["--drain-timeout", "500ms"]] {
-			let cli = Invocation::try_parse_from(
-				["moq", "--connect", "https://relay.example"]
-					.iter()
-					.chain(flags)
-					.chain(&["import", "ts"])
-					.copied(),
-			)
-			.unwrap();
-			assert!(cli.unserved().unwrap_err().to_string().contains(flags[0]));
-		}
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--connect",
+			"https://relay.example",
+			"--drain-timeout",
+			"500ms",
+			"import",
+			"ts",
+		])
+		.unwrap();
+		assert!(cli.unserved().unwrap_err().to_string().contains("--drain-timeout"));
 	}
 
 	#[cfg(feature = "play")]
 	#[test]
 	fn listening_lifecycle_settings_do_not_apply_to_playback() {
-		for flags in [&["--stats-enabled"][..], &["--drain-timeout", "500ms"]] {
-			let cli = Invocation::try_parse_from(
-				["moq", "--listen-tcp-bind", "127.0.0.1:0", "--auth-public", "**"]
-					.iter()
-					.chain(flags)
-					.chain(&["play"])
-					.copied(),
-			)
-			.unwrap();
-			assert!(cli.validate().unwrap_err().to_string().contains(flags[0]));
-		}
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-public",
+			"**",
+			"--drain-timeout",
+			"500ms",
+			"play",
+		])
+		.unwrap();
+		assert!(cli.validate().unwrap_err().to_string().contains("--drain-timeout"));
 	}
 
 	/// A listener for ordinary clients admits nobody without a decision, so it
@@ -2264,7 +2250,9 @@ mod tests {
 	#[test]
 	fn the_environment_cannot_ask_for_a_moq_side() {
 		let url = "https://relay.example.com";
-		let _env = crate::test_env::EnvGuard::set(&[("MOQ_CONNECT", url)]);
+		if !test_env::Env::default().set("MOQ_CONNECT", url).isolate() {
+			return;
+		}
 
 		let ambient = Invocation::try_parse_from(["moq", "auth", "generate"]).expect("parse");
 		assert!(
@@ -2371,7 +2359,6 @@ mod tests {
 			&["--listen-tcp-bind", "127.0.0.1:0"],
 			&["--cluster-node", "https://self.example"],
 			&["--auth-public", "**"],
-			&["--stats-enabled"],
 			&["--drain-timeout", "500ms"],
 		];
 		let dial: &[&[&str]] = &[
