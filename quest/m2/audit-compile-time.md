@@ -27,7 +27,7 @@ deduplicating and upgrading dependencies.
 What to check first:
 
 - [moq-dev/moq#6176](https://github.com/moq-dev/moq/pull/6176) (moq-net
-  compiles once) was still open at the m1 run. Once it lands, rerun
+  compiles once) landed after the m1 measurements, so rerun
   `cargo llvm-lines` on the moq-tokio lib and compare the transport rows
   below, then rerun the thin-LTO comparison against the smaller
   `libmoq_ffi.a`. On `d55407256` (m0, method in git history) thin grew the Go
@@ -99,9 +99,9 @@ instantiating the whole map.
 - Fixed: moq-mux's fragment decode read through `Cursor<&Bytes>`, a fourth
   instantiation of mp4-atom's `Any::decode_atom`; it now uses
   `Cursor<&[u8]>` like the rest (moq-mux lib 1,006,004 to 996,345 lines).
-- Waiting: the transport-generic share waits on
-  [moq-dev/moq#6176](https://github.com/moq-dev/moq/pull/6176), and the
-  thin-LTO comparison with it.
+- Deferred: [moq-dev/moq#6176](https://github.com/moq-dev/moq/pull/6176)
+  landed after these measurements, so the transport-share and thin-LTO
+  comparisons move to the m2 run.
 - Explained, no action: aws-lc-sys's build script remains the longest unit
   in clean builds; the crypto provider stays (m0). usage-rs derive output
   scales with config fields and is external code. serde visitors per

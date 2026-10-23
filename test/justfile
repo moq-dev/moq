@@ -85,6 +85,10 @@ interop-report results out *args:
 wire-compat *args:
     ./interop/compat.sh "$@"
 
+# Pinned Moxygen sections 1-7, subgroup zero, through one relay under the conformance profile.
+ietf-conformance:
+    ./ietf-conformance/run.sh
+
 # Installs each client from its public registry, inside test/smoke's own Nix
 # shell rather than this repo's toolchain. The first argument picks a smoke
 # recipe and the rest pass through, e.g. `just test smoke full` or `just test
