@@ -1886,7 +1886,11 @@ mod tests {
 			let client = tokio::spawn(drain::upgrade_while_draining(stream, true));
 			let admission = admissions.next().await.expect("a WebSocket admission");
 			assert_eq!(admission.request.transport, moq_auth::Transport::WebSocket);
-			assert_eq!(admission.request.server_name.as_deref(), expected, "WebSocket, tls={tls}");
+			assert_eq!(
+				admission.request.server_name.as_deref(),
+				expected,
+				"WebSocket, tls={tls}"
+			);
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(
 				moq_auth::Pattern::all(),
 				moq_auth::Pattern::all(),

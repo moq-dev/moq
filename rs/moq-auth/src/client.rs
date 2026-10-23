@@ -276,7 +276,10 @@ impl Post for Client {
 		let response = self.http.post(self.url.clone()).json(request).send().await?;
 		let status = response.status();
 		if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-			let refusal = reply(response).await.ok().and_then(|body| serde_json::from_slice(&body).ok());
+			let refusal = reply(response)
+				.await
+				.ok()
+				.and_then(|body| serde_json::from_slice(&body).ok());
 			return Err(Error::Refused(refusal.unwrap_or_default()));
 		}
 		if !status.is_success() {
@@ -302,7 +305,9 @@ async fn reply(mut response: reqwest::Response) -> crate::Result<Vec<u8>> {
 	let mut body = Vec::new();
 	while let Some(chunk) = response.chunk().await? {
 		if body.len() + chunk.len() > MAX_REPLY {
-			return Err(Error::Unavailable(format!("auth server reply exceeds {MAX_REPLY} bytes")));
+			return Err(Error::Unavailable(format!(
+				"auth server reply exceeds {MAX_REPLY} bytes"
+			)));
 		}
 		body.extend_from_slice(&chunk);
 	}
@@ -1032,11 +1037,17 @@ mod tests {
 			move |_| padded(200, &grant, MAX_REPLY)
 		})
 		.await;
-		client(&fits).connect(request()).await.expect("a reply at the bound admits");
+		client(&fits)
+			.connect(request())
+			.await
+			.expect("a reply at the bound admits");
 
 		let over = server(Log::default(), move |_| padded(200, &grant, MAX_REPLY + 1)).await;
 		let err = client(&over).connect(request()).await.unwrap_err();
-		assert!(matches!(&err, Error::Unavailable(message) if message.contains("exceeds")), "{err}");
+		assert!(
+			matches!(&err, Error::Unavailable(message) if message.contains("exceeds")),
+			"{err}"
+		);
 
 		let refused = server(Log::default(), move |_| padded(403, refusal, MAX_REPLY + 1)).await;
 		let Error::Refused(actual) = client(&refused).connect(request()).await.unwrap_err() else {
