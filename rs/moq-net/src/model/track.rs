@@ -5953,14 +5953,14 @@ impl Cursor {
 		let misses = self.misses.get_or_insert_with(Box::default);
 		let mut given_up = Vec::new();
 		if misses.lowest().is_some() {
-			misses.retain(from, &admitted(window, from, cap));
+			misses.retain(from, &below(window.missable(from), cap));
 		}
 		let asks = {
 			let state = self.state.read();
 			misses.judge(
 				&state,
 				(from, revision, cap),
-				|| admitted(window, from, cap),
+				|| below(window.missable(from), cap),
 				drift,
 				&mut given_up,
 				waiter,
@@ -16169,6 +16169,69 @@ mod test {
 		assert_eq!(group.sequence, 8);
 		assert_eq!(drained_drops(&mut subscriber), [(9, 10)], "only what it still read");
 		assert!(producer.state.read().drops.overlapping(&(0..8)).next().is_none());
+	}
+
+	/// A group the fill accepted but is still writing stops being wanted once its reader
+	/// narrows past it, though the fill still owes that reader later groups.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_narrowed_reader_leaves_an_accepted_group() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let ascending = |groups| replay().with_groups(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(0..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		assert_eq!(fill.next(), Some(0));
+		let _writing = fill.accept(0, None).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_ready(), "the accepted group is read");
+		assert!(fill.is_wanted(0));
+
+		subscriber.update(ascending(8..)).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert!(!fill.is_wanted(0), "nobody reads group 0 now");
+		assert!(fill.poll_unwanted(0, &waiter).is_ready());
+		assert!(fill.is_wanted(8));
+	}
+
+	/// A time start before every group held asks no fill below the oldest, since which of
+	/// those groups it reaches is unknown until they start; another range still asks for its
+	/// own misses.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_start_before_the_cache_asks_nothing_below_it() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let since = Range {
+			start: Anchor::Time(at(5)),
+			end: None,
+		};
+		let mut subscriber = producer.subscribe(
+			replay()
+				.with_ranges([Range::groups(0..2), since])
+				.with_order(Order::Ascending),
+		);
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		let mut read = drain_groups(&mut subscriber);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the group range misses its groups");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 2), "nothing below 10 for the time start");
+		while let Some(sequence) = fill.next() {
+			write_filled(fill.accept(sequence, None), sequence);
+		}
+		drop(fill);
+		read.extend(drain_groups(&mut subscriber));
+		assert_eq!(read, [10, 0, 1]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 	}
 
 	/// A wide fill refused group by group, each with its own error, holds only the answers its

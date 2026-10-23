@@ -122,7 +122,7 @@ impl Misses {
 	/// no longer owe it those groups, and one nobody waits on is withdrawn once its last join
 	/// goes.
 	pub fn retain(&mut self, from: u64, admitted: &RangeInclusiveSet<u64>) {
-		if self.wanted.is_empty() && self.filled.is_empty() {
+		if self.wanted.is_empty() && self.filled.is_empty() && self.joins.is_empty() {
 			return;
 		}
 		let outside = |sequence: u64| sequence < from || !admitted.contains(&sequence);
@@ -133,11 +133,13 @@ impl Misses {
 				kept.insert(inside);
 			}
 		}
-		let lost: RangeSet<u64> = self.wanted.iter().flat_map(|run| kept.gaps(run)).collect();
 		self.wanted = kept;
 		let wanted = &self.wanted;
 		self.joins.retain_mut(|join| {
-			join.release(&lost);
+			// By the join's whole span, not just what is unanswered: an accepted group still
+			// being written is held too.
+			let inside: RangeSet<u64> = clip(join.groups.clone(), from, admitted).into_iter().collect();
+			join.release(&inside.gaps(&join.groups).collect());
 			wanted.overlaps(&join.groups)
 		});
 	}
