@@ -7708,9 +7708,8 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 		stream: Stream<S, Version>,
 		// Boxed, as is the ingest, so the other states stay small.
 		producer: Box<crate::recv::Group>,
-		// The accepted request's demand: fetches that joined it but have not yet
-		// picked the group up from the cache.
-		joined: kio::Producer<track::FillOutcome>,
+		// The accepted group's readers that have not yet picked it up from the cache.
+		readers: track::FillReaders,
 		ingest: Box<FrameIngest>,
 	},
 	Done,
@@ -7937,9 +7936,9 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					// (a fetch with no live subscription); otherwise the group inherits the
 					// accepted info.
 					let group_info = self.info.clone();
-					// The joined fetches pick the group up from the cache only when next
-					// polled, so their demand outlives the request until then.
-					let joined = request.joined();
+					// The group's readers pick it up from the cache only when next polled,
+					// so their demand outlives the request until then.
+					let readers = request.readers();
 					let mut producer = match request.accept(group_info) {
 						Ok(producer) => producer,
 						Err(err) => {
@@ -7961,7 +7960,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					self.state = FetchRunState::Ingest {
 						stream,
 						producer: Box::new(crate::recv::Group::new(producer)),
-						joined,
+						readers,
 						ingest: Box::new(FrameIngest::new(
 							lite::Framing::new(&self.info, self.serve.subscriber.version),
 							self.serve.subscriber.version,
@@ -7973,15 +7972,16 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 				FetchRunState::Ingest {
 					stream,
 					producer,
-					joined,
+					readers,
 					ingest,
 				} => {
 					let Poll::Ready(res) = ingest.poll(&mut stream.reader, producer, waiter) else {
 						// Still short of its end, so completion always wins. Once nobody
-						// wants the rest (no joined fetch left to pick it up, no reader),
+						// wants the rest (no reader left to pick it up, none reading it),
 						// cancel upstream and abort the truncated group, never caching it
 						// as complete. The abort is atomic with a new reader arriving.
-						if joined.poll_unused(waiter).is_pending() || producer.handle().poll_unused(waiter).is_pending()
+						if readers.poll_unused(waiter).is_pending()
+							|| producer.handle().poll_unused(waiter).is_pending()
 						{
 							return Poll::Pending;
 						}

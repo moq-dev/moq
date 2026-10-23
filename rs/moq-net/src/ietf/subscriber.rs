@@ -5393,8 +5393,8 @@ where
 		// stream also owes every object up to it. A whole-group answer has no object bound.
 		let end = (end.group == sequence && !whole_group).then_some(end.object);
 
-		// Joined fetches still count until they pick the accepted group up from the cache.
-		let joined = request.joined();
+		// The group's readers still count until they pick it up from the cache.
+		let readers = request.readers();
 		// The track was accepted before any fetch was asked, so it keeps that info.
 		let track = request.track();
 		let mut producer = match request.accept(None) {
@@ -5457,7 +5457,7 @@ where
 
 			slot.poll(waiter, |state| match &**state {
 				GroupFetch::Done => Poll::Ready(()),
-				_ if joined.poll_unused(waiter).is_ready()
+				_ if readers.poll_unused(waiter).is_ready()
 					&& demand.poll_unused(waiter).is_ready()
 					&& demand.abort_unused(Error::Cancel) =>
 				{

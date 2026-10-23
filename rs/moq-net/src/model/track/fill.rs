@@ -227,6 +227,11 @@ impl Join {
 		pending.result.weak().same_channel(&self.attempt)
 	}
 
+	/// Whether the reader holds none of the fill any more.
+	pub(super) fn is_empty(&self) -> bool {
+		self.held.is_empty()
+	}
+
 	/// Stop reading `lost`, so the fill no longer owes this reader any of it.
 	pub(super) fn release(&mut self, lost: &RangeSet<u64>) {
 		let released: Vec<ops::Range<u64>> = lost
@@ -896,6 +901,34 @@ impl TrackState {
 	}
 }
 
+/// The readers of one group of a fill, outliving its [`GroupFill`].
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+// private: capability gap
+pub(crate) struct Readers {
+	fills: kio::Shared<FillState>,
+	id: u64,
+	sequence: u64,
+	outcome: kio::Producer<Outcome>,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl Readers {
+	/// Poll until no reader waits on the group. Once the fill ends its per-group demand goes
+	/// with it, so then until none of its readers is left.
+	// private: capability gap
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.outcome.poll_unused(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		self.fills
+			.poll(waiter, |fills| match fills.pending.get(&self.id) {
+				Some(pending) if !pending.wants.contains_key(&self.sequence) => Poll::Ready(()),
+				_ => Poll::Pending,
+			})
+			.map(drop)
+	}
+}
+
 /// One group of a [`Fill`], for a session serving it a group at a time. Answering it answers
 /// that group of the fill; dropping it unanswered leaves the group to the fill.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -951,10 +984,23 @@ impl GroupFill {
 		self.inner.result.is_used()
 	}
 
-	/// The fill's readers, for a session keeping a group alive while any still wait.
+	/// The fill's answers, kept open as long as this handle lives.
+	#[cfg(test)]
 	// private: capability gap
 	pub(crate) fn joined(&self) -> kio::Producer<Outcome> {
 		self.inner.result.clone()
+	}
+
+	/// The group's readers, for a session still writing it once accepted. Holds the fill's
+	/// answers open, as the group does not answer its readers until they take it.
+	// private: capability gap
+	pub(crate) fn readers(&self) -> Readers {
+		Readers {
+			fills: self.inner.fills.clone(),
+			id: self.inner.id,
+			sequence: self.sequence,
+			outcome: self.inner.result.clone(),
+		}
 	}
 
 	/// The track the fill serves.

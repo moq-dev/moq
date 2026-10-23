@@ -109,6 +109,7 @@ impl Misses {
 				return Some(slot.serving().clone());
 			}
 			self.filled.remove(&sequence);
+			self.release(sequence);
 			self.give_up(sequence..sequence + 1, given_up);
 		}
 	}
@@ -116,6 +117,18 @@ impl Misses {
 	/// Take `sequence` as handed out.
 	pub fn take_filled(&mut self, sequence: u64) {
 		self.filled.remove(&sequence);
+		self.release(sequence);
+	}
+
+	/// Stop holding a filled `sequence` in its fill: handed out, the group's own reader
+	/// keeps it wanted, or nothing does.
+	fn release(&mut self, sequence: u64) {
+		let mut lost = RangeSet::new();
+		lost.insert(sequence..sequence + 1);
+		self.joins.retain_mut(|join| {
+			join.release(&lost);
+			!join.is_empty()
+		});
 	}
 
 	/// Forget what the reader no longer reads: below `from`, or outside `admitted`. Its fills
@@ -134,13 +147,12 @@ impl Misses {
 			}
 		}
 		self.wanted = kept;
-		let wanted = &self.wanted;
 		self.joins.retain_mut(|join| {
-			// By the join's whole span, not just what is unanswered: an accepted group still
-			// being written is held too.
+			// By the join's whole span, not just what is unanswered: a filled group not
+			// taken yet is held too.
 			let inside: RangeSet<u64> = clip(join.groups.clone(), from, admitted).into_iter().collect();
 			join.release(&inside.gaps(&join.groups).collect());
-			wanted.overlaps(&join.groups)
+			!join.is_empty()
 		});
 	}
 
@@ -163,7 +175,11 @@ impl Misses {
 				.map(|run| run.start.max(join.groups.start)..run.end.min(join.groups.end))
 				.collect();
 			if wanted.is_empty() {
-				self.joins.swap_remove(i);
+				// Holding only filled groups until they are taken, it has nothing to answer.
+				match join.is_empty() {
+					true => drop(self.joins.swap_remove(i)),
+					false => i += 1,
+				}
 				continue;
 			}
 			let answers = match join.outcome().poll(waiter, |outcome| {
@@ -192,14 +208,12 @@ impl Misses {
 			};
 			// Read only after the outcome's lock is released.
 			let state = state.read();
-			// A refusal taken is no longer owed this reader. An accept stays held: its group may
-			// still be arriving, and is cancelled once nobody reads it.
+			// What is answered is no longer owed this reader, except a filled group: held until
+			// taken, so its source keeps writing it while the reader picks it up.
 			let mut taken = RangeSet::new();
 			for (groups, answer) in answers {
 				self.wanted.remove(groups.clone());
-				if answer.is_err() {
-					taken.insert(groups.clone());
-				}
+				taken.insert(groups.clone());
 				match answer {
 					// What the cache holds is filled, and the rest settled by run: a fill that
 					// ended unanswered may span far more groups than were ever cached.
@@ -208,6 +222,7 @@ impl Misses {
 						for (&sequence, slot) in state.lookup.range(groups) {
 							if !slot.is_aborted() {
 								self.filled.insert(sequence);
+								taken.remove(sequence..sequence + 1);
 							}
 						}
 					}

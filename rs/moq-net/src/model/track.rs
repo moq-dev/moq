@@ -36,7 +36,7 @@ use fill::FillState;
 
 // private: capability gap
 #[cfg_attr(not(feature = "async"), allow(unused_imports))]
-pub(crate) use fill::{GroupFill, Outcome as FillOutcome};
+pub(crate) use fill::{GroupFill, Readers as FillReaders};
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -14600,9 +14600,9 @@ mod test {
 		assert!(futures::poll!(widest.as_mut()).is_pending());
 		assert_eq!(request.frame_start(), 2, "the in-flight range is already on the wire");
 
-		// A handler may keep tracking the joined demand past the accept, as the lite
+		// A handler may keep tracking the group's readers past the accept, as the lite
 		// subscriber does, which holds the result channel open.
-		let _joined = request.joined();
+		let _readers = request.readers();
 		let mut group = request.accept(Info::timed()).unwrap();
 		// A handler numbers the frames from where it was asked to start, as `serve_fetch`
 		// does; that offset is what makes the cached group too narrow for `widest`.
@@ -16171,11 +16171,12 @@ mod test {
 		assert!(producer.state.read().drops.overlapping(&(0..8)).next().is_none());
 	}
 
-	/// A group the fill accepted but is still writing stops being wanted once its reader
-	/// narrows past it, though the fill still owes that reader later groups.
+	/// A group the fill accepted stays wanted until its reader takes it, even once the rest of
+	/// the fill is answered, so its source keeps writing it meanwhile; narrowing past it
+	/// before then leaves it.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_narrowed_reader_leaves_an_accepted_group() {
+	fn a_filled_group_is_wanted_until_taken() {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.dynamic();
 		let ascending = |groups| replay().with_groups(groups).with_order(Order::Ascending);
@@ -16187,19 +16188,48 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		assert_eq!(fill.next(), Some(0));
-		let _writing = fill.accept(0, None).unwrap();
-		assert!(
-			subscriber.poll_recv_group(&waiter).is_ready(),
-			"the accepted group is read"
-		);
-		assert!(fill.is_wanted(0));
+		let _writing = [fill.accept(0, None).unwrap(), fill.accept(1, None).unwrap()];
+		for sequence in 2..10 {
+			fill.group(sequence).reject(Error::NotFound);
+		}
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the first filled group is read");
+		};
+		assert_eq!(group.sequence, 0);
+		assert!(!fill.is_wanted(0), "taken: its reader holds the group itself");
+		assert!(fill.is_wanted(1), "filled, not taken yet");
 
 		subscriber.update(ascending(8..)).unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
-		assert!(!fill.is_wanted(0), "nobody reads group 0 now");
-		assert!(fill.poll_unwanted(0, &waiter).is_ready());
-		assert!(fill.is_wanted(8));
+		assert!(!fill.is_wanted(1), "nobody reads group 1 now");
+		assert!(fill.poll_unwanted(1, &waiter).is_ready());
+	}
+
+	/// A session still writing an accepted group stops once every reader narrowed past it,
+	/// though the fill still owes them later groups.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_accepted_groups_readers_leave_before_its_fill() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let ascending = |groups| replay().with_groups(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(0..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		let group = fill.group(0);
+		let readers = group.readers();
+		let _writing = group.accept(None).unwrap();
+		assert!(readers.poll_unused(&waiter).is_pending());
+
+		subscriber.update(ascending(1..)).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert!(readers.poll_unused(&waiter).is_ready(), "nobody reads group 0 now");
+		assert!(fill.poll_unused(&waiter).is_pending(), "the fill still owes 1 and up");
 	}
 
 	/// A time start before every group held asks no fill below the oldest, since which of
