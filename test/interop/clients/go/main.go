@@ -329,7 +329,8 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	for id, video = range catalog.Video {
 		break
 	}
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: maxDelay}})
+	delay := maxDelay
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: &delay}})
 	if err != nil {
 		return err
 	}
