@@ -3641,6 +3641,10 @@ where
 		}
 	}
 
+	pub(super) fn stats(&self) -> &crate::stats::Session {
+		self.origin.stats()
+	}
+
 	/// Open a stream for one advertisement, or `None` if the peer did not give us one in
 	/// time.
 	///
@@ -3654,7 +3658,13 @@ where
 
 		kio::wait(|waiter| {
 			if let Poll::Ready(res) = waiter.poll_future(open.as_mut()) {
-				return Poll::Ready(res.map(Some));
+				return Poll::Ready(res.map(|stream| {
+					Some(super::request_stream::with_stats(
+						stream,
+						self.origin.stats(),
+						self.version,
+					))
+				}));
 			}
 			if timeout.poll(waiter).is_ready() {
 				return Poll::Ready(Ok(None));

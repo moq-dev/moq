@@ -1,8 +1,10 @@
 // An open Track Stream is interest in the track: the subscriber keeps it open until its
 // SUBSCRIBE is answered, and the publisher keeps the track wanted until the subscriber closes it.
+
 import { describe, expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { randomHop } from "../hop.ts";
+import { Version as IetfVersion } from "../ietf/version.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -396,7 +398,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			for (;;) {
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
-				request.accept({ timescale: Timescale.MICRO, unchecked: true });
+				request.accept({ timescale: Timescale.MICRO, ietf: IetfVersion.DRAFT_22 });
 			}
 		})();
 

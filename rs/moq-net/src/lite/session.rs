@@ -111,9 +111,9 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		// before reporting the terminal error from accepting the next stream.
 		let result = setup
 			.as_mut()
-			.map(|reader| reader.poll_decode::<Setup>(&mut cx))
+			.map(|reader| reader.poll_decode_sized::<Setup>(&mut cx))
 			.unwrap_or(Poll::Pending);
-		let setup = match result {
+		let (setup, size) = match result {
 			Poll::Ready(result) => result?,
 			Poll::Pending => match accept_error {
 				Some(err) => return Poll::Ready(Err(err)),
@@ -128,6 +128,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		early.append(pending);
 		Poll::Ready(Ok(AcceptedSetup {
 			setup,
+			size,
 			early: std::mem::take(early),
 		}))
 	}
@@ -137,6 +138,8 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 pub struct AcceptedSetup<S: crate::transport::poll::Session> {
 	/// The SETUP decoded before origin binding.
 	pub setup: Setup,
+	/// The SETUP's encoded size, counted once the session's stats are known.
+	pub size: usize,
 	/// Streams with their type still buffered for the session classifier.
 	pub early: Vec<Reader<S::RecvStream, Version>>,
 }
@@ -145,6 +148,9 @@ pub struct AcceptedSetup<S: crate::transport::poll::Session> {
 pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
 	pub runtime: crate::time::Deadlines,
+
+	/// Where the session's control traffic is counted, even with neither origin set.
+	pub stats: crate::stats::Session,
 
 	/// Whether we dialed the session. Only the dialing side aborts on a publication
 	/// its grant does not cover: a server's publish origin is everything the peer
@@ -201,6 +207,7 @@ where
 {
 	let Config {
 		runtime,
+		stats,
 		client,
 		session,
 		setup_stream,
@@ -254,8 +261,12 @@ where
 	// An unset half gets an empty origin: an empty publish origin announces nothing
 	// (and answers the peer's announce-interest with an empty set), and an empty
 	// subscribe origin issues no ANNOUNCE_PLEASE.
-	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
-	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+	let publish = publish.unwrap_or_else(|| {
+		origin::Producer::empty(Hop::random())
+			.consume()
+			.with_stats(stats.clone())
+	});
+	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
 	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
@@ -327,6 +338,7 @@ where
 
 	let driver = Driver {
 		auth: Present {
+			stats: stats.clone(),
 			runtime: runtime.clone(),
 			session: session.clone(),
 			version,
@@ -340,9 +352,9 @@ where
 		local_close: Default::default(),
 		setup: version
 			.has_setup_stream()
-			.then(|| SendSetup::new(session.clone(), our_setup, version)),
-		goaway: Some(SendGoaway::new(session.clone(), goaway, version)),
-		session_stream: setup_stream,
+			.then(|| SendSetup::new(session.clone(), our_setup, version, stats.clone())),
+		goaway: Some(SendGoaway::new(session.clone(), goaway, version, stats.clone())),
+		session_stream: setup_stream.map(|stream| stream.with_stats(&stats)),
 		ending: None,
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber, early, client),
@@ -482,6 +494,7 @@ impl<S: crate::transport::poll::Session> Drop for Driver<S> {
 
 /// Opens one AUTH stream per token this side presents.
 struct Present<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
 	session: S,
 	version: Version,
@@ -507,6 +520,7 @@ impl<S: crate::transport::poll::Session> Present<S> {
 		}
 		while let Poll::Ready(Some((id, token))) = self.handle.poll_opening(waiter) {
 			self.tokens.push(PresentToken {
+				stats: self.stats.clone(),
 				runtime: self.runtime.clone(),
 				session: self.session.clone(),
 				version: self.version,
@@ -529,6 +543,7 @@ impl<S: crate::transport::poll::Session> Present<S> {
 /// One token's AUTH stream: send the token, then track the grant until either
 /// side ends it.
 struct PresentToken<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
 	session: S,
 	version: Version,
@@ -593,6 +608,7 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
 					};
+					stream = stream.with_stats(&self.stats);
 					let res = stream
 						.writer
 						.buffer(&super::ControlType::Auth)
@@ -684,6 +700,7 @@ fn poll_session_stream<S: crate::transport::poll::Session>(
 /// error is logged and the machine finishes; the peer falls back to "no
 /// capabilities" for us.
 struct SendSetup<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	version: Version,
 	state: SendSetupState<S>,
 }
@@ -704,8 +721,9 @@ enum SendSetupState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> SendSetup<S> {
-	fn new(session: S, setup: Setup, version: Version) -> Self {
+	fn new(session: S, setup: Setup, version: Version, stats: crate::stats::Session) -> Self {
 		Self {
+			stats,
 			version,
 			state: SendSetupState::Open {
 				session,
@@ -729,7 +747,7 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 				SendSetupState::Open { session, setup } => {
 					let stream = ready!(session.poll_open_uni(cx, Default::default()))
 						.map_err(crate::lite::error::from_transport)?;
-					let mut writer = Writer::new(stream, self.version);
+					let mut writer = Writer::new(stream, self.version).with_stats(&self.stats);
 					writer.buffer(&super::DataType::Setup)?;
 					writer.buffer(&**setup)?;
 					self.state = SendSetupState::Send {
@@ -754,6 +772,7 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 /// Send our single GOAWAY when the drain trigger fires. The session supervisor
 /// enforces the deadline independently, including on versions with no GOAWAY message.
 struct SendGoaway<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	version: Version,
 	goaway: crate::goaway::Protocol,
 	/// Opening a stream and watching the session close each need their own handle.
@@ -775,8 +794,9 @@ enum SendGoawayState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> SendGoaway<S> {
-	fn new(session: S, goaway: crate::goaway::Protocol, version: Version) -> Self {
+	fn new(session: S, goaway: crate::goaway::Protocol, version: Version, stats: crate::stats::Session) -> Self {
 		Self {
+			stats,
 			version,
 			goaway,
 			closed: session.clone(),
@@ -809,6 +829,7 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 							return Poll::Ready(());
 						}
 					};
+					stream = stream.with_stats(&self.stats);
 					let msg = super::Goaway {
 						uri: std::borrow::Cow::Borrowed(payload.uri.as_str()),
 					};
@@ -914,6 +935,7 @@ mod tests {
 
 		let start = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
 			session: transport,
@@ -946,6 +968,7 @@ mod tests {
 			let log = transport.log.clone();
 			let start = start(Config {
 				runtime: crate::time::sim(),
+				stats: Default::default(),
 				client: false,
 				limits: Default::default(),
 				session: transport,
@@ -1032,6 +1055,7 @@ mod tests {
 		let log = transport.log.clone();
 		let start = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
 			session: transport,
@@ -1101,6 +1125,7 @@ mod tests {
 				let log = session.log.clone();
 				let mut started = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup_stream: None,
 					publish: None,
@@ -1155,6 +1180,7 @@ mod tests {
 				let log = session.log.clone();
 				let mut started = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup_stream: None,
 					publish: None,
@@ -1187,6 +1213,7 @@ mod tests {
 	) -> SessionStart<ScriptedSession> {
 		start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			client,
 			session: transport,
 			setup_stream: None,
@@ -1254,6 +1281,7 @@ mod tests {
 					probe: super::super::ProbeLevel::Report,
 					..Default::default()
 				},
+				size: 0,
 				early: Vec::new(),
 			};
 			let mut started = raw_session(transport, version, true, Some(peer_setup));
