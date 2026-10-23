@@ -60,11 +60,16 @@ recorded but are not deterministic size or runtime-performance comparisons.
 Source `78e5b329458e5823415e0fe3f43678170b1df57b`, measured on 2026-10-23
 with pinned Rust 1.98.1 / LLVM 22.1.8 and Bun 1.4.2 in Nix. The empty claim
 `d2e15d270fb681b81ac7317329a3b13bab5aa5bb` has the same source tree.
-Each native package was built separately with default features using
+Native rows target the x86_64-unknown-linux-gnu host; WASM rows target
+wasm32-unknown-unknown. Remeasure on the same targets or start a new baseline.
+The relay, CLI, and FFI rows were each built separately with default features
+using
 `cargo bloat --locked --profile profiling -p PACKAGE --crates -n 0 --message-format json`
-(`--bin moq-relay`, `--bin moq`, or `--lib`). This inherits release's fat LTO,
-one codegen unit, and opt-level 3, retaining line tables for attribution.
-The local linker is rust-lld; shipping Linux builds use cargo-zigbuild.
+(`--bin moq-relay`, `--bin moq`, or `--lib`). The C archive row uses
+`cargo build` instead, as its Method column says. The profiling profile
+inherits release's fat LTO, one codegen unit, and opt-level 3, retaining line
+tables for attribution. The local linker is rust-lld; shipping Linux builds use
+cargo-zigbuild.
 
 | Local artifact | Bytes | Method |
 |---|---:|---|
@@ -138,8 +143,9 @@ own adoption when the synchronous and flush contracts can be met.
 
 The existing catalog quest owns generic catalog/diff serialization duplication:
 current CLI attribution includes 2,637,701 bytes `moq_mux` and 1,606,084 bytes
-`moq_json`. The FFI profile quest owns a measured size-versus-throughput choice;
-this audit does not adopt opt-level s or remove symbols. Recheck these leads
+`moq_json`. The FFI profile quest owns the open size-versus-throughput choice:
+its size reduction is measured, but its throughput cost still needs a
+benchmark. This audit does not adopt opt-level s or remove symbols. Recheck these leads
 against post-release shipping history before proposing more work. There was no
 new independently justified runtime fix in the m1 run.
 
