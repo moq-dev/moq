@@ -80,6 +80,9 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 ## Required
 
+- [Fail early on repository tooling errors](/quest/m0/ci/tooling-first.md) - cheap checks reject a broken queue entry before expensive builds
+- [Share Python check and test preparation](/quest/m0/ci/python-setup.md) - prepare editable bindings once per combined CI pass while preserving standalone commands
+- [Bound and parallelize OBS source checks](/quest/m0/ci/obs-parallel.md) - check independent translation units concurrently within the available resource budget
 - [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
 - [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
