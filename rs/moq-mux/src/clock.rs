@@ -460,7 +460,7 @@ mod tests {
 	fn wall_clock_validates_bounds() {
 		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		// The largest representable broadcast timestamp still maps.
-		let max = moq_net::Timestamp::from_micros((1u64 << 62) - 1).unwrap();
+		let max = moq_net::Timestamp::from_micros((1u64 << 61) - 1).unwrap();
 		assert!(clock.wall_clock(max).is_err(), "past the JSON-safe range is refused");
 	}
 }

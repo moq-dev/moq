@@ -51,7 +51,8 @@ Native clients dial the relay directly with the MoQ ALPN, skipping the HTTP/3
 handshake. The URL path and `?jwt=` token travel in the MoQ `SETUP` message
 instead of a `CONNECT` request, so the server sees the same thing either way.
 `moq-tokio` dials WebTransport for `https://` URLs; use `moql://` or `moqt://`
-for raw QUIC.
+for raw QUIC. A browser cannot dial raw QUIC, so `@moq/net` reaches a `moqt://`
+or `moql://` URL over WebTransport at the same host, port, and path.
 
 ## TCP and Unix sockets (local workers)
 

@@ -53,6 +53,8 @@ ranked just below deterministic TS legs, which it requires.
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
 - [OBS multitrack](/quest/m2/obs-multitrack.md) - the obs-moq output publishes OBS's native multitrack video encoders as simulcast renditions, configured like OBS multitrack and over obs-websocket
 - [MoQ in obs-studio](/quest/m2/obs-studio/README.md) - a native MoQ output and service merged into obs-studio, once its maintainers agree; the plugin carries it until then
+- [OBS source renditions](/quest/m2/obs-source-renditions.md) - the OBS source picks the best enabled decodable rendition, using a `preference` the bindings now carry, and resubscribes when a referenced publisher's epoch changes
+- [Drop unused OBS outputs](/quest/m2/obs-output-variants.md) - the plugin registers only `moq_output`, so the broken audio-only variant is gone
 - [CMake qlog option for OBS](/quest/m2/obs-qlog.md) - an OBS build can opt into qlog trace capture through moq-ffi's `qlog` feature
 - [AudioToolbox decode](/quest/m2/audio-decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
 - [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
@@ -71,16 +73,17 @@ ranked just below deterministic TS legs, which it requires.
 - [Group storage benchmark](/quest/m2/group-storage-bench.md) - numbers pick the append-only log, a ring buffer, or sorted runs for `GroupState` before either lands
 - [Perf](/quest/m2/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [Performance survey follow-ups](/quest/m2/performance-survey/README.md) - benchmark the source audit's transport, browser, media and serving risks before optimizing
+- [Nightly fuzzing keeps its corpus](/quest/m2/fuzz-corpus.md) - each fuzz target resumes from the previous Nightly's minimized corpus instead of starting from seeds
 - [Relay session bench](/quest/m2/bench-relay.md) - the same scenario through moq-relay's own connection handling
 - [Transport x version benches](/quest/m2/bench-transport-sweep.md) - the session benches sweep transports as well as versions
 - [Read-only lookup](/quest/m2/read-only-lookup.md) - a live track lookup stops waking the front and every demand watcher
 - [Ordered owed wait](/quest/m2/ordered-owed-wait.md) - an ordered reader waits within max_delay for a missing group only while the track still owes it
 - [lite-05/06 gap judgement](/quest/m2/lite-legacy-gap.md) - a resumed copy on lite-05/06 never reads a descending track's newest group as its start
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
+- [Receive pool](/quest/m2/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
 - [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - measure browser baselines, complete WASM bindings, and adopt Rust behind @moq/net before the later JS-only stage
 - [Front parking](/quest/m2/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [Route wakes](/quest/m2/route-wakes.md) - a route change wakes only the fronts it can move, so pool churn stops scaling with served paths
-- [IETF lazy discovery](/quest/m2/ietf-lazy-discovery.md) - moq-transport sessions ask for announcements only under watched prefixes, starting with UNSUBSCRIBE_NAMESPACE on d14/15
 - [Draft 14-16 session errors](/quest/m2/ietf-adapter-session-errors.md) - the moq-transport adapter keeps session-level error causes, so a terminal rejection is not redialed
 - [Keyed prefix polling](/quest/m2/keyed-prefix-polling.md) - `SubscriberDriver` polls only the prefixes a wake concerns, if a bench shows the slope
 - [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive track recovery over metadata-only subscriptions
@@ -99,11 +102,14 @@ ranked just below deterministic TS legs, which it requires.
 - [The catalog publish path compiles once](/quest/m2/catalog-publish-once.md) - the catalog producer and its JSON diff codegen in `moq-mux` instead of once per importer crate, about 1 MiB of the CLI
 - [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md) - returned payloads reach the host without a copy, if the payload numbers justify it
 - [Namespaced external types](/quest/m2/uniffi-namespaces.md) - the UniFFI fork lets two crates export the same type name, reopening the per-layer crate split
+- [crates.io trusts the workflow](/quest/m2/crates-trusted-publisher.md) - maintainer action: every published crate gets a trusted publisher for `release-rs.yml`
+- [Rust releases publish through OIDC](/quest/m2/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [Go module proxy](/quest/m2/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
 - [Go per-platform lib modules](/quest/m2/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
 - [Go first dial failure](/quest/m2/go-first-dial-failure.md) - Go reports why a first dial fails, and the Kotlin and Dart docs name `client.failure()` correctly
 - [Dart on iOS](/quest/m2/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture
+- [Browser publishing paths under test](/quest/m2/publish-firefox.md) - the media harness publishes from Firefox too, covering the worker capture and video-element fallback Chromium never takes
 - [Bindings in the interop matrix](/quest/m2/interop-bindings.md) - Kotlin, Swift, and Dart publish and subscribe against every other interop client
 - [WebGPU HDR](/quest/m2/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [MSF duplicate init](/quest/m2/msf-duplicate-init.md) - an MSF catalog refuses a repeated `initDataList` id instead of resolving it last-wins
@@ -113,6 +119,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the audited moq-net decoders have targets that assert an invariant, and the unsafe peer input reaches runs under Miri
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [qmux receive leases](/quest/m2/qmux-receive-lease.md) - WebSocket, TCP, and WebRTC sessions bound incomplete messages by their receive window, at a per-session cost the maintainer picks
+- [One stuck check per packet](/quest/m2/quic-stuck-scan.md) - a RESET_STREAM storm into a shrunk window costs one stream scan per packet, after #5878
 - [QUIC caps](/quest/m2/rate-quic.md) - paced MAX_DATA credit in and a capped pacer out hold a QUIC session to its token's bitrate
 - [WebSocket caps](/quest/m2/rate-websocket.md) - paced reads and writes over bounded socket buffers hold WebSocket to the same caps
 - [Publishers learn their cap](/quest/m2/rate-grant.md) - the AUTH grant carries the caps and publishers clamp their encoder to them
@@ -140,6 +147,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
 - [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) - every backend implements moq-net's `transport::poll` traits, and the generic `web_transport_trait` adapters are deleted
+- [QUIC driver poll waits](/quest/m2/driver-poll.md) - the `moq_tokio::quic::driver` stream, datagram, close, and accept waits get leak-free `poll_*` forms, named like moq-uring's driver; `handshake_confirmed` and `Endpoint::wait_idle` stay async
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
@@ -153,6 +161,8 @@ ranked just below deterministic TS legs, which it requires.
 - [Browser media report](/quest/m2/rs2ts-browser-report.md) - compare Rust-backed and handwritten @moq/net through full media workloads, supplementing the pre-adoption comparisons
 - [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - a `tls://` listener can identify a cluster peer by its client certificate
 - [Link quality](/quest/m2/link-quality.md) - a radio link's cost follows its measured quality without flapping routes
+- [io_uring handle lifecycle](/quest/m2/uring-lifecycle.md) - handles fail once their worker is gone, close on last drop like tokio, and surface a close behind unread data
+- [io_uring socket teardown](/quest/m2/uring-socket-teardown.md) - socket churn never exhausts buffer-group ids, and a failed receive cancel surfaces
 - [Ring drain GOAWAY](/quest/m2/uring-ring-drain.md) - the ring sends moq-transport 17+ sessions their drain GOAWAY
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
 - [io_uring thread check](/quest/m2/uring-transport-machines.md) - the relay fanout bench measures `moq_uring::transport::Local`'s per-call thread check after the transport is boxed, removing it only if it shows
@@ -210,8 +220,10 @@ ranked just below deterministic TS legs, which it requires.
 - [Askama uses a maintained TOML parser](/quest/m2/askama-maintained.md) - wait for a stable parser migration, then remove the generator dependency exception
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
 - [Dead code and API surface audit](/quest/m2/audit-dead-code.md) - repeat the removal audit before the next major release
+- [Typecheck with bun check](/quest/m2/bun-check.md) - workspace packages typecheck through bun once nixpkgs ships bun 1.4.4
 - [Test coverage audit](/quest/m2/audit-test-coverage.md) - repeat the coverage audit against the m1 baselines after the next release ships
 - [Documentation audit](/quest/m2/audit-docs.md) - repeat the docs audit after the release ships, against the m1 baselines
 - [Test cost audit](/quest/m2/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are fixed, deleted, or planned once the release ships
 
 - [Quest tree audit](/quest/m2/audit-quests.md) - repeat the whole-tree audit after the release ships, against the m1 baseline
+- [CI workflow audit](/quest/m2/audit-ci.md) - repeat the per-workflow and per-job review after the release ships, against the m1 baselines

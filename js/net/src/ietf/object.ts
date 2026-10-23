@@ -80,27 +80,7 @@ export async function encodeObjectExtensions(
 		return new Uint8Array();
 	}
 
-	const chunks: Uint8Array[] = [];
-	const writer = new Writer(
-		new WritableStream<Uint8Array>({
-			write(chunk) {
-				chunks.push(new Uint8Array(chunk));
-			},
-		}),
-		version,
-	);
-	await encodeObjectTime(writer, timestamp, timescale, version);
-	writer.close();
-	await writer.closed;
-
-	const size = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
-	const result = new Uint8Array(size);
-	let offset = 0;
-	for (const chunk of chunks) {
-		result.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return result;
+	return Writer.collect(version, (w) => encodeObjectTime(w, timestamp, timescale, version));
 }
 
 /** Decode the Timestamp an object's Properties block carries, consuming the whole block. */
