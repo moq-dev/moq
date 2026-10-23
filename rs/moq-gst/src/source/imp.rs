@@ -1156,9 +1156,12 @@ impl Follower {
 						let next = plan.borrow_and_update().clone();
 						listening = !next.closed;
 						following = listening || sibling;
-						self.apply(next.renditions);
-						if listening {
-							self.play();
+						let fresh = self.apply(next.renditions);
+						// The final plan starts what it adds or reshapes, but restarts no reader
+						// that already ended.
+						match listening {
+							true => self.play(),
+							false => self.play_where(|rendition| fresh.contains(rendition)),
 						}
 					}
 					// No rendition reads this path any more.
@@ -1199,10 +1202,11 @@ impl Follower {
 		while self.readers.join_next().await.is_some() {}
 	}
 
-	/// Bring the renditions in line with `wanted`, stopping each one reshaped or gone. [`Self::play`]
-	/// starts the rest.
-	fn apply(&mut self, mut wanted: HashMap<Rendition, Shape>) {
+	/// Bring the renditions in line with `wanted`, stopping each one reshaped or gone, and return
+	/// those added or reshaped. [`Self::play`] starts the rest.
+	fn apply(&mut self, mut wanted: HashMap<Rendition, Shape>) -> HashSet<Rendition> {
 		let pads = &self.playback.pads;
+		let mut fresh = HashSet::new();
 		self.renditions
 			.retain(|rendition, entry| match wanted.remove(rendition) {
 				Some(shape) => {
@@ -1210,6 +1214,7 @@ impl Follower {
 					if shape != entry.shape {
 						entry.shape = shape;
 						entry.reader = None;
+						fresh.insert(rendition.clone());
 					}
 					entry.draining = false;
 					true
@@ -1226,6 +1231,7 @@ impl Follower {
 				}
 			});
 		for (rendition, shape) in wanted {
+			fresh.insert(rendition.clone());
 			self.renditions.insert(
 				rendition,
 				Entry {
@@ -1236,6 +1242,7 @@ impl Follower {
 			);
 		}
 		self.forget();
+		fresh
 	}
 
 	/// Read `instance`, which took over from any before it.
@@ -1319,6 +1326,11 @@ impl Follower {
 
 	/// Start a reader on the current instance for each rendition without one that it may serve.
 	fn play(&mut self) {
+		self.play_where(|_| true);
+	}
+
+	/// [`Self::play`] for the renditions `only` accepts.
+	fn play_where(&mut self, only: impl Fn(&Rendition) -> bool) {
 		let Some(current) = &self.current else {
 			return;
 		};
@@ -1326,7 +1338,7 @@ impl Follower {
 			return;
 		};
 		for (rendition, entry) in &mut self.renditions {
-			if entry.reader.is_none() && serves(instance, entry.shape.epoch.as_ref()) {
+			if entry.reader.is_none() && only(rendition) && serves(instance, entry.shape.epoch.as_ref()) {
 				self.next_id += 1;
 				let (cancel, cancelled) = watch::channel(false);
 				let live = Arc::new(AtomicBool::new(false));
@@ -2410,6 +2422,37 @@ mod session_tests {
 		let session = run(consumer, weak, shutdown_rx);
 
 		await_pad(&element, "video_");
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
+	}
+
+	/// A rendition the catalog's final snapshot adds plays, even when the snapshot and the close
+	/// reach the follower together.
+	#[test]
+	fn a_closing_catalog_plays_the_rendition_its_final_snapshot_adds() {
+		let _pad_ids = pad_ids();
+		let element = element();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let _video = broadcast.create_track("video", None).unwrap();
+		let _audio = broadcast.create_track("audio", None).unwrap();
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		}
+
+		let (shutdown, shutdown_rx) = watch::channel(false);
+		let session = run(broadcast.consume(), element.downgrade(), shutdown_rx);
+		await_pad(&element, "video_");
+
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+		catalog.finish().unwrap();
+		await_pad(&element, "audio_");
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();
