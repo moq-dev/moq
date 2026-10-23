@@ -23,6 +23,8 @@ pub(super) fn decode_size(r: &mut Decoder<'_>, max: usize) -> Result<usize, Deco
 ///
 /// Lite messages use a varint size prefix.
 pub trait Message: Sized + std::fmt::Debug {
+	/// The control metric class, or none for media headers.
+	const CONTROL: Option<crate::stats::Control> = None;
 	/// The largest body this receiver accepts for this message.
 	const MAX_SIZE: usize = MAX_MESSAGE_SIZE;
 
@@ -43,7 +45,9 @@ impl<T: Message> Encode<Version> for T {
 			w.discard(prefix);
 			return Err(EncodeError::TooLarge);
 		}
-		w.fill(prefix)
+		w.fill(prefix)?;
+		w.control = T::CONTROL;
+		Ok(())
 	}
 }
 
@@ -63,6 +67,9 @@ impl<T: Message> Decode<Version> for T {
 		match &result {
 			Ok(msg) => tracing::trace!(?msg, "decoded"),
 			Err(err) => tracing::warn!(%err, "decode failed"),
+		}
+		if result.is_ok() {
+			r.control = T::CONTROL;
 		}
 		result
 	}

@@ -13,8 +13,7 @@ keywords = ["srt", "moq", "media", "live", "mpeg-ts"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 # Pure library: the SRT <-> MoQ gateway. The CLI lives in `moq-cli` (the `srt`
-# subcommand); a relay can also embed `moq_srt::run` / `Server` against its own
-# origin.
+# subcommand); a relay can also embed `moq_srt::Server` against its own origin.
 [dependencies]
 bytes = { workspace = true }
 futures = { workspace = true }
