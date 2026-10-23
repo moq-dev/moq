@@ -640,10 +640,14 @@ export class Decoder {
 		return true;
 	}
 
-	// A buffered subscription holds its head until it spans the floor, which playback waits for anyway.
+	// A buffered subscription holds its head until it runs past the floor, which playback waits for
+	// anyway, or spans the window the relay serves.
 	#order(): Order<FrameRead> {
 		if (!this.sync.out.buffered.peek()) return new Order(undefined);
-		return new Order({ floor: Micro.fromMilli(this.sync.out.delay.peek()) });
+		return new Order({
+			floor: Micro.fromMilli(this.sync.out.delay.peek()),
+			maxDelay: Micro.fromMilli(this.#subscribeMaxDelay.peek()),
+		});
 	}
 
 	// Reorders groups and frames up to the shared max delay. A rename is not a cold start: the path's
