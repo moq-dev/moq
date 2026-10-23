@@ -4,8 +4,8 @@ use moq_net::stats::{Role, Tier};
 use moq_net::{AsPath, broadcast};
 
 use crate::{
-	Encoding, GroupFrame, PrefixFrame, PresenceFrame, Result, SessionsFrame, TotalsFrame, TrafficFrame,
-	group_track, prefix_track, presence_track, sessions_track, totals_track, traffic_track,
+	Encoding, GroupFrame, PrefixFrame, PresenceFrame, Result, SessionsFrame, TotalsFrame, TrafficFrame, group_track,
+	prefix_track, presence_track, sessions_track, totals_track, traffic_track,
 };
 
 /// Configuration for a [`Consumer`]. Construct with [`Config::new`]
