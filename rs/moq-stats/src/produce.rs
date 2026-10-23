@@ -1900,8 +1900,7 @@ mod tests {
 		let interval = Duration::from_secs(1);
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("t.json.z", compressed_info()).unwrap();
-		let mut snapshot =
-			Snapshot::<Frame<u64>>::new(track.clone(), moq_json::snapshot::Config::default(), interval);
+		let mut snapshot = Snapshot::<Frame<u64>>::new(track.clone(), moq_json::snapshot::Config::default(), interval);
 		let frame = |n| Frame {
 			entries: vec![(PathOwned::from("a"), n)],
 		};
