@@ -1726,7 +1726,15 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					};
 				}
 				PrefixState::ReadInit { stream, run } => {
-					let msg = ready!(stream.reader.poll_decode::<lite::AnnounceInit>(&mut cx))?;
+					// Each suffix takes an announce slot, so a set past what is left of the
+					// budget is refused before it is decoded.
+					let version = self.subscriber.version;
+					let budget = run.announced.slots.available();
+					let msg = ready!(
+						stream
+							.reader
+							.poll_decode_with(&mut cx, |r| lite::AnnounceInit::decode_within(r, version, budget))
+					)?;
 					for suffix in msg.suffixes {
 						let path = self.prefix.join(&suffix);
 						// Lite01/02 don't carry hop information; the broadcast starts with
