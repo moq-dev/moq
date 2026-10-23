@@ -1,6 +1,6 @@
 # moq C++ package
 
-C++17 bindings for [rs/moq-ffi](../../rs/moq-ffi): the sources `uniffi-bindgen-cpp` generates, plus `include/moq/moq.hpp`, a thin layer that adds the executor, shutdown, and `co_await` glue. `uniffi.toml` strips moq-ffi's `Moq` type prefix, so `MoqClient` is generated as `moq::Client`. Nothing here re-implements a method; a shape problem is fixed in moq-ffi, where every binding benefits. User docs: [doc/lib/cpp](../../doc/lib/cpp/index.md).
+C++17 bindings for [rs/moq-ffi](../../rs/moq-ffi): the sources `uniffi-bindgen-cpp` generates, plus `include/moq/moq.hpp`, a thin layer that adds the executor, shutdown, and `co_await` glue. `uniffi.toml` strips moq-ffi's `Moq` type prefix and `moq_` function prefix, so `MoqClient` is generated as `moq::Client` and `moq_mint_epoch` as `moq::mint_epoch`. Nothing here re-implements a method; a shape problem is fixed in moq-ffi, where every binding benefits. User docs: [doc/lib/cpp](../../doc/lib/cpp/index.md).
 
 ## Layout
 
@@ -14,12 +14,12 @@ C++17 bindings for [rs/moq-ffi](../../rs/moq-ffi): the sources `uniffi-bindgen-c
 
 `just cpp check` builds and installs the package, builds the probe against it with `find_package` at C++17 and C++23 and, outside Windows, with pkg-config at C++17, runs each, and compiles the doc samples (also outside Windows). It also builds the probe at C++23 over bindings at C++17, to prove the two link. The probe builds with exceptions and RTTI disabled. `just cpp check --archive FILE` runs the same consumer checks against an extracted release archive, without rebuilding the package. Release dry runs check every archive this way.
 
-The generator is a fork, [kixelated/uniffi-bindgen-cpp](https://github.com/kixelated/uniffi-bindgen-cpp). It carries LiveKit's async support ported to uniffi 0.32, plus the `error_style = "expected"` and `strip_type_prefix` options `uniffi.toml` turns on. The dev shell provides it. Without Nix:
+The generator is a fork, [kixelated/uniffi-bindgen-cpp](https://github.com/kixelated/uniffi-bindgen-cpp). It carries LiveKit's async support ported to uniffi 0.32, plus the `error_style = "expected"`, `strip_type_prefix`, and `strip_function_prefix` options `uniffi.toml` turns on. The dev shell provides it. Without Nix:
 
 ```bash
 cargo install uniffi-bindgen-cpp --locked \
     --git https://github.com/kixelated/uniffi-bindgen-cpp \
-    --tag v0.11.0-kixelated.5+v0.32.2
+    --tag v0.11.0-kixelated.6+v0.32.2
 ```
 
 `flake.nix` pins the same tag and lists every other place that names it.

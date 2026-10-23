@@ -8,7 +8,6 @@
 #include <functional>
 #include <string>
 #include <utility>
-#include <vector>
 
 #if defined(__cpp_impl_coroutine) && __has_include(<coroutine>)
 #include <coroutine>
@@ -63,38 +62,11 @@ inline void shutdown() noexcept {
     ::uniffi::shutdown_async_dispatcher();
 }
 
-// Sets the log level: "error", "warn", "info", "debug", "trace", or "". Errors if called twice.
-inline expected<void> log_level(const std::string &level) {
-    return moq_log_level(level);
-}
-
-// The settings a default ClientConfig dials with, for a settings UI to show. Knobs whose default
-// depends on the backend (GSO, path MTU discovery, congestion control, system roots) stay unset.
-inline ClientConfig client_defaults() {
-    return moq_client_defaults();
-}
-
-// The protocol versions offered by default, most preferred first, as ClientConfig::versions spells them.
-inline std::vector<std::string> versions() {
-    return moq_versions();
-}
-
-// Whether this build can write qlog traces for QuicConfig::qlog.
-inline bool qlog_supported() {
-    return moq_qlog_supported();
-}
-
-// Mints a fresh publisher epoch, ordered newest last. Announce one per run in Route::epoch,
-// so viewers see a restart as a new broadcast instead of a stalled one.
-inline std::string mint_epoch() {
-    return moq_mint_epoch();
-}
-
 // The wall-clock time an epoch encodes, to the millisecond. Errors unless it is a UUIDv7.
 // Millisecond ticks hold every 48-bit UUIDv7 time, where system_clock's nanoseconds overflow in 2262.
 inline expected<std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>>
 epoch_time(const std::string &epoch) {
-    auto ms = moq_epoch_time_ms(epoch);
+    auto ms = epoch_time_ms(epoch);
     if (!ms) {
         return unexpected(std::move(ms).error());
     }
