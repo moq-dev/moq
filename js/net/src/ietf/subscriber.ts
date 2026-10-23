@@ -2,7 +2,16 @@ import { race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
-import { closeError, controlTimeout, error, ProtocolViolation, reason, StreamError, sessionCause } from "../error.ts";
+import {
+	closeError,
+	controlTimeout,
+	error,
+	ProtocolViolation,
+	reason,
+	StreamCode,
+	StreamError,
+	sessionCause,
+} from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -893,9 +902,10 @@ export class Subscriber {
 			let held = msg.cluster;
 			const done = version === Version.DRAFT_16 || legacy;
 			for (;;) {
-				// Drafts 17+ withdraw by resetting the request, which ends it like a FIN.
+				// Drafts 17+ withdraw by resetting the request with CANCELLED, which ends it like a
+				// FIN. Any other reset is a failure.
 				const ended = await stream.reader.done().catch((err: unknown) => {
-					if (!done && err instanceof StreamError) return true;
+					if (!done && err instanceof StreamError && err.code === StreamCode.Cancel) return true;
 					throw err;
 				});
 				if (ended) break;
