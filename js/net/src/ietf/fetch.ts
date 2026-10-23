@@ -1,6 +1,6 @@
 import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
-import type { Reader, Writer } from "../stream.ts";
+import { type Reader, Writer } from "../stream.ts";
 import { hasRangeFilters, isDraft20 } from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
@@ -22,9 +22,14 @@ export class FetchHeader {
 		this.requestId = requestId;
 	}
 
-	/** Write the header, which the stream type must already precede. */
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		await w.u62(this.requestId);
+	/** Write the stream type and the header in one write, like a subgroup header. */
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		await w.write(
+			await Writer.collect(version, async (h) => {
+				await h.u53(FetchHeader.type);
+				await h.u62(this.requestId);
+			}),
+		);
 	}
 
 	/** Read the header, with the stream type already consumed. */

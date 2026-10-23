@@ -16,6 +16,9 @@ mod common;
 
 use common::{Pair, Setup, ThreadCpu, payload};
 
+/// How often a `holes` case loses a client datagram: often enough that most windows hold a hole.
+const LOSE_EVERY: u64 = 16;
+
 /// Opens `streams` streams across `priorities` levels, writes `writes` writes of `size` bytes to
 /// each, and drives until the server has read them all.
 fn send(pair: &mut Pair, streams: usize, priorities: usize, writes: usize, size: usize) {
@@ -65,9 +68,39 @@ fn bench_priority(c: &mut Criterion<ThreadCpu>) {
     group.finish();
 }
 
+/// Writes `total` bytes to one stream in `size`-byte writes, exchanging packets whenever the
+/// client's send window is full, and drives until the server has read them all.
+fn send_windowed(pair: &mut Pair, total: usize, size: usize) {
+    let data = payload(size);
+    let target = pair.server.received.finished + 1;
+    let id = pair
+        .client()
+        .streams()
+        .open(Dir::Uni, Default::default())
+        .expect("stream limit");
+    let mut written = 0;
+    while written < total {
+        if pair.client().send_stream(id).write_limit() == 0 {
+            pair.drive_until(|pair| pair.client().send_stream(id).write_limit() > 0);
+        }
+        // A write the window cuts short resumes mid-chunk, so every chunk boundary stays put.
+        let start = written % size;
+        written += pair.client().send_stream(id).write(&data[start..]).unwrap();
+    }
+    pair.client().send_stream(id).finish().unwrap();
+    pair.drive_until(|pair| pair.server.received.finished >= target);
+    pair.settle();
+}
+
 /// Bytes per write against stream count, writing a fixed 64 KiB to each stream.
+///
+/// The `window` cases instead write a fixed 256 KiB to one stream through a send window, so the
+/// data retained until acknowledged grows with the window while the total stays put. The
+/// `holes` cases, at the largest window only to keep the nightly short, lose a datagram now and
+/// then, so a hole keeps everything after it retained and its retransmission reads old offsets.
 fn bench_write_size(c: &mut Criterion<ThreadCpu>) {
     const BYTES: usize = 64 << 10;
+    const TOTAL: usize = 256 << 10;
     let mut group = c.benchmark_group("send_write_size");
     for streams in [1, 64] {
         for size in [64, 1024, 16384] {
@@ -80,6 +113,33 @@ fn bench_write_size(c: &mut Criterion<ThreadCpu>) {
                     b.iter(|| send(pair, streams, 1, BYTES / size, size))
                 },
             );
+        }
+    }
+    let windows = [
+        (16 << 10, false),
+        (64 << 10, false),
+        (TOTAL, false),
+        (TOTAL, true),
+    ];
+    for (window, holes) in windows {
+        for size in [64, 1024, 16384] {
+            let mut pair = None;
+            let name = match holes {
+                false => format!("window_{}k", window >> 10),
+                true => format!("window_{}k_holes", window >> 10),
+            };
+            group.throughput(Throughput::Bytes(TOTAL as u64));
+            group.bench_function(BenchmarkId::new(name, format!("bytes_{size}")), |b| {
+                let pair = pair.get_or_insert_with(|| {
+                    let mut pair = Pair::new(Setup {
+                        client_send_window: window as u64,
+                        ..Setup::default()
+                    });
+                    pair.lose_every = holes.then_some(LOSE_EVERY);
+                    pair
+                });
+                b.iter(|| send_windowed(pair, TOTAL, size))
+            });
         }
     }
     group.finish();

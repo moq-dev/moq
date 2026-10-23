@@ -443,12 +443,12 @@ async def test_route_update_observes_restart():
     """A route metadata update arrives as an AnnounceEventUpdate.
 
     The publisher re-prices its announced route; the subscriber observes the new
-    hop chain in place (no retraction), and unannouncing retracts it.
+    cost in place (no retraction), and unannouncing retracts it.
     """
     origin = moq.OriginProducer()
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], publish=origin) as server:
         announce = origin.create_broadcast("routed")
-        announce.announce(moq.Route(hops=[42]))
+        announce.announce(moq.AnnounceRoute(cost=1))
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -461,15 +461,14 @@ async def test_route_update_observes_restart():
                 first = await next_route(announced)
                 assert isinstance(first, moq.AnnounceEventStart)
                 assert first.announce.prefix == "routed"
-                assert 42 in first.announce.route.hops
-                assert 77 not in first.announce.route.hops
+                first_cost = first.announce.route.cost
 
-                # The publisher advertises a longer chain: an in-place update.
-                announce.announce(moq.Route(hops=[42, 77]))
+                # The publisher raises its cost: an in-place update.
+                announce.announce(moq.AnnounceRoute(cost=5))
                 updated = await next_route(announced)
                 assert isinstance(updated, moq.AnnounceEventUpdate)
                 assert updated.announce.prefix == "routed"
-                assert 77 in updated.announce.route.hops
+                assert updated.announce.route.cost == first_cost + 4
 
                 # Unannouncing retracts the route.
                 announce.unannounce()
