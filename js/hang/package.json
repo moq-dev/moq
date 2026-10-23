@@ -24,7 +24,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
+		"@kixelated/libavjs-webcodecs-polyfill": "^0.5.6",
 		"@moq/clock": "workspace:^",
 		"@moq/json": "workspace:^",
 		"@moq/libav": "workspace:^",

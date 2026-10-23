@@ -114,7 +114,7 @@ test("the polyfill deinterleaves every channel to f32-planar", async () => {
 		}
 
 		const tail = new Float32Array(2);
-		audio.copyTo(tail, { planeIndex: 1, format: "f32-planar", frameOffset: 1 });
+		audio.copyTo(tail, { planeIndex: 1, format: "f32-planar", frameOffset: 1, frameCount: 2 });
 		expect(Array.from(tail)).toEqual([1, 2].map((frame) => data[frame * 2 + 1] / scale));
 		// A view smaller than the copy is refused, even with room in the buffer behind it.
 		const backing = new Float32Array(8);
