@@ -61,11 +61,15 @@ Each `sink_%u` request pad is one track. Pad properties: `track` names it
 [LOC](/concept/standard#loc) instead of the legacy hang container,
 `encoder=true` marks it as fed by a local encoder, and
 `track-status`/`track-error` report its lifecycle. Element properties:
-`url`, `broadcast`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
+`url`, `broadcast`, `connect-version`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, `linger`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. The sink reconnects for as long as the pipeline runs and only
 reports `failed` on an answer redialing can't change, such as a rejected token.
+Both elements accept the same connection properties. `connect-version` is a
+comma-separated list, matching the CLI's repeatable `--connect-version`;
+unknown versions fail startup. QUIC durations are milliseconds, with zero
+disabling the local idle timeout or keep-alive.
 Each run from `READY` publishes under a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
 or moq-transport draft 17 and later, viewers switch to a restarted pipeline at once instead of stalling on the old

@@ -1568,3 +1568,18 @@ fn connect_failure_retries_without_erroring() {
 	assert_eq!(send_bitrate, 0);
 	assert_eq!(recv_bitrate, 0);
 }
+
+// Both element factories expose the same connection syntax, and refuse unknown versions
+// before opening a transport rather than silently offering the defaults.
+#[test]
+fn parsed_connection_properties_are_shared_and_validated() {
+	init();
+	for factory in ["moqsink", "moqsrc"] {
+		let element = gst::parse::launch(&format!("{factory} url=https://127.0.0.1:1 broadcast=test connect-version=moq-lite-99 quic-idle-timeout=15000 quic-keep-alive=0"))
+			.expect("parse the shared property syntax");
+		assert_eq!(element.property::<u64>("quic-idle-timeout"), 15_000);
+		assert_eq!(element.property::<u64>("quic-keep-alive"), 0);
+		assert_eq!(element.set_state(gst::State::Paused), Err(gst::StateChangeError));
+		element.set_state(gst::State::Null).unwrap();
+	}
+}

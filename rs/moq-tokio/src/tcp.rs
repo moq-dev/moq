@@ -30,7 +30,7 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {
-	/// Bind a qmux TCP listener on this address, plaintext unless [`Self::tls`].
+	/// Bind a qmux TCP listener on this address, plaintext unless `--listen-tcp-tls` is set.
 	#[usage(
 		long = "listen-tcp-bind",
 		name = "listen-tcp-bind",

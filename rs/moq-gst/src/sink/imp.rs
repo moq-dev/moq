@@ -11,6 +11,7 @@
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
+#[cfg(test)]
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -31,21 +32,15 @@ use super::session::{
 struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
-	tls_disable_verify: bool,
-	quic_idle_timeout: Option<Duration>,
-	quic_keep_alive: Option<Duration>,
-	quic_keylog: bool,
+	connection: crate::connection::Settings,
 	linger: bool,
-}
-
-fn duration_millis(duration: Duration) -> u64 {
-	duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 impl TryFrom<Settings> for ResolvedSettings {
 	type Error = anyhow::Error;
 
 	fn try_from(value: Settings) -> Result<Self> {
+		let (connect, quic) = value.connection.resolve()?;
 		Ok(Self {
 			url: url::Url::parse(value.url.as_ref().context("url property is required")?)?,
 			broadcast: value
@@ -53,10 +48,8 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.as_ref()
 				.context("broadcast property is required")?
 				.clone(),
-			tls_disable_verify: value.tls_disable_verify,
-			quic_idle_timeout: value.quic_idle_timeout,
-			quic_keep_alive: value.quic_keep_alive,
-			quic_keylog: value.quic_keylog,
+			connect,
+			quic,
 		})
 	}
 }
@@ -177,7 +170,6 @@ impl ObjectSubclass for MoqSink {
 impl ObjectImpl for MoqSink {
 	fn properties() -> &'static [glib::ParamSpec] {
 		static PROPS: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
-			let quic = moq_tokio::quic::Resolved::default();
 			vec![
 				glib::ParamSpecString::builder("url")
 					.nick("Destination URL")
@@ -187,32 +179,6 @@ impl ObjectImpl for MoqSink {
 				glib::ParamSpecString::builder("broadcast")
 					.nick("Broadcast")
 					.blurb("The name of the broadcast to publish")
-					.mutable_ready()
-					.build(),
-				glib::ParamSpecBoolean::builder("tls-disable-verify")
-					.nick("TLS disable verify")
-					.blurb("Disable TLS verification")
-					.default_value(false)
-					.mutable_ready()
-					.build(),
-				glib::ParamSpecUInt64::builder("quic-idle-timeout")
-					.nick("QUIC idle timeout")
-					.blurb("QUIC idle timeout in milliseconds, 0 to disable locally")
-					.default_value(duration_millis(quic.idle_timeout))
-					.mutable_ready()
-					.build(),
-				glib::ParamSpecUInt64::builder("quic-keep-alive")
-					.nick("QUIC keep-alive")
-					.blurb("QUIC keep-alive interval in milliseconds, 0 to disable; iroh still pings at least every 5s")
-					.default_value(quic.keep_alive.map(duration_millis).unwrap_or(0))
-					.mutable_ready()
-					.build(),
-				glib::ParamSpecBoolean::builder("quic-keylog")
-					.nick("QUIC TLS key log")
-					.blurb(
-						"Danger: write TLS session secrets to the file SSLKEYLOGFILE names; without it the start fails",
-					)
-					.default_value(false)
 					.mutable_ready()
 					.build(),
 				glib::ParamSpecBoolean::builder("linger")
@@ -258,6 +224,9 @@ impl ObjectImpl for MoqSink {
 					.read_only()
 					.build(),
 			]
+			.into_iter()
+			.chain(crate::connection::properties())
+			.collect()
 		});
 		PROPS.as_ref()
 	}
@@ -285,12 +254,8 @@ impl ObjectImpl for MoqSink {
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
-			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
-			"quic-idle-timeout" => settings.quic_idle_timeout = Some(Duration::from_millis(value.get().unwrap())),
-			"quic-keep-alive" => settings.quic_keep_alive = Some(Duration::from_millis(value.get().unwrap())),
-			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
 			"linger" => settings.linger = value.get().unwrap(),
-			_ => unreachable!(),
+			name => settings.connection.set(name, value),
 		}
 	}
 
@@ -321,22 +286,8 @@ impl ObjectImpl for MoqSink {
 				match name {
 					"url" => settings.url.to_value(),
 					"broadcast" => settings.broadcast.to_value(),
-					"tls-disable-verify" => settings.tls_disable_verify.to_value(),
-					"quic-idle-timeout" => duration_millis(
-						settings
-							.quic_idle_timeout
-							.unwrap_or_else(|| moq_tokio::quic::Resolved::default().idle_timeout),
-					)
-					.to_value(),
-					"quic-keep-alive" => settings
-						.quic_keep_alive
-						.or_else(|| moq_tokio::quic::Resolved::default().keep_alive)
-						.map(duration_millis)
-						.unwrap_or(0)
-						.to_value(),
-					"quic-keylog" => settings.quic_keylog.to_value(),
 					"linger" => settings.linger.to_value(),
-					_ => unreachable!(),
+					name => settings.connection.get(name),
 				}
 			}
 		}
@@ -2273,7 +2224,7 @@ mod tests {
 
 	#[test]
 	fn duration_millis_saturates() {
-		assert_eq!(duration_millis(Duration::MAX), u64::MAX);
+		assert_eq!(crate::connection::duration_millis(Duration::MAX), u64::MAX);
 	}
 
 	#[test]

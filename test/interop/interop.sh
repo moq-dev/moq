@@ -1059,7 +1059,7 @@ run_gst_audio() {
     deadline=$((SECONDS + ${TIMEOUT%.*}))
     [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 1))
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
+        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
         s.video_0 ! filesink location="$out.video" buffer-mode=2 \
         s.audio_0 ! decodebin ! audioconvert ! audio/x-raw,format=F32LE,layout=interleaved \
         ! identity name=frames silent=false ! filesink location="$out.pcm" buffer-mode=2 >"$out.gst" 2>&1 &
@@ -1214,7 +1214,7 @@ PYCODE
                 trap '' PIPE
                 GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
                     timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
-                    moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
+                    moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
                     s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
                     2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true
             )
@@ -1428,7 +1428,7 @@ run_finish_gst() {
     deadline=$((SECONDS + ${TIMEOUT%.*} * 2))
     [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 2))
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
+        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
         s.video_0 ! identity name=frames silent=false ! fakesink >"$out" 2>&1 &
     pid=$!
     count=0

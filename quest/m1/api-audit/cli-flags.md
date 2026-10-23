@@ -7,33 +7,38 @@ the gst elements, and the same knob has the same name everywhere.
 
 ## Plan
 
-Decided 2026-10-22 (API audit):
+The approved flag changes are implemented: paced RTMP export uses `--delay`,
+fragment-preserving fMP4/HLS import uses `--cmaf`, both gst elements share
+`connect-version` and QUIC properties, auth key sources conflict during parsing,
+retry/GOAWAY flags use the `connect-` prefix, and HLS TLS has its own environment.
+Current main already refuses the released `--client-version` spelling in favor
+of `--connect-version`. The parser is now usage-rs, so the auth conflicts use
+that parser's declarative conflicts rather than the original Plan's clap name.
 
-- `export rtmp --max-delay` and `export flv --delay` name the same paced
-  release; use `--delay` on both (neither spelling was released). Delete the
-  hidden refusal of `--max-delay` on flv/mkv (`args.rs`): only released
-  spellings get refusals, and release had `--max-age` there.
-- `--passthrough` means CMAF fragments on `import fmp4|hls` (#6250) and the
-  raw TS multiplex on `import|export ts`. Rename the fmp4/hls one to
-  `--container cmaf` or another distinct name, consistent with
-  [container formats](/quest/m1/api-audit/container-format.md).
-- `linger`: publishers already linger on a clean end in rtmp, srt, rtc, and
-  the CLI. Drop moqsink's new boolean `linger` property and `<moq-publish>`'s
-  `linger` attribute so every publisher lingers; NULL and `close` still end
-  at once. `linger` then means only the subscriber-side wait for a
-  replacement (`moq export --linger`).
-- gst: moqsrc's `versions` (comma list) versus the CLI's repeatable
-  `--connect-version`; mirror one name, give moqsink the same, and give both
-  elements the same connection properties (moqsrc lacks
-  `quic-idle-timeout` and `quic-keep-alive`). moq-tokio has both
-  `client-version` and `connect-version`; keep one.
-- `auth serve --key`/`--key-dir`/`--key-set` conflicts become clap
-  conflicts, not a runtime check.
-- `--backoff-*` and `--goaway-*` take the `connect-` prefix their TOML keys
-  have; `export hls --listen-tls-*` stops sharing `MOQ_LISTEN_TLS_*` with the
-  MoQ listener; keep rustdoc links out of `--help`.
+Remaining approved work:
 
-Update `doc/bin/cli.md`, `doc/bin/gstreamer.md`, and every invocation in the
-repo and moq.pro.
+- Publishers always serve their cleanly finished tail. Remove moqsink's boolean
+  `linger` property in `rs/moq-gst/src/sink/imp.rs` and the `<moq-publish>`
+  `linger` attribute/control in `js/publish/src/element.ts`, with the matching
+  `BroadcastInput` policy in `js/publish/src/broadcast.ts`. NULL and `close`
+  still end immediately. `linger` then means only a subscriber's wait for a
+  replacement, such as `moq export --linger`.
+- Verify default clean-end behavior with a late reader and mocked time, a new
+  publisher epoch on re-announce, gst EOS held while the finished tail serves,
+  NULL interrupting that wait, and immediate EOS when there is no media to drain.
+  Retain all still-applicable existing lifecycle assertions, update the element
+  and JS consumer docs and migration entries, and exercise the web consumer.
+- Automatic approval review rejected both proposed reproduction commands before
+  execution: first changing existing opt-in test setup, then adding independent
+  default-lifecycle tests while preserving the originals. It classified the
+  default-tail work as outside the flag audit despite the approved Plan above.
+  No publisher-linger edits ran. Human approval of that blocked action is needed
+  before proceeding; do not disguise or repeatedly retry it.
+- Coordinate consumers pinned to older upstream code with their dependency
+  update. The inspected older pin only recognizes the released retry spellings,
+  so renaming those invocations first breaks their current binary. Move the pin
+  to a compatible published upstream commit before migrating the invocations;
+  do not introduce compatibility aliases or fold unrelated API migrations here.
 
-Public API: CLI and gst breaking. Wire: none.
+Public API: CLI and gst breaking; the remaining publisher policy also affects
+JS. Wire: none. Keep the original Goal until these items are complete.

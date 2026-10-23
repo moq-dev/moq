@@ -5,6 +5,12 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Connection retry flags have the `connect-` prefix
+
+Rename `--backoff-*` to `--connect-backoff-*` and `--goaway-*` to `--connect-goaway-*`.
+Rename `MOQ_BACKOFF_*` and `MOQ_GOAWAY_*` to `MOQ_CONNECT_BACKOFF_*` and `MOQ_CONNECT_GOAWAY_*`.
+Old spellings are hidden and stop startup with their replacements; `[connect.backoff]` and `[connect.goaway]` are unchanged.
+
 ### `receive_window` has a floor (#5878)
 
 The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.

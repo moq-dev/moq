@@ -849,7 +849,7 @@ fn spawn_export(
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
-				let max_delay = rtmp.max_delay.into_std();
+				let max_delay = rtmp.delay.into_std();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
 					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_delay));
