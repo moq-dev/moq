@@ -278,7 +278,7 @@ export class Reader {
 	#buffer: Uint8Array;
 	#chunks: Uint8Array[] = [];
 	#chunked = 0; // bytes across #chunks
-	#stream?: ReadableStream<Uint8Array>; // if undefined, the buffer is consumed then EOF
+	// Undefined once the stream finishes, or without a stream: the buffer is consumed then EOF.
 	#reader?: ReadableStreamDefaultReader<Uint8Array>;
 	#closed?: Promise<void>;
 	// The decode that last ran short and how far, so a retry can wait for those bytes.
@@ -294,8 +294,7 @@ export class Reader {
 		version: StreamVersion,
 	) {
 		this.#buffer = buffer ?? new Uint8Array();
-		this.#stream = stream;
-		this.#reader = this.#stream?.getReader();
+		this.#reader = stream?.getReader();
 		this.version = version;
 	}
 
