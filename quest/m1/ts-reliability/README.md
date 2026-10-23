@@ -62,7 +62,7 @@ refused means an error or a counted drop.
 
 | Mechanism | Contract | Owner |
 |:--|:--|:--|
-| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks`; DTS normalized from decode order. Today one access unit per PES | [access units](/quest/m1/ts-reliability/pes-access-units.md), [decode order](/quest/m1/ts-reliability/decode-order.md) |
+| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks`; AUs cross PES boundaries with source or explicitly proportional POC-derived PTS; DTS normalized from decode order | [decode order](/quest/m1/ts-reliability/decode-order.md) |
 | AAC ADTS (0x0F), MP2, AC-3, E-AC-3, Opus (0x06 + `Opus`) | Preserved: audio rendition; Opus export labels mono and stereo, and 3 to 8 channels with an OpusHead in the Vorbis layout. Other mapping families (such as 255) refuse | landed |
 | Private and unknown PES types, LATM (0x11), metadata (0x15) | Preserved: `pesPacket`, PTS and DTS rebased | landed |
 | PES clock fields (ESCR, pack header, TREF), PES scrambling | Refused, counted in `refused` | landed |

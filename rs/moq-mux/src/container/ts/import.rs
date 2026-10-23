@@ -8526,12 +8526,15 @@ pub(super) mod test {
 			}
 			assert_eq!(pictures.len(), 12);
 			let mut baseline = None;
-			for layout in ["single", "combined", "split"] {
+			for layout in ["single", "combined", "split", "no-clock"] {
+				if layout == "no-clock" && kind != StreamType::H264 {
+					continue;
+				}
 				let mut mux = fixture::Mux::default();
 				mux.pat(&[(1, 0x1000)]);
 				// fixed_frame_rate_flag + temporal_poc_flag. The AVC VUI alone
 				// deliberately does not authorize multiplying POC by a clock tick.
-				let descriptor = if kind == StreamType::H264 {
+				let descriptor = if kind == StreamType::H264 && layout != "no-clock" {
 					&[0x2a, 2, 0x7e, 0xdf][..]
 				} else {
 					&[]
@@ -8563,7 +8566,7 @@ pub(super) mod test {
 							push(&mut mux, Some(*pts), data);
 						}
 					}
-					"combined" => {
+					"combined" | "no-clock" => {
 						for chunk in pictures.chunks(4) {
 							let data: Vec<u8> = chunk.iter().flat_map(|(_, data)| data.iter().copied()).collect();
 							push(&mut mux, Some(chunk[0].0), &data);
@@ -8579,6 +8582,17 @@ pub(super) mod test {
 						}
 					}
 					_ => unreachable!(),
+				}
+				if layout == "no-clock" {
+					// Valid AVC with fixed-rate SPS VUI still needs the TS
+					// temporal-POC promise before numeric POC can mean time.
+					let err = match import_all(&mux.out) {
+						Ok(_) => panic!("SPS fixed frame rate alone cannot timestamp a later AU"),
+						Err(err) => err,
+					};
+					assert!(!err.is::<super::Damaged>());
+					assert!(err.to_string().contains("proportional"), "{err:#}");
+					continue;
 				}
 				let (consumer, catalog, _import) =
 					import_all(&mux.out).unwrap_or_else(|err| panic!("{kind:?} {layout}: {err:#}"));
