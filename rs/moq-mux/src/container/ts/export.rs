@@ -2350,6 +2350,7 @@ where
 		for (name, track) in self.tracks.iter_mut() {
 			track.release(name, &mut self.jitter, true)?;
 			track.finished = true;
+			track.withdrawn = false;
 			self.stale.insert(name.clone());
 		}
 		Ok(())
@@ -2698,6 +2699,8 @@ where
 				track.release(holder, &mut self.jitter, true)?;
 				track.finished = true;
 			}
+			// Replaced, so a return of its name no longer reads it on.
+			track.withdrawn = false;
 			// A same-instance return that put another track on its PID replaced it.
 			self.stale.remove(holder.as_str());
 			return Ok(false);
