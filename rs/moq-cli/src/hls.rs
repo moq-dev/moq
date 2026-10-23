@@ -264,6 +264,7 @@ mod test {
 		let (_dir, mut importer, mut listed, mut producer) = joined_then_ended(0).await.unwrap();
 		let result = run_announced(&mut importer, &mut listed, &mut producer, moq_net::Epoch::mint()).await;
 		assert!(producer.route().is_none(), "an empty playlist was announced");
-		result.expect_err("an empty playlist imports nothing");
+		let err = result.expect_err("an empty playlist imports nothing");
+		assert!(format!("{err:#}").contains("before it declared a track"), "{err:#}");
 	}
 }

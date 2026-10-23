@@ -425,7 +425,7 @@ impl TrackState {
 
 		// First step: starting mid-window is normal, so no warning.
 		let Some(next) = self.next_sequence else {
-			return join(playlist);
+			return self.join(playlist);
 		};
 
 		if next > last_playlist_seq {
@@ -437,7 +437,7 @@ impl TrackState {
 				"imported ahead of playlist (upstream sequence reset?), re-anchoring near the live edge"
 			);
 			self.reanchor();
-			return join(playlist);
+			return self.join(playlist);
 		}
 
 		if next < playlist_seq {
@@ -452,6 +452,24 @@ impl TrackState {
 		}
 
 		Ok((next - playlist_seq) as usize)
+	}
+
+	/// Where this track joins `playlist` when it has no position in it yet.
+	///
+	/// A live window is joined near its edge (see [`ANCHOR_SEGMENTS`]). An empty one has no edge,
+	/// so its first segment is where the track resumes, even when it arrives together with
+	/// `EXT-X-ENDLIST`. A playlist that has already ended is refused: joining its tail would end
+	/// the import cleanly having published an arbitrary suffix of the recording, and replaying it
+	/// whole would burst it out faster than real time, withholding the catalog until the last
+	/// segment downloads.
+	fn join(&mut self, playlist: &MediaPlaylist) -> Result<usize> {
+		if playlist.end_list {
+			return Err(Error::PlaylistEnded);
+		}
+		if playlist.segments.is_empty() {
+			self.next_sequence = Some(playlist.media_sequence);
+		}
+		Ok(playlist.segments.len().saturating_sub(ANCHOR_SEGMENTS))
 	}
 
 	/// Forget where we were, so the next pushed segment re-bases the MoQ group sequence.
@@ -905,19 +923,6 @@ impl Import {
 	}
 }
 
-/// Where a rendition joins `playlist` when it has no position in it yet.
-///
-/// A live window is joined near its edge (see [`ANCHOR_SEGMENTS`]). A playlist that has already
-/// ended is refused: joining its tail would end the import cleanly having published an arbitrary
-/// suffix of the recording, and replaying it whole would burst it out faster than real time,
-/// withholding the catalog until the last segment downloads.
-fn join(playlist: &MediaPlaylist) -> Result<usize> {
-	if playlist.end_list {
-		return Err(Error::PlaylistEnded);
-	}
-	Ok(playlist.segments.len().saturating_sub(ANCHOR_SEGMENTS))
-}
-
 /// Compute the delay before the next import step should run.
 fn refresh_delay(target_duration: Option<u64>, wrote_segments: usize) -> Duration {
 	let base = target_duration
@@ -1286,6 +1291,15 @@ mod tests {
 			let err = track.anchor(&window(100, len, true)).unwrap_err();
 			assert!(matches!(err, Error::PlaylistEnded), "{err:?}");
 		}
+	}
+
+	/// Joining an empty live window is still a join: the segment it gains next is imported, even
+	/// when the playlist ends in the same reload.
+	#[test]
+	fn an_empty_live_join_resumes_at_its_first_segment() {
+		let mut track = track_state();
+		assert_eq!(track.anchor(&window(100, 0, false)).unwrap(), 0);
+		assert_eq!(track.anchor(&window(100, 1, true)).unwrap(), 0);
 	}
 
 	#[test]
