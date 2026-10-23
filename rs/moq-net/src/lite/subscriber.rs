@@ -6962,6 +6962,8 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	/// through the producer's aggregate (including the resume floor after a source
 	/// change).
 	serving: track::Producer,
+	/// Follows `serving`'s largest, to announce a wanted group once one lands below it.
+	edge: track::Consumer,
 	largest: Option<u64>,
 	/// Watches `serving`'s subscribers, to release the copy once nobody reads it.
 	demand: track::Demand,
@@ -7181,6 +7183,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 		let serving = request.accept(info);
 		serving.received();
 		Self {
+			edge: serving.consume(),
 			largest: None,
 			demand: serving.demand(),
 			serving,
@@ -7305,7 +7308,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// past our largest, and every later update restates it. Joins asking for
 					// the same group coalesce into that one update.
 					if serve.subscriber.version.has_refresh() {
-						if let Poll::Ready(Some(largest)) = self.serving.poll_largest(waiter) {
+						while let Poll::Ready(Some(largest)) = self.edge.poll_largest(waiter) {
 							self.largest = Some(largest.group);
 						}
 						let _ = self.demand.poll_wanted_changed(waiter);
