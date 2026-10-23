@@ -253,6 +253,10 @@ pub(super) fn peer_grant(
 /// says it negotiated the extension. Never returns: a session without it just fails
 /// the tokens as unsupported.
 #[cfg(feature = "async")]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "the presenting task owns each piece of session state it drives"
+)]
 pub(super) async fn run_present<S>(
 	runtime: crate::time::Deadlines,
 	session: S,
@@ -261,6 +265,7 @@ pub(super) async fn run_present<S>(
 	peer_setup: peer::PeerSetup,
 	version: Version,
 	going_away: crate::goaway::GoingAway,
+	stats: crate::stats::Session,
 ) -> Result<(), Error>
 where
 	S: crate::transport::poll::Boxable,
@@ -285,6 +290,7 @@ where
 		.await?
 	{
 		let present = Present {
+			stats: stats.clone(),
 			runtime: runtime.clone(),
 			session: session.clone(),
 			control: control.clone(),
@@ -320,6 +326,7 @@ where
 /// One token's Auth request.
 #[cfg(feature = "async")]
 struct Present<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
 	session: S,
 	control: Control,
@@ -341,6 +348,7 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 			Ok(stream) => stream,
 			Err(err) => return err,
 		};
+		stream = super::request_stream::with_stats(stream, &self.stats, self.version);
 		if let Err(err) = stream.writer.encode_message(&Auth { request_id, token }).await {
 			return err;
 		}

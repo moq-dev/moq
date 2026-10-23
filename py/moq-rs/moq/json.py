@@ -56,8 +56,8 @@ class SnapshotProducer:
     Each :meth:`update` supersedes the last; a late joiner only sees the newest value, encoded as
     snapshots and merge-patch deltas automatically. Set ``deltas=False`` to publish every update
     as a full snapshot in its own group. With deltas on, give the track a ``refresh`` ratio so a
-    joiner that would download more than that many snapshots' worth of deltas gets the value
-    restated in a fresh group. Set ``compression`` to DEFLATE-compress each group; the consumer
+    join after more than that many snapshots' worth of deltas asks for the value restated in a
+    fresh group. Set ``compression`` to DEFLATE-compress each group; the consumer
     must pass the same flag. A name the catalog already carries is refused.
     """
 

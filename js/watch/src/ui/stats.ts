@@ -142,7 +142,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		if (aStats) aPrev = { bytes: aStats.bytesReceived, when: now };
 
 		// A non-zero count means the target is below what arrivals actually need.
-		const aUnder = watch.audio.out.underruns.peek();
+		const aUnder = aStats?.underruns ?? 0;
 		aUnderruns.textContent = watch.audio.out.stalled.peek() ? `${aUnder} (buffering)` : `${aUnder}`;
 
 		// Network. "Estimated max" is the congestion controller / PROBE estimate;

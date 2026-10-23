@@ -756,7 +756,7 @@ export class Subscriber {
 					// The peer's broadcast ended, whether or not its retraction has arrived: end the
 					// listing and let go of what it listed. FIN our half too, so the stream is done.
 					stream.writer.close();
-					lister.finish();
+					lister.end();
 					return;
 				}
 				if (event.kind === "added") {
@@ -766,11 +766,12 @@ export class Subscriber {
 					}
 					listed.add(event.name);
 					lister.add(event.name, this.#toModelInfo(event.info));
-				} else if (event.kind === "removed") {
+				} else if (event.kind === "removed" || event.kind === "finished") {
 					if (!listed.delete(event.name))
 						throw new ProtocolViolation(`unlisted track removed: ${event.name}`);
 					this.#announces.release();
-					lister.remove(event.name);
+					if (event.kind === "finished") lister.finish(event.name);
+					else lister.remove(event.name);
 				} else {
 					// This hop synced its readers when the listing began; only the order matters here.
 					if (synced) throw new ProtocolViolation("duplicate SYNCED");
@@ -1782,8 +1783,8 @@ export class Subscriber {
 	}
 
 	/**
-	 * Ends every subscribed track: cleanly for a deliberate close, or with `err` when the
-	 * session died, since those tracks were cut off rather than ended.
+	 * Ends every subscribed track: cleanly without declaring an end for a deliberate close, or
+	 * with `err` when the session died, since those tracks were cut off rather than ended.
 	 */
 	close(err?: Error) {
 		// A fetch or setup exchange cut off by the session is incomplete even on a deliberate
@@ -1792,7 +1793,8 @@ export class Subscriber {
 		this.#closed.abort(cut);
 
 		for (const { track } of this.#subscribes.values()) {
-			track.close(err);
+			if (err) track.close(err);
+			else hooks.releaseTrack(track);
 		}
 
 		this.#subscribes.clear();

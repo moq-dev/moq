@@ -84,7 +84,7 @@ inline bool qlog_supported() {
     return moq_qlog_supported();
 }
 
-// Mints a fresh publisher epoch, ordered newest last. Announce one per run in Route::epoch,
+// Mints a fresh publisher epoch, ordered newest last. Announce one per run in AnnounceRoute::epoch,
 // so viewers see a restart as a new broadcast instead of a stalled one.
 inline std::string mint_epoch() {
     return moq_mint_epoch();
