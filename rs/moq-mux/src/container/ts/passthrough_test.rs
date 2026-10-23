@@ -749,7 +749,10 @@ async fn a_clock_that_stops_is_refused_once_a_group_would_overflow() {
 		Err(err) => err,
 	};
 	assert!(
-		matches!(err.downcast_ref::<crate::Error>(), Some(crate::Error::PcrGap { pid: 0x100, .. })),
+		matches!(
+			err.downcast_ref::<crate::Error>(),
+			Some(crate::Error::PcrGap { pid: 0x100, .. })
+		),
 		"{err:?}"
 	);
 }
