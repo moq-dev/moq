@@ -21,10 +21,6 @@ use moq_tokio::moq_net;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
-#[expect(
-	clippy::large_enum_variant,
-	reason = "a test double, so the variant sizes don't matter"
-)]
 enum Answer {
 	Grant(Grant),
 	Status(u16),
