@@ -21,41 +21,61 @@ for `moqsrc`, through `moq_mux::Source::follow`;
 `moq play` resolves a reference once with `Source::resolve`, which waits for
 a sibling's first announcement and keeps it.
 
-Readers with their own follow loop today move onto `announced_broadcast`:
+[Draft PR6526](https://github.com/moq-dev/moq/pull/6526) checkpoints the settled
+reader work: `moq play` and `moqsrc` use `moq_mux::follow::Instances` and build
+`Source` from the returned broadcast, without requesting the path again.
+Playback resets presentation per instance; GStreamer keeps its pads and cancels
+the superseded run. A selected handler's explicit refusal is terminal. The
+player's refusal test fails on the base implementation, which silently waits.
+Epoch, epochless, same-instance route updates and route handoff tests preserve
+the existing behavior. A GStreamer test replaces an unanswered broadcast
+request and confirms a late stale answer cannot take the replacement's pads.
 
-- moqsrc: `follow_path` in `rs/moq-gst/src/source/imp.rs` drains
-  `origin.follow` and re-requests on each start, holding its pads across
-  instances.
-- `moq play`: `play` in `rs/moq-cli/src/play/media.rs` does the same and
-  resets its presentation per instance.
-- The TS stitching follower (`rs/moq-mux/src/container/ts/follower.rs`), if
-  `announced_broadcast` fits how it marks a break.
+`transcode` uses the same shared operation to retire the ladder on replacement
+and announce a fresh derivative instance with its own epoch, including an
+epochless source restart. A clean source end waits for another instance. Its
+pending-catalog tests exercise replacement before any encoder is required.
+The flags and public Rust APIs are unchanged; CLI behavior migration is in
+`rs/moq-cli/MIGRATE.md`.
 
-A finite read such as `fetch` stays on the one instance it resolved.
+Remaining work and decisions:
 
-The stdout exports (`subscribe`) already follow only where the output marks
-the break: TS with `--stitch`. Every other format, and TS without `--stitch`,
-stays pinned to the old instance until its route dies and its tracks error,
-never concatenating independent instances into one stream. Keep that rule.
-Audit and fix the rest the same way:
+- Keep finite `fetch`, non-TS stdout exports, and TS without `--stitch` pinned
+  to the instance they resolved. Never concatenate independent instances where
+  the output cannot mark a break. These readers are unchanged in the checkpoint.
+- TS listen and push SRT both use the existing TS `Follower`, and its stitch
+  tests already cover a live overlapping replacement. Moving that follower to
+  `Instances` still needs the shared operation to expose unresolved changes:
+  `Follower::with_linger` bounds announcement/restart through broadcast
+  resolution and the first catalog, but `Instances::Start` is yielded only
+  after resolution. Starting the timer there silently extends the public bound.
+  The follower also distinguishes a refused return while lingering from a
+  refused live switch. Recommend retaining these policies and designing the
+  smallest shared unresolved-change operation, rather than shifting the timer,
+  adding another reader-local follow loop, or changing refusal behavior.
+- HLS has a reproduced overlapping-replacement defect: while the old publisher
+  remains live, `Server::broadcaster` returns its cached `Arc<Broadcaster>` before
+  resolving the new winner. A paused-time test that publishes two epochs at one
+  path fails its assertion that a new request reads a different broadcaster.
+  Merely swapping cached broadcasters resets source-derived
+  `EXT-X-MEDIA-SEQUENCE` on the stable playlist URI, and does not establish
+  discontinuity continuity or safe segment identity. No cache/playlist policy
+  change is included. Settle a continuous playlist with monotonic media and
+  discontinuity sequences versus distinct run-specific playlist URIs. Recommend
+  explicit run identity before switching HTTP readers; coordinate the identity
+  decision with [HLS discontinuity](/quest/m1/release-audit/hls-discontinuity.md)
+  and its [draft PR6426](https://github.com/moq-dev/moq/pull/6426), without
+  importing that independent implementation. Failed timelines must retain their
+  existing no-store 5xx behavior.
+- FLV/RTMP and WebRTC listen and push outputs still need an explicit restart
+  contract. Recommend remaining pinned until the old route dies unless their
+  native output protocol can mark a new independent timeline. Decide whether
+  to reconnect the output or mark the break in-session, then implement and test
+  real publisher replacement without silently resetting timestamps or codec
+  state. This checkpoint does not choose that contract.
 
-- `export hls`: `moq-hls`'s server resolves per request; check that a restart
-  moves new requests to the new instance and how a playlist marks the break
-  (`EXT-X-DISCONTINUITY`); a failed timeline answers its playlists with a no-store 5xx.
-- `export rtmp`, `export srt`, `export rtc`, both `--listen` (per-viewer
-  streams in `moq-rtmp`, `moq-srt`, `moq-rtc`) and `--connect` (one push).
-  SRT already rides the TS follower (`--linger`, `--stitch`); confirm its
-  listen side does too. FLV and WebRTC need a decision.
-- `transcode`: its source broadcast; following means restarting the ladder
-  on the new instance.
+The goal remains open until these remaining readers and shared-operation
+choices are implemented and verified. Do not import the unmerged resolution
+or announcement-owner proposals to obtain another API.
 
-Share `moq_mux::follow::Instances::new(origin, path, None)` (decided 2026-10-20,
-maintainer: no reader hand-rolls its own follow loop) rather than one rule per
-reader: it yields `follow::Event::Start` for each instance serving the path and
-`follow::Event::End` once the one handed out stops serving. Build a
-`moq_mux::Source` from each started instance, so its siblings follow through
-`Source::follow` and its exporters pin through `Source::bind`, which waits for
-a sibling's first announcement. Each fix lands
-with a test that replaces the publisher while the reader runs.
-
-Public API: none. Wire: none.
+Public API: none. Wire: none. CLI lifetime/refusal behavior changes as above.

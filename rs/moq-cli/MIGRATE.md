@@ -4,6 +4,15 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### `transcode` follows source instances
+
+`transcode` now waits for another source instance after a clean end instead of
+exiting, and replaces its ladder when the publisher restarts. Each ladder is a
+fresh derivative broadcast with its own epoch. Stop the command explicitly if
+your script previously relied on a finite source ending it. `play` now exits
+with an error when the selected broadcast handler refuses its request instead
+of silently waiting for another announcement.
+
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 
 Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.
