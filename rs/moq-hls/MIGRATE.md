@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Denied broadcast references report authorization failure
+
+A rendition whose referenced broadcast is outside the source origin's scope now
+returns `Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized))` from
+playlist, init and segment reads instead of behaving like missing media.
+`Broadcaster::ready` and `Rendition::playable` settle on that refusal. Embedders
+should answer it with an uncacheable 403; the HTTP server does so automatically.
+Allowed renditions keep serving, and missing or disconnected media remains 404.
+
 ### HLS import unwraps fMP4 to Legacy (#6250)
 
 `import::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
