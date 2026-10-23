@@ -41,7 +41,7 @@ func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 //
 // Announcing again re-prices the route in place. Until announced, the
 // broadcast is invisible and unroutable for local consumers and peers alike.
-func (b *BroadcastProducer) Announce(route Route) error {
+func (b *BroadcastProducer) Announce(route AnnounceRoute) error {
 	return b.inner.Announce(route)
 }
 
@@ -97,7 +97,8 @@ func (b *BroadcastProducer) Finish() (*BroadcastFinish, error) {
 
 // BroadcastFinish is a cleanly ended broadcast, still announced and serving its
 // finished tracks. Closing it, or cancelling a [BroadcastFinish.Wait], closes
-// the broadcast at once.
+// the broadcast at once. An unreferenced one closes the broadcast only when the
+// garbage collector reclaims it, possibly long after, so wait on or close it.
 type BroadcastFinish struct {
 	inner *ffi.MoqBroadcastFinish
 }

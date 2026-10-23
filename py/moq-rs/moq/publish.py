@@ -23,8 +23,8 @@ from moq_ffi import (
 from ._records import _from_us, _opt_from_us, _subscription, _track_info
 from ._stream import _Stream
 from .types import (
+    AnnounceRoute,
     Frame,
-    Route,
     Subscription,
     TrackInfo,
 )
@@ -336,13 +336,13 @@ class BroadcastProducer:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastDynamic(self._inner.dynamic())
 
-    def announce(self, route: Route | None = None) -> None:
+    def announce(self, route: AnnounceRoute | None = None) -> None:
         """Advertise this broadcast's exact path as a route.
 
         Announcing again re-prices the route in place. Until announced, the
         broadcast is invisible and unroutable for local consumers and peers alike.
         """
-        self._inner.announce(route if route is not None else Route())
+        self._inner.announce(route if route is not None else AnnounceRoute())
 
     def unannounce(self) -> None:
         """Retract this broadcast's advertisement, if any, from local consumers and peers alike."""

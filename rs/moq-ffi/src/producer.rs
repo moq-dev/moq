@@ -282,7 +282,7 @@ impl MoqBroadcastProducer {
 	/// Until announced, the broadcast is invisible and unroutable for local
 	/// consumers and peers alike. Announcing again re-prices the route in place.
 	/// Errors with `Closed` on a standalone broadcast (no origin to announce on).
-	pub fn announce(&self, route: crate::origin::MoqRoute) -> Result<(), MoqError> {
+	pub fn announce(&self, route: crate::origin::MoqAnnounceRoute) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let route: moq_net::origin::Route = route.try_into()?;
 		self.with_state(|state| {
@@ -376,7 +376,9 @@ impl MoqBroadcastProducer {
 /// A cleanly ended broadcast, still announced and serving its finished tracks.
 ///
 /// Returned by [`MoqBroadcastProducer::finish`]. Closing or dropping it closes the broadcast,
-/// which is how an interrupt ends the linger early.
+/// which is how an interrupt ends the linger early. A garbage-collected language (Kotlin, Go,
+/// Dart) drops it only when the collector reclaims it, possibly long after the last reference
+/// goes, so wait on or close it rather than leave it for the collector.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastFinish {
 	linger: std::time::Duration,

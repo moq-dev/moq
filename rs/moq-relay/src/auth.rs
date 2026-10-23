@@ -74,7 +74,8 @@ pub struct Config {
 
 	/// Maximum in-band tokens one session has the auth server verifying at once,
 	/// counting checks still running past the admission timeout. Later tokens wait
-	/// for a slot. Defaults to 128.
+	/// for a slot. Also the requests one HTTP/2 connection carries at once, each
+	/// admitted on its own. Defaults to 128.
 	#[usage(
 		long = "auth-verifications",
 		env = "MOQ_AUTH_VERIFICATIONS",
@@ -892,6 +893,11 @@ impl Auth {
 		&self.node
 	}
 
+	/// How many credentials one session may have the decider verifying at once.
+	pub(crate) fn verifications(&self) -> usize {
+		self.verifications
+	}
+
 	/// A fresh `connect` request for this relay, before the transport's facts are filled in.
 	pub fn request(&self, transport: moq_auth::Transport, path: impl Into<String>) -> Request {
 		Request::new(self.node.as_ref(), transport, path)
@@ -1113,7 +1119,7 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::time::SystemTime;

@@ -50,6 +50,7 @@ from .subscribe import (
 )
 from .types import (
     Anchor,
+    AnnounceRoute,
     AudioCodec,
     AudioEncoderInput,
     AudioSampleFormat,
@@ -86,6 +87,7 @@ __all__ = [
     "AnnounceEventRestart",
     "AnnounceEventStart",
     "AnnounceEventUpdate",
+    "AnnounceRoute",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",

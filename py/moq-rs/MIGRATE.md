@@ -12,6 +12,11 @@ A reader narrowing its ranges can leave a single group while the fill stays used
 A refusal carries no application code: `drop_groups` fails the waiting fetches with `moq.Error.NotFound`.
 `Subscription.max_delay` also accepts `None`, leaving the publisher's max age alone to bound delivery.
 
+### `announce` takes an `AnnounceRoute`
+
+`BroadcastProducer.announce` takes `moq.AnnounceRoute(cost=..., epoch=...)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
+`Route` is only what announcements report. To re-announce an observed route, copy its `cost` and `epoch`.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve()` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
@@ -44,7 +49,7 @@ Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.
 ### Catalog references carry their epoch
 
 `Video` and `Audio` renditions gain `epoch`, the publisher instance their `broadcast` reference names.
-`BroadcastConsumer.resolve(reference)` becomes `resolve(reference, epoch)`; pass the rendition's `epoch` alongside its `broadcast`, or `None` to resolve whichever instance answers.
+`BroadcastConsumer.resolve(reference)` becomes `resolve(id, rendition)`, taking the catalog rendition the reference belongs to and reading its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, raise for a rendition whose broadcast is proven to serve another epoch.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
@@ -109,11 +114,11 @@ To start at group `n`, pass one range starting at the absolute anchor for group 
 ### Receive estimates come from `Session.recv_bandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `Session.recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop.
+Hold the consumer `Session.recv_bandwidth` returns to request PROBE, read it with `rate()` or wait with `rate_changed()`, and drop it to stop.
 
 ```python
 bandwidth = session.recv_bandwidth()
-rate = bandwidth.peek() if bandwidth else None
+rate = bandwidth.rate() if bandwidth else None
 ```
 
 ### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)

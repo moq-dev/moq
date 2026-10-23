@@ -16,6 +16,11 @@ A refusal carries no application code: `DropGroups` fails the waiting fetches wi
 `Subscription.MaxDelay` is a `*time.Duration`, where nil leaves the publisher's max age alone to bound delivery.
 A zero-value `Subscription` now means that rather than live edge only: point `MaxDelay` at a zero duration to keep skipping at once.
 
+### `Announce` takes an `AnnounceRoute`
+
+`BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
+`Route` is only what announcements report. To re-announce an observed route, copy its `Cost` and `Epoch`.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.Resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
@@ -48,7 +53,7 @@ Pass the new `media.ContainerFormatCmaf` to keep publishing CMAF.
 ### Catalog references carry their epoch
 
 `ffi.MoqVideo` and `ffi.MoqAudio` gain `Epoch`, the publisher instance their `Broadcast` reference names.
-`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, reference, epoch)`; pass the rendition's `Epoch` alongside its `Broadcast`, or `nil` to resolve whichever instance answers.
+`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, rendition)`, taking the catalog rendition (`media.VideoRendition` or `media.AudioRendition`) and reading its `Broadcast` and `Epoch` from it.
 Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another epoch.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
@@ -119,7 +124,7 @@ To start at group `n`, pass one range starting at the absolute anchor for group 
 ### Receive estimates come from `Session.RecvBandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `Session.RecvBandwidth` returns to request PROBE, read it with `Peek()` or wait with `Changed(ctx)`, and `Close()` it to stop.
+Hold the consumer `Session.RecvBandwidth` returns to request PROBE, read it with `Rate()` or wait with `RateChanged(ctx)`, and `Close()` it to stop.
 It returns `nil` when the version has no PROBE.
 
 ### `AnnouncedBroadcast.Available` waits for the next publisher instance (#5700)

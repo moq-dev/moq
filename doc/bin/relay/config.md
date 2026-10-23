@@ -267,7 +267,8 @@ url = "http://127.0.0.1:4440/"       # An auth server asked once per session eve
 # public = "anon/**"                 # Or a static anonymous grant rooted at /, publish and subscribe alike.
 # public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
 # public_publish = ["anon/**"]
-verifications = 128                  # In-band tokens one session verifies at once; later ones wait.
+verifications = 128                  # In-band tokens one session, or requests one HTTP/2 connection,
+                                     # has verifying at once; later ones wait.
 ```
 
 See [Authentication](/bin/relay/auth).
@@ -282,6 +283,7 @@ node = "https://us-west.example.com/"                 # This relay's own URL.
 connect_api = "https://api.example.com/peers"        # Or fetch the peer list (JSON array of URLs and/or objects) live.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 id = 12345                                            # Stable Hop ID across restarts.
+max_hops = 32                                         # Longest accepted/forwarded hop path (1 to 32).
 
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true
@@ -334,7 +336,7 @@ group of every track is always kept, even past `capacity`.
 [stats]
 enabled = true
 prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>.
-interval = 1                         # Seconds between snapshots.
+interval = "1s"                      # Time between snapshots. Default.
 node = "sjc/1"                       # Disambiguates relays sharing a cluster.
 depth = 1                            # Also bucket by the first N path segments (per tenant).
 linger = "5m"                        # Keep an empty group's broadcast announced this long. Default.

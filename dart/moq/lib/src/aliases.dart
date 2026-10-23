@@ -55,6 +55,9 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// A pending wait for a route to cover a specific path.
 typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
 
+/// How a broadcast advertises its exact path: its static production cost and publisher epoch.
+typedef AnnounceRoute = MoqAnnounceRoute;
+
 /// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
 typedef Announce = MoqAnnounce;
 

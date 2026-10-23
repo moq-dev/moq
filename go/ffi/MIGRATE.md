@@ -14,6 +14,11 @@ A fill also arrives for history a subscription covers that the cache lacks, not 
 `MoqSubscription.MaxDelayUs` is `*uint64`, where `nil` leaves the publisher's max age alone to bound delivery.
 Regenerate the bindings for the changed types and checksums.
 
+### `announce` takes a `MoqAnnounceRoute`
+
+`MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
+`MoqRoute` is only what announcements report, and the `InvalidRoute` error is gone.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.Resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
@@ -38,7 +43,7 @@ Regenerate the bindings for the changed `request_broadcast` checksum.
 ### Catalog references carry their epoch
 
 `MoqVideo` and `MoqAudio` gain `Epoch *string`, the publisher instance their `Broadcast` reference names.
-`MoqBroadcastConsumer.Resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `nil` to resolve whichever instance answers.
+`MoqBroadcastConsumer.Resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
 Regenerate the bindings for the changed records and checksums.
 

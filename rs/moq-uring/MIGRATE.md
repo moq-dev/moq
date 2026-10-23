@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `udp::Transmit` is built with `Transmit::new` (#6400)
+
+`udp::Transmit` gains `src_ip`, the local address a send leaves from, and is `#[non_exhaustive]`.
+Replace `Transmit { to, segment, ecn }` with `Transmit::new(to, segment)` and set `ecn` (or `src_ip`) on the result.
+Pass a received `Packet::dst_ip()` as `src_ip` to answer from the address the peer reached.
+
 ### Wrap sessions in `transport::Local` (#6176)
 
 moq-net dropped `connect_lite`, `accept_lite`, and `accept_request_lite`, and every session now needs a `Send` transport.
