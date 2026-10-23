@@ -292,21 +292,21 @@ export function parseRow(key: string): Row {
 
 /**
  * One audio frame reaching the viewer's container consumer: when, on the `viewer` clock; its
- * timestamp, on the `media` clock; and the group that carried it.
+ * timestamp, on the `media` clock; the group that carried it; and its encoded duration.
  */
-export type Arrival = [at: Ms, timestamp: Ms, group: number];
+export type Arrival = [at: Ms, timestamp: Ms, group: number, duration: Ms];
 
 /** A recorded arrival trace, as checked in under `traces/`. The file name is its profile. */
 export type Trace = {
 	/** Bumped when a field's meaning changes. */
-	version: 2;
+	version: 3;
 	/** Where it was recorded: the relay, the broadcast, its publisher, the date. */
 	source: string;
 	/** The shape it carries, and why it is kept. */
 	description: string;
 	/** The transport the session negotiated. */
 	transport: string;
-	/** The smallest round trip the connection's PROBE reported, which "auto" sizes from. */
+	/** The smallest round trip the connection's PROBE reported, retained as a diagnostic. */
 	rtt: Ms | null;
 	/** The audio rendition, as the catalog advertised it. */
 	config: {

@@ -35,8 +35,14 @@ noise.
   release's bare track handle opened a live SUBSCRIBE, while main sends a real
   FETCH per viewer ([#5820](https://github.com/moq-dev/moq/pull/5820) made
   handles lazy, and [#4974](https://github.com/moq-dev/moq/pull/4974) added
-  fetch-only demand). The lite `/fetch` cost is different: it is real, and
-  [FETCH fan-out](/quest/m1/release-perf/fetch-fanout.md) owns it.
+  fetch-only demand). The lite `/fetch` cost was real: a relay sent one
+  upstream FETCH per group, but revived the parked logical track for every
+  viewer's FETCH. [#6286](https://github.com/moq-dev/moq/pull/6286) serves a
+  whole cached group from the parked copy instead, cutting 12 to 19% of the
+  instructions per viewer where viewers share a group. The rest of the gap to
+  a viewer that holds a query is accepted: each viewer's own fetch of a group
+  it lacks revives its logical track, so the open group keeps its route and
+  fails over mid-read, and its copy releases the route's demand once idle.
 - `stats/session-report` is accepted at O(live sessions), after a cheap fix.
   Per-label payload bytes ([#5731](https://github.com/moq-dev/moq/pull/5731))
   match payload billing per label, such as per signing key. After removing
@@ -46,6 +52,14 @@ noise.
   with those wires; the earlier under-0.01% estimate omitted their walk.
   This remaining per-session and per-connection sampling is accepted. Deleting
   per-label bytes was rejected.
+- `track_gc/idle` is accepted at about 20 ns, flat across track counts, after
+  [#6291](https://github.com/moq-dev/moq/pull/6291) skipped the clock read
+  with no wall deadline and reused the bench's waiter (36.7 ns before). The
+  remaining ~8 ns over release's 11.6 ns is the lock and driver registration
+  that the wall-clock aging from
+  [#5548](https://github.com/moq-dev/moq/pull/5548) needs. An earliest-deadline
+  atomic cannot prove a replacement driver is registered, and a lock-free
+  notification primitive is not worth ~8 ns.
 - The mux exports' and Annex B import's fixed cost per broadcast is accepted.
   It publishes required output: a per-track timeline and an immediately
   completed catalog record. Their cold DEFLATE state is most of it (81% of a
@@ -87,12 +101,12 @@ usually pays for a feature.
 
 | Bench | release | main | Ratio | Owner |
 |---|---|---|---|---|
-| `track_gap_flush/4096` | 5.7 us | 551 us | 96x | [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) |
-| `track_gap_flush/512` | 1.8 us | 48 us | 27x | same |
-| `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | same |
+| `track_gap_flush/4096` | 5.7 us | 551 us | 96x | accepted (above) |
+| `track_gap_flush/512` | 1.8 us | 48 us | 27x | accepted (above) |
+| `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | accepted (above) |
 | `stats/session-report/1000x10` | 11.0 us | 86.8 us | 7.9x | accepted (above) |
-| `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | [Idle GC](/quest/m1/release-perf/gc-idle.md) |
-| `origin/resume_overlap/sequence/1r_64g_32c` | 93 us | 426 us | 4.6x | [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) |
+| `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | accepted (above) |
+| `origin/resume_overlap/sequence/1r_64g_32c` | 93 us | 426 us | 4.6x | fixed in [moq-dev/moq#6292](https://github.com/moq-dev/moq/pull/6292) |
 | `session_delivery_group_cost/moq-transport-22/.../viewers=64/.../fetch` | 1.19 ms | 3.86 ms | 3.2x | accepted (above) |
 | `group_write_frames/single/8192` | 424 us | 486 us | 1.17x | accepted (above) |
 
@@ -115,7 +129,7 @@ the moq-net and kio rows include the fixes above.
 | `track_fanout_frame/1` | 1.42x | 1.86x | accepted (above) |
 | `track_empty_run/{fresh/1,stale/8}/512` | median 1.36x | 1.53x | accepted (above) |
 | `track_datagram_subscriber_join/0d/1`, `64d/64` | median 2.3x | 2.12x, 3.55x | accepted (above) |
-| `track_sparse_read/timed/4096` | 4.3x | | [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) |
+| `track_sparse_read/timed/4096` | 4.3x | | [moq-dev/moq#6287](https://github.com/moq-dev/moq/pull/6287) |
 | `origin/announce_duplicate`, `1d_1s` to `240d_240s` | 4.3x | 1.06x to 1.16x | noise |
 | `session_delivery_{relays,paced,scale}` | 1.43x to 1.56x | 1.28x to 1.77x | accepted (above) |
 | moq-stats `aggregate`, live=16, departed=4096 | 2.1x | 1.05x | noise |
@@ -132,10 +146,7 @@ outside the worktree to keep the next one.
 
 ## Required
 
-- [FETCH fan-out](/quest/m1/release-perf/fetch-fanout.md) - a relay serves later viewers' lite FETCHes of a group from its cache, so per-viewer cost falls with viewers again
 - [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - an arrival and a gap flush cost O(log gaps), not O(gaps)
-- [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) - an ordered resume skips copies of an already-delivered group without consuming them
-- [Idle GC](/quest/m1/release-perf/gc-idle.md) - an idle track GC skips the wall-clock pass when nothing is due
 - [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
 
 ## Related
