@@ -4,8 +4,9 @@
 
 `moq ... export hls --output <dir>` writes the broadcast's playlists and
 segments to a directory as they complete, using moq-hls's recorder cursors,
-and exits with an error if the recording ends abruptly. It works alone or
-alongside `--listen`, so one stage can serve and record at once.
+and exits with an error if the recording ends abruptly or misses a segment.
+It works alone or alongside `--listen`, so one stage can serve and record at
+once.
 
 ## Plan
 
@@ -20,4 +21,4 @@ Decided 2026-10-23 (maintainer interview):
 
 ## Required
 
-- [HLS cursors error on every abrupt teardown](/quest/m1/hls-teardown.md) - an abrupt end must surface as an error before the recorder relies on it
+- [HLS cursors error on every incomplete recording](/quest/m1/hls-teardown.md) - an abrupt end or a missed segment must surface as an error before the recorder relies on it

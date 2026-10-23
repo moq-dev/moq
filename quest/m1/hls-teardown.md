@@ -1,12 +1,13 @@
-# [S] HLS cursors error on every abrupt teardown
+# [S] HLS cursors error on every incomplete recording
 
 ## Goal
 
 moq-hls's recorder cursors (`export::renditions::Consumer` and
 `export::segments::Consumer`) return `Ok(None)` only for a complete
 recording. Every other way a window closes, such as a retired rendition or a
-broadcaster closed without finishing, ends the cursor with an error, each
-path covered by a test.
+broadcaster closed without finishing, ends the cursor with an error, as does
+a segment the cursor misses because it fell behind. Each path is covered by
+a test.
 
 ## Plan
 
@@ -18,6 +19,11 @@ failing returning `Ok(None)`:
 - Audit every path that closes a window and decide each as either a clean
   finish or an error; a recorder must never mistake a truncated recording
   for a complete one.
+- Raised in review, not the interview: a slow cursor misses media silently
+  today. `segments::State::next_after` resumes at the oldest row still in the
+  window, and `Consumer::next` skips a segment whose groups left the relay
+  cache. Both become errors, with a slow-consumer test; a segment that is a
+  gap for the rendition stays a skip.
 - The cursors get a real consumer in
   [the CLI recorder](/quest/m1/hls-record-cli.md).
 - Update `rs/moq-hls/MIGRATE.md` for the changed end semantics.
