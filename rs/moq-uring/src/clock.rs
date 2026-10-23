@@ -5,7 +5,6 @@
 //! so everything it runs reads the sample instead of the host clock. The host
 //! clock is `CLOCK_MONOTONIC`, read directly so the park can hand the next
 //! deadline to the kernel as an absolute timeout without a second read.
-#![allow(clippy::disallowed_methods)]
 
 use std::task::Context;
 use std::time::Duration;
@@ -28,7 +27,10 @@ pub(crate) enum Clock {
 /// How the worker waits for its next deadline while parked.
 pub(crate) enum Wait {
 	/// The deadline already passed: run another turn instead of parking.
-	#[cfg_attr(not(feature = "manual"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "manual"),
+		allow(dead_code, reason = "only the `manual` feature uses it")
+	)]
 	Elapsed,
 	/// Park until a completion or a wake, with no timeout.
 	Forever,

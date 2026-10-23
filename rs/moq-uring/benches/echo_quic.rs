@@ -1,6 +1,8 @@
 //! Echo a tokio QUIC peer through the io_uring worker while ablating UDP features.
-// Benchmarks measure themselves on the host clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "benchmarks measure themselves on the host clock"
+)]
 
 use criterion::{criterion_group, criterion_main};
 

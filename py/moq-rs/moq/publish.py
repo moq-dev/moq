@@ -11,7 +11,6 @@ from moq_ffi import (
     MoqBroadcastDynamic,
     MoqBroadcastFinish,
     MoqBroadcastProducer,
-    MoqGroupDemand,
     MoqGroupProducer,
     MoqGroupRequest,
     MoqTrackDemand,
@@ -23,8 +22,8 @@ from moq_ffi import (
 from ._records import _from_us, _subscription, _track_info
 from ._stream import _Stream
 from .types import (
+    AnnounceRoute,
     Frame,
-    Route,
     Subscription,
     TrackInfo,
 )
@@ -193,37 +192,6 @@ class TrackRequest:
         self._inner.abort(error_code)
 
 
-class GroupDemand:
-    """A watch-only handle to the callers waiting on a requested group.
-
-    Returned by ``GroupRequest.demand()``. Weak: holding it does not keep the
-    request alive. The last caller to leave withdraws the request, so once
-    unused, demand never returns: drop the request. Waits raise
-    ``moq.Error.Closed`` after the request is accepted or dropped, and keep
-    the rejection reason after it is rejected.
-    """
-
-    def __init__(self, inner: MoqGroupDemand) -> None:
-        self._inner = inner
-
-    @property
-    def sequence(self) -> int:
-        """The sequence of the group this watches."""
-        return self._inner.sequence()
-
-    def is_used(self) -> bool:
-        """Whether the group has at least one waiting caller right now."""
-        return self._inner.is_used()
-
-    async def used(self) -> None:
-        """Wait until the group has at least one waiting caller."""
-        await self._inner.used()
-
-    async def unused(self) -> None:
-        """Wait until the group has no waiting callers."""
-        await self._inner.unused()
-
-
 class GroupRequest:
     """A request to produce one uncached group for a fetch consumer."""
 
@@ -239,10 +207,6 @@ class GroupRequest:
     def priority(self) -> int:
         """The consumer's delivery priority for this fetch."""
         return self._inner.priority()
-
-    def demand(self) -> GroupDemand:
-        """A watch-only handle to whether any caller still wants this group."""
-        return GroupDemand(self._inner.demand())
 
     def accept(self) -> GroupProducer:
         """Accept the request and return a producer for the group."""
@@ -318,13 +282,13 @@ class BroadcastProducer:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastDynamic(self._inner.dynamic())
 
-    def announce(self, route: Route | None = None) -> None:
+    def announce(self, route: AnnounceRoute | None = None) -> None:
         """Advertise this broadcast's exact path as a route.
 
         Announcing again re-prices the route in place. Until announced, the
         broadcast is invisible and unroutable for local consumers and peers alike.
         """
-        self._inner.announce(route if route is not None else Route())
+        self._inner.announce(route if route is not None else AnnounceRoute())
 
     def unannounce(self) -> None:
         """Retract this broadcast's advertisement, if any, from local consumers and peers alike."""

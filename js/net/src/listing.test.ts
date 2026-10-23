@@ -29,7 +29,8 @@ class Events {
 				(event) => {
 					if (!event) return "end";
 					if (event.kind === "synced") return "synced";
-					return `${event.kind === "added" ? "+" : "-"}${event.name}`;
+					const sign = { added: "+", removed: "-", finished: "~" }[event.kind];
+					return `${sign}${event.name}`;
 				},
 				(err: unknown) => `error: ${err instanceof StreamError ? err.code : String(err)}`,
 			);
@@ -84,20 +85,35 @@ test("a finished track is listed while the table holds it", async () => {
 	broadcast.createTrack("a").close();
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "synced"]);
+	// It finished before it was removed.
 	broadcast.removeTrack("a");
-	expect(await tracks.drain()).toEqual(["-a"]);
+	expect(await tracks.drain()).toEqual(["~a"]);
 	broadcast.close();
 	expect(await tracks.drain()).toEqual(["end"]);
 });
 
-test("a recreated track is removed before it is added again", async () => {
+test("a lister finishes or removes a track", async () => {
+	const broadcast = new BroadcastProducer();
+	const lister = wireOf(broadcast).lister();
+	const tracks = list(broadcast);
+	lister.add("up", { priority: 0 });
+	lister.add("gone", { priority: 0 });
+	lister.synced();
+	expect(await tracks.drain()).toEqual(["+up", "+gone", "synced"]);
+	lister.finish("up");
+	lister.remove("gone");
+	expect(await tracks.drain()).toEqual(["~up", "-gone"]);
+	expect(() => lister.finish("up")).toThrow();
+});
+
+test("a recreated track leaves as it ended before it is added again", async () => {
 	const broadcast = new BroadcastProducer();
 	broadcast.createTrack("a").close();
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "synced"]);
 	// The finished track still holds the name; its replacement takes it over.
 	broadcast.createTrack("a");
-	expect(await tracks.drain()).toEqual(["-a", "+a"]);
+	expect(await tracks.drain()).toEqual(["~a", "+a"]);
 });
 
 test("a track served on request is never listed", async () => {
@@ -288,14 +304,14 @@ test("a broadcast has one lister", () => {
 	wireOf(broadcast).lister();
 });
 
-test("a finished answer ends its readers and a later reader asks again", async () => {
+test("an ended answer ends its readers and a later reader asks again", async () => {
 	const broadcast = new BroadcastProducer();
 	const lister = wireOf(broadcast).lister();
 	const tracks = list(broadcast);
 	lister.add("up", { priority: 0 });
 	lister.synced();
 	expect(await tracks.drain()).toEqual(["+up", "synced"]);
-	lister.finish();
+	lister.end();
 	expect(await tracks.drain()).toEqual(["end"]);
 	expect(lister.used.peek()).toBe(false);
 
