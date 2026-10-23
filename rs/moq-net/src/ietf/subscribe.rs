@@ -147,7 +147,7 @@ impl Message for Subscribe<'_> {
 				// A zero cap still distinguishes a requested wait from an immediate miss.
 				let rendezvous = rendezvous_timeout.is_some_and(|millis| millis > 0);
 
-				let subscriber_priority = subscriber_priority.unwrap_or(super::priority::ABSENT_WIRE);
+				let subscriber_priority = subscriber_priority.unwrap_or(super::priority::DEFAULT_WIRE);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 				// An absent LOCATION_FILTER means the subscription is unfiltered.
 				let filter = filter.unwrap_or(Filter::Unfiltered);
@@ -450,7 +450,7 @@ impl Message for SubscribeUpdate {
 					.encode(w, version)?;
 				self.start_location.encode(w, version)?;
 				w.varint(self.end_group)?;
-				w.u8(self.subscriber_priority.unwrap_or(super::priority::ABSENT_WIRE));
+				w.u8(self.subscriber_priority.unwrap_or(super::priority::DEFAULT_WIRE));
 				w.bool(self.forward.unwrap_or(true));
 				encode_params!(w, version,
 					0x03 => self.authorization_token.clone(),
@@ -1137,6 +1137,31 @@ mod tests {
 
 		assert!(matches!(subscribe(&[0x40, 0xfa]), Err(DecodeError::InvalidValue)));
 		assert_eq!(subscribe(&[0x02]).unwrap().filter, Filter::NextObject);
+	}
+
+	/// From draft-15 SUBSCRIBER_PRIORITY is a parameter whose omission means 128, not this
+	/// stack's unset 127, so a relay forwards it unchanged.
+	#[test]
+	fn test_subscribe_omitted_priority_is_128() {
+		for version in [
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let mut bytes = vec![0x00]; // request_id
+			if version == Version::Draft17 {
+				bytes.push(0x00); // required_request_id_delta
+			}
+			bytes.extend_from_slice(b"\x01\x0bnonexistent\x0dno-such-track"); // namespace, name
+			bytes.push(0x00); // no parameters
+			let msg = decode_message::<Subscribe>(&bytes, version).unwrap();
+			assert_eq!(msg.subscriber_priority, 128, "{version}");
+		}
 	}
 
 	#[test]

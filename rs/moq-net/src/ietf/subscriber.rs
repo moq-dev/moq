@@ -511,7 +511,7 @@ fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info
 		// Drafts 14 and 15 carry only per-subgroup priorities, which the model does not keep,
 		// so they get the later drafts' default too.
 		.with_priority(super::priority::from_wire(
-			properties.priority.unwrap_or(super::priority::DEFAULT_PUBLISHER_WIRE),
+			properties.priority.unwrap_or(super::priority::DEFAULT_WIRE),
 		))
 		// A publisher answering NEW_GROUP_REQUEST refreshes on any join with a delta to skip;
 		// this session carries the request back to it.
@@ -8175,7 +8175,8 @@ mod tests {
 				.expect("the subscription is registered");
 			assert_eq!(
 				track.producer.as_ref().unwrap().publisher_priority(),
-				super::super::priority::from_wire(priority.unwrap_or(super::super::priority::DEFAULT_PUBLISHER_WIRE)),
+				// An omitted priority is the drafts' 128, one step below the unset 127.
+				priority.map_or(-1, super::super::priority::from_wire),
 				"SUBSCRIBE_OK priority must be committed before alias registration"
 			);
 			// The answer's largest is known before any group arrives.

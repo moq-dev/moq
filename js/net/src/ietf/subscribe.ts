@@ -7,7 +7,7 @@ import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { type MessageLocation, MSG_PARAM_FORWARD, MSG_PARAM_SUBSCRIBER_PRIORITY, Parameters } from "./parameters.ts";
-import { ABSENT_WIRE } from "./priority.ts";
+import { DEFAULT_WIRE } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -221,7 +221,7 @@ export class Subscribe {
 		}
 		// v15+: fields are in parameters
 		const params = await Parameters.decode(r, version, "subscribe");
-		const subscriberPriority = params.subscriberPriority ?? ABSENT_WIRE;
+		const subscriberPriority = params.subscriberPriority ?? DEFAULT_WIRE;
 		const groupOrder = decodeGroupOrder(params.groupOrder ?? GroupOrder.Descending);
 
 		// FILL_PARAMETERS and INCLUDE_PROPERTIES are draft-20 additions, and the Range
@@ -460,7 +460,7 @@ export class SubscribeUpdate {
 				await w.u62(0n); // start_group
 				await w.u62(0n); // start_object
 				await w.u62(0n); // end_group
-				await w.u8(this.parameters.subscriberPriority ?? ABSENT_WIRE);
+				await w.u8(this.parameters.subscriberPriority ?? DEFAULT_WIRE);
 				await w.bool(this.parameters.forward ?? true);
 				await this.parameters.encode(w, version, [MSG_PARAM_SUBSCRIBER_PRIORITY, MSG_PARAM_FORWARD]);
 			} else {
