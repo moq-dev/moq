@@ -445,7 +445,6 @@ impl EncoderInput for Buffer {
 /// This type is created via [`Buffer::lock`] or [`Buffer::try_lock`].
 /// The purpose of this type is similar to [`std::sync::MutexGuard`] -
 /// it automatically unlocks the buffer when the lock goes out of scope.
-#[allow(clippy::module_name_repetitions)]
 #[derive(Debug)]
 pub struct BufferLock<'a> {
 	buffer: &'a Buffer,

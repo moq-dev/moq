@@ -87,7 +87,10 @@ impl LinuxError {
         let required =
             unsafe { libc::CMSG_LEN(size_of::<libc::sock_extended_err>() as _) as usize };
 
-        #[allow(clippy::unnecessary_cast)] // cmsg.cmsg_len defined as size_t
+        #[allow(
+            clippy::unnecessary_cast,
+            reason = "`cmsg_len` is `size_t` on glibc but narrower on other libcs"
+        )]
         if (cmsg.cmsg_len as usize) < required {
             return None;
         }

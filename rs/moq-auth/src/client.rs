@@ -465,7 +465,11 @@ impl<S: Post> Driver<S> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	use moq_pattern::Patterns;
@@ -540,7 +544,10 @@ mod tests {
 	struct Script {
 		identity: Arc<()>,
 		log: Log,
-		#[allow(clippy::type_complexity)]
+		#[expect(
+			clippy::type_complexity,
+			reason = "a one-off test responder; an alias would only move the type"
+		)]
 		respond: std::sync::Arc<dyn Fn(&Request) -> Option<crate::Result<Grant>> + Send + Sync>,
 	}
 

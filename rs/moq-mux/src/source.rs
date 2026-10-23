@@ -139,7 +139,7 @@ impl Source {
 
 	/// The broadcast `path` is pinned to, or a lookup that waits for the path's first
 	/// announcement and pins its answer, either checked against `epoch` on every read.
-	fn request_path(&self, path: &moq_net::PathOwned, epoch: Option<&moq_net::Epoch>) -> Binding {
+	pub(crate) fn request_path(&self, path: &moq_net::PathOwned, epoch: Option<&moq_net::Epoch>) -> Binding {
 		let bound = match self.pins.lock().expect("pins poisoned").get(path) {
 			Some(pinned) => Bound::Ready(pinned.clone()),
 			// Unpinned even with an epoch: an epochless route still answers, best effort, and
@@ -184,17 +184,6 @@ impl Source {
 			tracing::error!(rel, catalog = %self.path, "broadcast reference escapes the root");
 			crate::Error::EscapingBroadcast(rel.to_string())
 		})
-	}
-
-	/// The skipping counterpart to [`Self::bind`] for a catalog entry, returning `None` when its
-	/// broadcast walks above the origin root.
-	///
-	/// The exporters use it to drop a single bad rendition rather than fail the whole export.
-	/// [`Self::retain_selectable`] already removes those renditions, so this is the second half of
-	/// the same policy rather than a different one.
-	pub(crate) fn try_request(&self, reference: &impl hang::catalog::Reference) -> Option<Binding> {
-		let path = self.resolve_reference(reference.broadcast())?;
-		Some(self.request_path(&path, reference.epoch()))
 	}
 
 	/// Remove the renditions an export must not select: a disabled one (catalog

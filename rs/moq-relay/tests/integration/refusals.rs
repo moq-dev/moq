@@ -42,7 +42,10 @@ struct Running {
 	stats: moq_net::stats::Registry,
 	origin: moq_net::origin::Consumer,
 	quic: SocketAddr,
-	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "websocket"),
+		allow(dead_code, reason = "only the `websocket` feature uses it")
+	)]
 	http: SocketAddr,
 	metrics: String,
 	trigger: moq_relay::shutdown::Trigger,
