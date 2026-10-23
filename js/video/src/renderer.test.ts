@@ -340,7 +340,7 @@ describe("Renderer", () => {
 		}
 	});
 
-	it("reports surface-lost for a canvas that holds another kind of context", async () => {
+	it("reports InvalidStateError for a canvas that holds another kind of context", async () => {
 		const canvas = new FakeCanvas();
 		canvas.getContext("webgpu");
 		const renderer = create(canvas, "2d");
