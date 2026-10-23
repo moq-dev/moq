@@ -1295,6 +1295,31 @@ mod tests {
 		assert_eq!(failed.count(stats::Failure::Application), 1, "{failed:?}");
 	}
 
+	/// A rejection counts by the code the peer is told, so a "no error" close is clean
+	/// however this side spelled it.
+	#[moq_clock::test]
+	async fn a_rejection_counts_by_its_code() {
+		for (err, failed) in [
+			(Error::GoingAway, None),
+			(Error::Session(SessionError::Cancel), None),
+			(Error::Unauthorized, Some(stats::Failure::Application)),
+		] {
+			let registry = stats::Registry::new(Default::default());
+			let session = FakeSession::new(ALPN_19, [ietf_setup(ietf::Version::Draft19, None)]);
+			Server::new()
+				.accept_request(moq_clock::now(), session)
+				.await
+				.unwrap()
+				.with_stats(registry.tier(Default::default()).session("room"))
+				.close(err.clone());
+			let failures = registry.snapshot().sessions()[0].1.sessions_failed;
+			for kind in stats::Failure::ALL {
+				let expected = u64::from(failed == Some(*kind));
+				assert_eq!(failures.count(*kind), expected, "{err:?}: {kind:?}");
+			}
+		}
+	}
+
 	#[moq_clock::test]
 	async fn accept_request_exposes_the_setup_token() {
 		let modern = FakeSession::new(

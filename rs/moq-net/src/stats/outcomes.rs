@@ -143,16 +143,19 @@ pub enum Failure {
 }
 
 impl Failure {
-	/// How a session that ended with `err` failed, or `None` for a clean end. A drain
-	/// that reached its deadline is the draining side ending it on purpose.
+	/// How a session that ended with `err` failed, or `None` for a clean end: anything the
+	/// peer is told is "no error", by either side, and a drain that reached its deadline,
+	/// which is the draining side ending it on purpose.
 	pub(crate) fn of(err: &crate::Error) -> Option<Self> {
 		use crate::{Error, SessionError};
 		match err {
-			Error::Cancel | Error::GoawayTimeout | Error::Session(SessionError::GoawayTimeout) => None,
 			Error::IdleTimeout => Some(Self::IdleTimeout),
 			Error::Transport(_) => Some(Self::Transport),
-			Error::Expired | Error::Session(SessionError::Expired) => Some(Self::Expired),
-			_ => Some(Self::Application),
+			_ => match SessionError::from(err) {
+				SessionError::Cancel | SessionError::GoawayTimeout => None,
+				SessionError::Expired => Some(Self::Expired),
+				_ => Some(Self::Application),
+			},
 		}
 	}
 
