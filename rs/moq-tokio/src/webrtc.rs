@@ -272,7 +272,7 @@ impl Offerer {
 	async fn with_hosts(config: &Config, protocol: &str, hosts: Vec<IpAddr>) -> Result<(Self, Offer), Error> {
 		let protocol = negotiated(protocol)?;
 		let socket = bind(&hosts)?;
-		let mut rtc = rtc(&socket.locals)?;
+		let mut rtc = rtc(socket.locals())?;
 
 		let mut api = rtc.sdp_api();
 		let id = api.add_channel_with_config(ChannelConfig {
@@ -362,7 +362,7 @@ impl Answerer {
 		let parsed = SdpOffer::from_sdp_string(&sdp).map_err(|err| Error::Sdp(err.to_string()))?;
 
 		let socket = bind(&hosts)?;
-		let mut rtc = rtc(&socket.locals)?;
+		let mut rtc = rtc(socket.locals())?;
 		let answer = rtc
 			.sdp_api()
 			.accept_offer(parsed)
@@ -853,11 +853,7 @@ fn bind(hosts: &[IpAddr]) -> Result<moq_ice::Socket, Error> {
 		return Err(Error::NoHost);
 	}
 	let udp = Arc::new(socket);
-	Ok(moq_ice::Socket {
-		inbound: moq_ice::reader(udp.clone()),
-		udp,
-		locals,
-	})
+	Ok(moq_ice::Socket::new(udp.clone(), locals, moq_ice::reader(udp))?)
 }
 
 /// Look up each STUN server. One that does not resolve is skipped, since a missing

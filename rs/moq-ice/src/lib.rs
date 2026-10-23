@@ -1,6 +1,8 @@
 //! The ICE side of a str0m peer connection: one UDP socket, its candidates, and
 //! the loop that drives an [`str0m::Rtc`] over it.
 //!
+//! This crate is internal infrastructure with no API stability promise.
+//!
 //! str0m is sans-IO, so [`Agent::next`] alternates between feeding it datagrams
 //! and timeouts and draining what it produces (transmits, events, the next
 //! timeout), and runs a STUN Binding client on the same socket so the agent can

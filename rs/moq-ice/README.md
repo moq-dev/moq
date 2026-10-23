@@ -8,5 +8,5 @@ str0m is sans-IO and requires every mutation to be followed by draining its
 output. `Agent::rtc_mut` hands out a guard that drains when dropped, so callers
 can't forget.
 
-This is infrastructure, not an entry point: `moq-tokio`'s `webrtc` feature
+This is internal infrastructure with no API stability promise: `moq-tokio`'s `webrtc` feature
 builds MoQ data channels on it, and `moq-rtc` builds its WHIP/WHEP gateway.

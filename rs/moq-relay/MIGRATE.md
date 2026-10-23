@@ -5,6 +5,12 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### STUN requires an opt-in feature
+
+Enable the `stun` Cargo feature to use `moq_relay::stun`, `Config::stun`, or `--stun-bind` / `MOQ_STUN_BIND` / `[stun]`.
+For example, install with `cargo install moq-relay --features stun`.
+Default builds have no STUN listener or settings and refuse a STUN CLI flag, environment variable, or TOML table.
+
 ### `receive_window` has a floor (#5878)
 
 The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.

@@ -4,6 +4,12 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### Native WebRTC data channels are opt-in
+
+The default features no longer enable `moq_tokio::webrtc` data channels.
+Enable `webrtc` explicitly in a source build that integrates that transport.
+`moq import rtc` and `moq export rtc` still include the WHIP/WHEP gateway and its ICE dependencies.
+
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 
 Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.

@@ -35,6 +35,7 @@ pub mod session;
 mod settings;
 pub mod shutdown;
 pub mod stats;
+#[cfg(any(feature = "stun", test))]
 pub mod stun;
 #[cfg(test)]
 mod test_env;

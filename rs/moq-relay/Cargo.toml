@@ -25,6 +25,8 @@ doc = false
 [features]
 # A programmatic relay fixture with generated TLS and ephemeral ports.
 test-support = []
+# The optional public STUN Binding listener (`--stun-bind`).
+stun = ["dep:stun-types"]
 default = ["cluster-lan", "quic", "websocket", "uds"]
 iroh = ["moq-tokio/iroh"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
@@ -81,7 +83,7 @@ rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-l
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
-stun-types = { workspace = true }
+stun-types = { workspace = true, optional = true }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -110,6 +112,7 @@ moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rand = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
+stun-types = { workspace = true }
 tempfile = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

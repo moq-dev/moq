@@ -20,4 +20,4 @@ See the [demo](https://github.com/moq-dev/moq/tree/main/demo/boy) for the orches
 cargo install moq-boy --features openh264
 ```
 
-The `openh264` feature is required: a Game Boy frame is below every hardware encoder's minimum size, so moq-boy refuses to start without the software encoder.
+The `openh264` feature is required: a Game Boy frame is below every hardware encoder's minimum size, so Cargo refuses to build or install the binary without the software encoder.
