@@ -2799,12 +2799,9 @@ async fn resolve_honors_the_reference_epoch() {
 		reference: &str,
 		epoch: Option<&str>,
 	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		tokio::time::timeout(
-			TIMEOUT,
-			broadcast.resolve(referencing(Some(reference), epoch)),
-		)
-		.await
-		.expect("timed out resolving the reference")
+		tokio::time::timeout(TIMEOUT, broadcast.resolve(referencing(Some(reference), epoch)))
+			.await
+			.expect("timed out resolving the reference")
 	}
 
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
@@ -3815,7 +3812,10 @@ async fn dynamic_broadcast_request() {
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only publish announces the answer, under its epoch and after admission.
-	assert!(matches!(served.announce(MoqAnnounceRoute::default()), Err(MoqError::Closed)));
+	assert!(matches!(
+		served.announce(MoqAnnounceRoute::default()),
+		Err(MoqError::Closed)
+	));
 	prepared.publish().unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
