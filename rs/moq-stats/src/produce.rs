@@ -14,8 +14,8 @@ use serde::Serialize;
 use web_async::spawn;
 
 use crate::{
-	COMPRESSED_SUFFIX, Encoding, Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track,
-	sessions_track, totals_track, traffic_track,
+	COMPRESSED_SUFFIX, Encoding, Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track,
+	presence_track, sessions_track, totals_track, traffic_track,
 };
 
 /// Settings for a [`Producer`]. Construct with [`Config::new`] and chain
@@ -1843,7 +1843,11 @@ mod tests {
 				let total = drain.groups[""].totals.sums.tiers[&Tier::default()].current.sessions;
 				assert_eq!(
 					(total.wire_tx, total.wire_rx),
-					if encoding == Encoding::Compressed { (1_307, 2_614) } else { (1_007, 2_014) },
+					if encoding == Encoding::Compressed {
+						(1_307, 2_614)
+					} else {
+						(1_007, 2_014)
+					},
 					"epoch totals never reset on re-hold"
 				);
 			}

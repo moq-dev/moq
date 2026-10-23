@@ -367,14 +367,23 @@ mod tests {
 	fn track_names() {
 		let default = Tier::default();
 		let regional = Tier::new("region/sjc");
-		assert_eq!(traffic_track(&default, Role::Publisher, Encoding::Plain), "publisher.json");
-		assert_eq!(traffic_track(&default, Role::Subscriber, Encoding::Compressed), "subscriber.json.z");
+		assert_eq!(
+			traffic_track(&default, Role::Publisher, Encoding::Plain),
+			"publisher.json"
+		);
+		assert_eq!(
+			traffic_track(&default, Role::Subscriber, Encoding::Compressed),
+			"subscriber.json.z"
+		);
 		assert_eq!(
 			traffic_track(&regional, Role::Publisher, Encoding::Plain),
 			"region/sjc/publisher.json"
 		);
 		assert_eq!(sessions_track(&default, Encoding::Plain), "sessions.json");
-		assert_eq!(sessions_track(&regional, Encoding::Compressed), "region/sjc/sessions.json.z");
+		assert_eq!(
+			sessions_track(&regional, Encoding::Compressed),
+			"region/sjc/sessions.json.z"
+		);
 		assert_eq!(totals_track(Encoding::Plain), "totals.json");
 		assert_eq!(totals_track(Encoding::Compressed), "totals.json.z");
 		assert_eq!(presence_track("acme/live", Encoding::Plain), "acme/live/presence.json");

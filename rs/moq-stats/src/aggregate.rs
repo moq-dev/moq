@@ -1887,7 +1887,9 @@ mod tests {
 				.create_broadcast(format!(".stats/acme/node/{node}").as_str())
 				.expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
-			let track = source.create_track(totals_track(Encoding::Plain), timed()).expect("create track");
+			let track = source
+				.create_track(totals_track(Encoding::Plain), timed())
+				.expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				_source: source,
