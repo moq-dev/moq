@@ -106,8 +106,9 @@ steered two-worker reuseport group serving one port across threads, and
 `tests/integration/web.rs` is WebTransport interop against moq-tokio's: stream and
 datagram echo through the H3 framing,
 close codes through the capsule, and a full moq-lite session over
-WebTransport. All of them skip (loudly) below the kernel floor, which
-includes GitHub-hosted CI runners.
+WebTransport. All of them skip (loudly) below the kernel floor. CI runs them
+on `ubuntu-24.04-arm`, whose kernel clears it, with `MOQ_STRICT=1` refusing a
+skip: in the `uring.yml` release gate and the nightly `rs uring` job.
 
 ## Benchmarks
 

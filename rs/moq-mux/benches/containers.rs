@@ -44,7 +44,18 @@ impl Drop for Fixture {
 	}
 }
 
-async fn prepare(tracks: usize, frames: usize, payload: &Bytes) -> (moq_mux::Source, impl Stream, Fixture) {
+struct Video {
+	tracks: usize,
+	frames: usize,
+	frames_per_group: usize,
+}
+
+async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream, Fixture) {
+	let Video {
+		tracks,
+		frames,
+		frames_per_group,
+	} = video;
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
@@ -66,7 +77,7 @@ async fn prepare(tracks: usize, frames: usize, payload: &Bytes) -> (moq_mux::Sou
 					timestamp: timestamp(index),
 					duration: Some(Timestamp::from_millis(20).unwrap()),
 					payload: payload.clone(),
-					keyframe: true,
+					keyframe: index % frames_per_group == 0,
 				})
 				.unwrap();
 		}
@@ -182,7 +193,14 @@ fn containers(c: &mut Criterion) {
 			for frames in [1, 16, 64] {
 				for size in [256, 4096] {
 					let payload = payload(size);
-					let (source, stream, fixture) = runtime.block_on(prepare(*tracks, frames, &payload));
+					let (source, stream, fixture) = runtime.block_on(prepare(
+						Video {
+							tracks: *tracks,
+							frames,
+							frames_per_group: 1,
+						},
+						&payload,
+					));
 					let data = runtime.block_on(export(format, source, stream, true));
 					drop(fixture);
 					if format == "cmaf" {
@@ -247,7 +265,16 @@ fn containers(c: &mut Criterion) {
 										}
 									} else {
 										b.iter_batched(
-											|| runtime.block_on(prepare(*tracks, frames, &payload)),
+											|| {
+												runtime.block_on(prepare(
+													Video {
+														tracks: *tracks,
+														frames,
+														frames_per_group: 1,
+													},
+													&payload,
+												))
+											},
 											|(source, stream, fixture)| {
 												std::hint::black_box(
 													runtime.block_on(export(format, source, stream, false)),
@@ -268,5 +295,59 @@ fn containers(c: &mut Criterion) {
 	}
 }
 
-criterion_group!(benches, containers);
+// A stable profiling boundary excludes publishing and benchmark setup from counts.
+#[inline(never)]
+fn export_queued_groups(runtime: &tokio::runtime::Runtime, source: moq_mux::Source, stream: impl Stream) {
+	std::hint::black_box(runtime.block_on(export("annexb", source, stream, false)));
+}
+
+// Keep both dimensions independent: per-frame scans over queued groups grow with
+// frames per group as well as group count, unlike one constant cost per group.
+fn queued_groups(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let payload = payload(256);
+	let mut group = c.benchmark_group("annexb-export-queued-groups");
+	for groups in [1, 16, 64] {
+		for frames_per_group in [1, 16] {
+			let frames = groups * frames_per_group;
+			let (source, stream, fixture) = runtime.block_on(prepare(
+				Video {
+					tracks: 1,
+					frames,
+					frames_per_group,
+				},
+				&payload,
+			));
+			let data = runtime.block_on(export("annexb", source, stream, true));
+			assert_eq!(data.len(), 256 * frames);
+			drop(fixture);
+			group.throughput(Throughput::Elements(frames as u64));
+			group.bench_function(BenchmarkId::new(groups.to_string(), frames_per_group), |b| {
+				b.iter_batched(
+					|| {
+						runtime.block_on(prepare(
+							Video {
+								tracks: 1,
+								frames,
+								frames_per_group,
+							},
+							&payload,
+						))
+					},
+					|(source, stream, fixture)| {
+						export_queued_groups(&runtime, source, stream);
+						fixture
+					},
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, containers, queued_groups);
 criterion_main!(benches);

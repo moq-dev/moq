@@ -244,6 +244,7 @@ impl Decode<Version> for Cost {
 
 impl Encode<Version> for AnnounceBroadcast<'_> {
 	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Control::Announce);
 		if version.has_announce_id() {
 			// Lite06+: outer type discriminator, then a size-prefixed body (like the
 			// subscribe stream). The body varies by type.
@@ -332,6 +333,7 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 
 impl Decode<Version> for AnnounceBroadcast<'_> {
 	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		buf.control = Some(crate::stats::Control::Announce);
 		if version.has_announce_id() {
 			// Lite06+: outer type, then a size-prefixed body decoded within its bounds.
 			let typ = buf.varint()?;
@@ -455,6 +457,7 @@ pub struct AnnounceRequest<'a> {
 }
 
 impl Message for AnnounceRequest<'_> {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Announce);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
 		let exclude_hop = match version.has_exclude_hop() {
@@ -499,6 +502,7 @@ enum AnnounceStatus {
 
 impl Decode<Version> for AnnounceStatus {
 	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Control::Announce);
 		let status = r.u8()?;
 		status.try_into().map_err(|_| DecodeError::InvalidValue)
 	}
@@ -506,6 +510,7 @@ impl Decode<Version> for AnnounceStatus {
 
 impl Encode<Version> for AnnounceStatus {
 	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Control::Announce);
 		w.u8(*self as u8);
 		Ok(())
 	}
@@ -521,6 +526,7 @@ pub struct AnnounceInit<'a> {
 }
 
 impl Message for AnnounceInit<'_> {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Announce);
 	// Published lite01/02 carry the whole initial set in one message.
 	const MAX_SIZE: usize = 64 * 1024 * 1024;
 
@@ -575,6 +581,7 @@ pub struct AnnounceOk {
 }
 
 impl Message for AnnounceOk {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Announce);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_announce_ok() {
 			return Err(DecodeError::Version);
