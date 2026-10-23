@@ -1308,24 +1308,32 @@ where
 					}
 
 					// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
-					// the same boundary used by the subscription so the two streams never overlap.
-					if let Some(join) = &_join {
-						let joined = match (msg.filter, edge.largest) {
-							(Filter::NextObject, Some(largest)) => Joined::Group {
-								end: Location {
-									group: largest.group,
-									object: largest.object + 1,
-								},
-								cache: cache.clone(),
-								namespace: msg.track_namespace.to_owned(),
-								token: request_grant.is_some(),
-								ranking: track_serve.ranking.clone(),
-							},
-							(Filter::NextObject, None) => Joined::Empty,
-							_ => Joined::Unsupported,
+					// the same boundary used by the subscription so the two streams never overlap,
+					// again on every resume.
+					let filter = msg.filter;
+					let namespace = msg.track_namespace.to_owned();
+					let token = request_grant.is_some();
+					let save_join =
+						|largest: Option<Location>, cache: &crate::track::Consumer, ranking: &Ranking<GroupOf<S>>| {
+							if let Some(join) = &_join {
+								let joined = match (filter, largest) {
+									(Filter::NextObject, Some(largest)) => Joined::Group {
+										end: Location {
+											group: largest.group,
+											object: largest.object + 1,
+										},
+										cache: cache.clone(),
+										namespace: namespace.clone(),
+										token,
+										ranking: ranking.clone(),
+									},
+									(Filter::NextObject, None) => Joined::Empty,
+									_ => Joined::Unsupported,
+								};
+								join.joins.lock().insert(request_id, Some(joined));
+							}
 						};
-						join.joins.lock().insert(request_id, Some(joined));
-					}
+					save_join(edge.largest, &cache, &track_serve.ranking);
 
 					// A fill reads the group cache through its own consumer, independent of the
 					// subscription's cursor.
@@ -1406,11 +1414,14 @@ where
 							}
 						};
 						let resumed = match broadcast.track(&msg.track_name) {
-							Ok(track) => self.subscribe_track(&track, &msg).await,
+							Ok(track) => self
+								.subscribe_track(&track, &msg)
+								.await
+								.map(|(serve, edge)| (serve, edge, track)),
 							Err(err) => Err(err),
 						};
-						let edge;
-						(track_serve, edge) = match resumed {
+						let (edge, track);
+						(track_serve, edge, track) = match resumed {
 							Ok(resumed) => resumed,
 							// The resuming update is owed an answer, so it fails.
 							Err(err) => {
@@ -1425,6 +1436,7 @@ where
 							}
 						};
 						track_serve.opened = opened.clone();
+						save_join(edge.largest, &track, &track_serve.ranking);
 						if self.version != Version::Draft14 {
 							self.write_request_ok(&mut stream.writer, resume, edge.largest).await?;
 						}
@@ -7639,6 +7651,36 @@ mod serve_tests {
 				assert_eq!(sent(b"paused"), 0, "{version}: served what it missed");
 			}
 		}
+	}
+
+	/// A resume joins as a new SUBSCRIBE would, so a joining FETCH after it is served from where
+	/// the resume joined rather than refused as the pause left it.
+	#[moq_clock::test]
+	async fn a_joining_fetch_after_a_resume_is_served() {
+		let version = Version::Draft16;
+		let h = serve(version);
+		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(timestamp(), b"head".as_slice()).unwrap();
+		let mut request = ScriptedSession::new(Vec::new());
+		request.log = h.log.clone();
+		let stream = Stream::open(&mut request.clone(), version).await.unwrap();
+		let mut msg = subscribe(Filter::NextObject, None);
+		msg.forward = false;
+		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+		serve_until(serve.as_mut(), "the pause", || {
+			!h.log.trail().is_empty() && h.track.subscription().is_none()
+		})
+		.await;
+		request.push(&forward_update(version, 4, true));
+		serve_until(serve.as_mut(), "the resume", || {
+			Wire::read(&h.log, version).sent(ietf::RequestOk::ID).is_some()
+		})
+		.await;
+
+		let mark = h.log.writes.lock().unwrap().len();
+		let mut buf = bytes::Bytes::from(joining_fetch(&h, mark).await.unwrap());
+		let id = crate::coding::decode_varint(&mut buf, version).unwrap();
+		assert_eq!(id, ietf::FetchOk::ID, "the joining FETCH was refused");
 	}
 
 	/// A resume that cannot subscribe again fails its update: REQUEST_ERROR answers it, then

@@ -589,6 +589,8 @@ export class Publisher {
 				let resumed: Info;
 				try {
 					resumed = await untilAborted(track.info(), left.signal);
+					// A resume answers with the live edge, which only a granted subscriber learns.
+					if (!this.#gate.allows(name)) throw unauthorized(name);
 				} catch (err) {
 					if (left.signal.aborted) return;
 					await refuseUpdate(request.writer, version, "subscribe", {
