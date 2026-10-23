@@ -1091,9 +1091,10 @@ observe_group() {
 
 # The GStreamer subscriber with audio: moqsrc's video_0 must deliver a byte, and each of the
 # <codecs> audio pads, audio_0 on, decodes through decodebin to <out>.<pad>.pcm while the log tracer
-# records each decoded buffer's timestamp and size where an identity passes it on. The tracer logs
-# from the streaming thread itself; -v's last-message notifications drop and repeat buffers once
-# two pads stream at once. Once enough of all has landed, an interrupt makes
+# records each pad's caps and each decoded buffer's timestamp and size where an identity passes it
+# on. The tracer logs from the streaming thread before the data moves on, so whatever reached a file
+# is in the trace; -v's notifications trail the data through the bus, can miss the interrupt, and drop
+# and repeat buffers once two pads stream at once. Once enough of all has landed, an interrupt makes
 # gst-launch stop the pipeline and close its session. Not with -e: moqsrc does not end its pads on
 # an EOS sent into the pipeline. Each pad's log, trimmed to the buffers its file holds, becomes
 # <out>.<codec>.txt beside <out>.<codec>.pcm, the layout tone.py reads, the codec named by the
@@ -1115,8 +1116,8 @@ run_gst_audio() {
             ! identity "name=frames$i" ! filesink "location=$out.$i.pcm" buffer-mode=2)
     done
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-        GST_TRACERS=log GST_DEBUG=GST_BUFFER:7 GST_DEBUG_NO_COLOR=1 GST_DEBUG_FILE="$out.trace" \
-        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
+        GST_TRACERS=log GST_DEBUG=GST_BUFFER:7,GST_EVENT:7 GST_DEBUG_NO_COLOR=1 GST_DEBUG_FILE="$out.trace" \
+        gst-launch-1.0 moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
         s.video_0 ! filesink location="$out.video" buffer-mode=2 "${pads[@]}" >"$out.gst" 2>&1 &
     pid=$!
     while :; do
@@ -1147,21 +1148,24 @@ run_gst_audio() {
     python3 - "$out" "${#renditions[@]}" <<'PYCODE'
 import os, re, sys
 out, pads = sys.argv[1], int(sys.argv[2])
-text = open(f"{out}.gst").read()
 trace = open(f"{out}.trace").read()
+
+def caps(pad):
+    found = re.search(rf'do_push_event_pre:<{pad}> .*?caps=\(caps\)"((?:[^"\\]|\\.)*)"', trace)
+    assert found, f"no caps event on {pad} in the gst trace"
+    return re.sub(r"\\(.)", r"\1", found[1])
+
 for pad in range(pads):
-    src = re.search(rf"GstDecodeBin:decode{pad}\.GstGhostPad:sink\S*: caps = ([^,\n]*)(.*)", text)
-    assert src, f"no caps into audio_{pad}'s decodebin in the gst log"
-    if src[1] == "audio/x-opus":
+    src = caps(f"s:audio_{pad}")
+    if src.startswith("audio/x-opus,"):
         codec = "opus"
-    elif src[1] == "audio/mpeg" and "mpegversion=(int)4" in src[2]:
+    elif src.startswith("audio/mpeg,") and "mpegversion=(int)4" in src:
         codec = "mp4a"
     else:
-        raise SystemExit(f"audio_{pad} carries {src[1]}{src[2]}, which this check does not name")
-    caps = re.search(rf"GstIdentity:frames{pad}\.GstPad:src: caps = audio/x-raw, (.*)", text)
-    assert caps, f"no decoded audio caps for audio_{pad} in the gst log"
-    rate = int(re.search(r"rate=\(int\)(\d+)", caps[1])[1])
-    channels = int(re.search(r"channels=\(int\)(\d+)", caps[1])[1])
+        raise SystemExit(f"audio_{pad} carries {src}, which this check does not name")
+    decoded = caps(f"frames{pad}:src")
+    rate = int(re.search(r"rate=\(int\)(\d+)", decoded)[1])
+    channels = int(re.search(r"channels=\(int\)(\d+)", decoded)[1])
     # The pipeline stopped mid-stream, so the file may lack the last buffers the tracer logged.
     held, kept, lines = os.path.getsize(f"{out}.{pad}.pcm"), 0, [f"{rate} {channels}"]
     pushes = rf"do_push_buffer_pre:<frames{pad}:src> .*? pts (\d+):(\d+):([\d.]+), dts [^,]*, dur [^,]*, size (\d+)"
