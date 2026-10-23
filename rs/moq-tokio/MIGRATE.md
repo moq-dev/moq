@@ -4,13 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Extension choices are Rust-only ([moq-dev/moq#6535](https://github.com/moq-dev/moq/pull/6535))
-
-Remove `[listen.extensions]` and `[connect.extensions]` from TOML. Explicit
-values, including `false`, are refused. Native embedders can still set the typed
-`listen::Config.extensions` / `connect::Config.extensions` fields before setup;
-endpoint APIs and negotiated wire behavior are unchanged.
-
 ### The connection receive window is 128 MiB, and has a floor (#5878)
 
 `quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.

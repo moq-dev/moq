@@ -364,14 +364,16 @@ mod tests {
 	/// The dial config offers every extension unless told otherwise, and leaves the
 	/// default out when serialized.
 	#[test]
-	fn extensions_are_rust_only() {
-		for value in ["false", "true"] {
-			assert!(toml::from_str::<Config>(&format!("[extensions]\nsolicit = {value}\n")).is_err());
-		}
-		let mut config = Config::default();
-		config.extensions.solicit = false;
+	fn extensions_default_on_and_parse_off() {
+		let config: Config = toml::from_str("[extensions]\nsolicit = false\n").expect("parse");
 		assert!(!config.extensions.solicit);
-		assert!(!toml::to_string(&config).unwrap().contains("extensions"));
+		assert!(config.extensions.auth);
+		assert!(toml::to_string(&config).expect("serialize").contains("solicit = false"));
+		assert!(
+			!toml::to_string(&Config::default())
+				.expect("serialize")
+				.contains("extensions")
+		);
 	}
 
 	#[test]
@@ -475,6 +477,11 @@ failover_delay = "1s"
 			Some(Addrs::new(url("moqt://a:4443")).or(url("moqt://b:4443")))
 		);
 	}
+}
+
+/// Whether `extensions` is the default a config leaves out.
+pub(crate) fn all_extensions(extensions: &moq_net::setup::Extensions) -> bool {
+	*extensions == moq_net::setup::Extensions::default()
 }
 
 /// The dial side of an endpoint: where to connect and how to get there.
@@ -634,8 +641,8 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// Extensions offered by a programmatic endpoint; unavailable in TOML.
-	#[serde(skip)]
+	/// The extensions to offer in SETUP, every moq-transport one by default.
+	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,
 

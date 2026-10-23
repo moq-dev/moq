@@ -306,6 +306,9 @@ tls.cert = "relay.pem"               # Present a client certificate (mTLS to pee
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
+extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
+extensions.solicit = false           # Decline MoQ Solicit.
+extensions.epoch = false             # Decline MoQ Epoch. All default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only

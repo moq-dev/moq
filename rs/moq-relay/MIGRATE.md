@@ -29,9 +29,8 @@ client identity, with its own `api.tls.root` server trust.
 
 Remove `auth.verifications` / `--auth-verifications` / `MOQ_AUTH_VERIFICATIONS`
 and `Auth::with_verifications`; the verification window is a private production policy.
-Remove `[listen.extensions]` and `[connect.extensions]` from TOML. The typed Rust
-fields and native endpoint setup APIs remain; the relay still offers IETF support.
-`Web::with_extensions` is private to the relay's own setup.
+`Web::with_extensions` is private to the relay's own setup; set
+`[listen.extensions]` instead.
 
 `Workers::spawn(self, …)` now returns `uring::Spawned`; call `serve`, `failed`,
 and consuming `shutdown` on that value. A merely bound worker group cannot serve.

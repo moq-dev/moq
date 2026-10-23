@@ -493,19 +493,17 @@ mod tests {
 		assert!(error.to_string().contains("acme feature"), "{error}");
 	}
 
-	/// Both explicit values of a removed TOML knob must be refused by the common loader.
+	/// The moq-transport extension choices are file-only, so the loader must carry them through.
 	#[test]
-	fn loader_refuses_toml_extension_settings() {
+	fn loader_keeps_toml_extension_settings() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("relay.toml");
-		for side in ["listen", "connect"] {
-			for value in ["true", "false"] {
-				std::fs::write(&path, format!("[{side}.extensions]\nietf = {value}\n")).unwrap();
-				let error =
-					Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap_err();
-				assert!(error.to_string().contains("extensions"), "{side} {value}: {error}");
-			}
-		}
+		std::fs::write(&path, "[listen.extensions]\nauth = false\n\n[connect.extensions]\nsolicit = false\n").unwrap();
+		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).unwrap();
+		assert!(!config.listen.extensions.auth);
+		assert!(config.listen.extensions.solicit);
+		assert!(!config.connect.extensions.solicit);
+		assert!(config.connect.extensions.auth);
 	}
 
 	#[test]
