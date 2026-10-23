@@ -828,6 +828,12 @@ impl Slots {
 		self
 	}
 
+	/// How many more slots may be taken right now.
+	pub(crate) fn available(&self) -> usize {
+		self.max
+			.saturating_sub(self.live.load(std::sync::atomic::Ordering::Acquire))
+	}
+
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.
 	///
 	/// A peer whose own request runs past its limits loses the session. A subscription we

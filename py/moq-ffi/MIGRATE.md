@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `announce` takes a `MoqAnnounceRoute`
+
+`MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
+`MoqRoute` is only what announcements report, and the `InvalidRoute` error is gone.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.resolve()` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
@@ -21,7 +26,7 @@ Regenerate the bindings for the changed `request_broadcast` checksum.
 ### Catalog references carry their epoch
 
 `MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names; it defaults to `None`, so only positional construction changes.
-`MoqBroadcastConsumer.resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `None` to resolve whichever instance answers.
+`MoqBroadcastConsumer.resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, raise `MoqError.Mux` for a rendition whose broadcast is proven to serve another epoch.
 Rebuild or reinstall the complete wheel so its generated Python code and native library match.
 

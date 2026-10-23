@@ -379,8 +379,10 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 }
 
 /// A client whose CONNECT is expected to fail, reporting how it failed.
-// Its timeout is a watchdog on the tokio peer, not the worker.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+	clippy::disallowed_methods,
+	reason = "its timeout is a watchdog on the tokio peer, not the worker"
+)]
 fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web::ClientError> {
 	std::thread::spawn(move || {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -742,7 +744,7 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 			let mut filler = session.accept_uni().await.expect("accept_uni");
 			read_all(&mut filler).await;
 
-			#[allow(clippy::disallowed_methods)] // A watchdog on the tokio peer, not the worker.
+			#[expect(clippy::disallowed_methods, reason = "a watchdog on the tokio peer, not the worker")]
 			let accept = tokio::time::timeout(std::time::Duration::from_secs(5), session.accept_uni());
 			let mut recv = accept.await.expect("the reset stream arrives").expect("accept_uni");
 			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
