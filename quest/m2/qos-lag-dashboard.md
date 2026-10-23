@@ -10,7 +10,7 @@ and per node like the existing counters.
 ## Plan
 
 - Read both from the stats totals and prefix tracks
-  (`<path>/traffic.json`) rather than the `publisher.json` rows they sit on today (decided in the
+  (`<path>/prefix.json`) rather than the `publisher.json` rows they sit on today (decided in the
   2026-10-06 audit; the rows stay for existing readers, 2026-10-12); [viewer lag histogram](/quest/m2/qos/lag-histogram.md)
   lands them on the egress side of its per-group totals and prefix tracks
   (decided 2026-10-08). `lag` is a cumulative byte count per bucket keyed
