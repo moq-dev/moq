@@ -28,7 +28,7 @@
 //!   storage.
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod archive_tests;
 mod history;
 pub mod master;
@@ -129,9 +129,13 @@ impl Default for Config {
 
 /// All renditions of one broadcast, kept in sync with its catalog.
 pub struct Broadcaster {
-	// Read only by the serve path's `is_closed`/`closed` (server-gated); a recording consumer
-	// observes close through its `renditions()` cursor ending instead.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(
+			dead_code,
+			reason = "read only by the serve path's `is_closed`/`closed` (server-gated); a recording consumer observes close through its `renditions()` cursor ending instead"
+		)
+	)]
 	broadcast: moq_net::broadcast::Consumer,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
@@ -200,7 +204,10 @@ impl Broadcaster {
 	}
 
 	/// Resolve once the master playlist lists at least one rendition.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn advertised(&self) {
 		self.renditions.advertised().await;
 	}
@@ -349,7 +356,10 @@ impl Broadcaster {
 
 	/// Build every rendition's init segment, so the manifest can name each by its hash. A
 	/// rendition whose init can't be built yet is left out of the render.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn build_inits(&self) {
 		for rendition in self.renditions.snapshot() {
 			if let Err(err) = rendition.init().await {
@@ -362,7 +372,10 @@ impl Broadcaster {
 	/// already-ended timeline). Every rendition's window is fed from the same timeline, so the
 	/// first rendition's readiness stands in for the broadcast's. Bounding the wait is the
 	/// caller's policy.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn playable(&self) {
 		if let Some(rendition) = self.renditions.snapshot().into_iter().next() {
 			rendition.playable().await;
@@ -370,7 +383,10 @@ impl Broadcaster {
 	}
 
 	/// Whether the current catalog contains no servable renditions (serve path).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) fn is_empty(&self) -> bool {
 		self.renditions.is_empty()
 	}
@@ -603,7 +619,11 @@ async fn watch(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -625,7 +645,10 @@ mod tests {
 
 	use super::*;
 
-	#[allow(clippy::large_enum_variant)]
+	#[allow(
+		clippy::large_enum_variant,
+		reason = "a test fixture built once per case; only large when extra features grow the video config"
+	)]
 	enum TestConfig {
 		Video(hang::catalog::VideoConfig),
 		Audio(hang::catalog::AudioConfig),
