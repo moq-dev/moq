@@ -406,7 +406,7 @@ where
 				Ok(()) => Error::Cancel,
 				Err(err) => err.clone(),
 			});
-			self.closing.cause(res.as_ref().err().unwrap_or(&Error::Cancel));
+			self.closing.record(res.as_ref().err().unwrap_or(&Error::Cancel));
 			match &res {
 				Err(Error::Transport(_) | Error::IdleTimeout) => {
 					tracing::info!("session terminated");

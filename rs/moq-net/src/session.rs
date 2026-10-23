@@ -38,7 +38,7 @@ pub(crate) struct Closing {
 
 impl Closing {
 	/// Remember why this side is closing the transport, unless it already gave a reason.
-	pub(crate) fn cause(&self, err: &Error) {
+	pub(crate) fn record(&self, err: &Error) {
 		let mut cause = self.cause.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		cause.get_or_insert_with(|| err.clone());
 	}
@@ -48,7 +48,7 @@ impl Closing {
 		self.local.load(std::sync::atomic::Ordering::Relaxed)
 	}
 
-	fn reason(&self) -> Option<Error> {
+	fn cause(&self) -> Option<Error> {
 		self.cause
 			.lock()
 			.unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -512,7 +512,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			let err = match err.close_kind() {
 				// The transport only knows this side closed it, so the reason is ours.
 				crate::transport::CloseKind::Closed if err.session_error().is_none() => {
-					self.closing.reason().unwrap_or(Error::Cancel)
+					self.closing.cause().unwrap_or(Error::Cancel)
 				}
 				_ => self.version.transport_error(err),
 			};
@@ -596,7 +596,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 
 	/// Close the transport over `cause`, this side's reason for ending the session.
 	fn close(&mut self, cause: Error, reason: &str) {
-		self.closing.cause(&cause);
+		self.closing.record(&cause);
 		self.session
 			.close(self.version.session_code(&SessionError::from(&cause)), reason);
 	}

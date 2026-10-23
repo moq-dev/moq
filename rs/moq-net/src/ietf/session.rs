@@ -646,7 +646,7 @@ fn close<S: crate::transport::poll::Session>(
 	closing: &crate::session::Closing,
 	res: &Result<(), Error>,
 ) {
-	closing.cause(res.as_ref().err().unwrap_or(&Error::Cancel));
+	closing.record(res.as_ref().err().unwrap_or(&Error::Cancel));
 	match res {
 		Err(err @ (Error::Transport(_) | Error::IdleTimeout)) => {
 			tracing::info!(%err, "session terminated");
