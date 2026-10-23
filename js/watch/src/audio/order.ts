@@ -7,24 +7,26 @@
  * anchored at the first decoded frame, cannot place the head anyway.
  *
  * A buffered subscription holds its head and releases it sorted. The head is complete once a newer
- * group than the first arrives, or once the first group alone spans the floor: the ring could not
- * start playing before holding that much, so waiting for the head costs no startup latency. Any frame
+ * group than the first arrives, or once the first group alone runs past the floor: the ring could not
+ * start playing before holding that much, so waiting for the head costs no startup latency. It is
+ * also released once it spans the subscription's max delay, since nothing older is served. Any frame
  * still older than one already released is dropped, as is every reordered frame when not holding.
  */
 export class Order<T extends { group: number; frame: { timestamp: number } }> {
-	// The head, oldest first, while it is still arriving.
+	// The head, in arrival order, while it is still arriving.
 	#held: T[] | undefined;
-	// The group the head started with, and its own oldest frame.
+	// The group the head started with, and its own first frame.
 	#first?: { group: number; timestamp: number };
-	// How far the first group may run before the head is released.
-	#floor: number;
+	// The oldest and newest held timestamps.
+	#span?: { oldest: number; newest: number };
+	#hold: { floor: number; maxDelay: number };
 	// The newest frame released since the decoder was last reset.
 	#newest?: number;
 
-	/** Hold the head until it spans `floor` (microseconds), or decode each frame as it arrives. */
-	constructor(hold: { floor: number } | undefined) {
+	/** Hold the head (bounds in microseconds), or decode each frame as it arrives. */
+	constructor(hold: { floor: number; maxDelay: number } | undefined) {
 		this.#held = hold ? [] : undefined;
-		this.#floor = hold?.floor ?? 0;
+		this.#hold = hold ?? { floor: 0, maxDelay: 0 };
 	}
 
 	/** Accept a frame, returning the frames ready to decode, oldest first. */
@@ -36,10 +38,13 @@ export class Order<T extends { group: number; frame: { timestamp: number } }> {
 		this.#first ??= { group, timestamp: frame.timestamp };
 		if (group > this.#first.group) return this.#release([...this.#take(), read]);
 
-		held.splice(held.findLastIndex((other) => other.frame.timestamp <= frame.timestamp) + 1, 0, read);
-		if (group === this.#first.group && frame.timestamp - this.#first.timestamp >= this.#floor) {
-			return this.#release(this.#take());
-		}
+		held.push(read);
+		const oldest = Math.min(this.#span?.oldest ?? frame.timestamp, frame.timestamp);
+		const newest = Math.max(this.#span?.newest ?? frame.timestamp, frame.timestamp);
+		this.#span = { oldest, newest };
+
+		const ran = group === this.#first.group && frame.timestamp - this.#first.timestamp > this.#hold.floor;
+		if (ran || newest - oldest >= this.#hold.maxDelay) return this.#release(this.#take());
 		return [];
 	}
 
@@ -56,7 +61,8 @@ export class Order<T extends { group: number; frame: { timestamp: number } }> {
 	#take(): T[] {
 		const held = this.#held ?? [];
 		this.#held = undefined;
-		return held;
+		// Stable, so frames sharing a timestamp keep their arrival order.
+		return held.sort((a, b) => a.frame.timestamp - b.frame.timestamp);
 	}
 
 	#release(reads: T[]): T[] {

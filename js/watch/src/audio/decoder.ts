@@ -350,12 +350,21 @@ export class Decoder {
 			decoder.configure(decoderConfig);
 
 			const order = this.#order();
+			let discontinuity: number | undefined;
 			for (;;) {
 				const next = await nextMedia(consumer);
-				if (next?.frame === undefined || next.end !== undefined) {
-					// The track ending, or a marker, cuts a held head short.
+				// The track ending, a marker, or a discontinuity cuts a held head short. A group merely
+				// completing does not.
+				if (
+					next === undefined ||
+					next.end !== undefined ||
+					next.discontinuity !== (discontinuity ?? next.discontinuity)
+				) {
 					if (!(await this.#play(effect, decoder, decoderConfig, order, order.flush()))) return;
-					if (!next) break;
+				}
+				if (!next) break;
+				discontinuity = next.discontinuity;
+				if (next.frame === undefined || next.end !== undefined) {
 					if (this.#onNext(next)) {
 						decoder.reset();
 						decoder.configure(decoderConfig);
@@ -430,13 +439,21 @@ export class Decoder {
 			decoder.configure(decoderConfig);
 
 			const order = this.#order();
+			let discontinuity: number | undefined;
 			for (;;) {
 				const next = await nextMedia(consumer);
-				if (next?.frame === undefined) {
-					// The track ending, or a marker, cuts a held head short.
+				// The track ending, a marker, or a discontinuity cuts a held head short. A group merely
+				// completing does not.
+				if (
+					next === undefined ||
+					next.end !== undefined ||
+					next.discontinuity !== (discontinuity ?? next.discontinuity)
+				) {
 					if (!(await this.#play(effect, decoder, decoderConfig, order, order.flush()))) return;
-					if (!next) break;
-
+				}
+				if (!next) break;
+				discontinuity = next.discontinuity;
+				if (next.frame === undefined) {
 					// Reset and re-anchor before decoding the first frame of a new codec epoch.
 					if (this.#onNext(next)) {
 						decoder.reset();
@@ -459,10 +476,14 @@ export class Decoder {
 		});
 	}
 
-	// A buffered subscription holds its head until it spans the floor, which playback waits for anyway.
+	// A buffered subscription holds its head until it runs past the floor, which playback waits for
+	// anyway, or spans the window the relay serves.
 	#order(): Order<FrameNext> {
 		if (!this.sync.out.buffered.peek()) return new Order(undefined);
-		return new Order({ floor: Time.Micro.fromMilli(this.sync.out.delay.peek()) });
+		return new Order({
+			floor: Time.Micro.fromMilli(this.sync.out.delay.peek()),
+			maxDelay: Time.Micro.fromMilli(this.sync.out.maxAge.peek()),
+		});
 	}
 
 	// Decode released frames in order, resetting the decoder before the first frame of a new codec
