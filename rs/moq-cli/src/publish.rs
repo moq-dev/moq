@@ -60,8 +60,9 @@ pub struct CaptureArgs {
 	pub camera: Option<Option<String>>,
 
 	/// Capture a whole display, by the id `moq devices` reports. Bare
-	/// `--display` captures the main display. On Wayland the desktop portal opens
-	/// a picker dialog; X11 accepts the listed monitor id.
+	/// `--display` captures the main display, or on Wayland opens the system
+	/// portal picker (requires the `pipewire` feature). Wayland accepts only
+	/// the XWayland `x11:` ids it lists.
 	#[usage(long, group = "video-source", alias = "screen")]
 	pub display: Option<Option<String>>,
 
@@ -724,8 +725,17 @@ impl CaptureArgs {
 			}
 		} else if let Some(id) = &self.app {
 			Source::App(id.clone())
-		} else if let Some(index) = &self.display {
-			Source::Display(index.clone())
+		} else if let Some(id) = &self.display {
+			match id {
+				Some(id) => Source::Display(Some(id.clone())),
+				// Wayland has no main display to name, so the system picker chooses the screen.
+				#[cfg(all(target_os = "linux", feature = "pipewire"))]
+				None if std::env::var_os("WAYLAND_DISPLAY").is_some() => {
+					use moq_video::capture::portal::{Kind, Selection};
+					Source::Portal(Selection::new(Kind::Screen))
+				}
+				None => Source::Display(None),
+			}
 		} else {
 			Source::Camera(self.camera.clone().flatten())
 		})
