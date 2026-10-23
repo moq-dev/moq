@@ -183,8 +183,6 @@ pub(super) struct Resume {
 	new_group: Option<u64>,
 	/// Whether a REQUEST_UPDATE asked for it, which the join's REQUEST_OK answers.
 	answer: Option<RequestId>,
-	/// The resume carries its own filter, which replaces the frozen cursor.
-	refilter: bool,
 }
 
 /// What ended a paused subscription's wait.
@@ -821,6 +819,7 @@ where
 		let mut new_group: Option<u64>;
 		// A PUBLISH_OK breaking a rule ends the PUBLISH, as a refused update does.
 		let mut refused = None;
+		let refilter;
 		let resume = match answer {
 			None => {
 				stream.writer.abort(&Error::Cancel);
@@ -849,6 +848,7 @@ where
 					}
 					params.order = ok.group_order.or(params.order);
 					params.filter = ok.filter.unwrap_or(params.filter);
+					refilter = ok.filter.is_some();
 					// The answer may ask for a new group only if the PUBLISH sent DYNAMIC_GROUPS
 					// (draft-18 section 10.2.13). The listing's own asked without knowing, as a
 					// SUBSCRIBE may, so it is ignored where it does not apply.
@@ -860,7 +860,6 @@ where
 						fill: None,
 						new_group: new_group.take(),
 						answer: None,
-						refilter: ok.filter.is_some(),
 					})
 				}
 				_ => return Err(goaways.failed(Error::UnexpectedMessage)),
@@ -885,6 +884,7 @@ where
 			published: true,
 			opened: Default::default(),
 			cursor: Arc::new(std::sync::Mutex::new(cursor)),
+			refilter,
 			renewal: Renewal::default(),
 		};
 		let running = self.run_pausable(&mut stream, request_id, &mut state, resume, &mut finished, &mut goaways);
@@ -1063,6 +1063,7 @@ where
 			}
 			if let Some(filter) = update.filter {
 				state.params.filter = filter;
+				state.refilter = true;
 			}
 			if let Some(max_age) = update.max_age {
 				state.params.max_age = Some(max_age);
@@ -1081,7 +1082,6 @@ where
 						fill: update.fill,
 						new_group: update.new_group.or(state.params.new_group.take()),
 						answer: (!renewing && self.version != Version::Draft14).then_some(update.request_id),
-						refilter: update.filter.is_some(),
 					})
 				}
 				_ if !renewing && self.version != Version::Draft14 => self
@@ -1119,7 +1119,8 @@ where
 		Ok(Served::UpdateFailed(err))
 	}
 
-	/// Resume at the current live edge, answering the update that asked when present.
+	/// Resume right after where the request paused, or from a filter the subscriber chose
+	/// since, answering the update that asked when present.
 	async fn resume_subscription(
 		&self,
 		stream: &mut Stream<S, Version>,
@@ -1138,11 +1139,12 @@ where
 		if let Some(max_age) = params.max_age {
 			subscription.max_delay = Duration::from_millis(max_age);
 		}
-		// A resume continues right after where the request paused; only a filter the resume
-		// carries starts afresh. A start the live edge does not decide is no join; see
+		// A resume continues right after where the request paused; only a filter the subscriber
+		// chose since starts afresh. A start the live edge does not decide is no join; see
 		// `serve_subscribe_stream`.
 		let cursor = *state.cursor.lock().unwrap();
-		let fixed = match how.refilter {
+		let refilter = std::mem::take(&mut state.refilter);
+		let fixed = match refilter {
 			true => subscribe_range(params.filter, LiveEdge::default(), self.version),
 			false => cursor.range(params.filter, self.version),
 		};
@@ -1176,7 +1178,7 @@ where
 		.await?;
 
 		state.ended = Some(track.serving().unwrap_or_else(|| track.clone()));
-		let (range, largest) = match how.refilter {
+		let (range, largest) = match refilter {
 			true => {
 				let edge = live_edge(track);
 				let range = subscribe_range(params.filter, edge, self.version);

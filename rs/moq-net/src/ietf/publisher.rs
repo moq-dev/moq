@@ -569,6 +569,9 @@ struct Forwarding<'a, S: crate::transport::poll::Session> {
 	opened: Arc<AtomicU64>,
 	/// Where the request stands, shared with the group writers that advance it.
 	cursor: Arc<std::sync::Mutex<Cursor>>,
+	/// The subscriber chose a filter since the last resume, which the next one serves
+	/// instead of the cursor.
+	refilter: bool,
 	renewal: Renewal,
 }
 
@@ -594,6 +597,17 @@ impl Cursor {
 				object: 0,
 			}),
 			largest: edge.largest,
+		}
+	}
+
+	/// Record `group` as delivered to its end, so a resume opens no stream for it.
+	fn finished(&mut self, group: u64) {
+		let after = group.saturating_add(1);
+		if after > self.next.group {
+			self.next = Location {
+				group: after,
+				object: 0,
+			};
 		}
 	}
 
@@ -1363,6 +1377,7 @@ where
 						published: false,
 						opened: Default::default(),
 						cursor: Default::default(),
+						refilter: false,
 						renewal: Renewal::default(),
 					};
 					if !msg.forward {
@@ -5195,6 +5210,8 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	writing: Option<u64>,
 	/// The last object handed to the stream whole.
 	written: Option<u64>,
+	/// Every object of the group was handed to the stream.
+	whole: bool,
 	/// The request's cursor, advanced past `written` once this machine is done.
 	cursor: Option<Arc<std::sync::Mutex<Cursor>>>,
 	slice: GroupSlice,
@@ -5231,11 +5248,18 @@ enum GroupState<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> Drop for GroupServe<S> {
 	fn drop(&mut self) {
-		if let (Some(cursor), Some(object)) = (&self.cursor, self.written) {
-			cursor.lock().unwrap().delivered(Location {
+		let Some(cursor) = &self.cursor else {
+			return;
+		};
+		let mut cursor = cursor.lock().unwrap();
+		if let Some(object) = self.written {
+			cursor.delivered(Location {
 				group: self.msg.group_id,
 				object,
 			});
+		}
+		if self.whole {
+			cursor.finished(self.msg.group_id);
 		}
 	}
 }
@@ -5276,6 +5300,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			prior_object: None,
 			writing: None,
 			written: None,
+			whole: false,
 			cursor: None,
 			slice,
 			ended: false,
@@ -5564,6 +5589,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 											self.marked = true;
 											continue;
 										}
+										self.whole = true;
 										break 'serve Ok(());
 									}
 									Poll::Ready(Err(err)) => break 'serve Err(err),
@@ -9263,6 +9289,54 @@ mod serve_tests {
 			Wire::read(&h.log, version).publish_done.unwrap().0,
 			ietf::PublishDoneStatus::TrackEnded.code(version)
 		);
+	}
+
+	/// A pause after a group was delivered to its end resumes past that group, opening no
+	/// empty stream for it.
+	#[moq_clock::test]
+	async fn a_resume_after_a_finished_group_skips_it() {
+		for version in [Version::Draft16, Version::Draft22] {
+			let h = serve(version);
+			let mut request = request_session(version);
+			request.log = h.log.clone();
+			let stream = Stream::open(&mut request.clone(), version).await.unwrap();
+			let mut running = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+			);
+			serve_until(running.as_mut(), "SUBSCRIBE_OK", || {
+				!h.log.trail().is_empty() && Wire::read(&h.log, version).sent(ietf::SubscribeOk::ID).is_some()
+			})
+			.await;
+			let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+			group.write_frame(timestamp(), b"g0".as_slice()).unwrap();
+			group.finish().unwrap();
+			serve_until(running.as_mut(), "group 0 delivered to its end", || {
+				data_streams(&h.log)
+					.values()
+					.any(|sent| sent.contains(&Sent::Write(b"g0".to_vec())) && sent.contains(&Sent::Finish))
+			})
+			.await;
+
+			let mut update = subscription_update(0x40);
+			update.forward = Some(false);
+			request.push(&encode_update(version, &update).await);
+			serve_until(running.as_mut(), "the pause", || h.track.subscription().is_none()).await;
+			update.request_id = RequestId(0x42);
+			update.forward = Some(true);
+			request.push(&encode_update(version, &update).await);
+			serve_until(running.as_mut(), "the resume", || h.track.subscription().is_some()).await;
+			let mut next = h.track.create_group(group::Info { sequence: 1 }).unwrap();
+			next.write_frame(timestamp(), b"g1".as_slice()).unwrap();
+			serve_until(running.as_mut(), "group 1", || sent_count(&h.log, b"g1") == 1).await;
+			assert_eq!(data_streams(&h.log).len(), 2, "{version}: group 0 reopened");
+			assert_eq!(
+				Wire::read(&h.log, version).request_oks.last(),
+				Some(&Some(Location { group: 0, object: 0 })),
+				"{version}"
+			);
+		}
 	}
 
 	/// A pause long enough for its groups to go stale resumes at the oldest group still

@@ -122,10 +122,16 @@ for (const version of drafts) {
 		await update(stream, version, 4n, false);
 		listing.abort(new StreamError(StreamCode.Cancel, { message: "listing cancelled" }));
 		await clock.advance(Nano.zero);
+		const later = track.appendGroup();
+		later.writeFrame({ payload: new Uint8Array([2]) });
+		later.close();
+		// The resume continues after the group it finished rather than serving it again.
 		await update(stream, version, 6n, true);
 		const resumed = await uni.read();
 		if (!resumed.value) throw new Error("missing resumed group");
-		await new Reader(resumed.value, undefined, version).readAll();
+		const resumedReader = new Reader(resumed.value, undefined, version);
+		expect((await Group.decode(resumedReader, version)).groupId).toBe(1);
+		await resumedReader.readAll();
 		await update(stream, version, 8n, false);
 		broadcast.close();
 		expect(await stream.reader.u53()).toBe(PublishDone.id);

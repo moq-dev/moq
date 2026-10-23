@@ -257,6 +257,9 @@ interface RunGroup {
 
 	/** The subscription's data stream count, which PUBLISH_DONE reports. */
 	streams: StreamCount;
+
+	/** The request's cursor, advanced past each object this group's stream takes whole. */
+	cursor: Cursor;
 }
 
 /** How many data streams a subscription opened, fill streams included. */
@@ -271,6 +274,56 @@ interface Pausable {
 	acked: boolean;
 	/** The update a resume answers with REQUEST_OK, if one asked: its own Request ID on drafts 15 and 16. */
 	answer?: { requestId?: bigint };
+	/** Where the request stands, once it first answered or served. */
+	cursor?: Cursor;
+	/** The subscriber chose a filter since the last resume, which the next one serves instead of the cursor. */
+	refilter?: boolean;
+}
+
+/**
+ * Where a pausable request stands. A pause freezes it and a resume continues right after it,
+ * never at the live edge: whatever expired meanwhile is skipped as the subscription catches
+ * back up.
+ */
+interface Cursor {
+	/** The next Location to serve. */
+	next: Location;
+	/**
+	 * What a resume's REQUEST_OK names: the last object delivered, or the Largest Location the
+	 * request's last answer named when it delivered none since.
+	 */
+	largest?: Location;
+}
+
+/** A cursor serving `range`, resolved against `edge`, whose Largest Location the answer names. */
+function cursorAt(range: ServeRange, edge: LiveEdge): Cursor {
+	// An absent start joins at the latest group, as the subscription does.
+	return { next: range.start ?? { group: edge.latest ?? 0n, object: 0n }, largest: edge.largest };
+}
+
+/** Record `group` as delivered to its end, so a resume opens no stream for it. */
+function finish(cursor: Cursor, group: bigint) {
+	if (group + 1n > cursor.next.group) cursor.next = { group: group + 1n, object: 0n };
+}
+
+/** Record `at` as handed to its stream whole. */
+function advance(cursor: Cursor, at: Location) {
+	if (at.group > cursor.next.group || (at.group === cursor.next.group && at.object >= cursor.next.object)) {
+		cursor.next = { group: at.group, object: at.object + 1n };
+		cursor.largest = at;
+	}
+}
+
+/** The range a resume serves: from `cursor` to the end of `msg`'s filter. */
+function resumeRange(cursor: Cursor, msg: Subscribe, version: IetfVersion): ServeRange {
+	return { start: cursor.next, end: subscribeRange(msg, {}, version).end };
+}
+
+/** The live edge as the cache's Largest Object describes it, for a request holding no subscription. */
+function cachedEdge(largest: TrackLocation | undefined): LiveEdge {
+	if (!largest) return {};
+	const at = { group: BigInt(largest.group), object: BigInt(largest.frame) };
+	return { latest: at.group, largest: at, next: { group: at.group, object: at.object + 1n } };
 }
 
 /** A decoded subscription REQUEST_UPDATE, with its own Request ID on drafts 15 and 16. */
@@ -598,22 +651,23 @@ export class Publisher {
 				left.signal.removeEventListener("abort", leave);
 				lookup.abort();
 			}
-			await this.#subscribeOk(
-				request,
-				msg,
-				info,
-				largest && { group: BigInt(largest.group), object: BigInt(largest.frame) },
-			);
+			// The filter resolves against it now, so the first resume serves from here rather than
+			// from wherever the live edge has moved by then.
+			const edge = cachedEdge(largest);
+			state.cursor = cursorAt(subscribeRange(msg, edge, this.#session.version), edge);
+			await this.#subscribeOk(request, msg, info, edge.largest);
 			state.acked = true;
 		}
 		await this.#pausedSubscribe({ msg, request, broadcast, state, left: left.signal });
 	}
 
-	/** Subscribe to `msg`'s track as its parameters stand, joining at the live edge. */
-	#subscribeTrack(broadcast: broadcast.Consumer, msg: Subscribe): TrackSubscriber {
+	/** Subscribe to `msg`'s track as its parameters stand: from `cursor` when resuming, else joining at the live edge. */
+	#subscribeTrack(broadcast: broadcast.Consumer, msg: Subscribe, cursor?: Cursor): TrackSubscriber {
 		// A range that resolves without the live edge has a fixed start, which is no join:
-		// bound the subscription before subscribing so the refresh ratio never judges it.
-		const fixed = subscribeRange(msg, {}, this.#session.version);
+		// bound the subscription before subscribing so the refresh ratio never judges it. A
+		// resume continues from its cursor, which is always fixed.
+		const version = this.#session.version;
+		const fixed = cursor ? resumeRange(cursor, msg, version) : subscribeRange(msg, {}, version);
 		return wireOf(broadcast).subscribe(msg.trackName, {
 			priority: fromWire(msg.subscriberPriority),
 			order: msg.groupOrder,
@@ -632,9 +686,9 @@ export class Publisher {
 	}
 
 	/**
-	 * Hold a paused SUBSCRIBE without upstream demand until an update resumes it at the live
-	 * edge, or it ends. Its track's end is unobservable without demand: the broadcast ending
-	 * ends it in error, and a resume learns what became of the track.
+	 * Hold a paused SUBSCRIBE without upstream demand until an update resumes it right after
+	 * where it paused, or it ends. Its track's end is unobservable without demand: the
+	 * broadcast ending ends it in error, and a resume learns what became of the track.
 	 */
 	async #pausedSubscribe({
 		msg,
@@ -711,7 +765,7 @@ export class Publisher {
 			}
 
 			state.answer = answer;
-			const track = this.#subscribeTrack(broadcast, msg);
+			const track = this.#subscribeTrack(broadcast, msg, state.cursor);
 			let paused: Paused | undefined;
 			try {
 				let info: Info;
@@ -862,7 +916,14 @@ export class Publisher {
 			// the draft's current-group join (Next Object plus a StartGroup=1 fill) cover the
 			// group with no gap and no overlap.
 			const edge = liveEdge(track);
-			const range = subscribeRange(msg, edge, version);
+			// A resume continues right after where the request paused; only a filter the
+			// resume carries starts afresh.
+			const resumed = paused.cursor && !paused.refilter ? paused.cursor : undefined;
+			paused.refilter = false;
+			const range = resumed ? resumeRange(resumed, msg, version) : subscribeRange(msg, edge, version);
+			const largest = resumed ? resumed.largest : edge.largest;
+			const cursor = resumed ?? cursorAt(range, edge);
+			paused.cursor = cursor;
 
 			// The wire request tells an upstream what we need; the cursor is what actually
 			// trims this subscriber, since the producer fans every cached group out to every
@@ -882,8 +943,7 @@ export class Publisher {
 			// subscription's cursor. Forked from this subscriber rather than resolved through
 			// the broadcast again: a dynamic serve is one request per peer subscription, so
 			// asking the broadcast would mint a second producer nobody has accepted.
-			const fill =
-				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
+			const fill = msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, largest) : undefined;
 			cache =
 				fill && fill.kind !== "empty"
 					? track.fork({ priority, order, maxDelay: Milli(Varint.MAX_U53) })
@@ -893,9 +953,9 @@ export class Publisher {
 				await this.#subscribeOk(request, msg, info, edge.largest);
 				paused.acked = true;
 			} else if (paused.answer) {
-				// The resuming update learns where the subscription now joins.
+				// The resuming update learns where the subscription continues from.
 				const parameters = new Parameters();
-				if (edge.largest) parameters.largest = { groupId: edge.largest.group, objectId: edge.largest.object };
+				if (largest) parameters.largest = { groupId: largest.group, objectId: largest.object };
 				await request.writer.u53(RequestOk.id);
 				await new RequestOk({ ...paused.answer, parameters }).encode(request.writer, version);
 			}
@@ -973,6 +1033,7 @@ export class Publisher {
 						slice: groupSlice(range, group.sequence),
 						unsubscribed,
 						streams,
+						cursor,
 					});
 					groups.add(task);
 					void task.finally(() => groups.delete(task));
@@ -1134,7 +1195,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, track, group, timescale, publisherPriority, ranking, slice, unsubscribed, streams } =
+		const { requestId, track, group, timescale, publisherPriority, ranking, slice, unsubscribed, streams, cursor } =
 			options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
@@ -1200,6 +1261,8 @@ export class Publisher {
 				// group) is empty, and starting here is what lets the check below see that
 				// before the read parks on an object the range already excludes.
 				let next = slice.skip;
+				// The group ran out rather than the range or the stream.
+				let exhausted = false;
 
 				for (;;) {
 					// The filter ends inside this group: everything at `until` and beyond is
@@ -1209,7 +1272,10 @@ export class Publisher {
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
 					const read = await race([hooks.readGroupFrame(group, slice.skip), stream.closed]);
-					if (!read) break;
+					if (!read) {
+						exhausted = slice.until === undefined;
+						break;
+					}
 					next = read.sequence + 1;
 					if (slice.until !== undefined && read.sequence >= slice.until) {
 						read.complete();
@@ -1223,6 +1289,7 @@ export class Publisher {
 						await hooks.guardGroup(group, () =>
 							obj.encode(stream, header.flags, timescale, this.#session.version, delta),
 						);
+						advance(cursor, { group: BigInt(group.sequence), object: BigInt(read.sequence) });
 					} finally {
 						read.complete();
 					}
@@ -1254,6 +1321,7 @@ export class Publisher {
 				// Only a stream that closed cleanly delivered the marker: one reset after its FIN
 				// may not have, which leaves the standalone fallback in place, as in Rust.
 				if (marked) streams.terminalSent = delivered === true;
+				if (exhausted && delivered === true) finish(cursor, BigInt(group.sequence));
 			} catch (err: unknown) {
 				stream.reset(error(err));
 			} finally {
@@ -2668,7 +2736,15 @@ export class Publisher {
 			hold.signal.removeEventListener("abort", cancelled);
 			stop();
 			// Once sent, the PUBLISH survives cancellation of its listing.
-			const state: Pausable = { streams: { opened: 0 }, unlisted, acked: true };
+			// The listing's filter resolves against the edge the PUBLISH names, so its first resume
+			// serves from there.
+			const edge = cachedEdge(largest);
+			const state: Pausable = {
+				streams: { opened: 0 },
+				unlisted,
+				acked: true,
+				cursor: cursorAt(subscribeRange(subscription, edge, version), edge),
+			};
 			const answer = await untilAborted(request.next(), hold.signal);
 			if (!answer) throw new ProtocolViolation("PUBLISH ended without an answer");
 			if (answer.type === RequestError.id) {
@@ -2690,6 +2766,7 @@ export class Publisher {
 			}
 			this.#applyPublished(subscription, params);
 			let forward = !Filter.isDraft20(version) && params.forward !== false;
+			state.refilter = params.subscriptionFilter !== undefined;
 			for (;;) {
 				if (!this.#gate.allows(namespace) || unlisted.peek() !== undefined) {
 					await request.writer.u53(PublishDone.id);
@@ -2703,7 +2780,10 @@ export class Publisher {
 					return;
 				}
 				if (forward) {
-					const fixed = subscribeRange(subscription, {}, version);
+					const fixed =
+						state.cursor && !state.refilter
+							? resumeRange(state.cursor, subscription, version)
+							: subscribeRange(subscription, {}, version);
 					const track = wireOf(source).subscribe(name, {
 						priority: fromWire(subscription.subscriberPriority),
 						order: subscription.groupOrder,
@@ -2786,6 +2866,7 @@ export class Publisher {
 				this.#applyPublished(subscription, update);
 				forward = update.forward === true;
 				state.answer = forward ? {} : undefined;
+				if (update.subscriptionFilter !== undefined) state.refilter = true;
 				if (!forward) {
 					await request.writer.u53(RequestOk.id);
 					await new RequestOk({}).encode(request.writer, version);

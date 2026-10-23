@@ -2744,6 +2744,19 @@ async function nextUni(
 	}
 }
 
+/** Read a group stream's header and its first `count` payloads, leaving the stream open. */
+async function readObjects(stream: ReadableStream<Uint8Array>, count: number): Promise<string[]> {
+	const reader = new Reader(stream, undefined, V20);
+	await GroupMessage.decode(reader, V20);
+	const payloads: string[] = [];
+	while (payloads.length < count) {
+		await reader.u53(); // delta
+		await reader.read(await reader.u53()); // object properties
+		payloads.push(new TextDecoder().decode(await reader.read(await reader.u53())));
+	}
+	return payloads;
+}
+
 /** Read a group stream to its end. */
 async function readGroup(stream: ReadableStream<Uint8Array>): Promise<ServedGroup> {
 	const reader = new Reader(stream, undefined, V20);
@@ -3996,11 +4009,14 @@ async function forwardUpdate(client: Stream, version: IetfVersion, id: bigint, f
 	return RequestOk.decode(client.reader, version);
 }
 
-test("a SUBSCRIBE pauses without demand and resumes at the live edge", async () => {
+test("a SUBSCRIBE pauses without demand and resumes right after the last object it delivered", async () => {
 	const fx = fixture(V20);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	writeGroup(track, 1);
-	const { client } = await runSubscribe(
+	const write = (group: ReturnType<TrackProducer["appendGroup"]>, text: string) =>
+		group.writeFrame({ payload: new TextEncoder().encode(text), timestamp: Timestamp.now() });
+	const first = track.appendGroup();
+	write(first, "before");
+	const { client, ok } = await runSubscribe(
 		fx,
 		new Subscribe({
 			requestId: 0n,
@@ -4011,21 +4027,34 @@ test("a SUBSCRIBE pauses without demand and resumes at the live edge", async () 
 		}),
 	);
 	try {
+		expect(ok.largest).toEqual({ groupId: 0n, objectId: 0n });
+		write(first, "delivered");
+		const live = await nextUni(fx.uni);
+		if (!live) throw new Error("the subscription served nothing");
+		expect(await readObjects(live, 1)).toEqual(["delivered"]);
+
 		await forwardUpdate(client, V20, 2n, false);
 		while (track.subscription.peek() !== undefined) await track.subscription.changed();
-		writeGroup(track, 1);
+		write(first, "mid-group");
+		first.close();
+		const second = track.appendGroup();
+		write(second, "while-paused");
+		second.close();
 
+		// Neither a duplicate nor a jump to the live edge: the resume continues mid-group.
 		const resumed = await forwardUpdate(client, V20, 4n, true);
-		expect(resumed.parameters.largest).toEqual({ groupId: 1n, objectId: 0n });
-		writeGroup(track, 1);
-		// Joining after group 1's only object, which came while paused, skips it.
+		expect(resumed.parameters.largest).toEqual({ groupId: 0n, objectId: 1n });
 		const served: ServedGroup[] = [];
-		while (served.at(-1)?.sequence !== 2) {
+		while (served.length < 2) {
 			const stream = await nextUni(fx.uni);
 			if (!stream) throw new Error("the resumed subscription served nothing");
 			served.push(await readGroup(stream));
 		}
-		expect(served.flatMap((group) => group.objects.map((object) => object.payload))).toEqual(["2.0"]);
+		served.sort((a, b) => a.sequence - b.sequence);
+		expect(served.map((group) => group.objects)).toEqual([
+			[{ id: 2, payload: "mid-group" }],
+			[{ id: 0, payload: "while-paused" }],
+		]);
 
 		// Paused again, only the broadcast ending ends it, in error: a paused track's end is unobservable.
 		await forwardUpdate(client, V20, 6n, false);
@@ -4033,7 +4062,7 @@ test("a SUBSCRIBE pauses without demand and resumes at the live edge", async () 
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, V20);
 		expect(done.statusCode).toBe(0x0);
-		expect(done.streamCount).toBe(BigInt(served.length));
+		expect(done.streamCount).toBe(BigInt(served.length + 1));
 	} finally {
 		client.close();
 		track.close();
