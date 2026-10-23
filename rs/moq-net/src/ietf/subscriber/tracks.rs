@@ -1503,9 +1503,9 @@ mod tests {
 		}
 	}
 
-	/// A PUBLISH_DONE with TRACK_ENDED removes the track, and the listing stands.
+	/// A PUBLISH_DONE with TRACK_ENDED unlists the track as finished, and the listing stands.
 	#[moq_clock::test]
-	async fn a_track_ended_publish_removes_the_track() {
+	async fn a_track_ended_publish_finishes_the_track() {
 		let version = Version::Draft22;
 		let mut h = harness(version);
 		let _listing = h.establish().await;
@@ -1519,7 +1519,7 @@ mod tests {
 			reason_phrase: "".into(),
 		};
 		write(&mut video, ietf::PublishDone::ID, &done).await;
-		assert_eq!(event(&mut h.tracks).as_deref(), Some("-video"));
+		assert_eq!(event(&mut h.tracks).as_deref(), Some("~video"));
 		assert!(h.listening.poll_failed(&kio::Waiter::noop()).is_pending());
 	}
 
