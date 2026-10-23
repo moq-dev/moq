@@ -326,7 +326,9 @@ class PostAudioBuffer implements AudioBuffer {
 			if (data?.type === "state") {
 				this.#timestamp.set(data.timestamp);
 				this.#stalled.set(data.stalled);
-				if (data.epoch === this.#epoch) this.#backpressure.observe(data.timestamp, data.stalled);
+				if (data.epoch === this.#epoch) {
+					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
+				}
 			}
 		});
 		// addEventListener on a MessagePort requires start() to begin delivery.

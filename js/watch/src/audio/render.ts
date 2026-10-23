@@ -55,6 +55,8 @@ export interface State {
 	type: "state";
 	timestamp: Time.Micro;
 	stalled: boolean;
+	// Whether `timestamp` is on the current timeline: it reads 0 until a frame anchors the ring.
+	anchored: boolean;
 	// The epoch of the last reset the worklet applied.
 	epoch: number;
 }

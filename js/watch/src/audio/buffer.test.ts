@@ -28,21 +28,17 @@ describe("SharedAudioBuffer", () => {
 
 	// A decode loop can reach `wait` on a buffer a shape change already closed. Nothing advances a
 	// closed buffer, so a gated wait would never settle and would hold the decoder effect's rerun.
-	it("does not gate a wait on a closed buffer", async () => {
+	it("does not gate a wait on a closed buffer", () => {
 		const worklet = { port: { postMessage: () => {} } } as unknown as AudioWorkletNode;
 		const buffer = createAudioBuffer(worklet, 1, 1000, 100, true);
 		buffer.insert(0 as Time.Micro, [new Float32Array(200)]);
-		const settles = (wait: Promise<void>) =>
-			Promise.race([
-				wait.then(() => true),
-				new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 0)),
-			]);
+		const signal = new AbortController().signal;
 
 		// Open, a frame this far ahead of the playhead is held.
-		expect(await settles(buffer.wait(10_000_000 as Time.Micro, new AbortController().signal))).toBe(false);
+		expect(Bun.peek.status(buffer.wait(10_000_000 as Time.Micro, signal))).toBe("pending");
 
 		buffer.close();
-		expect(await settles(buffer.wait(10_000_000 as Time.Micro, new AbortController().signal))).toBe(true);
+		expect(Bun.peek.status(buffer.wait(10_000_000 as Time.Micro, signal))).toBe("fulfilled");
 	});
 
 	// A decode loop retired mid-wait (a rendition change while the playhead is parked) must not leave
@@ -111,7 +107,8 @@ describe("PostAudioBuffer", () => {
 	// Only the postMessage path exists outside cross-origin isolation.
 	function post(): {
 		buffer: ReturnType<typeof createAudioBuffer>;
-		state: (timestamp: number, stalled: boolean, epoch: number) => Promise<void>;
+		// An undefined timestamp reports a ring no frame has anchored yet, whose playhead reads 0.
+		state: (timestamp: number | undefined, stalled: boolean, epoch: number) => Promise<void>;
 		close: () => void;
 	} {
 		const channel = new MessageChannel();
@@ -133,8 +130,9 @@ describe("PostAudioBuffer", () => {
 				state: (timestamp, stalled, epoch) => {
 					const msg: State = {
 						type: "state",
-						timestamp: timestamp as Time.Micro,
+						timestamp: (timestamp ?? 0) as Time.Micro,
 						stalled,
+						anchored: timestamp !== undefined,
 						epoch,
 					};
 					const handled = new Promise<void>((resolve) =>
@@ -182,6 +180,22 @@ describe("PostAudioBuffer", () => {
 
 			await state(600_000, false, 1);
 			expect(Bun.peek.status(ahead)).toBe("fulfilled");
+		} finally {
+			close();
+		}
+	});
+
+	// A reset ring reads 0 until a frame anchors it, which is no bound on a timeline far from 0.
+	it("ignores the playhead before the ring anchors", async () => {
+		const { buffer, state, close } = post();
+		const signal = new AbortController().signal;
+		try {
+			buffer.reset();
+			await state(undefined, true, 1);
+			expect(Bun.peek.status(buffer.wait(10_000_000 as Time.Micro, signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(10_050_000 as Time.Micro, signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(10_100_000 as Time.Micro, signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(10_120_000 as Time.Micro, signal))).toBe("pending");
 		} finally {
 			close();
 		}
