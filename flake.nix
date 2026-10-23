@@ -577,6 +577,10 @@
         legacyPackages = {
           inherit (pkgs) gst_all_1;
 
+          # Nightly conformance needs both pinned Moxygen endpoints. Keep this
+          # C++ dependency build out of the default shell and flake checks.
+          moxygen = pkgs.callPackage ./nix/moxygen.nix { };
+
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
