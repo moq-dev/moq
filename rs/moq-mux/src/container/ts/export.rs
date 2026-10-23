@@ -110,6 +110,10 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 /// leading PAT/PMT rides on the first frame (so it inherits a real timestamp), and
 /// is re-emitted at video keyframes and periodically for mid-stream tune-in.
 /// Returns `None` when the broadcast ends.
+///
+/// A rendition the catalog moves to another track (a new `track` or `broadcast`) goes on out
+/// of its PID from the new track's first sync frame past what was read, when the PMT can
+/// announce it unchanged; one that goes back in time fails the export.
 pub struct Export<S: Stream>
 where
 	S::Ext: catalog::Catalog,
@@ -1031,7 +1035,7 @@ impl Timing {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Kind {
 	/// Video carries its TS stream type (H.264 = 0x1B, H.265 = 0x24).
 	Video(StreamType),
@@ -1060,6 +1064,37 @@ enum Kind {
 }
 
 impl Kind {
+	/// The `stream_type` the PMT announces it as.
+	fn stream_type(&self) -> u8 {
+		match self {
+			Kind::Video(stream_type) => *stream_type as u8,
+			Kind::Aac { .. } => StreamType::AdtsAac as u8,
+			// Opus rides private-data PES; the registration + extension descriptors tell the
+			// demuxer it's Opus.
+			Kind::Opus { .. } => 0x06,
+			// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04; the full rates are
+			// MPEG-1 (0x03). The catalog sample rate came from the frame header, so the mapping
+			// is faithful.
+			Kind::Mp2 { sample_rate } if *sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio as u8,
+			Kind::Mp2 { .. } => StreamType::Mpeg1Audio as u8,
+			Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio as u8,
+			Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc as u8,
+			Kind::Verbatim { stream_type, .. } | Kind::PesPacket { stream_type } => *stream_type,
+		}
+	}
+
+	/// The PMT ES descriptors announcing it when import captured none: the ATSC Dolby
+	/// registration, so a fresh (non-TS) AC-3/E-AC-3 track is announced the way the import
+	/// path expects, and Opus's registration and channel configuration.
+	fn descriptors(&self) -> Vec<catalog::Descriptor> {
+		match self {
+			Kind::Ac3 => vec![registration(b"AC-3")],
+			Kind::Eac3 => vec![registration(b"EAC3")],
+			Kind::Opus { channel_config_code } => opus_descriptors(*channel_config_code),
+			_ => Vec::new(),
+		}
+	}
+
 	/// Its timestamp is arrival on the program clock, rather than a decode deadline.
 	fn placed(&self) -> bool {
 		matches!(self, Self::PesPacket { .. } | Self::Verbatim { .. })
@@ -1951,10 +1986,11 @@ where
 			if !self.stale.is_empty() {
 				self.resubscribe(&catalog, &mpegts)?;
 			}
+			self.rebind(&catalog)?;
 			// A listed track keeps its PID, kind and descriptors, which its packets went out
-			// under: a stream the source revises comes under a new name. The timing is not
-			// fixed: a `jitter` or `framerate` published after the tables still sizes the
-			// decode clock.
+			// under, even when the catalog moves it to another track: a stream the source
+			// revises comes under a new name. The timing is not fixed: a `jitter` or
+			// `framerate` published after the tables still sizes the decode clock.
 			for (name, config) in catalog.video.renditions.iter() {
 				if let Some(track) = self.tracks.get_mut(name).filter(|track| track.listed) {
 					track.timing.configure(config, name);
@@ -2029,9 +2065,9 @@ where
 		reject_colliding_si_pids(&mpegts, pmt_pid, &es_pids)?;
 
 		// Reuse each joining track's source (and any pending frame) by name; refresh its PID,
-		// kind, and descriptors from this snapshot. Before the tables, drop tracks no longer
-		// present; after them, a track the catalog dropped stays until what it holds is gone
-		// ([`Self::settle`]).
+		// kind, and descriptors from this snapshot, and start over on one the catalog moved to
+		// another track. Before the tables, drop tracks no longer present; after them, a track
+		// the catalog dropped stays until what it holds is gone ([`Self::settle`]).
 		let mut old: HashMap<String, Track> = self
 			.tracks
 			.extract_if(|name, track| !track.listed && active.contains_key(name))
@@ -2044,7 +2080,10 @@ where
 				continue;
 			};
 			let kind = video_kind(config, name)?;
-			let mut track = match old.remove(name) {
+			let reused = old
+				.remove(name)
+				.filter(|track| track.source.reads(&self.source, name, config));
+			let mut track = match reused {
 				Some(track) => track,
 				None => match ExportSource::for_video(&self.source, name, config, self.budget())?
 					.map(|s| at_edge(s, self.replay))
@@ -2062,7 +2101,10 @@ where
 				continue;
 			};
 			let kind = audio_kind(config, name)?;
-			let mut track = match old.remove(name) {
+			let reused = old
+				.remove(name)
+				.filter(|track| track.source.reads(&self.source, name, config));
+			let mut track = match reused {
 				Some(track) => track,
 				None => match ExportSource::for_audio(&self.source, name, config, self.budget())?
 					.map(|s| at_edge(s, self.replay))
@@ -2156,6 +2198,57 @@ where
 			track.source = source;
 			track.subscribed = moq_clock::now();
 			track.finished = false;
+		}
+		Ok(())
+	}
+
+	/// Move each listed track whose rendition the catalog moved to another track or broadcast
+	/// onto it. One the PMT does not list yet starts over on the new track instead.
+	///
+	/// The PID, PMT and lane stay as announced, and so does the kind the track's frames are
+	/// framed under as they go out, so the new track must have the same kind: an AAC track keeps
+	/// its configuration. Video parameter sets ride with each frame and may change. The new
+	/// source continues the old one ([`ExportSource::continuing`]), and the frames the old one
+	/// left held for their DTS go out first.
+	fn rebind(&mut self, catalog: &Catalog<S::Ext>) -> anyhow::Result<()> {
+		let budget = self.budget();
+		for (name, track) in self.tracks.iter_mut().filter(|(_, track)| track.listed) {
+			let (source, kind) = if let Some(config) = catalog.video.renditions.get(name) {
+				if track.source.reads(&self.source, name, config) {
+					continue;
+				}
+				let source = ExportSource::for_video(&self.source, name, config, budget)?;
+				(source, video_kind(config, name)?)
+			} else if let Some(config) = catalog.audio.renditions.get(name) {
+				if track.source.reads(&self.source, name, config) {
+					continue;
+				}
+				let source = ExportSource::for_audio(&self.source, name, config, budget)?;
+				(source, audio_kind(config, name)?)
+			} else {
+				continue;
+			};
+			let Some(source) = source else {
+				continue;
+			};
+			let same = match (&kind, &track.kind) {
+				(Kind::Aac { config, .. }, Kind::Aac { config: old, .. }) => config == old,
+				(kind, old) => kind == old,
+			};
+			anyhow::ensure!(
+				same,
+				"TS track layout changed after PAT/PMT was emitted: '{name}' moved to a track announced differently"
+			);
+			track.release(name, &mut self.jitter, true)?;
+			track.clock = DecodeClock::default();
+			track.source = source.continuing(&track.source);
+			track.finished = false;
+			track.subscribed = moq_clock::now();
+			// Group sequences are the old track's own, so the new track's first read opens one.
+			track.group = None;
+			if let Some(sync) = &mut track.sync {
+				sync.lane.forget();
+			}
 		}
 		Ok(())
 	}
@@ -2599,36 +2692,13 @@ where
 		let streams = tracks
 			.iter()
 			.map(|t| {
-				let stream_type = match &t.kind {
-					Kind::Video(stream_type) => *stream_type as u8,
-					Kind::Aac { .. } => StreamType::AdtsAac as u8,
-					// Opus rides private-data PES; the registration + extension descriptors
-					// below tell the demuxer it's Opus.
-					Kind::Opus { .. } => 0x06,
-					// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04; the full
-					// rates are MPEG-1 (0x03). The catalog sample rate came from the frame
-					// header, so the mapping is faithful.
-					Kind::Mp2 { sample_rate } if *sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio as u8,
-					Kind::Mp2 { .. } => StreamType::Mpeg1Audio as u8,
-					Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio as u8,
-					Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc as u8,
-					Kind::Verbatim { stream_type, .. } | Kind::PesPacket { stream_type } => *stream_type,
-				};
-				// Prefer the descriptors captured verbatim on import; otherwise synthesize
-				// the ATSC Dolby registration so a fresh (non-TS) AC-3/E-AC-3 track is
-				// still announced the way the import path expects.
-				let descriptors = if !t.descriptors.is_empty() {
-					t.descriptors.clone()
-				} else {
-					match &t.kind {
-						Kind::Ac3 => vec![registration(b"AC-3")],
-						Kind::Eac3 => vec![registration(b"EAC3")],
-						Kind::Opus { channel_config_code } => opus_descriptors(*channel_config_code),
-						_ => Vec::new(),
-					}
+				// Prefer the descriptors captured verbatim on import.
+				let descriptors = match t.descriptors.is_empty() {
+					true => t.kind.descriptors(),
+					false => t.descriptors.clone(),
 				};
 				Ok(super::psi::Es {
-					stream_type,
+					stream_type: t.kind.stream_type(),
 					pid: Pid::new(t.pid)?,
 					descriptors,
 				})

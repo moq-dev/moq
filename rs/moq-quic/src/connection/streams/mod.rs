@@ -36,7 +36,6 @@ pub struct Streams<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> Streams<'a> {
     /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
     #[cfg(any(test, feature = "fuzz"))]
@@ -230,7 +229,6 @@ pub struct SendStream<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> SendStream<'a> {
     /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
     #[cfg(any(test, feature = "fuzz"))]

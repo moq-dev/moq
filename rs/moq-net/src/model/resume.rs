@@ -648,7 +648,7 @@ impl Subscriber {
 
 	/// Poll for where the serving copy's live feed starts; see
 	/// [`track::Subscriber::poll_start`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let mut reader = self.reader();
 		let sub = ready!(reader.poll_serving(waiter));
@@ -670,7 +670,7 @@ impl Subscriber {
 	}
 
 	/// Poll for sequences the serving copy gave up; see [`track::Subscriber::poll_drop`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(std::ops::Range<u64>, StreamError)> {
 		let mut reader = self.reader();
 		let sub = ready!(reader.poll_serving(waiter));
@@ -687,7 +687,7 @@ impl Subscriber {
 
 	/// Move the local read floor to `start`, including downward.
 	/// See [`track::Subscriber::start_at`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn start_at(&mut self, start: u64) {
 		self.reader().start_at(start)
 	}
@@ -706,7 +706,7 @@ impl Subscriber {
 	}
 
 	/// The newest sequence any copy has.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn latest(&self) -> Option<u64> {
 		self.reader().latest()
 	}
@@ -745,7 +745,7 @@ impl Subscriber {
 
 	/// Poll for the serving copy's cache reflecting its live feed; see
 	/// [`track::Subscriber::poll_live`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn poll_live(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let mut reader = self.reader();
 		let sub = ready!(reader.poll_serving(waiter));
@@ -1535,7 +1535,7 @@ impl Reader {
 
 	/// The serving copy's subscription, once it answered; `None` once the track ended
 	/// without one.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_serving(&mut self, waiter: &kio::Waiter) -> Poll<Option<&mut track::Subscriber>> {
 		loop {
 			self.sync(waiter);
@@ -1572,7 +1572,7 @@ impl Reader {
 	/// from the mirrored subscription when it resolves; one already reading has
 	/// to be moved, or a group it skipped stays skipped. Never below a copy's own
 	/// resume point: groups under it were handed out by an earlier route, or never owed.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn start_at(&mut self, start: u64) {
 		self.peeked = None;
 		self.groups.0 = start;
@@ -1593,7 +1593,7 @@ impl Reader {
 		}
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn latest(&self) -> Option<u64> {
 		self.copies.iter().filter_map(|copy| copy.track.latest_sequence()).max()
 	}
