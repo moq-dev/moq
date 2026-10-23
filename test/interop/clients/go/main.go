@@ -44,6 +44,9 @@ const readChunk = 64 * 1024
 // media.TrackConsumer max delay: how much reordering the jitter buffer tolerates.
 const maxDelay = time.Second
 
+// durationPtr is d as the optional duration the wrapper's options take.
+func durationPtr(d time.Duration) *time.Duration { return &d }
+
 // Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 const (
 	audioTrack     = "tone"
@@ -329,7 +332,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	for id, video = range catalog.Video {
 		break
 	}
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: maxDelay}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: durationPtr(maxDelay)}})
 	if err != nil {
 		return err
 	}
@@ -441,7 +444,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string, rendition moqmedia.Audio, out string, audioMs int) error {
 	decoder, err := moqaudio.Subscribe(ctx, consumer, id, rendition, moqaudio.DecoderOutput{
 		Format:   moq.AudioSampleFormatF32,
-		MaxDelay: func() *time.Duration { d := maxDelay; return &d }(),
+		MaxDelay: durationPtr(maxDelay),
 	})
 	if err != nil {
 		return err
@@ -535,7 +538,7 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 		break
 	}
 
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: maxDelay}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: durationPtr(maxDelay)}})
 	if err != nil {
 		return err
 	}
