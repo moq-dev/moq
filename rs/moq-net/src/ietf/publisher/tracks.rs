@@ -663,8 +663,9 @@ where
 					let Ok(track) = broadcast.track(&name) else {
 						continue;
 					};
-					// Each paused PUBLISH holds a subscription slot; past the cap the peer is
-					// told the track exists rather than left without it.
+					// Each paused PUBLISH holds a subscription slot. Nothing else bounds how many
+					// a peer's listings hold, so past `Limits::requests` the peer is told the
+					// track exists rather than left without it.
 					let Ok(slot) = self.subscriptions.acquire() else {
 						skip(name);
 						continue;
@@ -1637,10 +1638,10 @@ mod tests {
 		}
 	}
 
-	/// Each paused PUBLISH holds a subscription slot; past the cap the track is skipped
-	/// (PUBLISH_BLOCKED, the same message, on draft-18) rather than held.
+	/// Each paused PUBLISH holds a subscription slot; past `Limits::requests` the track is
+	/// skipped (PUBLISH_BLOCKED, the same message, on draft-18) rather than held.
 	#[moq_clock::test]
-	async fn past_the_subscription_cap_a_track_is_skipped() {
+	async fn past_the_request_limit_a_track_is_skipped() {
 		for version in DRAFTS {
 			let mut h = harness(version);
 			h.publisher.subscriptions = crate::session::Slots::new(1);

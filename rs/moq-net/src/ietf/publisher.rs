@@ -688,9 +688,8 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	auth: crate::auth::Handle,
 	// Dispatched finite serves, including those not yet polled.
 	pub(super) owed: Arc<AtomicUsize>,
-	// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
+	// Subscriptions the peer holds, PUBLISHes for its listings capped by `session::Limits::requests`.
 	pub(super) subscriptions: crate::session::Slots,
-	pub(super) fetches: crate::session::Slots,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
 	// The peer's SUBSCRIBE_TRACKS requests and the PUBLISHes they made.
@@ -775,7 +774,6 @@ where
 			auth: crate::auth::Handle::new(false),
 			owed: Default::default(),
 			subscriptions: Default::default(),
-			fetches: Default::default(),
 			priority: Default::default(),
 			listings: Default::default(),
 		}
@@ -1182,17 +1180,8 @@ where
 				.await;
 			}
 			// Held for the life of the subscription, and while the application verifies its
-			// token. A peer past its limits loses the session.
-			let slot: crate::auth::Hold = match self.subscriptions.acquire() {
-				Ok(slot) => std::sync::Arc::new(slot),
-				Err(err) => {
-					self.session.clone().close(
-						super::error::to_session_code(&crate::SessionError::from(&err)),
-						"too many subscriptions",
-					);
-					return Err(err);
-				}
-			};
+			// token. The request window or stream credit already bounds how many the peer opens.
+			let slot: crate::auth::Hold = std::sync::Arc::new(self.subscriptions.hold());
 
 			let mut request_finished = false;
 			let mut goaways = super::request_stream::Messages::new(self.session.clone(), self.control.client());
@@ -2310,16 +2299,6 @@ where
 		msg: ietf::Fetch<'_>,
 		admission: FetchGate,
 	) -> Result<(), Error> {
-		let _slot = match self.fetches.acquire() {
-			Ok(slot) => slot,
-			Err(err) => {
-				self.session.close(
-					super::error::to_session_code(&crate::SessionError::from(&err)),
-					"too many fetches",
-				);
-				return Err(err);
-			}
-		};
 		let namespace = match &msg.fetch_type {
 			FetchType::Standalone { namespace, .. } | FetchType::Filtered { namespace, .. } => Some(namespace),
 			_ => None,
@@ -8810,33 +8789,6 @@ mod serve_tests {
 				assert_eq!(refusal_code(&h.log.writes.lock().unwrap()[mark..], version), Some(0x10));
 				assert!(h.log.closes().is_empty());
 			}
-		}
-	}
-
-	/// A SUBSCRIBE past the session's cap closes the session with TOO_MANY_REQUESTS.
-	#[moq_clock::test]
-	async fn subscriptions_past_the_cap_close_the_session() {
-		for version in [Version::Draft14, Version::Draft16, Version::Draft20] {
-			let mut h = serve(version);
-			h.publisher.subscriptions = crate::session::Slots::new(0);
-			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-			let mut body = Vec::new();
-			subscribe(Filter::NextObject, None)
-				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
-				.unwrap();
-			h.publisher
-				.clone()
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, false)
-				.unwrap_or_else(|e| panic!("{version}: the request was not started: {e}"))
-				.await;
-			assert_eq!(
-				h.log.closes(),
-				vec![(
-					crate::SessionError::TooManyRequests.to_code(),
-					"too many subscriptions".to_string()
-				)],
-				"{version}"
-			);
 		}
 	}
 

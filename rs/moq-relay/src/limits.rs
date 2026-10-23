@@ -1,9 +1,9 @@
-//! Request caps and QUIC limits selected after the relay authorizes a session.
+//! Session limits and QUIC limits selected after the relay authorizes a session.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-/// Request caps for ordinary client sessions.
+/// Session limits for ordinary client sessions.
 #[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -16,41 +16,32 @@ pub struct Session {
 		setting = "session.announces"
 	)]
 	pub announces: usize,
-	/// Maximum simultaneously held subscriptions.
+	/// Maximum other simultaneously held moq-transport requests, sizing the drafts 14 to 16 request window.
 	#[usage(
-		long = "session-subscriptions",
-		env = "MOQ_SESSION_SUBSCRIPTIONS",
-		default = "1000",
-		setting = "session.subscriptions"
-	)]
-	pub subscriptions: usize,
-	/// Maximum simultaneously held FETCH requests.
-	#[usage(
-		long = "session-fetches",
-		env = "MOQ_SESSION_FETCHES",
+		long = "session-requests",
+		env = "MOQ_SESSION_REQUESTS",
 		default = "10000",
-		setting = "session.fetches"
+		setting = "session.requests"
 	)]
-	pub fetches: usize,
+	pub requests: usize,
 }
 
 impl Default for Session {
 	fn default() -> Self {
 		Self {
 			announces: 1000,
-			subscriptions: 1000,
-			fetches: 10000,
+			requests: 10000,
 		}
 	}
 }
 
 impl Session {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		resolve(self.announces, self.subscriptions, self.fetches)
+		resolve(self.announces, self.requests)
 	}
 }
 
-/// Request caps and QUIC limits for authenticated cluster peer sessions.
+/// Session limits and QUIC limits for authenticated cluster peer sessions.
 #[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -63,22 +54,14 @@ pub struct Peer {
 		setting = "peer.announces"
 	)]
 	pub announces: usize,
-	/// Maximum simultaneously held subscriptions.
+	/// Maximum other simultaneously held moq-transport requests, sizing the drafts 14 to 16 request window.
 	#[usage(
-		long = "peer-subscriptions",
-		env = "MOQ_PEER_SUBSCRIPTIONS",
-		default = "10000",
-		setting = "peer.subscriptions"
+		long = "peer-requests",
+		env = "MOQ_PEER_REQUESTS",
+		default = "20000",
+		setting = "peer.requests"
 	)]
-	pub subscriptions: usize,
-	/// Maximum simultaneously held FETCH requests.
-	#[usage(
-		long = "peer-fetches",
-		env = "MOQ_PEER_FETCHES",
-		default = "10000",
-		setting = "peer.fetches"
-	)]
-	pub fetches: usize,
+	pub requests: usize,
 	/// QUIC limits a peer session widens to (`[peer.quic]`).
 	#[usage(flatten)]
 	pub quic: Quic,
@@ -88,8 +71,7 @@ impl Default for Peer {
 	fn default() -> Self {
 		Self {
 			announces: 100000,
-			subscriptions: 10000,
-			fetches: 10000,
+			requests: 20000,
 			quic: Quic::default(),
 		}
 	}
@@ -97,7 +79,7 @@ impl Default for Peer {
 
 impl Peer {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		resolve(self.announces, self.subscriptions, self.fetches)
+		resolve(self.announces, self.requests)
 	}
 }
 
@@ -172,10 +154,9 @@ impl Quic {
 	}
 }
 
-fn resolve(announces: usize, subscriptions: usize, fetches: usize) -> moq_net::session::Limits {
+fn resolve(announces: usize, requests: usize) -> moq_net::session::Limits {
 	let mut limits = moq_net::session::Limits::default();
 	limits.announces = announces;
-	limits.subscriptions = subscriptions;
-	limits.fetches = fetches;
+	limits.requests = requests;
 	limits
 }

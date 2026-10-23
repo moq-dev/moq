@@ -208,8 +208,8 @@ where
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
-		let subscriptions = crate::session::Slots::new(limits.subscriptions)
-			.with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+		let subscriptions =
+			crate::session::Slots::new(limits.requests).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 		let announces =
 			crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
@@ -223,7 +223,7 @@ where
 					);
 					return Err(err);
 				};
-				let control = Control::new(request_id_max, client).with_window(limits.requests(), client, version);
+				let control = Control::new(request_id_max, client).with_window(limits.window(), client, version);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
 				// No AUTH on these drafts, but a limit still reaches both halves.
@@ -241,7 +241,6 @@ where
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
-				publisher.fetches = crate::session::Slots::new(limits.fetches);
 
 				let mut subscriber = Subscriber::new(
 					runtime.clone(),
@@ -391,7 +390,7 @@ where
 				res
 			}
 			_ => {
-				let control = Control::new(None, client).with_history(limits.requests());
+				let control = Control::new(None, client).with_history(limits.window());
 				// Send SETUP and retain its writer for the session's lifetime. Only a failure
 				// ends the session; the other branches report how it closed.
 				let setup = err_only(run_setup(
@@ -423,7 +422,6 @@ where
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
-				publisher.fetches = crate::session::Slots::new(limits.fetches);
 
 				// Only the dialing side fails loud on a publication outside its grant: a
 				// server's publish origin is everything the peer may read, not what it
