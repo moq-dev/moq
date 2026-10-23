@@ -40,6 +40,12 @@ Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
 `MoqBroadcastConsumer::resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `None` to resolve whichever instance answers.
 Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
 
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Every `timestamp_us` input, such as `MoqTrackProducer::write_frame` or `MoqAnchor::Time`, fails with `MoqError::TimeOverflow` past `2^61 - 1` instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer::finish` lets go, instead of unlisting when its producer finishes or is released.

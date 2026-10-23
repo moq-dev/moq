@@ -176,6 +176,7 @@ impl Server {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			stats: self.stats.clone(),
 			client: false,
 			limits: self.limits,
 			session: session.clone(),
@@ -414,8 +415,9 @@ impl Server {
 
 		// Legacy bidi SETUP exchange (IETF 14-16, lite 01/02). Read the client's
 		// SETUP to choose the version; `ok()` sends the server SETUP and starts.
+		// Stats attach in `ok()`: a caller may still replace them on the handshake.
 		let mut stream = Stream::accept(&mut session, encoding).await?;
-		let client: setup::Client = stream.reader.decode().await?;
+		let (client, client_setup_size) = stream.reader.decode_sized::<setup::Client>().await?;
 
 		let version = client
 			.versions
@@ -476,6 +478,7 @@ impl Server {
 					version,
 					request_id_max,
 					peer_declared,
+					client_setup_size,
 				})),
 			}),
 		})
@@ -622,12 +625,14 @@ where
 				version,
 				peer_setup,
 			} = *self;
+			server.stats.control(stats::Control::Session, peer_setup.size, true);
 			let (publish, subscribe) = server.stat_tagged_origins();
 
 			// The client's SETUP was read at the pause; hand the stream back
 			// for GOAWAY. A server never advertises a path, hence `None`.
 			let (protocol, goaway) = ietf::start(ietf::Config {
 				runtime: runtime.clone(),
+				stats: server.stats.clone(),
 				limits: server.limits,
 				session: session.clone(),
 				setup: None,
@@ -681,6 +686,8 @@ struct PausedLegacy<S: crate::transport::poll::Session> {
 	request_id_max: Option<ietf::RequestId>,
 	/// What the client's SETUP declared, for the options `ok` acts on.
 	peer_declared: ietf::peer::Peer,
+	/// The client SETUP's encoded size, counted under the final stats.
+	client_setup_size: usize,
 }
 
 impl<S> Paused<S> for PausedLegacy<S>
@@ -700,11 +707,14 @@ where
 		async move {
 			let Self {
 				session,
-				mut stream,
+				stream,
 				version,
 				request_id_max,
 				peer_declared,
+				client_setup_size,
 			} = *self;
+			let mut stream = stream.with_stats(&server.stats);
+			server.stats.control(stats::Control::Session, client_setup_size, true);
 			let (publish, subscribe) = server.stat_tagged_origins();
 
 			// Encode parameters using the version-appropriate type.
@@ -741,6 +751,7 @@ where
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
 					let start = lite::start(lite::Config {
 						runtime: runtime.clone(),
+						stats: server.stats.clone(),
 						client: false,
 						limits: server.limits,
 						session: session.clone(),
@@ -766,6 +777,7 @@ where
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
 					let (protocol, goaway) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
+						stats: server.stats.clone(),
 						limits: server.limits,
 						session: session.clone(),
 						setup: Some(stream),
@@ -932,7 +944,10 @@ where
 				session,
 				version,
 				client_setup,
-			} => server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth),
+			} => {
+				server.stats.control(stats::Control::Session, client_setup.size, true);
+				server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
+			}
 			PausedHandshake::Boxed(paused) => paused.ok(server, runtime, peer_hop, auth).await,
 		}
 	}
@@ -1050,10 +1065,10 @@ mod tests {
 			_cx: &mut std::task::Context<'_>,
 		) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
 			match self.uni.lock().unwrap().pop_front() {
-				Some(data) => std::task::Poll::Ready(Ok(FakeRecv {
+				Some(data) => std::task::Poll::Ready(Ok(crate::transport::poll::Buffered::new(FakeChunks {
 					data: data.into(),
 					stops: self.stops.clone(),
-				})),
+				}))),
 				None if self.close_code().is_some() => std::task::Poll::Ready(Err(FakeError)),
 				None => std::task::Poll::Pending,
 			}
@@ -1065,10 +1080,10 @@ mod tests {
 			match self.bi.lock().unwrap().pop_front() {
 				Some(data) => std::task::Poll::Ready(Ok((
 					FakeSend,
-					FakeRecv {
+					crate::transport::poll::Buffered::new(FakeChunks {
 						data: data.into(),
 						stops: self.stops.clone(),
-					},
+					}),
 				))),
 				None => std::task::Poll::Pending,
 			}
@@ -1150,31 +1165,27 @@ mod tests {
 		}
 	}
 
-	struct FakeRecv {
+	type FakeRecv = crate::transport::poll::Buffered<FakeChunks>;
+
+	struct FakeChunks {
 		data: VecDeque<u8>,
 		stops: Arc<Mutex<Vec<u32>>>,
 	}
-	impl crate::transport::poll::RecvStream for FakeRecv {
+	impl crate::transport::poll::Chunks for FakeChunks {
 		type Error = FakeError;
-		fn poll_read(
+		fn poll_read_chunk(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
-			dst: &mut [u8],
-		) -> std::task::Poll<Result<Option<usize>, Self::Error>> {
+			max: usize,
+		) -> std::task::Poll<Result<Option<Bytes>, Self::Error>> {
 			if self.data.is_empty() {
 				return std::task::Poll::Ready(Ok(None));
 			}
-			let size = dst.len().min(self.data.len());
-			for slot in dst.iter_mut().take(size) {
-				*slot = self.data.pop_front().unwrap();
-			}
-			std::task::Poll::Ready(Ok(Some(size)))
+			let size = max.min(self.data.len());
+			std::task::Poll::Ready(Ok(Some(self.data.drain(..size).collect())))
 		}
 		fn stop(&mut self, code: u32) {
 			self.stops.lock().unwrap().push(code);
-		}
-		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
-			std::task::Poll::Ready(Ok(()))
 		}
 	}
 
@@ -1529,6 +1540,7 @@ mod tests {
 							crate::lite::test_transport::PendingRecv,
 							Version::Ietf(version),
 						),
+						size: 0,
 						path: None,
 						token: None,
 						declared: ietf::peer::Peer::default(),
