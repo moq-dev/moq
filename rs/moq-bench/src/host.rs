@@ -313,8 +313,10 @@ mod linux {
 			) else {
 				return Ok(());
 			};
-			// The sampler runs outside any runtime, so it blocks on the host clock.
-			#[allow(clippy::disallowed_methods)]
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the sampler runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(delay);
 		}
 	}

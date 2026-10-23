@@ -9,8 +9,7 @@ For the contract, the relay flags, and worked examples, see
 
 Gateway sessions may identify `rtmp`, `srt`, or `webrtc` transport. A lease producer
 owns its re-check and expiry clock through `due()`, `update()`, and `failed()`.
-`Key::decode::<T>` verifies signature, algorithm, and key ID without applying
-MoQ claims policy; `Key::verify` applies that strict policy.
+`Key::verify` checks signature, algorithm, key ID, strict claims, key scope, expiry, and not-before.
 
 Grants and claims name paths with patterns: `foo` is one broadcast, `foo/**` is
 a subtree, `**` is everything.

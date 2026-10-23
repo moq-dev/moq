@@ -954,6 +954,7 @@ export class Consumer {
 			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
 		}
 		this.#abandon();
+		this.#recover?.close?.();
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;

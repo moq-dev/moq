@@ -523,7 +523,7 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::{Algorithm, Bytes, Claims, Client, Error, Peer, Transport, lease::Reason};
@@ -633,8 +633,8 @@ mod tests {
 		let jwt = sign(&key, "demo/room", &["alice/**"], &["**"], Some(exp));
 
 		let grant = policy.decide(&with_token(request("/demo/room/"), &jwt)).await.unwrap();
-		assert_eq!(grant.publish, patterns(&["alice/**"]).into());
-		assert_eq!(grant.subscribe, patterns(&["**"]).into());
+		assert_eq!(grant.publish, patterns(&["alice/**"]));
+		assert_eq!(grant.subscribe, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(exp));
 		assert_eq!(grant.revalidate, None);
 		assert_eq!(grant.tier.as_deref(), Some("gold"));
@@ -666,8 +666,8 @@ mod tests {
 		};
 		let jwt = sign(&key, "demo", &["alice/**"], &["**"], None);
 		let grant = policy.decide(&with_token(request("/demo/alice"), &jwt)).await.unwrap();
-		assert_eq!(grant.publish, patterns(&["**"]).into());
-		assert_eq!(grant.subscribe, patterns(&["**"]).into());
+		assert_eq!(grant.publish, patterns(&["**"]));
+		assert_eq!(grant.subscribe, patterns(&["**"]));
 
 		let err = policy.decide(&with_token(request("/other"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Refusal::RootMismatch { .. }), "{err}");
@@ -837,7 +837,7 @@ mod tests {
 			.decide(&with_setup_token(request("/demo"), Token::OUT_OF_BAND, &jwt))
 			.await
 			.unwrap();
-		assert_eq!(grant.publish, patterns(&["alice/**"]).into());
+		assert_eq!(grant.publish, patterns(&["alice/**"]));
 
 		// And refused like one: a stranger's key never falls through to public.
 		let stranger = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
@@ -880,7 +880,7 @@ mod tests {
 		let jwt = sign(&key, "demo", &["**"], &[], None);
 		let request = with_setup_token(with_token(request("/demo"), &jwt), Token::OUT_OF_BAND, &jwt);
 		let grant = policy.decide(&request).await.unwrap();
-		assert_eq!(grant.publish, patterns(&["**"]).into());
+		assert_eq!(grant.publish, patterns(&["**"]));
 	}
 
 	/// Two different credentials would leave the server guessing which one the client meant.
@@ -952,7 +952,7 @@ mod tests {
 		};
 		let not_after = SystemTime::now() + Duration::from_secs(86400 * 30);
 		let grant = policy.decide(&with_peer(request("/"), Some(not_after))).await.unwrap();
-		assert_eq!(grant.publish, patterns(&["**"]).into());
+		assert_eq!(grant.publish, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(not_after));
 
 		// A certificate without a bound gets none by default, like 0.14.
@@ -1033,7 +1033,7 @@ mod tests {
 			..Default::default()
 		};
 		let grant = policy.decide(&request("/")).await.unwrap();
-		assert_eq!(grant.subscribe, patterns(&["anon/**"]).into());
+		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
 		assert!(grant.publish.is_empty());
 		// Never re-checked or closed by default, like 0.14.
 		assert_eq!(grant.expires, None);
@@ -1058,8 +1058,8 @@ mod tests {
 			("/rooms", &[], &["chat"]),
 		] {
 			let grant = policy.decide(&request(path)).await.unwrap();
-			assert_eq!(grant.publish, patterns(publish).into(), "{path}");
-			assert_eq!(grant.subscribe, patterns(subscribe).into(), "{path}");
+			assert_eq!(grant.publish, patterns(publish), "{path}");
+			assert_eq!(grant.subscribe, patterns(subscribe), "{path}");
 			assert_eq!(grant.root, None, "{path}");
 		}
 
@@ -1075,7 +1075,7 @@ mod tests {
 		}
 
 		let grant = policy.decide(&with_peer(request("/origin/edge0"), None)).await.unwrap();
-		assert_eq!(grant.publish, patterns(&[""]).into());
+		assert_eq!(grant.publish, patterns(&[""]));
 		let err = policy.decide(&with_peer(request("/anon"), None)).await.unwrap_err();
 		assert!(matches!(err, Refusal::NoAccess { .. }), "{err}");
 	}
@@ -1326,7 +1326,7 @@ mod tests {
 		.await;
 
 		let consumer = client.connect(request("/demo")).await.unwrap();
-		assert_eq!(consumer.grant().publish, patterns(&["**"]).into());
+		assert_eq!(consumer.grant().publish, patterns(&["**"]));
 
 		let err = client.connect(request("/demo")).await.unwrap_err();
 		assert!(matches!(err, Error::Refused(_)), "{err}");
@@ -1440,6 +1440,6 @@ mod tests {
 		let url = format!("unix://{}", url.path()).parse().unwrap();
 		let client = Client::new(url, None).unwrap();
 		let consumer = client.connect(request("/")).await.unwrap();
-		assert_eq!(consumer.grant().subscribe, patterns(&["**"]).into());
+		assert_eq!(consumer.grant().subscribe, patterns(&["**"]));
 	}
 }

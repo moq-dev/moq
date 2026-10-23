@@ -29,7 +29,7 @@ test("sign / verify - round trip selects the key by kid", async () => {
 	const token = await KeySet.sign(set, CLAIMS);
 	const claims = await KeySet.verify(set, token);
 	expect(claims.root).toBe("demo");
-	expect(claims.publish?.toJSON()).toEqual(["alice/**"]);
+	expect(claims.publish).toEqual(["alice/**"]);
 });
 
 test("verify - a token signed by a key outside the set is rejected", async () => {

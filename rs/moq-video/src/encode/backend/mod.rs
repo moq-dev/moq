@@ -174,7 +174,10 @@ struct Candidate {
 	open: fn(&Config) -> Result<Box<dyn Backend>, Error>,
 	/// Whether every encoder this opens honors a cut ([`Backend::can_cut`]), known before
 	/// opening one. V4L2 learns it from the driver at open, so it cannot promise.
-	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "capture"),
+		allow(dead_code, reason = "only the `capture` feature uses it")
+	)]
 	cuts: bool,
 	#[cfg(target_os = "linux")]
 	vulkan: bool,
@@ -315,7 +318,10 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 
 /// Whether whichever backend [`open`] picks for `codec` + `kind` honors a cut, answered
 /// before opening one: every candidate it may fall to must promise it.
-#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+#[cfg_attr(
+	not(feature = "capture"),
+	allow(dead_code, reason = "only the `capture` feature uses it")
+)]
 pub(crate) fn always_cuts(codec: Codec, kind: &Kind) -> bool {
 	let attempts = attempts(codec, kind);
 	!attempts.is_empty() && attempts.iter().all(|attempt| attempt.candidate.cuts)
@@ -438,7 +444,10 @@ fn available_names(codec: Codec) -> Vec<&'static str> {
 }
 
 #[cfg(test)]
-#[cfg_attr(not(feature = "openh264"), allow(dead_code))]
+#[cfg_attr(
+	not(feature = "openh264"),
+	allow(dead_code, reason = "only the `openh264` feature uses it")
+)]
 pub(crate) mod test_util {
 	use h264_reader::nal::sps::SeqParameterSet;
 	use h264_reader::nal::{Nal, RefNal, UnitType};
@@ -519,7 +528,10 @@ pub(crate) mod test_util {
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
 
 	use super::*;
 

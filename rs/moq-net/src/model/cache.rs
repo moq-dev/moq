@@ -391,7 +391,8 @@ impl Pool {
 			first = self.inner.wall_epoch.get().is_none();
 			let epoch = *self.inner.wall_epoch.get_or_init(|| now);
 			let micros = u64::try_from(now.duration_since(epoch).as_micros()).unwrap_or(u64::MAX);
-			self.inner.wall_micros.fetch_max(micros, Ordering::Relaxed);
+			// The clock lock already orders drivers and clamps their supplied time.
+			self.inner.wall_micros.store(micros, Ordering::Relaxed);
 			if self.sweep_interval().is_none() {
 				clock.sweep = None;
 			} else if sweep && clock.sweep.is_none_or(|at| at <= now) {
@@ -404,36 +405,45 @@ impl Pool {
 			let mut undriven = self.inner.wall.lock().undriven.take();
 			undriven.wake();
 		}
-		let wall = self.release_due(self.now_wall(), driver);
+		let wall = self.release_due(driver);
 		next.into_iter().chain(wall).min()
 	}
 
-	/// Wake every read parked on a wall-clock deadline at or before `now`, returning the
+	/// Wake every read whose wall-clock deadline has passed, returning the
 	/// earliest left and registering `driver` to hear of an earlier one.
-	fn release_due(&self, now: crate::time::Instant, driver: Option<&kio::Waiter>) -> Option<crate::time::Instant> {
+	fn release_due(&self, driver: Option<&kio::Waiter>) -> Option<crate::time::Instant> {
+		let mut wall = self.inner.wall.lock();
+		if wall.due.is_empty() {
+			if let Some(driver) = driver {
+				driver.register(&mut wall.drivers);
+			}
+			return None;
+		}
+		// With no parked read there is nothing to age. Otherwise the ambient clock
+		// still matters, even when a caller supplies an instant behind its deadline.
+		// Keep one sample across tracks that rearm while this pass releases them.
+		let now = self.now_wall();
 		loop {
-			let due: Vec<_> = {
-				let mut wall = self.inner.wall.lock();
-				let mut due = Vec::new();
-				while let Some(entry) = wall.due.first_entry()
-					&& entry.key().0 <= now
-				{
-					due.push(entry.remove());
+			let mut due = Vec::new();
+			while let Some(entry) = wall.due.first_entry()
+				&& entry.key().0 <= now
+			{
+				due.push(entry.remove());
+			}
+			if due.is_empty() {
+				if let Some(driver) = driver {
+					driver.register(&mut wall.drivers);
 				}
-				if due.is_empty() {
-					if let Some(driver) = driver {
-						driver.register(&mut wall.drivers);
-					}
-					return wall.due.first_key_value().map(|((at, _), _)| *at);
-				}
-				due
-			};
+				return wall.due.first_key_value().map(|((at, _), _)| *at);
+			}
+			drop(wall);
 			// Outside the lock: a track re-arms its next deadline here.
 			for track in due.iter().filter_map(Weak::upgrade) {
 				if let Some(next) = track.wakes.release_wall(now) {
 					self.schedule(next, None, &track);
 				}
 			}
+			wall = self.inner.wall.lock();
 		}
 	}
 
@@ -734,6 +744,11 @@ impl Track {
 		if largest.position.is_some_and(|position| position.group == sequence) {
 			largest.open = false;
 		}
+	}
+
+	/// The greatest location written or reported, without waiting.
+	pub(super) fn largest(&self) -> Option<Position> {
+		self.largest.read().position
 	}
 
 	/// Whether the largest group's content may still grow; see [`Self::finish_largest`].
@@ -1337,6 +1352,52 @@ mod test {
 		assert!(!read.0.load(Ordering::SeqCst), "released early");
 		assert_eq!(pool.gc(at, &driving), None);
 		assert!(read.0.load(Ordering::SeqCst), "the read was never released");
+	}
+
+	/// A fresh driver must hear deadlines armed after an empty collection, including
+	/// after the previous driver was dropped or a prior deadline drained its wake list.
+	#[test]
+	fn replacement_drivers_hear_new_deadlines() {
+		let pool = Pool::unbounded();
+		let now = super::super::clock::wall();
+		pool.gc(now, &kio::Waiter::noop());
+		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let (read, reading) = flag();
+		let (driver, driving) = flag();
+		assert_eq!(pool.gc(now, &driving), None);
+		let at = now + Duration::from_secs(1);
+		track.watch_wall(at, &reading);
+		assert!(driver.0.swap(false, Ordering::SeqCst));
+		assert_eq!(pool.gc(at, &driving), None);
+		assert!(read.0.swap(false, Ordering::SeqCst));
+		track.watch_wall(at + Duration::from_secs(1), &reading);
+		assert!(driver.0.load(Ordering::SeqCst), "the drained list was never rearmed");
+	}
+
+	/// Wall time can lead a lagging driver's sample, while another driver can supply
+	/// future time. Neither a new driver nor a backward sample may rewind expiration.
+	#[moq_clock::test]
+	async fn wall_deadlines_use_the_later_of_ambient_and_driven_time() {
+		let pool = Pool::unbounded();
+		let now = moq_clock::now();
+		let waiter = kio::Waiter::noop();
+		pool.gc(now, &waiter);
+		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let (read, reading) = flag();
+		let at = now + Duration::from_secs(1);
+		track.watch_wall(at, &reading);
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(pool.gc(now, &waiter), None);
+		assert!(read.0.swap(false, Ordering::SeqCst), "ambient time was ignored");
+
+		let future = at + Duration::from_secs(1);
+		track.watch_wall(future, &reading);
+		assert_eq!(pool.gc(future, &waiter), None);
+		assert!(read.0.swap(false, Ordering::SeqCst), "driven time was ignored");
+		let tick = pool.now();
+		pool.gc(now, &waiter);
+		assert_eq!(pool.now_wall(), future);
+		assert_eq!(pool.now(), tick);
 	}
 
 	/// A track indexes one wall-clock deadline, its earliest, and takes it along when dropped.

@@ -58,11 +58,6 @@ const OBSERVED = [
 	"announced",
 	"delay",
 	"buffer",
-	// Released spellings are observed only so assigning them can fail loudly instead of being ignored.
-	"reload",
-	"latency",
-	"latency-min",
-	"jitter",
 	"catalog-format",
 	"captions",
 ] as const;
@@ -145,11 +140,6 @@ export default class MoqWatch extends HTMLElement {
 
 	/** Headless playback pipeline behind this element. */
 	readonly player: Player;
-	/** Fatal media decode failure; select another source to clear it. */
-	get error() {
-		return this.player.error;
-	}
-
 	/** The broadcast being watched. */
 	broadcast: Broadcast;
 
@@ -295,7 +285,7 @@ export default class MoqWatch extends HTMLElement {
 		// A canvas that lost its GPU never hands out another context, so swap in a fresh copy. The
 		// observer above picks it up, which clears the error and selects a renderer again.
 		this.signals.run((effect) => {
-			if (effect.get(this.renderer.out.error) !== "surface-lost") return;
+			if (effect.get(this.renderer.out.error)?.name !== "InvalidStateError") return;
 			// Peek: rerunning on the swap itself would replace the fresh canvas before the error clears.
 			const canvas = this.#canvas.peek();
 			canvas?.replaceWith(canvas.cloneNode());
@@ -451,10 +441,6 @@ export default class MoqWatch extends HTMLElement {
 			this.controls.delay.set(parseDelay(newValue));
 		} else if (name === "buffer") {
 			this.controls.buffer.set(parseBuffer(newValue));
-		} else if (name === "reload") {
-			console.warn("moq-watch: `reload` was renamed to `announced`");
-		} else if (name === "latency" || name === "latency-min" || name === "jitter") {
-			console.warn(`moq-watch: \`${name}\` is gone; use \`delay\` and \`buffer\``);
 		} else if (name === "catalog-format") {
 			this.#catalogFormat.set(parseCatalogFormat(newValue));
 		} else if (name === "captions") {
@@ -547,11 +533,6 @@ export default class MoqWatch extends HTMLElement {
 		this.#announced.set(value);
 	}
 
-	/** @internal */
-	set reload(_value: unknown) {
-		throw new Error("moq-watch: `reload` was renamed to `announced`");
-	}
-
 	/**
 	 * How far playback trails the live edge, in milliseconds. See {@link Delay}.
 	 *
@@ -580,42 +561,6 @@ export default class MoqWatch extends HTMLElement {
 
 	set buffer(value: Milli) {
 		this.controls.buffer.set(value);
-	}
-
-	/** @internal */
-	get latency(): Delay {
-		return this.controls.delay.peek();
-	}
-
-	/** @internal */
-	set latency(_value: unknown) {
-		throw new Error("moq-watch: `latency` is gone; use `delay` and `buffer`");
-	}
-
-	/** @internal */
-	get latencyMin(): Delay {
-		return this.controls.delay.peek();
-	}
-
-	/** @internal */
-	set latencyMin(_value: unknown) {
-		throw new Error("moq-watch: `latencyMin` is gone; use `delay` and `buffer`");
-	}
-
-	/** @internal */
-	set latencyMax(_value: unknown) {
-		throw new Error(
-			"moq-watch: `latencyMax` is gone. Use `buffer`, the media held beyond the live edge; the old ceiling included the floor, so it is `latencyMax - delay`.",
-		);
-	}
-
-	/** The jitter buffer in milliseconds. */
-	get jitter(): Milli {
-		return this.sync.out.jitter.peek();
-	}
-
-	set jitter(_value: unknown) {
-		throw new Error("moq-watch: `jitter` is a readout; set `delay` instead");
 	}
 
 	/**

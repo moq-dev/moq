@@ -769,6 +769,276 @@ export class Pattern {
 	}
 }
 
+/** Which relation an {@link Index} walk tests members against the query with. */
+type Relation = "contains" | "overlaps";
+
+/** Values keyed by UTF-16 code units, read forward or backward, one level per unit. */
+class Trie<T> {
+	value: T | undefined;
+	children: Map<number, Trie<T>> | undefined;
+
+	entry(key: string, backward: boolean, init: () => T): T {
+		let trie: Trie<T> = this;
+		for (let i = 0; i < key.length; i++) {
+			const unit = unitAt(key, i, backward);
+			trie.children ??= new Map();
+			let next = trie.children.get(unit);
+			if (!next) {
+				next = new Trie();
+				trie.children.set(unit, next);
+			}
+			trie = next;
+		}
+		trie.value ??= init();
+		return trie.value;
+	}
+
+	/** The level `key` ends at, if any value's key starts with it. */
+	find(key: string, backward: boolean): Trie<T> | undefined {
+		let trie: Trie<T> | undefined = this;
+		for (let i = 0; i < key.length && trie; i++) trie = trie.children?.get(unitAt(key, i, backward));
+		return trie;
+	}
+
+	/** Visit each value whose key starts `key` and is at most `most` units, with its length. */
+	above(key: string, backward: boolean, most: number, visit: (depth: number, value: T) => void): void {
+		let trie: Trie<T> | undefined = this;
+		for (let depth = 0; trie && depth <= most; depth++) {
+			if (trie.value !== undefined) visit(depth, trie.value);
+			trie = depth < key.length ? trie.children?.get(unitAt(key, depth, backward)) : undefined;
+		}
+	}
+
+	/** Visit each value whose key starts with `key`. */
+	below(key: string, backward: boolean, visit: (value: T) => void): void {
+		const found = this.find(key, backward);
+		if (!found) return;
+		// Iterative: a key may be as long as a whole message.
+		const stack: Trie<T>[] = [found];
+		for (let trie = stack.pop(); trie; trie = stack.pop()) {
+			if (trie.value !== undefined) visit(trie.value);
+			if (trie.children) for (const child of trie.children.values()) stack.push(child);
+		}
+	}
+
+	/** Visit each value whose key starts `key` or starts with it. */
+	related(key: string, backward: boolean, visit: (value: T) => void): void {
+		let trie: Trie<T> = this;
+		for (let i = 0; i < key.length; i++) {
+			// Strictly shorter keys here; the level `key` ends at holds the rest.
+			if (trie.value !== undefined) visit(trie.value);
+			const next = trie.children?.get(unitAt(key, i, backward));
+			if (!next) return;
+			trie = next;
+		}
+		trie.below("", false, visit);
+	}
+}
+
+function unitAt(key: string, i: number, backward: boolean): number {
+	return key.charCodeAt(backward ? key.length - 1 - i : i);
+}
+
+interface Literal {
+	readonly text: string;
+	readonly node: IndexNode;
+}
+
+class IndexNode {
+	/** Literal children by their units, so a partial query finds the literals it could match without scanning them all. */
+	literals = new Trie<Literal>();
+	wildcard: IndexNode | undefined;
+	/** Partial children by prefix, then by suffix read backward. */
+	partials = new Trie<Trie<IndexNode>>();
+	/** The member ending here: a fixed-length member in the head trie, or a `**` member whose reversed tail ends here. */
+	end: Pattern | undefined;
+	/** The reversed tails of the `**` members whose head ends here. */
+	tails: IndexNode | undefined;
+
+	child(segment: Segment): IndexNode {
+		switch (segment.kind) {
+			case "literal":
+				return this.literals.entry(segment.value, false, () => ({ text: segment.value, node: new IndexNode() }))
+					.node;
+			case "wildcard":
+				this.wildcard ??= new IndexNode();
+				return this.wildcard;
+			case "partial":
+				return this.partials
+					.entry(segment.prefix, false, () => new Trie())
+					.entry(segment.suffix, true, () => new IndexNode());
+			case "globstar":
+				throw new Error("an index splits ** out before walking segments");
+		}
+	}
+
+	/** Visit each child whose segment `relation` can hold for against `slot`; `undefined` is a position inside the query's `**`. */
+	children(slot: Segment | undefined, relation: Relation, visit: (node: IndexNode) => void): void {
+		// `*` covers, and so overlaps, any one segment.
+		if (this.wildcard) visit(this.wildcard);
+		if (slot === undefined || slot.kind === "wildcard") {
+			// Only `*` contains a position the query leaves free.
+			if (relation === "contains") return;
+			this.literals.below("", false, (literal) => visit(literal.node));
+			this.partials.below("", false, (suffixes) => suffixes.below("", true, visit));
+			return;
+		}
+		switch (slot.kind) {
+			case "literal": {
+				const text = slot.value;
+				const literal = this.literals.find(text, false)?.value;
+				if (literal) visit(literal.node);
+				// A partial overlaps a literal exactly when it covers it: its prefix starts the
+				// literal and its suffix ends it, without the two overlapping.
+				this.partials.above(text, false, text.length, (prefix, suffixes) =>
+					suffixes.above(text, true, text.length - prefix, (_, node) => visit(node)),
+				);
+				return;
+			}
+			case "partial":
+				if (relation === "contains") {
+					this.partials.above(slot.prefix, false, Number.POSITIVE_INFINITY, (_, suffixes) =>
+						suffixes.above(slot.suffix, true, Number.POSITIVE_INFINITY, (_, node) => visit(node)),
+					);
+					return;
+				}
+				this.literals.below(slot.prefix, false, (literal) => {
+					if (matchesPart(slot, literal.text)) visit(literal.node);
+				});
+				// Two partials meet when one prefix starts the other and one suffix ends the other.
+				this.partials.related(slot.prefix, false, (suffixes) => suffixes.related(slot.suffix, true, visit));
+				return;
+			case "globstar":
+				throw new Error("a query splits ** out before walking segments");
+		}
+	}
+}
+
+/**
+ * A segment trie over patterns, so a batch of containment or overlap queries costs the
+ * paths each query can follow instead of a scan of every member.
+ *
+ * A fixed-length member ends at the node its segments lead to. A member with `**` hangs
+ * its tail, reversed, off the node its head leads to, so a query reaches it from both
+ * ends. Built for one batch and dropped after: holding one would multiply a union's memory.
+ */
+class Index {
+	#root = new IndexNode();
+
+	constructor(members: Iterable<Pattern> = []) {
+		for (const member of members) this.insert(member);
+	}
+
+	/** Index one more member. */
+	insert(member: Pattern): void {
+		const { head, tail, open } = sides(member);
+		let node = this.#root;
+		for (const segment of head) node = node.child(segment);
+		if (open) {
+			node.tails ??= new IndexNode();
+			node = node.tails;
+			for (let i = tail.length - 1; i >= 0; i--) node = node.child(tail[i]);
+		}
+		node.end = member;
+	}
+
+	/** Whether some member contains `query`. */
+	contains(query: Pattern): boolean {
+		let found = false;
+		this.#walk(query, "contains", () => {
+			found = true;
+			return true;
+		});
+		return found;
+	}
+
+	/** The members that overlap `query`. */
+	overlapping(query: Pattern): Pattern[] {
+		const out: Pattern[] = [];
+		this.#walk(query, "overlaps", (member) => {
+			// The walk pins only what the trie can see from each end; the rest is exact here.
+			if (member.overlaps(query)) out.push(member);
+			return false;
+		});
+		return out;
+	}
+
+	/**
+	 * Visit the members `relation` may hold for, until `visit` returns true. For "contains"
+	 * every visited member contains `query`; for "overlaps" every overlapping member is
+	 * visited, among others.
+	 */
+	#walk(query: Pattern, relation: Relation, visit: (member: Pattern) => boolean): void {
+		const { head: front, tail: back, open } = sides(query);
+		// A member that contains an open query has no more fixed segments than it.
+		const limit = relation === "contains" && open ? front.length + back.length : Number.POSITIVE_INFINITY;
+		const slot = (depth: number, head: number | undefined): Segment | undefined | null => {
+			if (head === undefined) return depth < front.length ? front[depth] : open ? undefined : null;
+			// Beneath a member head of length `head`, a fixed query has only the segments the head left.
+			const room = open ? back.length : back.length - head;
+			if (depth < room) return back[back.length - 1 - depth];
+			return open ? undefined : null;
+		};
+
+		// Each frame is a node, its depth in its trie, and, inside a tail trie, the length of
+		// the head that led there.
+		const stack: [IndexNode, number, number | undefined][] = [[this.#root, 0, undefined]];
+		for (let frame = stack.pop(); frame; frame = stack.pop()) {
+			const [node, depth, head] = frame;
+			if (node.end) {
+				const candidate =
+					head !== undefined ||
+					// A fixed-length member contains only a fixed query of its own length.
+					(relation === "contains" ? !open && depth === front.length : open || depth === front.length);
+				if (candidate && visit(node.end)) return;
+			}
+			if (head === undefined && node.tails) stack.push([node.tails, 0, depth]);
+			if ((head ?? 0) + depth >= limit) continue;
+			const next = slot(depth, head);
+			if (next === null) continue;
+			node.children(next, relation, (child) => stack.push([child, depth + 1, head]));
+		}
+	}
+}
+
+/** A pattern's segments before and after its `**`, or all of them on both sides when it has none. */
+function sides(pattern: Pattern): { head: readonly Segment[]; tail: readonly Segment[]; open: boolean } {
+	const at = pattern.segments.findIndex((segment) => segment.kind === "globstar");
+	if (at < 0) return { head: pattern.segments, tail: pattern.segments, open: false };
+	return { head: pattern.segments.slice(0, at), tail: pattern.segments.slice(at + 1), open: true };
+}
+
+/**
+ * Reduce a union in one pass, broadest first.
+ *
+ * In specificity order a pattern can only be contained by one before it, so each is kept
+ * unless the index of those kept already contains it, and nothing kept is ever removed.
+ */
+function reduce(patterns: Iterable<Pattern>): Pattern[] {
+	const sorted = Array.from(patterns, (pattern) => ({ pattern, specificity: pattern.specificity() }));
+	sorted.sort((a, b) => compareSpecificity(a.specificity, b.specificity) || Pattern.compare(a.pattern, b.pattern));
+
+	const index = new Index();
+	const out: Pattern[] = [];
+	let last: Pattern | undefined;
+	for (const { pattern } of sorted) {
+		if (last?.text === pattern.text) continue;
+		last = pattern;
+		if (index.contains(pattern)) continue;
+		index.insert(pattern);
+		out.push(pattern);
+	}
+	// The wire order is canonical text, whatever order reduction visited.
+	return out.sort(Pattern.compare);
+}
+
+/** The reduced union of `patterns`, throwing {@link IntersectionError} past the limit. */
+function bounded(patterns: Iterable<Pattern>): Pattern[] {
+	const out = reduce(patterns);
+	if (out.length > MAX_INTERSECTION_PATTERNS) throw new IntersectionError();
+	return out;
+}
+
 /**
  * A union of patterns, reduced so no member is contained by another.
  *
@@ -781,6 +1051,11 @@ export class Pattern {
  * against `a`, `a/*`, and `a/* /**`) is refused, which keeps the check linear and its answer
  * easy to predict. A grant that means a subtree writes `a/**`.
  *
+ * Operations over a whole union (construction, {@link Patterns.covers}, and
+ * {@link Patterns.intersect}) index one side by segment first, so their cost follows the
+ * members a query could match rather than every pair: a peer's large grant costs about its
+ * own size, not its square.
+ *
  * @public
  */
 export class Patterns implements Iterable<Pattern> {
@@ -788,11 +1063,12 @@ export class Patterns implements Iterable<Pattern> {
 
 	/** A union of the given patterns, reduced. Empty when none are given. */
 	constructor(patterns?: Iterable<Pattern>) {
-		if (patterns) for (const pattern of patterns) this.insert(pattern);
+		if (patterns) this.#members = reduce(patterns);
 	}
 
 	/**
-	 * Add a pattern, dropping members it contains.
+	 * Add a pattern, dropping members it contains. Linear in the members; build a union
+	 * of many at once with the constructor.
 	 *
 	 * Returns false when a member already contains it, leaving the union unchanged.
 	 */
@@ -817,7 +1093,8 @@ export class Patterns implements Iterable<Pattern> {
 
 	/** Whether every member of `other` is contained here: `other` grants nothing this union does not. */
 	covers(other: Patterns): boolean {
-		return other.#members.every((pattern) => this.contains(pattern));
+		const index = new Index(this.#members);
+		return other.#members.every((pattern) => index.contains(pattern));
 	}
 
 	/** Whether any member overlaps `pattern`. */
@@ -828,24 +1105,41 @@ export class Patterns implements Iterable<Pattern> {
 	/**
 	 * The paths in both unions, as one union: every member of this one intersected with
 	 * every member of `other`. See {@link Pattern.intersect}.
+	 *
+	 * Throws {@link IntersectionError} when the union grows past {@link Pattern.MAX_INTERSECTIONS} members.
 	 */
 	intersect(other: Patterns): Patterns {
-		const out = new Patterns();
+		// A member inside the other union is its own intersection, and every other result it
+		// takes part in lies within it, so only the members left over are paired.
+		const ours = new Index(this.#members);
+		const theirs = new Index(other.#members);
+		let out: Pattern[] = [];
+		const rest = new Index();
 		for (const member of this.#members) {
-			for (const candidate of other.#members)
-				for (const pattern of member.intersect(candidate)) {
-					out.insert(pattern);
-					if (out.size > MAX_INTERSECTION_PATTERNS) throw new IntersectionError();
-				}
+			if (theirs.contains(member)) out.push(member);
+			else rest.insert(member);
 		}
-		return out;
+		for (const candidate of other.#members) {
+			if (ours.contains(candidate)) {
+				out.push(candidate);
+				continue;
+			}
+			for (const member of rest.overlapping(candidate)) {
+				out.push(...member.intersect(candidate));
+				// Fail once the union grows past the limit, so the pieces held stay within a few
+				// times it rather than the product of both unions' sizes. A later, broader piece
+				// could have absorbed them, so this can refuse a union that would fit.
+				if (out.length > 2 * MAX_INTERSECTION_PATTERNS) out = bounded(out);
+			}
+		}
+		const union = new Patterns();
+		union.#members = bounded(out);
+		return union;
 	}
 
 	/** Every member rebased at `root`, as one union. See {@link Pattern.rebase}. */
 	rebase(root: string): Patterns {
-		const out = new Patterns();
-		for (const member of this.#members) for (const pattern of member.rebase(root)) out.insert(pattern);
-		return out;
+		return new Patterns(this.#members.flatMap((member) => [...member.rebase(root)]));
 	}
 
 	/** Every member placed beneath `root`. See {@link Pattern.rooted}. */

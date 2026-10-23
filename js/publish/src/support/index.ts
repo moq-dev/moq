@@ -20,7 +20,7 @@ export type Codec = {
 
 /** Which audio codecs encode. */
 export type Audio = {
-	aac: boolean;
+	aac: Level;
 	opus: Level;
 };
 
@@ -78,7 +78,8 @@ export async function isSupported(): Promise<Full> {
 		audio: {
 			capture: typeof AudioWorkletNode !== "undefined",
 			encoding: {
-				aac: await audioEncoderSupported("aac"),
+				// No fallback encodes AAC, so it is native or nothing.
+				aac: (await audioEncoderSupported("aac")) ? "full" : "none",
 				opus: (await audioEncoderSupported("opus")) ? "full" : "partial",
 			},
 		},

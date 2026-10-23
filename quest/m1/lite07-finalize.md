@@ -86,10 +86,9 @@ identifier. This release adopts the new routing contract end to end.
 Public API: the lite-07 version constant and ALPN lose `-wip`. Wire: lite-07
 is published; older versions are unchanged.
 
-Decided 2026-10-22 (maintainer): lite-07 also waits for the lite-06
-max-sequence quest, since it may change what the final wire carries.
 Timestamp provenance landed in
-[#6150](https://github.com/moq-dev/moq/pull/6150).
+[#6150](https://github.com/moq-dev/moq/pull/6150), and the 2^61 - 1
+timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 ## Required
 
@@ -99,8 +98,6 @@ Timestamp provenance landed in
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
-- [Listing end reason](/quest/m1/listing-end-reason.md) - lite-07's TRACKS_FINISH says a listed track finished, so an IETF answerer can end it with TRACK_ENDED
-- [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - the refusal boundary for an uncarriable sequence is settled before lite-07 freezes
 
 ## Related
 
