@@ -206,6 +206,13 @@ Test on mock time through a relay:
 - A single run spanning billions of sequences is settled by each cursor in
   one step, whether dropped, skipped by a wider reader, or evicted and
   judged again.
+- Per-reader misses are bounded the same way. [Dynamic range
+  requests](/quest/m1/subscribe-ranges/dynamic.md) adds a third unbounded
+  record: each reader's given-up misses, one per gap, which a reader whose
+  floor never moves cannot forget. Fold them into the cursor's runs, billed
+  to the pool (from
+  [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171), decided
+  2026-10-23).
 
 Mirror each case in `js/net`.
 

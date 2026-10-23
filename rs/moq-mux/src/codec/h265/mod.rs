@@ -299,19 +299,15 @@ pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::cat
 /// and the picture period when the VUI's HRD parameters fix the picture rate within the CVS
 /// (ITU-T H.265 E.3.2).
 ///
-/// `None` when the SPS declares more than
-/// [`Reorder::MAX_DEPTH`](crate::codec::video::Reorder::MAX_DEPTH), or fails to parse.
+/// `None` when the SPS fails to parse.
 pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
-	use crate::codec::video::Reorder;
-
 	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?;
 	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
 	let reorder = &sps.rbsp.sub_layer_ordering_info.sps_max_num_reorder_pics;
 	let depth = *reorder.get(highest).or(reorder.last())?;
-	Some(Reorder {
-		depth: u32::try_from(depth).ok().filter(|depth| *depth <= Reorder::MAX_DEPTH)?,
+	Some(crate::codec::video::Reorder {
+		depth: u32::try_from(depth).ok()?,
 		period: sps_period(&sps.rbsp),
-		fields: false,
 	})
 }
 

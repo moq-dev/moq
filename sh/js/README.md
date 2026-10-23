@@ -38,6 +38,6 @@ nixpkgs moves Playwright, update the reported manifests and regenerate `bun.lock
 with `bun install` in the new shell. Smoke has its own flake and freshness check.
 
 Run `python3 sh/js/workspace.test.py` for graph and execution regressions. The same
-suite runs in `just gh test` nightly. To inspect work without executing it, pass
+suite runs in `just gh test` on every check. To inspect work without executing it, pass
 a file containing relevant paths, one per line, to
 `python3 sh/js/workspace.py plan LISTFILE`, or pass `--all`.
