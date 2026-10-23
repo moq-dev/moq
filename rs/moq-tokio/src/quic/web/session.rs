@@ -195,7 +195,7 @@ impl Session {
 				}
 				Ok(Some(web_transport_proto::Capsule::Grease { .. })) => {}
 				Ok(Some(web_transport_proto::Capsule::Unknown { typ, payload })) => {
-					tracing::warn!(%typ, size = payload.len(), "unknown capsule");
+					tracing::debug!(%typ, size = payload.len(), "unknown capsule");
 				}
 				Ok(None) => return None,
 				// The capsule reader reports a lost stream as `UnexpectedEnd`, so ask the
