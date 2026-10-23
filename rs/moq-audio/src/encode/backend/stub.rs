@@ -2,7 +2,8 @@
 //! platform encoder. A test opts in with [`install`]; every other test sees the
 //! real tiers.
 
-use std::cell::Cell;
+use std::cell::RefCell;
+use std::sync::{Arc, Weak};
 
 use bytes::Bytes;
 
@@ -16,31 +17,40 @@ pub(crate) const NAME: &str = "stub";
 pub(crate) const DELAY: usize = 2112;
 
 thread_local! {
-	static INSTALLED: Cell<bool> = const { Cell::new(false) };
+	static INSTALLED: RefCell<Weak<()>> = const { RefCell::new(Weak::new()) };
 }
 
 /// Stand the stub in for the platform tier on this thread until the guard drops.
 pub(crate) fn install() -> Installed {
-	INSTALLED.set(true);
-	Installed(())
+	let resource = Arc::new(());
+	INSTALLED.set(Arc::downgrade(&resource));
+	Installed(resource)
 }
 
 /// Whether this thread has the stub installed.
 pub(super) fn installed() -> bool {
-	INSTALLED.get()
+	INSTALLED.with(|installed| installed.borrow().strong_count() > 0)
 }
 
 /// Uninstalls the stub on drop.
-pub(crate) struct Installed(());
+pub(crate) struct Installed(Arc<()>);
+
+impl Installed {
+	/// The backend resources still owned by encoders opened under this guard.
+	pub(crate) fn resources(&self) -> usize {
+		Arc::strong_count(&self.0) - 1
+	}
+}
 
 impl Drop for Installed {
 	fn drop(&mut self) {
-		INSTALLED.set(false);
+		INSTALLED.set(Weak::new());
 	}
 }
 
 /// Emits each frame's index as its payload, and cannot retune.
 pub(crate) struct Stub {
+	_resource: Arc<()>,
 	bitrate: u64,
 	frames: u64,
 }
@@ -48,6 +58,7 @@ pub(crate) struct Stub {
 impl Stub {
 	pub(super) fn open(settings: &Settings) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self {
+			_resource: INSTALLED.with(|installed| installed.borrow().upgrade().unwrap()),
 			bitrate: settings.bitrate.map_or(128_000, |rate| rate.as_bps()),
 			frames: 0,
 		}))

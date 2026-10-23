@@ -318,10 +318,7 @@ impl<T> Inner<T> {
 		// admits the groups below it. The largest counts every group, even an empty one, so the
 		// next group is the one after it.
 		let track = &self.track.inner;
-		let next = match track.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
-			std::task::Poll::Ready(Some(largest)) => largest.group.saturating_add(1),
-			_ => 0,
-		};
+		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
 		if track.is_closed()
 			|| track
 				.end()
