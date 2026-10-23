@@ -62,15 +62,17 @@ each turned green:
   [runner client bump](/quest/m2/release/runner-client-bump.md) describes.
   The JS client's `moqt://` dials (m0 fix) then reach every relay serving
   WebTransport on that port; a raw-QUIC-only relay stays unsupported, since
-  JS has no raw QUIC.
-- Draft-17+ PUBLISH_NAMESPACE withdrawal: released Rust and JS end it with
-  FIN, which some relays ignore, so `subscribe-namespace-lifecycle` waits for
-  NAMESPACE_DONE (released Rust against quic-zig, xquic-draft-18, and moxygen's
-  docker relay; released JS against six relays). `main` resets the request
-  ([moq-dev/moq#5483](https://github.com/moq-dev/moq/pull/5483)); from
-  `main` the Rust client passes against quic-zig and the JS client against
-  Cloudflare draft-18. [moq-dev/moq#6518](https://github.com/moq-dev/moq/pull/6518)
-  backports the JS half to `release`.
+  JS has no raw QUIC. The JS client's red5 WebTransport cells still time out
+  connecting, which m0's one-write control messages target.
+- `subscribe-namespace-lifecycle`: released JS withdraws a draft-17+
+  PUBLISH_NAMESPACE with FIN, which six relays ignore, so it waits for
+  NAMESPACE_DONE. `main` resets the request
+  ([moq-dev/moq#5483](https://github.com/moq-dev/moq/pull/5483)) and passes
+  against Cloudflare draft-18;
+  [moq-dev/moq#6518](https://github.com/moq-dev/moq/pull/6518) backports it
+  to `release`. Released Rust never sees the NAMESPACE itself from quic-zig
+  or moxygen (docker, and draft-14 over raw QUIC); the client built on
+  `main` passes against both.
 - Our relay through third-party clients: `rendezvous-timeout` 0x10
   (aiomoqt, imquic, quic-zig, Cloudflare draft-18), the relay stamping a
   Timestamp property on every object
@@ -131,7 +133,8 @@ Theirs, reported or waiting on others:
 
 Unsupported or down, not worth rechecking unless something changes:
 PUBLISH and SUBSCRIBE_TRACKS cases (`publish-track-*`, `namespace-discovery`,
-Cloudflare's PUBLISH cases), Cloudflare draft-14 (no SUBSCRIBE_NAMESPACE),
+Cloudflare's PUBLISH cases), relays without namespace discovery, which
+moq-net needs before a SUBSCRIBE (Cloudflare draft-14, xquic-draft-18),
 quiche-moq (connect idle timeout), xquic's docker relay (binds loopback),
 and moqtopus and xquic-draft-18 over WebTransport (raw QUIC only).
 
