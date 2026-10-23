@@ -33,17 +33,23 @@ def main():
         parser.error("a command, positive samples and positive worker counts are required")
     if os.name != "posix":
         parser.error("CPU accounting requires a POSIX host")
+    checkouts = [checkout.resolve() for checkout in args.checkout]
+    if not all(checkout.is_dir() for checkout in checkouts) or len(set(checkouts)) != len(checkouts):
+        parser.error("each checkout must be a distinct existing directory")
+    # Every checkout runs solo, so a concurrent run is compared against its own baseline.
+    groups = [[checkout] for checkout in checkouts] + ([checkouts] if len(checkouts) > 1 else [])
     def cancel(number, _frame):
         raise SystemExit(128 + number)
     for number in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, cancel)
-    for copies in sorted({1, len(args.checkout)}):
-        for workers in args.workers:
-            for sample in range(args.samples):
+    # Alternating the order spreads drift in host load or thermals over solo and concurrent runs.
+    for sample in range(args.samples):
+        for group in groups if sample % 2 == 0 else reversed(groups):
+            for workers in args.workers:
                 processes = []
                 load = os.getloadavg()
                 try:
-                    for checkout in args.checkout[:copies]:
+                    for checkout in group:
                         directory = checkout / ".scratch/local-bench"
                         directory.mkdir(parents=True, exist_ok=True)
                         stem = directory / str(uuid.uuid4())
@@ -73,7 +79,8 @@ def main():
                         if process.returncode is None:
                             process.terminate()
                             process.wait()
-                print(json.dumps({"copies": copies, "nextest_workers": workers, "sample": sample,
+                print(json.dumps({"copies": len(group), "checkouts": [str(checkout) for checkout in group],
+                                  "nextest_workers": workers, "sample": sample,
                                   "cache": args.cache, "host_load": load, "command": command,
                                   "runs": results}), flush=True)
 
