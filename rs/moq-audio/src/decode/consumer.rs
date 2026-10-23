@@ -435,9 +435,9 @@ impl Consumer {
 					} else {
 						r.held_at().unwrap_or(decoded_at)
 					};
-					let skipped = r.skipped();
+					let timestamp = r.output_at(held)?;
 					let pcm = r.process(&decoded, decoded_at)?;
-					(pcm, rewind(held, skipped, self.resolved_sample_rate)?)
+					(pcm, timestamp)
 				}
 				None => (decoded, decoded_at),
 			};
@@ -532,10 +532,9 @@ impl Consumer {
 		let Some(resampler) = self.resampler.as_mut() else {
 			return Ok(None);
 		};
-		let held = resampler.held_at();
-		let skipped = resampler.skipped();
+		let timestamp = resampler.held_at().map(|held| resampler.output_at(held)).transpose()?;
 		let pcm = resampler.drain()?;
-		self.tail(pcm, held, skipped)
+		self.tail(pcm, timestamp)
 	}
 
 	/// The tail the resampler is still holding when the track ends, once.
@@ -549,27 +548,19 @@ impl Consumer {
 			return Ok(None);
 		};
 
-		let held = resampler.held_at();
-		let skipped = resampler.skipped();
-		self.tail(resampler.flush()?, held, skipped)
+		let timestamp = resampler.held_at().map(|held| resampler.output_at(held)).transpose()?;
+		self.tail(resampler.flush()?, timestamp)
 	}
 
 	/// Stamp and pack a tail the resampler handed back, if it handed back one.
 	///
-	/// `held` is where the samples it was holding arrived, which is where the tail
-	/// begins once the startup frames it dropped of its own are taken off. `None`
-	/// there means the resampler never ran, so there is nothing to place.
-	fn tail(
-		&mut self,
-		pcm: Vec<f32>,
-		held: Option<moq_net::Timestamp>,
-		skipped: usize,
-	) -> Result<Option<Frame>, Error> {
-		let Some(held) = held.filter(|_| !pcm.is_empty()) else {
+	/// `timestamp` includes the filter's retained fractional phase. `None` means
+	/// the resampler never ran, so there is nothing to place.
+	fn tail(&mut self, pcm: Vec<f32>, timestamp: Option<moq_net::Timestamp>) -> Result<Option<Frame>, Error> {
+		let Some(timestamp) = timestamp.filter(|_| !pcm.is_empty()) else {
 			return Ok(None);
 		};
 
-		let timestamp = rewind(held, skipped, self.resolved_sample_rate)?;
 		let activity = self.activity_at(timestamp);
 		self.frame(pcm, timestamp, activity)
 	}
@@ -790,18 +781,12 @@ mod tests {
 			.with_subscriber(to.clone());
 		tokio::join!(
 			async {
-				let (session, driver) = client
-					.connect_lite(moq_net::time::now(), client_transport)
-					.await
-					.unwrap();
+				let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			},
 			async {
-				let (session, driver) = server
-					.accept_lite(moq_net::time::now(), server_transport)
-					.await
-					.unwrap();
+				let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			}
@@ -1587,7 +1572,7 @@ mod tests {
 		let read = pcm_gaps(44_100, 48_000, 882, &stamps).await;
 		let mut r = crate::resample::Resampler::new(44_100, 48_000, 1, 882).unwrap();
 		r.process(&[0.25; 882], stamps[0]).unwrap();
-		let expected = rewind(stamps[1], r.skipped(), 48_000).unwrap().as_micros();
+		let expected = r.output_at(stamps[1]).unwrap().as_micros();
 		assert_eq!(read[1].0, expected);
 	}
 

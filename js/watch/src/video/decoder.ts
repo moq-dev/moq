@@ -14,7 +14,6 @@ import {
 	Signal,
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
-import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync } from "../sync";
@@ -111,9 +110,6 @@ export class Decoder {
 	// shares `closed`, so it identifies the instance where the handle itself does not.
 	#instance?: { path: Moq.Path.Valid; closed: unknown };
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
-
-	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
-	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
 	#selected?: DecoderTrack;
@@ -285,8 +281,6 @@ export class Decoder {
 
 			// Upgrade the pending track to active.
 			// #runActive will be in charge of it now.
-			if (current) current.arrivals = undefined;
-			pending.arrivals = this.#arrivals;
 			this.#active.set(pending);
 			this.#pending.set(undefined);
 			pending = undefined;
@@ -383,15 +377,9 @@ export class Decoder {
 		}, Nano.fromMilli(BUFFERING));
 	}
 
-	/** Observe every frame and gap the displayed rendition receives until the handle or this decoder closes. */
-	arrivals(): Arrivals {
-		return this.#arrivals.consume();
-	}
-
 	/** Stop and release everything this holds. */
 	close() {
 		this.#clearCurrentFrame();
-		this.#arrivals.close();
 
 		this.#signals.close();
 	}
@@ -428,9 +416,6 @@ class DecoderTrack {
 	identity: string;
 	catalog: Getter<Catalog.Root | undefined>;
 	stats: Signal<Stats | undefined>;
-	// Set once promoted, so only the rendition feeding the picture reports arrivals.
-	arrivals?: ArrivalProducer;
-
 	timestamp = new Signal<Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
@@ -496,36 +481,23 @@ class DecoderTrack {
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				try {
-					// The clock epoch this frame was decoded in. A reset while we wait below (this
-					// track's playhead moving, or a shared reset such as audio's at an utterance
-					// boundary) means the frame belongs to the previous timeline and must be dropped.
-					const epoch = this.sync.epoch;
-
 					const timestamp = Milli.fromMicro(frame.timestamp as Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
 						return;
 					}
 
-					// `received()` runs at submit, so a frame is anchored by the time it decodes.
-					// Reaching here unanchored means a reset cleared the clock after this frame's
-					// received(), so it predates the current timeline. Drop it: painting it would
-					// set `timestamp` from the old timeline and late-reject what follows.
-					if (this.sync.out.reference.peek() === undefined) return;
-					// WebCodecs can hold a picture until after another track skipped the playhead past it.
-					if (this.sync.skipped(timestamp)) return;
-
-					if (this.frame.peek() === undefined) {
-						// Render something while we wait for the sync to catch up.
+					// Render something while we wait for the sync to catch up, unless the frame is
+					// already off the timeline: WebCodecs can hold a picture past a reset or a skip.
+					if (this.frame.peek() === undefined && this.sync.presentable(timestamp)) {
 						this.frame.set(frame.clone());
 					}
 
-					// Returns immediately when the latency is "instant". Closing the track releases it.
-					// Capture the signal: a rerun replaces `effect.abort` before this continuation runs.
+					// Resolves at once when the delay is "instant". Closing the track releases it.
+					// Capture the signal: a rerun replaces `effect.abort`, and can abort it after the wait
+					// resolves but before this continuation runs.
 					const signal = effect.abort;
-					await this.sync.wait(timestamp, signal);
-					if (signal.aborted) return;
-					if (epoch !== this.sync.epoch || this.sync.skipped(timestamp)) return;
+					if (!(await this.sync.wait(timestamp, signal)) || signal.aborted) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -608,10 +580,7 @@ class DecoderTrack {
 				// A gap or a declared end breaks the timeline: re-anchor before decoding further, and
 				// never bridge the buffer across it.
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") {
-						recovery.gap();
-						this.arrivals?.write(gap(next));
-					}
+					if (next.kind === "gap") recovery.gap();
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -630,9 +599,7 @@ class DecoderTrack {
 				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
-				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
-				const late = this.sync.received(timestamp, "video", frame.arrival);
-				this.arrivals?.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
+				this.sync.received(Milli.fromMicro(frame.timestamp as Micro), frame.arrival);
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -697,10 +664,7 @@ class DecoderTrack {
 
 				// A gap or a declared end breaks the timeline (see #runLegacy).
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") {
-						recovery.gap();
-						this.arrivals?.write(gap(next));
-					}
+					if (next.kind === "gap") recovery.gap();
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -719,9 +683,7 @@ class DecoderTrack {
 				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
-				const timestamp = Milli.fromMicro(frame.timestamp);
-				const late = this.sync.received(timestamp, "video", frame.arrival);
-				this.arrivals?.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
+				this.sync.received(Milli.fromMicro(frame.timestamp), frame.arrival);
 
 				// Track decode buffer (see #runLegacy: bridge only when no gap or end came between,
 				// never on group adjacency, which proves nothing about the timeline).

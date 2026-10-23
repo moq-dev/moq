@@ -35,7 +35,7 @@ pub fn default_provider() -> Provider {
 	{
 		return Arc::new(rustls::crypto::ring::default_provider());
 	}
-	#[allow(unreachable_code)]
+	#[allow(unreachable_code, reason = "unreachable when a crypto feature returns above")]
 	{
 		panic!("CryptoProvider::set_default() must be called; or only enable one ring/aws-lc-rs feature.");
 	}

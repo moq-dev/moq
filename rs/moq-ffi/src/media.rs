@@ -135,6 +135,9 @@ pub struct MoqVideo {
 	/// Whether this rendition may be selected; when false, no frames are coming.
 	#[uniffi(default = true)]
 	pub enabled: bool,
+	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
+	#[uniffi(default = 0)]
+	pub preference: i32,
 	/// The frame rate in frames per second, when specified.
 	pub framerate: Option<f64>,
 	/// The framing used to carry this rendition.
@@ -526,6 +529,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					},
 					bitrate: config.bitrate,
 					enabled: config.enabled,
+					preference: config.preference,
 					framerate: config.framerate,
 					container: MoqContainer::from_catalog(&config.container)?,
 				},
@@ -584,6 +588,20 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	#[test]
+	fn catalog_preserves_video_preference() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		for preference in [i32::MIN, -1, 0, 1, i32::MAX] {
+			let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			video.preference = preference;
+			catalog.video.renditions.insert(preference.to_string(), video);
+		}
+		let converted = convert_catalog(&catalog);
+		for (id, video) in &catalog.video.renditions {
+			assert_eq!(converted.video[id].preference, video.preference);
+		}
+	}
 
 	#[test]
 	fn catalog_exposes_disabled_renditions() {
@@ -1187,7 +1205,7 @@ pub enum MoqRendition {
 
 impl MoqRendition {
 	/// Split into the broadcast reference and its epoch, the track name, and the container.
-	fn into_parts(self) -> (Option<String>, Option<String>, String, MoqContainer) {
+	pub(crate) fn into_parts(self) -> (Option<String>, Option<String>, String, MoqContainer) {
 		let (id, broadcast, epoch, track, container) = match self {
 			Self::Video { id, config } => (id, config.broadcast, config.epoch, config.track, config.container),
 			Self::Audio { id, config } => (id, config.broadcast, config.epoch, config.track, config.container),

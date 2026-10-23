@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Manual, Wall } from "@moq/clock";
 import { base64url, exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, type Claims } from "./claims.ts";
@@ -53,23 +54,38 @@ async function generateAsymmetricKeyPair(
 	};
 }
 
-test("decode checks the signature, algorithm, and kid without applying claims policy", async () => {
-	const key = Key.parse(encodeJwk(testKey));
-	const secret = new TextEncoder().encode("test-secret-that-is-long-enough-for-hmac-sha256");
-	const custom = await new SignJWT({ custom: "accepted", exp: 1 })
-		.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
-		.sign(secret);
-	await expect(Key.decode(key, custom)).resolves.toEqual({ custom: "accepted", exp: 1 });
-	await expect(Key.verify(key, custom)).rejects.toThrow();
-
-	const wrongKid = await new SignJWT({ custom: "accepted" })
-		.setProtectedHeader({ alg: "HS256", kid: "other" })
-		.sign(secret);
-	await expect(Key.decode(key, wrongKid)).rejects.toThrow(/kid/);
-	const wrongAlgorithm = await new SignJWT({ custom: "accepted" })
-		.setProtectedHeader({ alg: "HS384", kid: testKey.kid })
-		.sign(secret);
-	await expect(Key.decode(key, wrongAlgorithm)).rejects.toThrow();
+test("verify refuses unsafe signed payloads without dropping their restrictions", async () => {
+	const clock = new Manual();
+	clock.stepWall(Wall(1_000_000));
+	const restore = clock.install();
+	try {
+		const key = Key.parse(encodeJwk(testKey));
+		const secret = new TextEncoder().encode("test-secret-that-is-long-enough-for-hmac-sha256");
+		const signed = (payload: Record<string, unknown>, header = { alg: "HS256", kid: testKey.kid as string }) =>
+			new SignJWT(payload).setProtectedHeader(header).sign(secret);
+		for (const payload of [
+			{ custom: "refused", exp: 1 },
+			{},
+			{ publish: [] },
+			{ publish: ["**"], exp: 1000 },
+			{ publish: ["**"], nbf: 1001 },
+			{ publish: ["**"], subscribe: { path: "alice/**", rate: 8000 } },
+			{ publish: { path: ["alice/**"], rate: 8000 }, subscribe: ["**"] },
+		]) {
+			await expect(Key.verify(key, await signed(payload))).rejects.toThrow();
+		}
+		await expect(Key.verify(key, await signed({ publish: ["**"], exp: 1001, nbf: 1000 }))).resolves.toMatchObject({
+			publish: ["**"],
+		});
+		await expect(
+			Key.verify(key, await signed({ publish: ["**"] }, { alg: "HS256", kid: "other" })),
+		).rejects.toThrow(/kid/);
+		await expect(
+			Key.verify(key, await signed({ publish: ["**"] }, { alg: "HS384", kid: testKey.kid })),
+		).rejects.toThrow();
+	} finally {
+		restore();
+	}
 });
 
 test("parse - valid JWK", () => {
@@ -235,8 +251,8 @@ test("verify - successful verification", async () => {
 	const claims = await Key.verify(key, token);
 
 	expect(claims.root).toBe(testClaims.root);
-	expect(claims.publish?.toJSON()).toEqual(testClaims.publish);
-	expect(claims.subscribe?.toJSON()).toEqual(testClaims.subscribe);
+	expect(claims.publish).toEqual(testClaims.publish);
+	expect(claims.subscribe).toEqual(testClaims.subscribe);
 });
 
 test("verify - key doesn't support verification", async () => {
@@ -290,7 +306,7 @@ test("verify - token without exp field", async () => {
 	const claims = await Key.verify(key, token);
 
 	expect(claims.root).toBe("test-path");
-	expect(claims.publish?.toJSON()).toEqual(["test-pub/**"]);
+	expect(claims.publish).toEqual(["test-pub/**"]);
 	expect(claims.exp).toBe(undefined);
 });
 
@@ -323,8 +339,8 @@ test("round-trip - sign and verify", async () => {
 	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(originalClaims.root);
-	expect(verifiedClaims.publish?.toJSON()).toEqual(originalClaims.publish);
-	expect(verifiedClaims.subscribe?.toJSON()).toEqual(originalClaims.subscribe);
+	expect(verifiedClaims.publish).toEqual(originalClaims.publish);
+	expect(verifiedClaims.subscribe).toEqual(originalClaims.subscribe);
 	expect(verifiedClaims.exp).toBe(originalClaims.exp);
 	expect(verifiedClaims.iat).toBe(originalClaims.iat);
 });
@@ -405,7 +421,7 @@ test("different algorithms - HS384", async () => {
 	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(testClaims.root);
-	expect(verifiedClaims.publish?.toJSON()).toEqual(testClaims.publish);
+	expect(verifiedClaims.publish).toEqual(testClaims.publish);
 });
 
 test("different algorithms - HS512", async () => {
@@ -422,7 +438,7 @@ test("different algorithms - HS512", async () => {
 	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(testClaims.root);
-	expect(verifiedClaims.publish?.toJSON()).toEqual(testClaims.publish);
+	expect(verifiedClaims.publish).toEqual(testClaims.publish);
 });
 
 test("verify - private to public key", async () => {
@@ -764,8 +780,8 @@ test("verify - a legacy put/get prefix token reads as subtrees", async () => {
 		.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
 		.sign(secret);
 	const claims = await Key.verify(key, legacy);
-	expect(claims.publish?.toJSON()).toEqual(["alice/**"]);
-	expect(claims.subscribe?.toJSON()).toEqual(["**"]);
+	expect(claims.publish).toEqual(["alice/**"]);
+	expect(claims.subscribe).toEqual(["**"]);
 });
 
 test("sign - subtree grants are written as legacy put/get", async () => {

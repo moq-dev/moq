@@ -91,11 +91,12 @@ async function encodePrefixes(w: Writer, list: Path.Valid[]) {
 
 async function decodePrefixes(r: Reader): Promise<Path.Patterns> {
 	const count = await r.u53();
-	const patterns = new Path.Patterns();
+	const patterns: Path.Pattern[] = [];
 	for (let i = 0; i < count; i++) {
-		patterns.insert(Path.Pattern.subtree(await Namespace.decode(r)));
+		patterns.push(Path.Pattern.subtree(await Namespace.decode(r)));
 	}
-	return patterns;
+	// Reduce once, so a peer's count never turns into quadratic work.
+	return new Path.Patterns(patterns);
 }
 
 /** AUTH_OK: the grant a token earns, replacing any earlier one on the stream. @internal */
