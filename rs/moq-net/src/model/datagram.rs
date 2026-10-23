@@ -11,7 +11,8 @@
 //! (moq-lite before 05, or stream-only transports like WebSocket) never deliver them.
 //!
 //! A datagram is never cached or served by a fetch. Only the short per-track send buffer holds
-//! it, which a new subscription may still read.
+//! it, which a new subscription may still read. That buffer bills what it retains to the
+//! track's [`Pool`](crate::cache::Pool), like cached groups, so pressure drops the oldest.
 //!
 //! Wire counterparts: [`crate::lite::Datagram`], and on moq-transport an OBJECT_DATAGRAM at
 //! object 0 whose Group ID is the sequence ([`crate::ietf::ObjectDatagram`]).
@@ -19,6 +20,7 @@
 use bytes::Bytes;
 
 use crate::Timestamp;
+use crate::cache;
 
 /// Hard ceiling on a datagram payload, matching the QUIC DATAGRAM frame limit.
 ///
@@ -77,6 +79,53 @@ impl Stored {
 	/// The bytes the track stores and meters: the DEFLATE slice when it has one.
 	pub fn stored_len(&self) -> u64 {
 		self.deflated.as_ref().unwrap_or(&self.datagram.payload).len() as u64
+	}
+
+	/// What buffering it costs the pool: both payload forms, any wire metadata, and its slot.
+	fn cache_size(&self) -> u64 {
+		let wire = self.wire.as_ref().map_or(0, |wire| {
+			size_of::<Wire>() + wire.properties.block.as_ref().map_or(0, |block| block.bytes.len())
+		});
+		let deflated = self.deflated.as_ref().map_or(0, Bytes::len);
+		(self.datagram.payload.len() + deflated + wire + SLOT_OVERHEAD) as u64
+	}
+}
+
+/// Heap a buffered datagram's slot takes, doubled because a `VecDeque` holds up to twice
+/// its entries.
+const SLOT_OVERHEAD: usize = 2 * size_of::<Buffered>();
+
+/// A datagram in a track's send buffer, billed to the track's pool until it leaves.
+///
+/// Readers take clones of [`Self::stored`], which alias its payloads rather than copy them,
+/// so only the buffer is billed.
+pub(super) struct Buffered {
+	pub stored: Stored,
+	bill: cache::Bill,
+}
+
+impl Buffered {
+	/// Bill `stored` to `cache`, accruing eviction debt like a group's frames.
+	pub fn new(stored: Stored, cache: &std::sync::Arc<cache::Track>) -> Self {
+		let bill = cache.bill(stored.cache_size());
+		Self { stored, bill }
+	}
+
+	/// What it bills the pool.
+	pub fn bytes(&self) -> u64 {
+		self.bill.bytes()
+	}
+
+	/// Whether nobody has written it for the pool's idle window.
+	pub fn expired(&self) -> bool {
+		self.bill.expired()
+	}
+}
+
+impl std::ops::Deref for Buffered {
+	type Target = Stored;
+	fn deref(&self) -> &Stored {
+		&self.stored
 	}
 }
 
