@@ -1,5 +1,5 @@
-//! Media reports: the stats track `import --stats` names in its catalog, the feedback
-//! `export --echo` publishes where a catalog solicits it, and the `export stats` and
+//! Media reports: the track `import --report` names in its catalog's `stats` section, the feedback
+//! `export --echo` publishes where a catalog solicits it, and the `export report` and
 //! `export echo` sinks that print them.
 //!
 //! Each report is one snapshot track and its compressed `.z` sibling, written about once a
@@ -415,9 +415,9 @@ async fn snapshot(
 	}
 }
 
-/// `export stats`: write the broadcast's stats snapshots to stdout as JSON lines, following the
+/// `export report`: write the broadcast's media reports to stdout as JSON lines, following the
 /// track its catalog's `stats` section names, until the catalog and that track have both ended.
-pub async fn print_stats(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
+pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
 	let mut stdout = tokio::io::stdout();
 	origin
 		.routed(&path)

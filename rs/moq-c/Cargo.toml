@@ -53,4 +53,6 @@ moq-loc = { path = "../moq-loc" }
 # The tests encode with OpenH264, the one encoder a GPU-less host has, so they
 # turn it on without the `openh264` feature.
 moq-video = { path = "../moq-video", features = ["openh264"] }
+# Runs the tests that need a variable set or unset in a child process given it.
+test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }
