@@ -36,70 +36,49 @@ on a public type is an API change, so it is a follow-up. Removing one of our
 own deprecated exports or hidden CLI spellings is a breaking change with a
 `MIGRATE.md` entry, so it is also a follow-up.
 
-### What the m0 run left in place
+### Remaining work
 
-Every workspace crate but `moq-quic` sets `lints.workspace = true`, and the
-root `[workspace.lints]` enables `clippy::allow_attributes_without_reason`, so a
-suppression without a reason fails clippy. Unconditional suppressions are
-`#[expect(..., reason = "...")]`, so a stale one fails as
-`unfulfilled_lint_expectations`. A crate needing extra lints gets its own
-manifest `[lints]` tables that repeat that rule (`moq-quic/Cargo.toml`), since
-Cargo can't extend the workspace table per crate and crate attributes skip
-benches and examples. Biome reports an unused `biome-ignore` as
-`suppressions/unused`, and ruff selects `RUF100` (root and
-`demo/carla/sim`). This run only reviews what those gates can't see.
+This run remains open until the Apple-native checks can run. Do not add the
+m2 successor before finishing these checks and the audit's fixes.
 
-### Check first
+- Run Swift build/tests on macOS and inspect SDK deprecation warnings.
+  `just swift check` skipped on the Linux audit host because Swift was absent;
+  searching and reading the thin Swift wrappers found no explicit deprecated
+  declarations, but does not establish that their SDK calls are warning-free.
+- Run macOS clippy for `moq-sock` and `moq-video`, including capture.
+  The Apple-only `msghdr_x` naming expectation was stale and is removed:
+  Rust exempts `repr(C)` structs from `non_camel_case_types`. A minimal example
+  under the pinned compiler reproduced an unfulfilled expectation, then passed
+  with `deny(warnings)` after removing it. The actual Apple module still needs
+  its native build.
+- Confirm whether to retain AVFoundation `devicesWithMediaType` for the
+  supported macOS 12.3 floor, or migrate discovery without losing cameras on
+  older systems. Its existing reason identifies macOS 14+ device-type constants
+  as the compatibility constraint. Do not raise the deployment floor implicitly.
 
-- Conditional suppressions: every `cfg_attr(..., allow(...))` and every
-  plain `allow` with a reason. Ask whether the condition still holds or the
-  lint now fires everywhere (then `expect`) or nowhere (then delete). The
-  wasm lane also lints `moq-net` and `moq-flate` as dependencies, so a
-  suppression there must hold on wasm32 too.
-- Lanes clippy never runs: the macOS and Windows platform lane is
-  `cargo check` only, so an `expect` on Apple or Windows code
-  (`moq-video` AVFoundation, `moq-sock`) is unverified. Run clippy there or
-  confirm by reading.
-- Python type ignores: run pyright with
-  `reportUnnecessaryTypeIgnoreComment`, which m0 didn't.
-- Swift: grep and build for deprecation warnings, which m0 didn't.
-- TypeScript deprecations: typescript-eslint doesn't support the repo's TS 7
-  yet, so m0 swept `no-deprecated` from a throwaway package pinning
-  typescript 6 and eslint 9. Files outside any `tsconfig` project can't be
-  typed-linted. Check whether typescript-eslint supports TS 7 before
-  repeating that setup; if it does, consider joining CI.
-- `sh/rs/model-markers.py` walks attributes above a model marker, including
-  ones rustfmt wraps over several lines. Run its tests if a long reason moves
-  near a marker.
+### Results (m1, 2026-10-23)
 
-### Results (m0, 2026-10-20)
+- Conditional Rust suppressions were inspected. The feature-dependent enum
+  layouts, pointer-width gates, libc-dependent casts, conditional crypto
+  fallbacks, and benchmark modules compiled without test bodies still explain
+  their allows. The one reproduced stale Apple naming expectation is removed.
+  Dead-code and unused suppressions remain with the dead-code audit.
+- TypeScript deprecations: 877 files under `js`, `demo`, `bench`, and `test`
+  passed `@typescript-eslint/no-deprecated`. The first 851 used their existing
+  projects; 26 files outside projects passed a second sweep with an explicit
+  temporary `allowDefaultProject` list. No repository TS configuration changed.
+  The disposable toolchain was typescript-eslint 8.72.0, TypeScript 6.0.3,
+  ESLint 9.39.5. The [supported TypeScript range](https://typescript-eslint.io/users/dependency-versions/)
+  remains `>=4.8.4 <6.1.0`, so a permanent TS 7 deprecation gate is still premature.
+- Python: removed 20 unnecessary type ignores, reproduced by pyright against
+  freshly generated bindings. Both the wrapper and CARLA configurations now
+  reject unnecessary ignores in their existing checks; both pass. Retained
+  ignores cover intentional invalid calls or UniFFI error-class rebinding.
+- Existing stale-suppression gates remain: Rust lint reasons and unconditional
+  `expect`, Biome unused suppressions, and Ruff `RUF100`. Go, Kotlin, and Dart
+  deprecation gates were clean in m0; this run found no additional hand-written
+  suppression/deprecation markers in those wrappers or C/C++ requiring changes.
 
-- Rust: workspace lints adopted, every suppression given a reason, and
-  stale ones removed: 27 `match_like_matches_macro` (now `matches!`), 27
-  `non_camel_case_types` on `repr(C)` structs, `moq-quic`'s crate-wide
-  `cognitive_complexity` and `too_many_arguments`, and stale
-  `type_complexity`, `arc_with_non_send_sync`, `field_reassign_with_default`,
-  `disallowed_methods`, and pedantic allows.
-- Deprecations: `js/publish` file import moved to mediabunny's async track
-  getters. The `moq-relay` cluster test's `#[allow(deprecated)]` was stale.
-  Go (staticcheck `SA1019`), Kotlin, and Dart (`--fatal-infos`) were clean.
-
-### Baselines (2026-10-20, after the m0 run)
-
-- Rust `clippy::` suppression attributes: 189 (168 `expect`, 12 `cfg_attr`
-  `expect`, 9 `allow`), counted 2026-10-22 after main's moq-clock move.
-  Most common: `disallowed_methods` 123, `disallowed_types` 48,
-  `large_enum_variant` 24, mostly test modules reading the host clock.
-- Rust rustc and rustdoc suppressions: 64 (49 `expect`, 15 `allow`), led by
-  `non_camel_case_types` 19 on C ABI enums. `dead_code` and `unused`: 421,
-  owned by the dead code audit.
-- Rust `deprecated`: 1, the macOS AVFoundation `devicesWithMediaType`.
-- TypeScript: 40 `biome-ignore` and 47 `@ts-expect-error`.
-- Python: 26 `noqa` or `type: ignore`.
-
-Count with `git grep` over the whole tree, not per language directory, so
-only tracked files count and none outside `rs/`, `js/`, or `py/` are missed.
-Count multi-line Rust attributes too, since rustfmt wraps long ones.
-Generated UniFFI bindings are untracked (`kt/.gitignore`) and carry their own
-suppressions, such as Kotlin's 139 `@Suppress`; leave them out, and fix a
-noisy one in the generator config instead of the output.
+Count with `git grep` over tracked files, including multi-line Rust attributes.
+Generated/vendor bindings retain generator-owned suppressions. The model-marker
+parser accepts wrapped attributes; run its tests if a reason moves near a marker.
