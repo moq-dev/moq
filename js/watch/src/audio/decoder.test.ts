@@ -91,6 +91,7 @@ class FakeWorklet {
 			type: "state",
 			timestamp: ring.timestamp,
 			stalled: ring.stalled,
+			anchored: ring.anchored,
 			underruns: ring.underruns,
 			epoch: this.#epoch,
 		};

@@ -575,7 +575,7 @@ fn write_key(key: &moq_auth::Key, path: &std::path::Path) -> anyhow::Result<()> 
 fn read_key(path: &std::path::Path) -> anyhow::Result<moq_auth::Key> {
 	if is_dash(path) {
 		let contents = io::read_to_string(io::stdin())?;
-		moq_auth::Key::from_str(contents.trim()).context("failed to parse key from stdin")
+		contents.parse().context("failed to parse key from stdin")
 	} else {
 		moq_auth::Key::from_file(path).with_context(|| format!("failed to read key from {}", path.display()))
 	}
