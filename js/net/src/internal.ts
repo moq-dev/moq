@@ -232,6 +232,8 @@ export interface Expiry {
  * touches it. The counterpart of the Rust `resume::Recover`.
  */
 export interface GroupRecover {
+	/** Release the route held by this group when its consumer closes. */
+	close?(): void;
 	/**
 	 * Whether to look past the copy being read: it failed with `failed` and that is no verdict
 	 * on the group, or (with none) it stalled while a newer route serves.

@@ -105,13 +105,14 @@ tracks, so per-group stats stop costing cluster announces.
 - [An evicted group is judged stale](/quest/m1/evicted-group-stale.md) - a handed-out group the cache evicted goes stale once its successor's arrival plus the budget passes, so its stalled stream resets
 - [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during BBR3's ProbeBW_UP so an app-limited sender validates headroom up to the target
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - Rust/FFI and OBS publishers stop encoding the top renditions their grant cannot fund and resume them once probing raises the estimate
-- [One audio ring](/quest/m1/watch-audio-one-ring.md) - the SharedArrayBuffer audio ring and the isolated test axis are gone; playback uses the postMessage ring only
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [Buffered backpressure timestamps](/quest/m1/audio-backpressure-timestamps.md) - buffered audio keeps holding frames past 2^31 microseconds instead of decoding ahead and dropping audio
 - [Audio playout memory](/quest/m1/audio-playout-memory.md) - a catalog's advertised jitter or delay cannot size decoded PCM; the lookahead stays encoded
 - [AAC alias classification](/quest/m1/aac-he-alias.md) - every accepted AAC spelling gets the right frame duration from one classification
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
+- [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
+- [Buffered video poster](/quest/m1/buffered-video-poster.md) - buffered startup paints the first video frame at once and starts A/V together at a shared floor
 - [qmux local lifecycle](/quest/m1/qmux-local-lifecycle.md) - an abort blocked on send credit resets at once, and a close behind a backed-up socket still sends APPLICATION_CLOSE
 - [JS release preflight](/quest/m1/js-publish-preflight.md) - `release.ts` refuses a package whose `@moq/*` dependency is not on npm, so no dependent publishes uninstallable
 - [Stream sockets disable Nagle](/quest/m1/tcp-nodelay.md) - every qmux TCP, TLS, and WebSocket socket, accepted or dialed, sets `TCP_NODELAY`
@@ -121,7 +122,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
 - [Producers drop the phantom catalog type](/quest/m1/catalog-phantom.md) - moq-video, moq-audio and moq-mux producers lose an `E: CatalogExt` parameter that only `PhantomData` holds
 - [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
-- [Audio devices on ARM](/quest/m1/audio-devices-arm.md) - `just rs audio-devices` passes on the hosted ARM runner
 - [Tooling tests gate every merge](/quest/m1/gh-test-gate.md) - every queue Check runs `just gh test`, so a change to the CI selector or release tooling cannot merge without its own tests
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
 - [libav polyfill fork fix](/quest/m1/libav-polyfill-fork.md) - our polyfill fork copies planar audio correctly and `@moq/hang` drops its patch
@@ -148,7 +148,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [Caption store bounds](/quest/m1/caption-store-bounds.md) - a hostile caption track cannot grow a viewer's cue and region store or its per-frame work without bound
 - [Peers advertise their implementation and version](/quest/m1/peer-version.md) - moq-net and `@moq/net` send a `name/version` SETUP parameter both ways, and the auth request and session span carry the client's
 - [Binding peer version](/quest/m1/binding-peer-version.md) - every binding names itself ahead of the Rust core in that parameter
-- [Nightly benchmark regressions](/quest/m1/bench-ci.md) - each nightly compares the Rust Criterion benches against the previous nightly's commit on the same hosted runner, publishes it to the git.moq.dev report, and alerts on a regression
+- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [Interop audit](/quest/m1/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down
 - [Lint override and deprecation audit](/quest/m1/audit-lints.md) - repeat the suppression and deprecation audit, starting with the conditional allows and the lanes clippy never runs
 
