@@ -3149,9 +3149,12 @@ impl Producer {
 	///
 	/// The abort is the same as [`Self::abort`]: a group consumer that outlived the track's
 	/// consumers ends with `err`, and the group's writer fails.
-	#[expect(
-		clippy::result_large_err,
-		reason = "return the owned producer without allocating on an idle check"
+	#[cfg_attr(
+		target_pointer_width = "64",
+		expect(
+			clippy::result_large_err,
+			reason = "return the owned producer without allocating on an idle check"
+		)
 	)]
 	pub fn abort_unused(self, err: Error) -> std::result::Result<(), Self> {
 		let used = match self.state.write_unused() {
