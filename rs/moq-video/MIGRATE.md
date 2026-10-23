@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### `Source::Display` no longer opens the portal on Wayland
 
 `capture::Source::Display` captures X11 displays only, including XWayland's `x11:` ids.
-On Wayland the main display and any other id now fail with `Error::Unsupported` instead of opening the system picker with a selection shared by every publication in the process.
+On Wayland the main display and any non-`x11:` id now fail with `Error::Unsupported` instead of opening the system picker with a selection shared by every publication in the process.
 Pass `Source::Portal(portal::Selection::new(portal::Kind::Screen))` to ask the picker, and keep that selection for the publication's reopens.
 
 ### `Control::cut` is not rate limited, and capture advertises refresh (#6048)
