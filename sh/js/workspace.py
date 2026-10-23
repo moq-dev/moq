@@ -144,7 +144,7 @@ def run(action, plan):
     if action == "test":
         command("python3", "sh/js/playwright.test.py")
         command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
-                "js/common/docs.test.ts", "js/common/worklet.test.ts")
+                "js/common/docs.test.ts", "js/common/worklet.test.ts", "js/common/release.test.ts")
         scripts("test")
         return
     if action == "build":

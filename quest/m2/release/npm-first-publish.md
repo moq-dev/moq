@@ -38,5 +38,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Release preflight](/quest/m1/js-publish-preflight.md) - refuses a dependent whose `@moq/*` dependency did not publish
 - [Dart publication](/quest/m2/release/dart-publish.md) - the same trusted-publishing check for pub.dev
