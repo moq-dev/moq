@@ -33,7 +33,6 @@ struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
 	connection: crate::connection::Settings,
-	linger: bool,
 }
 
 impl TryFrom<Settings> for ResolvedSettings {
@@ -60,8 +59,6 @@ struct State {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
-	/// Whether a clean end keeps serving the finished broadcast until its media is stale.
-	linger: bool,
 	/// Whether the finished broadcast stopped serving its tail, so the EOS it owes may go out.
 	drained: bool,
 	/// Whether this publication's single EOS message already went out. One per publication, not per
@@ -181,12 +178,6 @@ impl ObjectImpl for MoqSink {
 					.blurb("The name of the broadcast to publish")
 					.mutable_ready()
 					.build(),
-				glib::ParamSpecBoolean::builder("linger")
-					.nick("Linger")
-					.blurb("At end of stream, serve the finished broadcast until its media is stale, then post EOS")
-					.default_value(false)
-					.mutable_ready()
-					.build(),
 				// Read-only, served from the live session's status. Each notifies on change.
 				glib::ParamSpecEnum::builder::<ConnectionStatus>("status")
 					.nick("Connection status")
@@ -254,7 +245,6 @@ impl ObjectImpl for MoqSink {
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
-			"linger" => settings.linger = value.get().unwrap(),
 			name => settings.connection.set(name, value),
 		}
 	}
@@ -286,7 +276,6 @@ impl ObjectImpl for MoqSink {
 				match name {
 					"url" => settings.url.to_value(),
 					"broadcast" => settings.broadcast.to_value(),
-					"linger" => settings.linger.to_value(),
 					name => settings.connection.get(name),
 				}
 			}
@@ -551,7 +540,6 @@ impl MoqSink {
 	/// Create the session and producers before any buffer flows.
 	fn start_session(&self) -> Result<SessionRegistration, gst::StateChangeError> {
 		let settings = self.settings.lock().unwrap().clone();
-		let linger = settings.linger;
 		let settings = ResolvedSettings::try_from(settings).map_err(|err| {
 			gst::error!(CAT, obj = self.obj(), "invalid settings: {err:#}");
 			gst::StateChangeError
@@ -570,7 +558,6 @@ impl MoqSink {
 				broadcast,
 				catalog: Some(catalog),
 				wall,
-				linger,
 				drained: false,
 				eos_delivered: false,
 			});
@@ -1043,16 +1030,15 @@ impl MoqSink {
 		Finished { updates, message }
 	}
 
-	/// With `linger` set, serve the finished broadcast so subscribers still catching up drain its tail
-	/// until the media is stale, and owe the EOS once it closes. Otherwise, or with nothing to drain,
-	/// close it and owe the EOS now.
+	/// Serve the finished broadcast until its media is stale, then owe the EOS.
+	/// With nothing to drain, close it and owe the EOS now.
 	///
 	/// The EOS waits for the linger because `gst-launch` exits on it, and NULL closes the broadcast.
 	/// Stopping the pipeline is the interrupt: it closes the broadcast, which ends the wait.
 	fn linger_locked(&self, control: &mut Control, finish: moq_net::broadcast::Finish) -> Posted {
 		let state = control.live.as_mut().expect("a finished publication is live");
 		let linger = finish.linger();
-		if !state.linger || linger.is_zero() {
+		if linger.is_zero() {
 			drop(finish);
 			state.drained = true;
 			return claim_eos(control);
@@ -2088,7 +2074,9 @@ mod tests {
 			.clone()
 			.create_track("video", moq_net::track::Info::default().with_max_age(max_age))
 			.unwrap();
-		track.append_group().unwrap().finish().unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(None, Bytes::from_static(b"finished media")).unwrap();
+		group.finish().unwrap();
 		track.finish().unwrap();
 		assert!(session.finish());
 		while bus.pop().is_some() {}
@@ -2101,10 +2089,17 @@ mod tests {
 
 		tokio::time::sleep(max_age - Duration::from_secs(1)).await;
 		let mut late = consumer.track("video").unwrap().subscribe(None).await.unwrap();
-		assert!(
-			late.recv_group().await.unwrap().is_some(),
-			"a late subscriber drains the tail"
+		let mut group = late
+			.recv_group()
+			.await
+			.unwrap()
+			.expect("a late subscriber drains the tail");
+		assert_eq!(
+			group.read_frame().await.unwrap().unwrap().payload,
+			b"finished media"[..]
 		);
+		assert!(group.read_frame().await.unwrap().is_none());
+		assert!(late.recv_group().await.unwrap().is_none());
 		assert!(bus.pop_filtered(&[gst::MessageType::Eos]).is_none(), "the EOS waits");
 
 		linger.await.unwrap();
@@ -2191,7 +2186,6 @@ mod tests {
 			"quic-idle-timeout",
 			"quic-keep-alive",
 			"quic-keylog",
-			"linger",
 		] {
 			assert!(
 				spec(&sink, name).flags().contains(gst::PARAM_FLAG_MUTABLE_READY),

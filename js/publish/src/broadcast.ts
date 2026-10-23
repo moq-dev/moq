@@ -30,14 +30,9 @@ export type BroadcastInput = {
 	// see or subscribe to it. The flip rather than a gate on creating it: tracks can be
 	// populated while this is false, then announced once ready. The catalog is served from the
 	// first announce, so its first snapshot is the one current at announce time.
-	// Turning it off unannounces the broadcast, unless `linger` finishes it.
+	// Turning it off finishes the broadcast, serving its tail until stale. Announcing again
+	// creates a new broadcast and publisher epoch. Disable or close to interrupt immediately.
 	announce: Getter<boolean>;
-
-	// Whether turning `announce` off after an announce finishes the broadcast cleanly instead of
-	// unannouncing it. Defaults to false. A finished broadcast stays announced while its media is
-	// fresh, so a viewer still catching up drains the tail, then closes, and announcing again
-	// publishes a new broadcast that replaces it at once. Read when announcing stops.
-	linger: Getter<boolean>;
 
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
@@ -91,8 +86,8 @@ export class Broadcast {
 	readonly catalog = new CatalogProducer();
 
 	/**
-	 * The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
-	 * and is `undefined` in between. It lives in the origin rather than any session, so it spans
+	 * The underlying network broadcast, recreated when the name, enabled state, or maxAge changes
+	 * or after announcing stops cleanly. It is `undefined` while the finished tail is served. It lives in the origin rather than any session, so it spans
 	 * reconnects. Exposed so an application can serve its own tracks alongside the built-in
 	 * catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
 	 * Names under a rendition's ID (`video/1`) are reserved for that rendition's replacement tracks.
@@ -146,7 +141,6 @@ export class Broadcast {
 			origin: getter(props?.origin),
 			enabled: getter(props?.enabled ?? true),
 			announce: getter(props?.announce ?? true),
-			linger: getter(props?.linger ?? false),
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
@@ -376,7 +370,7 @@ export class Broadcast {
 		// Creating into the origin outlives any single session: a reconnect re-announces the
 		// broadcast and new subscriptions land on the same producer.
 		const broadcast = origin.createBroadcast(name);
-		// Set once announcing stops after serving with `linger`, which ends this broadcast cleanly.
+		// Set once announcing stops after serving, which ends this broadcast cleanly.
 		const ended = new Signal(false);
 		effect.get(ended);
 		effect.cleanup(() => {
@@ -386,8 +380,8 @@ export class Broadcast {
 			this.#finished = { finish, origin, name, maxAge };
 			void finish.wait();
 		});
-		// One publisher instance per broadcast, kept across unannounce and announce, so a
-		// restart is a new broadcast rather than a resume into the old one.
+		// One publisher epoch per broadcast, so a restart is a new publication rather than
+		// a resume into the old catalog and group sequence.
 		const epoch = Moq.Epoch.mint();
 
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
@@ -415,7 +409,7 @@ export class Broadcast {
 		effect.run((inner) => {
 			if (!inner.get(this.in.announce)) {
 				// Before the first announce there is nothing to finish.
-				if (serving && this.in.linger.peek()) ended.set(true);
+				if (serving) ended.set(true);
 				else broadcast.unannounce();
 				return;
 			}

@@ -4,10 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `BroadcastInput` has a `linger` input
+### Clean completion always serves the finished tail
 
-Code that builds a complete `BroadcastInput` adds `linger`, such as `new Signal(false)` to keep turning `announce` off unannouncing at once.
-`new Broadcast({ ... })` defaults it to `false`, so constructor calls need no change.
+Turning `BroadcastInput.announce` off after announcing now finishes the broadcast
+and serves its tail until the media is stale. Turning it back on publishes a new
+broadcast and publisher epoch; reacquire `broadcast.net` rather than reuse its
+previous producer or track handles. Use `enabled: false` or `close()` for an
+immediate end.
+
+Remove the unreleased `BroadcastInput.linger`, `<moq-publish linger>` attribute,
+`element.linger` property, and `element.controls.linger` input. Clean completion
+is unconditional. Removing the element still ends its broadcast immediately.
 
 ### `Encoder.cut()` is not rate limited, and video tracks advertise refresh (#6048)
 

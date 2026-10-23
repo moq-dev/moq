@@ -62,7 +62,7 @@ Each `sink_%u` request pad is one track. Pad properties: `track` names it
 `encoder=true` marks it as fed by a local encoder, and
 `track-status`/`track-error` report its lifecycle. Element properties:
 `url`, `broadcast`, `connect-version`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
-`quic-keep-alive`, `linger`, and read-only `status`, `connected`, `moq-version`, and
+`quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. The sink reconnects for as long as the pipeline runs and only
 reports `failed` on an answer redialing can't change, such as a rejected token.
@@ -81,12 +81,11 @@ it is released, reaches EOS, or fails; a flush or new stream after that EOS
 holds it back again. Opaque data pads are not listed. Later
 catalog updates do not wait for newly requested pads.
 
-Once every pad reaches EOS, the sink finishes the broadcast and posts EOS.
-With `linger=true` it first keeps serving the finished broadcast until its
-media is stale (30 seconds for audio and video), so a viewer still catching up
+Once every pad reaches EOS, the sink finishes the broadcast and keeps serving
+its tail until the media is stale (30 seconds for audio and video), so a viewer still catching up
 gets the tail, and posts EOS only then, which is when `gst-launch-1.0 -e`
 exits. Stopping the pipeline, such as a second Ctrl-C under `-e`, closes the
-broadcast at once.
+broadcast at once. With no media to drain, EOS is immediate.
 
 All pads share one media timeline on one wall clock. The first timed buffer places
 it using UNIX or NTP reference timestamp metadata; other clock domains use the

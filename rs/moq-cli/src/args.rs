@@ -1349,12 +1349,14 @@ mod tests {
 
 	#[test]
 	fn hls_tls_environment_is_independent_of_the_moq_listener() {
-		// SAFETY: nextest gives each test a process; nothing else reads these variables.
-		unsafe {
-			std::env::set_var("MOQ_LISTEN_TLS_CERT", "moq.pem");
-			std::env::set_var("MOQ_HLS_TLS_CERT", "hls.pem");
-			std::env::set_var("MOQ_HLS_TLS_KEY", "hls.key");
-			std::env::set_var("MOQ_HLS_TLS_ROOT", "root.pem");
+		if !test_env::Env::default()
+			.set("MOQ_LISTEN_TLS_CERT", "moq.pem")
+			.set("MOQ_HLS_TLS_CERT", "hls.pem")
+			.set("MOQ_HLS_TLS_KEY", "hls.key")
+			.set("MOQ_HLS_TLS_ROOT", "root.pem")
+			.isolate()
+		{
+			return;
 		}
 		let cli = Invocation::try_parse_from(["moq", "export", "hls"]).unwrap();
 		assert_eq!(cli.moq.server.tls.cert, [std::path::PathBuf::from("moq.pem")]);
@@ -1369,36 +1371,60 @@ mod tests {
 		assert_eq!(hls.tls.root, [std::path::PathBuf::from("root.pem")]);
 	}
 
-	#[test]
-	fn released_connection_environment_is_refused() {
-		for (family, names) in [
-			("BACKOFF", &["INITIAL", "MULTIPLIER", "MAX", "TIMEOUT"][..]),
-			("GOAWAY", &["REDIRECT", "HANDOVER"][..]),
-		] {
-			for name in names {
-				let variable = format!("MOQ_{family}_{name}");
-				let replacement = format!("MOQ_CONNECT_{family}_{name}");
-				let value = match *name {
-					"MULTIPLIER" => "3",
-					"REDIRECT" => "ignore",
-					_ => "2s",
-				};
-				// SAFETY: nextest isolates this parser-only test in its own process.
-				unsafe {
-					std::env::set_var(&variable, value);
+	macro_rules! released_environment {
+		($test:ident, $old:literal, $replacement:literal, $value:literal) => {
+			#[test]
+			fn $test() {
+				if !test_env::Env::default().set($old, $value).isolate() {
+					return;
 				}
-				let parsed = Invocation::try_parse_from(["moq", "import", "ts"]);
-				unsafe {
-					std::env::remove_var(&variable);
-				}
-				let err = parsed.err().expect("released environment must not be ignored");
+				let err = Invocation::try_parse_from(["moq", "import", "ts"])
+					.err()
+					.expect("released environment must not be ignored");
 				assert!(
-					err.to_string().contains(&variable) && err.to_string().contains(&replacement),
+					err.to_string().contains($old) && err.to_string().contains($replacement),
 					"{err}"
 				);
 			}
-		}
+		};
 	}
+
+	released_environment!(
+		released_backoff_initial_env,
+		"MOQ_BACKOFF_INITIAL",
+		"MOQ_CONNECT_BACKOFF_INITIAL",
+		"2s"
+	);
+	released_environment!(
+		released_backoff_multiplier_env,
+		"MOQ_BACKOFF_MULTIPLIER",
+		"MOQ_CONNECT_BACKOFF_MULTIPLIER",
+		"3"
+	);
+	released_environment!(
+		released_backoff_max_env,
+		"MOQ_BACKOFF_MAX",
+		"MOQ_CONNECT_BACKOFF_MAX",
+		"2s"
+	);
+	released_environment!(
+		released_backoff_timeout_env,
+		"MOQ_BACKOFF_TIMEOUT",
+		"MOQ_CONNECT_BACKOFF_TIMEOUT",
+		"2s"
+	);
+	released_environment!(
+		released_goaway_redirect_env,
+		"MOQ_GOAWAY_REDIRECT",
+		"MOQ_CONNECT_GOAWAY_REDIRECT",
+		"ignore"
+	);
+	released_environment!(
+		released_goaway_handover_env,
+		"MOQ_GOAWAY_HANDOVER",
+		"MOQ_CONNECT_GOAWAY_HANDOVER",
+		"2s"
+	);
 
 	#[test]
 	fn connection_prefixes_refuse_released_spellings() {
