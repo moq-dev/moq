@@ -16,6 +16,10 @@ This covers a relative start other than the live (`0`) and oldest starts, a time
 A track received over moq-lite-07 resolves them as its publisher would.
 Ask for absolute groups over those wires, or resolve the anchor where the track is published.
 
+### Video rendition preference
+
+`moq::Video` gains `int32_t preference`. Update aggregate initializers with `0` to keep the default ranking and rebuild against the matching generated headers and native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes an `AnnounceRoute`
 
 `BroadcastProducer::announce` takes `moq::AnnounceRoute{cost, epoch}` instead of a `moq::Route`: the origin builds the hop chain, so `hops` is no longer an input.

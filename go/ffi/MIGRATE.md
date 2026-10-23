@@ -16,6 +16,10 @@ This covers a relative start other than the live (`0`) and oldest starts, a time
 A track received over moq-lite-07 resolves them as its publisher would.
 Ask for absolute groups over those wires, or resolve the anchor where the track is published.
 
+### Video rendition preference
+
+`MoqVideo` gains `Preference int32`. Update unkeyed struct literals or use keyed fields, leaving `Preference: 0` for the default ranking. Regenerate bindings with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.

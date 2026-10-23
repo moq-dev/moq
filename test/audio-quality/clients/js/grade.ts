@@ -40,12 +40,7 @@ if (summaries.length === 0) {
 /** A budget applies to exactly one matrix cell, matched on the whole row. */
 const budgetFor = (row: Row) =>
 	budgets.rows.find(
-		(b) =>
-			b.runtime === row.runtime &&
-			b.codec === row.codec &&
-			b.rate === row.rate &&
-			b.profile === row.profile &&
-			b.ring === row.ring,
+		(b) => b.runtime === row.runtime && b.codec === row.codec && b.rate === row.rate && b.profile === row.profile,
 	);
 
 const failures: string[] = [];

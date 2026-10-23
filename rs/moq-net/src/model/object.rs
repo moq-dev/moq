@@ -4,14 +4,12 @@ use bytes::Bytes;
 use crate::Timestamp;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-// private: passthrough
 pub(crate) enum Value {
 	Int(u64),
 	Bytes(Bytes),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-// private: passthrough
 pub(crate) struct Property {
 	pub id: u64,
 	pub value: Value,
@@ -22,7 +20,6 @@ pub(crate) struct Property {
 /// On a timed track, the mutable Timestamp is never held: it is the frame's, which egress
 /// restates. On an untimed one it has no units, so it stays in the block like any other.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-// private: passthrough
 pub(crate) struct Properties {
 	/// The Timestamp the block's Immutable Properties hold on a timed track, which keeps
 	/// its ingress units.
@@ -36,7 +33,6 @@ pub(crate) struct Properties {
 /// Kept encoded because a decoded list costs many times its wire size, and a relay holds
 /// one per cached object. Egress decodes it only to re-encode for another draft.
 #[derive(Clone, Debug, PartialEq, Eq)]
-// private: passthrough
 pub(crate) struct Block {
 	/// The properties in ascending ID order, serialized as the track's
 	/// [`TrackProperties::version`] does. Never empty.
@@ -59,7 +55,6 @@ impl Properties {
 /// The moq-transport state of a track a moq-transport publisher published, which a relay
 /// forwards unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
-// private: passthrough
 pub(crate) struct TrackProperties {
 	/// The draft the publisher spoke, which serialized these and every object's [`Block`]
 	/// and gives each property its meaning. A publisher on another draft is a new instance.
@@ -71,7 +66,6 @@ pub(crate) struct TrackProperties {
 
 /// Object numbering is separate from the public frame's ordinal in its group.
 #[derive(Clone, Debug)]
-// private: passthrough
 pub(crate) struct Fields {
 	pub id: u64,
 	pub properties: Properties,
