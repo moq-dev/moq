@@ -4,7 +4,7 @@ import * as Video from "@moq/video";
 import type { Fanout } from "./fanout";
 import type * as Encoder from "./video";
 
-export type { Backend, RendererError } from "@moq/video";
+export type { Backend } from "@moq/video";
 
 /**
  * What the canvas preview renders.
@@ -47,8 +47,8 @@ export class Renderer {
 
 	/** The derived outputs, read-only. */
 	readonly out: Readonlys<{
-		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererError}.
-		error: Getter<Video.RendererError | undefined>;
+		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererOutput.error}.
+		error: Getter<Error | undefined>;
 	}>;
 
 	// Whether we've already warned about `encoded` mode without an encoder, so it fires at most once.

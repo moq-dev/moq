@@ -2164,9 +2164,16 @@ async fn stuck_window_evicts_the_lower_priority() {
         client.open_uni(Default::default()).await.unwrap(),
     ]
     .map(|mut send| {
-        tokio::spawn(
-            async move { send.write_all(&[7; WINDOW]).await.is_ok() && send.finish().is_ok() },
-        )
+        let id = send.id();
+        let writer = tokio::spawn(async move {
+            // Queuing the whole write and FIN can succeed before the peer evicts the stream.
+            // Only the peer's final outcome proves whether it was stopped.
+            if send.write_all(&[7; WINDOW]).await.is_ok() {
+                send.finish().unwrap();
+            }
+            send.stopped().await.unwrap()
+        });
+        (id, writer)
     });
 
     let mut low = server.accept_uni().await.unwrap();
@@ -2175,20 +2182,27 @@ async fn stuck_window_evicts_the_lower_priority() {
     high.set_priority(1);
     let leased = tokio::join!(
         poll_fn(|cx| low.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())),
-        poll_fn(|cx| high
-            .poll_lease(cx, WINDOW)
-            .map_ok(|lease| lease.remaining())),
+        poll_fn(|cx| high.poll_lease(cx, WINDOW).map_ok(|mut lease| {
+            let len = lease.remaining();
+            lease.advance(len);
+            lease.release();
+            len
+        })),
     );
     assert_eq!(leased, (Err(ReadError::Evicted), Ok(WINDOW)));
 
-    // The peer hears of the eviction once the stream is stopped.
-    drop((low, high));
-    let [low, high] = writers;
+    let low_id = low.id();
+    // The peer hears of the eviction once the stream is stopped. Drain the survivor to FIN
+    // instead of dropping unread data, which would stop that stream too.
+    drop(low);
     assert!(
-        !low.await.unwrap(),
-        "the evicted stream's writer is stopped"
+        poll_fn(|cx| high.poll_lease(cx, 1).map_ok(|lease| lease.is_fin()))
+            .await
+            .unwrap()
     );
-    assert!(high.await.unwrap());
+    for (id, writer) in writers {
+        assert_eq!(writer.await.unwrap(), (id == low_id).then(|| 0u32.into()));
+    }
 }
 
 /// Wait until `recv` leases at least `want` bytes, returning how many it leased.
