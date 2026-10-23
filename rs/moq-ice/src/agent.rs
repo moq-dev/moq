@@ -62,8 +62,10 @@ impl Error {
 /// What [`Agent::next`] surfaced.
 #[derive(Debug)]
 #[non_exhaustive]
-// Moved once per poll; boxing would allocate for every data channel message.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+	clippy::large_enum_variant,
+	reason = "moved once per poll; boxing would allocate for every data channel message"
+)]
 pub enum Event {
 	/// An event from str0m. ICE disconnection is reported as [`Error::Closed`] instead.
 	Rtc(str0m::Event),

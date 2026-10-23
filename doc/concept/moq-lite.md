@@ -73,6 +73,10 @@ bytes. A hop of 0 is the anonymous mark and travels the chain unchanged. A
 route that passed through an anonymous hop at any depth ranks below
 every fully identified route, whatever the costs say.
 
+A relay operator can lower the [hop-path cap](/bin/relay/cluster#topology) to
+limit the detours explored after a withdrawal. It drops longer paths while
+preserving route selection among those within the cap.
+
 A broadcast exists only while it is announced, in the same process and across
 a session: one that is created but never announced can be neither discovered
 nor requested. Retracting a route stops new requests from resolving through it
