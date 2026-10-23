@@ -437,7 +437,7 @@ impl Drain {
 			// Serve consumer requests for tracks no drain has created yet: a
 			// tier's tracks appear lazily on its first traffic, and a label's
 			// presence track only while requested. See `serve_requests`.
-			group.serve_requests(&self.report, depth, self.tick);
+			group.serve_requests(&self.report, depth, self.tick, now);
 		}
 	}
 
@@ -537,14 +537,15 @@ impl<T: Serialize> Snapshot<T> {
 		self.track.demand()
 	}
 
-	/// Write one frame. `Some(len)` is the payload written; `None` means the
-	/// value was unchanged, or the track already ended, and nothing was written.
+	/// Write one frame, stamped and numbered by the drain's `now`. `Some(len)` is the payload
+	/// written; `None` means the value was unchanged, the interval already has a group for a
+	/// snapshot, or the track already ended, and nothing was written.
 	///
 	/// A frame over the cache limit aborts the track with
 	/// [`moq_net::Error::FrameTooLarge`]: skipping it would leave readers on the
 	/// previous snapshot with no sign it stopped tracking. A compressed frame
 	/// meets the same limit by its uncompressed size, which the encoder refuses.
-	fn update(&mut self, value: &T) -> moq_json::Result<Option<usize>> {
+	fn update(&mut self, value: &T, now: Instant) -> moq_json::Result<Option<usize>> {
 		if self.track.is_closed() {
 			return Ok(None);
 		}
@@ -570,7 +571,7 @@ impl<T: Serialize> Snapshot<T> {
 			Err(err) => return Err(err),
 		};
 		let len = frame.payload.len();
-		let timestamp = moq_net::Timestamp::now();
+		let timestamp = moq_net::Timestamp::from(now);
 		if frame.keyframe {
 			let sequence = (std::time::Duration::from(timestamp).as_nanos() / self.interval.as_nanos()) as u64;
 			// The interval already has its group: the uncommitted frame is encoded again next tick.
@@ -670,16 +671,16 @@ impl<V: Serialize> TrackPair<V> {
 	/// and clear them for the next drain; moq-json skips unchanged values. A
 	/// flavor that fails ends alone: DEFLATE can shrink a frame too large for
 	/// the plain track, or grow one that just fits.
-	fn publish(&mut self, name: &str) {
+	fn publish(&mut self, name: &str, now: Instant) {
 		self.frame.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-		let plain = match self.plain.update(&self.frame) {
+		let plain = match self.plain.update(&self.frame, now) {
 			Ok(len) => len,
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to write frame");
 				None
 			}
 		};
-		let compressed = match self.compressed.update(&self.frame) {
+		let compressed = match self.compressed.update(&self.frame, now) {
 			Ok(len) => len,
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to write compressed frame");
@@ -838,9 +839,9 @@ impl<V: Serialize> TrackFamily<V> {
 	/// Publish every pair's pending frame, an empty one when the drain had
 	/// nothing for it, so a track whose last entry closed transitions to `{}`
 	/// exactly once.
-	fn flush(&mut self) {
+	fn flush(&mut self, now: Instant) {
 		for (name, pair) in self.tracks.iter_mut() {
-			pair.publish(name);
+			pair.publish(name, now);
 		}
 	}
 
@@ -887,7 +888,7 @@ impl<V: Serialize> TrackFamily<V> {
 	/// later drain, so a valid-shaped request is never terminally rejected
 	/// merely for arriving while the quota was full. Entries whose every
 	/// requester left are dropped instead of adopted.
-	fn adopt_parked(&mut self, broadcast: &broadcast::Producer, requested: &mut HashSet<String>) {
+	fn adopt_parked(&mut self, broadcast: &broadcast::Producer, requested: &mut HashSet<String>, now: Instant) {
 		let noop = kio::Waiter::noop();
 		let mut parked = std::mem::take(&mut self.parked);
 		parked.retain(|plain, pending| {
@@ -897,7 +898,7 @@ impl<V: Serialize> TrackFamily<V> {
 			if requested.len() >= MAX_REQUESTED_TRACKS {
 				return true;
 			}
-			self.adopt_pair(broadcast, requested, plain.clone(), std::mem::take(pending));
+			self.adopt_pair(broadcast, requested, plain.clone(), std::mem::take(pending), now);
 			false
 		});
 		self.parked = parked;
@@ -912,6 +913,7 @@ impl<V: Serialize> TrackFamily<V> {
 		requested: &mut HashSet<String>,
 		plain: String,
 		pending: PendingPair,
+		now: Instant,
 	) {
 		// A request racing the pair's creation is fulfilled by `create_track`
 		// (queued) or adopted by [`Self::push`] (parked), so a live pair here
@@ -924,7 +926,7 @@ impl<V: Serialize> TrackFamily<V> {
 		match pending.adopt(broadcast, &plain, self.interval) {
 			Ok(mut pair) => {
 				// Hold the subscription open with zeros until the tier records.
-				pair.publish(&plain);
+				pair.publish(&plain, now);
 				self.tracks.insert(plain.clone(), pair);
 				requested.insert(plain);
 			}
@@ -1084,7 +1086,7 @@ struct PresenceTrack {
 }
 
 impl PresenceTrack {
-	fn publish(&mut self) {
+	fn publish(&mut self, now: Instant) {
 		self.sums.fill(&mut self.pair.frame);
 		for (tier, presence) in &mut self.pair.frame.entries {
 			if let Some(&(tx, rx)) = self.wire_start.get(tier) {
@@ -1092,7 +1094,7 @@ impl PresenceTrack {
 				presence.wire_rx = presence.wire_rx.saturating_sub(rx);
 			}
 		}
-		self.pair.publish(&self.name);
+		self.pair.publish(&self.name, now);
 	}
 }
 
@@ -1159,7 +1161,7 @@ impl PrefixTrack {
 
 	/// Publish each tier's sums, dropping children this drain carried no row
 	/// for.
-	fn publish(&mut self, tick: u64) {
+	fn publish(&mut self, tick: u64, now: Instant) {
 		for (tier, sums) in self.tiers.iter_mut() {
 			sums.children.retain(|_, child| child.seen == tick);
 			self.pair.frame.entries.push((
@@ -1176,7 +1178,7 @@ impl PrefixTrack {
 				},
 			));
 		}
-		self.pair.publish(&self.name);
+		self.pair.publish(&self.name, now);
 	}
 }
 
@@ -1312,14 +1314,14 @@ impl GroupTrack {
 
 	/// Write this drain's frame; moq-json skips an unchanged one. A frame too
 	/// large to cache ends this group's track alone.
-	fn publish(&mut self) {
+	fn publish(&mut self, now: Instant) {
 		let tiers = &mut self.body.tiers.entries;
 		tiers.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 		for (_, tier) in tiers.iter_mut() {
 			tier.paths.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 			tier.labels.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 		}
-		if let Err(err) = self.snapshot.update(&self.body) {
+		if let Err(err) = self.snapshot.update(&self.body, now) {
 			tracing::warn!(?err, name = self.name, "stats: failed to write group frame");
 		}
 	}
@@ -1586,23 +1588,23 @@ impl GroupPublisher {
 	/// Publish the pending frames, then drop change-detection state for
 	/// entries this drain did not carry (the registry pruned them).
 	fn flush(&mut self, tick: u64, now: Instant, linger: Duration) {
-		self.traffic.flush();
-		self.sessions.flush();
+		self.traffic.flush(now);
+		self.sessions.flush(now);
 
 		for (_, track) in self.group_tracks.extract_if(|_, track| track.lingered(now, linger)) {
 			track.finish();
 		}
 		for track in self.group_tracks.values_mut() {
-			track.publish();
+			track.publish(now);
 		}
 
 		self.totals.sums.fill(&mut self.totals.pair.frame);
-		self.totals.pair.publish(crate::TOTALS);
+		self.totals.pair.publish(crate::TOTALS, now);
 		for track in self.presence.values_mut() {
-			track.publish();
+			track.publish(now);
 		}
 		for track in self.prefixes.values_mut() {
-			track.publish(tick);
+			track.publish(tick, now);
 		}
 
 		self.local.retain(|_, tiers| {
@@ -1627,7 +1629,7 @@ impl GroupPublisher {
 	/// It is reclaimed once its last consumer leaves, so the held set follows
 	/// live readers. A prefix track follows the same rules for a broadcast
 	/// prefix in this group. Any other name is rejected.
-	fn serve_requests(&mut self, report: &Report, depth: usize, tick: u64) {
+	fn serve_requests(&mut self, report: &Report, depth: usize, tick: u64, now: Instant) {
 		// Reclaim before parking and adopting, so a freed slot is usable by
 		// this very drain.
 		self.traffic.reclaim(&mut self.requested);
@@ -1686,19 +1688,19 @@ impl GroupPublisher {
 			}
 		}
 
-		self.traffic.adopt_parked(&self.broadcast, &mut self.requested);
-		self.sessions.adopt_parked(&self.broadcast, &mut self.requested);
+		self.traffic.adopt_parked(&self.broadcast, &mut self.requested, now);
+		self.sessions.adopt_parked(&self.broadcast, &mut self.requested, now);
 		for (label, pending) in labels {
-			self.adopt_presence(report, label, pending);
+			self.adopt_presence(report, label, pending, now);
 		}
 		for (path, pending) in paths {
-			self.adopt_prefix(report, path, pending, tick);
+			self.adopt_prefix(report, path, pending, tick, now);
 		}
 	}
 
 	/// Hold a requested label's presence track, publishing its current counters
 	/// so the subscription resolves at once. Cumulative from here on.
-	fn adopt_presence(&mut self, report: &Report, label: PathOwned, pending: PendingPair) {
+	fn adopt_presence(&mut self, report: &Report, label: PathOwned, pending: PendingPair, now: Instant) {
 		// A request for a live track is served by the broadcast itself, so a
 		// live pair here means the requested flavor ended and cannot update.
 		if self.presence.contains_key(&label) {
@@ -1728,13 +1730,13 @@ impl GroupPublisher {
 				start.1 += entry.presence.wire_rx;
 			}
 		}
-		track.publish();
+		track.publish(now);
 		self.presence.insert(label, track);
 	}
 
 	/// Hold a requested prefix track, publishing its current counters so the
 	/// subscription resolves at once. Cumulative from here on.
-	fn adopt_prefix(&mut self, report: &Report, path: PathOwned, pending: PendingPair, tick: u64) {
+	fn adopt_prefix(&mut self, report: &Report, path: PathOwned, pending: PendingPair, tick: u64, now: Instant) {
 		// Defensive only, as in `adopt_presence`.
 		if self.prefixes.contains_key(path.as_str()) {
 			pending.reject(moq_net::Error::NotFound);
@@ -1761,7 +1763,7 @@ impl GroupPublisher {
 			let child = rest.as_str().split('/').next().filter(|child| !child.is_empty());
 			track.add(entry, child, tick);
 		}
-		track.publish(tick);
+		track.publish(tick, now);
 		self.prefixes.insert(path.as_str().to_string(), track);
 	}
 
@@ -1908,23 +1910,23 @@ mod tests {
 
 		// A 7 byte snapshot and nine 7 byte deltas: past eight snapshots.
 		for n in 0..10 {
-			snapshot.update(&frame(n)).unwrap();
+			snapshot.update(&frame(n), moq_clock::now()).unwrap();
 		}
 		let first = snapshot.largest.unwrap();
 		let _late = track.subscribe(None);
 		assert_eq!(wanted(&track), Some(first + 1), "the join asks for a fresh group");
 
 		// The interval already has its group, so the snapshot waits for the next one.
-		assert!(snapshot.update(&frame(9)).unwrap().is_none());
+		assert!(snapshot.update(&frame(9), moq_clock::now()).unwrap().is_none());
 		assert_eq!(snapshot.largest, Some(first));
 
 		tokio::time::advance(interval).await;
 		assert!(
-			snapshot.update(&frame(9)).unwrap().is_some(),
+			snapshot.update(&frame(9), moq_clock::now()).unwrap().is_some(),
 			"restated though unchanged"
 		);
 		assert_eq!(snapshot.largest, Some(first + 1), "numbered by its interval");
-		assert!(snapshot.update(&frame(10)).unwrap().is_some());
+		assert!(snapshot.update(&frame(10), moq_clock::now()).unwrap().is_some());
 		assert_eq!(snapshot.largest, Some(first + 1), "the next change is a delta");
 	}
 
@@ -1943,6 +1945,7 @@ mod tests {
 				&mut requested,
 				"idle/publisher.json".into(),
 				PendingPair::default(),
+				moq_clock::now(),
 			);
 			let mut subscriber = subscribing.await.unwrap();
 			let group = subscriber.recv_group().await.unwrap().unwrap();
@@ -1963,6 +1966,7 @@ mod tests {
 				&mut requested,
 				"idle/publisher.json".into(),
 				PendingPair::default(),
+				moq_clock::now(),
 			);
 			let mut subscriber = subscribing.await.unwrap();
 			let group = subscriber
@@ -2176,7 +2180,7 @@ mod tests {
 		let mut pair = TrackPair::<u64>::create(&broadcast, "t.json", Duration::from_secs(1)).unwrap();
 		let mut publish = |key: &str, value: u64| {
 			pair.frame.entries.push((PathOwned::from(key.to_string()), value));
-			pair.publish("t.json");
+			pair.publish("t.json", moq_clock::now());
 		};
 		publish("small", 1);
 
@@ -3794,7 +3798,14 @@ mod tests {
 				let _held = hold.then(|| {
 					let tick = drain.tick;
 					let group = drain.groups.get_mut(key).expect("group");
-					group.adopt_prefix(&drain.report, PathOwned::from("room0"), PendingPair::default(), tick);
+					let now = moq_clock::now();
+					group.adopt_prefix(
+						&drain.report,
+						PathOwned::from("room0"),
+						PendingPair::default(),
+						tick,
+						now,
+					);
 					group.prefixes["room0"].pair.plain.track.subscribe(None)
 				});
 				drain.collect();
