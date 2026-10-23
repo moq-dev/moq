@@ -84,7 +84,6 @@ Rejected in planning:
 - [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - Python, Go, and Dart client options use the FFI's names and nesting
 - [One decode read](/quest/m1/api-audit/decode-read.md) - audio and video decoders yield the same `Frame`, `Gap`, `End` read as moq-mux containers
 - [Watch and publish trim](/quest/m1/api-audit/watch-trim.md) - the clock is re-exported, unused watch outputs are gone, and derived publish state is read-only
-- [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
 - [CLI and gst flags](/quest/m1/api-audit/cli-flags.md) - one flag name per meaning across CLI subcommands and gst elements, and `linger` means one thing
 - [qmux shape](/quest/m1/api-audit/qmux-shape.md) - qmux binds framing at connect, shares flow-control names with moq-tokio, and JS drops the legacy wire
 - [Transport config](/quest/m1/api-audit/transport-config.md) - moq-tokio and moq-quic configs have one meaning for unset, enums for modes, no order-dependent setters, and no leftover features

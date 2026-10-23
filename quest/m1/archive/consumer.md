@@ -58,8 +58,7 @@ Guidance:
 
 - An absent group below the newest stored one is a gap and reports as dropped.
   A group below the oldest stored key was pruned or never stored and reports
-  the same way; history-mode callers rely on the start answering with what
-  remains ([History from the retained floor](/quest/m1/archive/history-floor.md)).
+  the same way.
 - Keep a byte-bounded object LRU so neighbouring groups come from one GET.
 - When [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) lands, the
   `track::Dynamic` handler resolves a `Time(pts)` end by picking the object
