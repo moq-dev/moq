@@ -20,7 +20,7 @@ independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
 Scope: this audit owns per-crate build cost in one build (dev, release, and
-incremental). The [CI workflow audit](/quest/m1/audit-ci.md) owns job-level CI
+incremental). The [CI workflow audit](/quest/m2/audit-ci.md) owns job-level CI
 cost and caching; the [dependency audit](/quest/m2/audit-deps.md) owns
 deduplicating and upgrading dependencies.
 

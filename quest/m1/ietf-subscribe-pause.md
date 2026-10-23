@@ -31,7 +31,7 @@ paused wait watches only listing removal, session close, and the auth gate, so
 a SUBSCRIBE paused there would never see its track end. Keep a watcher for the
 track's end while paused, so a track that ends sends PUBLISH_DONE with
 TRACK_ENDED, which the paused-SUBSCRIBE removal in
-[outbound SUBSCRIBE_TRACKS](/quest/m1/archive/subscribe-tracks-outbound.md)
+outbound SUBSCRIBE_TRACKS ([moq-dev/moq#6280](https://github.com/moq-dev/moq/pull/6280))
 relies on. Carry the SUBSCRIBE's grant across the pause too:
 `apply_subscription_update` returns `Served::Paused` before it starts
 `verify_renewal`, and the paused loop refuses AUTHORIZATION TOKEN. A
@@ -58,4 +58,4 @@ served instead of refused.
 
 ## Related
 
-- [Outbound SUBSCRIBE_TRACKS](/quest/m1/archive/subscribe-tracks-outbound.md) - the subscriber side that sends Forward=0 and toggles it
+- [Broadcast archives](/quest/m1/archive/README.md) - lists an IETF peer's tracks through SUBSCRIBE_TRACKS, which sends Forward=0 and toggles it

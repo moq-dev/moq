@@ -7,6 +7,7 @@ throughput divides BoltFFI by UniFFI.
 """
 
 import json
+import os
 import statistics
 import sys
 from collections import defaultdict
@@ -62,6 +63,9 @@ def main() -> None:
     table = "\n".join(lines)
     (directory / "report.md").write_text(table + "\n")
     print(table)
+    if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(summary).open("a") as output:
+            output.write("## Binding generator comparison\n\n" + table + "\n")
 
 
 if __name__ == "__main__":
