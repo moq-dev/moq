@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Micro } from "@moq/clock";
-import { createAudioBuffer } from "./buffer";
+import { Backpressure, createAudioBuffer } from "./buffer";
 import type { InitShared } from "./render";
 import { SharedRingBuffer } from "./shared-ring-buffer";
 
@@ -62,6 +62,27 @@ describe("SharedAudioBuffer", () => {
 			expect(Bun.peek.status(buffer.wait(10_000_000 as Micro, controller.signal))).toBe("fulfilled");
 		} finally {
 			buffer.close();
+		}
+	});
+});
+
+describe("Backpressure", () => {
+	// Media timestamps are absolute microseconds, so they pass 2^31 after ~36 minutes of broadcast
+	// and 2^32 after ~72. The gate has to hold a frame ahead of the playhead at any of them.
+	it("holds a frame one second ahead at any timestamp", () => {
+		for (const base of [0, 2 ** 31, 2 ** 32, 3_600_000_000]) {
+			const backpressure = new Backpressure(true, 100_000 as Micro);
+			const timestamp = (base + 1_000_000) as Micro;
+			const wait = backpressure.wait(timestamp, base as Micro, new AbortController().signal);
+			expect(Bun.peek.status(wait)).toBe("pending");
+
+			// Still more than the headroom ahead.
+			backpressure.advance((base + 800_000) as Micro);
+			expect(Bun.peek.status(wait)).toBe("pending");
+
+			// Within the headroom of the frame.
+			backpressure.advance((base + 900_000) as Micro);
+			expect(Bun.peek.status(wait)).toBe("fulfilled");
 		}
 	});
 });

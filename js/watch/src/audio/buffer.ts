@@ -11,7 +11,7 @@ import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
  * floor-sized ring. Both transports share this; they differ only in how they observe the playhead
  * (Atomics poll vs worklet state messages). A no-op when not buffered (the ring bounds itself).
  */
-class Backpressure {
+export class Backpressure {
 	#enabled: boolean;
 	#headroom: Micro;
 	#waiters: Array<{ timestamp: Micro; resolve: () => void }> = [];
@@ -28,7 +28,7 @@ class Backpressure {
 
 	wait(timestamp: Micro, playhead: Micro, signal: AbortSignal): Promise<void> {
 		if (!this.#enabled || signal.aborted) return Promise.resolve();
-		if (playhead >= ((timestamp - this.#headroom) | 0)) return Promise.resolve();
+		if (playhead >= timestamp - this.#headroom) return Promise.resolve();
 		return new Promise((resolve) => {
 			// An aborted wait drops its waiter, so a retired decode loop leaves nothing queued here.
 			const abort = () => {
@@ -52,7 +52,7 @@ class Backpressure {
 	advance(playhead: Micro): void {
 		if (this.#waiters.length === 0) return;
 		this.#waiters = this.#waiters.filter(({ timestamp, resolve }) => {
-			if (playhead < ((timestamp - this.#headroom) | 0)) return true;
+			if (playhead < timestamp - this.#headroom) return true;
 			resolve();
 			return false;
 		});
