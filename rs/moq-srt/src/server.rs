@@ -16,8 +16,7 @@
 //!
 //! This mirrors `moq-tokio`'s `Server` / `Request`, so the gateway stays
 //! unopinionated about auth: the embedder (e.g. a relay verifying the stream id
-//! as a JWT) owns that policy. For the unauthenticated convenience that accepts
-//! everything and routes by prefix, use [`crate::run`].
+//! as a JWT) owns that policy.
 
 use std::net::SocketAddr;
 use std::time::Duration;

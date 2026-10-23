@@ -3,7 +3,11 @@
 //! A subscription's tail (the session's `tail::Tail`) and a track's record of live arrivals
 //! both keep one, so they give up on a missing group by the same rule.
 
-use std::{ops::Range, time::Duration};
+use std::{
+	collections::{BTreeMap, BTreeSet},
+	ops::Range,
+	time::Duration,
+};
 
 use crate::time::Instant;
 
@@ -23,10 +27,10 @@ pub(crate) fn grace(max_delay: Duration) -> Duration {
 	}
 }
 
-/// A run of accounted sequences.
+/// A run of accounted sequences, keyed by its inclusive start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Run {
-	groups: Range<u64>,
+	end: u64,
 	/// When the gap below this run opened, which is when its missing groups became late.
 	since: Instant,
 }
@@ -38,7 +42,10 @@ pub(crate) struct Ledger {
 	// can no longer be waited for, so it folds into the runs around it, which bounds this by
 	// the gaps opened within the grace rather than every gap ever seen. A fold is final: a
 	// later, longer grace or a lowered floor cannot reopen it.
-	runs: Vec<Run>,
+	runs: BTreeMap<u64, Run>,
+	// Demand can restart a gap below an older one, so sequence order is not age order.
+	// Index both: one due gap must not make every arrival scan all the younger ones.
+	ages: BTreeSet<(Instant, u64)>,
 	grace: Duration,
 }
 
@@ -52,7 +59,8 @@ impl Ledger {
 	/// A ledger that gives up on a missing group after `grace`.
 	pub fn new(grace: Duration) -> Self {
 		Self {
-			runs: Vec::new(),
+			runs: BTreeMap::new(),
+			ages: BTreeSet::new(),
 			grace,
 		}
 	}
@@ -62,43 +70,69 @@ impl Ledger {
 		self.grace = grace;
 	}
 
+	fn remove(&mut self, start: u64) -> Run {
+		let run = self.runs.remove(&start).expect("an indexed run");
+		self.ages.remove(&(run.since, start));
+		run
+	}
+
 	/// Record `groups` as accounted for. Gaps fold only on [`Self::expire`].
 	pub fn account(&mut self, groups: Range<u64>, now: Instant) {
 		if groups.is_empty() {
 			return;
 		}
-		// Every run the insert overlaps or touches merges with it into one.
-		let first = self.runs.partition_point(|run| run.groups.end < groups.start);
-		let last = self.runs.partition_point(|run| run.groups.start <= groups.end);
-		let merged = match &self.runs[first..last] {
-			[] => Run {
-				groups,
-				// Splitting a gap leaves both halves as late as it was. A run past every
-				// other one opens a new gap.
-				since: self.runs.get(first).map_or(now, |above| above.since),
-			},
-			[head, .., tail] => Run {
-				groups: head.groups.start.min(groups.start)..tail.groups.end.max(groups.end),
-				since: head.since,
-			},
-			[only] => Run {
-				groups: only.groups.start.min(groups.start)..only.groups.end.max(groups.end),
-				since: only.since,
-			},
+		// Keep the lower run in place when extending it: the in-order path changes
+		// only its end, without reallocating either index or changing its gap's age.
+		let below = self
+			.runs
+			.range(..=groups.start)
+			.next_back()
+			.filter(|(_, run)| run.end >= groups.start)
+			.map(|(&start, run)| (start, run.end));
+		if below.is_some_and(|(_, end)| groups.end <= end) {
+			return;
+		}
+		let first = below.map_or(groups.start, |(start, _)| start);
+		// Splitting a gap inherits the upper run's age; only an arrival above every
+		// run opens a fresh gap.
+		let since = self.runs.range(first..).next().map_or(now, |(_, run)| run.since);
+		let mut end = groups.end.max(below.map_or(groups.end, |(_, end)| end));
+		let from = match below {
+			Some(_) => std::ops::Bound::Excluded(first),
+			None => std::ops::Bound::Included(first),
 		};
-		self.runs.splice(first..last, [merged]);
+		while let Some((&start, run)) = self.runs.range((from, std::ops::Bound::Included(end))).next() {
+			end = end.max(run.end);
+			self.remove(start);
+		}
+		match below {
+			Some(_) => self.runs.get_mut(&first).expect("the lower run stayed indexed").end = end,
+			None => {
+				self.ages.insert((since, first));
+				self.runs.insert(first, Run { end, since });
+			}
+		}
 	}
 
 	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
-		let grace = self.grace;
-		self.runs.dedup_by(|run, below| {
-			let expired = now.duration_since(run.since) >= grace;
-			if expired {
-				below.groups.end = run.groups.end;
+		let Some((&first, _)) = self.runs.first_key_value() else {
+			return;
+		};
+		// There is no lower run to fold the leading gap into. Keep its age for a
+		// later lowered floor, but do not let it hide due gaps elsewhere in the index.
+		while let Some(&(since, start)) = self.ages.iter().find(|(_, start)| *start != first) {
+			if now.duration_since(since) < self.grace {
+				break;
 			}
-			expired
-		});
+			let run = self.remove(start);
+			self.runs
+				.range_mut(..start)
+				.next_back()
+				.expect("not the first run")
+				.1
+				.end = run.end;
+		}
 	}
 
 	/// Whether a gap separates two runs, so [`Self::expire`] has anything to fold.
@@ -108,30 +142,26 @@ impl Ledger {
 
 	/// The lowest sequence accounted for.
 	pub fn first(&self) -> Option<u64> {
-		self.runs.first().map(|run| run.groups.start)
+		self.runs.first_key_value().map(|(start, _)| *start)
 	}
 
 	/// One past the highest sequence accounted for.
 	pub fn end(&self) -> Option<u64> {
-		self.runs.last().map(|run| run.groups.end)
+		self.runs.last_key_value().map(|(_, run)| run.end)
 	}
 
 	/// The exclusive end of the accounted run holding `sequence`, `None` while it is not.
 	pub fn run_end(&self, sequence: u64) -> Option<u64> {
-		let run = self
-			.runs
-			.get(self.runs.partition_point(|run| run.groups.end <= sequence))?;
-		(run.groups.start <= sequence).then_some(run.groups.end)
+		self.runs
+			.range(..=sequence)
+			.next_back()
+			.filter(|(_, run)| sequence < run.end)
+			.map(|(_, run)| run.end)
 	}
 
 	/// Whether every group in `groups` is accounted for.
 	pub fn covers(&self, groups: Range<u64>) -> bool {
-		// Runs merge on insert, so one run covers the span or none does.
-		groups.is_empty()
-			|| self
-				.runs
-				.get(self.runs.partition_point(|run| run.groups.end <= groups.start))
-				.is_some_and(|run| run.groups.start <= groups.start && groups.end <= run.groups.end)
+		groups.is_empty() || self.run_end(groups.start).is_some_and(|end| groups.end <= end)
 	}
 }
 
@@ -149,11 +179,13 @@ impl Ledger {
 			return;
 		}
 		let mut below = 0;
-		for run in &mut self.runs {
-			if below < groups.end && groups.start < run.groups.start {
+		for (&start, run) in &mut self.runs {
+			if below < groups.end && groups.start < start {
+				self.ages.remove(&(run.since, start));
 				run.since = now;
+				self.ages.insert((now, start));
 			}
-			below = run.groups.end;
+			below = run.end;
 		}
 	}
 
@@ -161,23 +193,25 @@ impl Ledger {
 	/// group opened the gap below it. `None` while it is accounted for, or while no later
 	/// group has arrived, since nothing says it is late yet.
 	pub fn folds_at(&self, group: u64, grace: Duration) -> Option<Instant> {
-		let above = self
-			.runs
-			.get(self.runs.partition_point(|run| run.groups.end <= group))?;
-		match above.groups.start <= group {
-			true => None,
-			false => above.since.checked_add(grace),
+		if self.run_end(group).is_some() {
+			return None;
 		}
+		self.runs.range(group..).next()?.1.since.checked_add(grace)
 	}
 
 	/// The gaps within `groups`, each with when a later arrival opened it: `None` for the
 	/// one past the last run, which nothing has opened yet.
 	pub fn gaps(&self, groups: Range<u64>) -> impl Iterator<Item = (Range<u64>, Option<Instant>)> + '_ {
-		let first = self.runs.partition_point(|run| run.groups.end <= groups.start);
+		let first = self
+			.runs
+			.range(..=groups.start)
+			.next_back()
+			.filter(|(_, run)| run.end > groups.start)
+			.map_or(groups.start, |(start, _)| *start);
 		let mut below = groups.start;
-		self.runs[first..]
-			.iter()
-			.map(|run| (run.groups.clone(), Some(run.since)))
+		self.runs
+			.range(first..)
+			.map(|(&start, run)| (start..run.end, Some(run.since)))
 			.chain(std::iter::once((u64::MAX..u64::MAX, None)))
 			.map_while(move |(run, since)| {
 				let gap = below..run.start.min(groups.end);
@@ -190,9 +224,9 @@ impl Ledger {
 	/// Gaps whose age bounds a held fetch, including the gap before the first arrival.
 	pub fn folds(&self, grace: Duration) -> impl Iterator<Item = (Range<u64>, Instant)> + '_ {
 		let mut below = 0;
-		self.runs.iter().filter_map(move |run| {
-			let gap = below..run.groups.start;
-			below = run.groups.end;
+		self.runs.iter().filter_map(move |(&start, run)| {
+			let gap = below..start;
+			below = run.end;
 			if gap.is_empty() {
 				return None;
 			}
@@ -212,7 +246,11 @@ mod tests {
 	}
 
 	fn groups(ledger: &Ledger) -> Vec<Range<u64>> {
-		ledger.runs.iter().map(|run| run.groups.clone()).collect()
+		assert_eq!(
+			ledger.ages,
+			ledger.runs.iter().map(|(&start, run)| (run.since, start)).collect()
+		);
+		ledger.runs.iter().map(|(&start, run)| start..run.end).collect()
 	}
 
 	#[test]
@@ -328,5 +366,67 @@ mod tests {
 
 		ledger.expire(lowered + GRACE);
 		assert!(ledger.covers(1..10));
+	}
+	#[test]
+	fn demand_can_move_an_older_gap_after_a_newer_one() {
+		let start = Instant::now();
+		let mut ledger = Ledger::new(GRACE);
+		arrive(&mut ledger, 0..1, start);
+		arrive(&mut ledger, 4..5, start);
+		arrive(&mut ledger, 8..9, start + GRACE / 4);
+		ledger.demand(1..4, start + GRACE / 2);
+
+		ledger.expire(start + GRACE + GRACE / 4);
+		assert_eq!(groups(&ledger), vec![0..1, 4..9]);
+		assert_eq!(ledger.folds_at(1, GRACE), Some(start + GRACE + GRACE / 2));
+		ledger.expire(start + GRACE + GRACE / 2);
+		assert_eq!(groups(&ledger), vec![0..9]);
+	}
+
+	#[test]
+	fn changing_grace_uses_current_gap_ages_without_reopening_folds() {
+		let start = Instant::now();
+		let mut ledger = Ledger::new(GRACE);
+		arrive(&mut ledger, 0..1, start);
+		arrive(&mut ledger, 2..3, start);
+		ledger.set_grace(GRACE * 2);
+		ledger.expire(start + GRACE);
+		assert_eq!(groups(&ledger), vec![0..1, 2..3]);
+
+		ledger.set_grace(GRACE / 2);
+		ledger.expire(start + GRACE);
+		assert_eq!(groups(&ledger), vec![0..3]);
+		ledger.set_grace(GRACE * 2);
+		arrive(&mut ledger, 4..5, start + GRACE);
+		ledger.expire(start + GRACE * 2);
+		assert_eq!(groups(&ledger), vec![0..3, 4..5]);
+	}
+
+	#[test]
+	fn a_former_first_run_keeps_its_age_when_a_lower_run_arrives() {
+		let start = Instant::now();
+		let mut ledger = Ledger::new(GRACE);
+		arrive(&mut ledger, 10..11, start);
+		ledger.expire(start + GRACE * 2);
+		assert_eq!(groups(&ledger), vec![10..11]);
+		arrive(&mut ledger, 0..1, start + GRACE * 2);
+		assert_eq!(groups(&ledger), vec![0..11]);
+	}
+	#[test]
+	fn one_gap_expires_per_arrival_without_retaining_older_gaps() {
+		let start = Instant::now();
+		for retained in [0u64, 1, 4, 16] {
+			let mut ledger = Ledger::new(Duration::from_millis(retained));
+			for arrival in 0..retained * 4 + 8 {
+				arrive(
+					&mut ledger,
+					arrival * 2..arrival * 2 + 1,
+					start + Duration::from_millis(arrival),
+				);
+				let runs = groups(&ledger);
+				assert_eq!(runs.len() as u64, (arrival + 1).min(retained + 1));
+				assert_eq!(runs[0], 0..arrival.saturating_sub(retained) * 2 + 1);
+			}
+		}
 	}
 }
