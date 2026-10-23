@@ -324,7 +324,7 @@ def main() -> None:
     parser.add_argument("--version")
     parser.add_argument("--grant", action="store_true")
     parser.add_argument("--tone", help="publish: comma-separated frequency of each channel, in Hz")
-    parser.add_argument("--audio-out", help="subscribe: decode each audio rendition to this prefix's .<codec>.txt and .pcm")
+    parser.add_argument("--audio-out", help="subscribe: decode each audio rendition to PREFIX.<codec>.{txt,pcm}")
     parser.add_argument("--audio-ms", type=int, help="subscribe: how much audio to decode")
     parser.add_argument("--finish-ack", help="publisher completion FIFO; enables clean finish")
     parser.add_argument("--finish", action="store_true", help="verify a late tail and clean broadcast end")

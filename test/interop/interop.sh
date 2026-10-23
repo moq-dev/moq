@@ -1097,7 +1097,7 @@ run_gst_audio() {
     deadline=$((SECONDS + ${TIMEOUT%.*}))
     [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 1))
     for i in "${!renditions[@]}"; do
-        pads+=("s.audio_$i" ! decodebin "name=decode$i" ! audioconvert ! audio/x-raw,format=F32LE,layout=interleaved
+        pads+=("s.audio_$i" ! decodebin "name=decode$i" ! audioconvert ! "audio/x-raw,format=F32LE,layout=interleaved"
             ! identity "name=frames$i" ! filesink "location=$out.$i.pcm" buffer-mode=2)
     done
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
