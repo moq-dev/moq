@@ -2220,9 +2220,9 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 }
 
 /// Answers a FETCH stream: a single cached group, streamed in order.
-#[expect(
+#[allow(
 	clippy::large_enum_variant,
-	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk; an allow, since the size gap varies by target"
 )]
 enum FetchServe {
 	/// Waiting for the fetched group.
