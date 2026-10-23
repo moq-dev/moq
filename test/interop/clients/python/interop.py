@@ -87,9 +87,7 @@ async def _print_grant(client: moq.Client, timeout: float) -> None:
     )
 
 
-async def publish(
-    url: str, broadcast: str, version: str | None, grant: bool, timeout: float, tones: list[int]
-) -> None:
+async def publish(url: str, broadcast: str, version: str | None, grant: bool, timeout: float, tones: list[int]) -> None:
     async with _client(url, version) as client:
         if grant:
             await _print_grant(client, timeout)
@@ -104,9 +102,9 @@ async def publish(
             moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=AUDIO_RATE, channels=len(tones)),
             moq.audio.EncoderOutput(
                 codec=moq.audio.Codec.opus(),
-                track=AUDIO_TRACK,
                 frame_duration=timedelta(microseconds=AUDIO_FRAME_DURATION_US),
             ),
+            track=AUDIO_TRACK,
         )
         producer.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {tones} Hz tone) to {url}")

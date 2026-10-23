@@ -235,7 +235,7 @@ int main(void) {
     if (moq_publish_announce((uint32_t)broadcast, NULL) < 0)
         fail("error: moq_publish_announce failed (%s)\n", moq_error());
 
-    moq_video_encoder_input input = {MOQ_VIDEO_PIXEL_FORMAT_RGBA, WIDTH, HEIGHT, 30};
+    moq_video_encoder_input input = {MOQ_VIDEO_PIXEL_FORMAT_RGBA, WIDTH, HEIGHT, {30000, 1001}};
     moq_video_encoder_output output = {MOQ_VIDEO_CODEC_H264, 0, 0, MOQ_VIDEO_ENCODER_KIND_SOFTWARE, NULL, 0};
     int32_t producer = moq_encode_video((uint32_t)broadcast, &input, &output, 0);
     if (producer <= 0) fail("error: moq_encode_video failed: %d (%s)\n", producer, moq_error());

@@ -74,3 +74,6 @@ extension AudioConsumerDuration on MoqAudioConsumer {
   /// Playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
   Duration get delay => Duration(microseconds: delayUs());
 }
+
+/// Input, codec settings, and publication ownership for a producer.
+typedef ProducerOptions = MoqAudioProducerOptions;

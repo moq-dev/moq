@@ -24,3 +24,6 @@ typealias Codec = uniffi.moq.MoqAudioCodec
 typealias Preset = uniffi.moq.MoqAudioPreset
 /** A raw PCM sample layout. */
 typealias SampleFormat = uniffi.moq.MoqAudioSampleFormat
+
+/** Input, codec settings, and publication ownership for a producer. */
+typealias ProducerOptions = uniffi.moq.MoqAudioProducerOptions

@@ -11,30 +11,37 @@ the publication `track` name leaves `MoqVideoEncoderOutput` and
 
 ## Plan
 
-Decided 2026-10-22 (maintainer, from an external API audit): one quest for
-both, since they break the same records and every wrapper, so callers
-migrate once with the cut.
+The draft checkpoint exposes `MoqVideoRate { numerator, denominator }` and
+uses the existing `moq_video::Rate` validation. Codec-only and publishing
+video paths share the same config conversion. C's current raw encoder also
+uses a rational input; its track naming was already separate from codec
+settings.
 
-- Rate: `rs/moq-ffi/src/video.rs` builds `moq_video::Rate::new(framerate, 1)`
-  in `video_encoder_config` (the codec-only `MoqVideoEncoder`) and again
-  inline in `MoqVideoProducer::new`; `moq_video::Rate` already holds a
-  numerator and denominator. Expose it as a numerator/denominator record and
-  build the rate once. Audio's integer `sample_rate` is exact and stays.
-- Publication options: `track` is the only publish-only field today.
-  `video_encoder_config` and `audio_settings` never read it. Nest it in a
-  publication options record taken by the producers, beside the existing
-  `catalog` and `bandwidth` arguments, rather than adding a fourth argument.
-  Keep the `audio`/`video` namespaces. Propose the record and field names
-  with a recommendation in the PR before shipping them.
-- Wrappers alias the uniffi records, so update `py/moq-rs`, `kt/moq`,
-  `swift`, `dart/moq`, `go/wrapper`, `cpp/moq`, their tests and `doc/lib/*`
-  per the Cross-Package Sync table. The generated C picks the records up;
-  the hand-written `rs/moq-c` has no raw encoder, so it is untouched.
-- [OBS moq-video adapter](/quest/m2/obs-moq-video/adapter.md) later adds a
-  preset to the codec-only config; this shape is the one it extends.
+Both encoder output records now contain only codec settings. The proposed
+`MoqAudioProducerOptions` / `MoqVideoProducerOptions` records own `input`,
+`output`, optional `track`, and optional `bandwidth`. Producers take
+`(catalog, options)` in UniFFI, Go, Kotlin, Dart, and C++. Python and Swift
+keep their established keyword/labeled arguments and move track naming to
+the producer, building the options record internally.
 
-Public API: breaking in moq-ffi and every binding wrapper, each with a
-`MIGRATE.md` entry. Wire: none.
+Remaining maintainer decisions, recorded on the draft PR:
+
+- Recommend `video.Rate` (UniFFI `MoqVideoRate`) for the exact numerator and
+  denominator record, matching Rust's existing role. `FrameRate` is the
+  more explicit alternative.
+- Recommend `audio.ProducerOptions` / `video.ProducerOptions` with input,
+  codec output, and publication ownership together, so construction takes
+  two arguments. The alternative is a publication/config record containing
+  input, output, and track with bandwidth kept as a third argument.
+
+Settle those names and constructor shapes before
+retiring this quest. Keep the independent video catalog preference change
+in [moq-dev/moq#6410](https://github.com/moq-dev/moq/pull/6410); it does not belong to encoder configuration. The
+[OBS moq-video adapter](/quest/m2/obs-moq-video/adapter.md) later adds a preset
+to the codec-only config; this shape is the one it extends.
+
+Public API: breaking in moq-ffi, C's raw video input, and every binding
+wrapper, with migration entries and regenerated bindings. Wire: none.
 
 ## Related
 

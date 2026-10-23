@@ -51,6 +51,8 @@ if (session < 0)
     return fail(moq_error());
 ```
 
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings.
+
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) is

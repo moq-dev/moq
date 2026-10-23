@@ -71,6 +71,17 @@ pub enum moq_video_encoder_kind {
 	MOQ_VIDEO_ENCODER_KIND_NAMED = 3,
 }
 
+/// An exact video frame rate in frames per second.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(non_camel_case_types)]
+pub struct moq_video_rate {
+	/// Frames per second numerator; must be nonzero.
+	pub numerator: u32,
+	/// Frames per second denominator; must be nonzero.
+	pub denominator: u32,
+}
+
 /// Raw frame layout the caller hands to [`moq_encode_video_frame`], plus
 /// the resolution and rate the encoder is opened at. Every published frame must
 /// match `width` x `height`; scale before publishing if your source moves.
@@ -85,7 +96,7 @@ pub struct moq_video_encoder_input {
 	pub height: u32,
 	/// Nominal frames per second, used for the codec time base and the default
 	/// bitrate and keyframe interval. Must be non-zero.
-	pub framerate: u32,
+	pub framerate: moq_video_rate,
 }
 
 /// Codec-side configuration for [`moq_encode_video`]. Every knob spells
@@ -709,8 +720,8 @@ pub unsafe extern "C" fn moq_encode_video(
 
 		let format = pixel_format_from_u32(raw_input.format)?;
 
-		let framerate = moq_video::Rate::new(raw_input.framerate, 1)
-			.map_err(|_| Error::Video(moq_video::Error::InvalidFramerate(raw_input.framerate).into()))?;
+		let framerate = moq_video::Rate::new(raw_input.framerate.numerator, raw_input.framerate.denominator)
+			.map_err(|err| Error::InvalidConfig(format!("invalid framerate: {err}")))?;
 		let mut config = moq_video::encode::Config::new(raw_input.width, raw_input.height, framerate);
 		config.codec = codec_from_u32(raw_output.codec)?;
 		config.kind = unsafe { encoder_kind(raw_output)? };
