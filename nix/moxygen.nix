@@ -30,6 +30,9 @@ stdenv.mkDerivation {
   version = "unstable-2026-10-23";
   src = sources.moxygen;
   cmakeDir = "../standalone";
+  # The relay conformance profile: the client accepts track-level priority and
+  # an END_OF_TRACK directly after the last object. Every other check stays.
+  patches = [ ./moxygen-profile.patch ];
   nativeBuildInputs = [
     cmake
     ninja

@@ -10,7 +10,10 @@ Tracks advertising DYNAMIC_GROUPS relay NEW_GROUP_REQUEST back to the
 original publisher, with redundant requests coalesced. Across the cluster,
 refresh demand carries them on native lite-07.
 moxygen's moq-test conformance (sections 1-7, except cases that use a
-subgroup other than 0) passes through moq-relay in a nightly CI job.
+subgroup other than 0) passes through moq-relay in a nightly CI job under the
+relay conformance profile. The profile accepts the track's publisher priority
+on every group and an END_OF_TRACK directly after the last object. It still
+checks forwarded object IDs, properties, END_OF_GROUP and FIRST_OBJECT.
 
 Boundaries:
 
@@ -82,54 +85,46 @@ Work owned by this README, after the children land:
 - FETCH cases are skipped upstream. Section 8 stays out while PUBLISH is
   declined.
 
+### Conformance profile and remaining work
 
-### Remaining conformance decision
+Decided with the maintainer on 2026-10-23: keep the relay's track-level egress
+priority and its END_OF_TRACK, and verify under a relay conformance profile
+instead of the literal upstream suite. Changing per-group priority transport or
+terminal representation to satisfy one verifier would cost scheduling and wire
+complexity for no behavioral gain.
 
-The original Goal above is unmet. The pinned harness is in
+The pinned harness is in
 [`test/ietf-conformance`](../../../test/ietf-conformance/README.md), with Moxygen
 `c27ae6358df62a1195da479b2e07c50dd8174279` and its matching dependency revisions.
 It keeps all selected case arguments and deadlines, excludes only the agreed
 nonzero-subgroup cases, and fails on client crashes or publisher reconnects.
-The nightly job is a diagnostic checkpoint, not a passing conformance claim.
+`nix/moxygen-profile.patch` applies the profile to the client verifier: it also
+accepts the track's advertised priority on every group, and one END_OF_TRACK
+directly after the last object, whose stream ends no payload group. All other
+upstream checks stay, including object IDs, properties, END_OF_GROUP and
+FIRST_OBJECT.
 
-The direct-origin controls pass 29/29 cases on draft 16 and 28/29 on draft 18.
-The draft-18 large-scale case fails even without a relay with
-`Group Mismatch: Actual=1 Expected=0`; its provenance must be resolved upstream.
-A different single-relay draft-18 case, "End of group markers with single object", also reports `(1, expected 0)`;
-its relationship to the direct-control failure is not established.
-Every relay cell fails 29/29. Single-relay cells expose the conflicts below;
-cluster cells fail before media because their TRACK_INFO query needs upstream
-TRACK_STATUS, and the pinned MoQTestPublisher inherits NOT_SUPPORTED. Preserve
-that refusal: changing query-only demand into a SUBSCRIBE is not an authorized
-fallback here. [Range widening](/quest/m1/compress/ietf-range-widen.md), claimed
-by [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465), owns that separate
-cold-metadata boundary. The recommended prerequisite is an upstream publisher
-that answers metadata queries, plus a validated direct-origin control.
+Measured on the profile: the direct-origin controls and both single-relay cells
+pass 29/29 on drafts 16 and 18. Both cluster cells fail 29/29 before media.
+Remaining, in order:
 
-The suite's assumptions conflict with two settled behaviors:
+- **A publisher that answers metadata queries.** Cluster cells fail because the
+  edge's TRACK_INFO query becomes TRACK_STATUS upstream, and the pinned
+  MoQTestPublisher inherits NOT_SUPPORTED. Preserve that refusal: widening
+  query-only demand into a SUBSCRIBE is not an authorized fallback.
+  [Range widening](/quest/m1/compress/ietf-range-widen.md), claimed by
+  [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465), owns that
+  separate cold-metadata boundary. Needs a Moxygen revision whose test
+  publisher answers TRACK_STATUS; then bump the pins and rebase the profile.
+- **The direct draft-18 control.** One checkpoint run failed upstream's "Large
+  scale: Many groups and objects" with `Group Mismatch: Actual=1 Expected=0`
+  without any relay; the profile run passed it. The verifier expects groups in
+  order although each arrives on its own stream, which its own comment calls a
+  spurious failure. Resolve it at the verifier, not with a retry.
 
-- Its subgroup-zero verifier requires `publisherPriorityForGroup(group)`
-  (200 on even groups, 201 on odd groups). This Plan explicitly ranks egress
-  by track priority, so a track with priority 200 remains 200.
-- It rejects END_OF_TRACK. The relay keeps that status, as decided on
-  2026-10-22 in [the runner decision](https://github.com/moq-dev/moq/blob/5f09861634b793056f840408a589f89a8c464fb0/quest/m1/interop-coverage/runner-cases.md).
-  Its subgroup-header verifier also applies ordinary payload-group expectations
-  to that extra terminal stream. A standalone marker at `(last_group + 1, 0)`
-  does not claim END_OF_GROUP for a payload group that never existed.
-
-Retain the hard Goal until a maintainer chooses a compatible verification
-contract. Recommended: keep the approved relay behavior and agree an upstream
-conformance profile that understands track-level priority and legitimate
-END_OF_TRACK, while still checking forwarded object IDs, properties,
-END_OF_GROUP and FIRST_OBJECT. That changes the Goal's current requirement that
-this selected unmodified suite passes, so it needs approval. The alternative is
-to revisit the egress-priority and terminal-status decisions and explicitly
-scope their API/wire and scheduling costs. Do not silently alter those decisions,
-weaken assertions, or exclude every failing case.
-
-After that decision, rerun both direct-origin controls and all four relay cells,
-fix any remaining independently justified forwarding failures at source, and
-make the nightly gate pass before deleting this README.
+Then rerun both direct-origin controls and all four relay cells, fix any
+independently justified forwarding failures at source, and make the nightly
+gate pass before deleting this README.
 
 ## Related
 

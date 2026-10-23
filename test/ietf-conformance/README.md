@@ -29,41 +29,42 @@ reports, client and server logs, relay logs, configs, and endpoints. All childre
 and port reservations belong to the shared harness and are reaped on exit.
 The pinned C++ build is opt-in under `legacyPackages.<system>.moxygen`; ordinary
 checks and development shells do not build it. Updating the pins also requires
-reviewing the selected cases and rerunning the full matrix. The build recipe
-adds the client's missing Folly ManualExecutor link dependency and patches
-dependency script interpreters for Nix; it changes no protocol code.
+reviewing the selected cases, rebasing the profile patch, and rerunning the full
+matrix. The build recipe adds the client's missing Folly ManualExecutor link
+dependency and patches dependency script interpreters for Nix.
 
-## Contract decision
+## Conformance profile
 
-The full command currently fails against the relay. Its verdict is preserved:
-the upstream client requires a priority that alternates by group, while this
-relay deliberately ranks egress by the track's priority. It also rejects the
-relay's END\_OF\_TRACK status. Keeping that status is a settled decision in
+The client runs under a relay conformance profile, applied by
+[`nix/moxygen-profile.patch`](../../nix/moxygen-profile.patch). The test origin
+alternates priority by group and never ends the track in-band. This relay ranks
+egress by the track's priority and keeps END\_OF\_TRACK, as decided in
 [the runner decision](https://github.com/moq-dev/moq/blob/5f09861634b793056f840408a589f89a8c464fb0/quest/m1/interop-coverage/runner-cases.md).
+The profile therefore accepts:
 
-The [passthrough quest](../../quest/m1/ietf-extension/README.md) retains the unmet
-Goal and the remaining conformance-profile decision. This draft does not change
-protocol behavior or hide these differences behind extra exclusions. The nightly
-job will remain red until that conflict is resolved.
+- the track's advertised publisher priority (200) on any group, besides the
+  per-group value;
+- one END\_OF\_TRACK on the subscription, directly after the last object,
+  either inline or opening the next group. That terminal stream skips the
+  END\_OF\_GROUP header expectation, since it ends no payload group.
 
-The two-relay path also needs metadata from TRACK\_STATUS before subscribing.
-The pinned MoQTestPublisher inherits NOT\_SUPPORTED for that request. The relay
-preserves that refusal, rather than widening query-only demand into SUBSCRIBE.
-The [range-widening quest](../../quest/m1/compress/ietf-range-widen.md) owns that
-separate design boundary.
+Every other check is upstream's: forwarded object IDs, properties, payloads,
+END\_OF\_GROUP status objects and header bits, and FIRST\_OBJECT. Any other
+priority, a second END\_OF\_TRACK, or one anywhere else still fails.
 
-Measured against relay base `5f09861634`:
+Measured on this branch:
 
 | Draft | Direct origin | One relay | Two relays |
 | --- | --- | --- | --- |
-| 16 | 29 pass, 0 fail | 0 pass, 29 fail | 0 pass, 29 fail |
-| 18 | 28 pass, 1 fail | 0 pass, 29 fail | 0 pass, 29 fail |
+| 16 | 29 pass | 29 pass | 0 pass, 29 fail |
+| 18 | 29 pass | 29 pass | 0 pass, 29 fail |
 
-The direct draft-18 failure is upstream's "Large scale: Many groups and objects"
-case: `Group Mismatch: Actual=1 Expected=0`. One single-relay draft-18 case also
-stops on that diagnostic. The other single-relay failures report the priority
-and terminal-status differences above; END\_OF\_GROUP header mismatches name only
-the added terminal stream at `last_group + 1`. Neither run reports a missing
-FIRST\_OBJECT signal. Both cluster cells refuse the metadata query before media
-flows. These results establish prerequisites and a contract conflict, not a
-passing data-preservation result or a completed quest.
+The command still exits 1, so the nightly job stays red until the
+[passthrough quest](../../quest/m1/ietf-extension/README.md)'s remaining work
+lands. The two-relay path needs metadata from TRACK\_STATUS before subscribing,
+and the pinned MoQTestPublisher inherits NOT\_SUPPORTED for that request. The
+relay preserves that refusal, rather than widening query-only demand into
+SUBSCRIBE. Separately, the direct draft-18 control has failed the "Large scale:
+Many groups and objects" case with `Group Mismatch: Actual=1 Expected=0`; the
+upstream verifier expects groups in order although each arrives on its own
+stream.
