@@ -51,8 +51,9 @@ gets an answer, is closed instead of held open by keep-alives. An HTTP read's
 admission is bounded by the same value from the request's arrival.
 
 `implementation` names the relay in its SETUP, on accepted sessions and cluster dials
-alike. Each client's own name reaches the [auth server](/bin/relay/auth#the-contract)
-as `implementation`, which is where to count client versions.
+alike. A client that advertises its own name (moq-lite-05+ or any moq-transport draft)
+reaches the [auth server](/bin/relay/auth#the-contract) with it as `implementation`,
+which is where to count client versions; older clients arrive without one.
 
 `reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of

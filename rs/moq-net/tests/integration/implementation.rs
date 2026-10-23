@@ -69,3 +69,18 @@ async fn the_default_names_the_crate_and_empty_omits_it() {
 		assert_eq!(seen_by_client, None, "{name}");
 	}
 }
+
+/// A SETUP too large to encode fails the dial instead of leaving the peer waiting for it.
+#[moq_clock::test]
+async fn an_oversized_implementation_fails_the_dial() {
+	let version: Version = "moq-lite-06".parse().unwrap();
+	let mut transport = moq_net::transport::memory::Config::default();
+	transport.protocol = Some(version.alpn().to_string());
+	let (client, _server) = support::mock::create_mock_session_pair(transport);
+	let dial = moq_net::Client::new()
+		.with_versions(version.into())
+		.with_implementation("x".repeat(u16::MAX.into()))
+		.connect(support::harness::now(), client)
+		.await;
+	assert!(matches!(dial, Err(moq_net::Error::Encode(_))), "{:?}", dial.err());
+}

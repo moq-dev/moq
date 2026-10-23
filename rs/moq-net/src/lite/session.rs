@@ -347,6 +347,16 @@ where
 	});
 	subscriber.announces = announces;
 
+	// SendSetup only logs a failure, so refuse a SETUP that cannot encode (one past the
+	// size bound, such as a long implementation or path) here rather than leave the peer waiting.
+	if version.has_setup_stream() {
+		crate::coding::Encode::encode(
+			&our_setup,
+			&mut crate::coding::Encoder::new(&mut Vec::new(), version.into()),
+			version,
+		)?;
+	}
+
 	let driver = Driver {
 		auth: Present {
 			stats: stats.clone(),
