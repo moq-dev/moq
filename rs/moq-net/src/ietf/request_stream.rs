@@ -372,8 +372,7 @@ pub(super) struct Update {
 	pub(super) authorization_token: Option<super::token::RequestToken>,
 	/// NEW_GROUP_REQUEST (draft-15+), which only a track advertising DYNAMIC_GROUPS takes.
 	pub(super) new_group: Option<u64>,
-	/// FORWARD, `None` when unchanged. Only a subscription we initiated with PUBLISH may
-	/// pause; the rest serve forwarding subscriptions only.
+	/// FORWARD, `None` when unchanged.
 	pub(super) forward: Option<bool>,
 	/// The new Location Filter, which only a paused PUBLISH subscription resuming takes.
 	pub(super) filter: Option<super::Filter>,

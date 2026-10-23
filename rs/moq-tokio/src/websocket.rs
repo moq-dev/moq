@@ -140,7 +140,24 @@ impl Options {
 	}
 }
 
+/// The largest WebSocket message or frame [`accept`] reads: one qmux record.
+///
+/// Cap the socket at this before upgrading it, so a peer cannot make it buffer more.
+pub fn max_message_size() -> usize {
+	qmux::ws::max_message_size(&crate::qmux_config())
+}
+
+/// A socket config capped at [`max_message_size`], for the sockets upgraded here.
+fn socket_config() -> tungstenite::protocol::WebSocketConfig {
+	let max = max_message_size();
+	tungstenite::protocol::WebSocketConfig::default()
+		.max_message_size(Some(max))
+		.max_frame_size(Some(max))
+}
+
 /// Read SETUP on an upgraded WebSocket, leaving admission to the returned request.
+///
+/// Cap the socket at [`max_message_size`] before the upgrade.
 pub async fn accept<T>(socket: T, options: Options) -> crate::Result<crate::server::Request>
 where
 	T: futures::Stream<Item = std::result::Result<tungstenite::Message, tungstenite::Error>>
@@ -507,10 +524,11 @@ async fn connect_tls_override(
 	);
 
 	let connector = tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()));
-	let (websocket, response) = tokio_tungstenite::client_async_tls_with_config(request, stream, None, Some(connector))
-		.await
-		.map_err(qmux::Error::from)
-		.map_err(Error::connect)?;
+	let (websocket, response) =
+		tokio_tungstenite::client_async_tls_with_config(request, stream, Some(socket_config()), Some(connector))
+			.await
+			.map_err(qmux::Error::from)
+			.map_err(Error::connect)?;
 
 	let negotiated = response
 		.headers()
@@ -711,7 +729,7 @@ impl Listener {
 		};
 
 		async move {
-			let websocket = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, None)
+			let websocket = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(socket_config()))
 				.await
 				.map_err(qmux::Error::from)
 				.map_err(Error::accept)?;

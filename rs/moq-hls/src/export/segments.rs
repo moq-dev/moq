@@ -198,8 +198,8 @@ pub(crate) struct Window {
 enum Next {
 	/// A segment is ready to fetch.
 	Ready(Row),
-	/// No further segment will ever appear (the timeline ended).
-	Ended,
+	/// No further segment will ever appear (the timeline ended or failed).
+	Done,
 	/// Nothing new yet; wait for the next window change.
 	Pending,
 }
@@ -229,7 +229,7 @@ impl State {
 		});
 		match next {
 			Some(row) => Next::Ready(row.clone()),
-			None if self.ended => Next::Ended,
+			None if self.ended || self.failed.is_some() => Next::Done,
 			None => Next::Pending,
 		}
 	}
@@ -323,7 +323,7 @@ impl Producer {
 	}
 
 	/// Mark the reference timeline failed with `err`: every listing refuses with it instead of
-	/// ending. Call [`close`](Self::close) after, so cursors end once drained.
+	/// ending, and cursors return it once drained. No row is pushed after.
 	pub fn fail(&self, err: crate::Error) {
 		if let Ok(mut state) = self.state.write() {
 			state.failed.get_or_insert(err);
@@ -506,8 +506,12 @@ impl Consumer {
 		self.rendition.init().await
 	}
 
-	/// The next segment, with its media; `None` once the rendition ends, including when its
-	/// timeline failed.
+	/// The next segment, with its media; `None` only once the rendition ends cleanly, so a
+	/// recording that reads to `None` is complete.
+	///
+	/// Once a timeline fails (the reference's, or this rendition's own), the cursor drains the
+	/// segments it still covers, then fails every call with
+	/// [`TimelineFailed`](crate::Error::TimelineFailed), as [`Rendition::playlist`] does.
 	///
 	/// Waits for the next segment to resolve on this rendition, then FETCHes and transmuxes its
 	/// frames. A segment whose groups already left the relay cache (or that is a gap for this
@@ -517,13 +521,15 @@ impl Consumer {
 	/// is never read under the old rows.
 	pub async fn next(&mut self) -> Result<Option<Segment>> {
 		loop {
-			let Some((row, resets)) = kio::wait(|waiter| self.poll_next(waiter)).await else {
+			let Some((row, resets)) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
 				return Ok(None);
 			};
 			kio::wait(|waiter| self.rendition.poll_resolved(waiter, &row)).await;
-			// The rendition's timeline failed: the cursor ends, and its playlist answers the error.
-			if self.rendition.is_failed(&row) {
-				return Ok(None);
+			// This rendition's timeline failed before covering the row, so no later row resolves.
+			if let Some(err) = self.rendition.own_failure()
+				&& self.rendition.is_failed(&row)
+			{
+				return Err(err);
 			}
 			let media = self.rendition.fetch(&row).await?;
 			self.after = Some((resets, row.segment));
@@ -539,21 +545,26 @@ impl Consumer {
 		}
 	}
 
-	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<(Row, u64)>> {
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<(Row, u64)>>> {
 		self.poll_feed(waiter);
 		let poll = self
 			.state
 			.poll(waiter, |state| match state.next_after(self.after.as_ref()) {
 				Next::Ready(row) => Poll::Ready(Some((row, state.resets))),
-				Next::Ended => Poll::Ready(None),
+				Next::Done => Poll::Ready(None),
 				Next::Pending => Poll::Pending,
 			});
-		match poll {
-			Poll::Ready(Ok(found)) => Poll::Ready(found),
-			// The producer closed without a clean end (broadcast dropped): no more segments.
-			Poll::Ready(Err(_)) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
+		// A closed window (the rendition was retired) has nothing more, and its guard must drop
+		// before `check` reads the window again.
+		let found = match poll {
+			Poll::Ready(found) => found.unwrap_or(None),
+			Poll::Pending => return Poll::Pending,
+		};
+		if found.is_some() {
+			return Poll::Ready(Ok(found));
 		}
+		// Nothing left to drain: end where the playlist does, failing if it fails.
+		Poll::Ready(self.rendition.check().map(|()| None))
 	}
 
 	/// Hold a live subscription on the media track the rendition is bound to now.
@@ -787,7 +798,7 @@ mod tests {
 		);
 
 		live.end();
-		assert!(matches!(live.state.read().next_after(after(1).as_ref()), Next::Ended));
+		assert!(matches!(live.state.read().next_after(after(1).as_ref()), Next::Done));
 	}
 
 	/// A cleared window may restart its numbering lower, so a cursor past a higher number of the
