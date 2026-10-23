@@ -4,8 +4,7 @@
 
 moq-net and `@moq/net` model items that only the built-in sessions use are
 private. The public model serves applications: publish, subscribe, and answer
-on demand. Nothing in the source marks items as pending or deliberately
-private.
+on demand.
 
 ## Plan
 
@@ -23,9 +22,8 @@ for a named consumer.
   `pub(crate)`. JS `Track.Request.stage`, `Track.Staged`, and
   `Track.Producer.dropGroups` become internal again (`dropGroups` returns to
   `hooks.dropTrackGroups`). Keep `create_frame(self)`: hang and moq-mux use it.
-- Delete every `// pending:` and `// private:` mark in `rs/moq-net` and
-  `js/net`; their lint is already gone. The moq-transport passthrough
-  exception stays documented in
+- The `// pending:` and `// private:` marks and their lint are already gone.
+  The moq-transport passthrough exception stays documented in
   [moq-transport passthrough](/quest/m1/ietf-extension/README.md).
 
 Rejected: the toy-transport integration tests proving a third party could

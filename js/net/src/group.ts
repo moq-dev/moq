@@ -270,7 +270,6 @@ export class Producer {
 		return makeConsumer(this.#state);
 	}
 
-	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * Create an independent read handle that receives every frame written here.
 	 *

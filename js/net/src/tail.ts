@@ -8,7 +8,6 @@ export interface TailOptions {
 	grace?: () => Milli;
 }
 
-// private: plumbing
 /**
  * The group streams a subscription has received, so its end can wait for the ones still owed.
  *
