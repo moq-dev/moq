@@ -783,8 +783,8 @@ impl Publish {
 		}
 	}
 
-	/// Hand `fill` to C a group at a time, each once the one before it is answered, until
-	/// every group is answered or nobody waits on it.
+	/// Hand `fill` to C a group at a time, each once the one before it is answered or nobody
+	/// reads it any more, until every group is answered or nobody waits on the fill.
 	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::Fill>) {
 		let mut last = None;
 		while fill.is_used()
@@ -802,10 +802,13 @@ impl Publish {
 				return;
 			};
 			callback.call(id);
-			let unused = kio::wait(|waiter| fill.poll_unused(waiter));
+			let unwanted = kio::wait(|waiter| fill.poll_unwanted(sequence, waiter));
 			tokio::select! {
 				_ = answered => {}
-				_ = unused => return,
+				// Withdrawn, so answering it fails as not found, and the fill moves on.
+				_ = unwanted => {
+					State::lock().publish.group_request.remove(id);
+				}
 			}
 		}
 	}

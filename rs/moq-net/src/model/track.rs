@@ -16013,14 +16013,15 @@ mod test {
 			panic!("below the start is a miss");
 		};
 		assert_eq!(fill.next(), Some(0));
-		let fetching = fill.group(0);
-		assert!(fetching.poll_unused(&waiter).is_pending());
+		assert!(fill.is_wanted(0));
+		assert!(fill.poll_unwanted(0, &waiter).is_pending());
 
 		subscriber.update(ascending(8..)).unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
-		assert!(fetching.poll_unused(&waiter).is_ready(), "nobody reads group 0 now");
-		drop(fetching);
-		assert!(fill.group(8).poll_unused(&waiter).is_pending());
+		assert!(fill.poll_unwanted(0, &waiter).is_ready(), "nobody reads group 0 now");
+		assert!(!fill.is_wanted(0));
+		assert!(fill.is_wanted(8));
+		assert!(fill.poll_unwanted(8, &waiter).is_pending());
 		assert_eq!(fill.next(), Some(8), "nobody reads below 8 any more");
 		write_filled(fill.accept(8, None), 8);
 		assert_eq!(fill.next(), Some(9));
@@ -16063,7 +16064,7 @@ mod test {
 		};
 		assert_eq!((again.start().group, again.end()), (0, 8));
 		assert_eq!(fill.next(), Some(8), "the first fill still owes only 8 and up");
-		assert!(fill.group(0).poll_unused(&waiter).is_ready());
+		assert!(!fill.is_wanted(0), "a group stops being wanted for good");
 	}
 
 	/// A descending reader's disjoint misses queue newest first, so a handler serving one fill

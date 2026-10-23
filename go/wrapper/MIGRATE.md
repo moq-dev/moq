@@ -8,6 +8,7 @@ How to update your code for each breaking change, newest first.
 
 `TrackDynamic.RequestedGroup` is now `RequestedFill`, returning a `*Fill` (`StartGroup`, `StartFrame`, `EndGroup`, `Priority`, `MaxDelay`, `Order`, `Next`, `Accept(sequence)`, `DropGroups(start, end)`, `IsUsed`, `Unused`), and `All` ranges over fills.
 `GroupRequest` and `GroupDemand` are removed: serve each group `Next` names, and watch `IsUsed` or `Unused` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `Next` skips it, and `IsWanted(sequence)` and `Unwanted(ctx, sequence)` say when to stop serving one.
 A refusal carries no application code: `DropGroups` fails the waiting fetches with `ErrNotFound`.
 
 ### `Subscription.MaxDelay` is a pointer

@@ -384,6 +384,13 @@ impl FillState {
 		}
 	}
 
+	/// Whether a join of fill `id` still reads `sequence`.
+	fn wants(&self, id: u64, sequence: u64) -> bool {
+		self.pending
+			.get(&id)
+			.is_some_and(|pending| pending.wants.contains_key(&sequence))
+	}
+
 	/// Take the oldest queued fill, still pending (joinable) until it ends.
 	fn pop(&mut self) -> Option<u64> {
 		let id = self.queue.pop_front()?;
@@ -501,6 +508,8 @@ pub(super) fn poll_requested(
 /// it has and [`drop_groups`](Self::drop_groups) for the rest. Dropping the fill names
 /// whatever is left as dropped while a reader still wants it; once nobody does, the fill is
 /// withdrawn and records nothing, so stop serving it when [`unused`](Self::unused) resolves.
+/// A reader narrowing its ranges may leave a single group, so stop serving that one when
+/// [`unwanted`](Self::unwanted) resolves and move on to [`next`](Self::next).
 pub struct Fill {
 	inner: Arc<Inner>,
 }
@@ -582,6 +591,23 @@ impl Fill {
 		self.inner.result.poll_unused(waiter).map(|_| ())
 	}
 
+	/// Whether a reader still reads group `sequence`: false once every reader narrowed past
+	/// it, or nobody waits on the fill. A group stops being wanted for good.
+	pub fn is_wanted(&self, sequence: u64) -> bool {
+		self.inner.is_wanted(sequence)
+	}
+
+	/// Wait until no reader reads group `sequence`, so stop serving it.
+	#[cfg(feature = "async")]
+	pub async fn unwanted(&self, sequence: u64) {
+		kio::wait(|waiter| self.poll_unwanted(sequence, waiter)).await
+	}
+
+	/// Poll until no reader reads group `sequence`.
+	pub fn poll_unwanted(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
+		self.inner.poll_unwanted(sequence, waiter)
+	}
+
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
 	/// neither answered nor delivered live since it was asked. `None` once none is owed.
 	pub fn next(&self) -> Option<u64> {
@@ -641,6 +667,22 @@ impl Fill {
 impl Inner {
 	fn contains(&self, sequence: u64) -> bool {
 		(self.start.group..self.end).contains(&sequence)
+	}
+
+	fn is_wanted(&self, sequence: u64) -> bool {
+		self.result.is_used() && self.fills.read().wants(self.id, sequence)
+	}
+
+	fn poll_unwanted(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
+		if self.result.poll_unused(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		self.fills
+			.poll(waiter, |fills| match fills.wants(self.id, sequence) {
+				true => Poll::Pending,
+				false => Poll::Ready(()),
+			})
+			.map(drop)
 	}
 
 	/// The runs of the fill a reader still reads, read before any other lock.
@@ -858,26 +900,10 @@ impl GroupFill {
 		self.frame_start
 	}
 
-	/// Poll until no reader waits on this group, as when every reader narrowed past it.
+	/// Poll until no reader waits on this group, as [`Fill::poll_unwanted`].
 	// private: capability gap
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
-		if self.inner.result.poll_unused(waiter).is_ready() {
-			return Poll::Ready(());
-		}
-		let (id, sequence) = (self.inner.id, self.sequence);
-		self.inner
-			.fills
-			.poll(waiter, |fills| {
-				match fills
-					.pending
-					.get(&id)
-					.is_some_and(|pending| pending.wants.contains_key(&sequence))
-				{
-					true => Poll::Pending,
-					false => Poll::Ready(()),
-				}
-			})
-			.map(drop)
+		self.inner.poll_unwanted(self.sequence, waiter)
 	}
 
 	/// Poll until the track closes, with its abort error.

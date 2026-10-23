@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -11467,6 +11465,7 @@ abstract class MoqFillInterface {
   void dropGroups({required int start, required int end});
   int endGroup();
   bool isUsed();
+  bool isWanted({required int sequence});
   int? maxDelayUs();
   int? next();
   MoqOrder order();
@@ -11474,6 +11473,7 @@ abstract class MoqFillInterface {
   int startFrame();
   int startGroup();
   Future<void> unused();
+  Future<void> unwanted({required int sequence});
 }
 
 final _MoqFillFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -11550,6 +11550,18 @@ class MoqFill implements MoqFillInterface {
     );
   }
 
+  bool isWanted({required int sequence}) {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqfill_is_wanted(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(sequence),
+        status,
+      ),
+      FfiConverterBool.lift,
+      null,
+    );
+  }
+
   int? maxDelayUs() {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqfill_max_delay_us(
@@ -11615,6 +11627,20 @@ class MoqFill implements MoqFillInterface {
   Future<void> unused() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqfill_unused(uniffiClonePointer()),
+      ffi_moq_ffi_rust_future_poll_void,
+      ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_free_void,
+      (_) {},
+      moqExceptionErrorHandler,
+    );
+  }
+
+  Future<void> unwanted({required int sequence}) {
+    return uniffiRustCallAsync(
+      () => uniffi_moq_ffi_fn_method_moqfill_unwanted(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(sequence),
+      ),
       ffi_moq_ffi_rust_future_poll_void,
       ffi_moq_ffi_rust_future_complete_void,
       ffi_moq_ffi_rust_future_free_void,
@@ -17361,6 +17387,15 @@ external int uniffi_moq_ffi_fn_method_moqfill_is_used(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Int8 Function(Pointer<Void>, Uint64, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external int uniffi_moq_ffi_fn_method_moqfill_is_wanted(
+  Pointer<Void> ptr,
+  int sequence,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -17412,6 +17447,12 @@ external int uniffi_moq_ffi_fn_method_moqfill_start_group(
 @Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqfill_unused(
   Pointer<Void> ptr,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Uint64)>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqfill_unwanted(
+  Pointer<Void> ptr,
+  int sequence,
 );
 
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
@@ -18925,6 +18966,9 @@ external int uniffi_moq_ffi_checksum_method_moqfill_end_group();
 external int uniffi_moq_ffi_checksum_method_moqfill_is_used();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqfill_is_wanted();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqfill_max_delay_us();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -18944,6 +18988,9 @@ external int uniffi_moq_ffi_checksum_method_moqfill_start_group();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqfill_unused();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqfill_unwanted();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqgroupproducer_abort();
@@ -19639,6 +19686,9 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqfill_is_used() != 6429) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
+  if (uniffi_moq_ffi_checksum_method_moqfill_is_wanted() != 35921) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
   if (uniffi_moq_ffi_checksum_method_moqfill_max_delay_us() != 40340) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
@@ -19658,6 +19708,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqfill_unused() != 3173) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqfill_unwanted() != 58929) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqgroupproducer_abort() != 59787) {

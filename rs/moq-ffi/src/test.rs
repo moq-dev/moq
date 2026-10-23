@@ -2067,6 +2067,8 @@ async fn fill_goes_unused_when_the_fetcher_leaves() {
 		.expect("timed out waiting for fill")
 		.unwrap();
 	assert!(fill.is_used());
+	assert!(fill.is_wanted(5));
+	assert!(!fill.is_wanted(6), "outside the fill");
 
 	fetch.abort();
 	tokio::time::timeout(TIMEOUT, fill.unused())
@@ -2074,6 +2076,11 @@ async fn fill_goes_unused_when_the_fetcher_leaves() {
 		.expect("timed out waiting for the abandoned fetch to become unused")
 		.unwrap();
 	assert!(!fill.is_used());
+	tokio::time::timeout(TIMEOUT, fill.unwanted(5))
+		.await
+		.expect("an unused fill wants none of its groups")
+		.unwrap();
+	assert!(!fill.is_wanted(5));
 }
 
 #[tokio::test]

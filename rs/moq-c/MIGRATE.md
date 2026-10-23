@@ -8,6 +8,7 @@ How to update your code for each breaking change, newest first.
 
 The ABI is unchanged. A track's dynamic handler now also gets group requests for history a subscription covers that the cache lacks, not only for fetches; each run arrives one group at a time, the next once the previous is accepted, aborted, or freed.
 `moq_group_request_abort` no longer delivers its error code: the waiting fetches fail as not found.
+A request whose group nobody reads any more, because every subscriber narrowed past it, is withdrawn and the next group follows: answering it then fails as not found.
 `moq_subscription.max_delay_us` always sets a budget, so a C subscriber cannot ask for the publisher's max age alone.
 
 ### JSON snapshot `delta_ratio` is `deltas`

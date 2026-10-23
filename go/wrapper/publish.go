@@ -379,7 +379,8 @@ func (d *TrackDynamic) Cancel() {
 // Accept each group you have and DropGroups the rest; Next names what is still
 // owed, in the fill's order. Releasing the fill names whatever is left as dropped
 // while a reader still wants it; once nobody does, it is withdrawn, so stop
-// serving it when Unused returns.
+// serving it when Unused returns. Stop serving a single group when Unwanted
+// returns for it, and move on to Next.
 type Fill struct {
 	inner *ffi.MoqFill
 }
@@ -443,4 +444,15 @@ func (f *Fill) IsUsed() bool {
 // Unused blocks until no reader waits on this fill.
 func (f *Fill) Unused(ctx context.Context) error {
 	return f.inner.Unused(ctx)
+}
+
+// IsWanted reports whether a reader still reads group sequence: false once every
+// reader narrowed past it, or nobody waits on the fill.
+func (f *Fill) IsWanted(sequence uint64) bool {
+	return f.inner.IsWanted(sequence)
+}
+
+// Unwanted blocks until no reader reads group sequence, so stop serving it.
+func (f *Fill) Unwanted(ctx context.Context, sequence uint64) error {
+	return f.inner.Unwanted(ctx, sequence)
 }

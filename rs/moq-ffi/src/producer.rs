@@ -486,7 +486,8 @@ impl MoqTrackDynamic {
 /// Call [`accept`](Self::accept) for each group you have and [`drop_groups`](Self::drop_groups)
 /// for the rest; [`next`](Self::next) names what is still owed, in the fill's order. Releasing
 /// it names whatever is left as dropped while a reader still wants it; once nobody does, it is
-/// withdrawn, so stop serving it when [`unused`](Self::unused) resolves.
+/// withdrawn, so stop serving it when [`unused`](Self::unused) resolves. Stop serving a single
+/// group when [`unwanted`](Self::unwanted) resolves for it, and move on to the next.
 #[derive(uniffi::Object)]
 pub struct MoqFill {
 	inner: Arc<moq_net::track::Fill>,
@@ -559,6 +560,22 @@ impl MoqFill {
 		let fill = self.inner.clone();
 		crate::ffi::detached(async move {
 			fill.unused().await;
+			Ok::<_, MoqError>(())
+		})
+		.await
+	}
+
+	/// Whether a reader still reads group `sequence`: false once every reader narrowed past
+	/// it, or nobody waits on the fill.
+	pub fn is_wanted(&self, sequence: u64) -> bool {
+		self.inner.is_wanted(sequence)
+	}
+
+	/// Wait until no reader reads group `sequence`, so stop serving it.
+	pub async fn unwanted(&self, sequence: u64) -> Result<(), MoqError> {
+		let fill = self.inner.clone();
+		crate::ffi::detached(async move {
+			fill.unwanted(sequence).await;
 			Ok::<_, MoqError>(())
 		})
 		.await

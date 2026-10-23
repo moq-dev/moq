@@ -254,7 +254,8 @@ the start, also serves the cached groups they newly cover, never one already
 served. A group they cover below the live feed that the cache lacks (evicted
 before the subscriber first looked for it, skipped, or below where the feed
 starts) is asked of the track's dynamic handler
-as a fill, which a relay serves by fetching upstream one group at a time; with
+as a fill, which a relay serves by fetching upstream one group at a time, skipping
+a group once every subscriber that asked for it narrows past it; with
 no handler it is reported as dropped once the feed stops waiting for it. One
 evicted after the subscriber saw it cached, but before it read it, is skipped. A relay merges its subscribers' ranges into one upstream request, which
 today's wire versions carry as the single span covering them. A time anchor is

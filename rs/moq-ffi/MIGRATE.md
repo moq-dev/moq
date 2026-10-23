@@ -9,6 +9,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 `MoqTrackDynamic::requested_group` is now `requested_fill`, returning a `MoqFill`: `start_group`, `start_frame`, `end_group`, `priority`, `max_delay_us`, `order`, `next`, `accept(sequence)`, `drop_groups(start, end)`, `is_used`, and `unused`.
 `MoqGroupRequest` and `MoqGroupDemand` are removed: serve each group `next()` names, and watch `is_used` or `unused` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `is_wanted(sequence)` and `unwanted(sequence)` say when to stop serving one.
 A refusal carries no application code: `drop_groups` fails the waiting fetches with `NotFound`.
 A fill also arrives for history a subscription covers that the cache lacks, not only for a fetch.
 

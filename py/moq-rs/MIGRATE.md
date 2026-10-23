@@ -8,6 +8,7 @@ How to update your code for each breaking change, newest first.
 
 `TrackDynamic.requested_group()` is now `requested_fill()`, returning a `Fill` (`start_group`, `start_frame`, `end_group`, `priority`, `max_delay`, `order`, `next()`, `accept(sequence)`, `drop_groups(start, end)`, `is_used()`, `unused()`), and iterating a `TrackDynamic` yields fills.
 `GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `is_used()` or `unused()` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `is_wanted(sequence)` and `unwanted(sequence)` say when to stop serving one.
 A refusal carries no application code: `drop_groups` fails the waiting fetches with `moq.Error.NotFound`.
 `Subscription.max_delay` also accepts `None`, leaving the publisher's max age alone to bound delivery.
 

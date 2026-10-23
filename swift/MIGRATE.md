@@ -8,6 +8,7 @@ How to update your code for each breaking change, newest first.
 
 `TrackDynamic.requestedGroup()` is now `requestedFill()`, returning a `Fill` (`startGroup`, `startFrame`, `endGroup`, `priority`, `maxDelayUs`, `order`, `next()`, `accept(sequence:)`, `dropGroups(start:end:)`, `isUsed`, `unused()`), and iterating a `TrackDynamic` yields fills.
 `GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `isUsed` or `unused()` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `isWanted(sequence:)` and `unwanted(sequence:)` say when to stop serving one.
 A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
 `Subscription.maxDelayUs` is a `UInt64?`, where nil leaves the publisher's max age alone to bound delivery.
 

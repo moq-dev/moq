@@ -199,7 +199,8 @@ class Fill:
     Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest;
     :meth:`next` names what is still owed, in the fill's order. Dropping the fill names
     whatever is left as dropped while a reader still wants it; once nobody does, it is
-    withdrawn, so stop serving it when :meth:`unused` returns.
+    withdrawn, so stop serving it when :meth:`unused` returns. Stop serving a single group
+    when :meth:`unwanted` returns for it, and move on to :meth:`next`.
     """
 
     def __init__(self, inner: MoqFill) -> None:
@@ -257,6 +258,17 @@ class Fill:
     async def unused(self) -> None:
         """Wait until no reader waits on this fill."""
         await self._inner.unused()
+
+    def is_wanted(self, sequence: int) -> bool:
+        """Whether a reader still reads group ``sequence``.
+
+        False once every reader narrowed past it, or nobody waits on the fill.
+        """
+        return self._inner.is_wanted(sequence)
+
+    async def unwanted(self, sequence: int) -> None:
+        """Wait until no reader reads group ``sequence``, so stop serving it."""
+        await self._inner.unwanted(sequence)
 
 
 class TrackDynamic(_Stream[Fill]):

@@ -515,6 +515,8 @@ async def test_fetch_group_and_serve_dynamic_miss():
     assert fill.priority == 11
     assert fill.next() == 7
     assert fill.is_used()
+    assert fill.is_wanted(7)
+    assert not fill.is_wanted(8)
 
     produced = fill.accept(7)
     produced.write_frame(b"archive", timedelta(microseconds=140_000))

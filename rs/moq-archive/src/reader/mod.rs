@@ -414,16 +414,18 @@ async fn serve_timeline_group<T: ObjectStore>(
 			return;
 		}
 	};
-	let object = shared
-		.cache
-		.get_or_insert_async(&key, async {
+	let object = tokio::select! {
+		biased;
+		// Every reader narrowed past it: the fill moves on to the groups it still owes.
+		_ = fill.unwanted(sequence) => return,
+		object = shared.cache.get_or_insert_async(&key, async {
 			shared
 				.store
 				.get_segments(name, segment, timescale.is_some())
 				.await
 				.map(Arc::new)
-		})
-		.await;
+		}) => object,
+	};
 	let object = match object {
 		Ok(object) => object,
 		Err(err) => {
@@ -439,6 +441,9 @@ async fn serve_timeline_group<T: ObjectStore>(
 	};
 	if object.frame_start != 0 {
 		reject();
+		return;
+	}
+	if !fill.is_wanted(sequence) {
 		return;
 	}
 	let Ok(mut producer) = fill.accept(sequence, None) else {
@@ -549,7 +554,13 @@ async fn serve_group<T: ObjectStore>(
 	// Validate the first object before accepting, so an unreadable group is a plain miss. Keep it,
 	// so a cache too small to hold it costs no second GET.
 	let timed = timescale.is_some();
-	let mut first = match object(shared, track, timed, &spans[0]).await {
+	let loaded = tokio::select! {
+		biased;
+		// Every reader narrowed past it: the fill moves on to the groups it still owes.
+		_ = fill.unwanted(sequence) => return,
+		loaded = object(shared, track, timed, &spans[0]) => loaded,
+	};
+	let mut first = match loaded {
 		Ok(object) => Some((spans[0].sequence, object)),
 		Err(err) => {
 			tracing::warn!(track, sequence, %err, "archived group is unavailable");
@@ -557,6 +568,9 @@ async fn serve_group<T: ObjectStore>(
 			return;
 		}
 	};
+	if !fill.is_wanted(sequence) {
+		return;
+	}
 	let Ok(mut producer) = fill.accept(sequence, None) else {
 		return;
 	};

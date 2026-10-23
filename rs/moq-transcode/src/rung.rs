@@ -516,8 +516,9 @@ fn spawn_fill(
 /// Transcode group `sequence` of a fill, fetching it from the source.
 ///
 /// A failure while someone still wants the group drops it. Once nobody wants the
-/// fill, it is left unanswered instead: the last caller already withdrew it, and
-/// accepting afterwards would cache the group a fresh fill is about to serve.
+/// group, it is left unanswered instead, releasing the permit for the groups the
+/// fill still owes: its last reader already left it, and accepting afterwards would
+/// cache the group a fresh fill is about to serve.
 async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Result<(), Error> {
 	let reject = || fill.drop_groups(sequence..sequence + 1);
 	// A fresh encode of this group need not match the bytes the reader's head
@@ -541,7 +542,7 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 	let options = moq_net::group::Fetch::default().with_priority(fill.priority());
 	let mut source = tokio::select! {
 		biased;
-		_ = fill.unused() => return abandon(sequence),
+		_ = fill.unwanted(sequence) => return abandon(sequence),
 		source = track.fetch_group(sequence, options) => match source {
 			Ok(source) => source,
 			Err(err) => {
@@ -575,7 +576,7 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 
 	// Accepting is what publishes the group. One last look, so a caller who
 	// left while the pipeline was opening does not race a fresh fill.
-	if !fill.is_used() {
+	if !fill.is_wanted(sequence) {
 		return abandon(sequence);
 	}
 
@@ -591,8 +592,8 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 	Ok(())
 }
 
-/// Leave a fill nobody is waiting on: it was withdrawn, so this encode must not publish
-/// the group a fresh fill is about to serve.
+/// Leave a group nobody is waiting on: its fill no longer owes it, so this encode must not
+/// publish the group a fresh fill is about to serve.
 fn abandon(sequence: u64) -> Result<(), Error> {
 	tracing::debug!(sequence, "leaving a fetch nobody wants");
 	Ok(())
@@ -889,6 +890,55 @@ mod tests {
 			retire,
 		};
 		(rung, source, trigger)
+	}
+
+	/// A group every reader narrowed past releases the fill's one-at-a-time fetch, so the
+	/// groups the fill still owes are fetched rather than waiting behind it.
+	#[tokio::test]
+	#[allow(clippy::disallowed_methods)]
+	async fn a_group_nobody_reads_releases_its_fill() {
+		use std::task::Poll;
+		let (rung, source, _retire) = idle_rung();
+		let source_fills = source.create_track("video", None).unwrap().dynamic();
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let timed = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let mut track = output.create_track("video/120p", timed).unwrap();
+		let fills = track.dynamic();
+		let ascending = |groups| {
+			moq_net::track::Subscription::default()
+				.with_max_delay(None)
+				.with_groups(groups)
+				.with_order(moq_net::track::Order::Ascending)
+		};
+		let mut reader = track.subscribe(ascending(7..));
+		track.start_at(10).unwrap();
+		let mut live = track.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		live.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
+			.unwrap();
+		live.finish().unwrap();
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+		let fill = fills.requested_fill().await.unwrap();
+		assert_eq!((fill.start().group, fill.end()), (7, 10));
+
+		let mut tasks = tokio::task::JoinSet::new();
+		let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+		spawn_fill(&mut tasks, rung, fill, permit);
+		let wait = std::time::Duration::from_secs(5);
+		let first = tokio::time::timeout(wait, source_fills.requested_fill())
+			.await
+			.expect("group 7 is fetched from the source")
+			.unwrap();
+		assert_eq!(first.start().group, 7);
+
+		reader.update(ascending(8..)).unwrap();
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		let next = tokio::time::timeout(wait, source_fills.requested_fill())
+			.await
+			.expect("the fill waited behind group 7, which nobody reads")
+			.unwrap();
+		assert_eq!(next.start().group, 8);
 	}
 
 	#[tokio::test(start_paused = true)]
