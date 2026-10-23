@@ -5097,6 +5097,7 @@ dependencies = [
  "bytesize",
  "criterion",
  "futures",
+ "h2",
  "hex",
  "http-body",
  "http-cache-reqwest",

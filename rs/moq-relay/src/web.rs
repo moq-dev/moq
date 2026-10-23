@@ -424,9 +424,12 @@ impl Web {
 			.layer(axum::middleware::from_fn(get_cors))
 			.into_make_service_with_connect_info::<crate::listener::Peer>();
 		let ws = config.resolved_ws();
+		// Each request is admitted on its own, so a connection may have as many in flight
+		// as a session may have credentials verifying; the client queues the rest.
+		let streams = u32::try_from(state.auth.verifications()).unwrap_or(u32::MAX);
 
 		let http = if let Some(listener) = http_listener {
-			let server = crate::listener::server(
+			let mut server = crate::listener::server(
 				listener,
 				crate::listener::Config {
 					health: health.clone(),
@@ -435,6 +438,7 @@ impl Web {
 				},
 				WebAcceptor::plain(ws),
 			)?;
+			server.http_builder().http2().max_concurrent_streams(streams);
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -454,7 +458,7 @@ impl Web {
 					),
 				);
 			}
-			let server = crate::listener::server(
+			let mut server = crate::listener::server(
 				listener,
 				crate::listener::Config {
 					health: health.clone(),
@@ -463,6 +467,7 @@ impl Web {
 				},
 				WebAcceptor::tls(rustls_config, ws),
 			)?;
+			server.http_builder().http2().max_concurrent_streams(streams);
 			Some(server.serve(app))
 		} else {
 			None
@@ -1982,6 +1987,48 @@ mod tests {
 		let response = String::from_utf8_lossy(&response);
 		assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
 		assert!(start.elapsed() >= timeout, "refused before the timeout");
+
+		serving.abort();
+	}
+
+	/// An HTTP/2 connection carries no more requests at once than a session may have
+	/// credentials verifying, advertised up front so the client queues the rest rather
+	/// than having them refused.
+	#[tokio::test]
+	async fn h2_streams_are_bounded_by_the_verification_budget() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let mut config = Config::default();
+		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		let (auth, _admissions) = crate::auth::Auth::embedded("test");
+		let auth = auth.with_verifications(7);
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
+		let http = web.addrs().http.expect("the HTTP listener is configured");
+		let routes = web.routes();
+		let serving = tokio::spawn(web.serve(routes));
+
+		// Prior-knowledge HTTP/2: the preface, then an empty SETTINGS frame.
+		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
+		tcp.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+			.await
+			.unwrap();
+
+		// The server's own SETTINGS frame comes first.
+		let mut header = [0; 9];
+		tcp.read_exact(&mut header).await.unwrap();
+		assert_eq!(header[3], 0x4, "the server opened with something other than SETTINGS");
+		let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+		let mut payload = vec![0; len];
+		tcp.read_exact(&mut payload).await.unwrap();
+		let streams = payload
+			.chunks_exact(6)
+			.find(|setting| setting[..2] == [0, 0x3])
+			.map(|setting| u32::from_be_bytes(setting[2..].try_into().unwrap()));
+		assert_eq!(streams, Some(7));
 
 		serving.abort();
 	}

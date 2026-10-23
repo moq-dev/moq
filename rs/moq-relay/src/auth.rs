@@ -74,7 +74,8 @@ pub struct Config {
 
 	/// Maximum in-band tokens one session has the auth server verifying at once,
 	/// counting checks still running past the admission timeout. Later tokens wait
-	/// for a slot. Defaults to 128.
+	/// for a slot. Also the requests one HTTP/2 connection carries at once, each
+	/// admitted on its own. Defaults to 128.
 	#[usage(
 		long = "auth-verifications",
 		env = "MOQ_AUTH_VERIFICATIONS",
@@ -898,6 +899,11 @@ impl Auth {
 	/// The name this relay puts in every request.
 	pub fn node(&self) -> &str {
 		&self.node
+	}
+
+	/// How many credentials one session may have the decider verifying at once.
+	pub(crate) fn verifications(&self) -> usize {
+		self.verifications
 	}
 
 	/// A fresh `connect` request for this relay, before the transport's facts are filled in.
