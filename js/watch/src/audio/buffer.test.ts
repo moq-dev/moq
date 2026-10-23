@@ -129,6 +129,29 @@ describe("AudioBuffer", () => {
 		}
 	});
 
+	// Media timestamps are absolute microseconds, so they pass 2^31 after ~36 minutes of broadcast
+	// and 2^32 after ~72. The gate has to hold a frame ahead of the playhead at any of them.
+	it("holds a frame one second ahead at any timestamp", async () => {
+		for (const base of [0, 2 ** 31, 2 ** 32, 3_600_000_000]) {
+			const { buffer, state, close } = open();
+			try {
+				await state(base, false, 0);
+				const wait = buffer.wait((base + 1_000_000) as Micro, new AbortController().signal);
+				expect(Bun.peek.status(wait)).toBe("pending");
+
+				// Still more than the floor behind the frame.
+				await state(base + 800_000, false, 0);
+				expect(Bun.peek.status(wait)).toBe("pending");
+
+				// Within the floor of the frame.
+				await state(base + 900_000, false, 0);
+				expect(Bun.peek.status(wait)).toBe("fulfilled");
+			} finally {
+				close();
+			}
+		}
+	});
+
 	// The decoder's output reaches the ring after the decode loop has moved on, so a stalled ring
 	// still looks stalled while the loop releases frame after frame. Releasing all of them pushes
 	// the whole lookahead into a floor-sized ring, which drops the oldest unplayed audio.
