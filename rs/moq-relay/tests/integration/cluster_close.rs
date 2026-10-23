@@ -143,7 +143,10 @@ async fn a_relay_shutdown_closes_its_cluster_dials() {
 	let runtime = dialer_runtime();
 	let (trigger, running) = runtime
 		.spawn(async move {
-			let relay = moq_relay::Relay::load(config).await.expect("load relay");
+			let relay = moq_relay::Relay::load(config)
+				.await
+				.expect("load relay")
+				.with_signals(false);
 			let trigger = relay.shutdown_trigger().clone();
 			(trigger, tokio::spawn(relay.run()))
 		})

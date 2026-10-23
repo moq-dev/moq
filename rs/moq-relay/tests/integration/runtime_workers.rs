@@ -77,7 +77,7 @@ async fn workers_serve_quic_and_share_one_origin() {
 	let (cert, key) = certificate(dir.path());
 	let config = worker_config(&cert, &key, WORKERS);
 
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 
 	// The owner keeps the worker group; aborting this task is what joins them.

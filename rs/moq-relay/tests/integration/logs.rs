@@ -6,6 +6,28 @@ pub struct Logs {
 }
 
 impl Logs {
+	/// Capture this test's connection logs without installing a shared writer.
+	pub fn capture(&self) -> tracing::dispatcher::DefaultGuard {
+		use tracing_subscriber::layer::SubscriberExt;
+
+		// With just one registered dispatcher, tracing-core registers new callsites
+		// against the registering thread's default. An explicit process fallback
+		// keeps a different test's first event from disabling this scoped subscriber.
+		static FALLBACK: std::sync::Once = std::sync::Once::new();
+		FALLBACK.call_once(|| {
+			tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::default())
+				.expect("integration tests own the no-op process subscriber");
+		});
+		let subscriber = tracing_subscriber::fmt()
+			.with_ansi(false)
+			.with_writer(self.clone())
+			.finish()
+			.with(
+				tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO),
+			);
+		tracing::subscriber::set_default(subscriber)
+	}
+
 	pub fn text(&self) -> String {
 		self.text.lock().unwrap().clone()
 	}
@@ -40,5 +62,44 @@ impl tracing_subscriber::fmt::MakeWriter<'_> for Logs {
 
 	fn make_writer(&self) -> Self {
 		self.clone()
+	}
+}
+
+/// Registering a callsite on another test thread must not disable a scoped capture.
+#[test]
+fn scoped_capture_survives_another_threads_first_event() {
+	fn event() {
+		tracing::info!(target: "moq_relay::connection", "scoped capture probe");
+	}
+
+	let logs = Logs::default();
+	let _logging = logs.capture();
+	std::thread::spawn(event).join().unwrap();
+	event();
+	assert!(logs.text().contains("scoped capture probe"));
+}
+
+/// Scoped writers must not collect sessions from another runtime's test thread.
+#[test]
+fn simultaneous_captures_keep_their_own_events() {
+	let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+	let threads: Vec<_> = ["first", "second"]
+		.into_iter()
+		.map(|owner| {
+			let ready = ready.clone();
+			std::thread::spawn(move || {
+				let logs = Logs::default();
+				let _logging = logs.capture();
+				ready.wait();
+				tracing::info!(target: "moq_relay::connection", owner, "scoped owner");
+				ready.wait();
+				let text = logs.text();
+				assert_eq!(text.lines().count(), 1, "{text}");
+				assert!(text.contains(owner), "{text}");
+			})
+		})
+		.collect();
+	for thread in threads {
+		thread.join().unwrap();
 	}
 }
