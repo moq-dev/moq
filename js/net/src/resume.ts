@@ -316,6 +316,7 @@ class Reader implements ResumeSource {
 			}),
 			shell.cursor.subscribe(() => {
 				for (const copy of this.#copies) this.#bound(copy);
+				if (this.#ended) this.#letGo(this.#delivered);
 			}),
 		);
 		// A fork starts on its parent's newest copy, at that copy's generation: the copy keeps its
@@ -1149,7 +1150,11 @@ class Recover implements GroupRecover {
 	 * reading `closed` before then would settle it on a failure recovery could still continue.
 	 */
 	watch(group: GroupConsumer): void {
-		void group.closed.then(() => this.#release(this.#reader.out.delete(this)));
+		void group.closed.then(() => this.close());
+	}
+
+	close(): void {
+		this.#release(this.#reader.out.delete(this));
 	}
 
 	// Release the copy being read. `wake` says a parked read may let go of a copy anyway.

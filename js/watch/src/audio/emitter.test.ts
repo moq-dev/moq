@@ -1,5 +1,4 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 import { Emitter } from "./emitter";
@@ -38,11 +37,11 @@ afterEach(() => {
 	else Reflect.deleteProperty(globalThis, "GainNode");
 });
 
-async function setup(fade?: Milli) {
+async function setup() {
 	const context = { currentTime: 10, destination: {} };
 	const source = { out: { root: new Signal({ context, connect: () => {} }) } } as unknown as Decoder;
 	const volume = new Signal(0.5);
-	const emitter = new Emitter({ source, volume, fade });
+	const emitter = new Emitter({ source, volume });
 	await settle();
 	return { emitter, volume, node: nodes[0] };
 }
@@ -51,8 +50,8 @@ async function settle(): Promise<void> {
 	for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
 }
 
-test("ramps a volume change over the fade", async () => {
-	const { emitter, volume, node } = await setup(Milli(50));
+test("ramps a volume change from wherever the last ramp reached", async () => {
+	const { emitter, volume, node } = await setup();
 	try {
 		node.calls.length = 0;
 		volume.set(0);
@@ -60,46 +59,9 @@ test("ramps a volume change over the fade", async () => {
 		expect(node.calls).toEqual([
 			["cancel", 0, 10],
 			["set", 0.5, 10],
-			["ramp", 0, 10.05],
+			["ramp", 0, 10.2],
 		]);
 	} finally {
 		emitter.close();
-	}
-});
-
-test("steps at once with no fade", async () => {
-	const { emitter, volume, node } = await setup(Milli(0));
-	try {
-		node.calls.length = 0;
-		volume.set(0);
-		await settle();
-		expect(node.calls).toEqual([
-			["cancel", 0, 10],
-			["set", 0.5, 10],
-			["set", 0, 10],
-		]);
-	} finally {
-		emitter.close();
-	}
-});
-
-test("refuses an invalid fade", async () => {
-	const error = spyOn(console, "error").mockImplementation(() => {});
-	const { emitter, node } = await setup();
-	try {
-		node.calls.length = 0;
-		emitter.fade.set(-1 as Milli);
-		await settle();
-		expect(node.calls.filter(([method]) => method === "ramp")).toEqual([]);
-		expect(error).toHaveBeenCalled();
-
-		error.mockClear();
-		emitter.fade.set(Number.POSITIVE_INFINITY as Milli);
-		await settle();
-		expect(node.calls.filter(([method]) => method === "ramp")).toEqual([]);
-		expect(error).toHaveBeenCalled();
-	} finally {
-		emitter.close();
-		error.mockRestore();
 	}
 });
