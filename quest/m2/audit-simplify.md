@@ -91,8 +91,7 @@ several.
   doc promises.
 - The `until_wanted` loop copied into moq-audio, moq-boy, moq-video, and
   moq-transcode is one line over `Demand::wanted_changed`. A helper on
-  `Demand` would be a second way to wait for the one demand signal
-  [refresh](/quest/m1/refresh/README.md) chose.
+  `Demand` would be a second way to wait for the one demand signal.
 - js/net's lite version gates mirror Rust's on purpose, and its per-message
   IETF error classes are distinct wire messages.
 
