@@ -554,13 +554,17 @@ impl Consumer {
 				Next::Done => Poll::Ready(None),
 				Next::Pending => Poll::Pending,
 			});
-		match poll {
-			Poll::Ready(Ok(Some(found))) => Poll::Ready(Ok(Some(found))),
-			// Nothing left to drain: the timeline ended or failed, or the window closed (the
-			// rendition was retired). End where the playlist does, failing if it fails.
-			Poll::Ready(_) => Poll::Ready(self.rendition.check().map(|()| None)),
-			Poll::Pending => Poll::Pending,
+		// A closed window (the rendition was retired) has nothing more, and its guard must drop
+		// before `check` reads the window again.
+		let found = match poll {
+			Poll::Ready(found) => found.unwrap_or(None),
+			Poll::Pending => return Poll::Pending,
+		};
+		if found.is_some() {
+			return Poll::Ready(Ok(found));
 		}
+		// Nothing left to drain: end where the playlist does, failing if it fails.
+		Poll::Ready(self.rendition.check().map(|()| None))
 	}
 
 	/// Hold a live subscription on the media track the rendition is bound to now.

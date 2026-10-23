@@ -4105,21 +4105,19 @@ mod tests {
 		assert_eq!(second.segment, 1);
 		assert_eq!(second.discontinuity, 0, "consecutive segments are continuous");
 
-		// Tear down the publisher mid-group. The track ends abruptly (the cursor drains the
-		// segments it already saw and ends; the still-open live-edge group is NOT finalized,
-		// since a reset can't vouch that its media is complete), and the broadcast closes.
-		// (Clean-end finalization of the
-		// live edge is covered by segments::tests::next_after_walks_finalized_segments.)
+		// Tear down the publisher mid-group. The timeline ends abruptly, so the cursor fails
+		// rather than finalize the open live-edge group (a reset can't vouch that its media is
+		// complete) or end as if the recording were complete.
 		drop((catalog, media, registration));
 		broadcast.close();
 
 		let end = tokio::time::timeout(Duration::from_secs(5), segments.next())
 			.await
-			.expect("segment cursor resolves after the source is lost")
-			.unwrap();
+			.expect("segment cursor resolves after the source is lost");
 		assert!(
-			end.is_none(),
-			"an abrupt end does not finalize the open live-edge group"
+			matches!(end, Err(crate::Error::TimelineFailed { .. })),
+			"an abrupt end fails the recording: {:?}",
+			end.map(|segment| segment.map(|segment| segment.segment))
 		);
 
 		// The renditions cursor also ends once the source closes.
