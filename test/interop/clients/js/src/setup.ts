@@ -6,6 +6,7 @@ import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
 import { refused, refusedWebSocket } from "./close";
 import { type CaptureState, FAULTS, type Fault, publish, SAMPLE_MS } from "./contract";
+import { finish } from "./finish";
 import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
 
@@ -23,7 +24,9 @@ function parseFault(value: string | null): Fault {
 	return fault;
 }
 
-if (role === "publish") {
+if (role === "finish-publish" || role === "finish-subscribe") {
+	finish(role, url, broadcast, versions, Number(params.get("frames") ?? 10), Number(params.get("timeout") ?? 60_000));
+} else if (role === "publish") {
 	const el = document.createElement("moq-publish") as MoqPublish;
 	el.setAttribute("url", url);
 	if (versions) el.setAttribute("versions", versions);

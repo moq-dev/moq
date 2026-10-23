@@ -347,6 +347,29 @@ class Reader implements ResumeSource {
 		// The replaced copies keep delivering until the new one delivers its first group: a
 		// group they get meanwhile may be one the new route never has. See #observe.
 		for (const copy of this.#copies) copy.replaced = true;
+		// Cloned handles share closed, so a returning route reuses its subscription and
+		// leases rather than replaying its cache and retaining another copy per flap.
+		const index = this.#copies.findIndex((copy) => copy.source.from.closed === source.from.closed);
+		if (index !== -1) {
+			const [copy] = this.#copies.splice(index, 1);
+			source.retain();
+			copy.source.release();
+			copy.source = source;
+			copy.generation = route.generation;
+			copy.replaced = false;
+			copy.until = undefined;
+			copy.since = undefined;
+			copy.done = undefined;
+			copy.datagramsDone = undefined;
+			// Resume where a fresh copy would: a group it buffered while replaced, below the newest
+			// another route handed out, is not handed out.
+			if (this.#newest !== undefined) copy.floor = Math.max(copy.floor ?? 0, this.#newest);
+			this.#update(copy);
+			this.#bound(copy);
+			this.#copies.push(copy);
+			this.wake();
+			return;
+		}
 		const floor = this.#newest;
 		this.#add({
 			generation: route.generation,

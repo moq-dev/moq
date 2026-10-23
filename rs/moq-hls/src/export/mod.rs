@@ -173,6 +173,11 @@ impl Broadcaster {
 		self.broadcast.closed().await;
 	}
 
+	/// [`closed`](Self::closed), polled: ready once the source broadcast closes.
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		self.broadcast.poll_closed(waiter)
+	}
+
 	/// Look up a rendition by kind and name. Video and audio are separate axes, so a
 	/// video and an audio rendition may share a name without colliding. A rendition is found
 	/// only once the catalog advertises its own timeline.
@@ -3867,8 +3872,8 @@ mod tests {
 		drop((track, catalog, live));
 	}
 
-	// A sibling not yet announced when the rendition binds it fails that first lookup. The
-	// catalog's rows are still listed, and the bind is issued again until the sibling resolves.
+	// A sibling not yet announced when the rendition binds it is waited for. The catalog's rows
+	// are still listed, and the binding resolves on the sibling's first announcement.
 	#[tokio::test]
 	async fn a_sibling_announced_after_export_start_is_bound() {
 		tokio::time::pause();
