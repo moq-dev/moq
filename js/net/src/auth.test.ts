@@ -289,7 +289,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 
 	test("a request waits for its token and survives union renewal", async () => {
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		const logged = spyOn(console, "debug");
 		const origin = new OriginProducer();
 		const broadcast = origin.createBroadcast(Path.from("room/x"));
@@ -344,7 +344,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 			server.abort();
 			await adding.catch(() => void 0);
 			logged.mockRestore();
-			restore();
+			installed.close();
 		}
 	});
 

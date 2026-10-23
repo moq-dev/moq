@@ -1025,12 +1025,12 @@ mod tests {
 	fn the_worker_reads_its_manual_clocks_wall_time() {
 		let Some((mut worker, clock)) = manual() else { return };
 		clock.advance(Duration::from_secs(5));
-		let (wall, anchor) = worker
-			.block_on(async { (moq_clock::wall(), moq_clock::anchor()) })
+		let (wall, origin) = worker
+			.block_on(async { (moq_clock::wall(), moq_clock::origin()) })
 			.unwrap();
 		assert_eq!(wall, clock.wall(), "the worker read the host's wall time");
-		assert_eq!(anchor.0, clock.now());
-		assert_eq!(anchor.1, clock.wall());
+		assert_eq!(origin.0, clock.now());
+		assert_eq!(origin.1, clock.wall());
 	}
 
 	/// A timer made between turns counts from the clock, not from the last turn's

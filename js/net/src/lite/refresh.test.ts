@@ -10,7 +10,7 @@ import { ALPN_06, ALPN_07_WIP } from "./version.ts";
 
 test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s", async (alpn) => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const source = new Producer();
 	const b = new Producer();
 	const broadcast = source.createBroadcast(Path.from("room"));
@@ -79,6 +79,6 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		for (const origin of [b, source]) origin.close();
 		for (const peer of peers) peer.abort();
 		await clock.advance(Nano(0));
-		restore();
+		installed.close();
 	}
 });

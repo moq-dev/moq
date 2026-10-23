@@ -30,7 +30,7 @@ pub async fn connect(
 	let (cluster, auth) = (cluster.clone(), auth.clone());
 	tokio::spawn(async move {
 		let server = moq_net::Server::new().with_versions(version.into());
-		let Ok(handshake) = server.accept_request(moq_net::time::now(), relay_link).await else {
+		let Ok(handshake) = server.accept_request(moq_net::time::Instant::now(), relay_link).await else {
 			return;
 		};
 		let request = Accepted::new(handshake, moq_auth::Transport::Quic);
@@ -39,7 +39,7 @@ pub async fn connect(
 
 	let (session, driver) = client
 		.with_versions(version.into())
-		.connect(moq_net::time::now(), client_link)
+		.connect(moq_net::time::Instant::now(), client_link)
 		.await?;
 	tokio::spawn(moq_net::time::run(driver));
 	Ok(session)

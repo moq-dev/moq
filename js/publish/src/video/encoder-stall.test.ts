@@ -95,7 +95,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	SlowEncoder.instances = [];
 	Input.all = [];
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	let controller!: ReadableStreamDefaultController<VideoFrame>;
 	const fanout = new Fanout(
 		new ReadableStream<VideoFrame>({
@@ -164,7 +164,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 		fanout.close();
 		track.close();
 		await clock.advance(Nano.zero);
-		restore();
+		installed.close();
 		for (const [index, name] of ["VideoEncoder", "VideoFrame"].entries()) {
 			const original = originals[index];
 			if (original) Object.defineProperty(globalThis, name, original);

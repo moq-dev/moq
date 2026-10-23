@@ -965,7 +965,7 @@ function finishedTrack(broadcast: BroadcastProducer, name: string, maxAge?: numb
 // max-age add nothing to the wait.
 test("finish serves finished tracks until stale", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const origin = new OriginProducer();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("finish"));
@@ -1005,7 +1005,7 @@ test("finish serves finished tracks until stale", async () => {
 		live.close();
 	} finally {
 		origin.close();
-		restore();
+		installed.close();
 	}
 });
 
@@ -1048,7 +1048,7 @@ test("a finished broadcast refuses changes", () => {
 // A close elsewhere ends the linger early.
 test("closing the broadcast elsewhere ends the linger", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	try {
 		const broadcast = new BroadcastProducer();
 		finishedTrack(broadcast, "video", 30).close();
@@ -1059,6 +1059,6 @@ test("closing the broadcast elsewhere ends the linger", async () => {
 		await wait;
 		expect(Number(clock.now())).toBe(Nano.fromMilli(Milli(1_000)));
 	} finally {
-		restore();
+		installed.close();
 	}
 });

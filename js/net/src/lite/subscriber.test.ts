@@ -2196,7 +2196,7 @@ test("announce init is the initial set", async () => {
 
 test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while waiting for %s", async (stage) => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { quic, streams, opened } = fakeSession(stage === "credit" ? [1] : []);
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	let failure: unknown;
@@ -2223,6 +2223,6 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
 		}
 	} finally {
 		subscriber.close();
-		restore();
+		installed.close();
 	}
 });

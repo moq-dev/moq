@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Refusal` is `RefusalKind` (#6510)
+
+The re-exported `moq_stats::Refusal` follows moq-net's rename: use `moq_stats::RefusalKind`.
+
 ### The `.z` flavor ends with the plain one past 32 MB
 
 A frame whose uncompressed JSON passes the 32 MB group budget now ends both the plain track and its `.z` sibling with `FrameTooLarge`: a reader inflates the whole group, so compression no longer carries a larger frame.

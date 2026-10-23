@@ -14,7 +14,7 @@ use moq_net::transport::memory;
 pub use moq_net::time::run;
 
 pub fn now() -> moq_net::time::Instant {
-	moq_net::time::now()
+	moq_net::time::Instant::now()
 }
 
 /// Options for [`connect_mock`].

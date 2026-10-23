@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// The reason a session was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Refusal {
+pub enum RefusalKind {
 	/// The admission decider refused the session.
 	Refused,
 	/// The admission decider could not answer.
@@ -21,7 +21,7 @@ pub enum Refusal {
 	Expired,
 }
 
-impl Refusal {
+impl RefusalKind {
 	/// Every currently defined kind, in display order.
 	pub const ALL: &'static [Self] = &[
 		Self::Refused,
@@ -65,14 +65,14 @@ pub struct Refusals {
 
 impl Refusals {
 	/// The cumulative count for this kind.
-	pub fn count(&self, kind: Refusal) -> u64 {
+	pub fn count(&self, kind: RefusalKind) -> u64 {
 		match kind {
-			Refusal::Refused => self.refused,
-			Refusal::Unavailable => self.unavailable,
-			Refusal::Request => self.request,
-			Refusal::Forbidden => self.forbidden,
-			Refusal::Lan => self.lan,
-			Refusal::Expired => self.expired,
+			RefusalKind::Refused => self.refused,
+			RefusalKind::Unavailable => self.unavailable,
+			RefusalKind::Request => self.request,
+			RefusalKind::Forbidden => self.forbidden,
+			RefusalKind::Lan => self.lan,
+			RefusalKind::Expired => self.expired,
 		}
 	}
 	/// Add every kind from another readout.
@@ -106,14 +106,14 @@ pub(super) struct RefusalCounters {
 }
 
 impl RefusalCounters {
-	pub(super) fn counter(&self, kind: Refusal) -> &AtomicU64 {
+	pub(super) fn counter(&self, kind: RefusalKind) -> &AtomicU64 {
 		match kind {
-			Refusal::Refused => &self.refused,
-			Refusal::Unavailable => &self.unavailable,
-			Refusal::Request => &self.request,
-			Refusal::Forbidden => &self.forbidden,
-			Refusal::Lan => &self.lan,
-			Refusal::Expired => &self.expired,
+			RefusalKind::Refused => &self.refused,
+			RefusalKind::Unavailable => &self.unavailable,
+			RefusalKind::Request => &self.request,
+			RefusalKind::Forbidden => &self.forbidden,
+			RefusalKind::Lan => &self.lan,
+			RefusalKind::Expired => &self.expired,
 		}
 	}
 	pub(super) fn snapshot(&self) -> Refusals {

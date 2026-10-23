@@ -2,8 +2,8 @@
 //!
 //! Drivers take the current [`Instant`] on every poll and never read a clock.
 
+pub use moq_clock::Instant;
 pub(crate) use moq_clock::{Deadline, Deadlines};
-pub use moq_clock::{Instant, now};
 
 use crate::Error;
 

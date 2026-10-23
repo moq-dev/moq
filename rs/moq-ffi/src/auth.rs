@@ -25,7 +25,7 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 			publish: patterns(&grant.publish),
 			subscribe: patterns(&grant.subscribe),
 			expires_us: grant.expires.map(|expires| {
-				let remaining = expires.saturating_duration_since(moq_net::time::now());
+				let remaining = expires.saturating_duration_since(moq_net::time::Instant::now());
 				u64::try_from(remaining.as_micros()).unwrap_or(u64::MAX)
 			}),
 		}

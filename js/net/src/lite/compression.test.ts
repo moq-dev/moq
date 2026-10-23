@@ -10,7 +10,7 @@ import { ALPN_06, ALPN_07_WIP } from "./version.ts";
 for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 	test(`compressed publishing on ${downstream}, FETCH and independent datagrams`, async () => {
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		const source = new Producer();
 		const destination = new Producer();
 		const broadcast = source.createBroadcast(Path.from("compressed"));
@@ -67,7 +67,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			for (const origin of [source, destination]) origin.close();
 			for (const peer of peers) peer.abort();
 			await clock.advance(Nano.zero);
-			restore();
+			installed.close();
 		}
 	});
 }

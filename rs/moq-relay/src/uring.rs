@@ -726,7 +726,7 @@ async fn serve_connection(
 		None => moq_net::transport::Binding::InBand,
 	};
 	let session = moq_uring::transport::Session::new(transport, binding);
-	let now = moq_net::time::now();
+	let now = moq_net::time::Instant::now();
 	// moq-lite on its own ALPN runs unboxed on this worker. Everything else
 	// (moq-transport, and the versions that negotiate in a bidi SETUP, which a
 	// browser offering no subprotocol falls back to) boxes its futures with a
@@ -832,7 +832,7 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 		.await
 		.inspect_err(|err| {
 			if matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::Timeout)) {
-				serve.cluster.refusals.record(crate::refusals::Refusal::Unavailable);
+				serve.cluster.refusals.record(crate::refusals::RefusalKind::Unavailable);
 			}
 		})?;
 	let (admitted, registration) = match decided {

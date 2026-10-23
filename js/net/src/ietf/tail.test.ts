@@ -133,7 +133,7 @@ test("a group read across PUBLISH_DONE is delivered whole", async () => {
 
 test("a Stream Count of 0 is a hint, so a late stream within the grace is still delivered", async () => {
 	const clock = new Manual();
-	using _clock = { [Symbol.dispose]: clock.install() };
+	using _clock = clock.install();
 	const { subscriber, reader, done } = await subscribed();
 	await done(TRACK_ENDED, 0n);
 

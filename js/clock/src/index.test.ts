@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { setTimeout as hostTimeout } from "node:timers/promises";
 import {
 	Elapsed,
+	type Installed,
 	Instant,
 	interval,
 	Manual,
@@ -19,13 +20,13 @@ import {
 	wall,
 } from "./index.ts";
 
-const restores: (() => void)[] = [];
+const installs: Installed[] = [];
 afterEach(() => {
-	for (const restore of restores.splice(0).reverse()) restore();
+	for (const installed of installs.splice(0).reverse()) installed.close();
 });
 function manual(): Manual {
 	const clock = new Manual();
-	restores.push(clock.install());
+	installs.push(clock.install());
 	return clock;
 }
 const ns = Nano.fromMilli;
@@ -77,11 +78,11 @@ test("installation restores nested and out-of-order scopes without reviving them
 	const inner = manual();
 	inner.jump(Nano(8));
 	expect<number>(now()).toBe(8);
-	restores[0]();
+	installs[0].close();
 	expect<number>(now()).toBe(8);
-	restores[1]();
+	installs[1].close();
 	const restored = now();
-	restores[1]();
+	installs[1].close();
 	expect<number>(now()).toBeGreaterThanOrEqual(restored);
 	expect<number>(now()).not.toBe(4);
 });

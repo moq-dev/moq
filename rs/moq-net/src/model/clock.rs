@@ -56,7 +56,7 @@ pub(super) fn wall() -> crate::time::Instant {
 pub(super) fn anchor() -> (crate::time::Instant, Duration) {
 	static ANCHORS: LazyLock<Mutex<HashMap<(crate::time::Instant, moq_clock::Wall), Duration>>> =
 		LazyLock::new(Default::default);
-	let (instant, wall) = moq_clock::anchor();
+	let (instant, wall) = moq_clock::origin();
 	let mut anchors = ANCHORS.lock().unwrap();
 	let offset = *anchors.entry((instant, wall)).or_insert_with(|| {
 		let jitter = Duration::from_millis(rand::rng().random_range(1..69_420));

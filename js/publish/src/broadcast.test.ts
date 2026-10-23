@@ -232,7 +232,7 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 // while its media is fresh, so a viewer still catching up drains the tail, then it closes.
 test("stopping the announce with linger serves the finished broadcast until its media is stale", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const origin = new Origin.Producer();
 	try {
 		const announce = new Signal(true);
@@ -283,7 +283,7 @@ test("stopping the announce with linger serves the finished broadcast until its 
 		broadcast.close();
 	} finally {
 		origin.close();
-		restore();
+		installed.close();
 	}
 });
 
@@ -568,7 +568,7 @@ test("changing maxAge publishes a new network broadcast", async () => {
 
 test("keeps the current catalog snapshot for a reconnecting viewer", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 
 	try {
 		const broadcast = new Broadcast({
@@ -595,7 +595,7 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 
 		broadcast.close();
 	} finally {
-		restore();
+		installed.close();
 	}
 });
 

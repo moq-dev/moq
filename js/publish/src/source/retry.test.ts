@@ -178,7 +178,8 @@ function published(media: Media | undefined): unknown {
 
 function fakeTime(): Manual & Disposable {
 	const clock = new Manual();
-	return Object.assign(clock, { [Symbol.dispose]: clock.install() });
+	const installed = clock.install();
+	return Object.assign(clock, { [Symbol.dispose]: () => installed.close() });
 }
 
 for (const [kind, create] of [

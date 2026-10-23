@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Manual, Milli, Nano, now } from "@moq/clock";
+import { type Installed, Manual, Milli, Nano, now } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { type Delay, Sync } from "./sync";
 
@@ -123,13 +123,13 @@ describe("auto delay", () => {
 
 describe("wait", () => {
 	// Sleeps run on a manual clock, so a parked wait only wakes on what the test changes.
-	let restore: () => void;
+	let installed: Installed;
 	beforeEach(() => {
 		const clock = new Manual();
 		clock.jump(Nano.fromMilli(Milli(1000)));
-		restore = clock.install();
+		installed = clock.install();
 	});
-	afterEach(() => restore());
+	afterEach(() => installed.close());
 	const nowMs = () => Nano.toMilli(Nano(now()));
 
 	it("returns at once when constructed instant, before effects flush", async () => {
@@ -214,7 +214,7 @@ describe("recorded ingress", () => {
 	it("anchors and classifies using arrival rather than delayed delivery", async () => {
 		const clock = new Manual();
 		clock.jump(Nano.fromMilli(Milli(10_000)));
-		const restore = clock.install();
+		const installed = clock.install();
 		const sync = new Sync({ delay: Milli(100) });
 		try {
 			for (let i = 0; i < 20; i++) await Promise.resolve();
@@ -223,7 +223,7 @@ describe("recorded ingress", () => {
 			expect(sync.received(Milli(20), "audio", Milli(1020))).toBe(false);
 			expect(sync.received(Milli(40), "audio", Milli(1200))).toBe(true);
 		} finally {
-			restore();
+			installed.close();
 			sync.close();
 		}
 	});
@@ -232,13 +232,13 @@ describe("recorded ingress", () => {
 describe("skip floor", () => {
 	// Arrivals are on the local clock, pinned here so a skip's playhead does not depend on wall time.
 	let clock: Manual;
-	let restore: () => void;
+	let installed: Installed;
 	beforeEach(() => {
 		clock = new Manual();
 		clock.jump(Nano.fromMilli(Milli(5000)));
-		restore = clock.install();
+		installed = clock.install();
 	});
-	afterEach(() => restore());
+	afterEach(() => installed.close());
 
 	it("a skip passes over only frames behind the playhead it jumped to", async () => {
 		const sync = new Sync({ delay: Milli(100) });

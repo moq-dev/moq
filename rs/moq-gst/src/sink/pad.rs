@@ -1192,7 +1192,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			None,
 			None,
-			moq_net::time::now(),
+			moq_net::time::Instant::now(),
 		)
 		.unwrap();
 
@@ -1330,7 +1330,7 @@ mod tests {
 			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 			.await
 			.unwrap();
-		let anchor = moq_net::time::now();
+		let anchor = moq_net::time::Instant::now();
 		for index in 0..17 {
 			assert_eq!(
 				pad.push_buffer(
@@ -1548,7 +1548,7 @@ mod tests {
 					Some(gst::ClockTime::from_mseconds(20 * index as u64)),
 					None,
 					None,
-					moq_net::time::now(),
+					moq_net::time::Instant::now(),
 				)
 				.unwrap(),
 				PushOutcome::Published
@@ -1581,7 +1581,7 @@ mod tests {
 				Some(gst::ClockTime::ZERO),
 				None,
 				None,
-				moq_net::time::now()
+				moq_net::time::Instant::now()
 			)
 			.unwrap(),
 			PushOutcome::NoSegment,
@@ -1593,7 +1593,7 @@ mod tests {
 				Some(gst::ClockTime::ZERO),
 				None,
 				None,
-				moq_net::time::now()
+				moq_net::time::Instant::now()
 			)
 			.unwrap(),
 			PushOutcome::Dropped,
@@ -1641,7 +1641,7 @@ mod tests {
 				Some(gst::ClockTime::ZERO),
 				None,
 				None,
-				moq_net::time::now(),
+				moq_net::time::Instant::now(),
 			)
 			.unwrap();
 
@@ -1675,7 +1675,7 @@ mod tests {
 			Some(gst::ClockTime::from_mseconds(40)),
 			None,
 			None,
-			moq_net::time::now(),
+			moq_net::time::Instant::now(),
 		)
 		.unwrap();
 		pad.push_buffer(
@@ -1683,7 +1683,7 @@ mod tests {
 			Some(gst::ClockTime::from_mseconds(80)),
 			None,
 			None,
-			moq_net::time::now(),
+			moq_net::time::Instant::now(),
 		)
 		.unwrap();
 
@@ -1743,7 +1743,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			None,
 			None,
-			moq_net::time::now(),
+			moq_net::time::Instant::now(),
 		)
 		.unwrap();
 
@@ -1813,7 +1813,7 @@ mod tests {
 			None,
 			None,
 			Some(gst::ClockTime::from_mseconds(25)),
-			moq_net::time::now(),
+			moq_net::time::Instant::now(),
 		)
 		.unwrap();
 		assert!(!pad.is_failed(), "a missing PTS uses the supplied running time");
@@ -1853,7 +1853,7 @@ mod tests {
 				None,
 				None,
 				None,
-				moq_net::time::now()
+				moq_net::time::Instant::now()
 			)
 			.is_err(),
 			"the caller gets a hard error instead of a silent drop"
@@ -1879,7 +1879,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			None,
 			None,
-			moq_net::time::now(),
+			moq_net::time::Instant::now(),
 		)
 		.unwrap();
 	}
@@ -1920,7 +1920,7 @@ mod tests {
 				Some(gst::ClockTime::ZERO),
 				None,
 				None,
-				moq_net::time::now(),
+				moq_net::time::Instant::now(),
 			)
 			.unwrap();
 		assert_eq!(outcome, PushOutcome::Published);
@@ -1942,7 +1942,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			None,
 			None,
-			moq_net::time::now(),
+			moq_net::time::Instant::now(),
 		)
 		.unwrap();
 
@@ -2131,7 +2131,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			Some(gst::ClockTime::from_seconds(1)),
 			None,
-			moq_net::time::now(),
+			moq_net::time::Instant::now(),
 		)
 		.unwrap();
 		assert!(pad.is_failed());
@@ -2158,7 +2158,7 @@ mod tests {
 				Some(gst::ClockTime::from_mseconds(start_ms)),
 				Some(gst::ClockTime::from_mseconds(dur_ms)),
 				None,
-				moq_net::time::now(),
+				moq_net::time::Instant::now(),
 			)
 			.unwrap();
 		}
@@ -2182,7 +2182,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			None,
 			None,
-			moq_net::time::now(),
+			moq_net::time::Instant::now(),
 		)
 		.unwrap();
 		assert!(!pad.is_failed(), "a durationless cue drops the buffer, not the pad");
@@ -2240,7 +2240,7 @@ mod tests {
 		import.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("import")));
 
 		// The third frame reaches the sink 100ms later than its running time says it should.
-		let anchor = moq_net::time::now();
+		let anchor = moq_net::time::Instant::now();
 		for (pts, arrival) in [(0, 0), (33, 33), (66, 166)] {
 			for pad in [&mut encoder, &mut import] {
 				pad.observe_segment(time_segment());
@@ -2274,7 +2274,7 @@ mod tests {
 				&catalog,
 				producer_options(&h264_caps(), Some("encoder")).with_encoder(true),
 			);
-			let anchor = moq_net::time::now();
+			let anchor = moq_net::time::Instant::now();
 			for (pts, arrival) in [(0, 0), (33, 33), (66, 166)] {
 				pad.observe_segment(time_segment());
 				assert_eq!(
@@ -2333,7 +2333,7 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
 		pad.observe_segment(time_segment());
 		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
-		let now = moq_net::time::now();
+		let now = moq_net::time::Instant::now();
 		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
 			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
 				.unwrap()
@@ -2354,7 +2354,7 @@ mod tests {
 			let mut pad = Pad::new();
 			pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
 			pad.observe_segment(time_segment());
-			let now = moq_net::time::now();
+			let now = moq_net::time::Instant::now();
 			let push = |pad: &mut Pad, data: Bytes, pts: u64| {
 				pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
 					.unwrap()
@@ -2383,7 +2383,7 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
 		pad.observe_segment(time_segment());
 		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
-		let now = moq_net::time::now();
+		let now = moq_net::time::Instant::now();
 		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
 			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
 				.unwrap()
@@ -2410,7 +2410,7 @@ mod tests {
 		let keyframe = h264_keyframe_au();
 		let headers = keyframe.slice(..keyframe.len() - 9);
 		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
-		let now = moq_net::time::now();
+		let now = moq_net::time::Instant::now();
 		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
 			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
 				.unwrap()

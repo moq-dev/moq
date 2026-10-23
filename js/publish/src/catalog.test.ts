@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Manual, Milli, Nano, Wall } from "@moq/clock";
+import { type Installed, Manual, Milli, Nano, Wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Track } from "@moq/net";
@@ -110,7 +110,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 test("catalog producer advertises the page clock from the first snapshot", async () => {
 	const clock = new Manual();
 	clock.jump(Nano.fromMilli(Milli(5000)));
-	const restore = clock.install();
+	const installed = clock.install();
 	const catalog = new CatalogProducer();
 
 	const effect = new Effect();
@@ -138,14 +138,14 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	expect(second.clock).toEqual(first.clock);
 
 	effect.close();
-	restore();
+	installed.close();
 });
 
 test("catalog producer omits the clock when the page's wall clock is unset", async () => {
 	// A device booted before it synced its clock: the page began in 1970.
 	const clock = new Manual();
 	clock.stepWall(Wall(86_400_000));
-	const restore = clock.install();
+	const installed = clock.install();
 	try {
 		const catalog = new CatalogProducer();
 		catalog.mutate((c) => {
@@ -160,7 +160,7 @@ test("catalog producer omits the clock when the page's wall clock is unset", asy
 		expect(await group?.readJson()).toEqual({ video: { renditions: {} } });
 		effect.close();
 	} finally {
-		restore();
+		installed.close();
 	}
 });
 
@@ -334,16 +334,16 @@ for (const section of ["json", "binary"] as const) {
 
 describe("estimate publication window", () => {
 	let clock = new Manual();
-	let restore: (() => void) | undefined;
+	let installed: Installed | undefined;
 	const scopes: Effect[] = [];
 	const advance = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
 	afterEach(() => {
 		for (const scope of scopes.splice(0)) scope.close();
-		restore?.();
+		installed?.close();
 	});
 	function fixture() {
 		clock = new Manual();
-		restore = clock.install();
+		installed = clock.install();
 		const producer = new CatalogProducer();
 		producer.mutate((catalog) => {
 			catalog.video = { renditions: { v: { codec: "avc1.640028", container: { kind: "legacy" } } } };

@@ -28,7 +28,7 @@ for (const protocol of protocols) {
 		`${protocol.alpn}: a parked group open ends when its group %s`,
 		async (mode) => {
 			const clock = new Manual();
-			const restore = clock.install();
+			const installed = clock.install();
 			const pair = createMockTransportPair(protocol.alpn);
 			const origin = new Origin();
 			const broadcast = origin.createBroadcast(Path.from("parked"));
@@ -142,7 +142,7 @@ for (const protocol of protocols) {
 				await running;
 				opening.mockRestore();
 				trying.mockRestore();
-				restore();
+				installed.close();
 			}
 		},
 	);
