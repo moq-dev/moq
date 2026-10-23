@@ -104,8 +104,8 @@ verdicts:
   merged green and reddened the next night. That happened three times in two
   days (the setup fixture, the removed `writer` bench, and the unregistered
   jitter and SUBSCRIBE_TRACKS benches the m1 run registered).
-  [Tooling tests gate every merge](/quest/m1/gh-test-gate.md) moves it into
-  every Check; confirm it landed.
+  [moq-dev/moq#6480](https://github.com/moq-dev/moq/pull/6480) moved it into
+  every Check; confirm no such break recurs.
 - Platform (macOS, Windows) now runs only in Nightly and on release PRs, not
   in the merge queue. A Windows- or macOS-only regression surfaces first in
   Nightly, as the reconnect test did.
