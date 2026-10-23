@@ -104,7 +104,6 @@ child records whether its behavior is new on main or inherited from release.
 - [Release finished importer scratch](/quest/m1/release-audit/finished-import-scratch.md) - finished video/importer publications release obsolete parser storage while retaining tracks and catalog renditions
 - [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets
 - [Settle finite HLS import](/quest/m1/release-audit/hls-finite.md) - initially ended playlists have an explicit and tested start position
-- [Settle HLS timestamp resets](/quest/m1/release-audit/hls-discontinuity.md) - unchanged-map discontinuities preserve timeline identity or are explicitly refused
 
 ## Related
 
