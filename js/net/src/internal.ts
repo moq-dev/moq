@@ -209,6 +209,8 @@ export interface TrackSequence {
 	next: number;
 	/** Open producers writing through this namespace. */
 	holders: number;
+	/** The open producer the name's newest claim went to; a later claim supersedes it. */
+	owner?: Producer;
 	/**
 	 * The highest-sequence checked group start any producer of the name wrote, which bounds a
 	 * replacement's groups the way the eviction watermark bounds a track's own.
@@ -351,7 +353,7 @@ export interface ResumeSource {
 	latest(): number | undefined;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
 	start(): number | "pending" | undefined;
-	/** The serving copy's declared exclusive end. */
+	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Location | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
 	finished(): Promise<Location>;
@@ -469,6 +471,11 @@ export const hooks: {
 	tryRecvDatagram: (subscriber: Subscriber) => RecvDatagram;
 	/** Whether a buffered group in `[start, end)` that `delivered` lacks still waits to be read. */
 	hasUnreadGroup: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
+	/**
+	 * Whether a subscriber's track ended and it holds nothing left to read: no datagram within its
+	 * cursor, and no group in `[start, end)` that `delivered` lacks.
+	 */
+	spent: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
@@ -640,6 +647,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	hasUnreadGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	spent: () => {
 		throw new Error("track.ts not loaded");
 	},
 	staleAt: () => {
