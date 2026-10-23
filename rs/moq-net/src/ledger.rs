@@ -166,7 +166,7 @@ impl Ledger {
 }
 
 // Gap timing shared by a subscription tail and its track's live arrivals.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl Ledger {
 	/// How long a gap is waited for once a later group opened it.
 	pub fn grace(&self) -> Duration {

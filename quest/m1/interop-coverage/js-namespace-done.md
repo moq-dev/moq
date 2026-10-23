@@ -1,19 +1,32 @@
-# [S] JS namespace lifecycle passes with both halves in one process
+# [XS] The runner's JS client withdraws namespaces by reset
 
 ## Goal
 
-The runner's moq-dev-js `subscribe-namespace-lifecycle` case passes against
-Cloudflare draft-18 and aiomoqt, where today the subscriber never sees
-NAMESPACE_DONE. If the cause is in the relay under test, it is reported
-upstream and the cell is classified instead.
+Condition: the next `@moq/net` patch release, 0.4.6 or later, ships from
+`release` carrying [moq-dev/moq#6518](https://github.com/moq-dev/moq/pull/6518),
+the JS-only `release` backport of
+[moq-dev/moq#5483](https://github.com/moq-dev/moq/pull/5483). It merged as
+`350dee5520` after the 0.4.5 bump
+([moq-dev/moq#6501](https://github.com/moq-dev/moq/pull/6501)) had shipped
+without it. Check that `npm view @moq/net version` is above 0.4.5 and that
+`git log origin/release -- js/net/package.json` shows the bump to it after
+`350dee5520`. Releases are cut separately; this quest bumps nothing.
+
+Then bump `@moq/net` in the moq-dev-js client of
+[englishm/moq-interop-runner](https://github.com/englishm/moq-interop-runner)
+to it, so `subscribe-namespace-lifecycle` passes against Cloudflare
+draft-18 and aiomoqt, and delete this quest once that PR merges.
 
 ## Plan
 
-Found in the runs for
-[englishm/moq-interop-runner#173](https://github.com/englishm/moq-interop-runner/pull/173)
-on 2026-10-22. It fails only when the JS publisher and subscriber share one
-process. Each half passes with a Rust counterpart, and two separate Bun
-processes pass, so suspect state the two `js/net` sessions share in one
-process before suspecting the relays. A fix in `js/net` gets a test there.
+`@moq/net` 0.4.5 and earlier withdraw a PUBLISH_NAMESPACE on drafts 17+
+with FIN plus STOP_SENDING, which draft-18 §3.3.2 does not allow. Both
+relays end the namespace only on RESET_STREAM, so the subscriber never sees
+NAMESPACE_DONE until the publisher's session closes. The case passed from
+two processes only because the exiting publisher closed its session. `main`
+has sent the reset since #5483, and the runner's client passes against both
+relays when built on `main` or on #6518. The Rust client already passes, so
+the maintainer kept the backport JS-only.
 
-Public API: unknown until the cause is found. Wire: none expected.
+The interop audit's standing approval covers PRs touching the `moq-dev-*`
+builds.

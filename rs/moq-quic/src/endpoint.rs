@@ -909,6 +909,10 @@ impl Endpoint {
         incoming_buffer
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "private plumbing; a single-use argument struct would only rename the parameters"
+    )]
     fn add_connection(
         &mut self,
         ch: ConnectionHandle,

@@ -826,7 +826,6 @@ fn spawn_export(
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
 			passthrough: stdout.passthrough,
-			sync: stdout.sync,
 			catalog: export.catalog_format,
 			select: export.select,
 		};
@@ -982,7 +981,7 @@ fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Resu
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::future::Future;

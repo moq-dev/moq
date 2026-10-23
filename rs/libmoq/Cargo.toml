@@ -11,3 +11,6 @@ rust-version.workspace = true
 
 keywords = ["quic", "media", "live"]
 categories = ["multimedia", "network-programming"]
+
+[lints]
+workspace = true

@@ -1,0 +1,35 @@
+name: IETF conformance
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+
+jobs:
+  moxygen:
+    runs-on: ubuntu-24.04
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      - name: Pinned Moxygen through the relay under the conformance profile
+        run: nix develop --command just test ietf-conformance
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/ietf-conformance
+          MOQ_TEST_KEEP: 1
+      - name: Keep conformance reports and endpoint logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ietf-conformance
+          path: ${{ runner.temp }}/ietf-conformance/
+          retention-days: 7
+          if-no-files-found: ignore
