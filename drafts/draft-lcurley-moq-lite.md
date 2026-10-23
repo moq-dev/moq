@@ -488,6 +488,7 @@ When resolving a path covered by several routes (across any number of streams), 
 The Spread Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by each Hop ID of the route's path, oldest first, as 8 little-endian bytes.
 It is keyed on the requested path rather than the route's prefix, so equal-cost advertisers of one prefix share its paths instead of the first one taking them all, while one path resolves to the same advertiser on every relay that holds the same routes.
 When choosing which route to advertise for a prefix, the requested path is the prefix itself.
+A relay skips the Spread Hash for a route a publisher announced to it directly at the requested path, which no other relay ranks, so a publisher reconnecting under a new Hop ID wins at once.
 
 Routes with the same Epoch serve the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 A relay MUST NOT move a subscription to a route with a different Epoch, or between routes without one: it stays on its route and ends with it.
@@ -1818,6 +1819,7 @@ The `Message Length` describes the payload size on the wire.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving. In lite-05 and lite-06 it is application-specific, so a subscriber there reads every drop as NOT_FOUND.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight; the Subscribe Stream FIN follows once every Group Stream has finished or been reset.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
+- Skipped the Spread Hash for a route a publisher announced directly at the requested path.
 - Added a local link preference to route selection, after the newest Epoch and before the 0 Hop ID check: the higher preference a subscriber assigns to the arriving link wins, and an unassigned link is neutral. Not carried on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.

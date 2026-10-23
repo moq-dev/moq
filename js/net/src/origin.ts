@@ -316,7 +316,8 @@ interface Candidate extends Advertised {
 
 /**
  * Orders advertisements at `prefix`: the better route, then a local broadcast on a tie, then
- * fewer hops, then the lower {@link spreadHash} of the prefix, matching `route_order` in rs/moq-net.
+ * fewer hops, then the lower {@link spreadHash} of the prefix, matching `route_order` in rs/moq-net
+ * for routes from cluster peers. A relay does not hash a route a publisher announced to it directly.
  */
 function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): number {
 	const order =
