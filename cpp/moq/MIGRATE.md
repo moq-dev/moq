@@ -4,6 +4,8 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+`Client::connect` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `state_changed(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `GroupRequest::priority()` returns one.

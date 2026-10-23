@@ -4,6 +4,8 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+`Moq.connect` returns a connecting native session. Replace `status()`, `connects()`, and failure polls with `state()` and `stateChanged(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio: UInt` is replaced by `deltas: Boolean` (default `true`).

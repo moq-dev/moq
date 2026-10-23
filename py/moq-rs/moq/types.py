@@ -19,7 +19,10 @@ from moq_ffi import (
     MoqAudioSampleFormat as AudioSampleFormat,
 )
 from moq_ffi import (
-    MoqConnectionStatus as ConnectionStatus,
+    MoqConnectionPhase as ConnectionPhase,
+)
+from moq_ffi import (
+    MoqConnectionState as ConnectionState,
 )
 from moq_ffi import (
     MoqErrorScope as ErrorScope,
@@ -74,7 +77,8 @@ __all__ = [
     "AudioSampleFormat",
     "Backoff",
     "ConnectionStats",
-    "ConnectionStatus",
+    "ConnectionPhase",
+    "ConnectionState",
     "Datagram",
     "ErrorScope",
     "Frame",

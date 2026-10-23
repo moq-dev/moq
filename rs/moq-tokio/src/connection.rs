@@ -467,6 +467,10 @@ impl Resolved {
 /// distinguishes a permanent give-up from a graceful close.
 #[derive(Default)]
 struct State {
+	/// Advances on every lifecycle update, including identical failed dials.
+	revision: u64,
+	/// The loop has finished and cannot publish another state.
+	ended: bool,
 	/// Tokens to queue before publishing a replacement session to its consumers.
 	tokens: std::sync::Mutex<Vec<std::sync::Weak<auth::Replay>>>,
 	/// Current connection status, or `None` before the first connect.
@@ -526,6 +530,7 @@ impl Shared {
 			if state.session.is_some() {
 				state.presence.sessions_ended += 1;
 			}
+			state.revision += 1;
 			state.status = Some(Status::Connected);
 			state.connects += 1;
 			state.presence.sessions_started += 1;
@@ -544,6 +549,7 @@ impl Shared {
 
 	fn status(&self, status: Status) {
 		if let Ok(mut state) = self.state.write() {
+			state.revision += 1;
 			state.status = Some(status);
 		}
 	}
@@ -551,12 +557,20 @@ impl Shared {
 	/// Nothing is live. Clears the session so a handle can't be handed a closed one,
 	/// and drops the estimates that belonged to it.
 	fn disconnected(&self) {
+		self.offline(None);
+	}
+
+	fn offline(&self, failure: Option<&Error>) {
 		if let Ok(mut state) = self.state.write() {
 			// Count one close per live session; a second call without an
 			// intervening connect (e.g. Drop after the loop already reported
 			// the close) must not move the counter again.
 			if state.session.is_some() {
 				state.presence.sessions_ended += 1;
+			}
+			state.revision += 1;
+			if let Some(failure) = failure {
+				state.failure = Some(failure.clone());
 			}
 			state.status = Some(Status::Disconnected);
 			state.version = None;
@@ -570,6 +584,7 @@ impl Shared {
 	/// Record why the loop is retrying, for [`Monitor::failure`].
 	fn retrying(&self, err: &Error) {
 		if let Ok(mut state) = self.state.write() {
+			state.revision += 1;
 			state.failure = Some(err.clone());
 		}
 	}
@@ -578,6 +593,7 @@ impl Shared {
 	/// retrying anymore, so [`Monitor::failure`] stops reporting.
 	fn failed(&self, err: Error) {
 		if let Ok(mut state) = self.state.write() {
+			state.revision += 1;
 			state.error = Some(err);
 			state.failure = None;
 		}
@@ -595,6 +611,8 @@ impl Drop for Shared {
 		self.disconnected();
 		// Nothing retries anymore, however the loop ended.
 		if let Ok(mut state) = self.state.write() {
+			state.revision += 1;
+			state.ended = true;
 			state.failure = None;
 		}
 	}
@@ -610,7 +628,84 @@ pub struct Monitor {
 	last_presence: moq_net::stats::Presence,
 }
 
+/// The current lifecycle phase of a reconnecting connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+	/// No session has connected yet.
+	Connecting,
+	/// A session is serving.
+	Connected,
+	/// No session is serving while the connection redials.
+	Disconnected,
+	/// The old session serves while its replacement dials.
+	Migrating,
+	/// The reconnect loop has stopped for good.
+	Closed,
+}
+
+/// One coherent observation of a connection's lifecycle.
+#[derive(Clone, Debug)]
+pub struct Observation {
+	/// An opaque revision to pass back to the next state wait.
+	pub revision: u64,
+	/// The current lifecycle phase, distinct from cumulative statistics presence.
+	pub phase: Phase,
+	/// How many sessions have connected, including replacements.
+	pub connects: u64,
+	/// The latest failed attempt or terminal failure, cleared by a successful connect.
+	pub failure: Option<Error>,
+	/// The live session's negotiated version, or none while offline.
+	pub version: Option<Version>,
+}
+
+impl State {
+	fn observation(&self) -> Observation {
+		Observation {
+			revision: self.revision,
+			phase: if self.ended {
+				Phase::Closed
+			} else {
+				match self.status {
+					None => Phase::Connecting,
+					Some(Status::Connected) => Phase::Connected,
+					Some(Status::Disconnected) => Phase::Disconnected,
+					Some(Status::Migrating) => Phase::Migrating,
+				}
+			},
+			connects: self.connects,
+			failure: self.error.clone().or_else(|| self.failure.clone()),
+			version: self.version,
+		}
+	}
+}
+
 impl Monitor {
+	/// Read the lifecycle fields together under one lock.
+	pub fn state(&self) -> Observation {
+		self.state.read().observation()
+	}
+
+	/// Poll for a lifecycle revision different from the caller's last snapshot.
+	pub fn poll_state(&self, waiter: &kio::Waiter, after: u64) -> Poll<crate::Result<Observation>> {
+		match self.state.poll(waiter, |state| {
+			if state.revision != after {
+				Poll::Ready(Ok(state.observation()))
+			} else if state.ended {
+				Poll::Ready(Err(terminal(state)))
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(result)) => Poll::Ready(result),
+			Poll::Ready(Err(state)) => Poll::Ready(Err(terminal(&state))),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Wait for a lifecycle revision without sharing a cursor with other observers.
+	pub async fn state_changed(&self, after: u64) -> crate::Result<Observation> {
+		kio::wait(|waiter| self.poll_state(waiter, after)).await
+	}
 	/// Cumulative connects and disconnects of this reconnect loop, the same shape as a relay's
 	/// sessions track: `sessions_started - sessions_ended` is 1 while connected, and a rate is a delta over
 	/// any window.
@@ -880,15 +975,6 @@ impl Connection {
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
 					let ended = run_session(shared, &session, &mut draining).await;
-					// Before any status moves, so a watcher woken by `Disconnected` finds why. Only
-					// a retry has a reason to report; a session that ends the loop reports through
-					// `closed` instead.
-					if let Ended::Closed(Err(err)) = &ended
-						&& client.reconnect
-						&& !err.is_terminal()
-					{
-						shared.retrying(err);
-					}
 
 					let tenure = connected.elapsed();
 
@@ -1015,7 +1101,12 @@ impl Connection {
 						continue;
 					}
 
-					shared.disconnected();
+					let failure = match &ended {
+						Ended::Closed(Err(err)) if client.reconnect && !err.is_terminal() => Some(err),
+						_ => None,
+					};
+					// Publish the lost transport and its cause in one lifecycle observation.
+					shared.offline(failure);
 
 					// Refusals and malformed protocol input are settled failures, however long
 					// the session lived. A new connection cannot repair either one.
@@ -2239,6 +2330,87 @@ mod tests {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
 		config.init(Default::default()).expect("build client")
+	}
+
+	#[test]
+	fn observation_keeps_independent_revisions_and_never_misses_registration() {
+		use std::sync::{
+			Arc,
+			atomic::{AtomicUsize, Ordering},
+		};
+		use std::task::{Wake, Waker};
+		struct Wakes(AtomicUsize);
+		impl Wake for Wakes {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+		let shared = shared();
+		let first = Monitor {
+			state: shared.state.consume(),
+			last_presence: Default::default(),
+		};
+		let second = first.clone();
+		let initial = first.state();
+		assert_eq!(initial.phase, Phase::Connecting);
+		assert_eq!(initial.connects, 0);
+		assert!(initial.version.is_none());
+		let failure = Error::ConnectFailed;
+		// The update precedes registration: reading a token must not lose this wake.
+		shared.retrying(&failure);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(next)) = first.poll_state(&waiter, initial.revision) else {
+			panic!("missed earlier update")
+		};
+		assert_eq!(next.phase, Phase::Connecting);
+		assert!(next.failure.is_some());
+		assert!(
+			matches!(second.poll_state(&waiter, initial.revision), Poll::Ready(Ok(_))),
+			"independent observer lost its update"
+		);
+		// Register first: even another failure with the same diagnostic must wake it.
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let registered = kio::Waiter::new(Waker::from(wakes.clone()));
+		assert!(first.poll_state(&registered, next.revision).is_pending());
+		shared.retrying(&failure);
+		assert!(wakes.0.load(Ordering::SeqCst) > 0);
+		let Poll::Ready(Ok(repeated)) = first.poll_state(&waiter, next.revision) else {
+			panic!("identical failed attempt was hidden")
+		};
+		assert_ne!(repeated.revision, next.revision);
+		shared.failed(failure);
+		drop(shared);
+		let final_state = first.state();
+		assert_eq!(final_state.phase, Phase::Closed);
+		assert!(final_state.failure.is_some(), "terminal cause must remain observable");
+		assert!(
+			matches!(first.poll_state(&waiter, repeated.revision), Poll::Ready(Ok(state)) if state.phase == Phase::Closed)
+		);
+		assert!(matches!(
+			first.poll_state(&waiter, final_state.revision),
+			Poll::Ready(Err(_))
+		));
+	}
+
+	#[tokio::test]
+	async fn cancelled_observation_does_not_advance_another_waiter() {
+		let shared = shared();
+		let monitor = Monitor {
+			state: shared.state.consume(),
+			last_presence: Default::default(),
+		};
+		let revision = monitor.state().revision;
+		{
+			let mut abandoned = std::pin::pin!(monitor.state_changed(revision));
+			assert!(futures::poll!(&mut abandoned).is_pending());
+		}
+		shared.retrying(&Error::ConnectFailed);
+		let first = monitor.state_changed(revision).await.unwrap();
+		let second = monitor.state_changed(revision).await.unwrap();
+		assert_eq!(first.revision, second.revision);
 	}
 
 	fn shared() -> Shared {

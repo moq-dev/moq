@@ -4,6 +4,8 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `SnapshotProducer(delta_ratio=...)` is replaced by `deltas: bool = True`.

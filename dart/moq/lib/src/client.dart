@@ -190,11 +190,11 @@ List<String> versions() => moqVersions();
 /// Whether this build can write qlog traces for [ConnectOptions.qlog].
 bool qlogSupported() => moqQlogSupported();
 
-/// A connected MoQ session with publishing and subscription conveniences.
+/// A MoQ session with publishing and subscription conveniences.
 final class Moq {
   final Client _client;
 
-  /// The established raw MoQ session.
+  /// The connecting or connected raw MoQ session.
   final Session session;
 
   Moq._(this.session, this._client);
@@ -243,9 +243,12 @@ final class Moq {
   Future<BroadcastConsumer> requestBroadcast(String path) =>
       session.consume().requestBroadcast(path: path);
 
-  /// How many times this session has connected: 1 for the connect that built it, one more
-  /// on each reconnect. A server-accepted session stays at 1.
-  int get connects => session.connects();
+  /// Read one coherent connection lifecycle snapshot.
+  ConnectionState state() => session.state();
+
+  /// Wait for a revision different from [after], without sharing a watcher cursor.
+  Future<ConnectionState> stateChanged(int after) =>
+      session.stateChanged(after: after);
 
   /// The session's bandwidth allocator.
   ///

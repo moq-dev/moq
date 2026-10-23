@@ -4,6 +4,8 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+Generated connection APIs now expose `MoqConnectionState` and `MoqConnectionPhase`, with `state()` and revision-based `state_changed(after)` instead of status, connect-count, and failure polls. Native connect returns before its first dial completes. Regenerate bindings from the matching Rust metadata.
+
 ### A client asks only about what it watches (#6165)
 
 On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announced_broadcast()`, instead of under its whole scope at connect.

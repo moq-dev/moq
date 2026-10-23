@@ -54,7 +54,7 @@ public final class Client: Sendable {
         ))
     }
 
-    /// Connect and wait for the session to be established. Cancellable via `cancel()`.
+    /// Start a connection and return its session without waiting for the native first dial to succeed.
     public func connect(to url: String) async throws -> Session {
         Session(try await ffi.connect(url: url))
     }
@@ -64,15 +64,7 @@ public final class Client: Sendable {
         ffi.cancel()
     }
 
-    /// Why the pending `connect(to:)` is still dialing: the error that failed its
-    /// latest attempt, or `nil` while nothing has failed or no connect is pending.
-    ///
-    /// A first dial that keeps failing and retrying never returns from `connect(to:)`,
-    /// so poll this to show the reason. Giving up for good throws from `connect(to:)`
-    /// instead. Once connected, `Session.failure()` reports the reconnects.
-    public func failure() -> MoqError? {
-        ffi.failure()
-    }
+
 }
 
 /// The protocol versions offered by default, most preferred first, spelled the way
@@ -86,7 +78,7 @@ public func qlogSupported() -> Bool {
     moqQlogSupported()
 }
 
-/// An established MoQ session.
+/// A MoQ session, including its initial native dial.
 public final class Session: Sendable {
     let ffi: MoqSession
 
@@ -108,41 +100,19 @@ public final class Session: Sendable {
 
     /// Suspend until the session is over: an error when the connection gave up for
     /// good, a normal return after a local `shutdown()`/`cancel()`. Transient drops
-    /// the reconnect loop rides out don't resolve this; watch `status()` for those.
+    /// the reconnect loop rides out don't resolve this; watch `stateChanged(after:)` for those.
     public func closed() async throws {
         try await ffi.closed()
     }
 
-    /// Suspend until the connection status differs from the one last reported. A
-    /// client session reports `.connected` first, then follows the reconnect loop
-    /// (`.disconnected` while redialing, `.migrating` during a GOAWAY handover) and
-    /// throws once the connection stops for good. A server-accepted session's only
-    /// transition is terminal: this waits for the close and throws its reason.
-    ///
-    /// This is the current status, not a queue of every edge: a drop that
-    /// reconnects before you ask again is coalesced away, so the outages it hides
-    /// are the ones that already healed. Don't count outages with it.
-    public func status() async throws -> ConnectionStatus {
-        try await ffi.status()
+    /// Read one coherent lifecycle snapshot without advancing a watcher.
+    public func state() -> ConnectionState {
+        ffi.state()
     }
 
-    /// How many times this session has connected: 1 for the connect that built it, one more
-    /// on each reconnect. A server-accepted session stays at 1.
-    ///
-    /// Pair it with `status()` to log each reconnect by number: a `.connected`
-    /// status whose count grew is a reconnect.
-    public func connects() -> UInt64 {
-        ffi.connects()
-    }
-
-    /// Why a client session is reconnecting: the error that ended the last
-    /// connection or failed the latest redial, or `nil` once a connection lands.
-    ///
-    /// A redial that keeps failing never changes `status()`, so poll this while it
-    /// reports `.disconnected` to show the reason. Giving up for good throws from
-    /// `closed()` instead. A server-accepted session always returns `nil`.
-    public func failure() -> MoqError? {
-        ffi.failure()
+    /// Wait for a revision different from `after`; independent callers retain their own revisions.
+    public func stateChanged(after: UInt64) async throws -> ConnectionState {
+        try await ffi.stateChanged(after: after)
     }
 
     /// Close the session with the given error code. Code 0 means "no error";

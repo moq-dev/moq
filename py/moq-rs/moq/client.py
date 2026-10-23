@@ -10,7 +10,6 @@ from moq_ffi import (
     MoqClientConfig,
     MoqClientTls,
     MoqCongestionControl,
-    MoqError,
     MoqQuicConfig,
     MoqWebSocketConfig,
     moq_qlog_supported,
@@ -225,18 +224,8 @@ class Client:
 
     @property
     def session(self) -> Session | None:
-        """The established session, or `None` before connecting / after exit."""
+        """The connecting or connected session, or `None` before connecting / after exit."""
         return self._session
-
-    def failure(self) -> MoqError | None:
-        """Why entering the client is still dialing: the error that failed its latest
-        attempt, or ``None`` while nothing has failed or no connect is pending.
-
-        A first dial that keeps failing and retrying never finishes ``async with``, so
-        poll this from another task to show the reason. Giving up for good raises from
-        ``async with`` instead. Once connected, :meth:`Session.failure` reports the
-        reconnects."""
-        return None if self._inner is None else self._inner.failure()
 
 
 def connect(

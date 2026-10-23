@@ -163,8 +163,11 @@ typealias Auth = uniffi.moq.MoqAuth
 typealias AuthToken = uniffi.moq.MoqAuthToken
 /** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
 typealias Grant = uniffi.moq.MoqGrant
-/** A connection lifecycle transition reported by [Session.status]. */
-typealias ConnectionStatus = uniffi.moq.MoqConnectionStatus
+/** A connection lifecycle transition reported by [Session.state]. */
+typealias ConnectionPhase = uniffi.moq.MoqConnectionPhase
+
+/** One coherent connection lifecycle snapshot. */
+typealias ConnectionState = uniffi.moq.MoqConnectionState
 /** Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window. */
 typealias Backoff = uniffi.moq.MoqBackoff
 /** Whether a protocol code is from the session or stream registry. */
