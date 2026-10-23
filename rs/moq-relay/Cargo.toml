@@ -111,6 +111,8 @@ qmux = { workspace = true, features = ["tcp"] }
 rand = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
 tempfile = { workspace = true }
+# Runs the tests that need a variable set or unset in a child process given it.
+test-env = { path = "../test-env" }
 time = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }

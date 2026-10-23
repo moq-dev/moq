@@ -102,11 +102,9 @@ child records whether its behavior is new on main or inherited from release.
 - [Parse QMux records without copying suffixes](/quest/m1/release-audit/qmux-copy.md) - many small frames do not cause quadratic copying
 - [Release AUTH wake listeners](/quest/m1/release-audit/auth-listeners.md) - session churn does not retain one terminal promise reaction per change
 - [Report fatal watch ingestion failures](/quest/m1/release-audit/watch-errors.md) - failed audio/video reads reach the existing error output and tear down their resources
-- [Accept reordered HTTP/3 streams](/quest/m1/release-audit/webtransport-streams.md) - QPACK or a stalled header before SETTINGS does not reject or block a valid handshake
 - [Finish bitrate recovery](/quest/m1/release-audit/rate-recovery.md) - a quiet bandwidth grant no longer strands moq-video, moq-ffi, and moq-c encoders partway up the ramp
-- [Release finished FFI codecs](/quest/m1/release-audit/ffi-finished.md) - preserving finished tracks does not preserve drained encoders and scratch buffers
+- [Release finished importer scratch](/quest/m1/release-audit/finished-import-scratch.md) - finished video/importer publications release obsolete parser storage while retaining tracks and catalog renditions
 - [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets
-- [Settle Go reservation release](/quest/m1/release-audit/go-reservation.md) - investigate prompt allocation release through the public wrapper
 - [Settle HLS timestamp resets](/quest/m1/release-audit/hls-discontinuity.md) - unchanged-map discontinuities preserve timeline identity or are explicitly refused
 
 ## Related

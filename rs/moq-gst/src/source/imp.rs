@@ -2646,8 +2646,9 @@ mod session_tests {
 	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.
 	#[test]
 	fn keylog_reaches_the_client() {
-		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
+			return;
+		}
 		let keylog = ResolvedSettings {
 			quic_keylog: true,
 			..unreachable()

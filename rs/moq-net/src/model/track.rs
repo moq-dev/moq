@@ -2612,8 +2612,6 @@ pub struct Producer {
 	// one subscription on tag and closed when the last producer clone drops. Empty
 	// (no-op) for an untagged broadcast.
 	stats: stats::Scope,
-	// Last position this handle yielded through `largest`.
-	largest: Option<Position>,
 }
 
 impl Producer {
@@ -2652,7 +2650,6 @@ impl Producer {
 			prev_subscription: None,
 			alive,
 			stats: stats::Scope::default(),
-			largest: None,
 		}
 	}
 
@@ -3144,9 +3141,12 @@ impl Producer {
 	///
 	/// The abort is the same as [`Self::abort`]: a group consumer that outlived the track's
 	/// consumers ends with `err`, and the group's writer fails.
-	#[expect(
-		clippy::result_large_err,
-		reason = "return the owned producer without allocating on an idle check"
+	#[cfg_attr(
+		target_pointer_width = "64",
+		expect(
+			clippy::result_large_err,
+			reason = "return the owned producer without allocating on an idle check"
+		)
 	)]
 	pub fn abort_unused(self, err: Error) -> std::result::Result<(), Self> {
 		let used = match self.state.write_unused() {
@@ -3188,24 +3188,9 @@ impl Producer {
 		self.state.read().max_sequence
 	}
 
-	/// Poll for the track's largest location: the current one, then each newer one, and `None` once the track ends.
-	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
-		let cache = self.state.read().cache.clone();
-		let state = &self.state;
-		poll_largest(
-			&cache,
-			&mut self.largest,
-			Bounds::default(),
-			waiter,
-			|waiter| state.poll(waiter, |state| largest_live(state, waiter)).map(|_| ()),
-			|waiter| state.poll(waiter, |state| largest_ended(state, waiter)).map(|_| ()),
-		)
-	}
-
-	/// The track's largest location, its newest group or datagram at the newest frame (0 while empty): the current one, then each newer one, and `None` once the track ends.
-	#[cfg(feature = "async")]
-	pub async fn largest(&mut self) -> Option<Position> {
-		kio::wait(|waiter| self.poll_largest(waiter)).await
+	/// The track's largest location: its newest group or datagram at the newest frame (0 while empty), `None` before any.
+	pub fn largest(&self) -> Option<Position> {
+		self.state.read().cache.largest()
 	}
 
 	/// Ready once the track holds content past `sequence`, or is closed: a later group whose
@@ -7528,7 +7513,6 @@ impl Request {
 				prev_subscription: None,
 				alive: self.alive,
 				stats: self.stats,
-				largest: None,
 			}),
 			_dynamic: self._dynamic,
 		}
@@ -7731,10 +7715,10 @@ mod test {
 	#[cfg(feature = "async")]
 	#[moq_clock::test]
 	async fn largest_streams_groups_and_frames_and_coalesces() {
-		let mut producer = track_producer("test", Info::default());
+		let producer = track_producer("test", Info::default());
 		let mut subscriber = producer.subscribe(replay());
 
-		assert!(producer.largest().now_or_never().is_none());
+		assert_eq!(producer.largest(), None);
 		let mut group = producer.append_group().unwrap();
 		assert_eq!(
 			subscriber.largest().await,
@@ -7743,7 +7727,7 @@ mod test {
 		);
 
 		group.write_frame(None, &b"a"[..]).unwrap();
-		assert_eq!(producer.largest().await, Some(Position { group: 0, frame: 0 }));
+		assert_eq!(producer.largest(), Some(Position { group: 0, frame: 0 }));
 		assert!(
 			subscriber.largest().now_or_never().is_none(),
 			"the first frame is the head already named"
@@ -7822,11 +7806,10 @@ mod test {
 	#[test]
 	fn a_datagram_raises_the_largest() {
 		let mut producer = track_producer("test", Info::default());
-		let noop = kio::Waiter::noop();
 		producer.append_group().unwrap().finish().unwrap();
 		let sequence = producer.append_datagram(None, &b"d"[..]).unwrap();
 		assert_eq!(sequence, 1);
-		assert_eq!(producer.poll_largest(&noop), Poll::Ready(Some(Position::group(1))));
+		assert_eq!(producer.largest(), Some(Position::group(1)));
 	}
 
 	/// A reader that starts at the largest group while it is still empty is at the live edge:
@@ -14406,9 +14389,10 @@ mod test {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_fetched_head_holds_the_largest_open() {
-		let mut producer = track_producer("test", Info::timed());
+		let producer = track_producer("test", Info::timed());
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
+		let mut reader = consumer.clone();
 		let noop = kio::Waiter::noop();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -14416,7 +14400,7 @@ mod test {
 		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
 			.unwrap();
 		assert_eq!(
-			producer.poll_largest(&noop),
+			reader.poll_largest(&noop),
 			Poll::Ready(Some(Position { group: 0, frame: 1 }))
 		);
 
@@ -14430,17 +14414,17 @@ mod test {
 
 		live.abort(Error::Cancel).unwrap();
 		producer.finish().unwrap();
-		assert!(producer.poll_largest(&noop).is_pending(), "the head still writes");
+		assert!(reader.poll_largest(&noop).is_pending(), "the head still writes");
 
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"more"))
 			.unwrap();
 		assert_eq!(
-			producer.poll_largest(&noop),
+			reader.poll_largest(&noop),
 			Poll::Ready(Some(Position { group: 0, frame: 2 }))
 		);
 
 		head.finish().unwrap();
-		assert_eq!(producer.poll_largest(&noop), Poll::Ready(None));
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(None));
 	}
 
 	#[moq_clock::test]

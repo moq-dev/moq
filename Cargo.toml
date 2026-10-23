@@ -46,6 +46,7 @@ members = [
     "rs/moq-video",
     "rs/moq-wasm",
     "rs/qmux",
+    "rs/test-env",
     "rs/uniffi-bindgen",
 ]
 default-members = [
@@ -91,6 +92,7 @@ default-members = [
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
     "rs/qmux",
+    "rs/test-env",
     # Maturin runs the workspace's `uniffi-bindgen` binary from the root to
     # generate the Python wheel, and that only searches default members. Its
     # `cli` feature keeps a plain check from compiling the generator.
@@ -143,6 +145,7 @@ humantime-serde = "1.1.1"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 # Interface addresses for WebRTC host candidates (moq-tokio's `webrtc` feature).
 if-addrs = "0.15"
+indexmap = "2.14.2"
 io-uring = "0.7.15"
 jsonwebtoken = "11"
 kio = { version = "0.6.2", path = "rs/kio" }
