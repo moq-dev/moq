@@ -79,8 +79,9 @@ describe("objectType", () => {
 	});
 
 	it("rejects anything the registration does not name", () => {
-		// AAC Main, MP3-in-MP4, and strings that only resemble an object type.
-		for (const codec of ["mp4a.40.1", "mp4a.40.34", "mp4a.40.", "mp4a.40.0x5", "mp4a.40.5 ", "mp4a.6B", "opus"]) {
+		// AAC Main, MP3-in-MP4, xHE-AAC, and strings that only resemble a registered spelling.
+		const codecs = ["mp4a.40.1", "mp4a.40.34", "mp4a.40.42", "mp4a.40.0005", "mp4a.40.5 ", "mp4a.6B", "opus"];
+		for (const codec of codecs) {
 			expect(objectType(codec)).toBeUndefined();
 		}
 	});
