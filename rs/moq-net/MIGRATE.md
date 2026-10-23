@@ -19,6 +19,14 @@ Dropping a fill with groups unanswered names them dropped, where the live feed w
 The default stays `Some(Duration::ZERO)`, and `with_max_delay` takes `impl Into<Option<Duration>>`, so `with_max_delay(delay)` still compiles; reads and assignments of the field need the `Option`.
 A lite SUBSCRIBE carries `None` as the largest delay the wire allows.
 
+### Sessions box their transport (#6176)
+
+`Driver` and `server::Handshake` lose their transport type parameter: write `moq_net::Driver` and `moq_net::server::Handshake`.
+`Client::connect_lite`, `Server::accept_lite`, and `Server::accept_request_lite` are gone; call `connect`, `accept`, or `accept_request`, which accept every ALPN.
+Every session now takes a `transport::poll::Boxable` transport, whose streams must also be `Sync` on native.
+A `!Send` transport wraps itself in a type that checks the thread on use, such as `moq_uring::transport::Local`.
+`Client::connect` and `Server::accept_request` are plain functions returning `impl Future`, so call them as before with `.await`.
+
 ### `track::Producer::largest()` is a getter
 
 `track::Producer::largest(&self)` returns the track's largest location now, `None` before any, instead of streaming each newer one; `track::Producer::poll_largest` is gone.
