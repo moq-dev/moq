@@ -117,19 +117,46 @@ impl Selector {
 	}
 
 	/// What `lane` read at `now`.
+	///
+	/// Between two pictures a lane keeps one gap, spanning every loss there, and its
+	/// first end, where the pictures before it stop. Marker-only groups read while this
+	/// lane waits behind the source then cost a bounded queue, not an entry each.
 	pub(super) fn push(&mut self, lane: Lane, read: Read, now: Instant) {
 		let state = &mut self.lanes[lane as usize];
-		if let Read::Frame(frame) = &read {
-			let timestamp = Duration::from(frame.timestamp);
-			if lane == Lane::Min
-				&& self.measured
-				&& let Some(step) = state.newest.and_then(|newest| timestamp.checked_sub(newest))
-				&& !step.is_zero()
-			{
-				self.interval = Some(self.interval.map_or(step, |interval| interval.min(step)));
+		let mut run = state
+			.queue
+			.iter_mut()
+			.rev()
+			.map(|(queued, _)| queued)
+			.take_while(|queued| !matches!(queued, Read::Frame(_)));
+		match &read {
+			Read::Frame(frame) => {
+				let timestamp = Duration::from(frame.timestamp);
+				if lane == Lane::Min
+					&& self.measured
+					&& let Some(step) = state.newest.and_then(|newest| timestamp.checked_sub(newest))
+					&& !step.is_zero()
+				{
+					self.interval = Some(self.interval.map_or(step, |interval| interval.min(step)));
+				}
+				state.newest = Some(state.newest.map_or(timestamp, |newest| newest.max(timestamp)));
+				state.pictures += 1;
 			}
-			state.newest = Some(state.newest.map_or(timestamp, |newest| newest.max(timestamp)));
-			state.pictures += 1;
+			Read::Gap { timestamp, duration } => {
+				if let Some(Read::Gap {
+					timestamp: start,
+					duration: span,
+				}) = run.find(|queued| matches!(queued, Read::Gap { .. }))
+				{
+					(*start, *span) = merge((*start, *span), (*timestamp, *duration));
+					return;
+				}
+			}
+			Read::End { .. } => {
+				if run.any(|queued| matches!(queued, Read::End { .. })) {
+					return;
+				}
+			}
 		}
 		state.queue.push_back((read, now));
 	}
@@ -226,6 +253,21 @@ impl Selector {
 				.count();
 		}
 	}
+}
+
+/// One gap covering two with no picture between them, or the newer alone if their
+/// scales differ.
+fn merge(
+	first: (moq_net::Timestamp, moq_net::Timestamp),
+	second: (moq_net::Timestamp, moq_net::Timestamp),
+) -> (moq_net::Timestamp, moq_net::Timestamp) {
+	let merged = || {
+		let start = first.0.min(second.0);
+		let earlier = first.0.checked_add(first.1).ok()?;
+		let later = second.0.checked_add(second.1).ok()?;
+		Some((start, earlier.max(later).checked_sub(start).ok()?))
+	};
+	merged().unwrap_or(second)
 }
 
 #[cfg(test)]
@@ -550,6 +592,27 @@ mod tests {
 		selector.push(Lane::Min, picture(1000), now);
 		assert_eq!(reads(&mut selector, now), ["gap 99+901", "frame 1000"]);
 		assert_eq!(selector.source, Lane::Min);
+	}
+
+	/// Boundaries the min-delay decoder reads while the max-delay source stalls fold
+	/// into one gap and the first end, however many marker groups arrive.
+	#[tokio::test]
+	async fn a_run_of_boundaries_holds_one_gap_and_one_end() {
+		tokio::time::pause();
+		let now = Instant::now();
+		let mut selector = selector();
+		selector.push(Lane::Max, picture(0), now);
+		selector.push(Lane::Min, picture(0), now);
+		assert_eq!(reads(&mut selector, now), ["frame 0"]);
+
+		selector.push(Lane::Min, end(33), now);
+		for index in 1..1000 {
+			selector.push(Lane::Min, gap(33 * index, 10), now);
+			selector.push(Lane::Min, end(33 * index + 10), now);
+		}
+		assert_eq!(selector.lanes[Lane::Min as usize].queue.len(), 2);
+		selector.push(Lane::Min, picture(40_000), now);
+		assert_eq!(reads(&mut selector, now), ["end 33", "gap 33+32944", "frame 40000"]);
 	}
 
 	/// Whatever order the two lanes deliver in, and however often the source
