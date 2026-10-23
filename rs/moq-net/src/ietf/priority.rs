@@ -4,11 +4,15 @@
 //! `priority + 128`: the IETF byte is always `255 -` the lite byte. The unset priority 0
 //! goes out as 127, one step off the draft's usual 128, to keep that.
 
-/// The model priority an absent IETF priority stands for: the unset default.
+/// The model priority an absent subscriber priority stands for: the unset default.
 pub(super) const ABSENT: i8 = 0;
 
 /// The wire byte of [`ABSENT`], for a message that must carry a priority it was not given.
 pub(super) const ABSENT_WIRE: u8 = to_wire(ABSENT);
+
+/// The publisher priority of a track whose publisher omits DEFAULT_PUBLISHER_PRIORITY
+/// (draft-16 section 11.1.1.1 on). Reading it as [`ABSENT`] would forward that track at 127.
+pub(super) const DEFAULT_PUBLISHER_WIRE: u8 = 128;
 
 /// Convert an IETF priority into the model's higher-first priority.
 pub(super) const fn from_wire(priority: u8) -> i8 {
