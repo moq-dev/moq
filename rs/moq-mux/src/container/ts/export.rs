@@ -303,6 +303,9 @@ struct Track {
 	listed: bool,
 	/// The catalog lists it.
 	cataloged: bool,
+	/// Read no further because the catalog withdrew it before the PMT listed it. A return
+	/// under the same name reads it on.
+	withdrawn: bool,
 	/// Frames released while its PID still carries the stream before it, which go out once
 	/// that stream's last has.
 	parked: VecDeque<Queued>,
@@ -366,6 +369,7 @@ impl Track {
 			pid: 0,
 			listed: false,
 			cataloged: true,
+			withdrawn: false,
 			parked: VecDeque::new(),
 			kind,
 			descriptors: Vec::new(),
@@ -1952,14 +1956,14 @@ where
 			// withdraws leaves nothing behind but what it already sent, which still goes out. A
 			// name that returns before that is gone is the same stream, so it is read on.
 			for (name, track) in self.tracks.iter_mut() {
-				let cataloged = locked || active.contains_key(name);
-				if cataloged && !track.cataloged && !track.listed {
+				track.cataloged = locked || active.contains_key(name);
+				if track.cataloged && std::mem::take(&mut track.withdrawn) {
 					track.finished = false;
 				}
-				track.cataloged = cataloged;
 				if !track.cataloged && !track.listed && !track.finished {
 					track.release(name, &mut self.jitter, true)?;
 					track.finished = true;
+					track.withdrawn = true;
 				}
 			}
 			self.revise()?;

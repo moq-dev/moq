@@ -1598,6 +1598,19 @@ async fn a_rate_change_under_sync_keeps_the_grid() {
 /// jitter buffer, and lists again under the same name is the same stream: it is read on.
 #[tokio::test(start_paused = true)]
 async fn a_track_withdrawn_before_its_listing_is_read_on_when_it_returns() {
+	withdraw_and_return(false).await;
+}
+
+/// As above, with the first frames it sent before leaving going out, which lists it, and the
+/// rest still waiting when it returns.
+#[tokio::test(start_paused = true)]
+async fn a_track_withdrawn_before_its_listing_is_read_on_when_it_returns_listed() {
+	withdraw_and_return(true).await;
+}
+
+/// Withdraw a track whose first frames wait in the jitter buffer, let some of them go out when
+/// `listed`, and list it again: the frames it sends after returning go out.
+async fn withdraw_and_return(listed: bool) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
@@ -1624,6 +1637,16 @@ async fn a_track_withdrawn_before_its_listing_is_read_on_when_it_returns() {
 	let config = catalog.modify().unwrap().audio.renditions[&name].clone();
 	remove(&mut catalog, &name);
 	settle(&mut export, &mut frames).await;
+	let back = match listed {
+		true => 2_050 + DELAY.as_millis() as u64,
+		false => 2_100,
+	};
+	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 2_100, back).await;
+	assert_eq!(
+		marks(&frames, OTHER_AUDIO_PID, &[0x31]).is_empty(),
+		!listed,
+		"its frames went out before it returned"
+	);
 	let mut guard = catalog.modify().unwrap();
 	guard.audio.renditions.insert(name.clone(), config);
 	guard
@@ -1637,8 +1660,8 @@ async fn a_track_withdrawn_before_its_listing_is_read_on_when_it_returns() {
 		&mut frames,
 		start,
 		&mut [(&mut first, 0x21), (&mut second, 0x32)],
-		2_100,
-		3_000,
+		back,
+		back + 1_000,
 	)
 	.await;
 	first.finish().unwrap();
