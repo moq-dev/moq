@@ -98,8 +98,13 @@ fn rendezvous_error(error: Error, requested: bool, resolved: bool) -> Error {
 	if requested && missing { Error::Timeout } else { error }
 }
 
-// Returned from one poll and matched at once, so its size never sits in a task.
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+	target_pointer_width = "64",
+	expect(
+		clippy::large_enum_variant,
+		reason = "returned from one poll and matched at once, so its size never sits in a task"
+	)
+)]
 enum FillStep {
 	Batch,
 	Partial(frame::Consumer),
@@ -5162,9 +5167,13 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	budget: kio::coop::Budget,
 }
 
-// A state machine's enum is its storage: one transient instance per stream, so the
-// big variant is the working state, not padding held in bulk.
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+	target_pointer_width = "64",
+	expect(
+		clippy::large_enum_variant,
+		reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
+	)
+)]
 enum GroupState<S: crate::transport::poll::Session> {
 	/// Waiting for stream credit on this machine's own session handle.
 	Open,

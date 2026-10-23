@@ -79,7 +79,7 @@ impl Hop {
 	}
 
 	/// Build a hop from an id read off the wire, where 0 is legal.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn from_wire(id: u64) -> Result<Self, DecodeError> {
 		if id >= 1u64 << 62 {
@@ -387,12 +387,12 @@ impl Cost {
 
 	/// A peer without a wire cost: the same as [`Cost::default`], so only the
 	/// local link price counts.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) const UNKNOWN: Self = Self(0);
 
 	/// Add a link's static price without overflowing the wire ceiling.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn charged(self, link_cost: u64) -> Self {
 		Self::new(self.0.saturating_add(link_cost))
@@ -548,7 +548,7 @@ impl Route {
 	///
 	/// Not part of the advertised route: an assigned identity is private selection
 	/// state and must not be forwarded.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn with_via(mut self, via: Hop) -> Self {
 		self.via = via;
@@ -630,7 +630,10 @@ fn fnv_key(name: &str, origins: impl IntoIterator<Item = Hop>) -> u64 {
 /// it, so convergence does not need the hash, and a restarted publisher announces
 /// under a new first hop, so a hash would keep its dead session winning half the
 /// time until the transport times out.
-#[allow(clippy::type_complexity)]
+#[expect(
+	clippy::type_complexity,
+	reason = "the tuple is the sort key; naming it would only move the type"
+)]
 fn route_order<'a>(
 	path: &Path,
 	entry: &'a RouteEntry,
@@ -717,7 +720,7 @@ struct ReleaseState {
 	held: Held,
 	hold: Duration,
 	clock: Deadlines,
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	deadline: crate::time::Deadline,
 }
 
@@ -751,7 +754,7 @@ impl Release {
 	}
 
 	/// `Ready` once released, registering `waiter` until then.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut state = self.0.lock().unwrap();
 		let now = state.clock.now();
@@ -1711,7 +1714,7 @@ impl Mount {
 
 impl OriginScope {
 	/// A view that reaches nothing.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn empty() -> Self {
 		Self {
 			allowed: Patterns::new(),
@@ -1968,7 +1971,7 @@ impl Producer {
 
 	/// Give this handle a frame budget of its own, so what one session allocates up front
 	/// never crowds out another's.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: tuning
 	pub(crate) fn with_own_frames(mut self) -> Self {
 		self.frames = Default::default();
@@ -1976,7 +1979,7 @@ impl Producer {
 	}
 
 	/// The ingress stats context this handle was tagged with.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn stats(&self) -> &stats::Session {
 		&self.stats
@@ -2050,7 +2053,7 @@ impl Producer {
 	/// advertises no subscribe interest (its `allowed()` is empty, so the
 	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
 	/// so both the publisher and subscriber loops still run.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn empty(hop: Hop) -> Self {
 		// No allowed prefixes means no broadcast is ever created, so nothing will
@@ -2181,7 +2184,7 @@ impl Producer {
 	/// is *not* entered into the route table. Sessions answer
 	/// [`Dynamic`] requests with one of these; the requester already holds
 	/// the request's result channel, so the table never needs to resolve it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn create_source(&self, path: impl AsPath) -> broadcast::Producer {
 		let path = path.as_path();
@@ -2222,7 +2225,7 @@ impl Producer {
 	/// Start a [`Snapshot`] under `prefix`: the announce consumers it overlaps are not
 	/// synced until the returned guard drops. Taken before the request goes out, so
 	/// nothing reads as synced in between.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn snapshot(&self, prefix: impl AsPath) -> Snapshot {
 		let prefix = self.root.join(prefix.as_path()).to_owned();
@@ -2232,7 +2235,7 @@ impl Producer {
 	/// Hear what this handle's session should ask its peer about: the broadest
 	/// prefixes readers of the origin want discovered, mapped onto this handle's
 	/// scope, starting with the current ones.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn interests(&self) -> Interests {
 		let queue = kio::Queue::new();
@@ -2272,7 +2275,7 @@ impl Producer {
 
 	/// Whether routes arrive here on a link between relays ([`Self::peer`] or
 	/// [`Self::upstream`]), whose sessions discover everything they may.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn relays(&self) -> bool {
 		self.link != Link::Local
@@ -4036,7 +4039,7 @@ struct Watched {
 
 enum WatchProducer {
 	Changes(kio::Producer<Watched>),
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Selection(kio::Producer<Selected>),
 }
 
@@ -4103,7 +4106,7 @@ impl Selected {
 }
 
 /// The lifetime of path requests while this peer still selects the held instance.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 // pending: /quest/m1/public-model/answer.md
 pub(crate) struct Selection {
 	shared: SendCell<kio::Shared<OriginState>>,
@@ -4113,7 +4116,7 @@ pub(crate) struct Selection {
 }
 
 impl Selection {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn current(&self) -> kio::Consumer<()> {
 		self.signal
 			.read()
@@ -4125,7 +4128,7 @@ impl Selection {
 
 	/// `Ready` once the current period's replacement is released, registering
 	/// `waiter` until then.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn poll_retired(&self, waiter: &kio::Waiter) -> Poll<()> {
 		match self.signal.poll(waiter, |selected| match &selected.retiring {
 			Some(release) => release.poll(waiter),
@@ -4205,7 +4208,7 @@ pub(crate) struct Snapshot {
 
 impl Snapshot {
 	/// A snapshot nothing waits on.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn landed() -> Self {
 		Self {
@@ -4301,7 +4304,7 @@ pub(crate) struct Interests {
 
 impl Interests {
 	/// The next change, or `None` once the origin closed.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<InterestChange>> {
 		Poll::Ready(ready!(self.queue.poll_pop(waiter)).ok())
@@ -5324,7 +5327,7 @@ pub struct Dynamic {
 }
 
 impl Dynamic {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn request_validity(&self, path: &Path) -> Option<Selection> {
 		let shared = &self.announcement.shared;
 		let mut table = shared.lock();
@@ -5388,7 +5391,7 @@ impl Dynamic {
 
 	/// Retire an explicit peer withdrawal, hiding derived paths only once its
 	/// last live advertisement at the prefix is gone. A lost session just drops.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn withdrawn(self) {
 		self.announcement.retract(true);
@@ -6012,7 +6015,7 @@ impl Consumer {
 	/// nobody, so the announcing session's assigned identity is what keeps an
 	/// anonymous route from echoing back. Pass [`Hop::UNKNOWN`] for an anonymous
 	/// peer.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.horizon.exclude = Some(peer);
@@ -6032,7 +6035,7 @@ impl Consumer {
 
 	/// A clone for a session serving its peer: its reads are the peer's, not a
 	/// local reader's, so they never make a session ask its own peer about them.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn serving(mut self) -> Self {
 		self.interested = false;
@@ -6050,7 +6053,7 @@ impl Consumer {
 
 	/// A clone whose [`announced`](Self::announced) reports only the routes a feed
 	/// from `outer` hides, for a stream topping up that feed.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn beyond(mut self, outer: &Consumer) -> Self {
 		self.hidden.beyond = Some(
@@ -6065,7 +6068,7 @@ impl Consumer {
 	}
 
 	/// Set wire discovery visibility relative to this consumer's requested root.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn discovery(mut self, hidden: bool) -> Self {
 		self.hidden.include = hidden;
@@ -6074,14 +6077,14 @@ impl Consumer {
 	}
 
 	/// Whether [`announced`](Self::announced) reports hidden routes too.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn includes_hidden(&self) -> bool {
 		self.hidden.include
 	}
 
 	/// The egress stats context this handle was tagged with.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn stats(&self) -> &stats::Session {
 		&self.stats
@@ -6109,7 +6112,7 @@ impl Consumer {
 	/// [`announced`](Self::announced) yields nothing. Used to answer a peer's
 	/// announce-interest for a prefix outside our scope by announcing nothing,
 	/// rather than tearing the stream down.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn empty(&self) -> Self {
 		Self {
@@ -7017,7 +7020,7 @@ impl Drop for AnnounceConsumer {
 use futures::FutureExt;
 
 #[cfg(test)]
-#[allow(missing_docs)] // test-only assertion helpers
+#[expect(missing_docs, reason = "test-only assertion helpers")]
 impl AnnounceConsumer {
 	/// The route of an active event at `expected`.
 	fn active(event: AnnounceEvent, expected: &Path) -> Route {

@@ -163,11 +163,17 @@ pub(crate) struct WebState {
 	pub(crate) certificates: moq_tokio::tls::Certificates,
 	/// Relay-wide shutdown broadcast; WebSocket sessions drain with a GOAWAY
 	/// when it fires. Defaults to a handle that never fires.
-	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "websocket"),
+		allow(dead_code, reason = "only the `websocket` feature uses it")
+	)]
 	pub(crate) shutdown: crate::shutdown::Observer,
 	/// Live sessions on this node, so a WebSocket session is listed and nudged
 	/// like a QUIC one.
-	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "websocket"),
+		allow(dead_code, reason = "only the `websocket` feature uses it")
+	)]
 	pub(crate) sessions: crate::session::Registry,
 	/// How long a connection may sit with no complete request in flight (TLS
 	/// handshake and partial headers included), and a WebSocket wait for its MoQ
@@ -1182,7 +1188,11 @@ impl IntoResponse for ServeGroup {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	use rcgen::{CertificateParams, KeyPair};

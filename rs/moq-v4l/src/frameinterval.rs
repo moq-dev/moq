@@ -44,7 +44,7 @@ impl TryFrom<v4l2_frmivalenum> for FrameIntervalEnum {
 	fn try_from(desc: v4l2_frmivalenum) -> Result<Self, Self::Error> {
 		unsafe {
 			// Unsafe because of access to union __bindgen_anon_1
-			#[allow(non_upper_case_globals)]
+			#[expect(non_upper_case_globals, reason = "the arms match bindgen's C constant names")]
 			match desc.type_ {
 				v4l2_frmivaltypes_V4L2_FRMIVAL_TYPE_DISCRETE => Ok(FrameIntervalEnum::Discrete(Fraction::from(
 					desc.__bindgen_anon_1.discrete,

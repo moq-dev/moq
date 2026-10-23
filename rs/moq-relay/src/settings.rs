@@ -4,7 +4,10 @@
 //! merged flag is declared twice. [`usage_rs::config::Registry::drift`] is the test
 //! that the two stay in step.
 
-#![allow(dead_code)]
+#![allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 
 /// Every setting `moq-relay` merges, flattened tokio groups included.
 #[derive(usage_rs::Config)]
