@@ -102,12 +102,13 @@ impl Endpoint {
 			None => None,
 		};
 		let accepting = server.is_some().then(|| Accepting { queue: VecDeque::new() });
-		// MTU discovery is off (the GSO pool sends fixed SEGMENT datagrams),
-		// so the endpoint has no reason to allow it either.
+		// Every `udp::Socket` refuses to fragment, so a probe too large for the
+		// path is lost rather than delivered in pieces, and discovery can trust
+		// what arrives. Each connection's transport still decides whether to probe.
 		let endpoint = moq_quic::Endpoint::new(
-			super::endpoint_config(socket.shard(), config.reset_secret.as_ref())?,
+			super::endpoint_config(socket.shard(), config.reset_secret.as_ref()),
 			server,
-			false,
+			true,
 		);
 
 		let inner = Rc::new(Inner {
