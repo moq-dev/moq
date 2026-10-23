@@ -556,7 +556,6 @@ async fn raw_audio_activity() {
 			channels: None,
 			bitrate: None,
 			frame_duration_us: FRAME_DURATION_US,
-			preset: None,
 		},
 		None,
 	)
@@ -816,7 +815,6 @@ async fn raw_audio_decode_delay() {
 			channels: None,
 			bitrate: None,
 			frame_duration_us: FRAME_US as u32,
-			preset: None,
 		},
 		None,
 	)
@@ -907,7 +905,6 @@ async fn raw_audio_frame_durations() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us,
-		preset: None,
 	};
 
 	let audio = MoqAudioProducer::new(&catalog, input(), output("fine", 2_500), None).unwrap();
@@ -950,7 +947,6 @@ async fn raw_audio_codec_default_frame() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us: 0,
-		preset: None,
 	};
 
 	let opus = MoqAudioProducer::new(&catalog, input(), output("opus", MoqAudioCodec::opus()), None).unwrap();

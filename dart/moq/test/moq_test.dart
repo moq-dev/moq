@@ -698,7 +698,7 @@ void main() {
       output: moq_audio.EncoderOutput(
         codec: moq_audio.Codec.opus(),
         track: 'mic',
-        preset: moq_audio.Preset.lowLatency,
+        frameDurationUs: 10000,
       ),
     );
     producer.write(

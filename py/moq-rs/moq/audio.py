@@ -24,7 +24,6 @@ from .session import Bandwidth, Reservation
 from .subscribe import BroadcastConsumer
 from .types import AudioCodec as Codec
 from .types import AudioEncoderInput as EncoderInput
-from .types import AudioPreset as Preset
 from .types import AudioSampleFormat as SampleFormat
 
 Packet = MoqAudioPacket
@@ -53,8 +52,8 @@ class Frame:
 class EncoderOutput:
     """Codec-side settings.
 
-    A zero ``frame_duration`` takes the ``preset``'s frame, or the codec's own.
-    ``preset`` defaults to ``Balanced`` and is refused alongside a nonzero ``frame_duration``.
+    A zero ``frame_duration`` takes the codec's own frame: 20 ms for Opus, 1024
+    samples for AAC. 10 ms Opus packets halve the packetization delay.
     """
 
     codec: Codec
@@ -63,7 +62,6 @@ class EncoderOutput:
     channels: int | None = None
     bitrate: int | None = None
     frame_duration: timedelta = timedelta(0)
-    preset: Preset | None = None
 
     def _ffi(self) -> MoqAudioEncoderOutput:
         return MoqAudioEncoderOutput(
@@ -73,7 +71,6 @@ class EncoderOutput:
             channels=self.channels,
             bitrate=self.bitrate,
             frame_duration_us=_to_us(self.frame_duration, "frame_duration"),
-            preset=self.preset,
         )
 
 
@@ -220,7 +217,6 @@ __all__ = [
     "Frame",
     "Codec",
     "Packet",
-    "Preset",
     "Producer",
     "SampleFormat",
 ]

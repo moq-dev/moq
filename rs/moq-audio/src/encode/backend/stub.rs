@@ -8,7 +8,7 @@ use bytes::Bytes;
 
 use super::Backend;
 use crate::Error;
-use crate::encode::{Encoded, Settings};
+use crate::encode::{Config, Encoded};
 
 pub(crate) const NAME: &str = "stub";
 
@@ -46,9 +46,9 @@ pub(crate) struct Stub {
 }
 
 impl Stub {
-	pub(super) fn open(settings: &Settings) -> Result<Box<dyn Backend>, Error> {
+	pub(super) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self {
-			bitrate: settings.bitrate.map_or(128_000, |rate| rate.as_bps()),
+			bitrate: config.bitrate.map_or(128_000, |rate| rate.as_bps()),
 			frames: 0,
 		}))
 	}

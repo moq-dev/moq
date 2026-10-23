@@ -271,7 +271,7 @@ fn parse_size(data: &[u8]) -> Option<(usize, i32)> {
 /// either of the two paths that do so (SILK coding nothing, and the Opus-level
 /// silence detector). Nothing else in a conforming encoder produces it except a
 /// bitrate below libopus's floor, which codes nothing whatever the input;
-/// [`Settings::bitrate`](crate::encode::Settings::bitrate) refuses those, so our own
+/// [`Config::bitrate`](crate::encode::Config::bitrate) refuses those, so our own
 /// encoder cannot emit one and this stays exact on both sides.
 ///
 /// It deliberately says nothing about the periodic refresh that interrupts a

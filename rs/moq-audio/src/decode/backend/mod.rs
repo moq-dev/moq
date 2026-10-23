@@ -6,8 +6,7 @@
 //!
 //! [`open`] tries the platform decoders before the software ones, skipping any
 //! that does not advertise the catalog codec, and refuses when none opens the
-//! track. [`Kind::Named`] names the codec, not a backend, so which backend
-//! decodes it stays the library's choice. The software tier is libopus for Opus, a passthrough for PCM, and
+//! track. Which backend decodes a codec stays the library's choice. The software tier is libopus for Opus, a passthrough for PCM, and
 //! symphonia for AAC-LC mono and stereo (behind the `aac` feature). No platform
 //! decoder is wired in yet.
 
@@ -88,39 +87,19 @@ const SOFTWARE: &[Candidate] = &[
 	},
 ];
 
-/// The name [`Kind::Named`] uses for a catalog codec, `None` for one this crate has no name for.
-fn codec_name(codec: &AudioCodec) -> Option<&'static str> {
-	match codec {
-		AudioCodec::Opus => Some("opus"),
-		AudioCodec::Pcm => Some("pcm"),
-		AudioCodec::AAC(_) => Some("aac"),
-		_ => None,
-	}
-}
-
 /// Open the first backend that advertises the catalog codec and accepts the track.
 pub(crate) fn open(catalog: &AudioConfig, config: &Config) -> Result<Box<dyn Backend>, Error> {
-	if let Kind::Named(requested) = &config.kind
-		&& codec_name(&catalog.codec) != Some(requested)
-	{
-		return Err(Error::Unsupported(format!(
-			"audio decoder {requested:?} is unavailable for {}",
-			catalog.codec
-		)));
-	}
-
-	select(catalog, candidates(&config.kind, PLATFORM, SOFTWARE))
+	select(catalog, candidates(config.kind, PLATFORM, SOFTWARE))
 }
 
 /// The candidates `kind` allows, in the order to try them.
 ///
 /// Takes the tiers as arguments so a test can supply stubs instead of whatever
 /// this host compiles in.
-fn candidates<'a>(kind: &Kind, platform: &'a [Candidate], software: &'a [Candidate]) -> Vec<&'a Candidate> {
+fn candidates<'a>(kind: Kind, platform: &'a [Candidate], software: &'a [Candidate]) -> Vec<&'a Candidate> {
 	match kind {
 		Kind::Software => software.iter().collect(),
-		// `open` has already checked that a name matches the codec.
-		Kind::Auto | Kind::Named(_) => platform.iter().chain(software).collect(),
+		Kind::Auto => platform.iter().chain(software).collect(),
 	}
 }
 
@@ -217,7 +196,7 @@ mod tests {
 	}
 
 	fn pick(kind: Kind, platform: &[Candidate], software: &[Candidate]) -> Result<String, Error> {
-		let backend = select(&opus(), candidates(&kind, platform, software))?;
+		let backend = select(&opus(), candidates(kind, platform, software))?;
 		Ok(backend.name().to_owned())
 	}
 
@@ -239,13 +218,6 @@ mod tests {
 		assert_eq!(name, "software");
 	}
 
-	/// A codec name is not a backend selector: it tries the same tiers as `Auto`.
-	#[test]
-	fn named_codec_picks_like_auto() {
-		let name = pick(Kind::Named("opus".into()), &[PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
-		assert_eq!(name, "platform");
-	}
-
 	#[test]
 	fn every_refusal_is_reported() {
 		const ALSO_REFUSING: Candidate = Candidate {
@@ -259,35 +231,5 @@ mod tests {
 			message.contains("refusing: ") && message.contains("also-refusing: "),
 			"{message}"
 		);
-	}
-
-	fn named(name: &str) -> Config {
-		Config {
-			kind: Kind::Named(name.into()),
-		}
-	}
-
-	/// The codec names published moq-audio accepts still open their codec.
-	#[test]
-	fn codec_names_open_their_codec() {
-		let pcm = AudioConfig::new(AudioCodec::Pcm, 48_000, 2);
-		assert_eq!(open(&pcm, &named("pcm")).unwrap().name(), pcm::NAME);
-		assert_eq!(open(&opus(), &named("opus")).unwrap().name(), libopus::NAME);
-	}
-
-	/// A name for another codec is refused, not quietly swapped for one that decodes.
-	#[test]
-	fn another_codecs_name_is_refused() {
-		assert!(matches!(open(&opus(), &named("pcm")), Err(Error::Unsupported(_))));
-	}
-
-	/// Backend names are internal: asking for one is refused like any unknown name.
-	#[test]
-	fn backend_names_are_refused() {
-		let message = open(&opus(), &named(libopus::NAME))
-			.err()
-			.expect("libopus is a backend, not a codec")
-			.to_string();
-		assert!(message.contains("\"libopus\"") && message.contains("opus"), "{message}");
 	}
 }

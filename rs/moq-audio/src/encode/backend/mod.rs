@@ -2,21 +2,20 @@
 //!
 //! The mirror of the decode backends. [`Backend`] is the seam between the codec
 //! and the [`Encoder`](super::Encoder) front end, which owns what every backend
-//! of a codec shares: validating [`Settings`](super::Settings) against the
+//! of a codec shares: validating [`Config`](super::Config) against the
 //! codec, framing the input, draining the startup delay at the end, and the
-//! catalog entry, whose description is synthesized from the settings rather than
+//! catalog entry, whose description is synthesized from the config rather than
 //! read back from the backend.
 //!
 //! [`open`] tries the platform encoders before the software ones, skipping any
-//! that does not emit the codec, and refuses when none opens. [`Kind::Named`]
-//! names the codec, not a backend, so which backend encodes it stays the
-//! library's choice. The software tier
-//! is libopus for Opus and a passthrough for PCM. AAC has no software encoder,
+//! that does not emit the codec, and refuses when none opens. Which backend
+//! encodes a codec stays the library's choice. The software tier is libopus for
+//! Opus and a passthrough for PCM. AAC has no software encoder,
 //! so it is only as available as the platform's, and no platform encoder is
 //! wired in yet.
 
 use super::Encoded;
-use super::encoder::{Codec, Kind, Settings};
+use super::encoder::{Codec, Config, Kind};
 use crate::Error;
 
 mod libopus;
@@ -27,8 +26,8 @@ pub(crate) mod stub;
 
 /// An opened encoder: one frame of interleaved `f32` PCM in, one packet out.
 ///
-/// Input arrives at the settings' rate, in the crate's canonical channel order
-/// for the settings' layout; a codec with another native order reorders it here.
+/// Input arrives at the config's rate, in the crate's canonical channel order
+/// for the config's layout; a codec with another native order reorders it here.
 ///
 /// One packet per frame is part of the contract: the producer stamps packets by
 /// counting frames. A codec that pipelines output (MediaCodec) needs a `flush`
@@ -67,7 +66,7 @@ pub(crate) trait Backend: Send + std::panic::UnwindSafe + std::panic::RefUnwindS
 struct Candidate {
 	name: &'static str,
 	codecs: &'static [Codec],
-	open: fn(&Settings) -> Result<Box<dyn Backend>, Error>,
+	open: fn(&Config) -> Result<Box<dyn Backend>, Error>,
 }
 
 /// Operating-system encoders, in priority order.
@@ -95,17 +94,8 @@ const STUB_PLATFORM: &[Candidate] = &[Candidate {
 	open: stub::Stub::open,
 }];
 
-/// Open the first backend that emits the codec and accepts the settings.
-pub(crate) fn open(settings: &Settings) -> Result<Box<dyn Backend>, Error> {
-	if let Kind::Named(requested) = &settings.kind
-		&& requested != settings.codec.as_str()
-	{
-		return Err(Error::Unsupported(format!(
-			"audio encoder {requested:?} is unavailable for {}",
-			settings.codec
-		)));
-	}
-
+/// Open the first backend that emits the codec and accepts the config.
+pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 	#[cfg(test)]
 	let platform = match stub::installed() {
 		true => STUB_PLATFORM,
@@ -114,30 +104,29 @@ pub(crate) fn open(settings: &Settings) -> Result<Box<dyn Backend>, Error> {
 	#[cfg(not(test))]
 	let platform = PLATFORM;
 
-	select(settings, candidates(&settings.kind, platform, SOFTWARE))
+	select(config, candidates(config.kind, platform, SOFTWARE))
 }
 
 /// The candidates `kind` allows, in the order to try them.
 ///
 /// Takes the tiers as arguments so a test can supply stubs instead of whatever
 /// this host compiles in.
-fn candidates<'a>(kind: &Kind, platform: &'a [Candidate], software: &'a [Candidate]) -> Vec<&'a Candidate> {
+fn candidates<'a>(kind: Kind, platform: &'a [Candidate], software: &'a [Candidate]) -> Vec<&'a Candidate> {
 	match kind {
 		Kind::Software => software.iter().collect(),
-		// `open` has already checked that a name matches the codec.
-		Kind::Auto | Kind::Named(_) => platform.iter().chain(software).collect(),
+		Kind::Auto => platform.iter().chain(software).collect(),
 	}
 }
 
-fn select(settings: &Settings, candidates: Vec<&Candidate>) -> Result<Box<dyn Backend>, Error> {
-	let codec = settings.codec;
+fn select(config: &Config, candidates: Vec<&Candidate>) -> Result<Box<dyn Backend>, Error> {
+	let codec = config.codec;
 	let mut refused = Vec::new();
 
 	for candidate in candidates {
 		if !candidate.codecs.contains(&codec) {
 			continue;
 		}
-		match (candidate.open)(settings) {
+		match (candidate.open)(config) {
 			Ok(backend) => return Ok(backend),
 			Err(err) => refused.push((candidate.name, err)),
 		}
@@ -163,9 +152,9 @@ fn select(settings: &Settings, candidates: Vec<&Candidate>) -> Result<Box<dyn Ba
 		true => "none".to_owned(),
 		false => available.join(", "),
 	};
-	Err(Error::Unsupported(match &settings.kind {
+	Err(Error::Unsupported(match config.kind {
 		Kind::Software => format!("no software {codec} audio encoder (this build has: {available})"),
-		Kind::Auto | Kind::Named(_) => format!("no {codec} audio encoder (this build has: {available})"),
+		Kind::Auto => format!("no {codec} audio encoder (this build has: {available})"),
 	}))
 }
 
@@ -206,12 +195,12 @@ mod tests {
 		open: |_| Ok(Box::new(Fake("platform"))),
 	};
 
-	/// Compiled in but refusing the settings, like a platform encoder asked for a
+	/// Compiled in but refusing the config, like a platform encoder asked for a
 	/// layout its framework does not open.
 	const REFUSING: Candidate = Candidate {
 		name: "refusing",
 		codecs: &[Codec::Aac],
-		open: |_| Err(Error::Unsupported("not these settings".into())),
+		open: |_| Err(Error::Unsupported("not these config".into())),
 	};
 
 	const SOFTWARE_STUB: Candidate = Candidate {
@@ -227,16 +216,16 @@ mod tests {
 		open: |_| panic!("opened for a codec it does not emit"),
 	};
 
-	fn aac(kind: Kind) -> Settings {
-		Settings {
+	fn aac(kind: Kind) -> Config {
+		Config {
 			kind,
-			..Settings::from_input(Codec::Aac, &Default::default())
+			..Config::from_input(Codec::Aac, &Default::default())
 		}
 	}
 
 	fn pick(kind: Kind, platform: &[Candidate], software: &[Candidate]) -> Result<String, Error> {
-		let settings = aac(kind);
-		let backend = select(&settings, candidates(&settings.kind, platform, software))?;
+		let config = aac(kind);
+		let backend = select(&config, candidates(config.kind, platform, software))?;
 		Ok(backend.name().to_owned())
 	}
 
@@ -256,13 +245,6 @@ mod tests {
 	fn software_skips_platform() {
 		let name = pick(Kind::Software, &[PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
 		assert_eq!(name, "software");
-	}
-
-	/// A codec name is not a backend selector: it tries the same tiers as `Auto`.
-	#[test]
-	fn named_codec_picks_like_auto() {
-		let name = pick(Kind::Named("aac".into()), &[PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
-		assert_eq!(name, "platform");
 	}
 
 	#[test]
@@ -299,38 +281,5 @@ mod tests {
 
 		let err = open(&aac(Kind::Software)).err().expect("no software AAC encoder");
 		assert!(err.to_string().contains("no software aac"), "{err}");
-	}
-
-	fn named(codec: Codec, name: &str) -> Settings {
-		Settings {
-			codec,
-			kind: Kind::Named(name.into()),
-			..Settings::default()
-		}
-	}
-
-	/// A codec's own name opens that codec, like `Auto`.
-	#[test]
-	fn codec_names_open_their_codec() {
-		let _stub = stub::install();
-		assert_eq!(open(&named(Codec::Opus, "opus")).unwrap().name(), libopus::NAME);
-		assert_eq!(open(&named(Codec::Pcm, "pcm")).unwrap().name(), pcm::NAME);
-		assert_eq!(open(&named(Codec::Aac, "aac")).unwrap().name(), stub::NAME);
-	}
-
-	/// A name for another codec is refused, not quietly swapped for the settings' codec.
-	#[test]
-	fn another_codecs_name_is_refused() {
-		assert!(matches!(open(&named(Codec::Opus, "pcm")), Err(Error::Unsupported(_))));
-	}
-
-	/// Backend names are internal: asking for one is refused like any unknown name.
-	#[test]
-	fn backend_names_are_refused() {
-		let message = open(&named(Codec::Opus, libopus::NAME))
-			.err()
-			.expect("libopus is a backend, not a codec")
-			.to_string();
-		assert!(message.contains("\"libopus\"") && message.contains("opus"), "{message}");
 	}
 }

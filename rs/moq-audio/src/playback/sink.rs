@@ -635,8 +635,13 @@ mod tests {
 		for _ in 0..4 {
 			mixer.fill(&mut out, Duration::ZERO);
 		}
-		observer.finish();
-		mixer.fill(&mut out, Duration::ZERO);
+		{
+			let mut cx = Context::from_waker(std::task::Waker::noop());
+			let mut finish = std::pin::pin!(observer.finish());
+			assert!(finish.as_mut().poll(&mut cx).is_pending());
+			mixer.fill(&mut out, Duration::ZERO);
+			assert!(finish.as_mut().poll(&mut cx).is_ready());
+		}
 		// Once the tail runs out nothing plays. The gap where it ran out lands in
 		// the buffer before the stall, which the analyzer attributes to the stall.
 		let observation = observer.read().unwrap();

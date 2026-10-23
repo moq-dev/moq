@@ -264,7 +264,6 @@ class MoqAudioEncoderOutput {
   final int? channels;
   final int? bitrate;
   final int frameDurationUs;
-  final MoqAudioPreset? preset;
   MoqAudioEncoderOutput({
     required this.codec,
     this.track = null,
@@ -272,7 +271,6 @@ class MoqAudioEncoderOutput {
     this.channels = null,
     this.bitrate = null,
     this.frameDurationUs = 0,
-    this.preset = null,
   });
 }
 
@@ -313,11 +311,6 @@ class FfiConverterMoqAudioEncoderOutput {
     );
     final frameDurationUs = frameDurationUs_lifted.value;
     new_offset += frameDurationUs_lifted.bytesRead;
-    final preset_lifted = FfiConverterOptionalMoqAudioPreset.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final preset = preset_lifted.value;
-    new_offset += preset_lifted.bytesRead;
     return LiftRetVal(
       MoqAudioEncoderOutput(
         codec: codec,
@@ -326,7 +319,6 @@ class FfiConverterMoqAudioEncoderOutput {
         channels: channels,
         bitrate: bitrate,
         frameDurationUs: frameDurationUs,
-        preset: preset,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -340,7 +332,6 @@ class FfiConverterMoqAudioEncoderOutput {
         FfiConverterOptionalUInt32.allocationSize(value.channels) +
         FfiConverterOptionalUInt32.allocationSize(value.bitrate) +
         FfiConverterUInt32.allocationSize(value.frameDurationUs) +
-        FfiConverterOptionalMoqAudioPreset.allocationSize(value.preset) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -373,10 +364,6 @@ class FfiConverterMoqAudioEncoderOutput {
       value.frameDurationUs,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalMoqAudioPreset.write(
-      value.preset,
-      Uint8List.view(buf.buffer, new_offset),
-    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -387,7 +374,6 @@ class FfiConverterMoqAudioEncoderOutput {
         FfiConverterOptionalUInt32.allocationSize(value.channels) +
         FfiConverterOptionalUInt32.allocationSize(value.bitrate) +
         FfiConverterUInt32.allocationSize(value.frameDurationUs) +
-        FfiConverterOptionalMoqAudioPreset.allocationSize(value.preset) +
         0;
   }
 }
@@ -4254,44 +4240,6 @@ class FfiConverterMoqVideoPacket {
         FfiConverterUint8List.allocationSize(value.data) +
         FfiConverterBool.allocationSize(value.keyframe) +
         0;
-  }
-}
-
-enum MoqAudioPreset { lowLatency, balanced, quality }
-
-class FfiConverterMoqAudioPreset {
-  static LiftRetVal<MoqAudioPreset> read(Uint8List buf) {
-    final index = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
-    switch (index) {
-      case 1:
-        return LiftRetVal(MoqAudioPreset.lowLatency, 4);
-      case 2:
-        return LiftRetVal(MoqAudioPreset.balanced, 4);
-      case 3:
-        return LiftRetVal(MoqAudioPreset.quality, 4);
-      default:
-        throw UniffiInternalError(
-          UniffiInternalError.unexpectedEnumCase,
-          "Unable to determine enum variant",
-        );
-    }
-  }
-
-  static MoqAudioPreset lift(RustBuffer buffer) {
-    return FfiConverterMoqAudioPreset.read(buffer.asUint8List()).value;
-  }
-
-  static RustBuffer lower(MoqAudioPreset input) {
-    return toRustBuffer(createUint8ListFromInt(input.index + 1));
-  }
-
-  static int allocationSize(MoqAudioPreset _value) {
-    return 4;
-  }
-
-  static int write(MoqAudioPreset value, Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.index + 1);
-    return 4;
   }
 }
 
@@ -13741,53 +13689,6 @@ class FfiConverterOptionalMoqAudioFrame {
     }
     buf[0] = 1;
     return FfiConverterMoqAudioFrame.write(
-          value,
-          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
-        ) +
-        1;
-  }
-}
-
-class FfiConverterOptionalMoqAudioPreset {
-  static MoqAudioPreset? lift(RustBuffer buf) {
-    return FfiConverterOptionalMoqAudioPreset.read(buf.asUint8List()).value;
-  }
-
-  static LiftRetVal<MoqAudioPreset?> read(Uint8List buf) {
-    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
-      return LiftRetVal(null, 1);
-    }
-    final result = FfiConverterMoqAudioPreset.read(
-      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
-    );
-    return LiftRetVal<MoqAudioPreset?>(result.value, result.bytesRead + 1);
-  }
-
-  static int allocationSize([MoqAudioPreset? value]) {
-    if (value == null) {
-      return 1;
-    }
-    return FfiConverterMoqAudioPreset.allocationSize(value) + 1;
-  }
-
-  static RustBuffer lower(MoqAudioPreset? value) {
-    if (value == null) {
-      return toRustBuffer(Uint8List.fromList([0]));
-    }
-    final buf = Uint8List(
-      FfiConverterOptionalMoqAudioPreset.allocationSize(value),
-    );
-    FfiConverterOptionalMoqAudioPreset.write(value, buf);
-    return toRustBuffer(buf);
-  }
-
-  static int write(MoqAudioPreset? value, Uint8List buf) {
-    if (value == null) {
-      buf[0] = 0;
-      return 1;
-    }
-    buf[0] = 1;
-    return FfiConverterMoqAudioPreset.write(
           value,
           Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
         ) +

@@ -702,7 +702,7 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::*;
-	use crate::encode::{Encoder, Input, Options as EncodeOptions, Producer, Settings};
+	use crate::encode::{Config as EncodeConfig, Encoder, Input, Options as EncodeOptions, Producer};
 	use crate::{Format, Layout};
 
 	async fn warmup_output(start: Start, declared: bool) -> (Vec<u128>, usize) {
@@ -1053,11 +1053,11 @@ mod tests {
 		};
 		let options = EncodeOptions {
 			track: Some("audio".to_string()),
-			settings: Settings::new(48_000, Layout::Mono),
+			config: EncodeConfig::new(48_000, Layout::Mono),
 			..EncodeOptions::default()
 		};
 		let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
-		let mut catalog = Encoder::new(&Settings::new(input.sample_rate, input.layout))
+		let mut catalog = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout))
 			.unwrap()
 			.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
@@ -1372,11 +1372,11 @@ mod tests {
 
 	#[tokio::test]
 	async fn resampling_keeps_the_activity_boundary_on_its_source() {
-		let mut encoder = Encoder::new(&Settings {
+		let mut encoder = Encoder::new(&EncodeConfig {
 			dtx: true,
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
 			frame_duration: std::time::Duration::from_millis(10),
-			..Settings::new(48_000, Layout::Mono)
+			..EncodeConfig::new(48_000, Layout::Mono)
 		})
 		.unwrap();
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 1);
@@ -1589,10 +1589,10 @@ mod tests {
 	/// before the jump and are labelled by the packet they came from.
 	#[tokio::test]
 	async fn a_terminal_jump_leaves_the_held_samples_alone() {
-		let mut encoder = Encoder::new(&Settings {
+		let mut encoder = Encoder::new(&EncodeConfig {
 			dtx: true,
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
-			..Settings::new(48_000, Layout::Mono)
+			..EncodeConfig::new(48_000, Layout::Mono)
 		})
 		.unwrap();
 		let mut catalog = encoder.catalog();
@@ -1710,7 +1710,7 @@ mod tests {
 			sample_rate: 48_000,
 			layout: Layout::Mono,
 		};
-		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout)).unwrap();
 		let mut catalog = encoder.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;
@@ -1884,7 +1884,7 @@ mod tests {
 	/// would shrink the term by exactly that much.
 	#[tokio::test]
 	async fn opus_states_its_own_frame_duration() {
-		let mut encoder = Encoder::new(&Settings::new(48_000, Layout::Mono)).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig::new(48_000, Layout::Mono)).unwrap();
 		let mut catalog = encoder.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;
@@ -1980,7 +1980,7 @@ mod tests {
 			sample_rate: 48_000,
 			layout: Layout::Mono,
 		};
-		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout)).unwrap();
 		let mut catalog = encoder.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;
@@ -2033,7 +2033,7 @@ mod tests {
 			sample_rate: 48_000,
 			layout: Layout::Mono,
 		};
-		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout)).unwrap();
 		let mut catalog = encoder.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;
@@ -2151,7 +2151,7 @@ mod tests {
 		};
 
 		// One real Opus packet, so a mis-framed read can't accidentally decode.
-		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout)).unwrap();
 		let mut catalog = encoder.catalog();
 		// Every packet counts here; the warmup tests cover trimming.
 		catalog.warmup = None;

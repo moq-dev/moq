@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `encode::Settings` is `encode::Config`
+
+`encode::Settings` is `encode::Config`, matching `decode::Config` and `moq_video::encode::Config`.
+`encode::Options::settings` is `config`, and `encode::Encoder::settings()` is `config()`.
+
+### `Kind::Named` is removed
+
+`encode::Kind::Named` and `decode::Kind::Named` only checked the codec, which the encoder already takes from `Config::codec` and the decoder from the catalog.
+Drop the variant and use `Kind::Auto`.
+
 ### Decoded reads carry encoder ends (#5687)
 
 `decode::Consumer::read()` returns `decode::Read` events instead of bare frames: `Frame { discontinuity, frame }` and `End { discontinuity, end }`; `None` still means the track is finished.

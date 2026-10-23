@@ -9,7 +9,7 @@ use super::backend::{self, Backend};
 use crate::{Error, Layout};
 
 /// Decoder backend selection.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Kind {
 	/// Prefer a platform decoder, falling back to software.
@@ -17,10 +17,6 @@ pub enum Kind {
 	Auto,
 	/// Require a software backend.
 	Software,
-	/// Require the track to be this codec, by its lowercase name: `"opus"`,
-	/// `"pcm"`, or `"aac"`. Any other codec is refused. The library still picks
-	/// the backend, platform first.
-	Named(String),
 }
 
 /// Low-level decoder configuration.
@@ -230,7 +226,7 @@ pub(crate) mod tests {
 	/// Real Opus: 20 ms packets of a continuous 440 Hz sine, mono, from libopus
 	/// with its 312-sample lookahead.
 	pub(crate) fn opus_packets(count: usize) -> Vec<bytes::Bytes> {
-		let mut encoder = crate::encode::Encoder::new(&crate::encode::Settings::new(48_000, Layout::Mono)).unwrap();
+		let mut encoder = crate::encode::Encoder::new(&crate::encode::Config::new(48_000, Layout::Mono)).unwrap();
 		let frames = encoder.frame_size();
 		(0..count)
 			.map(|packet| {
@@ -403,32 +399,5 @@ pub(crate) mod tests {
 			Decoder::new(&catalog, &Config::default()),
 			Err(Error::Unsupported(_))
 		));
-	}
-
-	/// Published moq-audio accepts the codec's name, not a backend's.
-	#[cfg(feature = "aac")]
-	#[test]
-	fn named_aac_decodes_aac() {
-		let config = Config {
-			kind: Kind::Named("aac".into()),
-		};
-		assert!(Decoder::new(&aac_catalog(), &config).is_ok());
-
-		let config = Config {
-			kind: Kind::Named("opus".into()),
-		};
-		assert!(matches!(
-			Decoder::new(&aac_catalog(), &config),
-			Err(Error::Unsupported(_))
-		));
-	}
-
-	#[test]
-	fn refuses_unavailable_backend() {
-		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 2);
-		let config = Config {
-			kind: Kind::Named("missing".into()),
-		};
-		assert!(matches!(Decoder::new(&catalog, &config), Err(Error::Unsupported(_))));
 	}
 }
