@@ -15,7 +15,7 @@
 use std::time::{Duration, Instant};
 
 use moq_net::{Epoch, origin};
-use moq_stats::{Role, Tier, Traffic, TrafficFrame, aggregate, traffic_track};
+use moq_stats::{Encoding, Role, Tier, Traffic, TrafficFrame, aggregate, traffic_track};
 
 /// Broadcast paths each node reports.
 const KEYS: usize = 16;
@@ -46,7 +46,7 @@ impl Node {
 			.unwrap();
 		let track = source
 			.create_track(
-				traffic_track(&Tier::default(), Role::Publisher, false),
+				traffic_track(&Tier::default(), Role::Publisher, Encoding::Plain),
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();

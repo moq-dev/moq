@@ -304,8 +304,8 @@ pub struct Publish {
 	broadcast: Option<moq_net::broadcast::Producer>,
 	// A stdin import's route, announced once its catalog lists the tracks; see [`Self::announce`].
 	route: Option<moq_net::origin::Route>,
-	// The `--stats` report, written beside the decode loop; see [`Self::with_stats`].
-	stats: Option<crate::report::Stats>,
+	// The `--report` track, written beside the decode loop; see [`Self::with_report`].
+	report: Option<crate::report::Stats>,
 }
 
 /// A broadcast's announcement, held until its catalog first goes out.
@@ -366,7 +366,7 @@ impl Publish {
 				},
 				broadcast: Some(broadcast),
 				route: None,
-				stats: None,
+				report: None,
 			});
 		}
 
@@ -413,7 +413,7 @@ impl Publish {
 			},
 			broadcast: Some(broadcast),
 			route: None,
-			stats: None,
+			report: None,
 		})
 	}
 
@@ -431,7 +431,7 @@ impl Publish {
 			},
 			broadcast: None,
 			route: None,
-			stats: None,
+			report: None,
 		}
 	}
 
@@ -471,24 +471,25 @@ impl Publish {
 			},
 			broadcast: Some(broadcast),
 			route: None,
-			stats: None,
+			report: None,
 		})
 	}
 
-	/// Name a stats track in the catalog and write it beside the decode loop: what each track
-	/// has written, and the transport of `connection` when there is one.
+	/// Name a media report track in the catalog's `stats` section and write it beside the
+	/// decode loop: what each track has written, and the transport of `connection` when there
+	/// is one.
 	///
 	/// Call it before the importer declares its tracks, so the section rides the first catalog.
-	pub fn with_stats(mut self, connection: Option<moq_tokio::connection::Monitor>) -> anyhow::Result<Self> {
+	pub fn with_report(mut self, connection: Option<moq_tokio::connection::Monitor>) -> anyhow::Result<Self> {
 		let (Some(broadcast), Source::Stream { catalog, .. }) = (self.broadcast.as_mut(), &self.source) else {
-			anyhow::bail!("--stats reports a stdin import's one catalog");
+			anyhow::bail!("--report reports a stdin import's one catalog");
 		};
-		let stats = match catalog {
+		let report = match catalog {
 			PublishCatalog::Media(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
 			PublishCatalog::Ts(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
 			PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
 		};
-		self.stats = Some(stats);
+		self.report = Some(report);
 		Ok(self)
 	}
 
@@ -521,7 +522,7 @@ impl Publish {
 					tokio::io::stdin(),
 					self.broadcast,
 					pending,
-					self.stats,
+					self.report,
 				)
 				.await
 			}
@@ -585,7 +586,7 @@ impl Publish {
 /// The finished `broadcast` then stays servable until its media is stale, so a subscriber
 /// that saw the final catalog only at EOF can still request it.
 ///
-/// `report` writes `--stats` beside the read loop, so a stalled input keeps reporting, and ends
+/// `report` writes `--report` beside the read loop, so a stalled input keeps reporting, and ends
 /// with its final counts when the media tracks do.
 async fn decode(
 	mut decoder: PublishDecoder,

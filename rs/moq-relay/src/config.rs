@@ -750,7 +750,7 @@ root = ["ca.pem"]
 		let toml = r#"
 [stats]
 enabled = true
-interval = 5
+interval = "5s"
 node = "localhost"
 depth = 2
 linger = "2m"
@@ -767,7 +767,7 @@ linger = "2m"
 			config.stats.enabled,
 			"TOML's stats.enabled=true must not be clobbered by CLI defaults"
 		);
-		assert_eq!(config.stats.interval, 5);
+		assert_eq!(config.stats.interval(), std::time::Duration::from_secs(5));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 		assert_eq!(config.stats.depth, 2);
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(120)));
@@ -776,9 +776,11 @@ linger = "2m"
 			std::ffi::OsString::from("moq-relay"),
 			std::ffi::OsString::from(&path),
 			std::ffi::OsString::from("--stats-linger=30s"),
+			std::ffi::OsString::from("--stats-interval=250ms"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(30)));
+		assert_eq!(config.stats.interval(), std::time::Duration::from_millis(250));
 	}
 
 	/// Bare runtime defaults loaded from TOML survive when the CLI omits them.
