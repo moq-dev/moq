@@ -72,14 +72,15 @@ each turned green:
   [moq-dev/moq#6518](https://github.com/moq-dev/moq/pull/6518) backports it
   to `release`. Released Rust never sees the NAMESPACE itself from quic-zig
   or moxygen (docker, and draft-14 over raw QUIC); the client built on
-  `main` passes against both.
+  `main` passes against both, so it gets no backport: the runner client bump
+  fixes it.
 - Our relay through third-party clients: `rendezvous-timeout` 0x10
   (aiomoqt, imquic, quic-zig, Cloudflare draft-18), the relay stamping a
   Timestamp property on every object
   ([moq-dev/moq#5083](https://github.com/moq-dev/moq/pull/5083)), and moq-go
   refusing a server without RESET_STREAM_AT (moq-quic) are fixed on `main`,
   as are xquic's raw-QUIC connection errors (5 of 6 cases pass). An omitted
-  DEFAULT_PUBLISHER_PRIORITY now forwards as 128, not 127.
+  DEFAULT_PUBLISHER_PRIORITY or SUBSCRIBER_PRIORITY now forwards as 128, not 127.
 - Through our relay, Cloudflare's draft-18 `data-subgroup-basic` still
   fails on two items reported upstream:
   [cloudflare/moq-rs#281](https://github.com/cloudflare/moq-rs/issues/281)
