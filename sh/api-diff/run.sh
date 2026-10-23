@@ -70,20 +70,35 @@ compare() {
     fi
 }
 
-# cargo-semver-checks over every published library crate, against the newest
-# crates.io release no newer than the crate's own version (its default).
-# `--release-type minor` holds every crate to "no breaking change" whatever its
-# version says, since the versions are bumped only after a cut.
+# cargo-semver-checks over every published library crate, against its newest
+# crates.io release, with every feature on. `--release-type minor` holds every
+# crate to "no breaking change" whatever its version says, since the versions
+# are bumped only after a cut.
+#
+# Both sides are documented as rustdoc JSON in one build each, sharing their
+# dependencies: cargo-semver-checks would otherwise build each crate, baseline
+# and current, in a workspace of its own and compile the dependencies again.
 rust() {
-    local name kinds status log baseline
-    # Share one target directory across crates: cargo-semver-checks otherwise
-    # builds every baseline and current crate's dependencies from scratch.
-    export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$root/target}
-    mkdir -p "$out/rust"
-    while read -r name kinds; do
+    local name kinds lib id path index version features status log target
+    local crates=() libs=() versions=() current=() baseline=()
+    local -A released=()
+    local manifest=$out/rust/baseline/Cargo.toml
+    mkdir -p "$out/rust/baseline/src"
+    : >"$out/rust/baseline/src/lib.rs"
+    # Its own workspace, so the repository's does not claim it.
+    printf '[package]\nname = "api-diff-baseline"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n\n[workspace]\n\n[dependencies]\n' >"$manifest"
+
+    while read -r name kinds lib id; do
         # A binary or a C library has no Rust API; moq-c and moq-ffi are diffed as FFI.
         [[ ",$kinds," == *,lib,* || ",$kinds," == *,rlib,* ]] || continue
-        status=$(curl -sS -o /dev/null -w '%{http_code}' "https://index.crates.io/${name:0:2}/${name:2:2}/$name")
+        # The sparse index shards names by length: 3/k/kio, ha/ng/hang.
+        case ${#name} in
+            1 | 2) path=${#name}/$name ;;
+            3) path=3/${name:0:1}/$name ;;
+            *) path=${name:0:2}/${name:2:2}/$name ;;
+        esac
+        index=$out/rust/$name.index
+        status=$(curl -sS -o "$index" -w '%{http_code}' "https://index.crates.io/$path")
         case "$status" in
             200) ;;
             404)
@@ -95,19 +110,55 @@ rust() {
                 exit 1
                 ;;
         esac
+        # The highest release that is neither yanked nor a pre-release, and its features.
+        version=$(jq -rs '[.[] | select((.yanked | not) and (.vers | contains("-") | not))]
+            | max_by(.vers | split(".") | map(tonumber)) | .vers' "$index")
+        features=$(jq -cs --arg v "$version" '.[] | select(.vers == $v) | (.features // {}) + (.features2 // {}) | keys' "$index")
+        printf '%s = { version = "=%s", features = %s }\n' "$name" "$version" "$features" >>"$manifest"
+        crates+=("$name")
+        libs+=("$lib")
+        versions+=("$version")
+        current+=(-p "$id")
+    done < <(cargo metadata --locked --no-deps --format-version 1 |
+        jq -r '.packages[] | select(.publish != []) |
+            "\(.name) \([.targets[].kind[]] | unique | join(",")) \([.targets[] | select(.kind | index("lib") or index("rlib")) | .name][0] // "-") \(.id)"')
 
-        echo "api-diff: rust $name" >&2
+    # The baseline resolves its own lockfile, as a consumer of those releases
+    # would. A release without a library, or with another name for it, shows here.
+    while read -r name version lib; do
+        released["$name $version"]=$lib
+    done < <(cargo metadata --manifest-path "$manifest" --format-version 1 |
+        jq -r '.packages[] | select(.source != null) |
+            "\(.name) \(.version) \([.targets[] | select(.kind | index("lib") or index("rlib")) | .name][0] // "-")"')
+    for i in "${!crates[@]}"; do
+        if [[ "${released["${crates[$i]} ${versions[$i]}"]:--}" == - ]]; then
+            row "${crates[$i]}" "${versions[$i]} (no library)" new
+            unset "crates[$i]"
+        else
+            baseline+=(-p "${crates[$i]}@${versions[$i]}")
+        fi
+    done
+
+    export RUSTC_BOOTSTRAP=1 RUSTDOCFLAGS="-Z unstable-options --output-format json"
+    target=$(cargo metadata --locked --no-deps --format-version 1 | jq -r .target_directory)
+    cargo doc --locked --no-deps --all-features "${current[@]}"
+    CARGO_TARGET_DIR=$target/api-diff-baseline cargo doc --manifest-path "$manifest" --no-deps "${baseline[@]}"
+    unset RUSTC_BOOTSTRAP RUSTDOCFLAGS
+
+    for i in "${!crates[@]}"; do
+        name=${crates[$i]}
+        lib=${released["$name ${versions[$i]}"]}
         log=$out/rust/$name.log
         status=0
-        cargo semver-checks check-release --color never --release-type minor -p "$name" </dev/null >"$log" 2>&1 || status=$?
-        # "Checking kio v0.6.2 -> v0.6.3 (minor change)" names the baseline first.
-        baseline=$(sed -nE 's/^ *Checking [^ ]+ v([^ ]+) -> .*/\1/p' "$log")
+        cargo semver-checks check-release --color never --release-type minor -p "$name" \
+            --baseline-rustdoc "$target/api-diff-baseline/doc/${lib//-/_}.json" \
+            --current-rustdoc "$target/doc/${libs[$i]//-/_}.json" >"$log" 2>&1 || status=$?
         case "$status" in
-            0) row "$name" "$baseline" unchanged ;;
+            0) row "$name" "${versions[$i]}" unchanged ;;
             # Keep each failed lint's title and the items it failed on, with
             # paths relative to the checkout or the crates.io source.
             100)
-                row "$name" "$baseline" break "$(grep -vE '^ *(Building|Built|Parsing|Parsed|Checked|Finished) |^mbx' "$log" |
+                row "$name" "${versions[$i]}" break "$(grep -vE '^ *(Parsing|Parsed|Checked|Finished) ' "$log" |
                     sed -E "/^Description:$/,/^ +impl: /d; s|$root/||g; s|[^ ]*/registry/src/[^/]+/||g")" text
                 ;;
             *)
@@ -116,8 +167,7 @@ rust() {
                 exit 1
                 ;;
         esac
-    done < <(cargo metadata --locked --no-deps --format-version 1 |
-        jq -r '.packages[] | select(.publish != []) | "\(.name) \([.targets[].kind[]] | unique | join(","))"')
+    done
 }
 
 js() {
