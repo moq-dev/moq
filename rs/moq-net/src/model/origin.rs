@@ -5925,6 +5925,7 @@ impl Consumer {
 	/// A clone whose announcements skip the routes this origin cannot forward: a
 	/// chain already at [`Config::max_hops`] has no room for our hop. Sessions whose
 	/// wire carries the hop path apply this to the routes they advertise.
+	// private: tuning
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn forwardable(mut self) -> Self {
 		self.horizon.max_hops = Some(self.max_hops);
