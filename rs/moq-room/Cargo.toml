@@ -23,3 +23,6 @@ thiserror = { workspace = true }
 [dev-dependencies]
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["net"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[lints]
+workspace = true

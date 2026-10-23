@@ -6,6 +6,20 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Stream},
 };
 
+/// Legacy receives are framed once by the physical multiplexer, not again by
+/// the virtual request decoder. Encodes still count at their typed codec.
+pub(super) fn with_stats<S: crate::transport::poll::Session>(
+	stream: Stream<S, Version>,
+	stats: &crate::stats::Session,
+	version: Version,
+) -> Stream<S, Version> {
+	let mut stream = stream.with_stats(stats);
+	if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+		stream.reader = stream.reader.with_stats(&Default::default());
+	}
+	stream
+}
+
 pub(super) fn fin_cancels(version: Version) -> bool {
 	matches!(
 		version,
@@ -130,8 +144,12 @@ pub(super) enum FollowUp {
 
 impl Decode<Version> for FollowUp {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let update = r.varint()? == super::SubscribeUpdate::ID;
+		let id = r.varint()?;
+		let update = id == super::SubscribeUpdate::ID;
+		let start = r.position();
 		let body = super::Body::decode(r, version)?;
+		r.control = Some(super::message::control(id, version));
+		r.uncounted = start;
 		Ok(match update {
 			true => Self::Update(body),
 			false => Self::End,
@@ -147,7 +165,11 @@ pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
 impl Decode<Version> for Framed {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
-		Ok(Self(id, super::Body::decode(r, version)?))
+		let start = r.position();
+		let body = super::Body::decode(r, version)?;
+		r.control = Some(super::message::control(id, version));
+		r.uncounted = start;
+		Ok(Self(id, body))
 	}
 }
 
@@ -171,6 +193,7 @@ impl<T: Decode<Version>> Decode<Version> for Next<T> {
 			let mut peek = r.clone();
 			if peek.varint()? == super::GoAway::ID {
 				*r = peek;
+				r.uncounted = r.position();
 				let msg = super::GoAway::decode(r, version)?;
 				// Draft-18's Request ID belongs on the control stream only.
 				if msg.request_id.is_some() {
@@ -349,8 +372,7 @@ pub(super) struct Update {
 	pub(super) authorization_token: Option<super::token::RequestToken>,
 	/// NEW_GROUP_REQUEST (draft-15+), which only a track advertising DYNAMIC_GROUPS takes.
 	pub(super) new_group: Option<u64>,
-	/// FORWARD, `None` when unchanged. Only a subscription we initiated with PUBLISH may
-	/// pause; the rest serve forwarding subscriptions only.
+	/// FORWARD, `None` when unchanged.
 	pub(super) forward: Option<bool>,
 	/// The new Location Filter, which only a paused PUBLISH subscription resuming takes.
 	pub(super) filter: Option<super::Filter>,
@@ -472,10 +494,14 @@ impl Decode<Version> for Update {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
 		}
+		let start = r.position();
 		let size = r.u16()? as usize;
 		let mut data = r.sub(size)?;
 		// The complete frame is present; a short field inside it is malformed.
-		Self::decode_body(&mut data, version).map_err(DecodeError::complete)
+		let update = Self::decode_body(&mut data, version).map_err(DecodeError::complete)?;
+		r.control = Some(super::message::control(super::SubscribeUpdate::ID, version));
+		r.uncounted = start;
+		Ok(update)
 	}
 }
 
@@ -506,6 +532,7 @@ impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
 		}
+		let start = r.position();
 		let size = r.u16()? as usize;
 		let mut data = r.sub(size)?;
 		let mut decode = || {
@@ -525,7 +552,10 @@ impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 				refused: super::token::single(token).err().map(Into::into),
 			})
 		};
-		decode().map_err(DecodeError::complete)
+		let update = decode().map_err(DecodeError::complete)?;
+		r.control = Some(super::message::control(super::SubscribeUpdate::ID, version));
+		r.uncounted = start;
+		Ok(update)
 	}
 }
 
@@ -549,6 +579,27 @@ mod tests {
 			));
 			assert_eq!(session.log.closes()[0].0, 0x03, "{version}");
 		}
+	}
+
+	/// A request-stream message counts as its sender counts it: the length and body, not the
+	/// type that selects it, including a GOAWAY read ahead of the response.
+	#[moq_clock::test]
+	async fn request_stream_messages_count_without_their_type() {
+		use crate::lite::test_transport::ScriptedSession;
+		use crate::stats::{Control, Registry, Tier};
+		let registry = Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("");
+		let version = Version::Draft22;
+		let mut session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0, 0x07, 0, 0]);
+		let mut stream = with_stats(Stream::open(&mut session, version).await.unwrap(), &stats, version);
+		let mut messages = Messages::new(session.clone(), true);
+		assert_eq!(messages.message(&mut stream.reader).await.unwrap().0, 0x07);
+		let rx = |class| {
+			let rows = registry.snapshot().control();
+			rows.into_iter().find(|row| row.1 == class).map(|row| row.2.rx)
+		};
+		assert_eq!(rx(Control::Goaway), Some(4));
+		assert_eq!(rx(Control::Other), Some(2));
 	}
 
 	#[moq_clock::test]

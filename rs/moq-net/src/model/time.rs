@@ -332,16 +332,15 @@ impl From<Timestamp> for std::time::Duration {
 }
 
 impl std::fmt::Debug for Timestamp {
-	#[allow(clippy::manual_is_multiple_of)] // is_multiple_of is unstable in Rust 1.85
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let nanos = self.as_nanos();
 
 		// Choose the largest unit where we don't need decimal places.
-		if nanos % 1_000_000_000 == 0 {
+		if nanos.is_multiple_of(1_000_000_000) {
 			write!(f, "{}s", nanos / 1_000_000_000)
-		} else if nanos % 1_000_000 == 0 {
+		} else if nanos.is_multiple_of(1_000_000) {
 			write!(f, "{}ms", nanos / 1_000_000)
-		} else if nanos % 1_000 == 0 {
+		} else if nanos.is_multiple_of(1_000) {
 			write!(f, "{}µs", nanos / 1_000)
 		} else {
 			write!(f, "{}ns", nanos)

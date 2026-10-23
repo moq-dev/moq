@@ -198,7 +198,10 @@ impl Producer {
 	}
 
 	/// Whether the current catalog contains no servable renditions (serve path).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub fn is_empty(&self) -> bool {
 		self.state.read().renditions.is_empty()
 	}
@@ -484,7 +487,10 @@ impl Producer {
 
 	/// Resolve once at least one enabled rendition is [advertised](Rendition::is_advertised), so a
 	/// master playlist can list it.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub(crate) async fn advertised(&self) {
 		let _ = kio::wait(|waiter| {
 			self.state.poll_ref(waiter, |current| {

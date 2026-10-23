@@ -231,7 +231,10 @@ mod tests {
 			assert!(poll_once(&mut sleep).is_pending());
 
 			// Idle on tokio's paused clock for an hour: the installed clock stays put.
-			#[allow(clippy::disallowed_methods)]
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the test idles on tokio's clock, not the installed one"
+			)]
 			tokio::time::sleep(Duration::from_secs(3_600)).await;
 			assert_eq!(crate::now(), start);
 			assert!(poll_once(&mut sleep).is_pending());

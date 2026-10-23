@@ -8,9 +8,10 @@ is fixed. Cost that pays for a feature `main` deliberately added is accepted,
 and the reason is written here.
 
 This epic's own work: once every child has landed, run the full main against
-release comparison again with `just bench origin/release`, and confirm nothing
-new regressed. Then add a release-baseline step to the recurring
-[performance audit](/quest/m1/audit-perf.md), so every later cut
+release comparison again with `just bench origin/release`, plus the JS frame
+path in Chromium with `bench/browser/micro.ts`, and confirm nothing new
+regressed. Then add a release-baseline step to the recurring
+[performance audit](/quest/m2/audit-perf.md), so every later cut
 repeats this comparison.
 
 ## Plan
@@ -60,6 +61,13 @@ noise.
   [#5548](https://github.com/moq-dev/moq/pull/5548) needs. An earliest-deadline
   atomic cannot prove a replacement driver is registered, and a lock-free
   notification primitive is not worth ~8 ns.
+- `track_gap_flush` is accepted at O(log gaps + retired entries) per shared
+  successor, after [#6287](https://github.com/moq-dev/moq/pull/6287) indexed
+  the gap ledger and retired a shared verdict's gaps with one split. Each
+  retired entry must be freed exactly once, so the batch is already amortized
+  optimal; a representation that hides that reclamation would widen scope for
+  no measured benefit. Sparse arrivals cost O(log gaps) amortized, and at 4096
+  gaps flush, read, and expiry instructions fell 80 to 95%.
 - The mux exports' and Annex B import's fixed cost per broadcast is accepted.
   It publishes required output: a per-track timeline and an immediately
   completed catalog record. Their cold DEFLATE state is most of it (81% of a
@@ -134,22 +142,27 @@ the moq-net and kio rows include the fixes above.
 | `session_delivery_{relays,paced,scale}` | 1.43x to 1.56x | 1.28x to 1.77x | accepted (above) |
 | moq-stats `aggregate`, live=16, departed=4096 | 2.1x | 1.05x | noise |
 | kio `contended_{notify,log}`, 16 threads | 4x to 5x | wall 1.04x to 1.15x | noise |
-| JS `net/bench/frames.ts` on bun | 1.2x to 2.2x | | [JS frames](/quest/m1/release-perf/js-frames.md) |
+| JS `net/bench/frames.ts` on bun | 1.2x to 2.2x | | accepted (below) |
 
 The kio contention benches spin across threads, so instructions don't measure
 them; the row is the least loaded of three alternating wall-time rounds, and
 later rounds swung both ways.
 
+JS `net/bench/frames.ts` on bun had lite rows at 1.2 to 1.3x and IETF rows at
+1.3 to 2.2x. Fixed in Chromium:
+[#6296](https://github.com/moq-dev/moq/pull/6296) removed a retained-history
+scan, and [#6479](https://github.com/moq-dev/moq/pull/6479) stopped
+releasing a finished stream's reader lock, which built a `TypeError` per
+group stream. Every row then sits within the A/A spread of release.
+The group write/read microbench stays 3 to 12% above release against an
+A/A of 3 to 8% on the same host. Decided 2026-10-23 (maintainer): browser
+parity accepted on this evidence; the final re-run above checks it again.
+
 The raw report lived in a scratch directory that has since been removed.
 `just bench <base>` now pairs full Criterion IDs; point `MOQ_BENCH_ARTIFACTS`
 outside the worktree to keep the next one.
 
-## Required
-
-- [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - an arrival and a gap flush cost O(log gaps), not O(gaps)
-- [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
-
 ## Related
 
-- [Performance audit](/quest/m1/audit-perf.md) - compares nightly to nightly; this epic compares main to release
+- [Performance audit](/quest/m2/audit-perf.md) - compares nightly to nightly; this epic compares main to release
 - [Nightly benchmark regressions](/quest/m1/bench-ci.md) - paired nightly-to-nightly comparison on one runner

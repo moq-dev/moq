@@ -20,7 +20,6 @@ export {
 	type Segment,
 	type Specificity,
 } from "@moq/pattern";
-export { Access, AccessSchema } from "./access.ts";
 export * from "./algorithm.ts";
 export * from "./claims.ts";
 export * from "./contract.ts";

@@ -328,6 +328,145 @@ test("a resumed fork shares an on-demand track request", async () => {
 	expect(await extra).toBeUndefined();
 });
 
+test("a lagging same-epoch replica resumes from one publisher's bytes exactly once", async () => {
+	const { clock, restore } = manual();
+	const publisher = new Producer();
+	const original = publisher.createBroadcast(path);
+	original.announce({ epoch: EPOCH });
+	const source = original.createTrack("seq");
+	const origin = new Producer();
+
+	// Both replicas forward this one source. Only the incumbent pauses mid-group.
+	function replica(lagging: boolean) {
+		const broadcast = new BroadcastProducer();
+		const output = broadcast.createTrack("seq");
+		const input = source.subscribe({ maxDelay: Milli(60_000) });
+		const release = Promise.withResolvers<void>();
+		let stopped = false;
+		const done = (async () => {
+			try {
+				for (;;) {
+					const group = await input.recvGroup();
+					if (!group) return;
+					const copy = new GroupProducer(group.sequence);
+					output.writeGroup(copy);
+					try {
+						for (let index = 0; ; index++) {
+							const frame = await group.readFrame();
+							if (!frame) break;
+							if (lagging && group.sequence === 1 && index === 2) await release.promise;
+							copy.writeFrame(frame);
+						}
+						copy.close();
+					} finally {
+						group.close();
+					}
+				}
+			} catch (err) {
+				if (stopped) return;
+				output.close(err instanceof Error ? err : new Error(String(err)));
+				broadcast.close();
+				return err;
+			}
+		})();
+		return {
+			broadcast,
+			done,
+			stop(err?: Error) {
+				stopped = true;
+				input.close();
+				release.resolve();
+				output.close(err);
+				broadcast.close();
+			},
+		};
+	}
+
+	const a = replica(true);
+	const b = replica(false);
+	const disposeA = serve(origin, a.broadcast, 5n);
+	const request = origin.request(path);
+	const standby = b.broadcast.consume();
+	const warm = standby.track("seq").subscribe({ maxDelay: Milli(60_000) });
+	let sub: track.Subscriber | undefined;
+	let disposeB: (() => void) | undefined;
+	try {
+		await clock.advance(Nano(0));
+		const active = request.active.peek();
+		if (!active) throw new Error("expected the incumbent route");
+		sub = active.track("seq").subscribe({ maxDelay: Milli(60_000) });
+		const first = source.appendGroup();
+		for (let frame = 0; frame < 4; frame++) first.writeFrame({ payload: enc.encode(`0.${frame}`) });
+		first.close();
+		const seen: string[] = [];
+		const initial = await sub.recvGroup();
+		if (!initial) throw new Error("expected group 0");
+		expect(initial.sequence).toBe(0);
+		for (let frame = 0; frame < 4; frame++) seen.push(dec.decode((await initial.readFrame())?.payload));
+		expect(await initial.readFrame()).toBeUndefined();
+		initial.close();
+
+		const open = source.appendGroup();
+		for (let frame = 0; frame < 2; frame++) open.writeFrame({ payload: enc.encode(`1.${frame}`) });
+		const interrupted = await sub.recvGroup();
+		if (!interrupted) throw new Error("expected group 1");
+		expect(interrupted.sequence).toBe(1);
+		for (let frame = 0; frame < 2; frame++) seen.push(dec.decode((await interrupted.readFrame())?.payload));
+		for (let frame = 2; frame < 4; frame++) open.writeFrame({ payload: enc.encode(`1.${frame}`) });
+		open.close();
+		const last = source.appendGroup();
+		for (let frame = 0; frame < 4; frame++) last.writeFrame({ payload: enc.encode(`2.${frame}`) });
+		last.close();
+
+		// The standby holds the complete original while the incumbent cannot pass 1.1.
+		for (let sequence = 0; sequence < 3; sequence++) {
+			const group = await warm.recvGroup();
+			if (!group) throw new Error("expected a warmed group");
+			expect(group.sequence).toBe(sequence);
+			for (let frame = 0; frame < 4; frame++) {
+				expect(dec.decode((await group.readFrame())?.payload)).toBe(`${sequence}.${frame}`);
+			}
+			expect(await group.readFrame()).toBeUndefined();
+			group.close();
+		}
+		disposeB = serve(origin, b.broadcast, 9n);
+		await clock.advance(Nano(0));
+		expect(request.active.peek()).toBe(active);
+		disposeA();
+		a.stop(new StreamError(StreamCode.SessionClosed));
+		await clock.advance(Nano(0));
+		for (let frame = 2; frame < 4; frame++) seen.push(dec.decode((await interrupted.readFrame())?.payload));
+		expect(await interrupted.readFrame()).toBeUndefined();
+		interrupted.close();
+		const successor = await sub.recvGroup();
+		if (!successor) throw new Error("expected group 2");
+		expect(successor.sequence).toBe(2);
+		for (let frame = 0; frame < 4; frame++) seen.push(dec.decode((await successor.readFrame())?.payload));
+		expect(await successor.readFrame()).toBeUndefined();
+		successor.close();
+		expect(seen).toEqual(Array.from({ length: 12 }, (_, index) => `${Math.floor(index / 4)}.${index % 4}`));
+		await clock.advance(Nano(0));
+		expect(sub.tryRecvGroup()).toBeUndefined();
+		// The source is still open, so the resumed subscription must stay live.
+		expect(sub.closed.peek()).toBeUndefined();
+	} finally {
+		sub?.close();
+		warm.close();
+		standby.close();
+		request.close();
+		disposeA();
+		disposeB?.();
+		a.stop();
+		b.stop();
+		original.close();
+		publisher.close();
+		origin.close();
+		const outcomes = await Promise.all([a.done, b.done]);
+		restore();
+		expect(outcomes).toEqual([undefined, undefined]);
+	}
+});
+
 test("a subscription reads on across a same-epoch route swap, each group once", async () => {
 	const { a, b, active, request, swap, close } = await setup();
 	const ta = copy(a);
@@ -1959,6 +2098,35 @@ test("an end a replaced copy declared holds once the copy is let go in the same 
 	b.close();
 });
 
+test("a replaced copy whose session closed locally binds no end", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	await settle();
+	ta.write(0);
+	await settle();
+	expect(drain(sub)).toEqual([0]);
+
+	front.serve(b.consume());
+	await settle();
+	// A clean close would declare an end at group 1, refusing b's next group.
+	hooks.releaseTrack(ta.producer);
+	tb.write(1);
+	await settle();
+	expect(drain(sub)).toEqual([1]);
+	expect(sub.end()).toBeUndefined();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
 test("largest ends once the serving copy reaches its end, with the front still open", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2287,7 +2455,7 @@ test("a group past the declared end on another copy is refused", async () => {
 
 test.each([
 	["fails", (answer: Lister) => answer.abort(new Error("old route failed"))],
-	["ends", (answer: Lister) => answer.finish()],
+	["ends", (answer: Lister) => answer.end()],
 	["changes", (answer: Lister) => answer.add("gone", { priority: 0 })],
 ])("a listing follows the source that took over as the old one's listing %s", async (_, end) => {
 	const front = new Front();

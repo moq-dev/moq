@@ -19,7 +19,11 @@
 //! times the input's size on disk.
 //!
 //! Hardware on another machine needs its own run; nothing here extrapolates.
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "the example reads the host clock"
+)]
 
 use std::time::{Duration, Instant};
 

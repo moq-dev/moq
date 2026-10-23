@@ -144,24 +144,19 @@ type Bandwidth struct {
 
 // Reserve claims up to maxBps for the track demand watches; every track
 // producer hands out its Demand. maxBps is a ceiling, not a measurement:
-// reserve the most the track can ever send. Drop the reservation to hand the
-// room back.
+// reserve the most the track can ever send. Reuse Reservation.Update to change
+// the ceiling, or call Update(0) before abandoning or replacing the reservation
+// to hand the room back without waiting for garbage collection.
 func (b *Bandwidth) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
 	return &Reservation{inner: b.inner.Reserve(demand.inner, maxBps)}
-}
-
-// SetTarget probes up to targetBps instead of the sum of the reservations. The
-// session probes for what its reservations add up to by default, so the
-// estimate can rise to fund them. 0 turns probing off, and nil follows the
-// reservations again.
-func (b *Bandwidth) SetTarget(targetBps *uint64) {
-	b.inner.SetTarget(targetBps)
 }
 
 // Reservation is one track's standing claim on a Bandwidth.
 //
 // Grant is a snapshot: nil means no estimate or no demand, so hold the current
 // rate, and 0 is a real zero grant.
+// Update(0) relinquishes the allocation while the track stays subscribed; the
+// handle remains usable and a later Update can claim bandwidth again.
 type Reservation struct {
 	inner *ffi.MoqReservation
 }
@@ -171,7 +166,9 @@ func (r *Reservation) Grant() *uint64 {
 	return r.inner.Grant()
 }
 
-// Update changes the ceiling, keeping the same claim.
+// Update changes the ceiling, keeping the same claim. Zero immediately gives
+// its share to siblings and removes its contribution to the automatic probe
+// target; it does not close the track or destroy the native handle.
 func (r *Reservation) Update(maxBps uint64) {
 	r.inner.Update(maxBps)
 }
@@ -217,12 +214,12 @@ func (s *Session) RecvBandwidth() *BandwidthConsumer {
 // BandwidthConsumer owns a bandwidth estimate, in bits per second.
 type BandwidthConsumer struct{ inner *ffi.MoqBandwidthConsumer }
 
-// Peek reads the current estimate, or nil while unavailable.
-func (b *BandwidthConsumer) Peek() *uint64 { return b.inner.Peek() }
+// Rate is the current estimate, or nil while unavailable.
+func (b *BandwidthConsumer) Rate() *uint64 { return b.inner.Rate() }
 
-// Changed waits for the estimate to change, or its producer to close.
-func (b *BandwidthConsumer) Changed(ctx context.Context) (*uint64, error) {
-	return bridge.Call(ctx, b.inner.Cancel, b.inner.Changed)
+// RateChanged waits for the estimate to change and returns the new Rate, or fails once its producer closes.
+func (b *BandwidthConsumer) RateChanged(ctx context.Context) (*uint64, error) {
+	return bridge.Call(ctx, b.inner.Cancel, b.inner.RateChanged)
 }
 
 // Close releases this consumer's demand, including a pending wait.

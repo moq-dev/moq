@@ -36,7 +36,6 @@ pub struct Streams<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> Streams<'a> {
     /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
     #[cfg(any(test, feature = "fuzz"))]
@@ -230,7 +229,6 @@ pub struct SendStream<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> SendStream<'a> {
     /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
     #[cfg(any(test, feature = "fuzz"))]
@@ -301,30 +299,24 @@ impl<'a> SendStream<'a> {
             .ok_or(WriteError::ClosedStream)?
             .get_or_insert_with(|| Send::new(max_send_data));
 
-        if limit == 0 {
-            trace!(
-                stream = %self.id, max_data = self.state.max_data, data_sent = self.state.data_sent,
-                "write blocked by connection-level flow control or send window"
-            );
-            if !stream.connection_blocked {
-                stream.connection_blocked = true;
-                self.state.connection_blocked.push(self.id);
-            }
-            // Only report blocking on the peer's limit, not on our own send window
-            if self.state.data_sent == self.state.max_data
-                && self.state.data_blocked_limit != Some(self.state.max_data)
-            {
-                self.state.data_blocked_limit = Some(self.state.max_data);
-                self.pending.data_blocked = true;
-            }
-            return Err(WriteError::Blocked);
-        }
-
         let was_pending = stream.is_pending();
         let written = match stream.write(source, limit) {
             Ok(written) => written,
             Err(WriteError::Blocked) => {
-                if stream.data_blocked_limit != Some(stream.max_data) {
+                if limit == 0 {
+                    trace!(
+                        stream = %self.id, max_data = self.state.max_data, data_sent = self.state.data_sent,
+                        "write blocked by connection-level flow control or send window"
+                    );
+                    self.state.connection_blocked.insert(self.id);
+                    // Only report the peer's limit, not our own send window.
+                    if self.state.data_sent == self.state.max_data
+                        && self.state.data_blocked_limit != Some(self.state.max_data)
+                    {
+                        self.state.data_blocked_limit = Some(self.state.max_data);
+                        self.pending.data_blocked = true;
+                    }
+                } else if stream.data_blocked_limit != Some(stream.max_data) {
                     stream.data_blocked_limit = Some(stream.max_data);
                     self.pending.stream_data_blocked.insert(self.id);
                 }
@@ -368,6 +360,7 @@ impl<'a> SendStream<'a> {
 
         let was_pending = stream.is_pending();
         stream.finish()?;
+        self.state.connection_blocked.swap_remove(&self.id);
         if !was_pending {
             self.state
                 .pending
@@ -469,6 +462,7 @@ impl<'a> SendStream<'a> {
         // credit based on the final offset communicated in the RESET_STREAM frame we send.
         let buffered = stream.pending.buffered();
         let send = stream.reset(error_code, reliable_size, at);
+        self.state.connection_blocked.swap_remove(&self.id);
         self.state.buffered_data -= buffered - stream.pending.buffered();
         if let Some(offset) = stream.take_waiting() {
             self.state.events.push_back(StreamEvent::Acked {
