@@ -56,7 +56,6 @@ hosts need.
 
 ## Related
 
-- [Fragmented QUIC sends](/quest/m1/quic-send-fragments.md) - owns `SendBuffer::get`'s per-packet segment scan
 - [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - redesigns the transmit buffers the pool lever would feed
 - [#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) -
   zero-copy on the same trains

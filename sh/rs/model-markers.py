@@ -55,12 +55,43 @@ def marker(path, index, line, private):
 	return True
 
 
+def indent(line):
+	return len(line) - len(line.lstrip())
+
+
+def wrapped(lines, end):
+	"""The opening line of the attribute rustfmt wrapped to close on `lines[end]`, or None.
+
+	rustfmt puts a wrapped attribute's `)]` alone at the `#[` line's indent, with every
+	line between indented deeper. Matching that shape rather than balancing brackets
+	leaves strings and comments alone, and code that merely ends in `)]`, like `)];`,
+	never borrows an earlier attribute and its marker.
+	"""
+	if lines[end].strip() != ")]":
+		return None
+	for start in range(end - 1, -1, -1):
+		line = lines[start]
+		if line.strip() and indent(line) <= indent(lines[end]):
+			if indent(line) == indent(lines[end]) and line.lstrip().startswith(("#[", "#!")):
+				return start
+			return None
+	return None
+
+
 def block(lines, index, prefixes):
 	"""The indices of the comment and attribute lines directly above `index`."""
 	above = []
-	while index > 0 and lines[index - 1].lstrip().startswith(prefixes):
-		index -= 1
-		above.append(index)
+	while index > 0:
+		line = lines[index - 1].lstrip()
+		start = wrapped(lines, index - 1) if "#[" in prefixes else None
+		if line.startswith(prefixes):
+			index -= 1
+			above.append(index)
+		elif start is not None:
+			above.extend(range(index - 1, start - 1, -1))
+			index = start
+		else:
+			break
 	return above
 
 

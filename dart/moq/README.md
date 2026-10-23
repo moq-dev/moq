@@ -33,7 +33,7 @@ final server = await Server.listen(
   ),
 );
 final broadcast = server.createBroadcast('live');
-broadcast.announce(route: MoqRoute()); // unannounced broadcasts are invisible
+broadcast.announce(route: AnnounceRoute()); // unannounced broadcasts are invisible
 await for (final request in server.requests()) {
   final session = await request.accept();
   print(session.state().connects);

@@ -175,7 +175,7 @@ bool MoQOutput::Start()
 		LOG_ERROR("Failed to create broadcast: %s", next_broadcast.error().to_string().c_str());
 		return false;
 	}
-	moq::Route route;
+	moq::AnnounceRoute route;
 	route.epoch = moq::mint_epoch();
 	if (auto announced = (*next_broadcast)->announce(route); !announced) {
 		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
@@ -457,7 +457,7 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 	snapshot.estimated_send_rate_valid = raw.estimated_send_rate_bps.has_value();
 	snapshot.estimated_send_rate_bps =
 		raw.estimated_send_rate_bps ? static_cast<double>(*raw.estimated_send_rate_bps) : 0;
-	const auto recv_rate = receive ? receive->peek() : std::nullopt;
+	const auto recv_rate = receive ? receive->rate() : std::nullopt;
 	snapshot.estimated_recv_rate_valid = recv_rate.has_value();
 	snapshot.estimated_recv_rate_bps = recv_rate ? static_cast<double>(*recv_rate) : 0;
 	snapshot.bytes_sent_valid = raw.bytes_sent.has_value();
