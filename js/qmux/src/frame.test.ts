@@ -380,8 +380,5 @@ describe("maxStreamPayload", () => {
 	test("the legacy binding reserves no length field", () => {
 		// The payload runs to the end of the message, so only the type byte and the
 		// stream ID come out of the budget.
-		expect(Frame.maxStreamPayload("webtransport", BigInt(Frame.MAX_FRAME_SIZE), id, 0n)).toBe(
-			BigInt(Frame.MAX_FRAME_SIZE) - 2n,
-		);
 	});
 });

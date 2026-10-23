@@ -48,7 +48,7 @@ const DEFAULT_MAX_MESSAGE_SIZE: u64 = 64 * 1024;
 /// Bytes the channel may hold unsent before qmux's writer waits, as `@moq/p2p` allows.
 const SEND_WINDOW: usize = RECORD_SIZE as usize * 4;
 
-/// Unread bytes the channel tolerates past qmux's advertised `max_data`, for the
+/// Unread bytes the channel tolerates past qmux's advertised `receive_window`, for the
 /// frame headers and control frames that flow control does not count. A peer that
 /// honors flow control with reasonably full records stays under it; one that
 /// ignores it has the channel closed instead of growing memory without limit.
@@ -503,7 +503,7 @@ fn session_config(protocol: &str, max_record_size: u64) -> qmux::Config {
 	config.protocol = qmux::Protocol::Negotiated(protocol.to_string());
 	config.max_record_size = max_record_size;
 	// The binding has no datagrams.
-	config.max_datagram_frame_size = 0;
+	config.max_datagram_frame_size = None;
 	config
 }
 
@@ -758,7 +758,7 @@ impl Driver {
 		};
 
 		let config = session_config(&protocol, max_record_size);
-		let (reads, reader) = channel::queue(config.max_data + READ_SLACK);
+		let (reads, reader) = channel::queue(config.receive_window + READ_SLACK);
 		let (tx, writes) = mpsc::channel(1);
 		Ok(Open {
 			id,

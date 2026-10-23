@@ -245,10 +245,10 @@ pub struct PeerCred {
 pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Session> {
 	let path = socket_path(&url).ok_or(Error::MissingPath)?;
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via Unix socket");
-	qmux::uds::Config::new(WIRE_VERSION)
-		.protocols(protocols.iter().copied())
-		.session_config(crate::qmux_config())
-		.connect(path)
+	let mut config = crate::qmux_config();
+	config.version = WIRE_VERSION;
+	config.protocol = qmux::Protocol::Negotiate(protocols.iter().map(|p| (*p).to_owned()).collect());
+	qmux::uds::connect(path, config)
 		.await
 		.map_err(|err| Error::Connect(crate::error::message(err)))
 }
@@ -355,9 +355,9 @@ impl Listener {
 	/// Accept a socket and return its independently driven qmux handshake.
 	pub(crate) async fn accept_pending(&self) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
 		let stream = self.accept_socket().await;
-		let config = qmux::uds::Config::new(WIRE_VERSION)
-			.protocols(self.protocols.iter().map(String::as_str))
-			.session_config(crate::qmux_config());
+		let mut config = crate::qmux_config();
+		config.version = WIRE_VERSION;
+		config.protocol = qmux::Protocol::Negotiate(self.protocols.clone());
 		async move {
 			let cred = stream.peer_cred()?;
 			let cred = PeerCred {
@@ -365,8 +365,7 @@ impl Listener {
 				gid: cred.gid(),
 				pid: cred.pid(),
 			};
-			let session = config
-				.accept(stream)
+			let session = qmux::uds::accept(stream, config)
 				.await
 				.map_err(|err| Error::Accept(crate::error::message(err)))?;
 			Ok((session, cred))

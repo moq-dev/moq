@@ -101,7 +101,7 @@ impl Client {
 		}
 
 		let session_config = self.session.clone().with_negotiated(version, protocol);
-		let mut transport = Stream::new(tls_stream, version, session_config.max_record_size);
+		let mut transport = Stream::new(tls_stream);
 		if let Some(stats) = socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
@@ -159,7 +159,7 @@ impl Server {
 		tracing::debug!(?version, ?protocol, "parsed ALPN");
 
 		let session_config = self.session.clone().with_negotiated(version, protocol);
-		let mut transport = Stream::new(tls_stream, version, session_config.max_record_size);
+		let mut transport = Stream::new(tls_stream);
 		if let Some(stats) = socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}

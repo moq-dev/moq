@@ -33,7 +33,7 @@ async fn ours_and_theirs(version: Version, ours_is_client: bool) -> (Session, qm
 	let mut theirs = qmux06::Config::new(old_version(version));
 	theirs.protocol = qmux06::Protocol::Negotiate(vec![PROTOCOL.into()]);
 
-	let ours_transport = qmux::transport::Stream::new(a, ours.version, ours.max_record_size);
+	let ours_transport = qmux::transport::Stream::new(a);
 	let theirs_transport = qmux06::transport::Stream::new(b, theirs.version, theirs.max_record_size);
 	if ours_is_client {
 		let (ours, theirs) = tokio::join!(

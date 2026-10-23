@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Framing belongs to session establishment
+
+Wrap byte streams with `transport::Stream::new(io)` and pass the sole `Config` to `Session::connect` or `Session::accept`; wrapping no longer starts I/O. Custom `Transport` implementations receive `&Config` in `split` and bind their framing there.
+Replace `tcp::Config` and `uds::Config` builders with `tcp::connect(addr, config)`, `tcp::accept(stream, config)` and their `uds` equivalents. Set version, protocol, handshake timeout and flow control on that one `Config`. TLS and WebSocket retain `with_session_config`.
+
+Rename `max_data` to `receive_window`, `max_stream_data` to `stream_receive_window`, and `max_idle_timeout` to `idle_timeout`. Directional `max_streams_bidi` and `max_streams_uni` remain distinct. Set `max_datagram_frame_size` to `Some(bytes)` or `None` to disable it; `Some(0)` is refused.
+
+Replace `ALPNS` with `Version::ALL.iter().map(|version| version.alpn())`. Replace `Config::negotiated` with `Config::new(version)` and set `protocol` to `Protocol::Negotiated(name)` when appropriate. Obtain scheduling groups through moq-net's `poll::Session::send_group`, whose result is optional. `SendStream::reset_at` is removed; use the poll trait's `reset(code)` to reset the whole stream.
+
 ### `RecvStream` reads through moq-net leases (#5878)
 
 `RecvStream` implements moq-net's lease-based `poll::RecvStream`: read with `read_chunk` or `poll_lease`, since `poll_read`, `read`, and `closed` are gone.
@@ -14,13 +23,12 @@ It still returns connection credit as it reads, so nothing is evicted.
 qmux moved into the moq repository and runs on moq-quic's stream state machine.
 `Session`, `SendStream`, and `RecvStream` implement `moq_net::transport::poll` in place of `web_transport_trait`.
 Import `moq_net::transport::poll::{Session as _, SendStream as _, RecvStream as _}` and use its `open_uni`, `accept_uni`, `write_buf`, `read_chunk`, `close`, and `closed`.
-Streams opened with the same `SendGroup` (from `Session::send_group(priority)`) share a scheduling group.
-`SendStream::reset_at(offset, code)` is new and sends draft-02's `RESET_STREAM_AT`.
+Streams opened with the same `SendGroup` share a scheduling group.
 
 ### The legacy `webtransport` wire format is gone (#6231)
 
 `Version::WebTransport`, `Version::is_qmux`, and the `webtransport` entry in `ALPNS` are removed, as is the WebSocket server's fallback to it when a client offers no subprotocol.
-Every peer must speak QMux draft-00, 01, or 02; a WebSocket client must offer one of `ALPNS` (or a `qmux-NN.<protocol>` subprotocol).
+Every peer must speak QMux draft-00, 01, or 02; a WebSocket client must offer a supported version's `Version::alpn()` (or a `qmux-NN.<protocol>` subprotocol).
 
 ### `ws::Upgraded` takes the negotiated subprotocol, and fails loud (#6231)
 
@@ -29,9 +37,9 @@ Every peer must speak QMux draft-00, 01, or 02; a WebSocket client must offer on
 
 ### `Config` collapses the stream windows and makes timers optional (#6231)
 
-`max_stream_data_bidi_local`, `max_stream_data_bidi_remote`, and `max_stream_data_uni` merge into `max_stream_data`.
-`max_idle_timeout` (milliseconds), `handshake_timeout`, and `rtt_interval` become `Option<Duration>`, with `None` disabling each.
-`tcp::Config::handshake_timeout` and `uds::Config::handshake_timeout` take an `Option<Duration>` to match.
+`max_stream_data_bidi_local`, `max_stream_data_bidi_remote`, and `max_stream_data_uni` merge into `stream_receive_window`.
+`idle_timeout` (formerly `max_idle_timeout`, milliseconds), `handshake_timeout`, and `rtt_interval` become `Option<Duration>`, with `None` disabling each.
+Set `Config::handshake_timeout` before passing it to the TCP or Unix entry point.
 
 ### `Error` carries plain codes (#6231)
 

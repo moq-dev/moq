@@ -24,8 +24,8 @@ pub trait Transport: Send + 'static {
 	/// The independently-owned receive half.
 	type Reader: Reader;
 
-	/// Split into send and receive halves.
-	fn split(self) -> (Self::Writer, Self::Reader);
+	/// Bind the session framing and split into send and receive halves.
+	fn split(self, config: &crate::Config) -> (Self::Writer, Self::Reader);
 
 	/// Statistics for the connection underneath, if it exposes any.
 	///
@@ -126,14 +126,13 @@ mod stream_transport {
 	/// use qmux::{Config, Session, Version};
 	///
 	/// let config = Config::new(Version::QMux01);
-	/// let transport = Stream::new(stream, config.version, config.max_record_size);
+	/// let transport = Stream::new(stream);
 	/// let session = Session::connect(transport, config).await?;
 	/// # let _ = session; Ok(())
 	/// # }
 	/// ```
 	pub struct Stream<T> {
-		writer: StreamWriter<T>,
-		reader: StreamReader,
+		stream: T,
 		socket_stats: Option<crate::SharedSocketStats>,
 	}
 
@@ -161,32 +160,10 @@ mod stream_transport {
 	}
 
 	impl<T: AsyncRead + AsyncWrite + Send + 'static> Stream<T> {
-		/// Wrap a byte stream speaking QMux `version`.
-		///
-		/// `our_max_record_size` bounds incoming records (use
-		/// [`Config::max_record_size`](crate::Config::max_record_size)); it is
-		/// ignored for draft-00, whose frames are bounded by `max_frame_size`.
-		pub fn new(stream: T, version: Version, our_max_record_size: u64) -> Self {
-			let (read, write) = tokio::io::split(stream);
-			let (tx, rx) = mpsc::channel(RECV_CHANNEL_CAPACITY);
-			let reader_task = tokio::spawn(reader_loop(
-				BufReader::new(read),
-				version,
-				usize::try_from(our_max_record_size).unwrap_or(usize::MAX),
-				tx,
-			));
-			let reader_lifetime = Arc::new(ReaderTask(reader_task.abort_handle()));
+		/// Wrap a byte stream; session establishment binds its framing and starts I/O.
+		pub fn new(stream: T) -> Self {
 			Self {
-				writer: StreamWriter {
-					writer: BufWriter::new(write),
-					version,
-					reader_task: Some(reader_task),
-					reader_lifetime: reader_lifetime.clone(),
-				},
-				reader: StreamReader {
-					rx,
-					_reader_lifetime: reader_lifetime,
-				},
+				stream,
 				socket_stats: None,
 			}
 		}
@@ -206,8 +183,28 @@ mod stream_transport {
 		type Writer = StreamWriter<T>;
 		type Reader = StreamReader;
 
-		fn split(self) -> (StreamWriter<T>, StreamReader) {
-			(self.writer, self.reader)
+		fn split(self, config: &crate::Config) -> (StreamWriter<T>, StreamReader) {
+			let (read, write) = tokio::io::split(self.stream);
+			let (tx, rx) = mpsc::channel(RECV_CHANNEL_CAPACITY);
+			let reader_task = tokio::spawn(reader_loop(
+				BufReader::new(read),
+				config.version,
+				usize::try_from(config.max_record_size).unwrap_or(usize::MAX),
+				tx,
+			));
+			let reader_lifetime = Arc::new(ReaderTask(reader_task.abort_handle()));
+			(
+				StreamWriter {
+					writer: BufWriter::new(write),
+					version: config.version,
+					reader_task: Some(reader_task),
+					reader_lifetime: reader_lifetime.clone(),
+				},
+				StreamReader {
+					rx,
+					_reader_lifetime: reader_lifetime,
+				},
+			)
 		}
 
 		fn socket_stats(&self) -> Option<crate::SharedSocketStats> {
@@ -484,11 +481,20 @@ mod stream_transport {
 		use crate::transport::{Reader, Transport};
 		use tokio::io::AsyncWriteExt;
 
+		#[test]
+		fn wrapping_a_stream_does_not_start_io() {
+			let (io, _peer) = tokio::io::duplex(64);
+			let _transport = Stream::new(io);
+		}
+
 		#[tokio::test(start_paused = true)]
 		async fn graceful_close_drains_the_peer_after_our_send_half_ends() {
 			for &version in Version::ALL {
 				let (stream, mut peer) = tokio::io::duplex(64);
-				let (mut writer, reader) = Stream::new(stream, version, 16 * 1024).split();
+				let (mut writer, reader) = Stream::new(stream).split(&crate::Config {
+					max_record_size: 16 * 1024,
+					..crate::Config::new(version)
+				});
 				drop(reader);
 
 				let mut close = Box::pin(writer.close());
@@ -513,7 +519,10 @@ mod stream_transport {
 		async fn closing_the_send_half_preserves_a_full_receive_channel() {
 			for &version in Version::ALL {
 				let (stream, mut peer) = tokio::io::duplex(1);
-				let (mut writer, mut reader) = Stream::new(stream, version, 16 * 1024).split();
+				let (mut writer, mut reader) = Stream::new(stream).split(&crate::Config {
+					max_record_size: 16 * 1024,
+					..crate::Config::new(version)
+				});
 				let (frame, payload): (&[u8], &[u8]) = if version.uses_records() {
 					(&[1, 42], &[42])
 				} else {
@@ -544,7 +553,10 @@ mod stream_transport {
 		#[tokio::test(start_paused = true)]
 		async fn a_framing_error_still_drains_peer_data_during_close() {
 			let (stream, mut peer) = tokio::io::duplex(64);
-			let (mut writer, mut reader) = Stream::new(stream, Version::QMux02, 4).split();
+			let (mut writer, mut reader) = Stream::new(stream).split(&crate::Config {
+				max_record_size: 4,
+				..crate::Config::new(Version::QMux02)
+			});
 			peer.write_all(&[5]).await.expect("oversized record header");
 			assert!(matches!(reader.recv().await, Err(Error::FrameTooLarge)));
 			drop(reader);
@@ -565,7 +577,10 @@ mod stream_transport {
 		#[tokio::test(start_paused = true)]
 		async fn cancelling_graceful_close_releases_the_receive_half() {
 			let (stream, mut peer) = tokio::io::duplex(64);
-			let (mut writer, reader) = Stream::new(stream, Version::QMux02, 16 * 1024).split();
+			let (mut writer, reader) = Stream::new(stream).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux02)
+			});
 			drop(reader);
 
 			let mut close = Box::pin(writer.close());
@@ -585,7 +600,10 @@ mod stream_transport {
 		#[tokio::test(start_paused = true)]
 		async fn dropping_the_send_half_keeps_the_receive_half_usable() {
 			let (stream, mut peer) = tokio::io::duplex(64);
-			let (writer, mut reader) = Stream::new(stream, Version::QMux02, 16 * 1024).split();
+			let (writer, mut reader) = Stream::new(stream).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux02)
+			});
 			drop(writer);
 			peer.write_all(&[1, 42]).await.expect("peer record");
 			assert_eq!(reader.recv().await.expect("receive half remains open"), &[42][..]);
@@ -598,7 +616,10 @@ mod stream_transport {
 		#[tokio::test]
 		async fn recv_is_cancel_safe_across_partial_writes() {
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux00, 16 * 1024).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux00)
+			});
 
 			// STREAM frame, type 0x0a (len bit set), id=4, length=5, payload="hello".
 			let mut frame = Vec::new();
@@ -626,7 +647,10 @@ mod stream_transport {
 		#[tokio::test]
 		async fn recv_qmux01_record_is_cancel_safe() {
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux01, 16 * 1024).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux01)
+			});
 
 			// 1-byte varint length (0x08) followed by 8 bytes of payload.
 			let mut record = vec![0x08];
@@ -654,7 +678,10 @@ mod stream_transport {
 		#[tokio::test]
 		async fn recv_returns_consecutive_frames_in_order() {
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux00, 16 * 1024).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux00)
+			});
 
 			// Two STREAM frames (type 0x0a) for stream ids 4 and 8.
 			let frame_a: Vec<u8> = [0x0a, 0x04, 0x05].into_iter().chain(*b"hello").collect();
@@ -676,7 +703,10 @@ mod stream_transport {
 		#[tokio::test]
 		async fn recv_propagates_parse_error_then_closes() {
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux00, 16 * 1024).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux00)
+			});
 
 			// Frame type 0x02 isn't a recognized QMux00 frame type.
 			server.write_all(&[0x02]).await.unwrap();
@@ -696,7 +726,10 @@ mod stream_transport {
 		#[tokio::test]
 		async fn recv_record_exceeding_max_returns_frame_too_large() {
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux01, 4).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 4,
+				..crate::Config::new(Version::QMux01)
+			});
 
 			// 1-byte varint length = 5, which exceeds the configured max of 4.
 			server.write_all(&[0x05]).await.unwrap();
@@ -725,7 +758,10 @@ mod stream_transport {
 			assert_eq!(over_limit.len(), MAX_FRAME_SIZE + 1);
 
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux00, 0).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 0,
+				..crate::Config::new(Version::QMux00)
+			});
 
 			server.write_all(&at_limit).await.unwrap();
 			server.flush().await.unwrap();
@@ -764,7 +800,7 @@ mod stream_session {
 				validate_protocol(protocol)?;
 			}
 		}
-		let mut transport = Stream::new(stream, config.version, config.max_record_size);
+		let mut transport = Stream::new(stream);
 		if let Some(stats) = socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
@@ -794,7 +830,7 @@ mod ws_transport {
 
 	use super::{Reader, Transport, Writer};
 	use crate::ws::KeepAlive;
-	use crate::{Error, MAX_FRAME_SIZE, Version};
+	use crate::{Error, MAX_FRAME_SIZE};
 
 	type Message = tungstenite::Message;
 
@@ -825,26 +861,15 @@ mod ws_transport {
 	pub(crate) struct WsTransport<T> {
 		ws: T,
 		keep_alive: Option<KeepAlive>,
-		/// Largest inbound message we accept, or `None` when nothing bounds it.
-		recv_limit: usize,
 		socket_stats: Option<crate::SharedSocketStats>,
 		binding: moq_net::transport::Binding,
 	}
 
 	impl<T> WsTransport<T> {
-		pub fn new(ws: T, version: Version, max_record_size: u64, binding: moq_net::transport::Binding) -> Self {
-			// A message is a record on the record-framed drafts, bounded by the
-			// `max_record_size` we advertised; on draft-00 it is a single frame,
-			// bounded by `max_frame_size` (§5.2), which we never advertise above
-			// its initial value.
-			let recv_limit = match version.uses_records() {
-				true => usize::try_from(max_record_size).unwrap_or(usize::MAX),
-				false => MAX_FRAME_SIZE,
-			};
+		pub fn new(ws: T, binding: moq_net::transport::Binding) -> Self {
 			Self {
 				ws,
 				keep_alive: None,
-				recv_limit,
 				socket_stats: None,
 				binding,
 			}
@@ -945,7 +970,7 @@ mod ws_transport {
 			self.binding
 		}
 
-		fn split(self) -> (WsWriter<T>, WsReader) {
+		fn split(self, config: &crate::Config) -> (WsWriter<T>, WsReader) {
 			use futures::StreamExt;
 			// BiLock-backed halves: the sink and stream can be polled concurrently
 			// on separate tasks, briefly serializing on the shared socket.
@@ -955,7 +980,12 @@ mod ws_transport {
 				None => (None, None),
 			};
 			let (tx, rx) = mpsc::channel(WS_RECV_CHANNEL_CAPACITY);
-			let pump = tokio::spawn(ws_pump(stream, deadline, self.recv_limit, tx));
+			let recv_limit = if config.version.uses_records() {
+				usize::try_from(config.max_record_size).unwrap_or(usize::MAX)
+			} else {
+				MAX_FRAME_SIZE
+			};
+			let pump = tokio::spawn(ws_pump(stream, deadline, recv_limit, tx));
 			(WsWriter { sink, ping }, WsReader { rx, pump })
 		}
 	}

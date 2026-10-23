@@ -22,10 +22,8 @@ const VERSIONS = ["qmux-02", "qmux-01", "qmux-00"] as const;
 // Small receive windows force the Rust sender to observe and react to
 // MAX_DATA/MAX_STREAM_DATA updates during the large transfer.
 const CONFIG = {
-	maxData: 64n * 1024n,
-	maxStreamDataBidiLocal: 32n * 1024n,
-	maxStreamDataBidiRemote: 32n * 1024n,
-	maxStreamDataUni: 32n * 1024n,
+	receiveWindow: 64n * 1024n,
+	streamReceiveWindow: 32n * 1024n,
 };
 
 function payload(seed: number): Uint8Array {

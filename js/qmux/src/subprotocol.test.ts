@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { resolveSubprotocols, selectSubprotocol } from "./session.ts";
 
 // The bare version ALPNs the polyfill appends when `requireProtocol` is false.
-const BARE = ["qmux-02", "qmux-01", "qmux-00", "webtransport"];
+const BARE = ["qmux-02", "qmux-01", "qmux-00"];
 
 describe("resolveSubprotocols", () => {
 	test("no protocols still offers the bare version ALPNs by default", () => {
@@ -91,7 +91,7 @@ describe("selectSubprotocol", () => {
 		expect(selectSubprotocol(undefined, OPTIONS)).toBeUndefined();
 	});
 
-	test("a legacy client gets the webtransport wire format by default", () => {
-		expect(selectSubprotocol("webtransport", {})).toBe("webtransport");
+	test("a legacy client is refused", () => {
+		expect(selectSubprotocol("webtransport", {})).toBeUndefined();
 	});
 });
