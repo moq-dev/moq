@@ -47,6 +47,8 @@ pub(super) struct Fragment<'a> {
 	pub data: &'a [u8],
 	pub moof_size: usize,
 	pub header_size: usize,
+	/// The `mdat` bytes the moof's earlier samples took.
+	pub claimed: &'a mut sample::Claimed,
 }
 
 impl Track {
@@ -97,6 +99,7 @@ impl Track {
 					.checked_add(sample.size as usize)
 					.ok_or(Error::InvalidDataOffset)?;
 				let data = input.data.get(offset..next).ok_or(Error::InvalidDataOffset)?;
+				input.claimed.take(offset..next)?;
 				let payload = match &self.format {
 					Format::Vtt { header } => vtt(header, data, timestamp, end)?,
 					// The frame timestamp is serialized in hang's scale, which the body's begin must match.
