@@ -530,7 +530,7 @@ impl Producer {
 	}
 
 	/// Transfer a receive handler's cancellation cleanup into its in-flight frame.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: capability gap
 	// A dropped receive handler cannot name its error; a public driver aborts explicitly.
 	pub(crate) fn cancel_on_drop(mut self) -> Self {
@@ -565,7 +565,7 @@ impl Producer {
 	/// to publish bytes nobody can observe yet.
 	///
 	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: tuning
 	pub(crate) fn write_deferred<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		let len = chunk.as_ref().len();
@@ -592,7 +592,7 @@ impl Producer {
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: tuning
 	pub(crate) fn notify(&self) {
 		self.group().frame_notify();
@@ -704,12 +704,12 @@ pub struct Consumer {
 	// The group's channel, used to park while a partial frame fills.
 	state: kio::Consumer<GroupState>,
 	info: Info,
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: passthrough
 	pub(crate) fields: Option<Arc<super::object::Fields>>,
 	/// The inflated size of a compressed frame read in its stored form (see
 	/// [`group::Consumer::compressed`]), whose payload is then the DEFLATE slice.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: passthrough
 	pub(crate) inflated: Option<u64>,
 	source: Source,

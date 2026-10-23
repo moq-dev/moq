@@ -7,7 +7,6 @@ pub struct FourCC {
 }
 
 impl FourCC {
-	#[allow(clippy::trivially_copy_pass_by_ref)]
 	/// Returns a pixelformat as four character code
 	///
 	/// # Arguments

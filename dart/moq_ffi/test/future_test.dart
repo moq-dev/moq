@@ -139,7 +139,7 @@ void main() {
       final next = cursor.next();
       final broadcast = origin.createBroadcast(path: 'still-listening');
       try {
-        broadcast.announce(route: MoqRoute());
+        broadcast.announce(route: MoqAnnounceRoute());
         expect(await next, isA<StartMoqAnnounceEvent>());
       } finally {
         broadcast.close();

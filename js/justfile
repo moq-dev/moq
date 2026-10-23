@@ -71,6 +71,11 @@ catalog-bench:
     bun install --frozen-lockfile
     bun publish/bench/catalog.ts
 
+# Sweep CMAF fragment decode over mdat bytes x declared sample count, including a hostile count.
+cmaf-bench:
+    bun install --frozen-lockfile
+    bun hang/bench/cmaf.ts
+
 # Time Effect create and close, which pays for the creation stack its diagnostics print.
 signals-bench:
     bun install --frozen-lockfile

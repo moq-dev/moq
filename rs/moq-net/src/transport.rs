@@ -451,7 +451,7 @@ pub mod poll {
 		/// A pending [`SendStream::closed`].
 		SendClosed, SendStream, poll_closed, Result<(), S::Error>);
 
-	/// A transport that [`Client`](crate::Client) and [`Server`](crate::Server) can box:
+	/// A transport that the async client and server can box:
 	/// the session, its streams, send groups, and errors are thread-safe on native.
 	/// Implemented automatically.
 	///

@@ -21,6 +21,9 @@
 //! An equal-cost pool is swept the same way, over its members and the paths it
 //! already serves, and over those paths and the cursors watching the pool.
 //!
+//! One-frame groups through a front with a single route are swept over readers and the
+//! groups each holds open, which is what a reader records per group it hands out.
+//!
 //! A route swap on one front is swept over its tracks and the copies each track
 //! still holds from earlier routes, and a front retiring over the fronts around it.
 //! Readers draining a swapped track are swept over their count, the groups every
@@ -28,8 +31,10 @@
 //!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
-// Custom timings measure the real time the work took, not the ambient clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "custom timings measure the real time the work took, not the ambient clock"
+)]
 
 #[path = "../tests/integration/support/mod.rs"]
 mod support;
@@ -1210,6 +1215,65 @@ fn bench_relay(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `(readers, open)` shapes for [`bench_passthrough`]: readers of one track, and the
+/// groups each holds open at once.
+const PASSTHROUGH: [(usize, usize); 4] = [(1, 1), (1, 64), (100, 1), (100, 64)];
+
+/// One-frame groups read through a front that only ever had one route, so each handed-out
+/// group's per-reader record (kept for a later route to back it) is a visible share of the
+/// cost. Each reader holds `open` groups at once, the live count that record tracks.
+fn bench_passthrough(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/passthrough");
+	for (readers, open) in PASSTHROUGH {
+		group.throughput(Throughput::Elements((readers * open) as u64));
+		group.bench_function(BenchmarkId::from_parameter(format!("{readers}r_{open}g")), |b| {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let (producer, driver) = origin::Producer::new(origin::Config::default());
+			runtime.spawn(moq_net::time::run(driver));
+			let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
+			let source = broadcast.create_track("0", timed()).unwrap();
+			let mut subscriptions = runtime.block_on(async {
+				let resolved = producer.consume().request_broadcast("room/live", None).await.unwrap();
+				let track = resolved.track("0").unwrap();
+				let mut subscriptions = Vec::with_capacity(readers);
+				for _ in 0..readers {
+					subscriptions.push(track.subscribe(None).await.unwrap());
+				}
+				subscriptions
+			});
+			let mut held: Vec<Vec<moq_net::group::Consumer>> = (0..readers).map(|_| Vec::with_capacity(open)).collect();
+
+			b.iter_custom(|iterations| {
+				runtime.block_on(async {
+					let started = std::time::Instant::now();
+					for _ in 0..iterations {
+						// Received as each is written: a reader behind the live edge skips ahead.
+						for _ in 0..open {
+							let mut group = source.append_group().unwrap();
+							group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
+							group.finish().unwrap();
+							for (subscription, held) in subscriptions.iter_mut().zip(&mut held) {
+								held.push(subscription.recv_group().await.unwrap().expect("group"));
+							}
+						}
+						for held in &mut held {
+							for group in held.iter_mut() {
+								group.read_frame().await.unwrap().expect("frame");
+							}
+							held.clear();
+						}
+					}
+					started.elapsed()
+				})
+			});
+		});
+	}
+	group.finish();
+}
+
 /// Re-poll stalled groups through a front, including their subscription budget.
 /// Sweep tracks and readers separately to expose unrelated table scans.
 fn bench_parked(c: &mut Criterion) {
@@ -1624,6 +1688,7 @@ criterion_group!(
 	bench_narrow_delivery,
 	bench_narrow,
 	bench_relay,
+	bench_passthrough,
 	bench_parked,
 	bench_copy_walk,
 	bench_resume_overlap

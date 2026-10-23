@@ -714,7 +714,6 @@ type Spawn = Box<dyn FnOnce() + Send + 'static>;
 /// built, which is what keeps this worker's packets on this thread. The server
 /// is handed back for the owner to build an accept loop from, which
 /// [`Spawner::serve`] spawns onto this same runtime.
-#[allow(clippy::too_many_arguments)]
 fn run(
 	member: ShardSocket,
 	core: Option<CoreId>,
