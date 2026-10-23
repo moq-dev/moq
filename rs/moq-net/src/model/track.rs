@@ -4393,8 +4393,7 @@ impl Consumer {
 	}
 
 	/// The serving route's copy, for a front's logical track; see [`super::resume`].
-	// private: capability gap
-	pub(crate) fn serving(&self) -> Option<Consumer> {
+	fn serving(&self) -> Option<Consumer> {
 		let routes = self.with_state(|state| state?.read().routes.clone())?;
 		routes.serving()
 	}
@@ -4604,8 +4603,7 @@ impl Consumer {
 	/// (the final group was produced), `Err` once it closed or aborted before
 	/// completing. This tells a track that truly ended from one whose serving route
 	/// died mid-stream. A session closed locally, on purpose, is [`Error::Closed`].
-	// private: capability gap
-	pub(crate) fn poll_complete(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+	pub(super) fn poll_complete(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Ready(Err(Error::Dropped));
