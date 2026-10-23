@@ -32,8 +32,10 @@ Decided 2026-10-20 by the maintainer:
   If the program returns, it publishes a new epoch of its broadcast, never
   the retired instance's names for new content. A single-program import
   whose selected program leaves the PAT ends, as today.
-- Open: a PAT that names a program whose PMT never arrives. Decide whether
-  the import refuses it or waits, and which clock bounds the wait (found in
+- Open: a PAT that names a program whose PMT never arrives. `Programs`
+  creates a program's broadcast only once its PMT lists a stream, so such a
+  program waits holding only its PAT entry. Decide whether the import refuses
+  it instead, and which clock bounds the wait (found in
   [moq-dev/moq#6122](https://github.com/moq-dev/moq/pull/6122)).
 
 Rust: `rs/moq-mux` TS `Import::handle_pat` and `Programs`.

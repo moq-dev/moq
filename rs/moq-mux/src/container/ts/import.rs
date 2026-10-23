@@ -302,6 +302,13 @@ impl<E: catalog::Catalog> Import<E> {
 		self
 	}
 
+	/// Start on a packet boundary another framer already confirmed, so a packet ending the input
+	/// routes without a successor to confirm it.
+	pub(super) fn aligned(mut self) -> Self {
+		self.framer = Framer { synced: true };
+		self
+	}
+
 	/// A reservation on this program's timebase, so every stream shifts by its offset.
 	fn reserve(&self) -> crate::catalog::Reserved<E> {
 		self.timebase.reserve()
@@ -521,7 +528,8 @@ impl<E: catalog::Catalog> Import<E> {
 		tracing::warn!(pid = pid.as_u16(), "dropped a PSI section with a bad CRC");
 	}
 
-	fn handle_pmt(&mut self, pmt: Pmt) -> anyhow::Result<()> {
+	/// Apply a whole PMT: route every stream it lists, and end those it no longer lists.
+	pub(super) fn handle_pmt(&mut self, pmt: Pmt) -> anyhow::Result<()> {
 		// PMTs of several programs may share one PID; only the chosen one maps streams.
 		if self.program.is_some_and(|program| program != pmt.program_number) {
 			return Ok(());
@@ -7050,7 +7058,7 @@ pub(super) mod test {
 
 	/// One PES on `pid` carrying two whole MP2 frames: enough for the second to confirm the
 	/// first, which is what the legacy path publishes on.
-	fn mp2_pes(pid: u16, cc: u8, pts: u64, fills: [u8; 2]) -> Vec<u8> {
+	pub(in crate::container::ts) fn mp2_pes(pid: u16, cc: u8, pts: u64, fills: [u8; 2]) -> Vec<u8> {
 		let mut payload = mp2_frame(fills[0]);
 		payload.extend_from_slice(&mp2_frame(fills[1]));
 		audio_pes_packet(pid, cc, pts, &payload)
@@ -7204,7 +7212,7 @@ pub(super) mod test {
 	}
 
 	/// A PMT section listing `(stream_type, pid, es_descriptors)`, the clock on the first.
-	fn pmt_section(program: u16, version: u8, streams: &[(u8, u16, &[u8])]) -> Vec<u8> {
+	pub(in crate::container::ts) fn pmt_section(program: u16, version: u8, streams: &[(u8, u16, &[u8])]) -> Vec<u8> {
 		let pcr = streams.first().map_or(0x1fff, |&(_, pid, _)| pid);
 		let mut body = vec![0xe0 | (pcr >> 8) as u8, pcr as u8, 0xf0, 0x00];
 		for &(stream_type, pid, descriptors) in streams {
@@ -7226,7 +7234,7 @@ pub(super) mod test {
 		section
 	}
 
-	const MP2: u8 = StreamType::Mpeg1Audio as u8;
+	pub(in crate::container::ts) const MP2: u8 = StreamType::Mpeg1Audio as u8;
 
 	/// A PAT listing fifty programs, which takes two packets, then program 50's PMT (one
 	/// MP2 stream on `0x0061`) and one PES on it.

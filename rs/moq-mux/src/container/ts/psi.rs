@@ -137,17 +137,6 @@ pub(super) struct Pat {
 	pub programs: Vec<Association>,
 }
 
-impl Pat {
-	/// The program numbers listed, without the network PID's.
-	pub fn program_numbers(&self) -> Vec<u16> {
-		self.programs
-			.iter()
-			.map(|entry| entry.program_number)
-			.filter(|&number| number != 0)
-			.collect()
-	}
-}
-
 /// Collects PAT sections until every section of one version has arrived.
 ///
 /// A PAT that needs more than one section is complete only once all of them are in, so a
@@ -553,7 +542,8 @@ mod test {
 		assert_eq!(pat.section(&first), None);
 		let whole = pat.section(&second).expect("both sections are in");
 		assert_eq!(whole.transport_stream_id, 7);
-		assert_eq!(whole.program_numbers(), [1, 2]);
+		let numbers: Vec<_> = whole.programs.iter().map(|entry| entry.program_number).collect();
+		assert_eq!(numbers, [1, 2]);
 		// A repetition of either section repeats the whole table.
 		assert_eq!(pat.section(&first), Some(whole));
 
