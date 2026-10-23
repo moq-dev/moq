@@ -115,4 +115,3 @@ Keep the T-STD controls passing.
 ## Related
 
 - [Deterministic TS legs for H.265](/quest/m2/ts-hitless-h265.md) - the `--sync` group anchor this path shares
-- [Access units across PES](/quest/m1/ts-reliability/pes-access-units.md) - TS import's other video timing gap
