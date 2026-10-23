@@ -91,6 +91,7 @@ class Render extends AudioWorkletProcessor {
 					type: "state",
 					timestamp: backend.timestamp,
 					stalled: backend.stalled,
+					anchored: backend.anchored,
 					underruns: backend.underruns,
 					epoch: this.#epoch,
 				};
