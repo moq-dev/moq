@@ -363,73 +363,35 @@ impl Binding {
 	}
 }
 
-/// One request for a path, made once the origin has heard whether anything serves it.
-///
-/// A client session only asks its peer about paths something watches, so a sibling no
-/// listing covers would be unroutable when asked at once. Following the path first and
-/// asking once a route serves it, or once every session has synced without one, answers
-/// from what the peers announce. An origin that already knows its routes answers at once,
-/// so the request still goes out on binding.
+/// One sibling resolution, retaining its first verdict for every read of the binding.
 struct Lookup {
-	origin: moq_net::origin::Consumer,
-	path: moq_net::PathOwned,
-	/// Dropped once the request settles: a broadcast resolved through a discovered route
-	/// keeps its own path watched.
-	watch: Option<moq_net::announce::Follow>,
 	request: Option<moq_net::origin::Requesting>,
+	result: Option<Result<moq_net::broadcast::Consumer, moq_net::Error>>,
 }
 
 impl Lookup {
 	fn new(origin: &moq_net::origin::Consumer, path: &moq_net::PathOwned) -> Self {
-		// A path no pattern can spell, or one outside the scope, fails on the request instead.
-		let watch = origin.follow(path).ok();
-		let mut lookup = Self {
-			origin: origin.clone(),
-			path: path.clone(),
-			watch,
-			request: None,
-		};
-		// Ask now when the origin already knows, so a dynamic handler hears it on binding.
-		let _ = lookup.poll(&kio::Waiter::noop());
-		lookup
+		Self {
+			request: Some(origin.request_broadcast(path, None).into_inner()),
+			result: None,
+		}
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<moq_net::broadcast::Consumer, moq_net::Error>> {
-		loop {
-			if self.request.is_none() {
-				if let Some(watch) = &mut self.watch {
-					// The follower reduces the covering routes to the one serving the path, so its
-					// latest event is whether a route serves it now. Ask as soon as one does:
-					// waiting for every session to sync would let one that never answers hold the
-					// lookup up. Without a route, only sync concludes that none will.
-					let mut routed = false;
-					loop {
-						match watch.poll_next(waiter) {
-							Poll::Ready(Some(moq_net::announce::Event::End(_))) => routed = false,
-							Poll::Ready(Some(_)) => routed = true,
-							Poll::Ready(None) | Poll::Pending => break,
-						}
-					}
-					if !routed {
-						ready!(watch.poll_synced(waiter));
-					}
-				}
-				self.request = Some(self.origin.request_broadcast(&self.path, None).into_inner());
-			}
-			let result = ready!(self.request.as_ref().expect("requested above").poll_ok(waiter));
-			// The route can retract between the follower reporting it and the request reading
-			// the table. Until every session has synced, keep following for another.
-			let unsynced = self
-				.watch
-				.as_ref()
-				.is_some_and(|watch| watch.poll_synced(&kio::Waiter::noop()).is_pending());
-			if matches!(result, Err(moq_net::Error::Unroutable)) && unsynced {
-				self.request = None;
-				continue;
-			}
-			self.watch = None;
-			return Poll::Ready(result);
+		if let Some(result) = &self.result {
+			return Poll::Ready(result.clone());
 		}
+		let result = ready!(
+			self.request
+				.as_mut()
+				.expect("unresolved lookup holds its request")
+				.poll_ok(waiter)
+		);
+		// A binding never retargets after its first verdict. Releasing the completed
+		// request also releases its discovery interest; a resolved front owns its own.
+		self.request = None;
+		self.result = Some(result.clone());
+		Poll::Ready(result)
 	}
 }
 

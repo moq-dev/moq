@@ -767,12 +767,12 @@ test("announced requests share no subscription and follow discovery", () => {
 	const slots = [...(wire.requests.peek()?.values() ?? [])];
 	expect(slots.length).toBe(200);
 
-	// Gated with no session attached and with full discovery; blind once one session cannot announce.
+	// Following remains gated even when a session cannot announce.
 	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
 	const seeing = wire.attach(true);
 	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
 	const silent = wire.attach(false);
-	expect(slots.every((slot) => wire.blind(slot))).toBe(true);
+	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
 	silent();
 	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
 
@@ -1041,6 +1041,7 @@ test("closing the origin makes an existing request unroutable", async () => {
 	const path = Path.from("doomed");
 
 	const detach = wireOf(origin).attach(true);
+	const synced = wireOf(origin).snapshot(path);
 	const request = origin.consume().request(path);
 	expect(request.unroutable.peek()).toBe(false);
 
@@ -1056,6 +1057,7 @@ test("closing the origin makes an existing request unroutable", async () => {
 	expect(request.unroutable.peek()).toBe(true);
 
 	request.close();
+	synced();
 });
 
 test("createBroadcast is invisible to everyone until announce", async () => {

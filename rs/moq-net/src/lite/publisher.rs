@@ -1562,7 +1562,7 @@ enum RequestState<M, R> {
 	/// broadcast (may wait on a dynamic handler).
 	Resolve {
 		msg: M,
-		requesting: Option<origin::Requesting>,
+		requesting: Option<origin::Lookup>,
 	},
 	Serve(R),
 	/// FIN the reply, and keep the request until the requester closes its side.

@@ -265,10 +265,8 @@ class CoveringRoot {
  * @internal
  */
 export interface RequestSlot {
-	/** Open handles that always take a blind answer. */
+	/** Open plain handles that can use a peer without discovery. */
 	blind: number;
-	/** Open announcement-gated handles, which take a blind answer only while discovery is incomplete. */
-	announced: number;
 	answer?: broadcast.Consumer;
 	readonly handles: Set<Once<Error | null>>;
 	readonly route: Signal<Resolution | undefined>;
@@ -372,6 +370,9 @@ function received(entry: RouteEntry): boolean {
 function unroutable(): StreamError {
 	return new StreamError(StreamCode.Unroutable, { message: "unroutable" });
 }
+
+// A selected handler refused these requests; a coalesced route gap can have the same error.
+const refusedRequests = new WeakSet<GetPromise<Error | null>>();
 
 /** A served route from {@link Producer.dynamic}: the queue a handler drains. */
 class ServeState {
@@ -903,14 +904,9 @@ class OriginState {
 		}
 	}
 
-	/**
-	 * Whether sessions should answer `slot` with a blind subscription. An announcement-gated
-	 * handle falls back to one only while at least one attached session cannot announce, and
-	 * stays gated with no session attached.
-	 */
+	/** Whether a plain request needs the non-discovery session's blind answer. */
 	blind(slot: RequestSlot): boolean {
-		if (slot.blind > 0) return true;
-		if (slot.announced === 0) return false;
+		if (slot.blind === 0) return false;
 		const { total, discovery } = this.sessions.peek();
 		return discovery < total;
 	}
@@ -923,13 +919,17 @@ class OriginState {
 	refuse(path: Path.Valid, entry: RouteEntry, err: Error): void {
 		// A detached slot failing over to this route ends with its answer.
 		for (const other of [...(this.detached.get(path) ?? [])]) {
-			if (other.failover === entry) this.drop(path, other, err);
+			if (other.failover === entry) {
+				for (const closed of other.handles) refusedRequests.add(closed);
+				this.drop(path, other, err);
+			}
 		}
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
 		// Only the route the request is waiting on speaks for it; one superseded by another
 		// route or a local broadcast has a moot answer.
 		if (this.bestEntry(path) !== entry || this.localWins(path, entry)) return;
+		for (const closed of slot.handles) refusedRequests.add(closed);
 		this.drop(path, slot, err);
 	}
 
@@ -1118,8 +1118,8 @@ export interface Table {
 /** Options for resolving a broadcast path. */
 export interface RequestOptions {
 	/**
-	 * Follow announced instances unless an epoch is pinned; resolve blindly when discovery is
-	 * unavailable. Watches the path, so a `consume` session asks its peer about it.
+	 * Follow announced instances, pinned to one epoch when provided. Requires discovery;
+	 * never falls back to a blind request when discovery is unavailable.
 	 */
 	announced?: boolean;
 	/** Refuse a different publisher instance, including an asynchronous answer or a retry. */
@@ -1594,8 +1594,8 @@ export class Requesting {
 
 	/**
 	 * The current broadcast, or undefined while nothing provides the path.
-	 * Announced requests without an epoch follow publisher restarts. Blind and epoch-pinned
-	 * requests retain their accepted instance. Another route of the same epoch taking over keeps
+	 * Announced requests follow publisher instances, pinned to one when requested.
+	 * Plain requests retain their accepted instance. Another route of the same epoch taking over keeps
 	 * this handle: its tracks resume on that route from the first group each reader lacks.
 	 * Closing this handle affects only this request.
 	 */
@@ -1608,14 +1608,15 @@ export class Requesting {
 	 * attached and no connection reconnecting toward one. False whenever {@link active} is
 	 * set, and false while a connection is still coming up, so the ordinary page-load window
 	 * before the first handshake reads as pending rather than as a missing broadcast.
+	 * A plain request also reports absence once its scoped discovery has synced.
 	 * An announced request can still resolve on a later announcement. True once refused or closed.
 	 */
 	readonly unroutable: Getter<boolean>;
 
 	/**
 	 * Settles on refusal, origin shutdown, or explicit close.
-	 * A pinned or blind request also ends when its accepted instance stops serving;
-	 * an unpinned announced request waits for a later start instead.
+	 * A plain request also ends when its accepted instance stops serving;
+	 * an announced request waits for a later start, even when pinned.
 	 */
 	readonly closed: GetPromise<Error | null>;
 
@@ -1726,16 +1727,13 @@ export class Consumer {
 	}
 
 	/**
-	 * Resolve a path, following publisher restarts when `announced` is true and no epoch is pinned.
-	 * Announced requests clear `active` on an end and resolve again on the next start. A refusal
-	 * is terminal. An epoch-pinned request never changes instance; a plain request keeps its
-	 * accepted instance and may resolve blindly when discovery has no answer. Either one,
-	 * once resolved through a discovered route, watches its path until closed.
-	 * Announcement gating falls back to blind resolution when discovery is unavailable.
-	 * Close the request to release its handle and announcement watch.
+	 * Resolve one publisher instance, or follow announcements when `announced` is true.
+	 * Every request owns discovery of its path until closed. A plain request reports absence
+	 * only after discovery syncs and can use a session without discovery. A follower requires
+	 * discovery and waits for its pinned instance to return instead of closing on a gap.
 	 */
 	request(path: Path.Valid, options: RequestOptions = {}): Requesting {
-		if (options.announced && options.epoch === undefined) return this.#following(path, options);
+		if (options.announced) return this.#following(path, options);
 		return this.#resolve(path, options);
 	}
 
@@ -1758,8 +1756,6 @@ export class Consumer {
 			(value, answerers, error) => error !== undefined || (!value && answerers === 0),
 		);
 		let current: Requesting | undefined;
-		// Whether `current` ever resolved, so losing it reads as an end rather than a refusal.
-		let resolved = false;
 		let subscriptions: Dispose[] = [];
 		let disposed = false;
 		const release = () => {
@@ -1777,10 +1773,15 @@ export class Consumer {
 			active.set(undefined);
 			closed.set(error);
 		};
-		const ended = (error: Error | null | undefined) => {
+		const ended = (error: Error | null | undefined, request: Requesting | undefined = current) => {
 			if (!error) return;
-			// Losing an accepted instance waits for its next announcement; a refusal is final.
-			if (resolved && error instanceof StreamError && error.code === StreamCode.Unroutable) {
+			// Provenance survives a coalesced end/start, even when both routes serve one epoch.
+			if (
+				error instanceof StreamError &&
+				error.code === StreamCode.Unroutable &&
+				request &&
+				!refusedRequests.has(request.closed)
+			) {
 				active.set(undefined);
 				return;
 			}
@@ -1806,15 +1807,13 @@ export class Consumer {
 			current = next;
 			active.set(value);
 			if (!next) return;
-			resolved = value !== undefined;
 			subscriptions.push(
 				next.active.subscribe((value) => {
-					if (value) resolved = true;
 					active.set(value);
 				}),
 			);
-			subscriptions.push(next.closed.subscribe(ended));
-			ended(next.closed.peek());
+			subscriptions.push(next.closed.subscribe((error) => ended(error, next)));
+			ended(next.closed.peek(), next);
 		};
 		try {
 			replace(this.#resolve(path, options));
@@ -1848,6 +1847,7 @@ export class Consumer {
 	}
 
 	#resolve(path: Path.Valid, options: RequestOptions): Requesting {
+		Path.Pattern.literal(path);
 		const epoch = options.epoch;
 		const relative = path;
 		path = this.#scope.path(path);
@@ -1873,7 +1873,6 @@ export class Consumer {
 			// notify nobody.
 			const created: RequestSlot = {
 				blind: 0,
-				announced: 0,
 				handles: new Set(),
 				route: new Signal(this.#state.route(path, {})),
 			};
@@ -1886,10 +1885,9 @@ export class Consumer {
 		slot.handles.add(closed);
 		// Counted, not subscribed: serving sessions decide blindness from the live discovery state.
 		const announced = options.announced === true;
-		if (announced) slot.announced += 1;
-		else slot.blind += 1;
-		// An announced request is a watch: sessions ask their peer about this path while it lives.
-		let unwatch = announced ? this.#state.watch([path]) : undefined;
+		if (!announced) slot.blind += 1;
+		// Resolution owns discovery from the first ask, not just after a route arrives.
+		const unwatch = this.#state.watch([path]);
 		this.#state.requests.mutate(() => {});
 
 		// Hand out a handle of the request's own rather than the table's. Closing a consumer
@@ -1940,30 +1938,22 @@ export class Consumer {
 		// holder that only ever peeked would then pin a route that has already been retracted
 		// until it happened to read again. Following the route as well retires it promptly,
 		// and the memo makes the two paths agree: whichever runs first does the swap.
-		// Any other request watches its path once it resolves through a discovered route, so that
-		// route stays discovered after whatever watch found it, such as a listing, is gone.
-		const discovered = (resolution: Resolution | undefined) => {
-			if (unwatch || !resolution?.front) return;
-			// Only a route a session received; a local broadcast or dynamic route needs no discovery.
-			const entry = this.#state.materialized.get(path)?.entry;
-			if (!entry || entry.identity !== resolution.source || !received(entry)) return;
-			unwatch = this.#state.watch([path]);
-		};
-		discovered(route.peek());
-		const unsubscribe = route.subscribe((resolution) => {
-			own(resolution);
-			discovered(resolution);
-		});
+		const unsubscribe = route.subscribe(own);
 
 		// Only meaningful while nothing is routed, so it reads the route rather than `active`:
 		// the two cannot disagree, since a routed path always has an answerer-independent
 		// answer.
 		const unroutable = new Derived(
-			[route, this.#state.answerers, closed],
-			(resolution, answerers, ended) =>
-				ended !== undefined ||
-				(epoch !== undefined && resolution?.epoch !== epoch) ||
-				(!own(resolution) && answerers === 0),
+			[route, this.#state.answerers, this.#state.sessions, this.#state.snapshots, closed, this.#state.closed],
+			(resolution, answerers, sessions, snapshots, ended, shutdown) => {
+				if (ended !== undefined || shutdown !== undefined) return true;
+				if (own(resolution)) return false;
+				if (resolution?.front && epoch !== undefined && resolution.epoch !== epoch) return true;
+				for (const prefix of coveringPrefixes(path)) {
+					if (snapshots.has(prefix)) return false;
+				}
+				return answerers === 0 || (sessions.total > 0 && sessions.discovery === sessions.total);
+			},
 		);
 
 		return makeRequesting(relative, active, unroutable, closed, () => {
@@ -1976,11 +1966,10 @@ export class Consumer {
 			handle = undefined;
 			source = undefined;
 
-			unwatch?.();
+			unwatch();
 			taken.handles.delete(closed);
 			if (closed.peek() === undefined) closed.set(null);
-			if (announced) taken.announced -= 1;
-			else taken.blind -= 1;
+			if (!announced) taken.blind -= 1;
 			this.#state.requests.mutate(() => {});
 			if (taken.handles.size > 0) return;
 

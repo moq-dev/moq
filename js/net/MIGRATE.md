@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Broadcast requests own discovery
+
+`Origin.Consumer.request` watches its path from creation until close and reports absence once scoped discovery has synced.
+Paths containing wildcard characters are refused before registering a request because discovery cannot name them.
+`{ announced: true, epoch }` follows that instance through gaps and returns it when announced again.
+Announcement-following requests no longer fall back to blind requests on a session without discovery; use a plain request for that session.
+
 ### Stage a requested track before subscribers see it (#6111)
 
 `Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.

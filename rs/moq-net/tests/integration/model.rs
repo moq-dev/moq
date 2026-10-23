@@ -29,7 +29,7 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 	broadcast.announce(origin::Route::default()).unwrap();
 
 	// Resolving and subscribing pass through the origin's core front tasks.
-	let requesting = origin.consume().request_broadcast("room/live", None);
+	let mut requesting = origin.consume().request_broadcast("room/live", None);
 	assert!(requesting.poll_ok(&waiter).is_pending());
 	driver.poll(now, &waiter).unwrap();
 	let receiving: broadcast::Consumer = ready(requesting.poll_ok(&waiter)).unwrap();

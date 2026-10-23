@@ -19,8 +19,8 @@ To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 beco
 ### A client asks only about what it watches (#6165)
 
 On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced` or `moq_origin_announced_broadcast`, instead of under its whole scope at connect.
-`moq_origin_request` watches nothing, so on a client it fails with a negative code for a path nothing watches, even when the relay announces it.
-Resolve the path with `moq_origin_announced_broadcast`, or hold `moq_origin_announced` over its prefix while requesting.
+`moq_origin_request` owns discovery of its path while resolving and reports an unroutable path only once discovery has synced without a covering route.
+Request the path directly; no separate announcement stream is needed for resolution. An explicit selected-handler refusal is returned directly, including while following announcements. Handle that error before explicitly trying a later resolution.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `MOQ_CONTAINER_FORMAT_FMP4` unwraps to Legacy (#6250)

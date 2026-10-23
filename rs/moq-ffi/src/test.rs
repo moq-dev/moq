@@ -219,9 +219,8 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 
 /// Wait for `path` to be announced on `origin` and return its consumer.
 ///
-/// A created broadcast becomes routable asynchronously, and resolving a reference goes through
-/// `request_broadcast`, which reports a not-yet-announced path as unroutable rather than waiting.
-/// So every broadcast a test resolves has to be awaited, not just the one it starts from.
+/// A local reference published asynchronously may appear after discovery has synced empty.
+/// These tests wait for that future announcement before resolving the reference.
 async fn await_announced(consumer: &MoqOriginConsumer, path: &str) -> Arc<MoqBroadcastConsumer> {
 	let announced = consumer.announced_broadcast(path.into()).unwrap();
 	tokio::time::timeout(TIMEOUT, announced.available())
@@ -3980,7 +3979,7 @@ async fn cancel_retracts_the_route_synchronously() {
 	let dynamic = serve(&origin, "");
 	let inner = origin.inner().consume();
 
-	let queued = inner.request_broadcast("x", None).into_inner();
+	let mut queued = inner.request_broadcast("x", None).into_inner();
 	assert!(
 		queued.poll_ok(&kio::Waiter::noop()).is_pending(),
 		"the route must serve while the handler lives"
@@ -3988,7 +3987,7 @@ async fn cancel_retracts_the_route_synchronously() {
 	drop(queued);
 
 	dynamic.cancel();
-	let verdict = inner.request_broadcast("y", None).into_inner();
+	let mut verdict = inner.request_broadcast("y", None).into_inner();
 	match verdict.poll_ok(&kio::Waiter::noop()) {
 		std::task::Poll::Ready(Err(moq_net::Error::Unroutable)) => {}
 		std::task::Poll::Ready(Err(err)) => panic!("unexpected error: {err}"),

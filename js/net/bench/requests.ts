@@ -343,3 +343,28 @@ for (const [version, alpn] of [
 				origin.close();
 			}
 		}
+
+// Missing-path classification examines only ancestor prefixes, even with unrelated snapshots.
+console.log("unrelated_snapshots,requests,lookup_us");
+for (const unrelated of [8, 128, 2048])
+	for (const requesters of [1, 8, 32]) {
+		const origin = new Producer();
+		const wire = wireOf(origin);
+		const detach = wire.attach(true);
+		const pending = Array.from({ length: unrelated }, (_, i) => wire.snapshot(Path.from(`other/${i}`)));
+		const requests = Array.from({ length: requesters }, (_, i) => origin.request(Path.from(`missing/${i}`)));
+		const samples: number[] = [];
+		for (let round = 0; round < 7; round++) {
+			const start = performance.now();
+			for (let iteration = 0; iteration < 128; iteration++)
+				for (const request of requests)
+					if (!request.unroutable.peek()) throw new Error("unrelated snapshot delayed absence");
+			if (round > 0) samples.push(((performance.now() - start) * 1000) / 128);
+		}
+		samples.sort((a, b) => a - b);
+		console.log(`${unrelated},${requesters},${samples[3].toFixed(2)}`);
+		for (const request of requests) request.close();
+		for (const land of pending) land();
+		detach();
+		origin.close();
+	}

@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Broadcast requests own discovery
+
+`Consumer::request_broadcast` now owns discovery of its path and retries across route churn until discovery has synced without a route for its requested instance.
+It returns `Pending<origin::Requesting>`; `routed_broadcast` uses that task too, replacing `origin::Routing`.
+When polling directly, keep the task mutable for `poll_ok`; awaiting it is unchanged.
+Remove manual `Requesting::is_queued` retries: the resolver now watches route changes itself.
+A selected handler's explicit refusal is returned directly by `request_broadcast` and `announced_broadcast`; they do not wait for other discovery. The existing `routed_broadcast` helper retains its policy of retrying refusals only after the covering routes change. Paths discovery cannot name fail with `InvalidPath`.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
@@ -96,8 +104,8 @@ On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority
 
 On moq-lite, a client session no longer asks its peer for announcements under its whole subscribe scope at connect.
 It asks only under the prefixes its subscribe origin's readers watch, with `announced()`, `follow`, `routed`, `routed_broadcast`, or `announced_broadcast`, and stops asking 2s after nothing at or beneath a prefix is watched.
-`request_broadcast` watches nothing, so on a client it fails with `Error::Unroutable` for a path no reader watches, even when the peer announces it.
-Resolve a path with `routed_broadcast` or `announced_broadcast`, or hold an `announced()` stream over its prefix while requesting, the way `routed` already did after connecting.
+`request_broadcast` owns discovery of its path while resolving and reports an unroutable path only once discovery has synced without a covering route.
+Request the path directly; no separate announcement stream is needed for resolution. An explicit selected-handler refusal is returned directly, including while following announcements. Handle that error before explicitly trying a later resolution.
 A broadcast resolved through a discovered route keeps its path watched until dropped.
 A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
 Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.

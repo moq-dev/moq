@@ -50,7 +50,7 @@ interface Reported {
  * requests with blind subscriptions.
  *
  * Discovery is lazy. One announce request opens per prefix in the origin's covering set of
- * watches (`announced(scope)` and `request(path, { announced: true })`) that no open request
+ * watches (`announced(scope)` and every `request(path)`) that no open request
  * already covers, and closes {@link LINGER} after nothing at or beneath its prefix is watched.
  * A narrower watch rides an open broader request, and a narrower request already open stays
  * open until the broader one covering it goes, so neither takes the other's routes over
@@ -147,8 +147,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	const downgrade = (failure: unknown) => {
 		if (blind) return;
 		blind = true;
-		// Announcement-gated consumers would wait forever on a table this session cannot fill,
-		// so they fall back to blind answers, which this session still provides.
+		// Plain requests can still use this session's blind answers. Announcement followers
+		// keep waiting for a source that can discover their path.
 		console.warn("broadcast discovery failed; broadcasts resolve on request only.", failure);
 		detach();
 		detach = originWire.attach(false);
