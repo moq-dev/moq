@@ -48,7 +48,7 @@ use crate::codec::annexb::InBandCodec;
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
 use crate::container::consumer::Event;
-use crate::container::decode::{DecodeClock, MAX_REORDER};
+use crate::container::decode::{DecodeClock, MAX_REORDER, Settle};
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
 
@@ -415,7 +415,9 @@ impl Track {
 				.describe(stream_type, self.source.description(), name, self.sync.is_some());
 		}
 		let pts = to_ticks(pending.frame.timestamp);
-		self.clock.push((pending, self.source.description().cloned()), pts);
+		let arrived = pending.arrived;
+		self.clock
+			.push((pending, self.source.description().cloned()), pts, arrived);
 		self.release(name, jitter, false)
 	}
 
@@ -783,7 +785,8 @@ impl Track {
 		Ok((key, start))
 	}
 
-	/// Queue every held video frame whose DTS is settled, or all of them when `flush`.
+	/// Queue every held video frame whose DTS is settled or that is overdue
+	/// ([`DecodeClock::settle`]), or all of them when `flush`.
 	///
 	/// A held frame is ready no earlier than the latest frame the source delivered, which
 	/// settled it, so it is judged as arriving then. Frames held through a silence,
@@ -800,7 +803,13 @@ impl Track {
 		let counted = self.sync.as_ref().and(self.timing.depth());
 		while let Some(((mut pending, description), dts)) = match counted {
 			Some(depth) => self.clock.pop_counted(depth, delay, flush),
-			None => self.clock.pop(lookahead, delay, flush),
+			None => {
+				let settle = match flush {
+					true => Settle::All,
+					false => self.clock.settle(lookahead, self.latest, jitter.delay()),
+				};
+				self.clock.pop(lookahead, delay, settle)
+			}
 		} {
 			if !self.finished {
 				pending.arrived = pending.arrived.max(self.latest);
@@ -2071,10 +2080,10 @@ where
 		stats
 	}
 
-	/// How many access units are waiting in the jitter buffer.
+	/// How many access units are waiting in the jitter buffer or a decode clock.
 	#[cfg(test)]
 	pub(super) fn buffered(&self) -> usize {
-		self.jitter.len()
+		self.jitter.len() + self.tracks.values().map(|track| track.clock.len()).sum::<usize>()
 	}
 
 	/// When the next queued frame is due, or the next grid slot while media is queued or
@@ -4055,8 +4064,8 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::{
-		Buffer, DecodeClock, Dolby, Kind, PSI_INTERVAL, PesPacket, dolby_removals, due, is_complete_section, si_due,
-		slot, unwrap_pts, verbatim_buffer,
+		Buffer, DecodeClock, Dolby, Kind, PSI_INTERVAL, PesPacket, Settle, dolby_removals, due, is_complete_section,
+		si_due, slot, unwrap_pts, verbatim_buffer,
 	};
 
 	/// The same available video/audio backlog must choose the same start in either fill order.
@@ -4261,12 +4270,12 @@ mod tests {
 		let mut clock = DecodeClock::default();
 		let mut dts = vec![0; pts.len()];
 		for (i, &p) in pts.iter().enumerate() {
-			clock.push(i, p);
-			while let Some((i, d)) = clock.pop(jitter, floor, false) {
+			clock.push(i, p, moq_clock::Instant::ZERO);
+			while let Some((i, d)) = clock.pop(jitter, floor, Settle::Due) {
 				dts[i] = d;
 			}
 		}
-		while let Some((i, d)) = clock.pop(jitter, floor, true) {
+		while let Some((i, d)) = clock.pop(jitter, floor, Settle::All) {
 			dts[i] = d;
 		}
 		dts
