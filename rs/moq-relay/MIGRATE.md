@@ -5,7 +5,7 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
-### One loader and role-scoped config (#6535)
+### One loader and role-scoped config ([moq-dev/moq#6535](https://github.com/moq-dev/moq/pull/6535))
 
 After an embedded CLI's `parse_from_with_settings`, call `config.relay.merge(&cli_layer)?`.
 It reads `relay.file`, applies CLI > environment > file > defaults, refuses obsolete
@@ -38,7 +38,6 @@ and consuming `shutdown` on that value. A merely bound worker group cannot serve
 `Incoming` and `Accepted` require the `test-support` feature for in-memory tests.
 `Cluster::admit`, `cluster::Admitted`, and `auth::hold` are private; real admissions
 use the existing `Auth::embedded` / `Admissions` and `Lease` lifecycle.
-
 
 ### `receive_window` has a floor (#5878)
 

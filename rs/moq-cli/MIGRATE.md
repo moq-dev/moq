@@ -4,7 +4,7 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
-### Relay config and certificate roles (#6535)
+### Relay config and certificate roles ([moq-dev/moq#6535](https://github.com/moq-dev/moq/pull/6535))
 
 Replace `moq auth serve --mtls-peer` with `--mtls-link peer`, and the combined
 peer/upstream flags with `--mtls-link upstream`. Omit the flag for ordinary
@@ -14,7 +14,6 @@ The removed flags are refused even when explicitly false.
 Cluster peer-list flags are now `--cluster-api-url` and `--cluster-api-tls-root`;
 the matching environment variables are `MOQ_CLUSTER_API_URL` and
 `MOQ_CLUSTER_API_TLS_ROOT`. TOML uses `[cluster.api] url` and `tls.root`.
-
 
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 

@@ -4,13 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A certificate has one cluster-link role (#6535)
+### A certificate has one cluster-link role ([moq-dev/moq#6535](https://github.com/moq-dev/moq/pull/6535))
 
 Replace `serve::Policy.mtls_peer` and `.mtls_upstream` with `.mtls_link`:
 use `None` for ordinary certificate grants, `Some(serve::Link::Peer)` for peers,
 and `Some(serve::Link::Upstream)` for upstream peers. `Grant.peer` and
 `Grant.upstream` retain their existing JSON boolean contract.
-
 
 ### `Client::connect` has no timeout of its own (#5765)
 
