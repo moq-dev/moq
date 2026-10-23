@@ -24,9 +24,14 @@ latest() {
     gh release list --repo moq-dev/moq --limit 1000 --json tagName --jq "[.[].tagName | select(test(\"$1\"))][0] // empty"
 }
 
-# Strip comments without expanding includes or macros.
+# Strip comments without expanding includes or macros. Only GCC can: Clang has
+# no -fpreprocessed, and is what `cc` and even `gcc` name on macOS.
+gcc --version 2>/dev/null | grep -q 'Free Software Foundation' || {
+    echo "api-diff: the FFI diff needs GCC to strip header comments; run \`just api-diff rust js\` without it" >&2
+    exit 1
+}
 strip() {
-    cc -x "$1" -fpreprocessed -dD -E -P -w "$2" -o "$3"
+    gcc -x "$1" -fpreprocessed -dD -E -P -w "$2" -o "$3"
 }
 
 c_tag=$(latest '^(moq-c|libmoq)-v')
