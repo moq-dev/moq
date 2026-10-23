@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class SelectTest(unittest.TestCase):
     # CI runs target lints before its test build.
-    def selected(self, *paths, action="lint"):
+    def selected(self, *paths, action="lint", github_actions=False):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
             calls = scratch / "calls"
@@ -22,16 +22,20 @@ class SelectTest(unittest.TestCase):
             changed = scratch / "changed"
             changed.write_text("\n".join(paths) + "\n")
             env = dict(os.environ, MOQ_LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
-                       SELECT_CALLS=str(calls), BASH_ENV=os.devnull)
+                       SELECT_CALLS=str(calls), BASH_ENV=os.devnull,
+                       GITHUB_ACTIONS=str(github_actions).lower())
             subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
                            cwd=ROOT, env=env, check=True, capture_output=True, text=True)
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
-        for action in ("check", "check-test", "lint", "test"):
-            with self.subTest(action=action):
-                self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz",
-                              self.selected("sh/rs/nextest.sh", action=action))
+        for github_actions in (False, True):
+            for action in ("check", "check-test", "lint", "test"):
+                with self.subTest(action=action, github_actions=github_actions):
+                    timings = " --timings" if github_actions and action == "test" else ""
+                    self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{timings}",
+                                  self.selected("sh/rs/nextest.sh", action=action,
+                                                github_actions=github_actions))
         selected = self.selected("sh/rs/nextest.sh")
         for recipe in ("wasm", "uring-check"):
             self.assertIn(f"rs {recipe}", selected)

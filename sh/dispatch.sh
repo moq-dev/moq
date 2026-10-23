@@ -158,7 +158,7 @@ declare -A tools=(
     [toml]='taplo'
     [nix]='nixfmt'
     [justfile]=''
-    [gh]='actionlint bun'
+    [gh]='actionlint bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
 )
 
 # CI and the local check share one selection and one lint/test dispatch.
@@ -314,15 +314,18 @@ for module in "${selected[@]}"; do
 done
 
 # The bindings run their tests in the preamble; these suites run once here.
+# gh's tooling tests run on every diff: path selection would let a broken
+# selector skip the very tests that catch it.
 if [[ "$verb" == check ]]; then
     for module in "${selected[@]}"; do
         case "$module" in
-            rs | js | py) begin "test $module" ;;
+            rs | js | py | gh) begin "test $module" ;;
         esac
         case "$module" in
             rs) just rs test-changed "$rs_list" ;;
             js) just js test-changed "$js_list" ;;
             py) just py test ;;
+            gh) just gh test ;;
         esac
         finish
     done

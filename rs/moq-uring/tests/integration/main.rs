@@ -14,6 +14,7 @@ mod echo;
 mod ecn;
 mod endpoint;
 mod identity;
+mod local_addr;
 mod qlog;
 mod receive_credit;
 mod session;
