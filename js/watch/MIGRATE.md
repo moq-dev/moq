@@ -4,10 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Rendition targets nest by media kind
+### Player inputs and `<moq-watch>` controls nest by media kind
 
-Replace `controls.target` with `controls.video.target` on `<moq-watch>`, and `new Player({ target })` with `new Player({ video: { target } })`; read it back from `player.in.video.target`.
-Pin an audio rendition the same way, with `controls.audio.target` or `new Player({ audio: { target: { name } } })`.
+Move each per-media input under `video`, `audio`, or `text`, on `new Player({...})`, on `player.in`, and on the element's `controls`:
+
+| Before | After |
+| --- | --- |
+| `target` | `video.target` |
+| `canvas` | `video.canvas` (Player only) |
+| `visible`, `backend` | `video.visible`, `video.backend` |
+| `volume`, `muted` | `audio.volume`, `audio.muted` |
+| `captions` | `text.target` |
+| `container` | `text.container` (Player only) |
+
+For example, `new Player({ canvas, muted })` becomes `new Player({ video: { canvas }, audio: { muted } })`, and `el.controls.volume` becomes `el.controls.audio.volume`.
+`paused`, `delay`, and `buffer` stay flat, as do the element's attributes and their properties (`el.muted`, `el.captions`, ...).
+Pin an audio rendition the new way, with `controls.audio.target` or `new Player({ audio: { target: { name } } })`.
 
 ### `Sync` drops its duplicate and decoder-only surface
 

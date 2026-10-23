@@ -25,56 +25,51 @@ export type PlayerInput = {
 	catalog: Getter<Catalog.Root | undefined>;
 	/** Connection probe used for rendition selection. */
 	probe: Getter<Moq.Connection.Probe | undefined>;
-	/** Canvas to paint video into. */
-	canvas: Getter<HTMLCanvasElement | undefined>;
-	/** Container to render captions into. */
-	container: Getter<HTMLElement | undefined>;
 	/** Pause media and captions. */
 	paused: Getter<boolean>;
-	/** Speaker volume from zero to one. */
-	volume: Getter<number>;
-	/** Silence audio and stop its download. */
-	muted: Getter<boolean>;
-	/** Canvas visibility policy for video downloads. */
-	visible: Getter<Video.Visible>;
-	/** Which graphics API paints the canvas. */
-	backend: Getter<Video.Backend>;
 	/** Playback distance from the live edge. */
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
 	buffer: Getter<Milli>;
-	/** Video rendition selection. */
+	/** Video rendition and canvas output. */
 	video: {
 		/** Desired video rendition or quality limits. */
 		target: Getter<Video.Target | undefined>;
+		/** Canvas to paint video into. */
+		canvas: Getter<HTMLCanvasElement | undefined>;
+		/** Canvas visibility policy for video downloads. */
+		visible: Getter<Video.Visible>;
+		/** Which graphics API paints the canvas. */
+		backend: Getter<Video.Backend>;
 	};
-	/** Audio rendition selection. */
+	/** Audio rendition and speaker output. */
 	audio: {
 		/** Desired audio rendition, or automatic selection when absent. */
 		target: Getter<Audio.Target | undefined>;
+		/** Speaker volume from zero to one. */
+		volume: Getter<number>;
+		/** Silence audio and stop its download. */
+		muted: Getter<boolean>;
 	};
-	/** Selected caption track, or undefined for off. */
-	captions: Getter<string | undefined>;
+	/** Caption track and overlay. */
+	text: {
+		/** Selected caption track, or undefined for off. */
+		target: Getter<string | undefined>;
+		/** Container to render captions into. */
+		container: Getter<HTMLElement | undefined>;
+	};
 };
 
-// The inputs that are not nested under a media kind.
-type FlatInput = Omit<PlayerInput, "video" | "audio">;
+// The inputs nested under a media kind; the rest are flat.
+type Kind = "video" | "audio" | "text";
 
 /** Constructor options for {@link Player}; omitted controls use the element defaults. */
-export type PlayerProps = Inputs<FlatInput> & {
-	/** Video rendition selection. */
-	video?: Inputs<PlayerInput["video"]>;
-	/** Audio rendition selection. */
-	audio?: Inputs<PlayerInput["audio"]>;
-};
+export type PlayerProps = Inputs<Omit<PlayerInput, Kind>> & { [K in Kind]?: Inputs<PlayerInput[K]> };
 
 /** Owns the broadcast, synchronized media pipelines, and their download policy. */
 export class Player {
 	/** Inputs wired into the pipeline. Pass signals to change them after construction. */
-	readonly in: Readonlys<FlatInput> & {
-		readonly video: Readonlys<PlayerInput["video"]>;
-		readonly audio: Readonlys<PlayerInput["audio"]>;
-	};
+	readonly in: Readonlys<Omit<PlayerInput, Kind>> & { readonly [K in Kind]: Readonlys<PlayerInput[K]> };
 	/** Broadcast subscription and effective catalog. */
 	readonly broadcast: Broadcast;
 	/** Shared audio, video, and caption clock. */
@@ -108,18 +103,24 @@ export class Player {
 			catalogFormat: getter<CatalogFormat | undefined>(props.catalogFormat),
 			catalog: getter(props.catalog),
 			probe: getter(props.probe),
-			canvas: getter(props.canvas),
-			container: getter(props.container),
 			paused: getter(props.paused ?? false),
-			volume: getter(props.volume ?? 0.5),
-			muted: getter(props.muted ?? false),
-			visible: getter(props.visible ?? "20%"),
-			backend: getter<Video.Backend>(props.backend ?? "auto"),
 			delay: getter(props.delay ?? "auto"),
 			buffer: getter(props.buffer ?? Milli.zero),
-			video: { target: getter<Video.Target | undefined>(props.video?.target) },
-			audio: { target: getter<Audio.Target | undefined>(props.audio?.target) },
-			captions: getter<string | undefined>(props.captions),
+			video: {
+				target: getter<Video.Target | undefined>(props.video?.target),
+				canvas: getter(props.video?.canvas),
+				visible: getter(props.video?.visible ?? "20%"),
+				backend: getter<Video.Backend>(props.video?.backend ?? "auto"),
+			},
+			audio: {
+				target: getter<Audio.Target | undefined>(props.audio?.target),
+				volume: getter(props.audio?.volume ?? 0.5),
+				muted: getter(props.audio?.muted ?? false),
+			},
+			text: {
+				target: getter<string | undefined>(props.text?.target),
+				container: getter(props.text?.container),
+			},
 		};
 
 		this.broadcast = new Broadcast(this.in);
@@ -141,7 +142,7 @@ export class Player {
 			audioSource.close();
 		});
 
-		this.text = new Text.Source({ broadcast: this.broadcast, target: this.in.captions });
+		this.text = new Text.Source({ broadcast: this.broadcast, target: this.in.text.target });
 		this.#signals.cleanup(() => this.text.close());
 
 		this.sync = new Sync({ delay: this.in.delay, buffer: this.in.buffer });
@@ -160,15 +161,15 @@ export class Player {
 
 		this.emitter = new Audio.Emitter({
 			source: this.audio,
-			volume: this.in.volume,
-			muted: this.in.muted,
+			volume: this.in.audio.volume,
+			muted: this.in.audio.muted,
 			paused: this.in.paused,
 		});
 		this.renderer = new Video.Renderer({
 			decoder: this.video,
-			canvas: this.in.canvas,
-			visible: this.in.visible,
-			backend: this.in.backend,
+			canvas: this.in.video.canvas,
+			visible: this.in.video.visible,
+			backend: this.in.video.backend,
 		});
 		this.#signals.cleanup(() => {
 			this.emitter.close();
@@ -178,7 +179,7 @@ export class Player {
 		this.textRenderer = new Text.Renderer({
 			source: this.text,
 			sync: this.sync,
-			container: this.in.container,
+			container: this.in.text.container,
 			enabled: this.#captionsEnabled,
 		});
 		this.#signals.cleanup(() => this.textRenderer.close());
