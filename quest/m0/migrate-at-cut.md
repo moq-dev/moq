@@ -23,7 +23,10 @@ Decided 2026-10-23 (maintainer interview):
   `!` subjects since the `release` merge base, reads each PR's Impact
   section, and relies on the [API-diff check](/quest/m1/api-diff.md) for
   breaks a PR left unmarked. Rejected: a `breaking` label (one more thing to
-  remember) and reading every merged PR (hundreds per cycle).
+  remember) and reading every merged PR (hundreds per cycle). A behavior
+  break that keeps its declarations and lacks `!` escapes both; it escapes
+  today's per-PR rule the same way, since an author who misses a break
+  writes no entry either, so catching it stays with PR review.
 - The `## Unreleased` entries already on `main` stay as the cut's starting
   draft, and [moq-dev/moq#6443](https://github.com/moq-dev/moq/pull/6443)
   lands as planned.
@@ -33,6 +36,9 @@ Changes:
 - `AGENTS.md` Public API and `CONTRIBUTING.md` PRs: a breaking change marks
   its title with `!` and its Impact bullet says how to migrate; drop the
   per-PR `MIGRATE.md` entry rule.
+- `CONTRIBUTING.md` Commits: drop the claim that the PR description becomes
+  the squash commit's body; the merge queue keeps only the title and
+  co-author trailers.
 - `CONTRIBUTING.md` Releases: replace the "rename `## Unreleased`" step with
   the cut writing each changed package's version-transition section from the
   audit.
