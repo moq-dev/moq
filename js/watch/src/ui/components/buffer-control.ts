@@ -85,7 +85,7 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Milli = DEFA
 	viz.tabIndex = 0;
 	viz.setAttribute("aria-valuemin", MIN_RANGE.toString());
 	viz.setAttribute("aria-valuemax", max.toString());
-	viz.setAttribute("aria-label", "Buffer jitter");
+	viz.setAttribute("aria-label", "Playback delay");
 
 	const playhead = document.createElement("div");
 	playhead.className = "buffer-playhead";
@@ -128,11 +128,11 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Milli = DEFA
 	let hasInteracted = false;
 
 	parent.run((effect) => {
-		const jitter = effect.get(watch.sync.out.jitter);
-		const pct = (jitter / max) * 100;
+		const delay = effect.get(watch.sync.out.delay);
+		const pct = (delay / max) * 100;
 		targetLine.style.left = `${pct}%`;
-		targetLabel.textContent = `${Math.round(jitter)}ms`;
-		viz.setAttribute("aria-valuenow", jitter.toString());
+		targetLabel.textContent = `${Math.round(delay)}ms`;
+		viz.setAttribute("aria-valuenow", delay.toString());
 	});
 
 	const updateFromX = (clientX: number) => {
@@ -180,7 +180,7 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Milli = DEFA
 		}
 		e.preventDefault();
 		interact();
-		const current = watch.sync.out.jitter.peek();
+		const current = watch.sync.out.delay.peek();
 		const value = Milli(Math.max(MIN_RANGE, Math.min(max, current + delta)));
 		watch.delay = value;
 	});

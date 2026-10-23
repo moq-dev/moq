@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- [**breaking**] Auth token roles now carry `moq_auth::Access`. Every capped grant is refused until its transport enforces caps, including in-band additions and revalidation. HTTP fetch and announcement endpoints always refuse per-connection caps. Gateway embedders must enforce caps or refuse them.
+- [**breaking**] Auth token roles hold path patterns directly, matching release. Unsupported object roles, including bitrate caps, are refused by auth parsing before admission.
 
 - Auth requests distinguish `webtransport` from native `quic`. Upgrade auth servers before relays: older servers reject the new value. Rust and JavaScript auth parsers now map future transport names to `unknown`.
 - `listen.timeout` bounds auth admission as part of the handshake, replacing the fixed ten-second admission timeout, so an auth server answering `connect` late is admitted within the deadline and `"0"` waits through admission too. HTTP reads bound admission by the web listener's timeout. `Auth::admit` and `Cluster::admit` no longer time out on their own; the caller owns the deadline. In-band token verification keeps its ten-second bound.

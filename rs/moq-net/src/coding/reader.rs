@@ -193,6 +193,19 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with(cx, true, |r| T::decode(r, version))
 	}
 
+	/// [`Self::poll_decode`] with `decode` in place of the type's own decoder, for a
+	/// message whose bounds come from the session.
+	pub(crate) fn poll_decode_with<T: Debug>(
+		&mut self,
+		cx: &mut Context<'_>,
+		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+	) -> Poll<Result<T, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_with(cx, true, decode)
+	}
+
 	/// Decode the next message from the stream.
 	pub async fn decode<T: Decode<V> + Debug>(&mut self) -> Result<T, Error>
 	where

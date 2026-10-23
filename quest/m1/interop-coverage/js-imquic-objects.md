@@ -16,8 +16,3 @@ compare what the two clients put on the wire (transport, SUBSCRIBE
 fields, stream types) before suspecting imquic.
 
 Public API: unknown until the cause is found. Wire: none expected.
-
-## Related
-
-- [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - lands the
-  client case this cell runs
