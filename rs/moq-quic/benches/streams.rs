@@ -93,8 +93,8 @@ fn send_windowed(pair: &mut Pair, total: usize, size: usize) {
 ///
 /// The `window` cases instead write a fixed 256 KiB to one stream through a send window, so the
 /// data retained until acknowledged grows with the window while the total stays put. The
-/// `holes` cases lose a datagram now and then, so a hole keeps everything after it retained until
-/// its retransmission is acknowledged.
+/// `holes` cases, at the largest window only to keep the nightly short, lose a datagram now and
+/// then, so a hole keeps everything after it retained and its retransmission reads old offsets.
 fn bench_write_size(c: &mut Criterion<ThreadCpu>) {
     const BYTES: usize = 64 << 10;
     const TOTAL: usize = 256 << 10;
@@ -112,27 +112,26 @@ fn bench_write_size(c: &mut Criterion<ThreadCpu>) {
             );
         }
     }
-    for window in [16 << 10, 64 << 10, TOTAL] {
-        for holes in [false, true] {
-            for size in [64, 1024, 16384] {
-                let mut pair = None;
-                let name = match holes {
-                    false => format!("window_{}k", window >> 10),
-                    true => format!("window_{}k_holes", window >> 10),
-                };
-                group.throughput(Throughput::Bytes(TOTAL as u64));
-                group.bench_function(BenchmarkId::new(name, format!("bytes_{size}")), |b| {
-                    let pair = pair.get_or_insert_with(|| {
-                        let mut pair = Pair::new(Setup {
-                            client_send_window: window as u64,
-                            ..Setup::default()
-                        });
-                        pair.lose_every = holes.then_some(LOSE_EVERY);
-                        pair
+    let windows = [(16 << 10, false), (64 << 10, false), (TOTAL, false), (TOTAL, true)];
+    for (window, holes) in windows {
+        for size in [64, 1024, 16384] {
+            let mut pair = None;
+            let name = match holes {
+                false => format!("window_{}k", window >> 10),
+                true => format!("window_{}k_holes", window >> 10),
+            };
+            group.throughput(Throughput::Bytes(TOTAL as u64));
+            group.bench_function(BenchmarkId::new(name, format!("bytes_{size}")), |b| {
+                let pair = pair.get_or_insert_with(|| {
+                    let mut pair = Pair::new(Setup {
+                        client_send_window: window as u64,
+                        ..Setup::default()
                     });
-                    b.iter(|| send_windowed(pair, TOTAL, size))
+                    pair.lose_every = holes.then_some(LOSE_EVERY);
+                    pair
                 });
-            }
+                b.iter(|| send_windowed(pair, TOTAL, size))
+            });
         }
     }
     group.finish();
