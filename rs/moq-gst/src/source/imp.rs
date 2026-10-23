@@ -435,14 +435,6 @@ struct Shape {
 /// A rendition by kind and moq track name: what a pad is kept by.
 type Rendition = (TrackKind, String);
 
-/// The media a rendition plays: its resolved broadcast and track name, whatever the catalog calls
-/// it or however it spells the reference.
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct Track {
-	broadcast: moq_net::PathOwned,
-	name: String,
-}
-
 /// The session's pads by rendition, and the renditions the latest catalog lists. The pads outlive
 /// the readers and runs that stream to them, so a pipeline linked by name (`s.video_0 ! ...`) keeps
 /// flowing across a restart.
@@ -786,14 +778,11 @@ async fn follow_catalog(
 	let playback = Playback {
 		element,
 		pads: pads.clone(),
-		path: broadcast.info().path.clone(),
 		timeline: Arc::default(),
-		siblings: Siblings::default(),
-		finished: Finished::default(),
 		shutdown: shutdown.clone(),
 		stop: stopped,
 	};
-	let mut followers: HashMap<Followed, watch::Sender<Plan>> = HashMap::new();
+	let mut followers: HashMap<moq_net::PathOwned, watch::Sender<Plan>> = HashMap::new();
 	// The followers, and the retirements of pads the catalog no longer lists.
 	let mut tasks = tokio::task::JoinSet::new();
 	let mut catalog_closed = false;
@@ -850,10 +839,6 @@ async fn follow_catalog(
 	result
 }
 
-/// The broadcast a [`Follower`] follows: the path a reference resolves to, and the instance it
-/// names, if any.
-type Followed = (moq_net::PathOwned, Option<moq_net::Epoch>);
-
 /// Bring the run in line with `catalog`: list its renditions on the pads, retiring the pads of
 /// those it dropped, and hand each referenced broadcast's follower the renditions that read it.
 ///
@@ -864,7 +849,7 @@ fn reconcile(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	source: &moq_mux::Source,
 	playback: &Playback,
-	followers: &mut HashMap<Followed, watch::Sender<Plan>>,
+	followers: &mut HashMap<moq_net::PathOwned, watch::Sender<Plan>>,
 	tasks: &mut tokio::task::JoinSet<()>,
 	cancel: &watch::Receiver<bool>,
 ) {
@@ -920,7 +905,7 @@ fn reconcile(
 		tasks.spawn_on(STREAMING.scope(playback.element.clone(), retire), RUNTIME.handle());
 	}
 
-	let mut plans: HashMap<Followed, Plan> = HashMap::new();
+	let mut plans: HashMap<moq_net::PathOwned, Plan> = HashMap::new();
 	for (rendition, shape) in desired {
 		let Some(path) = source.resolve_reference(shape.broadcast.as_ref()) else {
 			gst::warning!(
@@ -930,19 +915,15 @@ fn reconcile(
 			);
 			continue;
 		};
-		plans
-			.entry((path, shape.epoch.clone()))
-			.or_default()
-			.renditions
-			.insert(rendition, shape);
+		plans.entry(path).or_default().renditions.insert(rendition, shape);
 	}
 
 	// A broadcast no rendition reads any more is not followed: its readers stop, apart from a
 	// delisted one playing out its tail.
-	followers.retain(|followed, _| plans.contains_key(followed));
-	for (followed, plan) in plans {
+	followers.retain(|path, _| plans.contains_key(path));
+	for (path, plan) in plans {
 		// A follower whose broadcast failed exited, and this update follows it again.
-		if let Some(follower) = followers.get(&followed)
+		if let Some(follower) = followers.get(&path)
 			&& !follower.is_closed()
 		{
 			follower.send_replace(plan);
@@ -950,22 +931,25 @@ fn reconcile(
 		}
 
 		// Follow without waiting: an unavailable sibling must not park the catalog loop and hold
-		// up every other rendition. The follower resolves its instances under the run.
+		// up every other rendition. The follower resolves its instances under the run. Every
+		// instance is followed, and each rendition checks the epoch it names.
 		let shape = plan.renditions.values().next().expect("a plan names a rendition");
-		let instances = match source.follow(shape.broadcast.as_ref(), followed.1.as_ref()) {
+		let instances = match source.follow(shape.broadcast.as_ref(), None) {
 			Ok(instances) => instances,
 			Err(err) => {
-				gst::warning!(CAT, "ignoring the renditions of {}: {err:?}", followed.0);
+				gst::warning!(CAT, "ignoring the renditions of {path}: {err:?}");
 				continue;
 			}
 		};
 		let (follower, plan) = watch::channel(plan);
 		let follower_task = Follower {
 			playback: playback.clone(),
-			path: followed.0.clone(),
+			path: path.clone(),
 			renditions: HashMap::new(),
 			readers: tokio::task::JoinSet::new(),
 			current: None,
+			finished: Finished::default(),
+			started: 0,
 			next_id: 0,
 		}
 		.run(instances, plan);
@@ -973,22 +957,18 @@ fn reconcile(
 			STREAMING.scope(playback.element.clone(), follower_task),
 			RUNTIME.handle(),
 		);
-		followers.insert(followed, follower);
+		followers.insert(path, follower);
 	}
 }
 
 /// What one broadcast run shares with every follower and reader it starts. Pads survive a
-/// broadcast switch; its timing and finished tracks do not.
+/// broadcast switch; its timing does not.
 #[derive(Clone)]
 struct Playback {
 	element: glib::WeakRef<super::MoqSrc>,
 	pads: Pads,
-	/// The catalog's own path, whose renditions read the run's broadcast rather than following
-	/// announcements.
-	path: moq_net::PathOwned,
+	/// Shared by the catalog's own renditions and the first instance of each sibling.
 	timeline: Arc<Timeline>,
-	siblings: Siblings,
-	finished: Finished,
 	/// The session's shutdown, which [`SessionController::stop`] sets before it flushes the pads.
 	shutdown: watch::Receiver<bool>,
 	/// Set once the run ends, stopping every follower.
@@ -1004,21 +984,34 @@ struct Plan {
 	closed: bool,
 }
 
-/// Follows one broadcast's instances and plays the renditions that read it on each in turn: a
+/// Follows the instances at one path and plays the renditions that read it on each in turn: a
 /// start reads them on that instance, an end idles their pads, and another instance taking over
 /// restarts each stream on the same pad. The catalog's own broadcast is a single instance that
 /// never ends.
 ///
-/// It owns its renditions' readers, so whether a rendition is reading, idle, or playing out its
-/// tail is its own state rather than a task's.
+/// It owns its renditions' readers and the state of the instance they read, so whether a
+/// rendition is reading, idle, or playing out its tail is its own state rather than a task's.
 struct Follower {
 	playback: Playback,
 	path: moq_net::PathOwned,
 	renditions: HashMap<Rendition, Entry>,
 	readers: tokio::task::JoinSet<(Rendition, u64, Exit)>,
-	/// The instance being read, and the timeline its renditions share.
-	current: Option<(moq_net::broadcast::Consumer, Arc<Timeline>)>,
+	current: Option<Current>,
+	/// Shared with the readers.
+	finished: Finished,
+	/// How many instances started, numbering each.
+	started: u64,
 	next_id: u64,
+}
+
+/// The instance a [`Follower`] reads.
+struct Current {
+	instance: moq_net::broadcast::Consumer,
+	/// Shared by every rendition reading the instance, so their first frames fix one mapping for
+	/// all of them.
+	timeline: Arc<Timeline>,
+	/// Its number among the follower's instances.
+	serial: u64,
 }
 
 /// A rendition a [`Follower`] plays.
@@ -1147,15 +1140,25 @@ impl Follower {
 				},
 			);
 		}
+		self.finished
+			.retain(|rendition, _| self.renditions.contains_key(rendition));
 	}
 
 	/// Read `instance`, which took over from any before it.
 	fn start(&mut self, instance: moq_net::broadcast::Consumer) {
-		let timeline = match self.path == self.playback.path {
-			true => self.playback.timeline.clone(),
-			false => self.playback.siblings.timeline(&instance, &self.playback.timeline),
+		self.started += 1;
+		// The first instance is the one the run started alongside. A later one's timestamps share
+		// no origin with the run's.
+		let timeline = match self.started {
+			1 => self.playback.timeline.clone(),
+			_ => Arc::default(),
 		};
-		self.current = Some((instance, timeline));
+		self.current = Some(Current {
+			instance,
+			timeline,
+			serial: self.started,
+		});
+		self.finished.retain(|_, serial| serial == self.started);
 		self.idle();
 		self.play();
 	}
@@ -1168,13 +1171,13 @@ impl Follower {
 		}
 	}
 
-	/// Start a reader on the current instance for each rendition without one.
+	/// Start a reader on the current instance for each rendition without one that it may serve.
 	fn play(&mut self) {
-		let Some((instance, timeline)) = &self.current else {
+		let Some(current) = &self.current else {
 			return;
 		};
 		for (rendition, entry) in &mut self.renditions {
-			if entry.reader.is_none() {
+			if entry.reader.is_none() && serves(&current.instance, entry.shape.epoch.as_ref()) {
 				self.next_id += 1;
 				let (cancel, cancelled) = watch::channel(false);
 				let live = Arc::new(AtomicBool::new(false));
@@ -1182,12 +1185,10 @@ impl Follower {
 					playback: self.playback.clone(),
 					rendition: rendition.clone(),
 					shape: entry.shape.clone(),
-					track: Track {
-						broadcast: self.path.clone(),
-						name: entry.shape.track.clone(),
-					},
-					instance: instance.clone(),
-					timeline: timeline.clone(),
+					instance: current.instance.clone(),
+					serial: current.serial,
+					timeline: current.timeline.clone(),
+					finished: self.finished.clone(),
 					live: live.clone(),
 					cancel: cancelled,
 				};
@@ -1224,6 +1225,15 @@ impl Follower {
 	}
 }
 
+/// Whether `instance` may serve a rendition naming `epoch`. An epochless route cannot prove its
+/// instance, so only a known mismatch refuses it.
+fn serves(instance: &moq_net::broadcast::Consumer, epoch: Option<&moq_net::Epoch>) -> bool {
+	match (epoch, &instance.info().epoch) {
+		(Some(expected), Some(actual)) => expected == actual,
+		_ => true,
+	}
+}
+
 /// Why a [`Reader`] exited.
 enum Exit {
 	/// It is done with the instance.
@@ -1237,9 +1247,12 @@ struct Reader {
 	playback: Playback,
 	rendition: Rendition,
 	shape: Shape,
-	track: Track,
 	instance: moq_net::broadcast::Consumer,
+	/// The instance's [`Current::serial`].
+	serial: u64,
 	timeline: Arc<Timeline>,
+	/// The follower's [`Follower::finished`].
+	finished: Finished,
 	/// Shared with this reader's [`ReaderHandle::live`].
 	live: Arc<AtomicBool>,
 	cancel: watch::Receiver<bool>,
@@ -1254,25 +1267,25 @@ impl Reader {
 			playback,
 			rendition,
 			shape,
-			track: media,
 			instance,
+			serial,
 			timeline,
+			finished,
 			live,
 			mut cancel,
 		} = self;
 		let Playback {
 			element,
 			pads,
-			finished,
 			shutdown,
 			..
 		} = playback;
 		let (kind, name) = (rendition.0, &rendition.1);
-		let played = (rendition.clone(), media.clone());
+		let played = (rendition.clone(), shape.track.clone());
 
 		// An instance that already played this track to its end on the pad would replay its last
 		// group.
-		if finished.contains(&played, &instance) {
+		if finished.contains(&played, serial) {
 			return Exit::Done;
 		}
 
@@ -1284,7 +1297,7 @@ impl Reader {
 			_ = cancel.changed() => return Exit::Done,
 			subscriber = async {
 				instance
-					.track(&media.name)?
+					.track(&shape.track)?
 					.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 					.await
 			} => match subscriber {
@@ -1341,7 +1354,7 @@ impl Reader {
 				// The reader this one replaces records its track as finished before letting go, so
 				// one started while it was reading the end (a reshape) can't replay it. A
 				// retirement that got the pad first ended it.
-				if !pads.holds(&rendition, &owner) || finished.contains(&played, &instance) {
+				if !pads.holds(&rendition, &owner) || finished.contains(&played, serial) {
 					return Exit::Done;
 				}
 				tokio::task::block_in_place(|| begin(&pad, name, &shape.caps));
@@ -1364,7 +1377,7 @@ impl Reader {
 				// finishes the track, or a reader waiting for this pad would replay it.
 				_ = cancel.changed() => {
 					if ended(&mut track) {
-						finished.insert(&played, &instance);
+						finished.insert(&played, serial);
 					}
 					return Exit::Done;
 				}
@@ -1412,7 +1425,7 @@ impl Reader {
 					// Recorded while this reader still owns the pad, before any other can claim it,
 					// so a reshape on this instance does not replay it.
 					Ok(None) => {
-						finished.insert(&played, &instance);
+						finished.insert(&played, serial);
 						return Exit::Done;
 					}
 					Err(err) => {
@@ -1425,68 +1438,35 @@ impl Reader {
 	}
 }
 
-/// The timeline of each sibling instance, shared by every rendition reading that instance so
-/// their first frames fix one mapping for all of them.
+/// Each of a follower's renditions with a track it played to the end, and the serial of the
+/// instance that served it. A new subscription to a finished track replays its last group, so a
+/// catalog update that still lists the rendition (a publisher's final snapshot lands after its
+/// tracks end) must not start it on that pad again. A later instance carries a new track, and a
+/// pad that never played the track joins it like any late subscriber. Shared with the readers,
+/// since a reader that replaces another on its pad learns this only once the other lets go.
 #[derive(Clone, Default)]
-struct Siblings(Arc<Mutex<SiblingTimelines>>);
-
-#[derive(Default)]
-struct SiblingTimelines {
-	/// Each sibling path some instance served this run.
-	seen: HashSet<moq_net::PathOwned>,
-	/// Each instance still serving, and the timeline its renditions share while any reads it.
-	live: Vec<(moq_net::broadcast::Consumer, std::sync::Weak<Timeline>)>,
-}
-
-impl Siblings {
-	/// The timeline of `instance`: the run's for the first instance at its path, which the
-	/// catalog's own renditions share, and one of its own for any later instance, whose
-	/// timestamps share no origin with the run's.
-	fn timeline(&self, instance: &moq_net::broadcast::Consumer, run: &Arc<Timeline>) -> Arc<Timeline> {
-		let mut siblings = self.0.lock().unwrap();
-		// Forget an instance that ended or that no rendition reads any more, releasing its handle.
-		siblings
-			.live
-			.retain(|(known, timeline)| !known.is_closed() && timeline.strong_count() > 0);
-		if let Some(timeline) = siblings
-			.live
-			.iter()
-			.find(|(known, _)| known.is_clone(instance))
-			.and_then(|(_, timeline)| timeline.upgrade())
-		{
-			return timeline;
-		}
-		let timeline = match siblings.seen.insert(instance.info().path.clone()) {
-			true => run.clone(),
-			false => Arc::default(),
-		};
-		siblings.live.push((instance.clone(), Arc::downgrade(&timeline)));
-		timeline
-	}
-}
-
-/// Each pad's rendition with a track it played to the end, and the instance that served it. A new
-/// subscription to a finished track replays its last group, so a catalog update that still lists
-/// the rendition (a publisher's final snapshot lands after its tracks end) must not start it on
-/// that pad again. A later instance carries a new track, and a pad that never played the track
-/// joins it like any late subscriber. Shared with the readers, since a reader that replaces
-/// another on its pad learns this only once the other lets go.
-#[derive(Clone, Default)]
-struct Finished(Arc<Mutex<HashMap<(Rendition, Track), moq_net::broadcast::Consumer>>>);
+struct Finished(Arc<Mutex<HashMap<(Rendition, String), u64>>>);
 
 impl Finished {
-	/// Record that `instance` served `played` to its end, replacing any earlier instance's record.
-	fn insert(&self, played: &(Rendition, Track), instance: &moq_net::broadcast::Consumer) {
-		self.0.lock().unwrap().insert(played.clone(), instance.clone());
+	/// Record that instance `serial` served `played` to its end. A reader of an earlier instance
+	/// never overwrites a later one's record.
+	fn insert(&self, played: &(Rendition, String), serial: u64) {
+		let mut finished = self.0.lock().unwrap();
+		let recorded = finished.entry(played.clone()).or_insert(serial);
+		*recorded = (*recorded).max(serial);
 	}
 
-	/// Whether `instance` already served `played` to its end on this pad.
-	fn contains(&self, played: &(Rendition, Track), instance: &moq_net::broadcast::Consumer) -> bool {
+	/// Whether instance `serial` already served `played` to its end on this pad.
+	fn contains(&self, played: &(Rendition, String), serial: u64) -> bool {
+		self.0.lock().unwrap().get(played) == Some(&serial)
+	}
+
+	/// Keep only the records `keep` accepts.
+	fn retain(&self, keep: impl Fn(&Rendition, u64) -> bool) {
 		self.0
 			.lock()
 			.unwrap()
-			.get(played)
-			.is_some_and(|finished| finished.is_clone(instance))
+			.retain(|(rendition, _), serial| keep(rendition, *serial));
 	}
 }
 
@@ -1688,9 +1668,8 @@ fn opus_caps(config: &hang::catalog::AudioConfig, rate: i32, channels: i32) -> R
 
 #[cfg(test)]
 mod tests {
-	use super::{Siblings, Timeline, ended};
+	use super::{Timeline, ended};
 	use moq_net::Timestamp;
-	use std::sync::Arc;
 
 	/// A reader cancelled as its track ends records the end only when no media is left to read,
 	/// passing over the markers a publisher closes with.
@@ -1773,33 +1752,6 @@ mod tests {
 				);
 			}
 		}
-	}
-
-	/// Renditions on the same sibling instance share its timeline, whenever each starts on it:
-	/// the first instance shares the run's, and the next one starts another.
-	#[tokio::test(start_paused = true)]
-	async fn renditions_on_one_sibling_instance_share_its_timeline() {
-		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
-		tokio::spawn(moq_net::time::run(driver));
-		let consumer = origin.consume();
-		let mut audio = moq_mux::follow::Instances::new(&consumer, "source", None).unwrap();
-		let started = async |follow: &mut moq_mux::follow::Instances| match follow.next().await.unwrap() {
-			moq_mux::follow::Event::Start(broadcast) => broadcast,
-			moq_mux::follow::Event::End => panic!("expected a start"),
-		};
-		let (siblings, run) = (Siblings::default(), Arc::<Timeline>::default());
-
-		let _first = origin.publish("source", Default::default()).unwrap();
-		let first = started(&mut audio).await;
-		assert!(Arc::ptr_eq(&run, &siblings.timeline(&first, &run)));
-
-		// A video rendition that first starts on the replacement, as one still subscribing when it
-		// took over does, shares its timeline with the audio rendition restarting onto it.
-		let _second = origin.publish("source", Default::default()).unwrap();
-		let mut video = moq_mux::follow::Instances::new(&consumer, "source", None).unwrap();
-		let next = siblings.timeline(&started(&mut video).await, &run);
-		assert!(!Arc::ptr_eq(&run, &next), "another instance has its own timeline");
-		assert!(Arc::ptr_eq(&next, &siblings.timeline(&started(&mut audio).await, &run)));
 	}
 
 	#[test]
@@ -3047,10 +2999,7 @@ mod session_tests {
 			playback: super::Playback {
 				element: element.downgrade(),
 				pads,
-				path: instance.info().path.clone(),
 				timeline: Arc::default(),
-				siblings: super::Siblings::default(),
-				finished: super::Finished::default(),
 				shutdown,
 				stop,
 			},
@@ -3062,12 +3011,10 @@ mod session_tests {
 				broadcast: None,
 				epoch: None,
 			},
-			track: super::Track {
-				broadcast: instance.info().path.clone(),
-				name: "video".into(),
-			},
 			instance,
+			serial: 1,
 			timeline: Arc::default(),
+			finished: super::Finished::default(),
 			live: Arc::default(),
 			cancel,
 		};
@@ -3118,6 +3065,8 @@ mod session_tests {
 		/// A buffer, by its tag.
 		Buffer(String, u8),
 		Eos(String),
+		/// A segment, by its start.
+		Segment(String, i64),
 	}
 
 	/// Records what reaches the element's video pads. A new pad's first stream-start and caps
@@ -3151,6 +3100,9 @@ mod session_tests {
 									seen.push(Seen::Caps(name.clone(), media));
 								}
 								gst::EventView::Eos(_) => seen.push(Seen::Eos(name.clone())),
+								gst::EventView::Segment(segment) => {
+									seen.push(Seen::Segment(name.clone(), segment.segment().start().value()))
+								}
 								_ => {}
 							},
 							_ => {}
@@ -3353,6 +3305,67 @@ mod session_tests {
 			"no new stream on the kept pad"
 		);
 		recorder.assert_one_pad_held();
+	}
+
+	/// A rendition that joins a sibling instance after another started on it shares that instance's
+	/// timeline, so both map the instance's timestamps to one running time.
+	#[test]
+	fn a_rendition_joining_a_sibling_instance_shares_its_timeline() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let mut room = referencing(&origin, None);
+		let session = follow(&element, &origin);
+
+		// A replacement starts a timeline of its own, which its first frame on `first` fixes.
+		let mut old = Publisher::sibling(&origin, Default::default());
+		let first = recorder.written(&mut old, 1);
+		let mut new = Publisher::sibling(&origin, Default::default());
+		assert_eq!(recorder.written(&mut new, 2), first);
+		// Frames past the subscription's one second of delay, so the joining rendition starts on a
+		// later frame than `first` did.
+		for _ in 0..30 {
+			new.write(3);
+			std::thread::sleep(Duration::from_millis(50));
+		}
+
+		let mut again = room.catalog.modify().unwrap().video.renditions["video"].clone();
+		again.track = Some("video".into());
+		room.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert("again".into(), again);
+		let mut second = None;
+		for _ in 0..200 {
+			new.write(4);
+			std::thread::sleep(Duration::from_millis(50));
+			second = recorder.seen().into_iter().find_map(|seen| match seen {
+				Seen::Buffer(pad, 4) if pad != first => Some(pad),
+				_ => None,
+			});
+			if second.is_some() {
+				break;
+			}
+		}
+		let second = second.expect("the joining rendition never played");
+		stop(session);
+
+		let segment = |pad: &String| {
+			recorder.seen().into_iter().rev().find_map(|seen| match seen {
+				Seen::Segment(segmented, start) if segmented == *pad => Some(start),
+				_ => None,
+			})
+		};
+		assert_eq!(
+			segment(&second),
+			segment(&first),
+			"the joining rendition mapped the instance on its own: {:?}",
+			recorder.seen()
+		);
+		drop(old);
 	}
 
 	/// A sibling track finishing while its instance stays up idles the pad, and the instance that
