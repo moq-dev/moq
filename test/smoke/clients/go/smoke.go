@@ -64,7 +64,7 @@ func main() {
 func publish(url, broadcast string) error {
 	// The relay uses a self-signed cert, so verification is off. With no origin
 	// options, Dial shares one origin for publish + consume.
-	client, err := moq.Dial(context.Background(), url, moq.ClientConfig{TLS: moq.ClientTLS{Insecure: true}})
+	client, err := moq.Dial(context.Background(), url, moq.WithTLSVerify(false))
 	if err != nil {
 		return err
 	}
@@ -117,7 +117,7 @@ func subscribe(url, broadcast string, timeoutS float64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutS*float64(time.Second)))
 	defer cancel()
 
-	client, err := moq.Dial(ctx, url, moq.ClientConfig{TLS: moq.ClientTLS{Insecure: true}})
+	client, err := moq.Dial(ctx, url, moq.WithTLSVerify(false))
 	if err != nil {
 		return err
 	}

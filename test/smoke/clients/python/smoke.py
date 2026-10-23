@@ -19,7 +19,7 @@ READ_CHUNK = 64 * 1024
 
 
 async def publish(url: str, broadcast: str) -> None:
-    async with moq.Client(url, tls=moq.ClientTls(insecure=True)) as client:
+    async with moq.Client(url, tls_verify=False) as client:
         # create_broadcast registers the broadcast and hands back its producer
         # (the old client.publish(broadcast, producer) split was removed in the
         # ergonomic moq-rs API). publish_video_stream feeds a raw Annex-B pipe to
@@ -62,7 +62,7 @@ async def _catalog_with_video(consumer: moq.BroadcastConsumer) -> moq.Catalog:
 
 
 async def subscribe(url: str, broadcast: str, timeout: float) -> None:
-    async with moq.Client(url, tls=moq.ClientTls(insecure=True)) as client:
+    async with moq.Client(url, tls_verify=False) as client:
         # announced_broadcast yields a handle; available() resolves it to a live
         # consumer once the broadcast is announced. subscribe_catalog/_media are
         # coroutines in the ergonomic API, so they're awaited (below and above).
