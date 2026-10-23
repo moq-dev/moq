@@ -16579,6 +16579,41 @@ mod test {
 		);
 	}
 
+	/// A range starting inside the group after another range heads its own fill, rather
+	/// than being read whole as the second group of one.
+	#[test]
+	fn an_adjacent_range_starting_mid_group_heads_its_own_fill() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let at = |group, frame| Anchor::Absolute(Position { group, frame });
+		let mut reader = producer.subscribe(replay().with_ranges([
+			Range {
+				start: at(4, 0),
+				end: Some(at(5, 0)),
+			},
+			Range {
+				start: at(5, 7),
+				end: None,
+			},
+		]));
+		producer.start_at(8).unwrap();
+		write_group(&producer, 8);
+		let _ = reader.poll_recv_group(&kio::Waiter::noop());
+
+		let mut asked = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) {
+			asked.push((fill.start(), fill.end()));
+		}
+		asked.sort();
+		assert_eq!(
+			asked,
+			[
+				(Position { group: 4, frame: 0 }, 5),
+				(Position { group: 5, frame: 7 }, 8)
+			]
+		);
+	}
+
 	/// A descending reader joining a queued fill makes it newest first, as any descending
 	/// subscriber does a subscription.
 	#[test]

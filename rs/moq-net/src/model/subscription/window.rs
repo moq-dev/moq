@@ -527,6 +527,17 @@ impl Window {
 		hull.unwrap_or((0, None))
 	}
 
+	/// The groups some range starts inside, past their frame 0, that are read from there.
+	pub fn partial_starts(&self) -> impl Iterator<Item = u64> + '_ {
+		self.ranges
+			.iter()
+			.filter_map(|range| match range.start {
+				Anchor::Absolute(start) if start.frame > 0 => Some(start.group),
+				_ => None,
+			})
+			.filter(|group| self.frames(*group).0 > 0)
+	}
+
 	/// The first run of `range` that is in range.
 	pub fn clip(&self, range: ops::Range<u64>) -> Option<ops::Range<u64>> {
 		let last = range.end.checked_sub(1).filter(|last| *last >= range.start)?;
