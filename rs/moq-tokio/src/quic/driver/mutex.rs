@@ -49,4 +49,4 @@ mod non_tracking {
     }
 }
 
-pub(crate) use non_tracking::Mutex;
+pub(crate) use non_tracking::{Mutex, MutexGuard};

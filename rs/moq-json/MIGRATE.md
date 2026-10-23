@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A compressed group is held to the group budget
+
+A compressed group may inflate to at most `moq_net::group::MAX_CACHE_BYTES` (32 MiB), the most a plain group carries, so a peer's small frames cannot make a reader hold more than an uncompressed track would.
+The encoders charge each frame its plaintext: a compressed snapshot or window header over 32 MiB fails with `moq_net::Error::FrameTooLarge` (snapshot) or the window's group cache error, where it used to pass up to 64 MiB, and deltas and ops roll a new group once a group's plaintext would pass the budget.
+A compressed stream's budget is 32 MiB of record plaintext.
+`snapshot::consumer::Config::max_size` still sets a tighter limit, but no longer stops inflation early; a frame inflates within the group budget and is then refused.
+
 ### Groups roll on joiner demand
 
 `snapshot::Config::delta_ratio` and `window::ProducerConfig::op_ratio`, with `with_delta_ratio` and `with_op_ratio`, are replaced by `deltas: bool` and `ops: bool` (both default `true`).

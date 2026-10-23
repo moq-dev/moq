@@ -748,7 +748,7 @@ where
 		let Some(opened) = opened else {
 			return Ok(());
 		};
-		let mut stream = opened?;
+		let mut stream = super::super::request_stream::with_stats(opened?, self.stats(), self.version);
 		let allocated = kio::wait(|waiter| {
 			if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
 				return Poll::Ready(None);
@@ -892,7 +892,7 @@ where
 					)
 					.await
 				{
-					Ok(Served::Paused) => {
+					Ok(Served::Paused(_)) => {
 						self.pause_join(join.as_ref());
 						self.write_request_ok(&mut stream.writer, request_id, None).await?;
 						// Unlisted while it forwarded: it ends now that it is idle.
@@ -1004,7 +1004,7 @@ where
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
 	/// unless the subscription forwards.
-	fn pause_join(&self, join: Option<&Join<GroupOf<S>>>) {
+	pub(super) fn pause_join(&self, join: Option<&Join<GroupOf<S>>>) {
 		if let Some(join) = join {
 			join.joins.lock().insert(join.request_id, Some(Joined::Empty));
 		}
@@ -1124,7 +1124,6 @@ where
 		)
 		.compression(self.peer_setup.get().await.flate)
 		.ranked(self.priority.clone());
-		serve.pausable = true;
 		serve.dynamic = dynamic;
 		if let Some(value) = how.new_group {
 			serve.request_new_group(value);
@@ -1188,7 +1187,7 @@ where
 		params.priority = crate::ietf::priority::to_wire(applied.priority);
 		params.max_age = applied.max_delay.as_millis().try_into().ok();
 		let served = match served {
-			Ok(Some(Served::Paused)) => Served::Paused,
+			Ok(Some(Served::Paused(update))) => Served::Paused(update),
 			Ok(Some(served)) => {
 				if matches!(served, Served::Track(Ok(()))) {
 					self.write_end_of_track(stream, &mut serve, finished, goaways).await;
@@ -1377,6 +1376,7 @@ mod tests {
 			authorization_token: None,
 			new_group: None,
 			max_age: None,
+			fill: None,
 		}
 	}
 
@@ -1863,7 +1863,8 @@ mod tests {
 	}
 
 	async fn resume_asks_for_a_new_group(on_listing: bool) {
-		let version = Version::Draft22;
+		// Draft-22 sends no NEW_GROUP_REQUEST on SUBSCRIBE_TRACKS.
+		let version = Version::Draft21;
 		let mut h = harness(version);
 		let live = h
 			.broadcast
@@ -2048,11 +2049,12 @@ mod tests {
 		}
 	}
 
-	/// A paused listing's FILL_PARAMETERS (draft-20+) open no fill, even once a PUBLISH
-	/// resumes without its own (draft-22 section 3.4.1).
+	/// A paused listing's FILL_PARAMETERS (draft-20 and draft-21; draft-22 sends none on
+	/// SUBSCRIBE_TRACKS) open no fill, even once a PUBLISH resumes without its own
+	/// (draft-22 section 3.4.1).
 	#[moq_clock::test]
 	async fn a_listing_fill_opens_nothing() {
-		for version in [Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft20, Version::Draft21] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
 			let mut group = video.append_group().unwrap();
@@ -2151,9 +2153,10 @@ mod tests {
 
 	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
 	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
+	/// Draft-22 sends none of them on SUBSCRIBE_TRACKS.
 	#[moq_clock::test]
 	async fn a_listing_states_its_parameters_on_each_publish() {
-		for version in DRAFTS {
+		for version in DRAFTS.into_iter().filter(|version| *version != Version::Draft22) {
 			let mut h = harness(version);
 			let request = ietf::SubscribeTracks {
 				subscriber_priority: Some(7),

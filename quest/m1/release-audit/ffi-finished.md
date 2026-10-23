@@ -31,7 +31,3 @@ Measure retained resources as retired-track count grows; avoid a brittle RSS
 threshold. No public API or wire change is expected. If FFI API shape changes,
 update every binding consumer and migration entry together. Current consumers
 are long-lived binding publishers that replace or retire audio tracks.
-
-## Related
-
-- [Interop finish](/quest/m1/interop-finish.md) - preserve delivery while releasing resources

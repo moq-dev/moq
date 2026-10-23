@@ -42,8 +42,9 @@ const FRAME: Duration = Duration::from_millis(40);
 const AUDIO_TICKS: u64 = 1920;
 const WRAP: u64 = 1 << 33;
 
-/// How long the export holds each frame past its decode time: `export ts --delay`'s default.
-const DELAY: Duration = Duration::from_secs(1);
+/// How long the export holds each frame past its decode time: half `export ts --delay`'s
+/// default, so a fault costs more of it.
+const DELAY: Duration = Duration::from_millis(500);
 /// How long after its nominal time a frame arrives on a clean path, about a frame's transit.
 const LAG: Duration = Duration::from_millis(40);
 /// How far a frame's lateness may sit from a bound before the ledger calls it either way: the
@@ -1292,6 +1293,11 @@ async fn recover(arm: Arm) -> Run {
 	let run = run(&recording, &arm).await;
 	let _evidence = Evidence::save(&run);
 	grade(&run.ledgers, &run.stats).unwrap();
+	assert_eq!(
+		run.stats.release.out_of_tolerance, 0,
+		"exact source clock: {:?}",
+		run.stats.release
+	);
 	assert!(assert_on_time(&run.frames) > 200, "too little output to judge");
 	assert_continuous(&run.ts());
 	assert_eq!(
@@ -1379,8 +1385,9 @@ async fn a_cut_group_keeps_what_it_delivered() {
 }
 
 /// The video stalls for 2.5 s while the audio runs on, then delivers what it held at once: the
-/// source skips the groups it held past the age budget as one gap, nothing late goes out, and the
-/// video resumes on the first keyframe delivered in time, on the same clock.
+/// source skips the groups it held past the age budget as one gap, the newest whole group it held,
+/// within that budget but past its deadline, is dropped, nothing late goes out, and the video
+/// resumes on the first keyframe delivered in time, on the same clock.
 #[tokio::test(start_paused = true)]
 async fn a_stall_drops_what_it_made_late() {
 	let run = recover(arm(Profile::Closed, |slot| hold(slot.video, slot))).await;
@@ -1389,7 +1396,7 @@ async fn a_stall_drops_what_it_made_late() {
 		video.units.iter().any(|unit| unit.on_time == Some(false)),
 		"the schedule made pictures late"
 	);
-	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
+	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (12, 1));
 	let first = audio.units.iter().position(|unit| unit.output).unwrap();
 	assert!(
 		audio.units[first..].iter().all(|unit| unit.output),

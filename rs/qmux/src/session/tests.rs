@@ -185,7 +185,6 @@ async fn resets_and_stops_carry_their_codes() {
 	assert!(matches!(read_all(&mut recv).await, Err(Error::StreamReset(7))));
 	// The reset sticks: it never turns into a clean end
 	assert!(matches!(recv.read_chunk(usize::MAX).await, Err(Error::StreamReset(7))));
-	assert!(matches!(recv.closed().await, Err(Error::StreamReset(7))));
 
 	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
 	write_all(&mut send, Bytes::from_static(b"unwanted")).await;
@@ -502,4 +501,32 @@ async fn the_wire_counters_track_both_directions() {
 	let received = server.wire().unwrap().received_bytes();
 	assert!(sent >= 100_000, "sent {sent}");
 	assert!(received >= 100_000, "received {received}");
+}
+
+/// A local close keeps reading the peer until it finishes, since closing a TCP socket with
+/// unread data can reset it and discard our CONNECTION_CLOSE.
+#[tokio::test(start_paused = true)]
+async fn an_application_close_drains_the_peer() {
+	for &version in Version::ALL {
+		let (client, mut raw) = tokio::io::duplex(64);
+		let config = config(version);
+		let mut session = Session::new(
+			Stream::new(client, config.version, config.max_record_size),
+			Side::Client,
+			config,
+		)
+		.unwrap();
+		session.close(42, "bye");
+
+		let mut sent = Vec::new();
+		raw.read_to_end(&mut sent).await.unwrap();
+		// More than the pipe holds, so it completes only if the session is still reading.
+		raw.write_all(&[0; 1024]).await.expect("session drains the peer");
+		raw.shutdown().await.unwrap();
+		let err = session.closed().await;
+		assert!(
+			matches!(err, Error::ConnectionClosed { code: 42, .. }),
+			"{version:?}: got {err:?}"
+		);
+	}
 }

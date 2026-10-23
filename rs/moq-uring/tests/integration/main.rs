@@ -15,6 +15,7 @@ mod ecn;
 mod endpoint;
 mod identity;
 mod qlog;
+mod receive_credit;
 mod session;
 mod support;
 mod teardown;
