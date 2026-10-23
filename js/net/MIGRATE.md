@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A connect gives up after 30 seconds
+
+`connect()`, and each attempt of a `Connection`, now rejects with `Error.ConnectTimeout` once the dial and the MoQ handshake together take longer than 30 s, closing what it had opened. Before, an attempt nothing answered waited until the browser or the OS gave up, which for a WebSocket can be minutes, and a supplied `transport` whose handshake was never answered waited forever.
+Pass `timeout` to change the bound, or `timeout: Milli(0)` for no deadline. A deadline set through `signal`, for example `AbortSignal.timeout(60_000)`, now only takes effect when it is shorter than `timeout`.
+
 ### `Track.Producer.largest()` is a getter
 
 `Track.Producer.largest()` returns the track's largest location synchronously, `undefined` before any, instead of a promise for the next newer one.

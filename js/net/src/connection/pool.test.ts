@@ -301,6 +301,7 @@ test("connection-specific options infer a private loop and origin", async () => 
 			{ webtransport: { congestionControl: "throughput" as const } },
 			{ websocket: { enabled: false } },
 			{ delay: { timeout: Milli(0) } },
+			{ timeout: Milli(10_000) },
 			{ publish: origin.consume() },
 			{ consume: origin },
 		];
@@ -335,6 +336,7 @@ test("explicit share: true refuses connection-specific options", () => {
 		);
 		expect(() => new Connection({ share: true, websocket: { enabled: false } })).toThrow(/share: false/);
 		expect(() => new Connection({ share: true, delay: { timeout: Milli(0) } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, timeout: Milli(10_000) })).toThrow(/share: false/);
 	} finally {
 		origin.close();
 	}
@@ -774,4 +776,37 @@ test("GOAWAY keeps version pools distinct at the redirected URL", async () => {
 		joined?.close();
 		defaults?.close();
 	}
+});
+
+test("a private handle's timeout bounds each attempt", async () => {
+	let attempts = 0;
+	class Hung {
+		ready = new Promise<void>(() => {});
+		closed = new Promise<void>(() => {});
+		close() {}
+	}
+	globalThis.WebTransport = function StubWebTransport() {
+		attempts++;
+		return new Hung();
+	} as unknown as typeof WebTransport;
+
+	const handle = new Connection({
+		url,
+		share: false,
+		websocket: { enabled: false },
+		timeout: Milli(50),
+		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
+	});
+	try {
+		// Each hung dial is cut at 50 ms and redialed after the backoff; the default 30 s
+		// timeout would still be holding the first.
+		await advance(1_000);
+		expect(attempts).toBeGreaterThanOrEqual(3);
+	} finally {
+		handle.close();
+	}
+});
+
+test("an invalid timeout is refused when a private handle is built", () => {
+	expect(() => new Connection({ url, share: false, timeout: Number.NaN as Milli })).toThrow(RangeError);
 });

@@ -23,8 +23,10 @@ import type { Probe, Stats } from "./stats.ts";
  * Exponential backoff settings for the reconnect loop.
  *
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
- * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the current
- * URL. A new URL or a disable/re-enable starts another sequence.
+ * lockstep. Every failure is retried, including an attempt that outlives
+ * {@link ConnectProps.timeout}, until {@link ReloadDelay.timeout} runs out; only an auth
+ * rejection or a refused GOAWAY redirect stops the current URL sooner. A new URL or a
+ * disable/re-enable starts another sequence.
  *
  * A GOAWAY off a session that outlived {@link ReloadDelay.initial} migrates at once, unless it
  * sends the connection back to an endpoint that already redirected it elsewhere and the
@@ -44,7 +46,9 @@ export type ReloadDelay = {
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
 	 * (default: 0, unlimited). Resets after each successful connection outside a redirect loop,
-	 * a URL change, or a disable/re-enable.
+	 * a URL change, or a disable/re-enable. It decides whether another attempt starts and never
+	 * cuts one that is running, so giving up can take up to one attempt longer than the window;
+	 * {@link ConnectProps.timeout} bounds each attempt.
 	 */
 	timeout?: Milli;
 };
@@ -156,6 +160,9 @@ export class Reload {
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket: WebSocketProps | undefined;
 
+	/** The bound on each connection attempt. See {@link ConnectProps.timeout}. */
+	readonly timeout?: Milli;
+
 	/**
 	 * The origin whose broadcasts are served, spanning reconnects (not reactive).
 	 *
@@ -254,6 +261,8 @@ export class Reload {
 		this.versions = normalizeVersions(props);
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
+		// Validated here, like the versions, rather than by every attempt.
+		this.timeout = props?.timeout === undefined ? undefined : Milli(props.timeout);
 		this.publish = props?.publish;
 		this.consume = props?.consume;
 
@@ -411,6 +420,7 @@ export class Reload {
 							websocket: this.#redirect.peek() ? { ...this.websocket, url: undefined } : this.websocket,
 							versions: this.versions,
 							webtransport: this.webtransport,
+							timeout: this.timeout,
 							publish: this.publish,
 							consume: this.consume,
 							signal,
