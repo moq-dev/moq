@@ -249,6 +249,7 @@ impl Client {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			stats: self.stats.clone(),
 			client: true,
 			limits: self.limits,
 			session: session.clone(),
@@ -337,6 +338,7 @@ impl Client {
 				let auth = self.link(self.extensions.auth, true)?;
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
+					stats: self.stats.clone(),
 					limits: self.limits,
 					session: session.clone(),
 					setup: None,
@@ -421,7 +423,7 @@ impl Client {
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
-		let mut stream = Stream::open(&mut session, encoding).await?;
+		let mut stream = Stream::open(&mut session, encoding).await?.with_stats(&self.stats);
 
 		// The encoding is always an IETF version for SETUP negotiation.
 		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
@@ -469,6 +471,7 @@ impl Client {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
 					runtime: runtime.clone(),
+					stats: self.stats.clone(),
 					client: true,
 					limits: self.limits,
 					session: session.clone(),
@@ -515,6 +518,7 @@ impl Client {
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
+					stats: self.stats.clone(),
 					limits: self.limits,
 					session: session.clone(),
 					setup: Some(stream),

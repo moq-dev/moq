@@ -25,7 +25,3 @@ not `compress`. JS's `compatible()` (`js/net/src/resume.ts`) compares all four.
   B's groups decoded under A's metadata. Matching compression keeps resuming.
 
 Public API: behavior only. Wire: none.
-
-## Related
-
-- [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - the other Rust copy-compatibility check

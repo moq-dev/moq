@@ -1854,13 +1854,14 @@ test("returning demand survives a blocked unsubscribe", async () => {
 	const open = session.openBi.bind(session);
 	const opening = spyOn(session, "openBi").mockImplementationOnce(() => {
 		const stream = open();
-		const write = stream.writer.u53.bind(stream.writer);
-		spyOn(stream.writer, "u53").mockImplementation(async (value) => {
-			if (value === Unsubscribe.id) {
+		const write = stream.writer.write.bind(stream.writer);
+		// Each message is one write that leads with its one-byte type.
+		spyOn(stream.writer, "write").mockImplementation(async (chunk) => {
+			if (chunk[0] === Unsubscribe.id) {
 				cancelStarted.resolve();
 				await releaseCancel.promise;
 			}
-			await write(value);
+			await write(chunk);
 		});
 		const close = stream.close.bind(stream);
 		spyOn(stream, "close").mockImplementation(() => {
