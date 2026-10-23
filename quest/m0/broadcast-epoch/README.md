@@ -109,6 +109,8 @@ show a new run sooner than its keyframe cadence and playback delay allow, and
 the hold is a deliberate routing setting, so neither is a stall; the gate
 exists to exclude waiting on the old session's idle timeout. Each gate enforces
 the bound derived from its own configuration rather than a hang watchdog.
+The IETF22 viewer failures that bound exposed are fixed in the same PR, which
+stays draft until they are: they are what the gate exists to catch.
 
 When the release cut carries stats epochs, drop
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed and
