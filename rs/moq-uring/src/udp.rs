@@ -451,7 +451,7 @@ pub(crate) struct SockShared {
 	/// The worker, as the I/O built on this socket carries it.
 	owner: Owner,
 	/// This socket's slot in a steered reuseport group, if it is in one.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	shard: Option<moq_sock::shard::Shard>,
 	/// The worker's counters, held directly rather than reached through
 	/// `owner`, so counting a datagram is not a `Weak::upgrade`.
@@ -748,13 +748,13 @@ impl Socket {
 	}
 
 	/// The worker driving this socket, which everything built on it runs on.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn owner(&self) -> Owner {
 		self.shared.owner.clone()
 	}
 
 	/// This socket's slot in a steered reuseport group, if it is in one.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn shard(&self) -> Option<moq_sock::shard::Shard> {
 		self.shared.shard
 	}
@@ -793,7 +793,7 @@ impl Socket {
 	/// Report sends that find no route through
 	/// [`take_unreachable`](Self::take_unreachable) instead of failing every
 	/// later send, for a consumer that routes them to the right connection.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn route_unreachable(&self) {
 		self.shared.rx.borrow_mut().unreachable.get_or_insert_default();
 	}
@@ -802,7 +802,7 @@ impl Socket {
 	///
 	/// Reported through the receive waiters, so whoever parks in
 	/// [`poll_recv`](Self::poll_recv) is woken to collect it.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn take_unreachable(&self) -> Option<(SocketAddr, io::Error)> {
 		let (to, code) = self.shared.rx.borrow_mut().unreachable.as_mut()?.pop()?;
 		Some((to, io::Error::from_raw_os_error(code)))

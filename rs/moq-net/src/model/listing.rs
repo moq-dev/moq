@@ -65,7 +65,7 @@ pub(crate) struct Owner(u64);
 impl Owner {
 	// private: capability gap
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn new() -> Self {
 		static NEXT: AtomicU64 = AtomicU64::new(0);
 		Self(NEXT.fetch_add(1, Ordering::Relaxed))
@@ -477,7 +477,7 @@ impl Consumer {
 	/// [`Error::Cancel`].
 	// private: capability gap
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn tracks_as(&self, owner: Owner) -> Result<Tracks, Error> {
 		self.list(Some(owner))
 	}

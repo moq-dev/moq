@@ -16,7 +16,7 @@ pub mod vp8;
 pub mod vp9;
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod bitstream_test;
 
 use bytes::Bytes;
