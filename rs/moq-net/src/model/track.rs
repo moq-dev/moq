@@ -4777,13 +4777,14 @@ impl group::Request {
 
 	/// The first frame of the group the consumer wants; 0 is the whole group.
 	///
-	/// The group [`accept`](Self::accept) returns already starts here, so the frames a
-	/// handler writes carry the indices they have in the group rather than restarting at
-	/// 0. A handler serving from elsewhere moves it with
-	/// [`start_at`](group::Producer::start_at) before the first frame.
+	/// Only a peer's partial FETCH or a route change filling the rest of a group sets it;
+	/// an application always fetches whole groups. The group [`accept`](Self::accept)
+	/// returns already starts here, so the frames a handler writes carry the indices they
+	/// have in the group rather than restarting at 0. A handler serving from elsewhere
+	/// moves it with [`start_at`](group::Producer::start_at) before the first frame.
 	///
 	/// There is no end: the handler fetches through the end of the group so the result
-	/// is cacheable for anyone (see [`group::Fetch::frame_start`]).
+	/// is cacheable for anyone.
 	pub fn frame_start(&self) -> u64 {
 		self.frame_start
 	}
