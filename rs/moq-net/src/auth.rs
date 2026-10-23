@@ -87,12 +87,22 @@ impl Grant {
 		}
 	}
 
-	/// Fold `other` into this grant: the paths either allows, lapsing at the
-	/// earlier expiry, which is when the union next shrinks.
-	fn union(&mut self, other: &Self) {
-		self.publish.extend(other.publish.iter().cloned());
-		self.subscribe.extend(other.subscribe.iter().cloned());
-		self.expires = earliest(self.expires, other.expires);
+	/// The paths any of `grants` allows, lapsing at the earliest expiry, which is when
+	/// the union next shrinks. Reduced once, so it costs about the grants' total size.
+	fn union<'a>(grants: impl IntoIterator<Item = &'a Self>) -> Self {
+		let mut publish = Vec::new();
+		let mut subscribe = Vec::new();
+		let mut expires = None;
+		for grant in grants {
+			publish.extend(grant.publish.iter().cloned());
+			subscribe.extend(grant.subscribe.iter().cloned());
+			expires = earliest(expires, grant.expires);
+		}
+		Self {
+			publish: publish.into_iter().collect(),
+			subscribe: subscribe.into_iter().collect(),
+			expires,
+		}
 	}
 
 	/// The paths both grants allow, lapsing at the earlier expiry.
@@ -200,10 +210,7 @@ impl State {
 		if granted.peek().is_none() && !self.replied {
 			return;
 		}
-		let mut union = Grant::default();
-		for grant in granted {
-			union.union(grant);
-		}
+		let union = Grant::union(granted);
 		if self.union.as_ref() != Some(&union) {
 			self.union = Some(union);
 			self.epoch += 1;
@@ -212,13 +219,10 @@ impl State {
 
 	/// Re-derive the scope from the limit and the issued grants.
 	fn rescope(&mut self) {
-		let scope = self.limit.as_ref().map(|limit| {
-			let mut scope = limit.clone();
-			for grant in self.issued.values() {
-				scope.union(grant);
-			}
-			scope
-		});
+		let scope = self
+			.limit
+			.as_ref()
+			.map(|limit| Grant::union(std::iter::once(limit).chain(self.issued.values())));
 		if self.scope != scope {
 			self.scope = scope;
 			self.epoch += 1;

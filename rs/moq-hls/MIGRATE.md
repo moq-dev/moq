@@ -10,6 +10,20 @@ Program date times, MPD availability and publish times, and `export::Renditions:
 Pass `moq_clock::wall()` for now, convert third-party timestamps with `Wall::try_from`, and pass `wall.into()` to formatters that take `SystemTime`.
 HLS and DASH text encodings are unchanged.
 
+### A failed timeline fails the segment cursor
+
+`export::segments::Consumer::next` returns `Err(Error::TimelineFailed { .. })` once a failed timeline's covered segments drain, instead of `Ok(None)`.
+`Ok(None)` now means only a clean end, so finalize a recording there, and mark it truncated on the error.
+
+```rust
+match cursor.next().await {
+	Ok(Some(segment)) => { /* store it */ }
+	Ok(None) => { /* complete: finalize the recording */ }
+	Err(Error::TimelineFailed { .. }) => { /* truncated: every later call fails the same */ }
+	Err(err) => { /* a fetch failed: call next() again to retry it */ }
+}
+```
+
 ### HLS import unwraps fMP4 to Legacy (#6250)
 
 `import::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.

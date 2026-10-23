@@ -143,7 +143,9 @@ Routing prefers the longest covering prefix, then a fully identified hop list
 over one holding an anonymous hop (0), then the lowest cost, then the shortest
 hop list. Remaining ties hash the requested path, so equal-cost advertisers of
 one prefix, such as a transcode pool, split its paths, and every relay picks
-the same one for a given path.
+the same one for a given path. A publisher connected straight to the relay is
+not hashed at its own path: its newest session wins, so a publisher that
+restarts takes over from its lingering old session at once.
 
 ```toml
 [cluster]

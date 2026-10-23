@@ -73,7 +73,8 @@ bytes sent and received. A shutdown waits for these reports before exiting.
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;
 `unix://` speaks HTTP over a socket; `http://` is accepted for a loopback host
-only. There is no shared secret.
+only. There is no shared secret. Redirects are not followed, since each request
+carries a credential: point `url` at the final address.
 
 ```toml
 [auth]

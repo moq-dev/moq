@@ -96,9 +96,6 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// The published track, read for its largest group.
 	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
 	track: moq_net::track::Producer,
-	/// The largest group published, as last read from `track`.
-	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
-	largest: Option<u64>,
 	_ext: std::marker::PhantomData<fn() -> E>,
 }
 
@@ -164,7 +161,6 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(Self {
 			codecs,
 			track: published,
-			largest: None,
 			_ext: std::marker::PhantomData,
 		})
 	}
@@ -182,13 +178,10 @@ impl<E: CatalogExt> Producer<E> {
 	/// The group a subscriber wants past the largest published, which the next frame should
 	/// open with a keyframe, or `None` while the largest serves.
 	#[cfg(feature = "capture")]
-	fn wanted(&mut self) -> Option<u64> {
+	fn wanted(&self) -> Option<u64> {
 		let wanted = self.track.demand().wanted()?;
-		// Ready only when the largest moved since the last read.
-		if let std::task::Poll::Ready(Some(largest)) = self.track.poll_largest(&kio::Waiter::noop()) {
-			self.largest = Some(largest.group);
-		}
-		self.largest.is_none_or(|largest| wanted > largest).then_some(wanted)
+		let largest = self.track.largest().map(|largest| largest.group);
+		largest.is_none_or(|largest| wanted > largest).then_some(wanted)
 	}
 
 	/// Publish already-encoded frames, each at its own timestamp. Each frame is one
