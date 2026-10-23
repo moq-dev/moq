@@ -373,6 +373,9 @@ struct TrackState {
 	failures: usize,
 	/// The playlist carries `EXT-X-ENDLIST` and its last segment is imported: nothing follows.
 	ended: bool,
+	/// This track has joined the playlist while it was live. Unlike `next_sequence`, eviction
+	/// does not forget it, so a playlist that ends while the rendition recovers still finishes.
+	followed: bool,
 }
 
 impl TrackState {
@@ -389,6 +392,7 @@ impl TrackState {
 			media_range: RangeCursor::default(),
 			failures: 0,
 			ended: false,
+			followed: false,
 		}
 	}
 
@@ -456,18 +460,17 @@ impl TrackState {
 
 	/// Where this track joins `playlist` when it has no position in it yet.
 	///
-	/// A live window is joined near its edge (see [`ANCHOR_SEGMENTS`]). An empty one has no edge,
-	/// so its first segment is where the track resumes, even when it arrives together with
-	/// `EXT-X-ENDLIST`. A playlist that has already ended is refused: joining its tail would end
-	/// the import cleanly having published an arbitrary suffix of the recording, and replaying it
-	/// whole would burst it out faster than real time, withholding the catalog until the last
-	/// segment downloads.
+	/// The window is joined near its edge (see [`ANCHOR_SEGMENTS`]). A playlist that had already
+	/// ended before this track ever saw it live is refused: joining its tail would end the import
+	/// cleanly having published an arbitrary suffix of the recording, and replaying it whole would
+	/// burst it out faster than real time, withholding the catalog until the last segment
+	/// downloads. One that ended after it was followed live, even while this track had no position
+	/// in it (it was empty, or the rendition was evicted), is the live stream ending.
 	fn join(&mut self, playlist: &MediaPlaylist) -> Result<usize> {
-		if playlist.end_list {
+		if !playlist.end_list {
+			self.followed = true;
+		} else if !self.followed {
 			return Err(Error::PlaylistEnded);
-		}
-		if playlist.segments.is_empty() {
-			self.next_sequence = Some(playlist.media_sequence);
 		}
 		Ok(playlist.segments.len().saturating_sub(ANCHOR_SEGMENTS))
 	}
@@ -679,7 +682,7 @@ impl Import {
 	/// The playlist ends cleanly once every rendition's playlist carries `EXT-X-ENDLIST` and its
 	/// last segment is imported; this then returns `Ok`, and [`finish`](Self::finish) ends the
 	/// broadcast. A playlist that never ends runs until cancelled. Import follows live playlists
-	/// only: one that already carries `EXT-X-ENDLIST` when a rendition joins it fails with
+	/// only: one that has already ended (`EXT-X-ENDLIST`) when a rendition first sees it fails with
 	/// [`Error::PlaylistEnded`], rather than importing its tail and ending as if it were whole.
 	///
 	/// A failed step is logged and retried with escalating backoff, and the import ends with the
@@ -1328,13 +1331,20 @@ mod tests {
 		assert!(track.next_sequence.is_none());
 	}
 
-	/// Rejoining after a reset is a join too, so an ended playlist is refused there as well.
+	/// A followed playlist that ends while the track has no position in it, after an upstream
+	/// reset or an eviction, is rejoined near its edge and finishes: the live stream ended.
 	#[test]
-	fn anchor_ahead_of_an_ended_playlist_is_refused() {
+	fn a_followed_playlist_that_ends_is_rejoined() {
 		let mut track = track_state();
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 10 - ANCHOR_SEGMENTS);
 		track.next_sequence = Some(500);
-		let err = track.anchor(&window(100, 10, true)).unwrap_err();
-		assert!(matches!(err, Error::PlaylistEnded), "{err:?}");
+		assert_eq!(track.anchor(&window(100, 10, true)).unwrap(), 10 - ANCHOR_SEGMENTS);
+
+		let mut track = track_state();
+		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 10 - ANCHOR_SEGMENTS);
+		track.next_sequence = Some(110);
+		track.evict();
+		assert_eq!(track.anchor(&window(105, 10, true)).unwrap(), 10 - ANCHOR_SEGMENTS);
 	}
 
 	/// Falling out of the window loses media either way; take everything still there.

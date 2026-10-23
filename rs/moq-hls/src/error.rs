@@ -136,7 +136,7 @@ pub enum Error {
 		source: Box<Error>,
 	},
 
-	/// Import joined a media playlist that already carries `EXT-X-ENDLIST`; it follows live playlists only.
+	/// A media playlist already carried `EXT-X-ENDLIST` when import first saw it; import follows live playlists only.
 	#[error("playlist already ended (EXT-X-ENDLIST); HLS import follows live playlists only")]
 	PlaylistEnded,
 }
