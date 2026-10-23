@@ -26,7 +26,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -59,10 +59,6 @@ const FORMAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// ScreenCaptureKit backend).
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
-// Display sources share the implicit screen selection across demand reopens.
-// Explicit Portal sources instead own a separate grant for each selection.
-static DISPLAY: LazyLock<portal::Selection> = LazyLock::new(|| portal::Selection::new(portal::Kind::Screen));
-
 fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
 	Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
 }
@@ -70,8 +66,7 @@ fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
 pub(super) mod camera;
 
 /// Open a system-picked screen or window and stream frames from a PipeWire thread.
-pub(super) async fn open(config: &Config, selection: Option<&portal::Selection>) -> Result<Stream, Error> {
-	let selection = selection.unwrap_or(&DISPLAY);
+pub(super) async fn open(config: &Config, selection: &portal::Selection) -> Result<Stream, Error> {
 	let (node_id, fd, session) = portal_negotiate(config.cursor, selection).await?;
 	start(
 		config,
@@ -2178,7 +2173,7 @@ mod tests {
 	#[tokio::test]
 	#[ignore = "needs a desktop portal and a human at the picker; see quest/m3/video-hardware.md"]
 	async fn portal_captures_frames() {
-		let mut stream = match open(&Config::default(), None).await {
+		let mut stream = match open(&Config::default(), &portal::Selection::new(portal::Kind::Screen)).await {
 			Ok(stream) => stream,
 			Err(e) => {
 				eprintln!("skipping: no portal screen capture available: {e}");

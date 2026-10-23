@@ -32,9 +32,8 @@ Decided with the maintainer on 2026-10-23; see the epic for why.
 - Update `doc/concept` with one paragraph on the model (online = announced,
   end of content = track FIN, retention = app policy), plus `doc/lib/*` and
   every affected package's `MIGRATE.md`.
-- Coordinate with [binding trim](/quest/m1/api-audit/binding-trim.md) and
-  [publication owner](/quest/m1/api-audit/announce-owner.md), which touch the
-  same handles.
+- Coordinate with [publication owner](/quest/m1/api-audit/announce-owner.md),
+  which touches the same handles.
 
 Public API: breaking in moq-net, `@moq/net`, moq-ffi, moq-c, and every
 binding. Wire: none.
