@@ -462,9 +462,10 @@ export class Publisher {
 		const key = JSON.stringify([msg.trackNamespace, msg.trackName]);
 		const claimed = this.#session.version === Version.DRAFT_18;
 		if (claimed && this.#trackClaims.get(key) === "publish") {
-			await request.writer.u53(RequestError.id);
-			await new RequestError({ errorCode: 0x19, reasonPhrase: "track already PUBLISHed" }).encode(
+			await Message.write(
 				request.writer,
+				RequestError.id,
+				new RequestError({ errorCode: 0x19, reasonPhrase: "track already PUBLISHed" }),
 				this.#session.version,
 			);
 			return;
@@ -645,12 +646,10 @@ export class Publisher {
 					const parameters = new Parameters();
 					if (edge.largest)
 						parameters.largest = { groupId: edge.largest.group, objectId: edge.largest.object };
-					await request.writer.u53(RequestOk.id);
-					await new RequestOk({ parameters }).encode(request.writer, version);
+					await Message.write(request.writer, RequestOk.id, new RequestOk({ parameters }), version);
 				}
 			} else {
 				// Send SUBSCRIBE_OK
-				await request.writer.u53(SubscribeOk.id);
 				const ok = new SubscribeOk({
 					requestId:
 						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
@@ -688,7 +687,7 @@ export class Publisher {
 							// the track opts out of timestamps for this subscriber.
 							{},
 				});
-				await ok.encode(request.writer, version);
+				await Message.write(request.writer, SubscribeOk.id, ok, version);
 			}
 			console.debug(`publish ok: broadcast=${name} track=${track.name}`);
 
@@ -770,8 +769,8 @@ export class Publisher {
 						if (params.forward === false) throw new Paused();
 					}
 					if (version === Version.DRAFT_14) continue;
-					await request.writer.u53(RequestOk.id);
-					await new RequestOk({ requestId: ownRequestId }).encode(request.writer, version);
+					const ok = new RequestOk({ requestId: ownRequestId });
+					await Message.write(request.writer, RequestOk.id, ok, version);
 				}
 			})();
 			const requestEnded = race([updates, request.ended]);
@@ -927,7 +926,6 @@ export class Publisher {
 			// Draft 14 registers no UPDATE_FAILED, so a failed update ends there as any error does.
 			const updateFailed = publishError instanceof UpdateFailed && version !== Version.DRAFT_14;
 			try {
-				await request.writer.u53(PublishDone.id);
 				const done = new PublishDone({
 					requestId:
 						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
@@ -949,7 +947,7 @@ export class Publisher {
 								? "internal error"
 								: "track ended",
 				});
-				await done.encode(request.writer, version);
+				await Message.write(request.writer, PublishDone.id, done, version);
 			} catch {
 				// Stream might already be closed by peer.
 			}
@@ -1361,19 +1359,17 @@ export class Publisher {
 		try {
 			const answer = async (activeCount?: number) => {
 				if (version === Version.DRAFT_14) {
-					await request.writer.u53(SubscribeNamespaceOk.id);
 					const ok = new SubscribeNamespaceOk({ requestId: msg.requestId });
-					await ok.encode(request.writer, version);
+					await Message.write(request.writer, SubscribeNamespaceOk.id, ok, version);
 					return;
 				}
 				const parameters = new Parameters();
 				parameters.activeCount = activeCount;
-				await request.writer.u53(RequestOk.id);
 				const ok = new RequestOk({
 					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
 					parameters,
 				});
-				await ok.encode(request.writer, version);
+				await Message.write(request.writer, RequestOk.id, ok, version);
 			};
 
 			// MoQ Active Count: the OK counts what the first pass below sends, so it waits for
@@ -1398,10 +1394,10 @@ export class Publisher {
 			// publisher included, as Rust does. Only a legacy PUBLISH_NAMESPACE request can
 			// be declined.
 			const namespace = async (suffix: Path.Valid, snap: Advertised): Promise<Answer> => {
-				await request.writer.u53(SubscribeNamespaceEntry.id);
 				// Either extension puts the Parameters field on NAMESPACE, even an empty one.
 				const params = this.#advert !== undefined || this.#epoch ? this.#params(snap.route) : undefined;
-				await new SubscribeNamespaceEntry({ suffix, params }).encode(request.writer, version);
+				const entry = new SubscribeNamespaceEntry({ suffix, params });
+				await Message.write(request.writer, SubscribeNamespaceEntry.id, entry, version);
 				return "held";
 			};
 			const target: Target = legacy
@@ -1421,8 +1417,8 @@ export class Publisher {
 						held: () => undefined,
 						carry: () => undefined,
 						withdraw: async (suffix) => {
-							await request.writer.u53(SubscribeNamespaceEntryDone.id);
-							await new SubscribeNamespaceEntryDone({ suffix }).encode(request.writer, version);
+							const done = new SubscribeNamespaceEntryDone({ suffix });
+							await Message.write(request.writer, SubscribeNamespaceEntryDone.id, done, version);
 						},
 					};
 
@@ -1496,8 +1492,7 @@ export class Publisher {
 						// A new cursor starts its backoff fresh, as in Rust.
 						retry = 0;
 					}
-					await request.writer.u53(RequestOk.id);
-					await new RequestOk({ requestId: undefined }).encode(request.writer, version);
+					await Message.write(request.writer, RequestOk.id, new RequestOk({ requestId: undefined }), version);
 					updating = readUpdate();
 				}
 			}
@@ -1841,8 +1836,7 @@ export class Publisher {
 					await deadline.send(
 						stream,
 						async () => {
-							await opened.writer.u53(PublishNamespace.id);
-							await msg.encode(opened.writer, version);
+							await Message.write(opened.writer, PublishNamespace.id, msg, version);
 						},
 						legacy ? () => this.#done(opened, path, requestId) : undefined,
 					);
@@ -1966,12 +1960,9 @@ export class Publisher {
 				(async (): Promise<Answer> => {
 					const writer = request.stream.writer;
 					request.updating = true;
-					await writer.u53(PublishNamespaceUpdate.id);
 					const namespaceRequestId = version === Version.DRAFT_16 ? request.requestId : undefined;
-					await new PublishNamespaceUpdate({ requestId, namespaceRequestId, update, token }).encode(
-						writer,
-						version,
-					);
+					const msg = new PublishNamespaceUpdate({ requestId, namespaceRequestId, update, token });
+					await Message.write(writer, PublishNamespaceUpdate.id, msg, version);
 
 					const response = await (request.reply ?? request.stream.next());
 					if (response === undefined) {
@@ -2068,9 +2059,8 @@ export class Publisher {
 	/** Write the PUBLISH_NAMESPACE_DONE that withdraws a draft-14-16 request. */
 	async #done(request: RequestStream, path: Path.Valid, requestId: bigint) {
 		try {
-			await request.writer.u53(PublishNamespaceDone.id);
 			const done = new PublishNamespaceDone({ trackNamespace: path, requestId });
-			await done.encode(request.writer, this.#session.version);
+			await Message.write(request.writer, PublishNamespaceDone.id, done, this.#session.version);
 		} catch {
 			// Stream might already be closed
 		}
@@ -2160,8 +2150,7 @@ export class Publisher {
 			}
 
 			answering = true;
-			await request.writer.u53(TrackStatusOk.id(version));
-			await answer.encode(request.writer, version);
+			await Message.write(request.writer, TrackStatusOk.id(version), answer, version);
 			// The answer is all this stream carries.
 			request.close();
 			await request.writer.closed.catch(() => undefined);
@@ -2214,9 +2203,10 @@ export class Publisher {
 				(prefix) => Path.hasPrefix(prefix, msg.prefix) || Path.hasPrefix(msg.prefix, prefix),
 			)
 		) {
-			await request.writer.u53(RequestError.id);
-			await new RequestError({ errorCode: 0x30, reasonPhrase: "overlapping SUBSCRIBE_TRACKS prefix" }).encode(
+			await Message.write(
 				request.writer,
+				RequestError.id,
+				new RequestError({ errorCode: 0x30, reasonPhrase: "overlapping SUBSCRIBE_TRACKS prefix" }),
 				version,
 			);
 			return;
@@ -2240,8 +2230,7 @@ export class Publisher {
 		let updates: Promise<void> | undefined;
 		let writing: Promise<void> | undefined;
 		try {
-			await request.writer.u53(RequestOk.id);
-			await new RequestOk({}).encode(request.writer, version);
+			await Message.write(request.writer, RequestOk.id, new RequestOk({}), version);
 			updates = (async () => {
 				const framed = await request.next();
 				if (!framed) return request.ended;
@@ -2266,8 +2255,7 @@ export class Publisher {
 						continue;
 					}
 					skips.delete(first[0]);
-					await request.writer.u53(PublishSkipped.id);
-					await first[1].encode(request.writer, version);
+					await Message.write(request.writer, PublishSkipped.id, first[1], version);
 				}
 				if (refusal) await request.refuse("subscribe_namespace", refusal);
 				else request.close();
@@ -2483,26 +2471,30 @@ export class Publisher {
 				parameters.subscriptionFilter = subscription.filter;
 			}
 			const largest = wireOf(source).largest(name);
-			await request.writer.u53(Publish.id);
-			await new Publish({
-				requestId: id,
-				trackNamespace: namespace,
-				trackName: name,
-				trackAlias: id,
-				groupOrder: GroupOrder.Descending,
-				contentExists: !!largest,
-				largest: largest && { groupId: BigInt(largest.group), objectId: BigInt(largest.frame) },
-				forward: false,
-				parameters,
-				properties: subscription.propertiesWanted
-					? {
-							priority: toWire(info.priority),
-							groupOrder: Properties.DESCENDING,
-							timescale: info.timescale ?? undefined,
-							maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
-						}
-					: {},
-			}).encode(request.writer, version);
+			await Message.write(
+				request.writer,
+				Publish.id,
+				new Publish({
+					requestId: id,
+					trackNamespace: namespace,
+					trackName: name,
+					trackAlias: id,
+					groupOrder: GroupOrder.Descending,
+					contentExists: !!largest,
+					largest: largest && { groupId: BigInt(largest.group), objectId: BigInt(largest.frame) },
+					forward: false,
+					parameters,
+					properties: subscription.propertiesWanted
+						? {
+								priority: toWire(info.priority),
+								groupOrder: Properties.DESCENDING,
+								timescale: info.timescale ?? undefined,
+								maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
+							}
+						: {},
+				}),
+				version,
+			);
 			hold.signal.removeEventListener("abort", cancelled);
 			stop();
 			// Once sent, the PUBLISH survives cancellation of its listing.
@@ -2530,14 +2522,18 @@ export class Publisher {
 			let forward = !Filter.isDraft20(version) && params.forward !== false;
 			for (;;) {
 				if (!this.#gate.allows(namespace) || unlisted.peek() !== undefined) {
-					await request.writer.u53(PublishDone.id);
-					await new PublishDone({
-						statusCode: this.#gate.allows(namespace)
-							? PublishDoneStatus.INTERNAL_ERROR
-							: PublishDoneStatus.UNAUTHORIZED,
-						streamCount: BigInt(state.streams.opened),
-						reasonPhrase: "track no longer listed or granted",
-					}).encode(request.writer, version);
+					await Message.write(
+						request.writer,
+						PublishDone.id,
+						new PublishDone({
+							statusCode: this.#gate.allows(namespace)
+								? PublishDoneStatus.INTERNAL_ERROR
+								: PublishDoneStatus.UNAUTHORIZED,
+							streamCount: BigInt(state.streams.opened),
+							reasonPhrase: "track no longer listed or granted",
+						}),
+						version,
+					);
 					return;
 				}
 				if (forward) {
@@ -2558,12 +2554,16 @@ export class Publisher {
 							await refuseUpdate(request.writer, version, "subscribe", this.#failed(err));
 							await this.#publishFailed(request, state.streams);
 						} else {
-							await request.writer.u53(PublishDone.id);
-							await new PublishDone({
-								statusCode: PublishDoneStatus.INTERNAL_ERROR,
-								streamCount: BigInt(state.streams.opened),
-								reasonPhrase: "resume failed",
-							}).encode(request.writer, version);
+							await Message.write(
+								request.writer,
+								PublishDone.id,
+								new PublishDone({
+									statusCode: PublishDoneStatus.INTERNAL_ERROR,
+									streamCount: BigInt(state.streams.opened),
+									reasonPhrase: "resume failed",
+								}),
+								version,
+							);
 						}
 						return;
 					}
@@ -2575,8 +2575,7 @@ export class Publisher {
 						published: state,
 					});
 					if (!paused) return;
-					await request.writer.u53(RequestOk.id);
-					await new RequestOk({}).encode(request.writer, version);
+					await Message.write(request.writer, RequestOk.id, new RequestOk({}), version);
 					forward = false;
 				}
 				const revoked = new Once<true>();
@@ -2588,12 +2587,18 @@ export class Publisher {
 					gate.dispose();
 				}
 				if (next === true) {
-					await request.writer.u53(PublishDone.id);
-					await new PublishDone({
-						statusCode: revoked.peek() ? PublishDoneStatus.UNAUTHORIZED : PublishDoneStatus.INTERNAL_ERROR,
-						streamCount: BigInt(state.streams.opened),
-						reasonPhrase: "track no longer listed or granted",
-					}).encode(request.writer, version);
+					await Message.write(
+						request.writer,
+						PublishDone.id,
+						new PublishDone({
+							statusCode: revoked.peek()
+								? PublishDoneStatus.UNAUTHORIZED
+								: PublishDoneStatus.INTERNAL_ERROR,
+							streamCount: BigInt(state.streams.opened),
+							reasonPhrase: "track no longer listed or granted",
+						}),
+						version,
+					);
 					return;
 				}
 				if (!next) return request.ended;
@@ -2626,8 +2631,7 @@ export class Publisher {
 				forward = update.forward === true;
 				state.answer = forward;
 				if (!forward) {
-					await request.writer.u53(RequestOk.id);
-					await new RequestOk({}).encode(request.writer, version);
+					await Message.write(request.writer, RequestOk.id, new RequestOk({}), version);
 				}
 			}
 		} catch (err) {
@@ -2655,12 +2659,16 @@ export class Publisher {
 	}
 
 	async #publishFailed(request: RequestStream, streams: StreamCount) {
-		await request.writer.u53(PublishDone.id);
-		await new PublishDone({
-			statusCode: PublishDoneStatus.UPDATE_FAILED,
-			streamCount: BigInt(streams.opened),
-			reasonPhrase: "update failed",
-		}).encode(request.writer, this.#session.version);
+		await Message.write(
+			request.writer,
+			PublishDone.id,
+			new PublishDone({
+				statusCode: PublishDoneStatus.UPDATE_FAILED,
+				streamCount: BigInt(streams.opened),
+				reasonPhrase: "update failed",
+			}),
+			this.#session.version,
+		);
 	}
 
 	#applyPublished(msg: Subscribe, params: Parameters) {

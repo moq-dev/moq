@@ -91,6 +91,43 @@ test("WebTransport negotiates lite-07-wip only when explicitly offered", async (
 	expect(version).toBe("moq-lite-07-wip");
 });
 
+test("a raw QUIC URL dials WebTransport over https", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const original = globalThis.WebTransport;
+	let dialed: string | undefined;
+
+	function StubWebTransport(this: unknown, target: string | URL) {
+		dialed = target.toString();
+		return pair.client;
+	}
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+
+	try {
+		const connection = await connect(new URL("moqt://example.com:4443/anon?jwt=x"), {
+			websocket: { enabled: false },
+		});
+		connection.abort();
+	} finally {
+		globalThis.WebTransport = original;
+	}
+
+	expect(dialed).toBe("https://example.com:4443/anon?jwt=x");
+});
+
+test("a failed connect names why the transport failed", async () => {
+	const original = globalThis.WebTransport;
+	function FailingWebTransport(this: unknown): never {
+		throw new Error("handshake refused");
+	}
+	globalThis.WebTransport = FailingWebTransport as unknown as typeof WebTransport;
+
+	try {
+		await expect(connect(url, { websocket: { enabled: false } })).rejects.toThrow("handshake refused");
+	} finally {
+		globalThis.WebTransport = original;
+	}
+});
+
 test("connect logs the relay URL without its credentials", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const restoreTransport = stubWebTransport(pair.client);

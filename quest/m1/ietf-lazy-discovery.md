@@ -13,6 +13,16 @@ discovery lazy and kept IETF eager: lazy SUBSCRIBE_NAMESPACE needs an
 UNSUBSCRIBE_NAMESPACE path on drafts 14 and 15, and peers still push
 unsolicited PUBLISH_NAMESPACE.
 
+In m1 because it owns a red interop cell (decided 2026-10-22): `moq`
+against moxygen on draft-14 discovers nothing. moq-net never asks draft-14
+or 15 for the empty namespace, and moxygen announces nothing unasked. The
+CLI does no scoping of its own: the subtree scope tried for this in
+[moq-dev/moq#6255](https://github.com/moq-dev/moq/pull/6255) lost the
+sibling broadcasts a catalog references, such as a transcode's `.` source.
+Asking for the watched prefixes fixes the cell without that loss; verify
+it with `MOQ_BIN=target/debug/moq just relays --only moxygen` from
+`test/smoke`.
+
 - First step: Rust sends UNSUBSCRIBE_NAMESPACE on d14/15. It never does
   today ([moq-dev/moq#6133](https://github.com/moq-dev/moq/pull/6133)).
 - Then drive SUBSCRIBE_NAMESPACE from the origin's watched prefixes, as the

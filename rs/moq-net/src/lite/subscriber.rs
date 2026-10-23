@@ -740,7 +740,9 @@ impl<S: crate::transport::poll::Session> UniAccept<S> {
 		for reader in early {
 			children.push(UniServe {
 				subscriber: subscriber.clone(),
-				state: UniState::Start { reader },
+				state: UniState::Start {
+					reader: reader.with_stats(subscriber.origin.stats()),
+				},
 			});
 		}
 		Self {
@@ -760,7 +762,8 @@ impl<S: crate::transport::poll::Session> UniAccept<S> {
 					self.children.push(UniServe {
 						subscriber: self.subscriber.clone(),
 						state: UniState::Start {
-							reader: Reader::new(stream, self.subscriber.version),
+							reader: Reader::new(stream, self.subscriber.version)
+								.with_stats(self.subscriber.origin.stats()),
 						},
 					});
 				}
@@ -1529,6 +1532,7 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 						return Poll::Ready(Ok(()));
 					}
 					let mut stream = ready!(Stream::poll_open(&mut self.session, self.subscriber.version, &mut cx))?;
+					stream = stream.with_stats(self.subscriber.origin.stats());
 					stream.writer.buffer(&lite::ControlType::Probe)?;
 					self.state = ProbeState::Send { stream };
 				}
@@ -1635,6 +1639,8 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						self.subscriber.version,
 						&mut cx
 					))?;
+
+					stream = stream.with_stats(self.subscriber.origin.stats());
 
 					stream.writer.buffer(&lite::ControlType::Announce)?;
 					// Lite04/05: ask the peer to filter out announces that already passed
@@ -1890,6 +1896,7 @@ impl<S: crate::transport::poll::Session> TracksRecv<S> {
 			Some(stream) => stream,
 			None => {
 				let mut stream = ready!(Stream::poll_open(&mut self.session, version, &mut cx))?;
+				stream = stream.with_stats(source.subscriber.origin.stats());
 				stream.writer.buffer(&lite::ControlType::Tracks)?;
 				stream.writer.buffer(&lite::Tracks {
 					broadcast: source.path.as_path(),
@@ -3097,9 +3104,10 @@ mod tests {
 		);
 	}
 
-	/// Receive group 5 stamped 500ms over `version` into the copy a subscriber makes there,
-	/// whose group 4 started at 1000ms, returning the stream's result and the track.
-	async fn receive_rewind(version: Version) -> (Result<(), Error>, track::Producer) {
+	/// Receive group 5 over `version`, one frame per millisecond timestamp delta, into the
+	/// copy a subscriber makes there, whose group 4 started at 1000ms, returning the stream's
+	/// result and the track.
+	async fn receive_group(version: Version, deltas: &[i64]) -> (Result<(), Error>, track::Producer) {
 		use crate::transport::poll::Session as _;
 
 		let mut script = Vec::new();
@@ -3111,9 +3119,11 @@ mod tests {
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
-		// Frame 0 at 500ms: the first delta is absolute.
-		encoder.varint(crate::coding::varint::zigzag(500)).unwrap();
-		encoder.bytes(b"rewound").unwrap();
+		// The first delta is absolute.
+		for delta in deltas {
+			encoder.varint(crate::coding::varint::zigzag(*delta)).unwrap();
+			encoder.bytes(b"frame").unwrap();
+		}
 		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -3164,14 +3174,15 @@ mod tests {
 	#[moq_clock::test]
 	async fn lite06_timestamps_are_dropped() {
 		for version in [Version::Lite05, Version::Lite06] {
-			let (res, track) = receive_rewind(version).await;
+			// Frame 0 at 500ms, before group 4's 1000ms.
+			let (res, track) = receive_group(version, &[500]).await;
 			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
 			assert!(track.closed().now_or_never().is_none(), "{version}");
 			let mut consumer = track.subscribe(None);
 			let mut group = consumer.recv_group().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(group.sequence, 5, "{version}");
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-			assert_eq!(frame.payload.as_ref(), b"rewound", "{version}");
+			assert_eq!(frame.payload.as_ref(), b"frame", "{version}");
 			assert_eq!(frame.timestamp, None, "{version}");
 		}
 	}
@@ -3180,8 +3191,30 @@ mod tests {
 	/// write and one that rewinds is refused.
 	#[moq_clock::test]
 	async fn a_lite07_rewind_is_refused() {
-		let (res, _track) = receive_rewind(Version::Lite07).await;
+		let (res, _track) = receive_group(Version::Lite07, &[500]).await;
 		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
+	}
+
+	/// A received timestamp past 2^61 - 1 is refused at every version, so a relay never
+	/// holds one that lite-05/06 could not carry as a group's first frame. lite-06 reaches
+	/// it with a second delta, lite-07 with a first frame its 64-bit varint can encode.
+	/// lite-05/06 drop the timestamp, but a stream carrying one past the bound is still malformed.
+	#[moq_clock::test]
+	async fn a_received_timestamp_past_2_61_is_refused() {
+		let max: i64 = (1 << 61) - 1;
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let (res, track) = receive_group(version, &[max]).await;
+			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
+			let mut group = track.consume().peek_group(5).unwrap();
+			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			let kept = version.has_media_time().then_some(max as u64);
+			assert_eq!(frame.timestamp.map(Timestamp::value), kept, "{version}");
+
+			let (res, _) = receive_group(version, &[max, 1]).await;
+			assert!(matches!(res, Err(Error::BoundsExceeded(_))), "{version}: {res:?}");
+		}
+		let (res, _) = receive_group(Version::Lite07, &[max + 1]).await;
+		assert!(matches!(res, Err(Error::BoundsExceeded(_))), "{res:?}");
 	}
 
 	/// An idle copy that resubscribes gets its newest cached group again. That stream only
@@ -4305,6 +4338,54 @@ mod tests {
 			);
 			let msg = crate::coding::decode_buf(&mut wire, version, lite::Subscribe::decode).unwrap();
 			assert_eq!((msg.start_frame, msg.end_frame), (start_frame, Some(7)), "{version:?}");
+		}
+	}
+
+	/// A partial prefix, a tail, or a released group cannot seed the inflater. Only
+	/// a complete live prefix permits requesting the tail without widening its start.
+	#[moq_clock::test]
+	async fn compressed_frame_bounds_require_the_entire_cached_prefix() {
+		for (first, count, aborted, expected) in [
+			(0, 0, false, 0),
+			(0, 2, false, 0),
+			(0, 3, false, 3),
+			(1, 3, false, 0),
+			(0, 3, true, 0),
+		] {
+			let mut h = Harness::new(Version::Lite07);
+			h.producer = h
+				._broadcast
+				.create_track("compressed", track::Info::timed().with_compress(true))
+				.unwrap();
+			let mut group = h.producer.create_group(crate::group::Info { sequence: 5 }).unwrap();
+			group.start_at(first).unwrap();
+			for frame in first..first + count {
+				group
+					.write_frame(crate::Timestamp::from_millis(frame).unwrap(), b"prefix".as_ref())
+					.unwrap();
+			}
+			if aborted {
+				group.abort(Error::Cancel).unwrap();
+			} else {
+				group.finish().unwrap();
+			}
+			let mut sub = Sub::None;
+			h.serve
+				.handle_subscription(&mut h.producer, &mut sub, Some(mid_group_demand()), true)
+				.await
+				.unwrap();
+			let wire = h.wire();
+			let mut wire = wire.as_slice();
+			assert_eq!(
+				crate::coding::decode_buf(&mut wire, Version::Lite07, lite::ControlType::decode).unwrap(),
+				lite::ControlType::Subscribe
+			);
+			let msg = crate::coding::decode_buf(&mut wire, Version::Lite07, lite::Subscribe::decode).unwrap();
+			assert_eq!(
+				(msg.start_group, msg.start_frame, msg.end_group, msg.end_frame),
+				(Some(5), expected, Some(5), Some(7)),
+				"first={first}, count={count}, aborted={aborted}"
+			);
 		}
 	}
 
@@ -6217,6 +6298,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				// The wire carries one range: the span of every range asked for, which the
 				// subscribers' own reads narrow again.
 				subscription.set_bounds(subscription.start(), subscription.end());
+				producer.widen_compressed(&mut subscription);
 				self.widen_frame_bounds(&mut subscription);
 				match sub {
 					Sub::None => {
@@ -6476,6 +6558,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 						end_frame: bounds.end_frame,
 						order: self.subscription.order,
 					};
+					stream = stream.with_stats(self.serve.subscriber.origin.stats());
 					stream.writer.buffer(&lite::ControlType::Subscribe)?;
 					stream.writer.buffer(&msg)?;
 					self.state = EstablishState::Send { stream };
@@ -6791,6 +6874,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 			match &mut self.state {
 				TrackInfoState::Open => {
 					let mut stream = ready!(Stream::poll_open(&mut self.session, serve.subscriber.version, &mut cx))?;
+					stream = stream.with_stats(serve.subscriber.origin.stats());
 					stream.writer.buffer(&lite::ControlType::Track)?;
 					stream.writer.buffer(&lite::Track {
 						epoch: serve.epoch.clone(),
@@ -7602,6 +7686,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						// downstream cap is applied when serving, not when fetching.
 						end_frame: None,
 					};
+					stream = stream.with_stats(self.serve.subscriber.origin.stats());
 					let buffered = stream
 						.writer
 						.buffer(&lite::ControlType::Fetch)

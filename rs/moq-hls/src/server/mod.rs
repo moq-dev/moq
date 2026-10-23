@@ -57,7 +57,7 @@ mod routes;
 pub use routes::{Resource, Route};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -82,6 +82,9 @@ struct Inner {
 	_watch: moq_net::announce::Consumer,
 	config: Config,
 	broadcasters: Mutex<HashMap<String, Arc<Broadcaster>>>,
+	/// Closes with the last server clone, ending every eviction task, which would otherwise keep
+	/// its broadcaster for as long as the publisher stays live.
+	alive: kio::Producer<()>,
 }
 
 impl Server {
@@ -95,6 +98,7 @@ impl Server {
 				origin,
 				config,
 				broadcasters: Mutex::new(HashMap::new()),
+				alive: kio::Producer::new(()),
 			}),
 		}
 	}
@@ -152,13 +156,30 @@ impl Server {
 
 		let name = name.to_string();
 		broadcasters.insert(name.clone(), broadcaster.clone());
-		tokio::spawn(evict_closed(self.inner.clone(), name, broadcaster.clone()));
+		let alive = self.inner.alive.consume();
+		tokio::spawn(evict_closed(
+			Arc::downgrade(&self.inner),
+			alive,
+			name,
+			broadcaster.clone(),
+		));
 		Some(broadcaster)
 	}
 }
 
-async fn evict_closed(inner: Arc<Inner>, name: String, broadcaster: Arc<Broadcaster>) {
-	broadcaster.closed().await;
+/// Forget `broadcaster` once its source closes, unless the server is dropped first. The task
+/// holds the server weakly, so it never keeps the server's state alive.
+async fn evict_closed(inner: Weak<Inner>, alive: kio::Consumer<()>, name: String, broadcaster: Arc<Broadcaster>) {
+	let source_closed = kio::wait(|waiter| {
+		if broadcaster.poll_closed(waiter).is_ready() {
+			return Poll::Ready(true);
+		}
+		alive.poll_closed(waiter).map(|()| false)
+	})
+	.await;
+	let Some(inner) = inner.upgrade().filter(|_| source_closed) else {
+		return;
+	};
 
 	let mut broadcasters = inner.broadcasters.lock().unwrap();
 	if broadcasters
@@ -314,6 +335,35 @@ mod tests {
 		assert!(server.inner.broadcasters.lock().unwrap().contains_key("live"));
 	}
 
+	/// Dropping the last server clone releases its broadcasters while their publisher stays
+	/// live, every time a server is replaced, but a broadcaster a response still holds keeps
+	/// serving.
+	#[tokio::test]
+	async fn dropping_the_server_releases_its_broadcasters() {
+		let origin = produce_origin();
+		let producer = origin.create_broadcast("live").expect("publish allowed");
+		producer.announce(Default::default()).expect("publish allowed");
+		settle().await;
+
+		for _ in 0..4 {
+			let server = Server::new(origin.consume(), Config::default());
+			let broadcaster = server.broadcaster("live").await.expect("broadcast announced");
+			let released = Arc::downgrade(&broadcaster);
+			drop(broadcaster);
+			drop(server);
+			settle().await;
+			assert_eq!(released.strong_count(), 0, "the dropped server kept its broadcaster");
+		}
+
+		let server = Server::new(origin.consume(), Config::default());
+		let held = server.broadcaster("live").await.expect("broadcast announced");
+		drop(server);
+		settle().await;
+		assert_eq!(Arc::strong_count(&held), 1, "only the response holds it now");
+		assert!(!held.is_closed(), "a held broadcaster keeps serving");
+		producer.close();
+	}
+
 	#[tokio::test]
 	async fn eviction_keeps_newer_cached_instance() {
 		let origin = produce_origin();
@@ -331,7 +381,8 @@ mod tests {
 			.unwrap()
 			.insert("live".to_string(), new.clone());
 
-		evict_closed(server.inner.clone(), "live".to_string(), old).await;
+		let alive = server.inner.alive.consume();
+		evict_closed(Arc::downgrade(&server.inner), alive, "live".to_string(), old).await;
 
 		let cached = server.inner.broadcasters.lock().unwrap().get("live").cloned();
 		assert!(cached.is_some_and(|cached| Arc::ptr_eq(&cached, &new)));

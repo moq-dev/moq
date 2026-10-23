@@ -5,7 +5,7 @@
  */
 
 import { ProtocolViolation } from "../error.ts";
-import type { Reader } from "../stream.ts";
+import { concat, type Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -87,17 +87,6 @@ function varint(v: bigint, version: IetfVersion): Uint8Array {
 
 function unvarint(buf: Uint8Array, version: IetfVersion): [bigint, Uint8Array] {
 	return usesLeadingOnes(version) ? Varint.decodeLeadingOnes(buf) : Varint.decodeBigInt(buf);
-}
-
-function concat(parts: Uint8Array[]): Uint8Array {
-	const total = parts.reduce((n, p) => n + p.length, 0);
-	const out = new Uint8Array(total);
-	let offset = 0;
-	for (const part of parts) {
-		out.set(part, offset);
-		offset += part.length;
-	}
-	return out;
 }
 
 function endDelta(startGroup: bigint, endGroup: bigint): bigint {

@@ -594,11 +594,13 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Collect and compare sizes
+        id: sizes
         run: nix develop --command just gh size-nightly size-report "$GITHUB_RUN_ID"
         env:
           GH_TOKEN: ${{ github.token }}
+      # Only after the comparison ran, so a setup failure stays the job's only error.
       - name: Preserve sizes and attribution
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.sizes.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: nightly-size-history
