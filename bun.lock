@@ -324,7 +324,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.6.5",
+      "version": "0.6.6",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
