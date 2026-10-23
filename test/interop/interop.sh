@@ -10,10 +10,11 @@
 # cargo/bun/uv/go/cmake/cc.
 #
 # It stands up a moq-relay, then for each publisher language publishes an H.264
-# broadcast with an Opus tone per audio channel, and confirms every subscriber sees
-# video and decodes that tone, contiguous, before the timeout (tone.py judges the
-# decode; the browser judges its own playback). A publisher with its channels'
-# tones swapped must then fail every subscriber's check. The browser subscriber
+# broadcast with an Opus tone per audio channel (the Rust CLI an AAC one too), and
+# confirms every subscriber sees video and decodes that tone in every rendition,
+# contiguous, before the timeout (tone.py judges the decode; the browser judges its
+# own playback). A publisher with its channels' tones swapped must then fail every
+# subscriber's check. The browser subscriber
 # also verifies rendered WebCodecs output and player pause/resume, then that a
 # session the relay refuses hands Chromium the close code and reason.
 #
@@ -348,6 +349,14 @@ publisher_tone() {
 }
 # The wrong-tone control's publisher sends the stereo tone with its channels swapped.
 SWAPPED_TONE="660,440"
+# The audio renditions <lang> sends the tone in, by codec: the catalog codec up to its first `.`.
+# Every subscriber decodes each one, the native ones to <prefix>.<codec>.{txt,pcm}.
+publisher_codecs() {
+    case "$1" in
+        rust) echo "opus,mp4a" ;;
+        *) echo opus ;;
+    esac
+}
 
 # Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
 # harness_result). Every session in a case dials the same relay with each client's own
@@ -761,6 +770,13 @@ prepare_gst() {
             return
         }
     done
+    for factory in fdkaacdec avdec_aac faad ""; do
+        [[ -n "$factory" ]] || {
+            mark_broken gst "GStreamer has no AAC decoder (fdkaacdec, avdec_aac, or faad)"
+            return
+        }
+        GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" gst-inspect-1.0 "$factory" >/dev/null 2>&1 && break
+    done
 }
 
 # ── setup ───────────────────────────────────────────────────────────────────
@@ -927,15 +943,15 @@ tone_source() {
     printf 'aevalsrc=%s:s=48000:c=%s' "${exprs[*]}" "$layout"
 }
 
-# The Rust CLI's input: the same picture plus <tone> as Opus, both in fragmented MP4, so its
-# cells also cover moq-mux's fMP4 Opus import.
+# The Rust CLI's input: the same picture plus <tone> as both Opus and AAC, all in fragmented MP4,
+# so its cells also cover moq-mux's fMP4 Opus and AAC import, and every subscriber's AAC decode.
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 ffmpeg_fmp4() {
     ffmpeg -hide_banner -loglevel error -re -f lavfi -i "testsrc=size=${SIZE}:rate=${FPS}" \
-        -re -f lavfi -i "$(tone_source "$1")" \
+        -re -f lavfi -i "$(tone_source "$1")" -map 0:v -map 1:a -map 1:a \
         -c:v libx264 -profile:v baseline -preset ultrafast -pix_fmt yuv420p \
         -x264-params "keyint=${FPS}:min-keyint=${FPS}:scenecut=0" \
-        -c:a libopus -b:a 128k \
+        -c:a:0 libopus -b:a:0 128k -c:a:1 aac -b:a:1 128k \
         -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 -
 }
 
@@ -1059,28 +1075,43 @@ observe_group() {
         --timeout "$TIMEOUT" --track-file "$HARNESS_RUN/$broadcast.track" "$@")
 }
 
-# The GStreamer subscriber with audio: moqsrc's video_0 must deliver a byte, and audio_0 decodes
-# through decodebin to <out>.pcm while an identity logs each decoded buffer's timestamp and size.
-# Once enough of both has landed, an interrupt makes gst-launch stop the pipeline and close its
-# session. Not with -e: moqsrc does not end its pads on an EOS sent into the pipeline. The log,
-# trimmed to the buffers the file holds, becomes <out>.txt, the layout tone.py reads.
+# The GStreamer subscriber with audio: moqsrc's video_0 must deliver a byte, and each of the
+# <codecs> audio pads, audio_0 on, decodes through decodebin to <out>.<pad>.pcm while the log tracer
+# records each decoded buffer's timestamp and size where an identity passes it on. The tracer logs
+# from the streaming thread itself; -v's last-message notifications drop and repeat buffers once
+# two pads stream at once. Once enough of all has landed, an interrupt makes
+# gst-launch stop the pipeline and close its session. Not with -e: moqsrc does not end its pads on
+# an EOS sent into the pipeline. Each pad's log, trimmed to the buffers its file holds, becomes
+# <out>.<codec>.txt beside <out>.<codec>.pcm, the layout tone.py reads, the codec named by the
+# pad's caps.
 # shellcheck disable=SC2329  # reached from run_subscriber, which 'harness_spawn' invokes
 run_gst_audio() {
-    local url="$1" broadcast="$2" out="$3" tone="$4" tones pid want deadline version
+    local url="$1" broadcast="$2" out="$3" tone="$4" codecs="$5" tones renditions pid want deadline version i short
+    local pads=()
     version=$(cell_version gst)
     IFS=',' read -r -a tones <<<"$tone"
+    IFS=',' read -r -a renditions <<<"$codecs"
     # At 48 kHz, f32: a stop condition only. tone.py judges whatever rate and layout decoded.
     want=$((AUDIO_MS * 48 * 4 * ${#tones[@]}))
     # SECONDS counts whole seconds, so a fractional timeout rounds up rather than down to nothing.
     deadline=$((SECONDS + ${TIMEOUT%.*}))
     [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 1))
+    for i in "${!renditions[@]}"; do
+        pads+=("s.audio_$i" ! decodebin "name=decode$i" ! audioconvert ! audio/x-raw,format=F32LE,layout=interleaved
+            ! identity "name=frames$i" ! filesink "location=$out.$i.pcm" buffer-mode=2)
+    done
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
+        GST_TRACERS=log GST_DEBUG=GST_BUFFER:7 GST_DEBUG_NO_COLOR=1 GST_DEBUG_FILE="$out.trace" \
         gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
-        s.video_0 ! filesink location="$out.video" buffer-mode=2 \
-        s.audio_0 ! decodebin ! audioconvert ! audio/x-raw,format=F32LE,layout=interleaved \
-        ! identity name=frames silent=false ! filesink location="$out.pcm" buffer-mode=2 >"$out.gst" 2>&1 &
+        s.video_0 ! filesink location="$out.video" buffer-mode=2 "${pads[@]}" >"$out.gst" 2>&1 &
     pid=$!
-    until [[ -s "$out.video" && "$(wc -c <"$out.pcm" 2>/dev/null || echo 0)" -ge "$want" ]]; do
+    while :; do
+        short=0
+        [[ -s "$out.video" ]] || short=1
+        for i in "${!renditions[@]}"; do
+            [[ "$(wc -c 2>/dev/null <"$out.$i.pcm" || echo 0)" -ge "$want" ]] || short=1
+        done
+        [[ "$short" -eq 1 ]] || break
         if ! kill -0 "$pid" 2>/dev/null || ((SECONDS >= deadline)); then
             kill -KILL "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
@@ -1099,33 +1130,48 @@ run_gst_audio() {
         tail -n 20 "$out.gst"
         return 1
     }
-    python3 - "$out" <<'PYCODE'
+    python3 - "$out" "${#renditions[@]}" <<'PYCODE'
 import os, re, sys
-out = sys.argv[1]
+out, pads = sys.argv[1], int(sys.argv[2])
 text = open(f"{out}.gst").read()
-caps = re.search(r"GstIdentity:frames\.GstPad:src: caps = audio/x-raw, (.*)", text)
-assert caps, "no decoded audio caps in the gst log"
-rate = int(re.search(r"rate=\(int\)(\d+)", caps[1])[1])
-channels = int(re.search(r"channels=\(int\)(\d+)", caps[1])[1])
-# The pipeline stopped mid-stream, so the file may lack the last buffers the identity logged.
-held, kept, lines = os.path.getsize(f"{out}.pcm"), 0, [f"{rate} {channels}"]
-for size, h, m, s in re.findall(r"last-message = chain.*?\((\d+) bytes, dts: [^,]*, pts: (\d+):(\d+):([\d.]+)", text):
-    if kept + int(size) > held:
-        break
-    kept += int(size)
-    pts = round((int(h) * 3600 + int(m) * 60 + float(s)) * 1_000_000)
-    lines.append(f"{pts} {int(size) // (4 * channels)}")
-os.truncate(f"{out}.pcm", kept)
-open(f"{out}.txt", "w").write("\n".join(lines) + "\n")
+trace = open(f"{out}.trace").read()
+for pad in range(pads):
+    src = re.search(rf"GstDecodeBin:decode{pad}\.GstGhostPad:sink\S*: caps = ([^,\n]*)(.*)", text)
+    assert src, f"no caps into audio_{pad}'s decodebin in the gst log"
+    if src[1] == "audio/x-opus":
+        codec = "opus"
+    elif src[1] == "audio/mpeg" and "mpegversion=(int)4" in src[2]:
+        codec = "mp4a"
+    else:
+        raise SystemExit(f"audio_{pad} carries {src[1]}{src[2]}, which this check does not name")
+    caps = re.search(rf"GstIdentity:frames{pad}\.GstPad:src: caps = audio/x-raw, (.*)", text)
+    assert caps, f"no decoded audio caps for audio_{pad} in the gst log"
+    rate = int(re.search(r"rate=\(int\)(\d+)", caps[1])[1])
+    channels = int(re.search(r"channels=\(int\)(\d+)", caps[1])[1])
+    # The pipeline stopped mid-stream, so the file may lack the last buffers the tracer logged.
+    held, kept, lines = os.path.getsize(f"{out}.{pad}.pcm"), 0, [f"{rate} {channels}"]
+    pushes = rf"do_push_buffer_pre:<frames{pad}:src> .*? pts (\d+):(\d+):([\d.]+), dts [^,]*, dur [^,]*, size (\d+)"
+    for h, m, s, size in re.findall(pushes, trace):
+        if kept + int(size) > held:
+            break
+        kept += int(size)
+        pts = round((int(h) * 3600 + int(m) * 60 + float(s)) * 1_000_000)
+        lines.append(f"{pts} {int(size) // (4 * channels)}")
+    os.truncate(f"{out}.{pad}.pcm", kept)
+    # Exclusive, so two pads of one codec fail rather than overwrite each other.
+    with open(f"{out}.{codec}.txt", "x") as log:
+        log.write("\n".join(lines) + "\n")
+    os.rename(f"{out}.{pad}.pcm", f"{out}.{codec}.pcm")
 PYCODE
 }
 
-# run_subscriber <lang> <broadcast> <url> [audio prefix] [tone]: with $AUDIO, every subscriber
-# but the browser also decodes $AUDIO_MS of audio to <audio prefix>.{txt,pcm} for tone.py, and
-# the browser checks <tone> itself.
+# run_subscriber <lang> <broadcast> <url> [audio prefix] [tone] [codecs]: with $AUDIO, every
+# subscriber but the browser also decodes $AUDIO_MS of each audio rendition to
+# <audio prefix>.<codec>.{txt,pcm} for tone.py, and the browser checks <tone> itself in each of
+# <codecs>.
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 run_subscriber() {
-    local lang="$1" broadcast="$2" url="$3" audio_out="${4:-}" tone="${5:-}" audio=()
+    local lang="$1" broadcast="$2" url="$3" audio_out="${4:-}" tone="${5:-}" codecs="${6:-}" audio=()
     client_flags "$lang"
     if [[ "$AUDIO" -eq 1 ]]; then audio=(--audio-out "$audio_out" --audio-ms "$AUDIO_MS"); fi
     case "$lang" in
@@ -1221,7 +1267,7 @@ PYCODE
             # user's cache. buffer-mode=2 makes filesink unbuffered so the first frame
             # reaches head immediately.
             if [[ "$AUDIO" -eq 1 ]]; then
-                run_gst_audio "$url" "$broadcast" "$audio_out" "$tone"
+                run_gst_audio "$url" "$broadcast" "$audio_out" "$tone" "$codecs"
                 return
             fi
             local n version
@@ -1238,9 +1284,10 @@ PYCODE
             ;;
         js)
             # Headless Chromium decodes and renders via WebCodecs, checks the tone on each
-            # channel the player outputs, then drives the real player's pause/resume controls.
+            # channel the player outputs, then drives the real player's pause/resume controls,
+            # once per audio rendition with the player pinned to it.
             (cd "$CLIENTS/js" && bun driver.ts subscribe \
-                --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" --tone "$tone" ${FLAGS[@]+"${FLAGS[@]}"})
+                --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" --tone "$tone" --codecs "$codecs" ${FLAGS[@]+"${FLAGS[@]}"})
             ;;
         js-native-bun)
             # Native @moq/net via moq's WebTransport polyfill, under bun.
@@ -1271,15 +1318,20 @@ overall=0
 # creeping up on $TIMEOUT is a near-miss worth seeing before it fails.
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 run_cell() {
-    local pub="$1" sub="$2" broadcast="$3" url="$4" tone="$5" started=$SECONDS status=0
-    local decoded="$LOGS/$pub-$sub-audio"
+    local pub="$1" sub="$2" broadcast="$3" url="$4" tone="$5" codecs="$6" started=$SECONDS status=0
+    local decoded="$LOGS/$pub-$sub-audio" codec
     # `|| status=$?` rather than a bare call: under `set -e` a failing subscriber
     # would exit before it recorded anything, and a failure is exactly when the
     # duration is worth reading.
-    run_subscriber "$sub" "$broadcast" "$url" "$decoded" "$tone" || status=$?
-    # The browser judges the tone in its page; every other subscriber leaves its decode here.
+    run_subscriber "$sub" "$broadcast" "$url" "$decoded" "$tone" "$codecs" || status=$?
+    # The browser judges the tone in its page; every other subscriber leaves a decode per
+    # rendition here, and a missing one fails like a garbled one. Each is judged, so the
+    # wrong-tone control can require every rendition to fail.
     if [[ "$status" -eq 0 && "$AUDIO" -eq 1 && "$sub" != js ]]; then
-        python3 "$INTEROP_DIR/tone.py" --tone "$tone" "$decoded" || status=$?
+        for codec in ${codecs//,/ }; do
+            echo "the $codec rendition:"
+            python3 "$INTEROP_DIR/tone.py" --tone "$tone" "$decoded.$codec" || status=$?
+        done
     fi
     echo "$((SECONDS - started))" >"$LOGS/$pub-$sub.secs"
     return "$status"
@@ -1292,7 +1344,7 @@ run_cell() {
 # line the round's connections start on.
 run_round() {
     local pub="$1" broadcast="$2" pub_pid="$3" expect="$4" from="$5"
-    local pids=() names=() i sub sub_url sub_grant why tone
+    local pids=() names=() i sub sub_url sub_grant why tone codecs renditions
     # A round is named after its publisher's language, plus `-denied` or `-swapped` for a control.
     local publisher="${pub%-denied}"
     publisher="${publisher%-swapped}"
@@ -1306,6 +1358,8 @@ run_round() {
         case="wrong tone"
     fi
     tone=$(publisher_tone "$publisher")
+    codecs=$(publisher_codecs "$publisher")
+    IFS=',' read -r -a renditions <<<"$codecs"
     sub_url=$(token_url --subscribe "$(subscribe_grant "$broadcast")")
     sub_grant=$(grant_line "" "**/$broadcast")
     for sub in "${SUB_LIST[@]}"; do
@@ -1315,7 +1369,7 @@ run_round() {
             overall=1
             continue
         fi
-        harness_spawn "$pub-$sub" "$LOGS/$pub-$sub.log" run_cell "$pub" "$sub" "$broadcast" "$sub_url" "$tone"
+        harness_spawn "$pub-$sub" "$LOGS/$pub-$sub.log" run_cell "$pub" "$sub" "$broadcast" "$sub_url" "$tone" "$codecs"
         pids+=("$HARNESS_PID")
         names+=("$sub")
     done
@@ -1333,8 +1387,8 @@ run_round() {
         local log="$LOGS/$pub-${names[$i]}.log" outcome=nothing
         if harness_wait "${pids[$i]}"; then
             outcome=media
-        elif grep -q '^audio check failed: wrong tone' "$log"; then
-            # Media flowed and decoded, but not into the publisher's tone.
+        elif [[ "$(grep -c '^audio check failed: wrong tone' "$log" || true)" -eq "${#renditions[@]}" ]]; then
+            # Media flowed and every rendition decoded, but none into the publisher's tone.
             outcome=wrong-tone
         fi
         elapsed=$(cat "$LOGS/$pub-${names[$i]}.secs" 2>/dev/null || echo "?")

@@ -162,7 +162,9 @@ export type Sample = {
 	noiseDb?: number;
 	/** Root mean square of the graph root's output over the analyser window. */
 	rms?: number;
-	/** The catalog's audio channel count. */
+	/** The codec of the audio rendition the player selected. */
+	audioCodec?: string;
+	/** The selected audio rendition's channel count. */
 	audioChannels?: number;
 	/**
 	 * Per channel of the graph root, when the page was given the expected tones: the channel's RMS

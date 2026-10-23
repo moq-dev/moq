@@ -18,21 +18,25 @@ WebCodecs output painted to a canvas and drives the player's pause/resume contro
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
-fragmented MP4, the browser encodes its fake microphone playing the tone from a WAV
+fragmented MP4, as both an Opus and an AAC rendition, so AAC import and decode cross
+every subscriber. The browser encodes its fake microphone playing the tone from a WAV
 file, and the Python, Go, and C++ clients encode it through `moq-ffi` at a 2.5 ms
 frame duration, so the matrix covers the FFI audio path with a non-default codec config.
-Each subscriber decodes with what it already has: moq-audio for Rust (the
+Each subscriber decodes every audio rendition with what it already has: moq-audio for Rust (the
 `interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
-Go, and C++, `moq-c` for C, `decodebin` on `audio_0` for GStreamer, and
-`@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes its first
-600 ms of PCM and frame timestamps for [`tone.py`](tone.py), which requires the
+Go, and C++, `moq-c` for C, `decodebin` on each `audio_N` pad for GStreamer, and
+`@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes the first
+600 ms of PCM and frame timestamps of each rendition, named by its codec, for
+[`tone.py`](tone.py), which requires the
 publisher's channel count, contiguous timestamps, and each channel's tone carrying
 most of its energy by a Goertzel filter. A garbled decode (wrong channel order or
-sample rate), silence, or a timestamp gap fails the cell; a misapplied pre-skip only
-shifts the tone's phase, which this does not check. The browser
-runs the same filter on each channel of the player's audio graph. A negative control
-then has the Rust CLI swap its channels' tones, and every subscriber must refuse it
-as the wrong tone, not fail some other way. `interop.sh` is the one place the tones are chosen.
+sample rate), silence, a timestamp gap, or a rendition left undecoded fails the cell;
+a misapplied pre-skip or AAC priming only shifts the tone's phase, which this does not
+check. The browser plays each rendition in a page of its own, the player pinned to it
+by `controls.audioTarget`, and runs the same filter on each channel of the player's
+audio graph. A negative control then has the Rust CLI swap its channels' tones, and
+every subscriber must refuse every rendition as the wrong tone, not fail some other
+way. `interop.sh` is the one place the tones and each publisher's codecs are chosen.
 
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
@@ -121,9 +125,10 @@ marks the cell unavailable.
 
 The GStreamer client builds the `moqsrc` plugin from `rs/moq-gst` and points
 `GST_PLUGIN_PATH` at it, then reads a broadcast with
-`gst-launch-1.0 moqsrc ... ! filesink`, decoding `audio_0` through `decodebin`.
+`gst-launch-1.0 moqsrc ... ! filesink`, decoding each `audio_N` pad through `decodebin`.
 The plugin dynamic-links the host's GStreamer, so this cell needs `gst-launch-1.0`
-plus the core plugins and `opusdec` on the system.
+plus the core plugins, `opusdec`, and an AAC decoder (`fdkaacdec`, `avdec_aac`, or
+`faad`) on the system.
 The `nix develop` shell ships them; a bare shell without GStreamer marks the cell
 unavailable rather than failing it.
 

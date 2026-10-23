@@ -188,6 +188,8 @@ export default class MoqWatch extends HTMLElement {
 		buffer: new Signal<Milli>(Milli.zero),
 		// The desired video rendition (resolution/bitrate cap).
 		target: new Signal<Video.Target | undefined>(undefined),
+		// The desired audio rendition, or automatic selection when unset.
+		audioTarget: new Signal<Audio.Target | undefined>(undefined),
 		// The selected caption track name, or undefined for off (the default; captions are opt-in).
 		captions: new Signal<string | undefined>(undefined),
 	};

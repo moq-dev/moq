@@ -112,6 +112,18 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	const delay = params.get("delay");
 	if (delay) el.setAttribute("delay", delay);
 
+	// The interop matrix checks each audio rendition in a page of its own, pinned by codec (the
+	// catalog's up to its first `.`). The target lands with the catalog, before the player has
+	// probed which renditions it can decode, so no other rendition ever plays here.
+	const codec = params.get("codec");
+	if (codec) {
+		el.signals.run((effect) => {
+			const renditions = effect.get(el.broadcast.out.catalog)?.audio?.renditions ?? {};
+			const name = Object.keys(renditions).find((name) => renditions[name].codec.split(".")[0] === codec);
+			if (name) el.controls.audioTarget.set({ name });
+		});
+	}
+
 	const player = document.createElement("moq-watch-ui");
 	player.appendChild(el);
 	document.body.appendChild(player);
