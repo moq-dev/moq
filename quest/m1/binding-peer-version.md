@@ -12,8 +12,8 @@ additive moq-ffi config field.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-22, alongside
-[Peers advertise their implementation and version](/quest/m1/peer-version.md):
+Decided with the maintainer on 2026-10-22, alongside the core work that added the
+SETUP Implementation parameter, `moq_net::IMPLEMENTATION`, and moq-ffi's default token:
 
 - moq-ffi's client and server config gain an `implementation` prefix: the
   caller's own product tokens, which moq-ffi joins ahead of its default
@@ -32,7 +32,3 @@ Decided with the maintainer on 2026-10-22, alongside
 Tests: each binding's existing connect test asserts the advertised value
 starts with its own token, read back through the relay or a local server's
 peer accessor.
-
-## Required
-
-- [Peers advertise their implementation and version](/quest/m1/peer-version.md) - the SETUP parameter, the moq-net field, and moq-ffi's default token

@@ -15,8 +15,8 @@ import * as Extensions from "./extensions.ts";
  * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
  * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
  * extension), its Hop ID (see the MoQ Cluster extension), and whether MoQ Auth and MoQ Epoch
- * are negotiated, and the implementation it advertised. We declare our Hop ID on every session, and Solicit, Auth, and Epoch unless
- * `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * are negotiated, plus the implementation it advertised. We declare our Hop ID on every
+ * session, and Solicit, Auth, and Epoch unless `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
  * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
  * the advertisements that already flowed through us.
  */
