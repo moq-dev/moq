@@ -1,7 +1,7 @@
 import type { Effect } from "@moq/signals";
+import { controlButton } from "@moq/ui";
 import type MoqWatch from "../../element";
 import { captions as captionsIcon } from "../icons";
-import { controlButton } from "./button";
 
 /**
  * CC button toggling captions on and off.

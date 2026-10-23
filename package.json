@@ -51,6 +51,7 @@
 		"js/publish",
 		"js/room",
 		"js/signals",
+		"js/ui",
 		"js/wasm",
 		"demo/boy",
 		"demo/web",

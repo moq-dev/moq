@@ -1,9 +1,9 @@
 import { Milli, Nano, now } from "@moq/clock";
 import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
+import { graph } from "@moq/ui";
 import type MoqPublish from "../../element";
 import { formatBitrate, formatFps, formatHz } from "../format";
-import { graph } from "../graph";
 import { audio as audioIcon, icon, video as videoIcon, wifi as wifiIcon } from "../icons";
 
 const POLL = Nano.fromMilli(Milli(250));
