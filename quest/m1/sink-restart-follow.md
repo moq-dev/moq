@@ -16,8 +16,7 @@ route dies, since its subscriptions then end with an error.
 
 Decided with the maintainer on 2026-10-20: widened from the server and push
 sinks to every moq-cli and moq-gst reader. Following a catalog's references
-to other broadcasts is [moqsrc sibling follow](/quest/m0/broadcast-epoch/moqsrc-sibling-follow.md)
-for `moqsrc`, through `moq_mux::Source::follow`;
+to other broadcasts landed for `moqsrc` through `moq_mux::Source::follow`;
 `moq play` resolves a reference once with `Source::resolve`, which waits for
 a sibling's first announcement and keeps it.
 

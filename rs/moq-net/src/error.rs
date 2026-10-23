@@ -38,9 +38,9 @@ pub enum SessionError {
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
 
-	/// The peer went past what the session allows: a request ID at or past the
-	/// MAX_REQUEST_ID we advertised (moq-transport drafts 14 to 16), or more announcements,
-	/// subscriptions, or FETCH requests than its `crate::session::Limits`.
+	/// The peer went past what the session allows: more announcements than its
+	/// `crate::session::Limits`, or on moq-transport drafts 14 to 16, a request ID at or past
+	/// the MAX_REQUEST_ID we advertised or more live requests than the window.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -447,8 +447,8 @@ pub enum Error {
 	#[error("too many parameters")]
 	TooManyParameters,
 
-	/// The peer already holds as many FETCH requests, announcements, or subscriptions as this
-	/// session allows (see `crate::session::Limits`).
+	/// The peer went past this session's `crate::session::Limits`: too many announcements, or
+	/// too many requests on moq-transport drafts 14 to 16.
 	#[error("too many requests")]
 	TooManyRequests,
 

@@ -759,9 +759,9 @@ impl Drop for Withdrawing {
 /// Bounds on what one peer can make a session hold, where its transport does not already.
 ///
 /// Each moq-lite request, and each moq-transport request from draft 17 on, holds a stream
-/// of its own, so the transport's stream credit bounds those. A peer past a bound here loses
-/// the session, closed with `TOO_MANY_REQUESTS`. The stats sessions rows report announcement
-/// and subscription peaks.
+/// of its own, so the transport's stream credit bounds those. A peer that announces past
+/// `announces`, or overruns the drafts 14 to 16 request window, loses the session, closed with
+/// `TOO_MANY_REQUESTS`. The stats sessions rows report announcement and subscription peaks.
 ///
 /// ```
 /// let mut limits = moq_net::session::Limits::default();
@@ -826,6 +826,12 @@ impl Slots {
 		stats.track_held(cap, &self.live);
 		self.stats = Some((stats.clone(), cap));
 		self
+	}
+
+	/// How many more slots may be taken right now.
+	pub(crate) fn available(&self) -> usize {
+		self.max
+			.saturating_sub(self.live.load(std::sync::atomic::Ordering::Acquire))
 	}
 
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.

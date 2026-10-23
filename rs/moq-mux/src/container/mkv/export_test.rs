@@ -756,6 +756,115 @@ async fn chunk_now(exporter: &mut crate::container::mkv::Export<crate::catalog::
 		.expect("expected a chunk")
 }
 
+/// Every chunk the exporter can produce without waiting for more input, or its error.
+async fn drain_now(exporter: &mut crate::container::mkv::Export<crate::catalog::Consumer>) -> crate::Result<Vec<u8>> {
+	let mut out = Vec::new();
+	while let Ok(next) = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next()).await {
+		match next? {
+			Some(chunk) => out.extend_from_slice(&chunk),
+			None => break,
+		}
+	}
+	Ok(out)
+}
+
+/// A rendition the catalog moves to another track, in its broadcast or a sibling one, writes
+/// that track's media from then on under the track number the header declared, and none of
+/// the track it left.
+#[tokio::test(start_paused = true)]
+async fn a_moved_rendition_continues_on_its_new_track() {
+	use crate::container::test_util::{Moving, marked_frame, marks};
+
+	for (track, broadcast) in [("b", None), ("a", Some("other"))] {
+		let mut moving = Moving::new();
+		let mut exporter = crate::container::mkv::Export::new(moving.source().await, moving.catalog_stream().await);
+		let mut out = Vec::new();
+		for i in 0..45 {
+			moving.a.write(marked_frame(i, 0xa1)).unwrap();
+			out.extend(drain_now(&mut exporter).await.unwrap());
+		}
+
+		moving.point(track, broadcast, SPS);
+		out.extend(drain_now(&mut exporter).await.unwrap());
+		let next = match broadcast {
+			None => &mut moving.b,
+			Some(_) => &mut moving.other,
+		};
+		for i in 45..120 {
+			moving.a.write(marked_frame(i, 0xa2)).unwrap();
+			if i >= 60 {
+				next.write(marked_frame(i, 0xb1)).unwrap();
+			}
+			out.extend(drain_now(&mut exporter).await.unwrap());
+		}
+
+		let expected: Vec<u8> = [vec![0xa1; 45], vec![0xb1; 30]].concat();
+		assert_eq!(marks(&out), expected, "moved to {track} in {broadcast:?}");
+		let numbers: std::collections::HashSet<u64> = WebmIterator::new(&mut Cursor::new(out), &[])
+			.filter_map(|tag| match tag {
+				Ok(MatroskaSpec::SimpleBlock(data)) => Some(SimpleBlock::try_from(&data).unwrap().track),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(numbers.len(), 1, "every block is written under the declared track");
+	}
+}
+
+/// The header's TrackEntry carries the rendition's first avcC, which a move to a track
+/// described by another SPS cannot change mid-file. It fails before writing any of that track.
+#[tokio::test(start_paused = true)]
+async fn a_rendition_moved_to_another_codec_configuration_fails() {
+	use crate::container::test_util::{Moving, marked_frame, marks};
+
+	let mut moving = Moving::new();
+	let mut exporter = crate::container::mkv::Export::new(moving.source().await, moving.catalog_stream().await);
+	let mut out = Vec::new();
+	for i in 0..30 {
+		moving.a.write(marked_frame(i, 0xa1)).unwrap();
+		out.extend(drain_now(&mut exporter).await.unwrap());
+	}
+
+	moving.point("b", None, crate::container::test_util::Moving::MAIN_SPS);
+	out.extend(drain_now(&mut exporter).await.unwrap());
+	moving.b.write(marked_frame(30, 0xb1)).unwrap();
+	let err = drain_now(&mut exporter).await.unwrap_err();
+	assert!(
+		matches!(&err, crate::Error::Mkv(crate::container::mkv::Error::TrackChanged(name)) if name == Moving::RENDITION),
+		"{err:?}"
+	);
+	assert!(!marks(&out).contains(&0xb1));
+}
+
+/// A move to a CMAF track is refused like a CMAF rendition listed from the start.
+#[tokio::test(start_paused = true)]
+async fn a_rendition_moved_to_a_cmaf_track_fails() {
+	use crate::container::test_util::{Moving, marked_frame};
+
+	let mut moving = Moving::new();
+	let mut exporter = crate::container::mkv::Export::new(moving.source().await, moving.catalog_stream().await);
+	for i in 0..30 {
+		moving.a.write(marked_frame(i, 0xa1)).unwrap();
+		drain_now(&mut exporter).await.unwrap();
+	}
+
+	let mut config = Moving::config("b", None, SPS);
+	config.container = hang::catalog::Container::Cmaf {
+		init: Bytes::from(vec![0u8; 32]),
+	};
+	moving
+		.catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(Moving::RENDITION.to_string(), config);
+	let err = drain_now(&mut exporter).await.unwrap_err();
+	assert!(
+		matches!(&err, crate::Error::Mkv(crate::container::mkv::Error::UnsupportedCmafTrack { name, .. }) if name == Moving::RENDITION),
+		"{err:?}"
+	);
+}
+
 /// SimpleBlock count of one cluster, parsed behind the file header.
 fn count_blocks(header: &[u8], cluster: &[u8]) -> usize {
 	let mut cursor = Cursor::new([header, cluster].concat());

@@ -1612,9 +1612,9 @@ pub struct Session {
 /// Which peak a [`Session::hold`] raises.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Cap {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Announces,
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Subscriptions,
 }
 
@@ -1767,7 +1767,7 @@ impl Session {
 	}
 
 	/// Count `live` as what this session holds against `cap`, so a tier change carries it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn track_held(&self, cap: Cap, live: &Arc<AtomicUsize>) {
 		let Some(inner) = &self.inner else { return };
 		let mut held = inner.held.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1778,7 +1778,7 @@ impl Session {
 
 	/// Record that this session holds `held` of what `cap` limits, raising that peak on its
 	/// tier and label.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn hold(&self, cap: Cap, held: u64) {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);

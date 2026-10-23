@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import compliance  # noqa: E402
+import compliance
 
 PMT_PID = 0x1000
 

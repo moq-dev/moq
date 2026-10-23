@@ -33,6 +33,7 @@ mod head_fetch;
 mod history_groups;
 mod idle_cancel_refetch;
 mod idle_session;
+mod ietf_conformance;
 mod late_lower_group;
 mod lazy_discovery;
 mod mesh_withdraw;

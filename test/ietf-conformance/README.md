@@ -1,0 +1,68 @@
+# IETF relay conformance
+
+Run `nix develop --command just test ietf-conformance` on Linux. The harness
+builds the Moxygen revision and matching Meta dependencies pinned in
+[`nix/moxygen-sources.nix`](../../nix/moxygen-sources.nix), then runs its
+`conformance_test.sh` through this checkout's relay. This is separate from the
+published-package smoke matrix.
+
+Sections 1-7 run on both shared drafts, 16 and 18, through one relay. Each cell
+runs 29 upstream SUBSCRIBE cases. A direct-origin control runs the same cases
+once per draft, separating suite or pin failures from relay behavior. FETCH is
+skipped using upstream's `SKIP_FETCH`; section 8 uses PUBLISH and is outside the
+relay's support. Cases using forwarding modes 1 or 2 send
+nonzero subgroups and are explicitly excluded. Modes 0 and 3 are retained.
+The staged script preserves every selected case's arguments and deadline.
+A client that crashes after printing SUCCESS still fails. Selection tests prove
+these exclusions and failure sensitivity, and refuse a changed script anchor.
+
+The publisher advertises the `moq-test-00` prefix. The client subscribes to
+16-field namespaces below it. Mock-clock integration tests in
+[`ietf_conformance.rs`](../../rs/moq-net/tests/integration/ietf_conformance.rs)
+prove this routing path on both drafts, through one relay and through two
+relays joined with native lite-07. The live harness waits for that prefix at the
+relay before starting
+cases and rejects upstream publisher reconnects, so a recovered session cannot
+hide a failure.
+
+The nightly workflow runs this recipe. `MOQ_TEST_KEEP=1` retains the upstream
+reports, client and server logs, relay logs, configs, and endpoints. All children
+and port reservations belong to the shared harness and are reaped on exit.
+The pinned C++ build is opt-in under `legacyPackages.<system>.moxygen`; ordinary
+checks and development shells do not build it. Updating the pins also requires
+reviewing the selected cases, rebasing the profile patch, and rerunning the full
+matrix. The build recipe adds the client's missing Folly ManualExecutor link
+dependency and patches dependency script interpreters for Nix.
+
+## Conformance profile
+
+The client runs under a relay conformance profile, applied by
+[`nix/moxygen-profile.patch`](../../nix/moxygen-profile.patch). The test origin
+alternates priority by group and never ends the track in-band. This relay ranks
+egress by the track's priority and keeps END\_OF\_TRACK, as decided in
+[the runner decision](https://github.com/moq-dev/moq/blob/5f09861634b793056f840408a589f89a8c464fb0/quest/m1/interop-coverage/runner-cases.md).
+The profile therefore accepts:
+
+- the track's advertised publisher priority (200) on any group, besides the
+  per-group value;
+- one END\_OF\_TRACK on the subscription, directly after the last object,
+  either inline or opening the next group. That terminal stream skips the
+  END\_OF\_GROUP header expectation, since it ends no payload group.
+
+Every other check is upstream's: forwarded object IDs, properties, payloads,
+END\_OF\_GROUP status objects and header bits, and FIRST\_OBJECT. Any other
+priority, a second END\_OF\_TRACK, or one anywhere else still fails.
+
+Measured over six consecutive runs:
+
+| Draft | Direct origin | One relay |
+| --- | --- | --- |
+| 16 | 29 pass | 29 pass |
+| 18 | 29 pass | 29 pass |
+
+A two-relay cell is not run yet. The edge needs metadata from TRACK\_STATUS
+before subscribing, and the pinned MoQTestPublisher inherits NOT\_SUPPORTED for
+that request, so every case fails before media. The relay preserves that
+refusal, rather than widening query-only demand into SUBSCRIBE. The
+[passthrough quest](../../quest/m1/ietf-extension/README.md) tracks adding the
+cell back once a pinned publisher answers it.

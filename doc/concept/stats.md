@@ -32,8 +32,8 @@ with unavailable transport measurements absent. Missing rendition counters
 mean zero, and JavaScript preserves omission. A known-zero gauge or transport
 measurement stays explicit, so it remains distinct from unavailable.
 
-`moq import --stats` and `moq export --echo` report them from the
-[CLI](/bin/cli#stats-and-feedback). An import counts the frames and payload
+`moq import --report` and `moq export --echo` report them from the
+[CLI](/bin/cli#reports-and-feedback). An import counts the frames and payload
 bytes it writes to each rendition, and video keyframes; an export counts what
 it reads and records its newest arrival. See the
 [hang draft](/draft/moq-hang#media-stats) for track framing, field units, and
@@ -153,9 +153,9 @@ comes in two encodings:
 | `totals.json` | tier | [Totals](#totals) for the whole group |
 | `[<tier>/]publisher.json` | broadcast path | [Traffic](#traffic) this node sent (egress) |
 | `[<tier>/]subscriber.json` | broadcast path | [Traffic](#traffic) this node received (ingress) |
-| `[<tier>/]sessions.json` | stats label | [Sessions](#sessions) connected now |
-| `[<label>/]presence.json` | tier | [Sessions](#sessions) under one stats label |
-| `[<path>/]traffic.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
+| `[<tier>/]sessions.json` | stats label | [Presence](#presence): sessions connected now |
+| `[<label>/]presence.json` | tier | [Presence](#presence): sessions under one stats label |
+| `[<path>/]prefix.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
 
 The default tier's per-tier tracks are unprefixed. A named tier prefixes each
 name with its label and a slash: tier `region/sjc` publishes
@@ -173,7 +173,7 @@ for any stats label in the group (`presence.json` for the empty label). The rela
 answers with the label's current sessions and counts from there, holding a label
 with no sessions open at `{}`, and stops producing it once the last subscriber
 leaves. A prefix track works the same way for any broadcast prefix in the
-group: ask for `<path>/traffic.json` (`traffic.json` for the empty prefix). A
+group: ask for `<path>/prefix.json` (`prefix.json` for the empty prefix). A
 label or prefix outside the group, or any other name, is refused.
 
 ## Frames
@@ -186,7 +186,7 @@ writes only when a track's frame changed, so silence means nothing moved, not
 that the producer is gone. The track ends when the producer does, or at
 depth 1 or more when its group's broadcast is unannounced; the group may
 return later as a new broadcast. A frame too large to cache (32 MB) ends its
-track with a `FrameTooLarge` error. The `.z` flavor meets the same limit by its
+track with a `FRAME_TOO_LARGE` error. The `.z` flavor meets the same limit by its
 uncompressed size, since a reader inflates the whole group.
 
 ### Totals
@@ -200,7 +200,7 @@ uncompressed size, since a reader inflates the whole group.
 
 Each tier that recorded anything in the group's epoch, with its egress
 (`publisher`) and ingress (`subscriber`) [Traffic](#traffic) and its
-[Sessions](#sessions), summed over every broadcast and stats label in the group.
+[Presence](#presence), summed over every broadcast and stats label in the group.
 Unlike the per-path tracks, an entry that ends stays counted, so the next
 frame always carries everything since the epoch began: a reader that misses
 frames loses nothing while the group stays announced. Billing reads this
@@ -220,7 +220,7 @@ zero; the totals keep what it counted. A sessions entry appears while a
 session or HTTP request holds its context and on the tick its last one ends. While a group
 lingers empty, these tracks hold `{}`.
 
-### Presence
+### Per-label tracks
 
 A presence track's entries are cumulative from when it was first held: a
 session that ends stays counted, and so does every one after it, while
@@ -300,7 +300,7 @@ The last six fields are legacy spellings of the `*_started` and `*_ended`
 counters, still written so an older consumer reads a newer relay. A reader
 should prefer the canonical name and fall back to the legacy one.
 
-### Sessions
+### Presence
 
 ```json
 {

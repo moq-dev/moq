@@ -798,7 +798,10 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 /// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
 /// declare our identity and (client-only) what this link costs to cross. `extensions`
 /// names the other extensions we offer.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "private plumbing; a single-use argument struct would only rename the parameters"
+)]
 async fn run_setup<S: crate::transport::poll::Session>(
 	mut session: S,
 	version: Version,
