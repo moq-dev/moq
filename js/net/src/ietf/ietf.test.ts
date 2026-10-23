@@ -455,6 +455,20 @@ test("PublishNamespaceDone: round trip", async () => {
 	expect(decoded.trackNamespace).toBe("old/stream" as Path.Valid);
 });
 
+test("UnsubscribeNamespace: names the prefix on draft 14 and the request on draft 15", async () => {
+	const msg = new SubscribeNamespace.UnsubscribeNamespace({ prefix: Path.from("cam/front"), requestId: 6n });
+
+	const v14 = await encodeVersioned(msg, Version.DRAFT_14);
+	const named = await decodeVersioned(v14, SubscribeNamespace.UnsubscribeNamespace.decode, Version.DRAFT_14);
+	expect(named.prefix).toBe("cam/front" as Path.Valid);
+
+	const v15 = await encodeVersioned(msg, Version.DRAFT_15);
+	const numbered = await decodeVersioned(v15, SubscribeNamespace.UnsubscribeNamespace.decode, Version.DRAFT_15);
+	expect(numbered.requestId).toBe(6n);
+
+	await expect((() => encodeVersioned(msg, Version.DRAFT_16))()).rejects.toThrow(/draft-14\/15 only/);
+});
+
 test("PublishNamespaceCancel: round trip", async () => {
 	const msg = new Announce.PublishNamespaceCancel({
 		trackNamespace: Path.from("canceled"),
