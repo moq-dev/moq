@@ -490,7 +490,7 @@ checks to hard.
 Two exporters of the same broadcast must converge after acquisition. `--pair`
 starts the second subscriber five seconds late and checks table placement on the
 shared PCR timeline. This measures table alignment; it does not establish packet
-identity, `--sync`, or ST 2022-7 compatibility.
+identity or ST 2022-7 compatibility.
 
 ```bash
 just test ts --pair

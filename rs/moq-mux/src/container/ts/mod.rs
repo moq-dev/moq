@@ -29,7 +29,6 @@ mod export;
 mod follower;
 mod health;
 mod import;
-mod lane;
 mod mux_rate;
 mod programs;
 mod psi;

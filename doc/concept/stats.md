@@ -96,8 +96,6 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 | `offset` | Gauge, milliseconds: how far the output clock sits from the source's plus the delay. Positive holds frames longer than the delay. The clock pulls it shut over ten minutes. |
 | `drift` | Gauge, parts per million: the source clock's rate against ours, positive running fast. |
 | `outOfTolerance` | Measurements that found the source clock past the 30 ppm ISO/IEC 13818-1 allows, which the output cannot follow. |
-| `overruns` | `export ts --sync` only: groups that began behind the end of the one before on their PID, where legs can differ until the lane catches up. |
-| `late` | `export ts --sync` only: packets dropped for reaching their slot after it went out, leaving stuffing. |
 
 ## Broadcasts
 

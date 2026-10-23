@@ -132,9 +132,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Watch decode gate](/quest/m2/watch-decode-gate.md) - video lookahead stays encoded until it is near presentation, like audio
 - [Drop announce="never"](/quest/m2/publish-announce-never.md) - `@moq/publish` offers only announce modes a watcher can reach
-- [Deterministic H.265 TS legs](/quest/m2/ts-hitless-h265.md) - H.265's buffering period gets the same group anchor as H.264
-- [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - two legs send identical RTP packets, headers included, so an ST 2022-7 receiver can merge them
-- [Old tail across a restart](/quest/m2/ts-sync-restart-tail.md) - both `--sync` legs send the old timeline's tail up to a restart, so an ST 2022-7 merge has no hole there
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
