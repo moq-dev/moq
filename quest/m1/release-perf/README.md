@@ -1,4 +1,4 @@
-# Main is no slower than release
+# [M] Main is no slower than release
 
 ## Goal
 
