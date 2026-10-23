@@ -1614,7 +1614,7 @@ impl TableCursor {
 	fn best<'a>(&self, candidates: impl Iterator<Item = &'a RouteEntry>) -> Option<&'a RouteEntry> {
 		candidates
 			.filter(|entry| self.visible(entry))
-			.min_by_key(|entry| (Reverse(entry.prefix.len()), route_order(&entry.prefix, *entry)))
+			.min_by_key(|entry| (Reverse(entry.prefix.len()), route_order(&entry.prefix, entry)))
 	}
 
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
