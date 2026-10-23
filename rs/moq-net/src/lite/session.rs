@@ -351,7 +351,7 @@ where
 			started: false,
 			_setup: setup_token,
 		},
-		local_close: Default::default(),
+		closing: Default::default(),
 		setup: version
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version, stats.clone())),
@@ -377,7 +377,7 @@ where
 pub(crate) struct Driver<S: crate::transport::poll::Session> {
 	/// Presenting our tokens, one AUTH stream each.
 	auth: Present<S>,
-	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	pub(crate) closing: std::sync::Arc<crate::session::Closing>,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
 	setup: Option<SendSetup<S>>,
@@ -406,6 +406,7 @@ where
 				Ok(()) => Error::Cancel,
 				Err(err) => err.clone(),
 			});
+			self.closing.cause(res.as_ref().err().unwrap_or(&Error::Cancel));
 			match &res {
 				Err(Error::Transport(_) | Error::IdleTimeout) => {
 					tracing::info!("session terminated");
@@ -423,7 +424,7 @@ where
 					self.session.close(SessionError::Cancel.to_code(), "");
 				}
 			}
-			if self.local_close.load(std::sync::atomic::Ordering::Relaxed) {
+			if self.closing.is_local() {
 				self.subscriber.close();
 				return Poll::Ready(res);
 			}

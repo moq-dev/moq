@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A clean session close is `Cancelled`
+
+A session closed cleanly by the peer now ends with `MoqError.Cancelled`, like one this side closed, instead of `MoqError.Protocol` with a session-scoped `MoqProtocolKind.CANCEL`.
+Drop any check for the session-scoped cancel kind.
+
 ### A client asks only about what it watches (#6165)
 
 On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announced_broadcast()`, instead of under its whole scope at connect.

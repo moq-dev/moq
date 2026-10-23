@@ -862,16 +862,21 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 	if let Some(limits) = serve.cluster.quic_limits(&lease) {
 		conn.set_limits(limits)?;
 	}
-	let mut request = request
-		.with_stats(stats.clone())
-		.with_limits(serve.cluster.limits(&lease));
+	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}
 	if let Some(publisher) = publisher {
 		request = request.with_subscriber(publisher);
 	}
-	let lease = lease.preparing(request.auth(), request.role())?;
+	// A grant that no longer holds is refused, so the session records why it ended.
+	let lease = match lease.preparing(request.auth(), request.role()) {
+		Ok(lease) => lease,
+		Err(err) => {
+			request.close(err.clone());
+			return Err(err.into());
+		}
+	};
 	let serving = serve.shutdown.serve();
 	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
 	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the
@@ -880,9 +885,7 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 	let expired = std::pin::pin!(lifecycle.shared(&serve.tokio, async move { shutdown.expired().await }));
 	let reply = std::pin::pin!(deadline.bound(request.ok()));
 	let (session, driver) = match futures::future::select(reply, expired).await {
-		futures::future::Either::Left((reply, _)) => {
-			reply.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?
-		}
+		futures::future::Either::Left((reply, _)) => reply?,
 		futures::future::Either::Right(_) => anyhow::bail!("the SETUP reply was still pending at the drain deadline"),
 	};
 	let driver_handle = handle.clone();

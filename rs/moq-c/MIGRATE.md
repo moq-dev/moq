@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A clean session close carries no protocol error
+
+A session closed cleanly by the peer no longer reports a session-scoped `MOQ_PROTOCOL_KIND_CANCEL` from `moq_error_protocol`, matching one this side closed.
+Treat `MOQ_ERROR_MOQ` without protocol details as the session's end.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `moq_json_snapshot_config.delta_ratio` is replaced by `bool deltas`.

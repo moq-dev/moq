@@ -5,6 +5,13 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `sessions_failed` counts how the session ended
+
+`sessions_failed` now comes from how each session itself ended.
+A grant revoked or expiring after its session already closed no longer counts, and neither does a SETUP reply abandoned at the handshake deadline.
+A cluster link fails only if the last session it dialed did, rather than when its reconnect loop gives up.
+A grant the decider revokes with `shutdown` closes its session cleanly instead of as unauthorized, and a grant that fails its re-check at SETUP is rejected as unauthorized instead of closed cleanly.
+
 ### `receive_window` has a floor (#5878)
 
 The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.

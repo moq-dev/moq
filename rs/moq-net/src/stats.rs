@@ -1702,16 +1702,15 @@ impl Session {
 		Wire { inner: Some(source) }
 	}
 
-	/// Record the first abnormal end on this connected session, shared across clones.
-	pub fn fail(&self, kind: Failure) {
+	/// Record how a transport session under this connected context ended, shared across
+	/// clones. A reconnect's later end replaces an earlier one, so the context fails only
+	/// if its last session did.
+	pub(crate) fn end(&self, err: &crate::Error) {
 		let Some(inner) = &self.inner else { return };
 		if !inner.connected {
 			return;
 		}
-		let mut current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
-		if current.failure.is_none() {
-			current.failure = Some(kind);
-		}
+		inner.current.lock().unwrap_or_else(PoisonError::into_inner).failure = Failure::of(err);
 	}
 
 	/// Record later traffic and session presence under `(tier, label)`; a request stays counted where admitted.
@@ -2275,8 +2274,9 @@ mod tests {
 		let session = handle.session("root");
 		let clone = session.clone();
 		session.retag(Tier::new("next"), "root");
-		clone.fail(Failure::IdleTimeout);
-		session.fail(Failure::Application);
+		// A reconnect's later end replaces an earlier one.
+		clone.end(&crate::Error::Transport("lost".into()));
+		session.end(&crate::Error::IdleTimeout);
 		drop(clone);
 		drop(session);
 		let before = stats.snapshot();
@@ -2295,14 +2295,17 @@ mod tests {
 			.unwrap()
 			.1;
 		assert_eq!(next.sessions_failed.idle_timeout, 1);
-		assert_eq!(next.sessions_failed.application, 0);
+		assert_eq!(next.sessions_failed.transport, 0);
 		assert_eq!(next.active(), 0);
 		drain(&stats);
 		let after = stats.snapshot();
 		assert_eq!(before.sessions(), after.sessions(), "retirement keeps outcomes once");
 		let disabled = Registry::disabled();
 		disabled.tier(Tier::default()).refuse("root", Refusal::Refused);
-		disabled.tier(Tier::default()).session("root").fail(Failure::Expired);
+		disabled
+			.tier(Tier::default())
+			.session("root")
+			.end(&crate::Error::Expired);
 		assert!(disabled.snapshot().sessions().is_empty());
 	}
 

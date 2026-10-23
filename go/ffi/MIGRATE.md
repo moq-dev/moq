@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A clean session close is `Cancelled`
+
+A session closed cleanly by the peer now ends with `ErrMoqErrorCancelled`, like one this side closed, instead of a protocol error with a session-scoped `MoqProtocolKindCancel`.
+Drop any check for the session-scoped cancel kind.
+
 ### Priorities are signed (#6142)
 
 `MoqTrackInfo.Priority`, `MoqSubscription.Priority`, `MoqFetchGroupOptions.Priority`, and `MoqGroupRequest.Priority()` are `int8`, higher first, and 0 is the unset midpoint.

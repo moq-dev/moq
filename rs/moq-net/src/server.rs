@@ -96,7 +96,8 @@ impl Server {
 
 	/// Attach a per-connection [`stats::Session`] context. The session's publish
 	/// (egress) and subscribe (ingress) origin handles are tagged with it, so all
-	/// traffic counters are attributed through the model for this session's lifetime.
+	/// traffic counters are attributed through the model for this session's lifetime,
+	/// and how the session ended is recorded there.
 	/// Pass [`stats::Session::default`] (a no-op context) to opt out.
 	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.stats = stats;
@@ -936,7 +937,8 @@ where
 			handshake,
 		} = self.inner.take().expect("request already responded");
 
-		match handshake {
+		let stats = server.stats.clone();
+		let res = match handshake {
 			PausedHandshake::LiteBare { session, version } => {
 				server.start_lite(runtime, session, version, None, peer_hop, auth)
 			}
@@ -949,7 +951,11 @@ where
 				server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
 			}
 			PausedHandshake::Boxed(paused) => paused.ok(server, runtime, peer_hop, auth).await,
+		};
+		if let Err(err) = &res {
+			stats.end(err);
 		}
+		res
 	}
 
 	/// Reject the session, closing the transport with `err`'s wire code.
@@ -961,6 +967,7 @@ where
 
 impl<S: crate::transport::poll::Session> RequestInner<S> {
 	fn close(self, err: Error) {
+		self.server.stats.end(&err);
 		let (mut session, version) = match self.handshake {
 			PausedHandshake::LiteBare { session, version } => (session, version),
 			PausedHandshake::LiteSetup { session, version, .. } => (session, version),

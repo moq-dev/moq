@@ -535,6 +535,7 @@ mod tests {
 			let request = moq_net::Server::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
+				.with_stats(lease.stats.clone())
 				.accept_request(now, server)
 				.await
 				.unwrap();
@@ -628,6 +629,7 @@ mod tests {
 			let request = moq_net::Server::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
+				.with_stats(stats.clone())
 				.accept_request(now, server)
 				.await
 				.unwrap();
@@ -698,65 +700,46 @@ mod tests {
 		let _ = supervising.await;
 	}
 
-	/// A union that ended before the supervisor saw it still fails a racing clean close.
+	/// How a lease ends decides how its session's stats count the end: an expired grant as
+	/// `expired`, a shutdown as clean, and any other reason as `application`.
 	#[tokio::test(start_paused = true)]
-	async fn an_unobserved_union_end_fails_a_racing_clean_close() {
-		let (auth, mut admissions) = super::super::Auth::embedded("test");
-		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
-		let request = auth.request(moq_auth::Transport::Quic, "/room");
-		let (lease, ()) = tokio::join!(auth.admit(request), async {
-			admissions.next().await.unwrap().grant(consumer);
-		});
-		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
-		let (client, session, lease) = connect(lease.unwrap().with_stats(stats.clone())).await;
-
-		producer.revoke(lease::Reason::Refused);
-		lease.close_session(&moq_net::Error::Cancel, Default::default());
-		drop((session, stats));
-		let presence = registry.snapshot().sessions()[0].1;
-		assert_eq!(presence.sessions_ended, 1);
-		assert_eq!(presence.sessions_failed.application, 1);
-		client.abort(moq_net::Error::Cancel);
+	async fn a_lease_end_counts_by_its_reason() {
+		use moq_net::stats::Failure;
+		for (reason, failed) in [
+			(lease::Reason::Expired, Some(Failure::Expired)),
+			(lease::Reason::Shutdown, None),
+			(lease::Reason::Refused, Some(Failure::Application)),
+		] {
+			let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+			let registry = moq_net::stats::Registry::new(Default::default());
+			let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
+			let lease = super::super::Lease::new("/room", consumer).with_stats(stats);
+			let (client, supervising) = sessions(lease).await;
+			producer.revoke(reason.clone());
+			supervising.await.unwrap();
+			client.closed().await;
+			drop(client);
+			// The server's driver releases the stats once its transport has closed.
+			tokio::time::sleep(Duration::from_secs(1)).await;
+			let presence = registry.snapshot().sessions()[0].1;
+			assert_eq!(presence.sessions_ended, 1, "{reason}");
+			for kind in Failure::ALL {
+				let expected = u64::from(failed == Some(*kind));
+				assert_eq!(presence.sessions_failed.count(*kind), expected, "{reason}: {kind:?}");
+			}
+		}
 	}
 
-	/// The relay's own reason for ending an unobserved union fails a racing clean close too.
+	/// A replacement keeps the session alive past the first credential's expiry.
 	#[tokio::test(start_paused = true)]
-	async fn an_unobserved_cap_fails_a_racing_clean_close() {
+	async fn a_superseded_expiry_does_not_end_the_session() {
 		let (auth, mut admissions) = super::super::Auth::embedded("test");
 		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
 		let request = auth.request(moq_auth::Transport::Quic, "/room");
 		let (lease, ()) = tokio::join!(auth.admit(request), async {
 			admissions.next().await.unwrap().grant(consumer);
 		});
-		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
-		let (client, session, lease) = connect(lease.unwrap().with_stats(stats.clone())).await;
-
-		let mut capped = grant("a/**", 3000);
-		capped.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
-		producer.update(capped);
-		lease.close_session(&moq_net::Error::Cancel, Default::default());
-		drop((session, stats));
-		let presence = registry.snapshot().sessions()[0].1;
-		assert_eq!(presence.sessions_ended, 1);
-		assert_eq!(presence.sessions_failed.application, 1);
-		client.abort(moq_net::Error::Cancel);
-	}
-
-	/// A replacement keeps the session alive past the first credential's expiry, so a
-	/// later clean close is not an expired session.
-	#[tokio::test(start_paused = true)]
-	async fn a_superseded_expiry_does_not_fail_a_clean_close() {
-		let (auth, mut admissions) = super::super::Auth::embedded("test");
-		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
-		let request = auth.request(moq_auth::Transport::Quic, "/room");
-		let (lease, ()) = tokio::join!(auth.admit(request), async {
-			admissions.next().await.unwrap().grant(consumer);
-		});
-		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
-		let (client, session, mut lease) = connect(lease.unwrap().with_stats(stats.clone())).await;
+		let (client, session, mut lease) = connect(lease.unwrap()).await;
 		let (close, closing) = tokio::sync::oneshot::channel::<()>();
 		let server = tokio::spawn(async move {
 			tokio::select! {
@@ -781,10 +764,7 @@ mod tests {
 
 		close.send(()).unwrap();
 		server.await.unwrap();
-		drop((session, stats));
-		let presence = registry.snapshot().sessions()[0].1;
-		assert_eq!(presence.sessions_ended, 1);
-		assert_eq!(presence.sessions_failed, moq_net::stats::Failures::default());
+		drop(session);
 		client.abort(moq_net::Error::Cancel);
 	}
 

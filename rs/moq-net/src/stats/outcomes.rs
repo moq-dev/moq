@@ -143,6 +143,19 @@ pub enum Failure {
 }
 
 impl Failure {
+	/// How a session that ended with `err` failed, or `None` for a clean end. A drain
+	/// that reached its deadline is the draining side ending it on purpose.
+	pub(crate) fn of(err: &crate::Error) -> Option<Self> {
+		use crate::{Error, SessionError};
+		match err {
+			Error::Cancel | Error::GoawayTimeout | Error::Session(SessionError::GoawayTimeout) => None,
+			Error::IdleTimeout => Some(Self::IdleTimeout),
+			Error::Transport(_) => Some(Self::Transport),
+			Error::Expired | Error::Session(SessionError::Expired) => Some(Self::Expired),
+			_ => Some(Self::Application),
+		}
+	}
+
 	/// Every currently defined kind, in display order.
 	pub const ALL: &'static [Self] = &[Self::IdleTimeout, Self::Transport, Self::Application, Self::Expired];
 	/// The stable stats and metrics name.

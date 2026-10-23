@@ -28,7 +28,3 @@ decided 2026-10-22 (maintainer): keep the removal and construct
 `StreamError::Session(SessionError::Cancel)` there directly. Removing a
 public variant is a breaking Rust change: add the `rs/moq-net/MIGRATE.md`
 entry. Wire: none.
-
-## Related
-
-- [One clean close](/quest/m1/api-audit/clean-close.md) - collapses the clean session-close spellings this removal touches

@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A session records how it ended
+
+`stats::Session::fail` is gone.
+A session records its own end in the `stats::Session` it was given (`Client::with_stats`, `Server::with_stats`, `server::Handshake::with_stats`), including a SETUP reply that failed and a `Handshake::close` rejection.
+Delete calls to `fail`, and abort the session with the error that should count instead: `Error::Expired` counts as `expired`, a clean close or a reached GOAWAY deadline as no failure, and anything else by its kind.
+A context shared across reconnects fails only if its last session did.
+
+`Session::closed()`, and the error from `Session::close()`, is `Error::Cancel` for every clean close by either side, where a peer's was `Error::Session(SessionError::Cancel)`.
+When the transport reports only that this side closed it, the error is this side's reason, the `abort` error or the protocol failure, where it was a clean close.
+Match `Error::Cancel` alone for a clean end.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.

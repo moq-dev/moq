@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A clean session close is `Cancelled`
+
+A session closed cleanly by the peer now ends with `Error.Cancelled`, which `is_shutdown` accepts, instead of `Error.Protocol` with a session-scoped cancel kind.
+Drop any check for that kind.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `SnapshotProducer(delta_ratio=...)` is replaced by `deltas: bool = True`.

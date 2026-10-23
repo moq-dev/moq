@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A clean session close is `Cancelled`
+
+A session closed cleanly by the peer now ends with the cancelled error, like one this side closed, instead of a protocol error with a session-scoped cancel kind.
+Drop any check for that kind.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `GroupRequest::priority()` returns one.

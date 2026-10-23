@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A clean session close is `ErrCancelled`
+
+A session closed cleanly by the peer now ends with `ErrCancelled`, which `IsShutdown` accepts, instead of a `ProtocolError` with a session-scoped `ProtocolKindCancel`.
+Drop any check for that kind.
+
 ### JSON snapshot `DeltaRatio` is `Deltas`
 
 `json.SnapshotOptions.DeltaRatio *uint32` and `json.DefaultDeltaRatio` are replaced by `Deltas *bool` (nil enables deltas).

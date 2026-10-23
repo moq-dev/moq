@@ -5,6 +5,12 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### A clean session close is `Cancelled`
+
+A session closed cleanly by the peer now ends with `MoqError::Cancelled`, like one this side closed, instead of `MoqError::Protocol` with a session-scoped `MoqProtocolKind::Cancel`.
+When this side aborted the session, it ends with that abort's error.
+Drop any check for the session-scoped `Cancel` kind.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `MoqJsonSnapshotConfig::delta_ratio` is replaced by `deltas: bool` (default `true`).

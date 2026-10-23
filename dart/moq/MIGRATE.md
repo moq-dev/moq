@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A clean session close is `CancelledMoqException`
+
+A session closed cleanly by the peer now ends with `CancelledMoqException`, like one this side closed, instead of a protocol exception with a session-scoped cancel kind.
+Drop any check for that kind.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio` is replaced by `bool deltas` (default `true`).

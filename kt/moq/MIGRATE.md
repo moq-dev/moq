@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A clean session close is `Cancelled`
+
+A session closed cleanly by the peer now ends with `MoqException.Cancelled`, which `isShutdown` accepts, instead of `MoqException.Protocol` with a session-scoped cancel kind.
+Drop any check for that kind.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio: UInt` is replaced by `deltas: Boolean` (default `true`).
