@@ -2450,6 +2450,93 @@ async fn aac_program_config_leads_a_packed_pes() {
 	}
 }
 
+/// A stream added mid-stream revises the tables off their cadence, and a receiver tunes in
+/// there too: each AAC PID's next PES after any PAT leads with its program config element, the
+/// one already open when the revision came included.
+#[tokio::test(start_paused = true)]
+async fn aac_program_config_follows_a_revision() {
+	let mut quad = vec![0x11, 0x80, 0x04, 0xC4, 0x04, 0x00, 0x21, 0x10, 0x0C];
+	quad.extend_from_slice(b"Lavc63.1.101");
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut add = |name: &str| {
+		let track = broadcast
+			.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 4);
+		cfg.container = Container::Legacy;
+		cfg.description = Some(Bytes::from(quad.clone()));
+		catalog.modify().unwrap().audio.renditions.insert(name.to_string(), cfg);
+		Producer::new(track, HangContainer::Legacy(Kind::Audio))
+	};
+	// 1,024 samples at 48 kHz, so the frames run on and share PESs, a few to each so one starts
+	// between the revision and the next repeat.
+	let write = |producer: &mut Producer<HangContainer>, offset: u64, frames: std::ops::Range<u64>| {
+		for i in frames {
+			producer
+				.write(Frame {
+					timestamp: Timestamp::from_micros(offset + i * 1_024 * 1_000_000 / 48_000).unwrap(),
+					duration: None,
+					payload: Bytes::from(vec![0x20; 400]),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+	};
+	let mut a = add("a.aac");
+	let mut export = open_export(crate::source::announced(&consumer).await)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	write(&mut a, 0, 0..58);
+	let mut frames = poll_frames(&mut export);
+	// The second stream joins 1.25 s in, halfway between table repeats.
+	let mut b = add("b.aac");
+	frames.extend(poll_frames(&mut export));
+	write(&mut a, 0, 58..96);
+	write(&mut b, 1_250_000, 0..40);
+	a.finish().unwrap();
+	b.finish().unwrap();
+	catalog.finish().unwrap();
+	frames.extend(drain_frames(&mut export).await);
+	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+
+	// Whether each PES start, per PID, is the first on its PID since a PAT, and leads with the element.
+	let mut tuned: std::collections::HashSet<u16> = Default::default();
+	let mut starts: Vec<(u16, bool, bool)> = Vec::new();
+	let mut reader = TsPacketReader::new(Cursor::new(&ts[..]));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		let pid = packet.header.pid.as_u16();
+		match packet.payload {
+			Some(TsPayload::Pat(_)) => tuned.clear(),
+			Some(TsPayload::PesStart(pes)) => {
+				let header = super::adts::Header::parse(&pes.data).unwrap();
+				// ID_PCE in the first three bits of the raw data block.
+				starts.push((pid, tuned.insert(pid), pes.data[header.header_len] >> 5 == 5));
+			}
+			_ => {}
+		}
+	}
+	assert_eq!(
+		starts
+			.iter()
+			.map(|(pid, ..)| pid)
+			.collect::<std::collections::HashSet<_>>()
+			.len(),
+		2
+	);
+	for (i, (pid, first, pce)) in starts.iter().enumerate() {
+		assert!(
+			!first || *pce,
+			"PES {i} on PID {pid}: the first since a PAT lacks the element"
+		);
+	}
+}
+
 /// GStreamer 1.28 `fdkaacenc` output, 48 kHz stereo, remuxed to FLV by ffmpeg 9.0.1. Its
 /// AudioSpecificConfig signals SBR (and PS for v2) explicitly: object type 5 or 29 over an LC core
 /// at 24 kHz, stereo for v1 and mono for v2. ADTS has two bits for the object type, so export

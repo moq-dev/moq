@@ -146,6 +146,8 @@ where
 	tables: Vec<u8>,
 	/// The program tables are due ahead of the next unit queued.
 	psi_due: bool,
+	/// The program tables changed, so the next frame muxed is a tune-in point that leads with them.
+	revised: bool,
 	/// The next continuity counter per PID, numbered as packets go out.
 	counters: HashMap<u16, u8>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
@@ -1394,6 +1396,7 @@ where
 			flagged: None,
 			tables: Vec::new(),
 			psi_due: false,
+			revised: false,
 			delay: Duration::ZERO,
 			jitter: jitter::Buffer::new(Duration::ZERO),
 			held: None,
@@ -1851,7 +1854,7 @@ where
 				// A revision is one boundary: the rate rides the next tables out.
 				false => {
 					self.mux_rate = mux_rate;
-					self.psi_due = true;
+					self.revised = true;
 				}
 			}
 		}
@@ -1946,9 +1949,14 @@ where
 			// on another stream, so the leaving cannot say which it was. The track's end does:
 			// a finish ends it cleanly, and a drop is the error the export reports. One the PMT
 			// does not list yet is read no further, so a publisher that never ends what it
-			// withdraws leaves nothing behind but what it already sent, which still goes out.
+			// withdraws leaves nothing behind but what it already sent, which still goes out. A
+			// name that returns before that is gone is the same stream, so it is read on.
 			for (name, track) in self.tracks.iter_mut() {
-				track.cataloged = locked || active.contains_key(name);
+				let cataloged = locked || active.contains_key(name);
+				if cataloged && !track.cataloged && !track.listed {
+					track.finished = false;
+				}
+				track.cataloged = cataloged;
 				if !track.cataloged && !track.listed && !track.finished {
 					track.release(name, &mut self.jitter, true)?;
 					track.finished = true;
@@ -2624,12 +2632,16 @@ where
 			Vec::new()
 		};
 
-		let program_number = self
-			.program
-			.as_ref()
-			.map(|s| s.program_number)
-			.filter(|&id| id != 0)
-			.unwrap_or(1);
+		// A revision stays on the program the PAT went out naming.
+		let program_number = match &self.psi {
+			Some(psi) => psi.pmt.program_number,
+			None => self
+				.program
+				.as_ref()
+				.map(|s| s.program_number)
+				.filter(|&id| id != 0)
+				.unwrap_or(1),
+		};
 		Ok(super::psi::Pmt {
 			program_number,
 			pcr_pid: Some(Pid::new(pcr_pid)?),
@@ -2638,7 +2650,7 @@ where
 		})
 	}
 
-	/// Rebuild the PMT from the listed tracks, due ahead of the next unit when it changed. The
+	/// Rebuild the PMT from the listed tracks, leading the next frame muxed when it changed. The
 	/// clock stays on its PID unless the stream carrying it retired. Under sync the tables
 	/// were laid once and never change.
 	fn revise(&mut self) -> anyhow::Result<()> {
@@ -2656,7 +2668,7 @@ where
 		let psi = self.psi.as_mut().expect("checked above");
 		if pmt != psi.pmt {
 			psi.pmt = pmt;
-			self.psi_due = true;
+			self.revised = true;
 		}
 		Ok(())
 	}
@@ -2708,6 +2720,7 @@ where
 						&& track.finished && track.pack.is_none()
 						&& track.parked.is_empty()
 						&& !self.jitter.holds(name.as_str())
+						&& self.held.as_ref().is_none_or(|held| held.track != **name)
 						&& !(track.listed && self.schedule.holds(track.pid))
 				})
 				.map(|(name, _)| name.clone())
@@ -2866,8 +2879,9 @@ where
 			..
 		} = queued;
 		let is_video = matches!(self.tracks.get(name).context("missing track")?.kind, Kind::Video(_));
-		// Refresh PSI at keyframes or after the interval lapses.
-		let psi = (is_video && frame.keyframe) || due(frame.timestamp, self.last_psi, PSI_INTERVAL);
+		// Refresh PSI at keyframes or after the interval lapses, and lead with a revision.
+		let cadence = (is_video && frame.keyframe) || due(frame.timestamp, self.last_psi, PSI_INTERVAL);
+		let psi = std::mem::take(&mut self.revised) || cadence;
 		if psi {
 			// A receiver tunes in at the tables, so each AAC PID's next frame repeats its program
 			// config element. Its older frames go on ahead of the tables, so that frame starts a
@@ -2893,7 +2907,7 @@ where
 
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 
-		if psi {
+		if cadence {
 			self.last_psi = Some(frame.timestamp);
 		}
 
