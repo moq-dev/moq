@@ -18,7 +18,7 @@ import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync } from "../sync";
-import { type AudioBuffer, createAudioBuffer } from "./buffer";
+import { AudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 import { AUTO_MAX_DELAY, ringSamples, target } from "./latency";
@@ -112,7 +112,7 @@ export class Decoder {
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<Container.BufferedRanges>([]);
 
-	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
+	// Audio ring bridging the main thread and the worklet.
 	#ring = new Signal<AudioBuffer | undefined>(undefined);
 
 	// The context, worklet, and ring are keyed on this alone. It outlives a rendition's absence, so
@@ -270,8 +270,12 @@ export class Decoder {
 			const latencySamples = ringSamples(sampleRate, delay);
 			const buffered = this.sync.out.buffered.peek();
 
-			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
-			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples, buffered);
+			const ring = new AudioBuffer(worklet, {
+				channels: channelCount,
+				rate: sampleRate,
+				latency: latencySamples,
+				buffered,
+			});
 			effect.cleanup(() => ring.close());
 			effect.set(this.#ring, ring);
 
@@ -774,8 +778,7 @@ export class Decoder {
 			channelData.push(data.slice(frameOffset, frameOffset + frames));
 		}
 
-		// Hand off to the ring. Shared transport writes directly; post transport
-		// transfers the ArrayBuffers.
+		// Hand off to the ring, which transfers the ArrayBuffers.
 		ring.insert(timestamp, channelData);
 
 		sample.close();
