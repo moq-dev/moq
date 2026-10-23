@@ -15,7 +15,7 @@ benchmarks" nightly jobs, converted to the history input format where they
 don't already emit one.
 
 - Criterion targets now measure through `just gh criterion` in
-  `sh/gh/nightly.sh` (`rust-bench`, `rust-extra`, `rust-uring`), and the
+  `sh/gh/nightly.sh` (`rust-bench`, `rust-shared`, `rust-extra`, `rust-uring`), and the
   comparison harness uses quick mode. Check their published histories
   rather than converting them again; the unreported sources below remain.
 - The "Rust benchmark tests" job is not recorded yet: its nextest benchmarks
