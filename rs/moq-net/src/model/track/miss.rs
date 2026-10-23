@@ -469,7 +469,10 @@ impl TrackState {
 	/// Never: accounted for by its arrivals (evicted, or a gap it skipped), or in a gap its
 	/// grace gave up on, or anything once the feed is over. A declared start is no promise:
 	/// a group below it may still arrive.
-	#[allow(clippy::type_complexity)]
+	#[expect(
+		clippy::type_complexity,
+		reason = "the never-fed runs and the awaited gaps are returned together; naming them would only move the type"
+	)]
 	pub(super) fn unfed(
 		&self,
 		hole: ops::Range<u64>,

@@ -125,7 +125,10 @@ impl Outcome {
 
 	/// What was answered within `wanted`: accepted, or refused with why and the budget
 	/// the fill asked with.
-	#[allow(clippy::type_complexity)]
+	#[expect(
+		clippy::type_complexity,
+		reason = "each answer pairs a run with its outcome; naming it would only move the type"
+	)]
 	pub(super) fn within(
 		&self,
 		wanted: &RangeSet<u64>,
@@ -681,7 +684,7 @@ impl Fill {
 
 	/// Refuse every group still owed with `err`, which says nothing about whether the source
 	/// has them, so nothing is recorded dropped.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: capability gap
 	pub(crate) fn refuse(&self, err: Error) {
 		let unresolved = self.inner.unresolved(self.inner.start.group..self.inner.end);
@@ -689,7 +692,7 @@ impl Fill {
 	}
 
 	/// A handle on group `sequence` alone, for a session serving the fill one group at a time.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: capability gap
 	pub(crate) fn group(&self, sequence: u64) -> GroupFill {
 		GroupFill {
@@ -815,7 +818,7 @@ impl Inner {
 
 	/// Whether an [`Error::Old`] answer is the publisher's max age, which binds every reader,
 	/// rather than this fill's own budget, which a more tolerant reader may exceed.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn old_binds_everyone(&self) -> bool {
 		let Some(max_delay) = self.max_delay else {
 			return true;
@@ -825,7 +828,7 @@ impl Inner {
 	}
 
 	/// Refuse group `sequence` with `err`, as its source answered.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn reject(&self, sequence: u64, err: Error) {
 		let Some(end) = sequence.checked_add(1) else {
 			return;
@@ -904,7 +907,7 @@ impl TrackState {
 }
 
 /// The readers of one group of a fill, outliving its [`GroupFill`].
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 // private: capability gap
 pub(crate) struct Readers {
 	fills: kio::Shared<FillState>,
@@ -913,7 +916,7 @@ pub(crate) struct Readers {
 	outcome: kio::Producer<Outcome>,
 }
 
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl Readers {
 	/// Poll until no reader waits on the group. Once the fill ends its per-group demand goes
 	/// with it, so then until none of its readers is left.
@@ -933,7 +936,7 @@ impl Readers {
 
 /// One group of a [`Fill`], for a session serving it a group at a time. Answering it answers
 /// that group of the fill; dropping it unanswered leaves the group to the fill.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 // private: capability gap
 pub(crate) struct GroupFill {
 	inner: Arc<Inner>,
@@ -941,7 +944,7 @@ pub(crate) struct GroupFill {
 	frame_start: u64,
 }
 
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl GroupFill {
 	/// The group sequence to fetch.
 	// private: capability gap
@@ -1006,7 +1009,7 @@ impl GroupFill {
 	}
 
 	/// The track the fill serves.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: capability gap
 	pub(crate) fn track(&self) -> kio::Producer<TrackState> {
 		self.inner.state.clone()
@@ -1027,7 +1030,7 @@ impl GroupFill {
 
 	/// Declare the track's exclusive final sequence, as the source answering this group
 	/// reported it. A no-op once the track declared an end, or holds a later group.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: capability gap
 	pub(crate) fn finish_track_at(&self, final_sequence: u64) {
 		if let Ok(mut state) = TrackState::modify(&self.inner.state)

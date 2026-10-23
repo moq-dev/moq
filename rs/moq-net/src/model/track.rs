@@ -35,7 +35,7 @@ pub use fill::Fill;
 use fill::FillState;
 
 // private: capability gap
-#[cfg_attr(not(feature = "async"), allow(unused_imports))]
+#[cfg_attr(not(feature = "async"), allow(unused_imports, reason = "async-only"))]
 pub(crate) use fill::{GroupFill, Readers as FillReaders};
 
 use std::{

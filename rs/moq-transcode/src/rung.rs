@@ -895,7 +895,7 @@ mod tests {
 	/// A group every reader narrowed past releases the fill's one-at-a-time fetch, so the
 	/// groups the fill still owes are fetched rather than waiting behind it.
 	#[tokio::test(start_paused = true)]
-	#[allow(clippy::disallowed_methods)]
+	#[expect(clippy::disallowed_methods, reason = "tokio's paused clock bounds the waits")]
 	async fn a_group_nobody_reads_releases_its_fill() {
 		use std::task::Poll;
 		let (rung, source, _retire) = idle_rung();
