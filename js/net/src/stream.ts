@@ -314,11 +314,9 @@ export class Reader {
 
 		if (result.done) {
 			// The transport already finished the stream. Drop the reader so a later stop
-			// neither builds a cancel error nor sends a reset the peer will ignore.
-			if (this.#reader === reader) {
-				this.#reader = undefined;
-				reader.releaseLock();
-			}
+			// neither builds a cancel error nor sends a reset the peer will ignore. Dropped,
+			// not released: releasing a closed stream's lock builds a TypeError per stream.
+			if (this.#reader === reader) this.#reader = undefined;
 			return false;
 		}
 
