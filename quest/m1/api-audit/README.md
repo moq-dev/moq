@@ -52,7 +52,7 @@ Both are in m1, so the cut waits for them. hang's
 
 Rejected in planning:
 
-- Restoring `track::Demand::{used, unused}`: [refresh](/quest/m1/refresh/README.md)
+- Restoring `track::Demand::{used, unused}`: refresh
   decided one `wanted()` signal.
 - Removing `Audio.Decoder.arrivals()`: moq.dev has a planned consumer
   waiting on this release. Only the video handle goes

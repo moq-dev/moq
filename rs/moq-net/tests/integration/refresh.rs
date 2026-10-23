@@ -12,8 +12,8 @@ fn origin(hop: u64) -> origin::Producer {
 }
 
 /// The JSON owner answers demand across a publisher link, a cluster peer, and a reader link.
-/// Existing readers keep their deltas; the late reader can start at a new complete snapshot.
-/// This checks refresh propagation and correctness, not a cap on bytes sent before the answer.
+/// Existing readers keep their deltas; the late reader receives the cached group, then a new
+/// complete snapshot.
 #[moq_clock::test]
 async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 	use moq_json::snapshot;
@@ -98,21 +98,24 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 
 		let mut late = remote.subscribe(None).await.unwrap();
 		// Poll the new reader while the owner drives refresh: a front does not join its
-		// serving copy until read. Either a cached prefix or the fresh group may arrive first.
-		let mut fresh = moq_clock::timeout(Duration::from_secs(1), async {
-			let (refreshed, group) = futures::join!(producer.refresh(), async {
-				loop {
-					let group = late.recv_group().await.unwrap().unwrap();
-					if group.sequence > 0 {
-						break group;
-					}
-				}
+		// serving copy until read. Refresh is a request, not a hold, so the cached group
+		// arrives first, whole, and the fresh one follows.
+		let (mut cached, mut fresh) = moq_clock::timeout(Duration::from_secs(1), async {
+			let (refreshed, groups) = futures::join!(producer.refresh(), async {
+				let cached = late.recv_group().await.unwrap().unwrap();
+				(cached, late.recv_group().await.unwrap().unwrap())
 			});
 			refreshed.unwrap();
-			group
+			groups
 		})
 		.await
 		.unwrap();
+		assert_eq!(cached.sequence, 0, "the cached group is not withheld");
+		let mut cached_bytes = 0;
+		for _ in 0..=n {
+			cached_bytes += cached.read_frame().await.unwrap().unwrap().payload.len();
+		}
+		assert_eq!(cached_bytes, snapshot_bytes + delta_bytes);
 		assert!(
 			producer.poll_refresh(&kio::Waiter::noop()).is_pending(),
 			"answered once"

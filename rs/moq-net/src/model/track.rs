@@ -155,7 +155,7 @@ pub struct Info {
 	/// keyframe) that the deltas after it build on. A joiner reads the newest group from its
 	/// start, so once the deltas outweigh `refresh` times the first frame, a fresh group is
 	/// cheaper: [`Demand::wanted`] moves past the newest group and the publisher opens one.
-	/// Every hop judges a join against its own cache, which holds the same group.
+	/// The joiner still receives the cached group while the new one is pending. Every hop judges a join against its own cache, which holds the same group.
 	/// `Some(0)` asks on any join once a delta follows the first frame.
 	///
 	/// On moq-transport, `Some` is advertised as DYNAMIC_GROUPS, which arrives as `Some(0)`.
@@ -15807,15 +15807,17 @@ mod test {
 		assert_eq!(wanted_changed(&mut demand), Some(None));
 	}
 
-	/// A join reads the newest group, unless its bytes after the first frame exceed the
-	/// ratio times the first frame: then it wants the group after the newest.
+	/// A join reads the newest group, and once its bytes after the first frame exceed the
+	/// ratio times the first frame it also wants the group after the newest. The cached group
+	/// is served either way: refresh is a request, not a hold.
 	#[test]
 	fn a_join_over_the_ratio_wants_a_new_group() {
 		for (delta, wanted) in [(0, 0), (3, 0), (4, 1)] {
 			let producer = track_producer("test", Info::default().with_refresh(1));
 			refresh_group(&producer, delta);
-			let _subscriber = producer.subscribe(None);
+			let mut subscriber = producer.subscribe(None);
 			assert_eq!(producer.demand().wanted(), Some(wanted), "{delta} byte delta");
+			assert_eq!(subscriber.assert_group().sequence, 0, "{delta} byte delta");
 		}
 	}
 
