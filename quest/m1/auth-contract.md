@@ -26,4 +26,4 @@ Public API: one method on an internal trait. Wire: none.
 ## Related
 
 - [In-band auth](/quest/m1/auth/README.md) - the request and grant contract this corrects
-- [Auth credential redirects](/quest/m1/release-audit/auth-redirects.md) - owns the auth client's redirect policy
+- [moq-dev/moq#6384](https://github.com/moq-dev/moq/pull/6384) - the auth client refuses redirects
