@@ -1235,6 +1235,7 @@ This document has no IANA actions.
 - Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.
 - Added the optional video `color` field: H.273 primaries, transfer, matrix, and range, plus the SMPTE ST 2086 mastering display and CTA-861.3 content light levels.
 - Added the optional video `projection` (rectilinear, or equirectangular with a longitude `fov`) and `stereo` (mono, left-right, or top-bottom) fields and the optional audio `layout` field (ambisonic).
+- Added the optional video `interlaced` field, true when each decoded picture weaves two fields, and made it part of the track's identity ({{identity}}).
 
 ## moq-hang-03
 {:numbered="false"}
