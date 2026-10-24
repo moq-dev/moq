@@ -292,7 +292,7 @@ test("a redirect onto an already pooled key leaves both entries to their handles
 
 test("the connection's tokens ride every session across a GOAWAY", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	// Bounded by task turns rather than wall time, advancing the clock a millisecond per turn
 	// so the reconnect's delay passes long before the draining session's handover.
 	const until = async (done: () => boolean) => {
@@ -364,7 +364,7 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 		expect(await token.closed).toBeInstanceOf(Error);
 	} finally {
 		reload.close();
-		restore();
+		installed.close();
 	}
 });
 

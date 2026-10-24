@@ -627,7 +627,7 @@ test("closing a session settles its unanswered setup token", async () => {
 // moq-transport's AUTH_ERROR carries no code that may pass, so only lite retries.
 test("lite-07 presents a transiently refused token again after a backoff", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const warned = spyOn(console, "warn").mockImplementation(() => {});
 	const refusals = () => warned.mock.calls.filter(([line]) => line === "auth token refused").length;
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
@@ -689,14 +689,14 @@ test("lite-07 presents a transiently refused token again after a backoff", async
 		client.abort();
 		server.abort();
 		warned.mockRestore();
-		restore();
+		installed.close();
 	}
 });
 
 // The peer replied to the first presentation, so it knows AUTH: a reset is a lost stream.
 test("lite-07 keeps a shared token whose retry stream is reset", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const warned = spyOn(console, "warn").mockImplementation(() => {});
 	const logged = (line: string) => warned.mock.calls.filter(([first]) => first === line).length;
 	const handle = new Handle();
@@ -731,7 +731,7 @@ test("lite-07 keeps a shared token whose retry stream is reset", async () => {
 		client.abort();
 		server.abort();
 		warned.mockRestore();
-		restore();
+		installed.close();
 	}
 });
 
@@ -844,7 +844,7 @@ test("lite-07 ignores a draining session's late refusal once its successor grant
 
 test("lite-07 ignores a draining session's late refusal while its successor retries", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const warned = spyOn(console, "warn").mockImplementation(() => {});
 	const refusals = () => warned.mock.calls.filter(([line]) => line === "auth token refused").length;
 	const protocol = Lite.ALPN_07_WIP;
@@ -911,7 +911,7 @@ test("lite-07 ignores a draining session's late refusal while its successor retr
 		next.client.abort();
 		next.server.abort();
 		warned.mockRestore();
-		restore();
+		installed.close();
 	}
 });
 

@@ -258,7 +258,7 @@ test("an ended auth handle gives up instead of retrying", async () => {
 	};
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	// Bounded by task turns rather than wall time, advancing the clock a millisecond per turn
 	// so a reconnect, if the loop tried one, would be dialed well within the bound.
 	const until = async (done: () => boolean) => {
@@ -289,7 +289,7 @@ test("an ended auth handle gives up instead of retrying", async () => {
 	} finally {
 		warned.mockRestore();
 		reload.close();
-		restore();
+		installed.close();
 		globalThis.WebTransport = original;
 	}
 });
