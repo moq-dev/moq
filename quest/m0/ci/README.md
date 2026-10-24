@@ -91,7 +91,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
 - [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the queue builds two or more entries at once instead of one
-- [Run the queue's modules in parallel](/quest/m0/ci/parallel-modules.md) - `just ci` overlaps its selected modules
 - [Parallelize OBS source checks](/quest/m0/ci/obs-parallel.md) - check independent translation units concurrently when OBS is on the critical path
 - [Measure nightly compiler levers](/quest/m0/ci/nightly-levers.md) - the parallel frontend and Cranelift, adopted only if the numbers beat their risks
 - [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin

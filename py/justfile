@@ -25,23 +25,23 @@ _develop *args:
     cd .. && uv run --no-sync maturin develop --locked --uv {{ args }}
     uv pip install --no-deps -e moq-rs
 
-# `--no-install-workspace`
+# Lint + format + editable build + pyright + doc samples + docs. `--no-install-workspace`
 # installs the root dev group (ruff, maturin, pyright, pytest) without trying to
 # pip-build the workspace members; `_develop` then installs them editable, which
 # is also what `build` does, so there is no separate build gate here.
-
-# Shared by check and test within one Just invocation, never across invocations.
-_prepare:
-    uv sync --locked --no-install-workspace
-    just _develop {{ test_features }}
-
+#
 # `docs` runs here because a broken autodoc reference otherwise surfaces on Read
 # the Docs after the fact. It mocks the native module, so it costs no Rust build.
+#
+# The build has `test`'s features, so `just check` running both compiles moq-ffi
+# once. The release builds compile the default features.
 
 # Lint, type-check, editable-build, check the doc samples, and render the docs.
-check: _prepare
+check:
+    uv sync --locked --no-install-workspace
     uv run --no-sync ruff check .
     uv run --no-sync ruff format --check .
+    just _develop {{ test_features }}
     uv run --no-sync pyright
     just samples
     just docs
@@ -57,7 +57,9 @@ fix:
     uv run --no-sync ruff format .
 
 # Run the unit tests, on a build with the test clock (`moq.testing`).
-test: _prepare
+test:
+    uv sync --locked --no-install-workspace
+    just _develop {{ test_features }}
     uv run --no-sync pytest moq-rs/tests/ moq-ffi/tests/
 
 # Local dev build: editable install of moq-ffi (with the cdylib + uniffi
