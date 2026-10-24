@@ -561,6 +561,10 @@ export class Publisher {
 			try {
 				info = await untilAborted(track.info(), left.signal);
 			} catch (err) {
+				if (left.signal.aborted) {
+					request.abort(cancel);
+					return;
+				}
 				const failed = error(err);
 				if (
 					!(failed instanceof StreamError) ||

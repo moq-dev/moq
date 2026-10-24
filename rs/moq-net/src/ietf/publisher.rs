@@ -572,6 +572,8 @@ enum UpdateRead {
 enum Subscribed {
 	/// It never started, refused with this reason and error before SUBSCRIBE_OK.
 	Refused(String, Error),
+	/// The subscriber withdrew it, or the session closed, before SUBSCRIBE_OK.
+	Withdrawn,
 	/// It was served, and opened this many group streams.
 	Served(Served, u64),
 }
@@ -1206,17 +1208,9 @@ impl Publisher {
 				Some(token) => {
 					let verdict = gate.verify(token, Some(slot.clone()));
 					// The subscriber cancelling or the session closing withdraws the token.
-					let mut session = self.session.clone();
-					let verified = kio::wait(|waiter| {
-						let mut cx = waiter.context();
-						if session.poll_closed(&mut cx).is_ready()
-							|| super::request_stream::poll_withdrawn(&mut stream, self.version, &mut cx).is_ready()
-						{
-							return Poll::Ready(None);
-						}
-						verdict.poll_grant(waiter).map(Some)
-					})
-					.await;
+					let verified = self
+						.until_withdrawn(&mut stream, kio::wait(|waiter| verdict.poll_grant(waiter)))
+						.await;
 					let Some(verified) = verified else {
 						drop((verdict, slot));
 						self.released(&credit).await;
@@ -1256,46 +1250,38 @@ impl Publisher {
 					// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
 					// the model, through the tagged `origin::Consumer` the broadcast resolves from.
 
-					// We just received a subscribe for this exact namespace, so the peer must have
-					// already seen the announcement. `request_broadcast` resolves it immediately, or
-					// falls back to the route covering it (an `origin::Dynamic`), if any.
-					// Pinned to the instance it names, if any: another is refused, never served.
-					let broadcast = match self
-						.serving_origin()
-						.await
-						.request_broadcast(&msg.track_namespace, msg.epoch.clone())
-						.await
+					let setup = async {
+						let refused = |err: Error, resolved| {
+							Subscribed::Refused(err.to_string(), rendezvous_error(err, rendezvous, resolved))
+						};
+						// We just received a subscribe for this exact namespace, so the peer must
+						// have already seen the announcement. `request_broadcast` resolves it
+						// immediately, or falls back to the route covering it (an
+						// `origin::Dynamic`), if any. Pinned to the instance it names, if any:
+						// another is refused, never served.
+						let broadcast = self
+							.serving_origin()
+							.await
+							.request_broadcast(&msg.track_namespace, msg.epoch.clone())
+							.await
+							// The reason is the origin's, not ours: a dynamic router refusing on
+							// authorization or a drain says so, and only an unroutable path means
+							// the broadcast is not here.
+							.map_err(|err| refused(err, false))?;
+						let track = broadcast.track(&msg.track_name).map_err(|err| refused(err, true))?;
+						let (track_serve, edge) = self
+							.subscribe_track(&track, &msg)
+							.await
+							.map_err(|err| refused(err, true))?;
+						Ok((broadcast, track, track_serve, edge))
+					};
+					// A producer may never answer, so the subscriber withdrawing gives back the
+					// demand and the slot at once rather than once it does.
+					let (broadcast, track, mut track_serve, edge) = match self.until_withdrawn(&mut stream, setup).await
 					{
-						Ok(broadcast) => broadcast,
-						// The reason is the origin's, not ours: a dynamic router refusing on
-						// authorization or a drain says so, and only an unroutable path means the
-						// broadcast is not here.
-						Err(err) => {
-							return Ok(Subscribed::Refused(
-								err.to_string(),
-								rendezvous_error(err, rendezvous, false),
-							));
-						}
-					};
-
-					let track = match broadcast.track(&msg.track_name) {
-						Ok(track) => track,
-						Err(err) => {
-							return Ok(Subscribed::Refused(
-								err.to_string(),
-								rendezvous_error(err, rendezvous, true),
-							));
-						}
-					};
-
-					let (mut track_serve, edge) = match self.subscribe_track(&track, &msg).await {
-						Ok(subscribed) => subscribed,
-						Err(err) => {
-							return Ok(Subscribed::Refused(
-								err.to_string(),
-								rendezvous_error(err, rendezvous, true),
-							));
-						}
+						Some(Ok(setup)) => setup,
+						Some(Err(refused)) => return Ok(refused),
+						None => return Ok(Subscribed::Withdrawn),
 					};
 					let cache = track;
 					// A subscriber that opted out of this SUBSCRIBE_OK's properties learns the
@@ -1423,12 +1409,17 @@ impl Publisher {
 								return Ok(Subscribed::Served(served, opened.load(Ordering::Relaxed)));
 							}
 						};
-						let resumed = match broadcast.track(&msg.track_name) {
-							Ok(track) => self
-								.subscribe_track(&track, &msg)
-								.await
-								.map(|(serve, edge)| (serve, edge, track)),
-							Err(err) => Err(err),
+						let resume_setup = async {
+							let track = broadcast.track(&msg.track_name)?;
+							let (serve, edge) = self.subscribe_track(&track, &msg).await?;
+							Ok::<_, Error>((serve, edge, track))
+						};
+						// Withdrawn mid-setup, it ends as it would have while paused.
+						let Some(resumed) = self.until_withdrawn(&mut stream, resume_setup).await else {
+							return Ok(Subscribed::Served(
+								Served::Track(Ok(())),
+								opened.load(Ordering::Relaxed),
+							));
 						};
 						let (edge, track);
 						(track_serve, edge, track) = match resumed {
@@ -1503,6 +1494,11 @@ impl Publisher {
 				Ok(Ok(Subscribed::Refused(reason, err))) => {
 					return self.reject_subscribe(stream, request_id, &err, &reason).await;
 				}
+				// Nobody is left to answer.
+				Ok(Ok(Subscribed::Withdrawn)) => {
+					self.released(&credit).await;
+					return Ok(());
+				}
 				Ok(Err(err)) => return Err(err),
 				Err(refusal) => match acked {
 					Some(opened) => (Served::Track(Err(refusal.error)), opened.load(Ordering::Relaxed)),
@@ -1516,6 +1512,27 @@ impl Publisher {
 			self.write_publish_done(stream, request_id, served, streams, Some(&credit))
 				.await
 		}
+	}
+
+	/// Run `step` of a request's setup, or `None` once the requester withdraws the request or
+	/// the session closes, without reading anything it sent meanwhile.
+	async fn until_withdrawn<T>(
+		&self,
+		stream: &mut Stream<Transport, Version>,
+		step: impl std::future::Future<Output = T>,
+	) -> Option<T> {
+		let mut step = std::pin::pin!(step);
+		let mut session = self.session.clone();
+		kio::wait(|waiter| {
+			let mut cx = waiter.context();
+			if session.poll_closed(&mut cx).is_ready()
+				|| super::request_stream::poll_withdrawn(stream, self.version, &mut cx).is_ready()
+			{
+				return Poll::Ready(None);
+			}
+			waiter.poll_future(step.as_mut()).map(Some)
+		})
+		.await
 	}
 
 	/// Wait until no token verification holds `credit`'s request any more, or the session closes.
@@ -7736,7 +7753,7 @@ mod serve_tests {
 			max_age: None,
 			new_group: None,
 			request_id: RequestId(id),
-			subscription_request_id: matches!(version, Version::Draft15 | Version::Draft16)
+			subscription_request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 				.then_some(RequestId(REQUEST_ID)),
 			start_location: Location { group: 0, object: 0 },
 			end_group: 0,
@@ -11765,6 +11782,185 @@ mod serve_tests {
 		};
 		assert_eq!(sent, expected, "{version} {parked:?}");
 		drop(credit);
+	}
+
+	/// Where a SUBSCRIBE's setup waits on a producer that never answers.
+	#[derive(Clone, Copy, Debug)]
+	enum Setup {
+		/// Resolving a broadcast whose route never answers.
+		Resolving,
+		/// Subscribing to a track its broadcast never answers.
+		Subscribing,
+		/// Waiting for an idle copy's live edge, which its route never reports.
+		Live,
+	}
+
+	/// Withdraw the SUBSCRIBE on `request` as `version` cancels one: UNSUBSCRIBE through
+	/// draft 16, a FIN on drafts 17 and 18, a reset after.
+	fn withdraw(request: &ScriptedSession, version: Version) {
+		use crate::lite::test_transport::Close;
+		match version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
+				let mut unsubscribe = vec![ietf::Unsubscribe::ID as u8];
+				ietf::Unsubscribe {
+					request_id: RequestId(REQUEST_ID),
+				}
+				.encode(&mut Encoder::new(&mut unsubscribe, version.into()), version)
+				.unwrap();
+				request.push(&unsubscribe);
+			}
+			Version::Draft17 | Version::Draft18 => request.close(Close::Fin),
+			_ => request.close(Close::Reset),
+		}
+	}
+
+	/// A subscriber withdrawing a SUBSCRIBE while its setup waits on a producer that never
+	/// answers ends it at once: its demand and its slot are given back, and nothing answers it.
+	#[moq_clock::test]
+	async fn a_subscribe_withdrawn_during_setup_releases_its_demand() {
+		for version in ALL_VERSIONS {
+			for setup in [Setup::Resolving, Setup::Subscribing, Setup::Live] {
+				withdrawn_during(version, setup).await;
+			}
+		}
+	}
+
+	async fn withdrawn_during(version: Version, setup: Setup) {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let session = ScriptedSession::new(Vec::new());
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+		let publisher = Publisher::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(session.clone()),
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			version,
+		);
+		let request = ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), version)
+			.await
+			.unwrap();
+		let mut serving = std::pin::pin!(
+			publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+		);
+
+		// Drive the subscription to where it waits, holding what it asked for.
+		let mut claim = None;
+		let mut asked = None;
+		let mut idle = None;
+		match setup {
+			Setup::Resolving => {
+				let route = origin.dynamic_route("room", crate::origin::Route::default()).unwrap();
+				let request = {
+					let requested = std::pin::pin!(route.requested_broadcast());
+					match futures::future::select(requested, serving.as_mut()).await {
+						futures::future::Either::Left((request, _)) => request.unwrap(),
+						futures::future::Either::Right((res, _)) => panic!("{version} {setup:?}: ended: {res:?}"),
+					}
+				};
+				claim = Some((route, request));
+			}
+			Setup::Subscribing => {
+				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+				let mut dynamic = broadcast.dynamic();
+				let request = {
+					let requested = std::pin::pin!(dynamic.requested_track());
+					match futures::future::select(requested, serving.as_mut()).await {
+						futures::future::Either::Left((request, _)) => request.unwrap(),
+						futures::future::Either::Right((res, _)) => panic!("{version} {setup:?}: ended: {res:?}"),
+					}
+				};
+				asked = Some((broadcast, dynamic, request));
+			}
+			Setup::Live => {
+				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+				let mut track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+				track.set_idle();
+				serve_until(serving.as_mut(), "the upstream subscription", || {
+					track.subscription().is_some()
+				})
+				.await;
+				idle = Some((broadcast, track));
+			}
+		}
+		let demanded = || {
+			asked
+				.as_ref()
+				.is_some_and(|(_, _, request)| request.subscription().is_some())
+				|| idle.as_ref().is_some_and(|(_, track)| track.subscription().is_some())
+		};
+		for _ in 0..10 {
+			assert!(
+				futures::poll!(serving.as_mut()).is_pending(),
+				"{version} {setup:?}: setup ended unanswered"
+			);
+			settle().await;
+		}
+		assert_eq!(
+			publisher.subscriptions.available(),
+			usize::MAX - 1,
+			"{version} {setup:?}"
+		);
+		assert_eq!(demanded(), !matches!(setup, Setup::Resolving), "{version} {setup:?}");
+
+		withdraw(&request, version);
+		let res = moq_clock::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.unwrap_or_else(|_| panic!("{version} {setup:?}: outlived its withdrawal"));
+		assert!(res.is_ok(), "{version} {setup:?}: {res:?}");
+		settle().await;
+		assert!(!demanded(), "{version} {setup:?}: held its demand");
+		assert_eq!(publisher.subscriptions.available(), usize::MAX, "{version} {setup:?}");
+		assert!(
+			request.log.writes.lock().unwrap().is_empty(),
+			"{version} {setup:?}: answered a withdrawn request"
+		);
+		drop(claim);
+	}
+
+	/// A resume subscribes again as a new SUBSCRIBE does, so a subscriber withdrawing the
+	/// request while the resume waits on an idle copy's live edge ends it at once too.
+	#[moq_clock::test]
+	async fn a_subscribe_withdrawn_while_resuming_releases_its_demand() {
+		for version in ALL_VERSIONS {
+			let mut h = serve(version);
+			let mut request = ScriptedSession::new(Vec::new());
+			request.log = h.log.clone();
+			let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), version)
+				.await
+				.unwrap();
+			let mut msg = subscribe(Filter::NextObject, None);
+			msg.forward = false;
+			let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+			serve_until(serve.as_mut(), "the pause", || {
+				!h.log.trail().is_empty() && h.track.subscription().is_none()
+			})
+			.await;
+
+			h.track.set_idle();
+			request.push(&forward_update(version, 4, true));
+			serve_until(serve.as_mut(), "the resume", || h.track.subscription().is_some()).await;
+			for _ in 0..10 {
+				assert!(
+					futures::poll!(serve.as_mut()).is_pending(),
+					"{version}: the resume ended unanswered"
+				);
+				settle().await;
+			}
+
+			withdraw(&request, version);
+			moq_clock::timeout(std::time::Duration::from_secs(1), serve)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: outlived its withdrawal"))
+				.unwrap();
+			settle().await;
+			assert!(h.track.subscription().is_none(), "{version}: held its demand");
+		}
 	}
 
 	/// A datagram group is never fetchable: a FETCH for one is refused like a group that
