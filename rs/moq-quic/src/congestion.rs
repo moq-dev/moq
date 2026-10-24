@@ -175,6 +175,7 @@ pub trait Controller: Send + Sync {
             pacing_rate: None,
             bandwidth_estimate: None,
             send_quantum: None,
+            probe_inflight: None,
         }
     }
 
@@ -204,6 +205,12 @@ pub struct ControllerMetrics {
     pub bandwidth_estimate: Option<u64>,
     /// Send Quantum (bytes) used to control the size of packet bursts
     pub send_quantum: Option<u64>,
+    /// Bytes in flight up to which an application-limited sender may resend in-flight data,
+    /// while the controller probes for bandwidth (bytes)
+    ///
+    /// `None` when the controller is not probing, or cannot learn from a sender that fills its
+    /// pacing with redundant data.
+    pub probe_inflight: Option<u64>,
 }
 
 /// Constructs controllers on demand

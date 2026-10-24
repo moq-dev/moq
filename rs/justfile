@@ -319,7 +319,7 @@ loom *args:
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: "$@"
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom "$@"
 
-# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it.
+# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite.
 quic-sim:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -329,6 +329,8 @@ quic-sim:
     # Release keeps the sweep inside nextest's hang budget; the checks stay on so it still catches what a debug run would.
     export CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib -E 'test(/^tests::sim::/)'
+    # The bandwidth probe's acceptance suite, over fixed seeds: the merge gate runs only its short cases.
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only -E 'test(/^tests::probe::/)'
 
 # Prove downstream futures are Send at the default recursion limit on nightly.
 send-depth:

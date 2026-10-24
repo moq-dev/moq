@@ -234,6 +234,7 @@ impl PacketBuilder {
             ack_eliciting,
             retransmits: sent.retransmits,
             stream_frames: sent.stream_frames,
+            bandwidth_probe: sent.bandwidth_probe,
         };
 
         conn.path
@@ -256,6 +257,11 @@ impl PacketBuilder {
             }
             conn.set_loss_detection_timer(now);
             conn.path.pacing.on_transmit(size);
+            conn.bandwidth_probe.on_transmit(size);
+            if sent.bandwidth_probe {
+                conn.stats.path.sent_bandwidth_probes += 1;
+                conn.stats.path.sent_bandwidth_probe_bytes += u64::from(size);
+            }
         }
     }
 

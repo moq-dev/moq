@@ -851,6 +851,61 @@ impl StreamsState {
         written
     }
 
+    /// Whether STREAM `frame`, sent earlier, still has data a duplicate may carry
+    pub(crate) fn can_duplicate(&self, frame: &frame::StreamMeta) -> bool {
+        self.duplicable(frame.id)
+            .is_some_and(|stream| stream.pending.unacked(frame.offsets.clone()))
+    }
+
+    /// Write STREAM frames resending what is still unacknowledged of `frames`, sent in an
+    /// earlier packet, until the packet in `buf` is `max_buf_size` long, appending them to
+    /// `written`
+    ///
+    /// The duplicates are not queued for retransmission, and a reset stream's data expired, so
+    /// it is never sent again.
+    pub(crate) fn write_duplicates(
+        &self,
+        buf: &mut Vec<u8>,
+        max_buf_size: usize,
+        frames: &[frame::StreamMeta],
+        written: &mut StreamMetaVec,
+    ) {
+        for frame in frames {
+            if buf.len() + frame::Stream::SIZE_BOUND >= max_buf_size {
+                return;
+            }
+            let Some(stream) = self.duplicable(frame.id) else {
+                continue;
+            };
+            let max_len = max_buf_size - buf.len() - 1 - VarInt::size(frame.id.into());
+            let Some((offsets, encode_length)) =
+                stream.pending.duplicate(frame.offsets.clone(), max_len)
+            else {
+                continue;
+            };
+            let meta = frame::StreamMeta {
+                id: frame.id,
+                fin: frame.fin && offsets.end == frame.offsets.end,
+                offsets,
+            };
+            trace!(id = %meta.id, off = meta.offsets.start, len = meta.offsets.end - meta.offsets.start, fin = meta.fin, "STREAM (bandwidth probe)");
+            meta.encode(encode_length, buf);
+            for data in stream.pending.get(meta.offsets.clone()) {
+                buf.put_slice(data);
+            }
+            written.push(meta);
+        }
+    }
+
+    /// The send stream `id` if a duplicate of its data may still be sent: open, neither reset
+    /// nor stopped by the peer
+    fn duplicable(&self, id: StreamId) -> Option<&Send> {
+        self.send
+            .get(&id)?
+            .as_deref()
+            .filter(|stream| !stream.is_reset() && stream.stop_reason.is_none())
+    }
+
     /// Process the acknowledgement of stream data
     ///
     /// Returns the Reliable Size of a held reset to send now, once the peer holds all the data it
