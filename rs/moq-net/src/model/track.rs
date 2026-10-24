@@ -9770,10 +9770,7 @@ mod test {
 		let budget = cache::DEFAULT_EXPIRY * 2;
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
 		let waiter = kio::Waiter::noop();
-		let expired = |held: &mut [group::Consumer; 2]| {
-			held.each_mut()
-				.map(|group| group.poll_expired(&waiter))
-		};
+		let expired = |held: &mut [group::Consumer; 2]| held.each_mut().map(|group| group.poll_expired(&waiter));
 
 		// Frozen timestamps, so the wall clock alone convicts.
 		append_at(&mut producer, 0);
@@ -9832,10 +9829,7 @@ mod test {
 		let budget = cache::DEFAULT_EXPIRY * 2;
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
 		let waiter = kio::Waiter::noop();
-		let expired = |held: &mut [group::Consumer; 2]| {
-			held.each_mut()
-				.map(|group| group.poll_expired(&waiter))
-		};
+		let expired = |held: &mut [group::Consumer; 2]| held.each_mut().map(|group| group.poll_expired(&waiter));
 
 		append_at(&mut producer, 0);
 		let fetch = group::Fetch::default().with_max_delay(budget);
@@ -9891,10 +9885,7 @@ mod test {
 
 		pool.step(Duration::from_secs(1));
 		append_at(&mut producer, 0); // the successor
-		assert!(
-			!held.poll_expired(&waiter),
-			"the successor is recorded"
-		);
+		assert!(!held.poll_expired(&waiter), "the successor is recorded");
 		let state = producer.state.downgrade();
 		producer.finish().unwrap();
 		drop(producer);
@@ -9912,10 +9903,7 @@ mod test {
 		assert!(!held.poll_expired(&waiter), "early");
 
 		pool.step(budget - idle);
-		assert!(
-			held.poll_expired(&waiter),
-			"the successor arrived a budget ago"
-		);
+		assert!(held.poll_expired(&waiter), "the successor arrived a budget ago");
 	}
 
 	/// Empty groups are handed out like any other and retired by the wall clock like an
