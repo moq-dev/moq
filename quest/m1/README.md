@@ -148,7 +148,6 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [Python docs stubs](/quest/m1/py-docs-stubs.md) - `just py docs` rebuilds its autosummary stubs, so a renamed symbol cannot break it
 - [Interop pre-skip](/quest/m1/interop-preskip.md) - the interop tone check anchors phase to timestamps, so a misapplied pre-skip fails
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
-- [Camera audio stops falling behind video](/quest/m1/audio-capture-lag.md) - a physical camera and microphone publish without audio falling behind (lost samples or encoder backlog, not yet told apart), so the catalog `delay` settles and viewers stop resubscribing
 - [Unprefixed C++ free functions](/quest/m1/cpp-free-function-prefix.md) - generated free functions drop `moq_`, and `moq.hpp` deletes its five pass-through wrappers before C++ first publishes
 - [Error cleanups](/quest/m1/error-cleanups.md) - delete the unused `Error::SessionClosed`; raw transport failures already map to `Unroutable`
 - [API-diff check](/quest/m1/api-diff.md) - a recipe diffs every published package's API against its last release, run on PRs into release and against main before the cut
