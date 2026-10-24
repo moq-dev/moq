@@ -1,7 +1,13 @@
 use crate::Error;
 
 /// Validate that a protocol name contains only valid HTTP token characters (tchar).
-#[allow(dead_code)]
+#[cfg_attr(
+	not(any(feature = "ws", feature = "tcp", all(unix, feature = "uds"))),
+	expect(
+		dead_code,
+		reason = "only the byte-stream and WebSocket transports negotiate a protocol"
+	)
+)]
 pub(crate) fn validate_protocol(protocol: &str) -> Result<(), Error> {
 	if protocol.is_empty() {
 		return Err(Error::InvalidProtocol(protocol.to_string()));

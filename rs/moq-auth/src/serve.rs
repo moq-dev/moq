@@ -264,7 +264,7 @@ impl Policy {
 			}
 			Keys::Set(path) => {
 				let json = tokio::fs::read_to_string(path).await.map_err(|_| Refusal::UnknownKey)?;
-				KeySet::from_str(&json)
+				json.parse::<KeySet>()
 					.map_err(|err| Refusal::InvalidToken(err.to_string()))?
 					.key(jwt)
 					.and_then(|key| key.verify_claims(jwt))
@@ -523,7 +523,7 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::{Algorithm, Bytes, Claims, Client, Error, Peer, Transport, lease::Reason};

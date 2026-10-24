@@ -34,6 +34,7 @@
 		"@moq/json": "workspace:^",
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",
+		"@moq/ui": "workspace:^",
 		"@moq/video": "workspace:^",
 		"mediabunny": "^1.61.4"
 	},

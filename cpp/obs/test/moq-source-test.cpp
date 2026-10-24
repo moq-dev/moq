@@ -533,7 +533,7 @@ public:
 				TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init),
 				       "audio producer");
 		}
-		TestOk(broadcast->announce(moq::Route{}), "announce");
+		TestOk(broadcast->announce(moq::AnnounceRoute{}), "announce");
 	}
 
 	~Publisher() { (void)broadcast->close(); }
@@ -798,8 +798,11 @@ int main()
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
 			const auto &conn = ctx->connection;
+			// The catalog consumer exposes the default, and preference-only metadata keeps the decoder.
+			CHECK(video.preference == 0);
 			video.label = "relabeled";
 			video.bitrate = 1;
+			video.preference = -1;
 			audio.label = "relabeled";
 			audio.bitrate = 1;
 			moq_source_subscribe_video(ctx, conn, *snapshot);

@@ -12,10 +12,12 @@ use axum::{
 	response::Response,
 };
 
-use crate::{web::MtlsPeer, web::WebState, web::landing_response};
+use crate::{web::MtlsPeer, web::ServerName, web::WebState, web::landing_response};
 
-// One axum extractor per fact the upgrade needs; there is no struct to fold them into.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "one axum extractor per fact the upgrade needs; there is no struct to fold them into"
+)]
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
 pub(crate) async fn serve_ws(
@@ -23,6 +25,7 @@ pub(crate) async fn serve_ws(
 	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
 	mtls: Option<Extension<MtlsPeer>>,
+	server_name: Option<Extension<ServerName>>,
 	ConnectInfo(remote): ConnectInfo<std::net::SocketAddr>,
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	admission: Option<Extension<crate::listener::Admission>>,
@@ -63,6 +66,7 @@ pub(crate) async fn serve_ws(
 	let mut options = moq_tokio::websocket::Options::new(url, server, active);
 	options.link.remote = Some(remote);
 	options.link.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
+	options.link.server_name = server_name.map(|Extension(ServerName(name))| name);
 	options.identity = mtls.map(|Extension(MtlsPeer(identity))| identity);
 	options.socket_stats = socket_stats.map(|Extension(stats)| stats.0);
 	options.timeout = state.timeout;
@@ -141,7 +145,7 @@ const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19", "moqt-20", "moqt-21",
 /// `qmux-00.moqt-{18,19,20,21,22}` is excluded: moq-transport-18 and newer require
 /// qmux-01, so those pairs are illegal.
 fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
-	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * alpns.len() + qmux::ALPNS.len());
+	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * alpns.len() + qmux::Version::ALL.len());
 	for &alpn in alpns {
 		for &version in QMUX_VERSIONS {
 			if version == qmux::Version::QMux00 && QMUX01_ONLY_ALPNS.contains(&alpn) {
@@ -150,8 +154,8 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 			out.push(format!("{}{alpn}", version.prefix()));
 		}
 	}
-	for &alpn in qmux::ALPNS {
-		out.push(alpn.to_string());
+	for version in qmux::Version::ALL {
+		out.push(version.alpn().to_string());
 	}
 	out
 }
@@ -255,7 +259,11 @@ fn tungstenite_text_to_axum(text: tungstenite::Utf8Bytes) -> axum::extract::ws::
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
@@ -411,7 +419,8 @@ mod tests {
 			.iter()
 			.rposition(|s| s.contains('.'))
 			.expect("no versioned entries");
-		for &bare in qmux::ALPNS {
+		for version in qmux::Version::ALL {
+			let bare = version.alpn();
 			let bare_idx = list
 				.iter()
 				.position(|s| s == bare)

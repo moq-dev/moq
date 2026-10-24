@@ -461,7 +461,7 @@ fn with_jwt(query: Option<&str>, token: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use futures::FutureExt;
@@ -497,7 +497,7 @@ mod tests {
 			);
 			config
 		};
-		let stream = |io| qmux::transport::Stream::new(io, qmux::Version::QMux01, config().max_record_size);
+		let stream = |io| qmux::transport::Stream::new(io);
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		tokio::try_join!(
 			qmux::Session::connect(stream(client), config()),
