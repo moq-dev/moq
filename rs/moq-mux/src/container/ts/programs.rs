@@ -152,6 +152,7 @@ impl Programs {
 				};
 				let from = Resume {
 					health,
+					pat: self.pat_reader.clone(),
 					pmt: described.pid,
 					sections: described.sections.clone(),
 				};
@@ -643,6 +644,35 @@ mod test {
 		let packets = psi_packets(0x0100, &mut 0, &[], &sections);
 		assert_eq!(packets.len(), 2 * 188, "the revision spans two packets");
 		data.extend(packets);
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		programs.decode(&data).unwrap();
+		let _finished = programs.finish().unwrap();
+		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
+	}
+
+	/// A PAT revision still assembling when a program starts is finished by its importer, which
+	/// follows the PMT PID it names.
+	#[tokio::test]
+	async fn a_pat_revision_begun_before_a_program_starts_is_finished() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut cc = 0;
+		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100)]));
+		let revision = |number, entry: [u8; 4]| psi::section(0x00, 1, 1, number, 1, &entry);
+		data.extend(psi_packets(0, &mut cc, &[], &revision(0, [0x00, 0x01, 0xe2, 0x00])));
+		data.extend(psi_packets(
+			0x0100,
+			&mut 0,
+			&[],
+			&pmt_section(1, 0, &[(MP2, 0x0062, &[])]),
+		));
+		data.extend(psi_packets(0, &mut cc, &[], &revision(1, [0x00, 0x02, 0xe3, 0x00])));
+		data.extend(psi_packets(
+			0x0200,
+			&mut 0,
+			&[],
+			&pmt_section(1, 1, &[(MP2, 0x0061, &[])]),
+		));
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 		programs.decode(&data).unwrap();
 		let _finished = programs.finish().unwrap();

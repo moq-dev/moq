@@ -141,7 +141,7 @@ pub(super) struct Pat {
 ///
 /// A PAT that needs more than one section is complete only once all of them are in, so a
 /// program is never missed for having been listed in a section still on its way.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct PatAssembler {
 	/// The version, transport_stream_id, and last_section_number being collected.
 	table: Option<(u8, u16, u8)>,

@@ -307,6 +307,7 @@ impl<E: catalog::Catalog> Import<E> {
 	pub(super) fn resume(mut self, from: Resume) -> Self {
 		self.framer = Framer { synced: true };
 		self.health = from.health;
+		self.pat = from.pat;
 		self.pmt_sections.insert(from.pmt, from.sections);
 		self
 	}
@@ -2488,6 +2489,8 @@ impl Liveness {
 pub(super) struct Resume {
 	/// Its grading of the input so far.
 	pub health: Health,
+	/// Its PAT reader, holding any revision still assembling.
+	pub pat: PatReader,
 	/// The PMT PID that started the importer.
 	pub pmt: Pid,
 	/// That PID's reassembler, holding any section the starting packet began.
@@ -2554,7 +2557,7 @@ impl Framer {
 
 /// Reads whole PATs off PID 0: reassembles its sections, drops any whose CRC fails, and
 /// collects the rest until every section of a version is in.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct PatReader {
 	sections: SectionReassembler,
 	table: psi::PatAssembler,
