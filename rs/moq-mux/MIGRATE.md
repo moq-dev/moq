@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### `Programs::finish` returns the program broadcasts
 
-`Programs::finish` now returns each program's `broadcast::Producer` instead of a `broadcast::Finish`.
+`Programs::finish` now returns each program's `broadcast::Producer` instead of `()`.
 Hand them, with the `Programs` that owns their tracks, to the new `moq_mux::Linger` to keep the finished programs up for a fixed time from the end:
 
 ```rust
@@ -101,12 +101,6 @@ Recordings published with `pes` framing no longer export; import their source ag
 
 `container::fmp4::Wire::new` returns `Result<Wire>`, as `Wire::from_init` already did, and refuses any other handler instead of treating it as data.
 Handle the error from `Wire::new`.
-
-### `ts::Programs::finish` returns each program's `Finish` (#5795)
-
-`Programs::finish` returns `anyhow::Result<Vec<moq_net::broadcast::Finish>>` instead of `anyhow::Result<()>`.
-Each handle keeps its program's broadcast servable until its media is stale, and dropping it closes that program.
-Await `Finish::wait` on each handle to linger, or drop the handles to close every program now.
 
 ### Timeline durations are hints (#5715)
 

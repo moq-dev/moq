@@ -30,7 +30,7 @@ To keep the first publisher on a path, track the paths you accepted and reject a
 
 ### A finished ingest lingers
 
-`Publish::accept` and `Client::pull` now resolve only after the ended stream's finished broadcast goes stale.
+`Publish::accept` and `Client::pull` now resolve only after the ended stream's finished broadcast has stayed up for `with_linger`.
 Drop the future to close the broadcast early. A socket or demux error still closes it at once.
 
 ### Egress runs at least one second behind (#5553)
