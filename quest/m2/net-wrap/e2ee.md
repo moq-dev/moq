@@ -71,8 +71,9 @@ the reverse (decided 2026-10-20, maintainer):
   open (relay-forged, another epoch's, malformed) is skipped after one open
   and keeps no state: a relay can inject names into a listing, so ending
   the listing would let it deny discovery. Test a forged and an
-  older-epoch name among valid ones. Opening needs
-  [reversible names](/quest/m2/e2ee/reversible-names.md).
+  older-epoch name among valid ones. Recovery is crate-private
+  `generation::Producer::open` today; move it to the consuming generation,
+  which holds the same name keys, so both sides can open.
 - Demand and preference cross the wrapper: an encrypted track's demand is
   its physical track's, and preference updates reach the physical track.
 - Keep the nonce rules the epic specifies: a group producer still owns its

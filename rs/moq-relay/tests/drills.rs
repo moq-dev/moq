@@ -1466,7 +1466,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		loop {
 			if track
 				.subscription()
-				.is_some_and(|subscription| subscription.max_delay == Duration::from_millis(100))
+				.is_some_and(|subscription| subscription.max_delay == Some(Duration::from_millis(100)))
 			{
 				break;
 			}

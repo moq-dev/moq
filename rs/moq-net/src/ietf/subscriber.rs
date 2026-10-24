@@ -548,6 +548,8 @@ struct Idle {
 	dynamic: track::Dynamic,
 	demand: track::Demand,
 	timescale: Option<Timescale>,
+	/// The publisher ended the track, so a returning subscriber reads the copy as it is.
+	finished: bool,
 }
 
 struct TrackState {
@@ -792,7 +794,7 @@ pub(super) struct Subscriber {
 	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
 	// Our grant (MoQ Auth): a subscription it stops covering is cancelled.
-	auth: crate::auth::Handle,
+	auth: crate::auth::Link,
 	// Namespaces the peer may have announced at once (`session::Limits::announces`), and
 	// tracks it lists to us.
 	pub(super) announces: crate::session::Slots,
@@ -889,7 +891,7 @@ impl Subscriber {
 			tasks,
 			version,
 			going_away,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			announces: Default::default(),
 			listings: Default::default(),
 			validity: Default::default(),
@@ -899,7 +901,7 @@ impl Subscriber {
 
 	/// Bound what we subscribe to by the grant this session's tokens earn (MoQ Auth),
 	/// and what the peer may publish to us by the session's limit, as either changes.
-	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
+	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
 		let this = self.clone();
 		self.tasks.push(async move { this.run_limit().await });
@@ -2913,8 +2915,8 @@ impl Subscriber {
 	}
 
 	/// Subscribe upstream for `target`, until the subscription ends: `Some` once nobody
-	/// subscribes any more, with the copy kept for [`Self::linger`], `None` once the track
-	/// ended or failed.
+	/// subscribes any more or the track ended, with the copy kept for [`Self::linger`],
+	/// `None` once it failed.
 	async fn subscribe_once(
 		&mut self,
 		broadcast_path: &Path<'_>,
@@ -3063,14 +3065,8 @@ impl Subscriber {
 		let max_age_supported = self.peer_setup.get().await.max_age;
 		let aggregate = target.subscription();
 		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
-		let max_age = max_age_supported.then(|| {
-			super::max_age::millis(
-				aggregate
-					.as_ref()
-					.map(|s| s.max_delay)
-					.unwrap_or(Duration::from_millis(super::max_age::MAX_MILLIS)),
-			)
-		});
+		let max_age =
+			max_age_supported.then(|| super::max_age::millis(aggregate.as_ref().map_or(Duration::MAX, |s| s.budget())));
 		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		// Without an Established subscription, a relay includes the request it holds.
 		let new_group = target
@@ -3450,7 +3446,7 @@ impl Subscriber {
 			Idle,
 			Revoked,
 			Done(Result<ietf::PublishDone<'static>, Error>),
-			Fetch(group::Request),
+			Fill(track::Fill),
 			Update(Update),
 		}
 
@@ -3482,6 +3478,8 @@ impl Subscriber {
 		let mut failed = false;
 		// How the upstream subscription ended, which ends a listing entry it held.
 		let mut ended: Option<Result<(), Error>> = None;
+		// The publisher ended the track cleanly: the copy lingers for its history's fills.
+		let mut finished = false;
 		let mut demand = track.demand();
 		// Nobody subscribing at all (only fetches asked) needs no subscription.
 		let mut subscribed = track.subscription().is_some();
@@ -3507,8 +3505,8 @@ impl Subscriber {
 						}
 					}
 					// An error is the track closing, which the arms below report.
-					if let Poll::Ready(Ok(request)) = dynamic.poll_requested_group(waiter) {
-						return Poll::Ready(End::Fetch(request));
+					if let Poll::Ready(Ok(requested)) = dynamic.poll_requested_fill(waiter) {
+						return Poll::Ready(End::Fill(requested));
 					}
 					let _ = group_fetches.poll(waiter);
 					// A group past the answer's Largest also makes the copy current, so a join
@@ -3527,7 +3525,7 @@ impl Subscriber {
 						if let Some(subscription) = subscription {
 							priority = subscription.priority;
 							if max_age_supported {
-								wanted_max_age = Some(super::max_age::millis(subscription.max_delay));
+								wanted_max_age = Some(super::max_age::millis(subscription.budget()));
 							}
 						}
 					}
@@ -3605,11 +3603,11 @@ impl Subscriber {
 						ended = Some(Err(Error::Unauthorized));
 						break true;
 					}
-					End::Fetch(request) => {
-						let fetch = self.clone().run_group_fetch(
+					End::Fill(requested) => {
+						let fetch = self.clone().serve_fill(
 							broadcast_path.to_owned(),
 							track_name.to_owned(),
-							request,
+							requested,
 							timescale,
 						);
 						group_fetches.push(fetch);
@@ -3664,6 +3662,9 @@ impl Subscriber {
 								// A no-op once an END_OF_TRACK declared the end, whose readers wait
 								// for a missing group only as long as the grace.
 								let _ = track.finish();
+								// Only TRACK_ENDED ends the track: after SUBSCRIPTION_ENDED a
+								// later reader subscribes afresh.
+								finished = matches!(ended, Some(Ok(())));
 							}
 							Err(err) => {
 								tracing::debug!(%err, "subscribe ended with error");
@@ -3700,6 +3701,7 @@ impl Subscriber {
 				track,
 				dynamic,
 				timescale,
+				finished: false,
 			});
 		}
 
@@ -3709,7 +3711,15 @@ impl Subscriber {
 		if !idle {
 			// The publisher already ended the request, so a FIN is all we owe it.
 			stream.writer.finish().ok();
-			return None;
+			// A reader may still miss history the publisher holds, such as a group whose
+			// fetch was in flight as the track ended, so a finished copy keeps serving fills.
+			return (finished && !aborted).then(|| Idle {
+				demand: track.demand(),
+				track,
+				dynamic,
+				timescale,
+				finished: true,
+			});
 		}
 		// What the copy cached goes stale from here. Marked before the cancel, which waits
 		// on the publisher: it stops serving as soon as the cancel lands, and a reader
@@ -3736,12 +3746,13 @@ impl Subscriber {
 			track,
 			dynamic,
 			timescale,
+			finished: false,
 		})
 	}
 
 	/// Keep a copy nobody subscribes to, cache and all, for fetches and a subscriber
 	/// returning soon: `Some` once one does, to subscribe again, `None` once nobody held
-	/// it through the linger, or the session ended.
+	/// it through the linger, or the session ended. A finished copy never subscribes again.
 	async fn linger(
 		&mut self,
 		broadcast_path: &Path<'_>,
@@ -3761,7 +3772,7 @@ impl Subscriber {
 		let mut linger = crate::time::Deadline::new(&self.runtime);
 		let mut subscribed = idle.track.subscription().is_some();
 		enum Step {
-			Fetch(group::Request),
+			Fill(track::Fill),
 			Subscribe,
 			Expired,
 			Revoked,
@@ -3775,14 +3786,14 @@ impl Subscriber {
 				if gate.poll_denied(waiter).is_ready() {
 					return Poll::Ready(Step::Revoked);
 				}
-				if let Poll::Ready(Ok(request)) = idle.dynamic.poll_requested_group(waiter) {
-					return Poll::Ready(Step::Fetch(request));
+				if let Poll::Ready(Ok(fill)) = idle.dynamic.poll_requested_fill(waiter) {
+					return Poll::Ready(Step::Fill(fill));
 				}
 				let _ = group_fetches.poll(waiter);
 				while let Poll::Ready(Ok(subscription)) = idle.track.poll_subscription_changed(waiter) {
 					subscribed = subscription.is_some();
 				}
-				if subscribed {
+				if subscribed && !idle.finished {
 					return Poll::Ready(Step::Subscribe);
 				}
 				// Nobody holds it: let it go after the linger. A reader waiting on a fetch holds
@@ -3802,13 +3813,10 @@ impl Subscriber {
 			.await;
 
 			match step {
-				Step::Fetch(request) => {
-					let fetch = self.clone().run_group_fetch(
-						broadcast_path.to_owned(),
-						track_name.to_owned(),
-						request,
-						idle.timescale,
-					);
+				Step::Fill(fill) => {
+					let fetch =
+						self.clone()
+							.serve_fill(broadcast_path.to_owned(), track_name.to_owned(), fill, idle.timescale);
 					group_fetches.push(fetch);
 				}
 				Step::Subscribe => break true,
@@ -4319,6 +4327,7 @@ impl Subscriber {
 			track,
 			dynamic,
 			timescale: ok.properties.timescale,
+			finished: false,
 		})
 	}
 
@@ -5214,6 +5223,26 @@ impl Subscriber {
 		Ok(Fetched::Frame)
 	}
 
+	/// Serve a fill a group at a time, newest first for a descending reader, until it is
+	/// answered or nobody waits on it.
+	async fn serve_fill(self, broadcast: PathOwned, name: String, fill: track::Fill, timescale: Option<Timescale>) {
+		let mut last = None;
+		while fill.is_used()
+			&& let Some(sequence) = fill.next()
+		{
+			// Every fetch answers its group, so the same one coming back is a bug; ending the
+			// fill names it dropped rather than fetching it forever.
+			if last == Some(sequence) {
+				debug_assert!(false, "fill group {sequence} left unanswered");
+				return;
+			}
+			last = Some(sequence);
+			self.clone()
+				.run_group_fetch(broadcast.clone(), name.clone(), fill.group(sequence), timescale)
+				.await;
+		}
+	}
+
 	/// Fetch a group from the publisher to fill a cache miss, with a standalone (or
 	/// draft-20 filtered) FETCH for this subscription's track. It asks from the frame the reader wants through the end
 	/// of the group, so a publisher that evicted the prefix can still answer.
@@ -5225,7 +5254,7 @@ impl Subscriber {
 		self,
 		broadcast: PathOwned,
 		name: String,
-		request: group::Request,
+		request: track::GroupFill,
 		timescale: Option<Timescale>,
 	) {
 		let validity = self.validity.start();
@@ -5238,7 +5267,7 @@ impl Subscriber {
 		let mut opening = self.session.clone();
 		let mut stream = match kio::wait(|waiter| {
 			validity.check(waiter)?;
-			if let Poll::Ready(err) = track::TrackState::poll_closed(&request.state, waiter) {
+			if let Poll::Ready(err) = request.poll_closed(waiter) {
 				return Poll::Ready(Err(err));
 			}
 			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
@@ -5252,7 +5281,7 @@ impl Subscriber {
 		let mut timeout = crate::time::Deadline::after(&self.runtime, Control::REQUEST_ID_TIMEOUT);
 		let fetch_id = match kio::wait(|waiter| {
 			validity.check(waiter)?;
-			if let Poll::Ready(err) = track::TrackState::poll_closed(&request.state, waiter) {
+			if let Poll::Ready(err) = request.poll_closed(waiter) {
 				return Poll::Ready(Err(err));
 			}
 			self.control.poll_credit(waiter, &mut timeout)
@@ -5329,14 +5358,13 @@ impl Subscriber {
 					if let Err(err) = validity.check(waiter) {
 						return Poll::Ready(SetupResponse::Cancelled(err));
 					}
-					if let Poll::Ready(err) = track::TrackState::poll_closed(&request.state, waiter) {
+					if let Poll::Ready(err) = request.poll_closed(waiter) {
 						return Poll::Ready(SetupResponse::Cancelled(err));
 					}
 					if let Poll::Ready(res) = response {
 						return Poll::Ready(SetupResponse::Response(res));
 					}
 					request
-						.demand()
 						.poll_unused(waiter)
 						.map(|_| SetupResponse::Cancelled(Error::Cancel))
 				})
@@ -5412,10 +5440,10 @@ impl Subscriber {
 		// stream also owes every object up to it. A whole-group answer has no object bound.
 		let end = (end.group == sequence && !whole_group).then_some(end.object);
 
-		// Joined fetches still count until they pick the accepted group up from the cache.
-		let joined = request.result.clone();
+		// The group's readers still count until they pick it up from the cache.
+		let readers = request.readers();
 		// The track was accepted before any fetch was asked, so it keeps that info.
-		let track = request.state.clone();
+		let track = request.track();
 		let mut producer = match request.accept(None) {
 			Ok(producer) => producer,
 			// Already served by a concurrent fetch, or the track closed.
@@ -5476,7 +5504,7 @@ impl Subscriber {
 
 			slot.poll(waiter, |state| match &**state {
 				GroupFetch::Done => Poll::Ready(()),
-				_ if joined.poll_unused(waiter).is_ready()
+				_ if readers.poll_unused(waiter).is_ready()
 					&& demand.poll_unused(waiter).is_ready()
 					&& demand.abort_unused(Error::Cancel) =>
 				{
@@ -7270,13 +7298,13 @@ mod tests {
 	) -> (
 		Subscriber,
 		crate::lite::test_transport::Log,
-		crate::auth::Handle,
+		crate::auth::Link,
 		Vec<crate::auth::Auth>,
 		crate::util::TaskSet,
 	) {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let log = session.log.clone();
-		let auth = crate::auth::Handle::new(true);
+		let auth = crate::auth::Link::new(true);
 		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
 		auth.granted(setup.id(), crate::auth::Grant::default());
 		let unanswered = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
@@ -7444,8 +7472,8 @@ mod tests {
 
 	/// A subscriber whose grant from the peer covers everything until `auth.ended(0, ..)`
 	/// revokes it, with the token handle to hold meanwhile.
-	fn revocable_auth() -> (crate::auth::Handle, crate::auth::Auth) {
-		let auth = crate::auth::Handle::new(true);
+	fn revocable_auth() -> (crate::auth::Link, crate::auth::Auth) {
+		let auth = crate::auth::Link::new(true);
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
 		(auth, cred)
@@ -7729,7 +7757,7 @@ mod tests {
 				let dynamic = track.dynamic();
 				let mut pending = Box::pin(track.consume().fetch_group(0, None));
 				assert!(futures::poll!(pending.as_mut()).is_pending());
-				let request = dynamic.requested_group().await.expect("group request");
+				let request = dynamic.requested_fill_group().await.expect("group request");
 				group = Some(pending);
 				accepted = Some(track);
 				Box::pin(subscriber.clone().run_group_fetch(
@@ -7755,7 +7783,7 @@ mod tests {
 				Error::Unauthorized
 			}
 			Invalidated::Narrowed => {
-				auth.authorize(&crate::auth::Grant::default());
+				auth.handle().authorize(&crate::auth::Grant::default());
 				Error::Unauthorized
 			}
 			// The session's AUTH handler reports expiry by ending the peer's grant.
@@ -7922,7 +7950,7 @@ mod tests {
 					let requested = track.dynamic();
 					let mut pending = Box::pin(track.consume().fetch_group(0, None));
 					assert!(futures::poll!(pending.as_mut()).is_pending());
-					let group = requested.requested_group().await.expect("group request");
+					let group = requested.requested_fill_group().await.expect("group request");
 					fetch = Some((track, pending));
 					moq_clock::sim::spawn(subscriber.run_group_fetch(
 						Path::new("broadcast").to_owned(),
@@ -10257,8 +10285,8 @@ mod tests {
 		// Admitted by its own token, which holds the one slot for the request's life.
 		let path = crate::Path::new("room/host").to_owned();
 		let hold: crate::auth::Hold = std::sync::Arc::new(subscriber.announces.acquire().unwrap());
-		let auth = crate::auth::Handle::new(true);
-		let mut requests = auth.requests();
+		let auth = crate::auth::Link::new(true);
+		let mut requests = auth.handle().requests();
 		let token = crate::setup::Token {
 			kind: crate::setup::Token::OUT_OF_BAND,
 			value: vec![0x00, 0xff],
@@ -10732,8 +10760,8 @@ mod tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 
-		let auth = crate::auth::Handle::new(true);
-		let requests = auth.requests();
+		let auth = crate::auth::Link::new(true);
+		let requests = auth.handle().requests();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(
 			0,
@@ -10744,7 +10772,7 @@ mod tests {
 			},
 		);
 		// We let the peer announce only "other".
-		auth.authorize(&crate::auth::Grant {
+		auth.handle().authorize(&crate::auth::Grant {
 			publish: crate::Pattern::subtree("other").unwrap().into(),
 			subscribe: crate::Patterns::new(),
 			expires: None,
@@ -11066,7 +11094,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_covering_peer_grant_never_skips_the_verifier() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(true);
+		let auth = crate::auth::Link::new(true);
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth);
@@ -11121,8 +11149,8 @@ mod tests {
 			subscribe: crate::Patterns::new(),
 			expires: None,
 		};
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&limit("room"));
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&limit("room"));
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 			.await
@@ -11161,7 +11189,7 @@ mod tests {
 			"the verifier ran though the limit covers the announce"
 		);
 
-		auth.authorize(&limit("other"));
+		auth.handle().authorize(&limit("other"));
 		for _ in 0..50 {
 			let _ = futures::poll!(acceptor.as_mut());
 			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended");
@@ -11178,8 +11206,8 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_token_authorized_announce_is_exempt_from_the_limit() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant::default());
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 			.await
@@ -11208,7 +11236,7 @@ mod tests {
 		}
 		assert!(routed, "the token admits the announce outside the limit");
 
-		auth.authorize(&crate::auth::Grant {
+		auth.handle().authorize(&crate::auth::Grant {
 			publish: crate::Pattern::subtree("other").unwrap().into(),
 			subscribe: crate::Patterns::new(),
 			expires: None,
@@ -11229,8 +11257,8 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_token_authorized_announce_admits_its_subscriptions() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant::default());
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
 		// The announce's peer says nothing; the subscription's accepts it.
 		let subscribe_ok = {
 			let log = crate::lite::test_transport::Log::default();
@@ -12071,9 +12099,9 @@ mod tests {
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
 	) {
-		let auth = crate::auth::Handle::new(false);
+		let auth = crate::auth::Link::new(false);
 		if let Some(limit) = &limit {
-			auth.authorize(limit);
+			auth.handle().authorize(limit);
 		}
 		announce_harness_with(version, auth)
 	}
@@ -12081,7 +12109,7 @@ mod tests {
 	/// An announce harness over `auth`, set up by the caller, taking its requests.
 	fn announce_harness_with(
 		version: Version,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 	) -> (
 		Subscriber,
 		crate::auth::Requests,
@@ -12095,7 +12123,7 @@ mod tests {
 	/// An announce harness over `auth` and `session`, both set up by the caller.
 	fn announce_harness_on(
 		version: Version,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 		session: crate::lite::test_transport::ScriptedSession,
 	) -> (
 		Subscriber,
@@ -12110,7 +12138,7 @@ mod tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 
-		let requests = auth.requests();
+		let requests = auth.handle().requests();
 
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
@@ -15569,8 +15597,8 @@ mod stitch_tests {
 			let dynamic = self.track.dynamic();
 			let mut fetch = Box::pin(self.track.consume().fetch_group(SEQUENCE, None));
 			assert!(futures::poll!(fetch.as_mut()).is_pending());
-			let request = dynamic.requested_group().await.expect("group request");
-			let track = request.state.clone();
+			let request = dynamic.requested_fill_group().await.expect("group request");
+			let track = request.track();
 			let producer = request.accept(None).unwrap();
 			let consumer = producer.consume();
 			let slot = kio::Producer::new(GroupFetch::Ready {
@@ -15827,7 +15855,7 @@ mod joining_fetch_tests {
 				.iter()
 				.any(|(id, _)| *id == ietf::Fetch::ID)
 		);
-		run.subscriber.auth.authorize(&crate::auth::Grant::default());
+		run.subscriber.auth.handle().authorize(&crate::auth::Grant::default());
 		settle().await;
 		let mut received = (&mut run._hold.2)
 			.now_or_never()
@@ -15912,7 +15940,7 @@ mod joining_fetch_tests {
 				.count();
 			assert!(requests > 0, "cache-miss FETCH was sent");
 			let mut held = accepted.then(|| (&mut fetch).now_or_never().expect("FETCH_OK").unwrap());
-			auth.authorize(&crate::auth::Grant::default());
+			auth.handle().authorize(&crate::auth::Grant::default());
 			assert!(
 				futures::poll!(serving.as_mut()).is_pending(),
 				"FIN stays unacknowledged"
@@ -16283,7 +16311,11 @@ mod joining_fetch_tests {
 			assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"x");
 
 			// The grace runs out with the head still being written, ending the subscription.
-			(&mut run.serving).await.unwrap();
+			// The finished copy lingers for fills while the reader holds it.
+			while !run.subscriber.state.lock().subscribes.is_empty() {
+				moq_clock::sleep(Duration::from_millis(1)).await;
+			}
+			assert!(!run.serving.is_finished(), "{version}: the finished copy lingers");
 
 			data.close(crate::lite::test_transport::Close::Fin);
 			assert!(
@@ -16292,6 +16324,33 @@ mod joining_fetch_tests {
 			);
 			let end = group.read_frame().await;
 			assert!(matches!(end, Ok(None)), "{version}: the head was cut short: {end:?}");
+		}
+	}
+
+	/// SUBSCRIPTION_ENDED ends only our subscription, not the track, so the copy is released
+	/// for a later reader to subscribe afresh rather than lingering as if the track ended.
+	#[moq_clock::test]
+	async fn a_subscription_ended_copy_does_not_linger() {
+		for version in JOINING_DRAFTS {
+			let mut ok = subscribe_ok(version, None);
+			ok.extend(message_bytes(
+				ietf::PublishDone::ID,
+				&ietf::PublishDone {
+					request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+						.then_some(RequestId(1)),
+					status_code: 0x3,
+					stream_count: 0,
+					reason_phrase: "done".into(),
+				},
+				version,
+			));
+			let mut run = JoinRun::start(version, None, ok, Vec::new()).await;
+			let _subscriber = (&mut run._hold.2).await.expect("subscribed");
+			while !run.subscriber.state.lock().subscribes.is_empty() {
+				settle().await;
+			}
+			settle().await;
+			assert!(run.serving.is_finished(), "{version}: the copy is released");
 		}
 	}
 
@@ -16337,8 +16396,8 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = Box::pin(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_group().await.expect("group request");
-		let outcome = request.result.clone();
+		let request = dynamic.requested_fill_group().await.expect("group request");
+		let outcome = request.joined();
 		let mut run = Box::pin(subscriber.clone().run_group_fetch(
 			Path::new("broadcast").to_owned(),
 			"video".into(),
@@ -16359,7 +16418,7 @@ mod joining_fetch_tests {
 				"{version:?}: unanswered FETCH stays alive"
 			);
 			assert!(matches!(
-				outcome.read().rejected,
+				outcome.read().refused(GROUP).cloned(),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 		} else {
@@ -16580,7 +16639,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_group().await.expect("no group requested");
+		let request = dynamic.requested_fill_group().await.expect("no group requested");
 
 		subscriber
 			.clone()
@@ -16652,7 +16711,7 @@ mod joining_fetch_tests {
 						}
 					));
 					assert!(futures::poll!(fetch.as_mut()).is_pending());
-					let request = dynamic.requested_group().await.expect("no group requested");
+					let request = dynamic.requested_fill_group().await.expect("no group requested");
 
 					subscriber
 						.clone()
@@ -16798,7 +16857,7 @@ mod joining_fetch_tests {
 			}
 		));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_group().await.expect("no group requested");
+		let request = dynamic.requested_fill_group().await.expect("no group requested");
 
 		let serving = moq_clock::sim::spawn(subscriber.clone().run_group_fetch(
 			Path::new("broadcast").to_owned(),

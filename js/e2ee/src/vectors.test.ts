@@ -2,10 +2,12 @@
 import { expect, test } from "bun:test";
 import { Epoch } from "@moq/net";
 import { Credential } from "./credential.ts";
-import { type Domain, encode, nameInfo, nonce, parse, pathInfo } from "./derive.ts";
+import { type Domain, decode, encode, nameKeyInfo, nameMacInfo, nonce, pad, pathInfo } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import { keyBytes, TrackKey, trackKey } from "./key.ts";
 import * as Limits from "./limits.ts";
+import { NameKeys } from "./name.ts";
+import { expand } from "./secret.ts";
 
 type Row = Record<string, unknown>;
 
@@ -82,13 +84,17 @@ test("constants match the vectors", () => {
 	expect(vectors.profile).toBe(Limits.PROFILE);
 	expect(c.salt).toBe(hex(encoder.encode(Limits.PROFILE)));
 	expect(c.path_label).toBe(hex(encoder.encode(Limits.PATH_LABEL)));
-	expect(c.name_label).toBe(hex(encoder.encode(Limits.NAME_LABEL)));
+	expect(c.name_mac_label).toBe(hex(encoder.encode(Limits.NAME_MAC_LABEL)));
+	expect(c.name_key_label).toBe(hex(encoder.encode(Limits.NAME_KEY_LABEL)));
 	expect(c.key_label).toBe(hex(encoder.encode(Limits.KEY_LABEL)));
 	expect(c.domain_group).toBe(0);
 	expect(c.domain_datagram).toBe(1);
 	expect(c.tag_len).toBe(Limits.TAG_LEN);
 	expect(c.key_len).toBe(Limits.KEY_LEN);
-	expect(c.name_len).toBe(Limits.NAME_LEN);
+	expect(c.path_len).toBe(Limits.PATH_LEN);
+	expect(c.name_mac_len).toBe(Limits.NAME_MAC_LEN);
+	expect(c.name_nonce_len).toBe(Limits.NAME_NONCE_LEN);
+	expect(c.name_block).toBe(Limits.NAME_BLOCK);
 	expect(c.max_u53).toBe(Limits.MAX_U53);
 	expect(c.max_u32).toBe(Limits.MAX_U32);
 	expect(c.max_invocations).toBe(Limits.MAX_INVOCATIONS);
@@ -109,21 +115,27 @@ test("path vectors", async () => {
 		expect(hex(pathInfo(credential.context, credential.kid, semantic))).toBe(String(row.path_info));
 		const path = await credential.path(semantic);
 		expect(path).toBe(String(row.opaque) as typeof path);
-		expect(encode(unhex(row.path_material))).toBe(String(row.opaque) as ReturnType<typeof encode>);
+		expect(encode(unhex(row.path_material))).toBe(String(row.opaque));
 	}
 });
 
 test("derivation vectors", async () => {
 	for (const row of vectors.derivation) {
 		const generation = generationFrom(row);
+		const { credential, epoch } = generation;
 		const semantic = String(row.semantic_name);
-		expect(
-			hex(nameInfo(generation.credential.context, generation.epoch, generation.credential.kid, semantic)),
-		).toBe(String(row.name_info));
+		expect(hex(encoder.encode(semantic))).toBe(String(row.semantic_name_bytes));
+		const macInfo = nameMacInfo(credential.context, epoch, credential.kid);
+		expect(hex(macInfo)).toBe(String(row.name_mac_info));
+		expect(hex(await expand(credential, macInfo, Limits.NAME_MAC_LEN))).toBe(String(row.name_mac));
+		const keyInfo = nameKeyInfo(credential.context, epoch, credential.kid);
+		expect(hex(keyInfo)).toBe(String(row.name_key_info));
+		expect(hex(await expand(credential, keyInfo))).toBe(String(row.name_key));
+		expect(hex(pad(semantic))).toBe(String(row.padded));
 		const name = await generation.name(semantic);
 		expect(name).toBe(String(row.physical_name) as typeof name);
-		expect(encode(unhex(row.name_material))).toBe(name);
-		const key = await keyBytes(generation.credential, generation.epoch, name, row.domain as Domain);
+		expect(hex(decode(name).subarray(0, Limits.NAME_NONCE_LEN))).toBe(String(row.name_nonce));
+		const key = await keyBytes(credential, epoch, semantic, row.domain as Domain);
 		expect(hex(key)).toBe(String(row.key));
 	}
 });
@@ -131,24 +143,31 @@ test("derivation vectors", async () => {
 test("naming vectors", async () => {
 	const credential = credentialFrom(vectors.generation);
 	for (const row of vectors.naming) {
-		const name = await credential.consume(epochFrom(row)).name(String(row.semantic_name));
+		const semantic = String(row.semantic_name);
+		expect(hex(encoder.encode(semantic))).toBe(String(row.semantic_name_bytes));
+		expect(hex(pad(semantic))).toBe(String(row.padded));
+		const epoch = epochFrom(row);
+		const name = await credential.consume(epoch).name(semantic);
 		expect(name).toBe(String(row.physical_name) as typeof name);
+		// A producing generation under this epoch recovers the semantic name from the physical one alone.
+		expect(await new NameKeys(credential, epoch).open(String(row.physical_name))).toBe(semantic);
 	}
 });
 
 async function payloadRow(row: Row) {
 	const generation = generationFrom(row);
-	const name = await generation.name(String(row.semantic_name));
+	const semantic = String(row.semantic_name);
+	const name = await generation.name(semantic);
 	expect(name).toBe(String(row.physical_name) as typeof name);
 	const domain = row.domain as Domain;
-	expect(hex(await keyBytes(generation.credential, generation.epoch, name, domain))).toBe(String(row.key));
+	expect(hex(await keyBytes(generation.credential, generation.epoch, semantic, domain))).toBe(String(row.key));
 	const group = row.group as number;
 	const frame = row.frame as number;
 	expect(hex(nonce(group, frame))).toBe(String(row.nonce));
 
 	const plaintext = unhex(row.plaintext);
 	const limit = row.payload_limit as number;
-	const key = trackKey(generation.credential, generation.epoch, name, domain);
+	const key = trackKey(generation.credential, generation.epoch, semantic, domain);
 	const payload = await key.encrypt(key.admitSeal(group, frame, plaintext.byteLength, limit), plaintext);
 	expect(hex(payload)).toBe(String(row.payload));
 	const opened = await key.decrypt(key.admitOpen(group, frame, payload.byteLength, limit), payload);
@@ -174,10 +193,10 @@ test("negative vectors", async () => {
 		switch (row.operation) {
 			case "open": {
 				const source = generationFrom(row.generation as Row);
-				const name = parse(String(row.physical_name));
+				const semantic = String(row.semantic_name);
 				const domain = row.domain as Domain;
-				expect(hex(await keyBytes(source.credential, source.epoch, name, domain))).toBe(String(row.key));
-				const key = trackKey(source.credential, source.epoch, name, domain);
+				expect(hex(await keyBytes(source.credential, source.epoch, semantic, domain))).toBe(String(row.key));
+				const key = trackKey(source.credential, source.epoch, semantic, domain);
 				const payload = unhex(row.payload);
 				const group = row.group as number;
 				const frame = row.frame as number;
@@ -196,9 +215,12 @@ test("negative vectors", async () => {
 			case "generation":
 				got = code(() => generationFrom(row.generation as Row));
 				break;
-			case "key":
-				got = code(() => parse(String(row.physical_name)));
+			case "name": {
+				const source = row.generation as Row;
+				const names = new NameKeys(credentialFrom(source), epochFrom(source));
+				got = await rejection(names.open(String(row.physical_name)));
 				break;
+			}
 			case "bytes": {
 				const data = "a".repeat(row.length as number);
 				switch (row.field) {

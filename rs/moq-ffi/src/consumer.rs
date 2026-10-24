@@ -31,13 +31,13 @@ pub struct MoqSubscription {
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age of a non-latest group before it is skipped, in microseconds, or null
-	/// for moq-net's default: `0`, which skips immediately. A larger value tolerates that
-	/// much reordering.
+	/// Maximum age of a non-latest group before it is skipped, in microseconds.
+	/// `0` skips immediately; a larger value tolerates that much reordering; null leaves
+	/// the publisher's max age alone to bound it.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	#[uniffi(default = None)]
+	#[uniffi(default = Some(0))]
 	pub max_delay_us: Option<u64>,
 	/// The spans of the track to deliver, or null for everything `max_delay_us` still
 	/// considers fresh. An empty list asks for nothing.
@@ -128,6 +128,15 @@ impl From<MoqOrder> for moq_net::track::Order {
 	}
 }
 
+impl From<moq_net::track::Order> for MoqOrder {
+	fn from(order: moq_net::track::Order) -> Self {
+		match order {
+			moq_net::track::Order::Ascending => Self::Ascending,
+			moq_net::track::Order::Descending => Self::Descending,
+		}
+	}
+}
+
 /// Options for fetching one past group by sequence.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqFetchGroupOptions {
@@ -154,10 +163,9 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 	type Error = MoqError;
 
 	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
-		let mut subscription = moq_net::track::Subscription::default().with_priority(s.priority);
-		if let Some(max_delay) = s.max_delay_us {
-			subscription = subscription.with_max_delay(std::time::Duration::from_micros(max_delay));
-		}
+		let mut subscription = moq_net::track::Subscription::default()
+			.with_priority(s.priority)
+			.with_max_delay(s.max_delay_us.map(std::time::Duration::from_micros));
 		if let Some(ranges) = s.ranges {
 			subscription = subscription.with_ranges(
 				ranges

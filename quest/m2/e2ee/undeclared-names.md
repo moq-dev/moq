@@ -44,13 +44,12 @@ The design is the [E2EE epic](/quest/m2/e2ee/README.md)'s Dynamic names section.
 - Rust only: `@moq/net` has no public broadcast request handler yet;
   [JS undeclared names](/quest/m2/e2ee/js-undeclared-names.md) adds it and
   the `@moq/e2ee` mirror.
+- Recovery is already in both cores: crate-private
+  `generation::Producer::open` in Rust (drop its `allow(dead_code)` once
+  the handler calls it) and `@internal` `Generation.Producer.open` in JS.
 
 Public API: a request handler on `moq_e2ee::broadcast::Producer`, and
 `track::Request::name()` returns the semantic name. Wire: none.
-
-## Required
-
-- [Reversible physical names](/quest/m2/e2ee/reversible-names.md) - the recovery this handler opens requests with
 
 ## Related
 

@@ -2460,14 +2460,18 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 			.await
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(request.sequence(), 5);
+	assert_eq!(
+		(request.start_group(), request.start_frame(), request.end_group()),
+		(5, 0, 6)
+	);
 	assert_eq!(request.priority(), 11);
+	assert_eq!(request.next(), Some(5));
 
-	let group = request.accept().unwrap();
+	let group = request.accept(5).unwrap();
 	group
 		.write_frame(MoqFrame {
 			payload: b"fetched".to_vec(),
@@ -2488,6 +2492,35 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 }
 
 #[tokio::test]
+async fn fill_goes_unused_when_the_fetcher_leaves() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let dynamic = track.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+		.await
+		.expect("timed out waiting for fill")
+		.unwrap();
+	assert!(fill.is_used());
+	assert!(fill.is_wanted(5));
+	assert!(!fill.is_wanted(6), "outside the fill");
+
+	fetch.abort();
+	tokio::time::timeout(TIMEOUT, fill.unused())
+		.await
+		.expect("timed out waiting for the abandoned fetch to become unused")
+		.unwrap();
+	assert!(!fill.is_used());
+	tokio::time::timeout(TIMEOUT, fill.unwanted(5))
+		.await
+		.expect("an unused fill wants none of its groups")
+		.unwrap();
+	assert!(!fill.is_wanted(5));
+}
+
+#[tokio::test]
 async fn dynamic_track_rejects_fetch_miss() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
@@ -2495,26 +2528,19 @@ async fn dynamic_track_rejects_fetch_miss() {
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	request.abort(404).unwrap();
+	fill.drop_groups(5, 6);
+	assert_eq!(fill.next(), None, "the dropped group is answered");
 
 	let result = tokio::time::timeout(TIMEOUT, fetch)
 		.await
 		.expect("timed out waiting for rejected fetch")
 		.expect("fetch task panicked");
-	match result {
-		Err(MoqError::Protocol { details: protocol }) => {
-			assert_eq!(protocol.scope, crate::error::MoqErrorScope::Stream);
-			assert_eq!(protocol.code, 64 + 404);
-			assert_eq!(protocol.kind, crate::error::MoqProtocolKind::App);
-		}
-		Err(other) => panic!("expected Protocol App(404), got {other:?}"),
-		Ok(_) => panic!("expected Protocol App(404), got a group"),
-	}
-	assert!(matches!(request.accept(), Err(MoqError::Closed)));
+	assert!(matches!(result, Err(MoqError::NotFound)), "got {:?}", result.err());
+	assert!(fill.accept(5).is_err(), "a dropped group is answered already");
 }
 
 #[tokio::test]
@@ -2550,12 +2576,12 @@ async fn requested_track_dynamic_survives_accept() {
 	let track_dynamic = request.dynamic().unwrap();
 	let _track = request.accept(Some(timed_info())).unwrap();
 
-	let group_request = tokio::time::timeout(TIMEOUT, track_dynamic.requested_group())
+	let fill = tokio::time::timeout(TIMEOUT, track_dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(group_request.sequence(), 9);
-	let group = group_request.accept().unwrap();
+	assert_eq!(fill.start_group(), 9);
+	let group = fill.accept(9).unwrap();
 	group
 		.write_frame(MoqFrame {
 			payload: b"archive".to_vec(),

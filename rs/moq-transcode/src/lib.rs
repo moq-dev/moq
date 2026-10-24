@@ -1349,7 +1349,7 @@ mod tests {
 	/// source, so the source publishes no group at all and serves this one
 	/// through a [`moq_net::track::Dynamic`] instead. That handle also parks the
 	/// fetch at exactly the point in question: past the rung's handler, before
-	/// its `GroupRequest::accept`.
+	/// its `Fill::accept`.
 	#[tokio::test]
 	async fn retirement_waits_for_an_unclaimed_fetch() {
 		let mut source = source_catalog(320, 240);
@@ -1396,9 +1396,9 @@ mod tests {
 		let fetching = rung.fetch_group(7, None);
 
 		// The rung's fetch task is now inside its source read, which is upstream of
-		// both its decoder and the `GroupRequest::accept` that claims output group 7.
-		let request = source_fetches.requested_group().await.expect("the source track closed");
-		assert_eq!(request.sequence(), 7);
+		// both its decoder and the `Fill::accept` that claims output group 7.
+		let request = source_fetches.requested_fill().await.expect("the source track closed");
+		assert_eq!(request.start().group, 7);
 
 		// Retire the rung with the fetch parked there, and let the retirement land
 		// before the source group exists.
@@ -1414,7 +1414,7 @@ mod tests {
 
 		// Release the fetch: it opens its decoder and only now claims output group
 		// 7, which retirement had to leave writable.
-		let mut group = request.accept(None).unwrap();
+		let mut group = request.accept(7, None).unwrap();
 		write_keyframe(&mut group);
 		group.finish().unwrap();
 
@@ -1471,32 +1471,31 @@ mod tests {
 		rung.query().await.unwrap();
 
 		let fetching = rung.fetch_group(7, None);
-		let abandoned = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_group())
+		let abandoned = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the fetch never reached the source")
 			.expect("the source track closed");
-		assert_eq!(abandoned.sequence(), 7);
+		assert_eq!(abandoned.start().group, 7);
 
 		// Leave before a single source frame exists. Encoding can only happen
 		// if the handler keeps this fetch.
 		drop(fetching);
-		tokio::time::timeout(std::time::Duration::from_secs(5), abandoned.demand().unused())
+		tokio::time::timeout(std::time::Duration::from_secs(5), abandoned.unused())
 			.await
-			.expect("the abandoned fetch kept its source fetch")
-			.expect("the source fetch closed instead of going unused");
+			.expect("the abandoned fetch kept its source fetch");
 
 		// The handler dropped the output request with the caller, so this is a
 		// fresh request rather than a join of the one still encoding.
 		let retry = rung.fetch_group(7, None);
-		let fresh = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_group())
+		let fresh = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the retry never fetched the source")
 			.expect("the source track closed");
-		assert_eq!(fresh.sequence(), 7);
+		assert_eq!(fresh.start().group, 7);
 		drop(abandoned);
 
 		let mut group = fresh
-			.accept(None)
+			.accept(7, None)
 			.expect("the fresh request lost to the abandoned encode");
 		write_keyframe(&mut group);
 		group.finish().unwrap();

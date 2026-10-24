@@ -29,16 +29,12 @@ use super::{Message, Version, cluster, error::request, peer, request_update};
 
 mod tracks;
 
-/// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_DELAY_MS: u64 = super::max_age::MAX_MILLIS;
-
 /// Preserve retained groups when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
-		// Demand can cross a Lite hop before the producer's retention bound is
-		// known, so use the largest duration that remains wire-encodable.
-		max_delay: Duration::from_millis(MAX_SAFE_DELAY_MS),
+		// No Max Age is the publisher's retention alone, whatever it turns out to be.
+		max_delay: None,
 		..Default::default()
 	}
 }
@@ -694,7 +690,7 @@ pub(super) struct Publisher {
 	version: Version,
 	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
 	// shrink withdraws what it no longer covers.
-	auth: crate::auth::Handle,
+	auth: crate::auth::Link,
 	// Dispatched finite serves, including those not yet polled.
 	pub(super) owed: Arc<AtomicUsize>,
 	// Subscriptions the peer holds, PUBLISHes for its listings included, counted for the peak.
@@ -708,7 +704,7 @@ pub(super) struct Publisher {
 /// Authorization selected by dispatch: a standalone path or a live parent subscription.
 enum FetchGate {
 	Standalone(crate::auth::Gate),
-	Joining { id: RequestId, auth: crate::auth::Handle },
+	Joining { id: RequestId, auth: crate::auth::Link },
 }
 
 struct Serve(Arc<AtomicUsize>);
@@ -777,7 +773,7 @@ impl Publisher {
 			peer_setup,
 			joins: Default::default(),
 			version,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			owed: Default::default(),
 			subscriptions: Default::default(),
 			priority: Default::default(),
@@ -786,7 +782,7 @@ impl Publisher {
 	}
 
 	/// Bound what we publish by the grant this session's tokens earn (MoQ Auth).
-	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
+	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
 		self
 	}
@@ -1407,7 +1403,7 @@ impl Publisher {
 						// What an update changed while forwarding outlives the pause.
 						let applied = track_serve.track.subscription();
 						msg.subscriber_priority = super::priority::to_wire(applied.priority);
-						msg.max_age = applied.max_delay.as_millis().try_into().ok();
+						msg.max_age = applied.max_delay.and_then(|delay| delay.as_millis().try_into().ok());
 						track_serve.close_groups();
 						self.pause_join(_join.as_ref());
 						drop(track_serve);
@@ -1828,7 +1824,7 @@ impl Publisher {
 		// which the track's refresh ratio judges.
 		let mut subscription = serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
 		if let Some(max_age) = msg.max_age {
-			subscription.max_delay = Duration::from_millis(max_age);
+			subscription.max_delay = Some(Duration::from_millis(max_age));
 		}
 		// A range that resolves without the live edge has a fixed start, which is no join:
 		// bound the subscription before subscribing so the ratio never judges it. From the
@@ -2116,7 +2112,7 @@ impl Publisher {
 		}
 		if let Some(max_age) = update.max_age {
 			let mut subscription = serve.track.subscription();
-			subscription.max_delay = Duration::from_millis(max_age);
+			subscription.max_delay = Some(Duration::from_millis(max_age));
 			serve.track.update(subscription).map_err(failed)?;
 		}
 		if let Some(value) = update.new_group {
@@ -8509,7 +8505,7 @@ mod serve_tests {
 			));
 			assert!(futures::poll!(running.as_mut()).is_pending());
 			let mark = session.log.writes.lock().unwrap().len();
-			h.publisher.auth.authorize(&crate::auth::Grant::default());
+			h.publisher.auth.handle().authorize(&crate::auth::Grant::default());
 			// An otherwise valid no-op update is ready at the same time as revocation.
 			session.push(&[0x02, 0, 2, 2, 0]);
 			assert!(futures::poll!(running.as_mut()).is_pending());
@@ -9072,8 +9068,8 @@ mod serve_tests {
 				._origin
 				.dynamic_route("live", crate::origin::Route::default())
 				.unwrap();
-			let auth = crate::auth::Handle::new(false);
-			auth.authorize(&nothing());
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&nothing());
 			h.publisher = h.publisher.clone().with_auth(auth);
 			let code = moq_clock::timeout(
 				std::time::Duration::from_secs(1),
@@ -9095,7 +9091,7 @@ mod serve_tests {
 				._origin
 				.dynamic_route("live", crate::origin::Route::default())
 				.unwrap();
-			let auth = crate::auth::Handle::new(false);
+			let auth = crate::auth::Link::new(false);
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
 
 			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
@@ -9118,7 +9114,7 @@ mod serve_tests {
 
 			// Parked resolving the broadcast when the grant narrows.
 			let request = claim.requested_broadcast().await.unwrap();
-			auth.authorize(&nothing());
+			auth.handle().authorize(&nothing());
 			let output = crate::broadcast::Info::new().produce();
 			let _track = output.create_track("video", None).unwrap();
 			request.accept(&output);
@@ -9140,8 +9136,8 @@ mod serve_tests {
 		};
 		for version in [Version::Draft14, Version::Draft22] {
 			let mut h = serve(version);
-			let auth = crate::auth::Handle::new(false);
-			auth.authorize(&nothing);
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&nothing);
 			h.publisher = h.publisher.clone().with_auth(auth);
 
 			let mut body = track_status("room", true, version);
@@ -9168,7 +9164,7 @@ mod serve_tests {
 			let session = SinkSession::gated_bi(bi.consume());
 			let peer_setup = peer::PeerSetup::default();
 			peer_setup.set(peer::Peer::default());
-			let auth = crate::auth::Handle::new(false);
+			let auth = crate::auth::Link::new(false);
 			let publisher = Publisher::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
@@ -9205,7 +9201,7 @@ mod serve_tests {
 				moq_clock::sim::yield_now().await;
 			}
 
-			auth.authorize(&crate::auth::Grant {
+			auth.handle().authorize(&crate::auth::Grant {
 				publish: Default::default(),
 				subscribe: Default::default(),
 				expires: None,
@@ -11140,7 +11136,7 @@ mod serve_tests {
 			let request = h._broadcast.reserve_track("cam").unwrap();
 			let dynamic = request.dynamic();
 			let fetching = request.consume().fetch_group(4, None);
-			let mut fetched = dynamic.requested_group().await.unwrap().accept(None).unwrap();
+			let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
 			for object in 0..2 {
 				fetched.write_frame(None, format!("4-{object}").into_bytes()).unwrap();
 			}
@@ -11369,8 +11365,8 @@ mod serve_tests {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 1, None);
 			settle().await;
-			let auth = crate::auth::Handle::new(false);
-			auth.authorize(&nothing);
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&nothing);
 			h.publisher = h.publisher.clone().with_auth(auth);
 
 			let buf = standalone_fetch(&h, location, location, GroupOrder::Ascending).await;
@@ -11386,7 +11382,7 @@ mod serve_tests {
 			let h = serve(version);
 			let _group = h.track.clone().create_group(group::Info { sequence: 0 }).unwrap();
 			settle().await;
-			let auth = crate::auth::Handle::new(false);
+			let auth = crate::auth::Link::new(false);
 			let mut h = h;
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
 
@@ -11400,7 +11396,7 @@ mod serve_tests {
 				futures::poll!(fetch.as_mut()).is_pending(),
 				"{version}: served an unwritten group"
 			);
-			auth.authorize(&nothing);
+			auth.handle().authorize(&nothing);
 			let buf = moq_clock::timeout(std::time::Duration::from_secs(1), fetch)
 				.await
 				.unwrap_or_else(|_| panic!("{version}: still loading after the grant narrowed"));
@@ -11431,7 +11427,7 @@ mod serve_tests {
 			let session = SinkSession::gated_bi(bi.consume()).with_open_uni_gate(credit.consume());
 			let peer_setup = peer::PeerSetup::default();
 			peer_setup.set(peer::Peer::default());
-			let auth = crate::auth::Handle::new(false);
+			let auth = crate::auth::Link::new(false);
 			let publisher = Publisher::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
@@ -11482,7 +11478,7 @@ mod serve_tests {
 				"{version}: FETCH_OK never went out"
 			);
 
-			auth.authorize(&crate::auth::Grant {
+			auth.handle().authorize(&crate::auth::Grant {
 				publish: Default::default(),
 				subscribe: Default::default(),
 				expires: None,
@@ -11526,7 +11522,7 @@ mod serve_tests {
 				let session = SinkSession::gated_bi(bi.consume()).with_open_uni_gate(credit.consume());
 				let peer_setup = peer::PeerSetup::default();
 				peer_setup.set(peer::Peer::default());
-				let auth = crate::auth::Handle::new(false);
+				let auth = crate::auth::Link::new(false);
 				let publisher = Publisher::new(
 					crate::time::sim(),
 					crate::driver::Transport::new(session.clone()),
@@ -11588,7 +11584,7 @@ mod serve_tests {
 					"{version}: FETCH_OK never went out"
 				);
 
-				auth.authorize(&crate::auth::Grant {
+				auth.handle().authorize(&crate::auth::Grant {
 					publish: Default::default(),
 					subscribe: Default::default(),
 					expires: None,
@@ -11634,10 +11630,10 @@ mod serve_tests {
 			let session = SinkSession::gated_bi(bi.consume()).with_open_uni_gate(credit.consume());
 			let peer_setup = peer::PeerSetup::default();
 			peer_setup.set(peer::Peer::default());
-			let auth = crate::auth::Handle::new(false);
-			let mut requests = auth.requests();
+			let auth = crate::auth::Link::new(false);
+			let mut requests = auth.handle().requests();
 			// A limit of nothing, so only the token admits the subscription.
-			auth.authorize(&match token {
+			auth.handle().authorize(&match token {
 				true => crate::auth::Grant::default(),
 				false => crate::auth::Grant::all(),
 			});
@@ -11786,10 +11782,10 @@ mod serve_tests {
 		let session = SinkSession::gated_bi(bi.consume()).with_open_uni_gate(credit.consume());
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
-		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.requests();
+		let auth = crate::auth::Link::new(false);
+		let mut requests = auth.handle().requests();
 		// A limit of nothing, so only the token admits the subscription.
-		auth.authorize(&crate::auth::Grant::default());
+		auth.handle().authorize(&crate::auth::Grant::default());
 		let publisher = Publisher::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
@@ -12423,13 +12419,13 @@ mod serve_tests {
 
 	/// Like [`serve`], but with an app auth acceptor wired in and the subscribe stream's
 	/// reader scripted with `first_script` (a REQUEST_UPDATE, for the renewal tests).
-	fn serve_with_auth(version: Version, auth: crate::auth::Handle, first_script: Vec<u8>) -> Serve {
+	fn serve_with_auth(version: Version, auth: crate::auth::Link, first_script: Vec<u8>) -> Serve {
 		serve_on(version, auth, ScriptedSession::per_stream(vec![first_script]))
 	}
 
 	/// [`serve_with_auth`] over a given session, such as one that finishes the stream after
 	/// its script.
-	fn serve_on(version: Version, auth: crate::auth::Handle, session: ScriptedSession) -> Serve {
+	fn serve_on(version: Version, auth: crate::auth::Link, session: ScriptedSession) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
 		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
@@ -12472,13 +12468,13 @@ mod serve_tests {
 	/// An auth handle whose session grant covers only `other`, so a SUBSCRIBE for `room`
 	/// falls to its request token. The presented credential is kept alive by the returned
 	/// [`crate::auth::Auth`].
-	fn auth_covering_other() -> (crate::auth::Handle, crate::auth::Requests, crate::auth::Auth) {
-		let auth = crate::auth::Handle::new(true);
-		let requests = auth.requests();
+	fn auth_covering_other() -> (crate::auth::Link, crate::auth::Requests, crate::auth::Auth) {
+		let auth = crate::auth::Link::new(true);
+		let requests = auth.handle().requests();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		// The peer lets us publish everything, and we let it read only "other".
 		auth.granted(0, crate::auth::Grant::all());
-		auth.authorize(&crate::auth::Grant {
+		auth.handle().authorize(&crate::auth::Grant {
 			publish: crate::Patterns::new(),
 			subscribe: crate::Pattern::subtree("other").unwrap().into(),
 			expires: None,
@@ -13713,9 +13709,9 @@ mod serve_tests {
 	#[moq_clock::test]
 	async fn a_request_token_on_a_no_auth_session_is_verified() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.requests();
-		auth.authorize(&crate::auth::Grant::default());
+		let auth = crate::auth::Link::new(false);
+		let mut requests = auth.handle().requests();
+		auth.handle().authorize(&crate::auth::Grant::default());
 
 		let h = serve_with_auth(VERSION, auth, Vec::new());
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -13764,12 +13760,12 @@ mod serve_tests {
 	async fn serve_token_subscribe(
 		grant: crate::auth::Grant,
 		limit: Option<crate::auth::Grant>,
-	) -> (crate::auth::Handle, Serve, Serving) {
+	) -> (crate::auth::Link, Serve, Serving) {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.requests();
+		let auth = crate::auth::Link::new(false);
+		let mut requests = auth.handle().requests();
 		if let Some(limit) = &limit {
-			auth.authorize(limit);
+			auth.handle().authorize(limit);
 		}
 		let h = serve_with_auth(VERSION, auth.clone(), Vec::new());
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -13841,7 +13837,7 @@ mod serve_tests {
 			still_serving(&mut serving).await,
 			"a limit of nothing defers to the token"
 		);
-		auth.authorize(&crate::auth::Grant {
+		auth.handle().authorize(&crate::auth::Grant {
 			publish: crate::Patterns::new(),
 			subscribe: crate::Pattern::subtree("other").unwrap().into(),
 			expires: None,
@@ -13858,8 +13854,8 @@ mod serve_tests {
 	#[moq_clock::test]
 	async fn a_covering_peer_grant_never_skips_the_verifier() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(true);
-		let mut requests = auth.requests();
+		let auth = crate::auth::Link::new(true);
+		let mut requests = auth.handle().requests();
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
 		let h = serve_with_auth(VERSION, auth, Vec::new());
@@ -13910,7 +13906,7 @@ mod serve_tests {
 
 		let (auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::all(), Some(limit("room"))).await;
 		assert!(still_serving(&mut serving).await, "the verified token admits it");
-		auth.authorize(&limit("other"));
+		auth.handle().authorize(&limit("other"));
 		assert!(
 			still_serving(&mut serving).await,
 			"narrowing the limit leaves the token-verified subscription"
@@ -13922,8 +13918,8 @@ mod serve_tests {
 	#[moq_clock::test]
 	async fn a_token_on_a_subscription_admitted_without_one_is_refused() {
 		for version in [Version::Draft16, Version::Draft22] {
-			let auth = crate::auth::Handle::new(false);
-			auth.authorize(&crate::auth::Grant::all());
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&crate::auth::Grant::all());
 			let h = serve_with_auth(version, auth, Vec::new());
 			let session = ScriptedSession::per_stream(vec![update_with_tokens(version, &[TOKEN])]);
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
@@ -13981,7 +13977,7 @@ mod serve_tests {
 			a_token_without_a_verifier_is_refused(VERSION, limit).await;
 		}
 
-		let unlimited = crate::auth::Handle::new(false);
+		let unlimited = crate::auth::Link::new(false);
 		let h = serve_with_auth(VERSION, unlimited, Vec::new());
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
 		group.write_frame(timestamp(), b"frame".as_slice()).unwrap();
@@ -14002,8 +13998,8 @@ mod serve_tests {
 	/// Serve a token SUBSCRIBE on a session limited to `limit` with no verifier, and check it
 	/// is refused NOT_SUPPORTED.
 	async fn a_token_without_a_verifier_is_refused(version: Version, limit: crate::auth::Grant) {
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&limit);
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&limit);
 		let h = serve_with_auth(version, auth, Vec::new());
 		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
 			.await
@@ -14047,8 +14043,8 @@ mod serve_tests {
 		const VERSION: Version = Version::Draft18;
 
 		// Withdrawn before the application looked.
-		let auth = crate::auth::Handle::new(false);
-		let _requests = auth.requests();
+		let auth = crate::auth::Link::new(false);
+		let _requests = auth.handle().requests();
 		let mut h = serve_with_auth(VERSION, auth, Vec::new());
 		h.publisher.subscriptions = crate::session::Slots::new(1);
 		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -14071,8 +14067,8 @@ mod serve_tests {
 		);
 
 		// Withdrawn after the application took it.
-		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.requests();
+		let auth = crate::auth::Link::new(false);
+		let mut requests = auth.handle().requests();
 		let mut h = serve_with_auth(VERSION, auth, Vec::new());
 		h.publisher.subscriptions = crate::session::Slots::new(1);
 		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -14114,8 +14110,8 @@ mod serve_tests {
 	#[moq_clock::test]
 	async fn a_cancelled_subscribe_keeps_its_stream_until_the_application_answers() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.requests();
+		let auth = crate::auth::Link::new(false);
+		let mut requests = auth.handle().requests();
 		let h = serve_with_auth(VERSION, auth, Vec::new());
 		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), VERSION)
 			.await
@@ -14160,8 +14156,8 @@ mod serve_tests {
 	#[moq_clock::test]
 	async fn a_request_token_cannot_exceed_the_peers_grant() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(true);
-		let mut requests = auth.requests();
+		let auth = crate::auth::Link::new(true);
+		let mut requests = auth.handle().requests();
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(
 			0,
@@ -14171,7 +14167,7 @@ mod serve_tests {
 				expires: None,
 			},
 		);
-		auth.authorize(&crate::auth::Grant::default());
+		auth.handle().authorize(&crate::auth::Grant::default());
 		let h = serve_with_auth(VERSION, auth, Vec::new());
 		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), VERSION)
 			.await
@@ -14280,7 +14276,10 @@ mod tests {
 		}
 
 		let subscription = serving_subscription(128);
-		assert_eq!(subscription.max_delay.as_millis(), MAX_SAFE_DELAY_MS as u128);
+		assert_eq!(
+			subscription.max_delay, None,
+			"no Max Age is the publisher's retention alone"
+		);
 		let mut subscriber = producer.subscribe(subscription);
 		for sequence in [0, 1] {
 			let group = subscriber
@@ -15899,7 +15898,7 @@ mod tests {
 	/// `origin` unsolicited, with one script per stream it opens.
 	fn auth_publisher(
 		origin: &crate::origin::Producer,
-		auth: &crate::auth::Handle,
+		auth: &crate::auth::Link,
 		scripts: Vec<Vec<u8>>,
 		version: Version,
 	) -> (Publisher, crate::lite::test_transport::Log) {
@@ -15954,7 +15953,7 @@ mod tests {
 
 	async fn swaps_a_route_auth(version: Version) {
 		let origin = unheld_origin();
-		let auth = crate::auth::Handle::ietf(false);
+		let auth = crate::auth::Link::ietf(false);
 		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
 		let second = auth
 			.present(bytes::Bytes::from_static(b"second-secret"), false)
@@ -16025,7 +16024,7 @@ mod tests {
 		const VERSION: Version = Version::Draft16;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Handle::ietf(false);
+		let auth = crate::auth::Link::ietf(false);
 		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
 		let second = auth
 			.present(bytes::Bytes::from_static(b"second-secret"), false)
@@ -16068,7 +16067,7 @@ mod tests {
 		const VERSION: Version = Version::Draft16;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Handle::ietf(false);
+		let auth = crate::auth::Link::ietf(false);
 		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
 		let second = auth
 			.present(bytes::Bytes::from_static(b"second-secret"), false)
@@ -16115,7 +16114,7 @@ mod tests {
 		const VERSION: Version = Version::Draft19;
 
 		let origin = unheld_origin();
-		let other = crate::auth::Handle::ietf(false);
+		let other = crate::auth::Link::ietf(false);
 		let foreign = other
 			.present(bytes::Bytes::from_static(b"foreign-secret"), false)
 			.unwrap();
@@ -16125,7 +16124,7 @@ mod tests {
 		settle().await;
 
 		let ok = publish_namespace_ok(VERSION).await;
-		let (publisher, log) = auth_publisher(&origin, &crate::auth::Handle::ietf(false), vec![ok], VERSION);
+		let (publisher, log) = auth_publisher(&origin, &crate::auth::Link::ietf(false), vec![ok], VERSION);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"cam", 1).await;
 
@@ -16144,7 +16143,7 @@ mod tests {
 		const VERSION: Version = Version::Draft19;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Handle::ietf(false);
+		let auth = crate::auth::Link::ietf(false);
 		let token = auth.present(bytes::Bytes::from_static(b"late-secret"), false).unwrap();
 		let cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
 		settle().await;
@@ -16170,7 +16169,7 @@ mod tests {
 		const VERSION: Version = Version::Draft14;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Handle::ietf(false);
+		let auth = crate::auth::Link::ietf(false);
 		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
 		let second = auth
 			.present(bytes::Bytes::from_static(b"second-secret"), false)
@@ -16204,7 +16203,7 @@ mod tests {
 		const VERSION: Version = Version::Draft19;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Handle::ietf(false);
+		let auth = crate::auth::Link::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let a = origin
 			.announce("cam-a", crate::origin::Route::default().with_auth(present(b"a-first")))
@@ -16407,7 +16406,7 @@ mod tests {
 			// A token too big for the header's u16 length, so the header fails after its stream
 			// opened and its request ID was spent. A message goes out whole, so this is the one
 			// failure a fresh in-memory stream can be made to show.
-			let auth = crate::auth::Handle::ietf(false);
+			let auth = crate::auth::Link::ietf(false);
 			let token = auth.present(bytes::Bytes::from(vec![0; 70_000]), false).unwrap();
 			let _cam = origin
 				.announce("cam", crate::origin::Route::default().with_auth(token))
@@ -16472,7 +16471,7 @@ mod tests {
 		const VERSION: Version = Version::Draft19;
 
 		let origin = unheld_origin();
-		let auth = crate::auth::Handle::ietf(false);
+		let auth = crate::auth::Link::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
 			.announce("cam", crate::origin::Route::default().with_auth(present(b"first")))
@@ -16527,7 +16526,7 @@ mod tests {
 
 	async fn advertises_again_unanswered(version: Version) {
 		let origin = unheld_origin();
-		let auth = crate::auth::Handle::ietf(false);
+		let auth = crate::auth::Link::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
 			.announce("cam", crate::origin::Route::default().with_auth(present(b"first")))
