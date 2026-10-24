@@ -440,12 +440,12 @@ mod tests {
 			(session, AbortOnDrop::new(tokio::spawn(moq_net::time::run(driver))))
 		};
 		let server = async {
-			let request = moq_net::Server::new()
+			let mut request = moq_net::Server::new()
 				.with_versions(versions.clone())
 				.accept_request(now, server)
 				.await
 				.unwrap();
-			let mut requests = request.auth().requests().unwrap();
+			let mut requests = request.requests();
 			let (session, driver) = request.ok().await.unwrap();
 			let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 			let acceptor = tokio::spawn(async move {

@@ -21,11 +21,11 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 
 - Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>` with the epoch on its route, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. The epoch is the shared [`Epoch`](/doc/concept/moq-lite.md#publisher-epochs) primitive. Subscribers resolve `<opaque>` and take the epoch from its route, where the newest wins; on a wire without route epochs the application supplies it.
 - An encrypting publisher refuses a shared or explicit epoch (maintainer, 2026-10-08). Two producers handed one epoch would derive the same keys and repeat every nonce. Both cores produce only under an epoch they minted themselves; consuming still binds a discovered one. Rejected: a per-instance salt. State the rule in the draft's epoch section.
-- The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance. Plaintext broadcasts adopt the same epoch by default through [broadcast epochs](/quest/m0/broadcast-epoch/README.md).
+- The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance. First-party plaintext publishers already mint the same route epoch.
 - Nothing in the path says the bytes are encrypted. The format after decryption (`meeting.hang`) is inside the opaque name; a plaintext player, exporter, or matcher that opens a protected broadcast finds no catalog it can read and fails with its usual typed refusal, the same as for any format it does not support.
 - One 32-byte secret authorizes the whole broadcast; HKDF-SHA-256 derives separate AES-128-GCM keys for each physical track and for grouped-frame versus datagram domains. A grouped frame uses the 96-bit nonce `uint64_be(group) || uint32_be(frame)`; a datagram uses its sequence with frame zero under the datagram domain. Empty AAD: every immutable end-to-end field is in the HKDF info or the nonce.
 - Within an instance, group and datagram sequences are allocated monotonically and frames are numbered in write order, which is the whole reuse rule. There is no ciphertext retention or retransmission API: relays forward bytes unchanged, and an application that needs to resend encrypts nothing twice because it never gets the same identity twice.
-- Per-key limits are `2^24` AEAD invocations (failed opens included) and `2^36` plaintext bytes. Datagram plaintext is capped at `1200 - 24 - 16` bytes against the widest moq-lite header; a publisher cannot see the Subscribe ID each hop encodes, so the library does not pretend to budget it.
+- Per-key limits are `2^24` AEAD invocations (failed opens included) and `2^36` plaintext bytes. The generation handle owns each key's accounting, shared by every track and subscription through it and never evicted while the application holds it; binding the epoch again starts fresh, since remembering retired epochs would be state a relay grows (maintainer, 2026-10-24). Rejected: a credential-level registry of live generations, and refusing to re-bind a released epoch. Datagram plaintext is capped at `1200 - 24 - 16` bytes against the widest moq-lite header; a publisher cannot see the Subscribe ID each hop encodes, so the library does not pretend to budget it.
 
 ### Library shape
 
@@ -79,9 +79,6 @@ The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/587
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
-- [One epoch, one producer](/quest/m2/e2ee/lifecycle-hardening.md) - the epoch rule
-  holds in the TypeScript API, a failed grouped write ends the group, and an
-  out-of-range datagram is dropped
 
 ## Closes
 

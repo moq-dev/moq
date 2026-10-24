@@ -76,6 +76,7 @@ mod util;
 #[cfg(feature = "watch")]
 pub mod watch;
 #[cfg(feature = "webrtc")]
+#[doc(hidden)]
 pub mod webrtc;
 #[cfg(feature = "websocket")]
 pub mod websocket;

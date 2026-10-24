@@ -364,6 +364,9 @@ No state survives an instance: nothing needs to be persisted across restarts to 
 Empty AAD does not weaken the binding: every immutable end-to-end field is in the HKDF info or the nonce.
 Timestamps are excluded because relays rewrite them; a relay can therefore shift or reorder authentic objects in time within a receiver's tolerance.
 
+Nothing authenticates where a group ends.
+A relay can end a group after any frame, and a receiver cannot tell the truncated group from a shorter one, so an application MUST NOT rely on group completeness.
+
 The opaque path segment is a deterministic function of the secret and semantic broadcast name; physical track names are deterministic functions of the secret, epoch, and semantic name, so names under different epochs are unlinkable.
 An attacker without the secret cannot predict them; an attacker with the secret can derive every name, which is intended.
 
@@ -383,6 +386,7 @@ This document requests no registrations.
 - Require internally minted producing epochs and consume-only bindings for discovered epochs.
 - Require canonical UUIDv7 epochs, carried on the route rather than in the path, leaving HKDF UUID inputs unchanged.
 - Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.
+- Forbid applications from relying on group completeness, which is unauthenticated.
 - Derive physical track names by AES-128-GCM encryption of the padded semantic name under an HMAC-SHA-256 nonce, so a publisher recovers any requested name, and bind AEAD keys to the semantic name.
 
 ## draft-lcurley-moq-e2ee-00

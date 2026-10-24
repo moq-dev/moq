@@ -218,7 +218,7 @@ pub(crate) struct Server {
 }
 
 impl Server {
-	#[cfg(test)]
+	#[cfg(all(test, feature = "stun"))]
 	pub(crate) fn addr(&self) -> SocketAddr {
 		self.socket.local_addr().unwrap()
 	}

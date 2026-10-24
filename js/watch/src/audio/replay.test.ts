@@ -230,3 +230,35 @@ it("replay refuses missing, non-finite or non-positive recorded durations", asyn
 		await expect(reader.next()).rejects.toThrow("invalid recorded frame duration");
 	}
 });
+
+// Five seconds advertised is ten times what the ring holds decoded, so the rest waits encoded in the
+// consumer until the received media covers it, then plays at the advertised delay.
+it("plays an advertised flush span past the decoded floor at its delay without a gap", async () => {
+	const config = { ...CONFIG, jitter: 5000 } as Catalog.AudioConfig;
+	let start: number | undefined;
+	let short = 0;
+	let lag = 0;
+	let delay = 0;
+	for await (const quantum of replay(
+		paced(12, () => 30),
+		{
+			rate: RATE,
+			config,
+			delay: "auto",
+			duration: observed(12),
+		},
+	)) {
+		const filled = quantum.output.findLastIndex((v) => v !== 0) + 1;
+		if (start === undefined && filled > 0) start = quantum.at;
+		if (start !== undefined && filled < QUANTUM) short++;
+		lag = quantum.at - quantum.timestamp;
+		delay = quantum.delay;
+	}
+	expect(delay).toBe(5020);
+	// The first frame arrived 30 ms late, so it plays the target after its own capture plus that.
+	expect(start).toBeGreaterThanOrEqual(5020);
+	expect(start).toBeLessThan(5040);
+	expect(short).toBe(0);
+	expect(lag).toBeGreaterThanOrEqual(5020);
+	expect(lag).toBeLessThan(5040);
+});

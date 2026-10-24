@@ -71,35 +71,20 @@ cases!(
 	a_grant_update_too_large_for_one_message_is_unsupported,
 	nothing_outside_the_grant_reaches_the_peer,
 	a_broadcast_received_from_the_peer_is_not_ours_to_check,
+	exact_and_subtree_grants_admit_their_broadcast,
+	pattern_grants_arrive_exactly,
+	a_wildcard_grant_is_enforced,
 );
 
-/// Run each case on moq-transport alone, whose namespace prefixes cannot carry every
-/// pattern.
-macro_rules! prefix_cases {
-	($($case:ident),* $(,)?) => {
-		mod moqt_17_prefixes {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_17).await })*
-		}
-		mod moqt_22_prefixes {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_22).await })*
-		}
-	};
-}
-
-prefix_cases!(
-	an_unrepresentable_grant_is_unsupported,
-	an_unrepresentable_update_revokes_only_its_token,
-	a_grant_too_large_for_one_message_is_unsupported,
-);
-
+/// moq-transport's u16 message size is the one a test can overflow quickly.
 #[moq_clock::test]
-async fn lite_07_carries_pattern_grants() {
-	pattern_grants_arrive_exactly(LITE_07).await
+async fn moqt_17_a_grant_too_large_for_one_message_is_unsupported() {
+	a_grant_too_large_for_one_message_is_unsupported(MOQT_17).await
 }
 
 #[moq_clock::test]
-async fn lite_07_enforces_a_wildcard_grant() {
-	a_wildcard_grant_is_enforced(LITE_07).await
+async fn moqt_22_a_grant_too_large_for_one_message_is_unsupported() {
+	a_grant_too_large_for_one_message_is_unsupported(MOQT_22).await
 }
 
 #[moq_clock::test]
@@ -129,6 +114,17 @@ async fn lite_07_opens_an_auth_stream_per_side() {
 #[moq_clock::test]
 async fn lite_05_has_no_grant() {
 	older_versions_have_no_grant("moq-lite-05").await
+}
+
+/// The #6566 matrix's drafts: one without MoQ Auth, and one with it.
+#[moq_clock::test]
+async fn moqt_16_admits_exact_and_subtree_grants() {
+	exact_and_subtree_grants_admit_their_broadcast("moq-transport-16").await
+}
+
+#[moq_clock::test]
+async fn moqt_18_admits_exact_and_subtree_grants() {
+	exact_and_subtree_grants_admit_their_broadcast("moq-transport-18").await
 }
 
 #[moq_clock::test]
@@ -451,14 +447,12 @@ async fn connect(opts: Options) -> Pair {
 		session
 	};
 	let server_fut = async {
-		let handshake = server
+		let mut handshake = server
 			.accept_request(now(), server_transport)
 			.await
 			.expect("server handshake");
 		// Taken before the session starts, the way a relay verifying tokens would.
-		let requests = opts
-			.server_requests
-			.then(|| handshake.auth().requests().expect("requests available before ok()"));
+		let requests = opts.server_requests.then(|| handshake.requests());
 		let (session, mut driver) = handshake.ok().await.expect("server accept");
 		let driver = moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
@@ -985,6 +979,46 @@ async fn older_versions_have_no_grant(version: &'static str) {
 	.expect("timed out");
 }
 
+/// An exact path and a subtree are both admitted, and told as issued wherever AUTH runs:
+/// a grant is never refused for the shape of its patterns.
+async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
+	for scope in ["ch1", "ch1/**"] {
+		within(async {
+			let relay = produce_origin(1);
+			let broadcast = relay.create_broadcast("ch1").unwrap();
+			let track = broadcast.create_track("video", timed()).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+
+			let received = produce_origin(2);
+			let scope = pattern_set(&[scope]);
+			let pair = connect(Options {
+				version: Some(version),
+				client_subscribe: Some(received.clone()),
+				server_publish: Some(relay.scope("", &scope).unwrap()),
+				..Default::default()
+			})
+			.await;
+
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref())
+				.unwrap();
+			let remote = received.consume().routed_broadcast("ch1").await.unwrap();
+			let prefs = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+			let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
+			sub.recv_group().await.unwrap().expect("a group");
+
+			match version == "moq-transport-16" {
+				true => assert_eq!(pair.client.auth().grant().peek(), None),
+				false => assert_eq!(granted(&pair.client).await.subscribe, scope),
+			}
+			assert_eq!(pair.client_transport.close_reason(), None);
+		})
+		.await
+		.expect("timed out");
+	}
+}
+
 /// Connect on `version` and wait for a client announcement to reach the server. Each
 /// driver presents its setup token before it handles any other stream, so by then a
 /// version with AUTH has opened its Auth Stream on both sides.
@@ -1138,91 +1172,6 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			let count = resets.iter().filter(|&&code| code == unauthorized).count();
 			assert_eq!(count, 2, "both subscriptions reset with UNAUTHORIZED: {resets:x?}");
 		}
-	})
-	.await
-	.expect("timed out");
-}
-
-/// A grant moq-transport cannot carry as prefixes is never widened: the token is refused
-/// as unsupported, promptly, and the union stays unknown rather than empty.
-async fn an_unrepresentable_grant_is_unsupported(version: &'static str) {
-	within(async {
-		let mut pair = connect(Options {
-			version: Some(version),
-			client_publish: Some(produce_origin(2)),
-			server_subscribe: Some(produce_origin(1)),
-			server_requests: true,
-			..Default::default()
-		})
-		.await;
-		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
-			b"" => Some(grant(&["a"], &[])),
-			b"exact" => Some(Grant {
-				publish: Patterns::from(Pattern::try_from("room/alice").unwrap()),
-				subscribe: Patterns::new(),
-				expires: None,
-			}),
-			b"mixed" => Some(Grant {
-				publish: ["room/**", "lobby"]
-					.into_iter()
-					.map(|p| Pattern::try_from(p).unwrap())
-					.collect(),
-				subscribe: Patterns::new(),
-				expires: None,
-			}),
-			b"wildcard" => Some(Grant {
-				publish: Patterns::from(Pattern::try_from("room/*/cam").unwrap()),
-				subscribe: Patterns::new(),
-				expires: None,
-			}),
-			_ => None,
-		});
-		let (_, _setup) = issued.next().await.unwrap();
-		assert_eq!(granted(&pair.client).await, grant(&["a"], &[]));
-
-		for token in ["exact", "mixed", "wildcard"] {
-			let err = pair.client.auth().add(token).await.expect_err("not representable");
-			assert!(matches!(err, Error::Unsupported), "{token}: {err:?}");
-		}
-		// The other token is untouched, and so is the session.
-		assert_eq!(pair.client.auth().grant().peek(), Some(grant(&["a"], &[])));
-		assert_eq!(pair.client_transport.close_reason(), None);
-	})
-	.await
-	.expect("timed out");
-}
-
-/// An update moq-transport cannot carry revokes that token's earlier grant, and only
-/// that token's: the rest of the union and the session stay.
-async fn an_unrepresentable_update_revokes_only_its_token(version: &'static str) {
-	within(async {
-		let mut pair = connect(Options {
-			version: Some(version),
-			client_publish: Some(produce_origin(2)),
-			server_subscribe: Some(produce_origin(1)),
-			server_requests: true,
-			..Default::default()
-		})
-		.await;
-		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
-			b"" => Some(grant(&["a"], &[])),
-			b"t1" => Some(grant(&["b"], &[])),
-			_ => None,
-		});
-		let (_, _setup) = issued.next().await.unwrap();
-		let t1 = pair.client.auth().add("t1").await.unwrap();
-		let (_, t1_issued) = issued.next().await.unwrap();
-		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
-
-		t1_issued.update(Grant {
-			publish: Patterns::from(Pattern::try_from("b/exact").unwrap()),
-			subscribe: Patterns::new(),
-			expires: None,
-		});
-		t1.closed().await;
-		assert_eq!(t1.grant().peek(), None);
-		wait_for(pair.client.auth().grant(), |g| g == &Some(grant(&["a"], &[]))).await;
-		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await
 	.expect("timed out");

@@ -21,6 +21,10 @@ What remains here:
   application on a wire without route epochs), and bind it with
   `credential.consume(epoch)` in one call each player shares, in Rust and JS
   with matching names.
+- Keep that generation while the route keeps the same epoch, across
+  re-announcements: each key's AEAD budget lives in the generation, so
+  re-binding on every announce would let a relay that withdraws and
+  re-announces reset it.
 - Decrypt the protected catalog before the existing selection.
 - Rust and JS only (decided 2026-10-20, maintainer): the e2ee publisher has
   no moq-ffi half either, so an FFI consumer waits for a quest that adds both.
