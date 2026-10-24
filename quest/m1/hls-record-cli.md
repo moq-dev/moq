@@ -18,3 +18,19 @@ Decided 2026-10-23 (maintainer interview):
 - This is the cursors' first consumer outside moq-hls's tests.
 - Update `doc/bin/cli.md` and `doc/bin/hls.md`, and every example that uses
   `export hls`.
+
+Decoder reconfiguration closes the old rendition cursor and adds a replacement.
+The replacement cursor starts at the oldest row still in its window, so it can
+repeat segment numbers already written by the old cursor. Settle recorded
+playback before implementing the output layout:
+
+- Separate instance directories preserve both cursors independently, but a master
+  listing only current instances cannot play the recording's earlier part after
+  reconfiguration.
+- A continuous playlist per logical rendition must drain the old cursor, discard
+  repeated rows from the replacement, write its new init, and mark the decoder
+  transition without losing or duplicating media. Coordinate discontinuities
+  across the recording's audio and video playlists.
+
+Prefer continuity for a full recording. Confirm that contract and the overlap
+policy before choosing the layout; the CLI flags above are already decided.
