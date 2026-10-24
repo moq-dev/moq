@@ -955,10 +955,6 @@ impl PreSkip {
 			Some(gst::GenericFormattedValue::Default(clip)) => clip.map_or(0, |clip| *clip),
 			Some(other) => anyhow::bail!("Opus clipping meta counts {:?}, not samples", other.format()),
 		};
-		let late = self
-			.total
-			.checked_sub(clip)
-			.context("Opus clipping meta trims more than the OpusHead pre-skip")?;
 		if clip > 0 && pts.is_zero() {
 			let samples: u64 = moq_mux::codec::opus::packet_samples(&buffer.map_readable()?)
 				.context("malformed Opus packet")?
@@ -972,7 +968,15 @@ impl PreSkip {
 			}
 		}
 		self.clipped = 0;
-		Ok(Some(pts + samples_time(late)?))
+		// Clipping beyond the pre-skip (a seek, an edit) has no hang equivalent: those samples still
+		// play, and the packet lands earlier so its kept ones play where GStreamer put them.
+		match self.total.checked_sub(clip) {
+			Some(late) => Ok(Some(pts + samples_time(late)?)),
+			None => pts
+				.checked_sub(samples_time(clip - self.total)?)
+				.context("Opus clipping meta reaches before zero")
+				.map(Some),
+		}
 	}
 }
 
@@ -1614,6 +1618,26 @@ mod tests {
 					Some(gst::ClockTime::from_useconds(index as u64 * micros)),
 					"packet {index} of {frame_size} ms, stamped {:?}",
 					buffer.pts()
+				);
+			}
+
+			// Clipping past the pre-skip (a seek, an edit) lands the packet earlier instead, so its
+			// kept samples still play at its PTS, and refuses to reach before zero.
+			let clip = pre_skip.total + 48;
+			for (pts, expected) in [(10_000, Some(9_000)), (500, None)] {
+				let mut buffer = gst::Buffer::from_slice([0xf8]);
+				let buffer_mut = buffer.get_mut().unwrap();
+				buffer_mut.set_pts(gst::ClockTime::from_useconds(pts));
+				gst_audio::AudioClippingMeta::add(
+					buffer_mut,
+					gst::format::Default::from_u64(clip),
+					gst::format::Default::ZERO,
+				);
+				let restored = pre_skip.pts(&buffer).ok().flatten();
+				assert_eq!(
+					restored,
+					expected.map(gst::ClockTime::from_useconds),
+					"clip {clip} at {pts}us"
 				);
 			}
 		}
