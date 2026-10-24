@@ -19,7 +19,7 @@ flake. It started after
 and resume as a new subscriber), which is a guess from timing only.
 
 Reproduce one cell locally, bisect between the two runs, and fix the cause.
-Separate from [tone grace](/quest/m1/test-flakes-2/tone-grace.md), which
+Separate from [tone grace](https://github.com/moq-dev/moq/pull/6668), which
 covers a false "wrong tone" under CPU starvation.
 
 Decided 2026-10-23 (maintainer): its own quest, ranked above the load flakes.
