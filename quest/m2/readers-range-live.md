@@ -29,4 +29,3 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [Audio join budget](/quest/m2/audio-join-budget.md) - moq-audio's join at the latest group
-- [Track live signal](/quest/m1/track-live.md) - the fix this builds on
