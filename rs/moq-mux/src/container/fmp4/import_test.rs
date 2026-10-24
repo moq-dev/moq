@@ -819,6 +819,187 @@ async fn unwrapped_samples_present_at_their_composition_time() {
 	);
 }
 
+/// bbb's init with `entries` as the edit list of track `track_id`.
+fn bbb_init_with_edits(track_id: u32, entries: Vec<mp4_atom::ElstEntry>) -> Vec<u8> {
+	let (init, _, _) = bbb_init();
+	let (ftyp, mut moov) = decode_init(&init);
+	let trak = moov
+		.trak
+		.iter_mut()
+		.find(|trak| trak.tkhd.track_id == track_id)
+		.unwrap();
+	trak.edts = Some(mp4_atom::Edts {
+		elst: Some(mp4_atom::Elst { entries }),
+	});
+	let mut data = Vec::new();
+	ftyp.encode(&mut data).unwrap();
+	moov.encode(&mut data).unwrap();
+	data
+}
+
+/// An edit starting the media at `media_time`.
+fn media_edit(media_time: u64) -> mp4_atom::ElstEntry {
+	mp4_atom::ElstEntry {
+		segment_duration: 0,
+		media_time: Some(media_time),
+		media_rate: mp4_atom::FixedPoint::from(1),
+	}
+}
+
+/// The edit list moves every sample to its presentation time and drops the samples before the
+/// edit, priming that fills a frame or straddles one, passthrough or unwrapped. The passthrough
+/// init loses the `edts`, so no consumer applies it a second time.
+#[tokio::test]
+async fn audio_presents_from_its_edit() {
+	let (_, _, (audio_id, audio_scale)) = bbb_init();
+	let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(audio_scale.as_u64());
+	let empty = mp4_atom::ElstEntry {
+		// bbb's movie counts milliseconds.
+		segment_duration: 1000,
+		media_time: None,
+		media_rate: mp4_atom::FixedPoint::from(1),
+	};
+	// The samples start at 0 and 512, then every 1024 ticks.
+	let cases = [
+		// Priming of whole frames, as ffmpeg's AAC.
+		(vec![media_edit(512)], vec![0, 1024, 2048]),
+		// Priming that ends inside a frame drops that frame too, as Apple's AAC.
+		(vec![media_edit(1024)], vec![512, 1536]),
+		// An empty edit delays the media.
+		(vec![empty, media_edit(512)], vec![44_100, 45_124, 46_148]),
+	];
+
+	for (entries, expected) in cases {
+		for passthrough in [false, true] {
+			let init = bbb_init_with_edits(audio_id, entries.clone());
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+			let mut fmp4 =
+				crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+			fmp4.decode(&init).unwrap();
+			// A fragment wholly before the edit publishes nothing.
+			fmp4.decode(&audio_fragment(0, 512, 4)).unwrap();
+			fmp4.decode(&audio_fragment_samples(512, 1024, 4, 3)).unwrap();
+			fmp4.finish().unwrap();
+
+			let snapshot = catalog.snapshot();
+			if let Container::Cmaf { init } = &snapshot.audio.renditions.values().next().unwrap().container {
+				let (_, moov) = decode_init(init);
+				assert!(moov.trak[0].edts.is_none(), "the init keeps no edit list");
+			}
+			let [_, audio] = published(&consumer, &catalog).await;
+			let got: Vec<_> = audio.iter().map(|(timestamp, _, _)| *timestamp).collect();
+			let expected: Vec<_> = expected.iter().map(|&ticks| micros(ticks)).collect();
+			assert_eq!(got, expected, "{entries:?}, passthrough {passthrough}");
+		}
+	}
+}
+
+/// One video fragment decoding from `dts`, a sample per `(cts, flags, byte)` lasting `tick`.
+fn video_fragment(track_id: u32, dts: u64, tick: u64, entries: &[(u64, u32, u8)]) -> Vec<u8> {
+	let moof = mp4_atom::Moof {
+		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+		traf: vec![mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				track_id,
+				..Default::default()
+			},
+			tfdt: Some(mp4_atom::Tfdt {
+				base_media_decode_time: dts,
+			}),
+			trun: vec![mp4_atom::Trun {
+				data_offset: None,
+				entries: entries
+					.iter()
+					.map(|&(cts, flags, _)| mp4_atom::TrunEntry {
+						duration: Some(tick as u32),
+						size: Some(2),
+						flags: Some(flags),
+						cts: Some(cts as i32),
+					})
+					.collect(),
+			}],
+			..Default::default()
+		}],
+	};
+	let mut fragment = Vec::new();
+	moof.encode(&mut fragment).unwrap();
+	mp4_atom::Mdat {
+		data: entries.iter().flat_map(|&(_, _, byte)| [byte; 2]).collect(),
+	}
+	.encode(&mut fragment)
+	.unwrap();
+	fragment
+}
+
+/// The edit list drops the video samples before it and keeps every other one at its own
+/// presentation time and in decode order, passthrough or unwrapped. A dropped sync sample takes the
+/// samples decoding from it along, so the track resumes at the next one.
+#[tokio::test]
+async fn video_drops_the_samples_before_its_edit() {
+	let (_, (video_id, video_scale), _) = bbb_init();
+	let tick = video_scale.as_u64() / 24;
+	let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(video_scale.as_u64());
+	let sample = |ticks: u64, keyframe: bool, byte: u8| (micros(ticks), keyframe, bytes::Bytes::from(vec![byte; 2]));
+	let non_sync = 0x0001_0000;
+
+	let cases = [
+		// I, a leading B presenting before it, P, then B, in decode order.
+		(
+			2 * tick,
+			vec![video_fragment(
+				video_id,
+				0,
+				tick,
+				&[
+					(2 * tick, 0, 0xA),
+					(0, non_sync, 0xB),
+					(2 * tick, non_sync, 0xC),
+					(0, non_sync, 0xD),
+				],
+			)],
+			vec![
+				sample(0, true, 0xA),
+				sample(2 * tick, false, 0xC),
+				sample(tick, false, 0xD),
+			],
+		),
+		// An edit after the first I, as a cut at a non-sync sample writes: the P frames after the
+		// edit can't decode without it.
+		(
+			tick,
+			vec![
+				video_fragment(
+					video_id,
+					0,
+					tick,
+					&[(0, 0, 0xA), (0, non_sync, 0xB), (0, non_sync, 0xC)],
+				),
+				video_fragment(video_id, 3 * tick, tick, &[(0, 0, 0xD), (0, non_sync, 0xE)]),
+			],
+			vec![sample(2 * tick, true, 0xD), sample(3 * tick, false, 0xE)],
+		),
+	];
+	for (media_time, fragments, expected) in cases {
+		let init = bbb_init_with_edits(video_id, vec![media_edit(media_time)]);
+		for passthrough in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+			let mut fmp4 =
+				crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+			fmp4.decode(&init).unwrap();
+			for fragment in &fragments {
+				fmp4.decode(fragment).unwrap();
+			}
+			fmp4.finish().unwrap();
+			let [video, _] = published(&consumer, &catalog).await;
+			assert_eq!(video, expected, "edit at {media_time}, passthrough {passthrough}");
+		}
+	}
+}
+
 #[test]
 fn test_bbb_init_roundtrip() {
 	let data = include_bytes!("test_data/bbb.mp4");
