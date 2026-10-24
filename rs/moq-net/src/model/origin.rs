@@ -6159,8 +6159,8 @@ impl Consumer {
 	/// relative to this consumer's root; its patterns only filter visibility.
 	/// Routes with a segment starting with `.` below the literal head of those
 	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
-	/// The stream also watches its scope: a moq-lite client session fed by this
-	/// origin asks its peer about the scope while any stream watches it.
+	/// The stream also watches its scope: a client session fed by this origin asks
+	/// its peer about the scope while any stream watches it.
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -6451,7 +6451,7 @@ impl Consumer {
 	///
 	/// The returned future fails with [`Error::Unroutable`] at once when no
 	/// announced route covers the path, including a broadcast created on this
-	/// origin but not announced. A moq-lite client session only discovers what this
+	/// origin but not announced. A client session only discovers what this
 	/// origin's readers watch, so a path no [`Self::announced`],
 	/// [`Self::routed_broadcast`], or [`Self::announced_broadcast`] watches is
 	/// unroutable on it. A broadcast resolved through a discovered route keeps its

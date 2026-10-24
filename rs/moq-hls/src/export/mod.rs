@@ -137,6 +137,9 @@ pub struct Broadcaster {
 		)
 	)]
 	broadcast: moq_net::broadcast::Consumer,
+	/// The publisher instance served, which every URL the master playlist and manifest list
+	/// starts with: its epoch, or an id minted for an epochless instance.
+	instance: Arc<str>,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
 	/// Aborts the catalog watcher when the broadcaster is dropped; `Drop` then retires the
@@ -152,10 +155,13 @@ impl Broadcaster {
 	/// Start tracking the renditions of `source`'s catalog broadcast.
 	pub fn new(source: moq_mux::Source, config: Config) -> Arc<Self> {
 		let broadcast = source.broadcast();
+		// An epoch names the instance on every edge, so each serves it under the same URLs.
+		let instance = broadcast.info().epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
 		let renditions = renditions::Producer::new(config.window);
 		let timeline_watchers = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
 		let broadcaster = Arc::new(Self {
 			broadcast,
+			instance: Arc::from(instance.as_str()),
 			renditions: renditions.clone(),
 			watcher: Mutex::new(None),
 			timeline_watchers: timeline_watchers.clone(),
@@ -165,6 +171,15 @@ impl Broadcaster {
 		let watcher = tokio::spawn(watch_catalog(source, renditions, timeline_watchers, config.history));
 		*broadcaster.watcher.lock().unwrap() = Some(watcher);
 		broadcaster
+	}
+
+	/// The publisher instance every listed URL is under (`@{instance}/{kind}/{rendition}/...`).
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature routes by instance")
+	)]
+	pub(crate) fn instance(&self) -> &Arc<str> {
+		&self.instance
 	}
 
 	/// Whether the source broadcast has closed (ended or dropped).
@@ -263,7 +278,7 @@ impl Broadcaster {
 			}
 			match rendition.kind {
 				Kind::Video => video.push(master::VideoVariant {
-					uri: master::rendition_uri(Kind::Video, &rendition.name, query),
+					uri: master::rendition_uri(&self.instance, Kind::Video, &rendition.name, query),
 					bandwidth: rendition.bandwidth(),
 					width: rendition.width,
 					height: rendition.height,
@@ -271,7 +286,7 @@ impl Broadcaster {
 				}),
 				Kind::Audio => audio.push(master::AudioVariant {
 					name: rendition.name.clone(),
-					uri: master::rendition_uri(Kind::Audio, &rendition.name, query),
+					uri: master::rendition_uri(&self.instance, Kind::Audio, &rendition.name, query),
 					bandwidth: rendition.bandwidth(),
 					codec: rendition.codec.clone(),
 				}),
@@ -343,6 +358,7 @@ impl Broadcaster {
 
 		Ok(Some(mpd::render_manifest(
 			&mpd::Manifest {
+				instance: self.instance.clone(),
 				availability_start,
 				publish: moq_clock::wall(),
 				window: self.renditions.window(),
@@ -2161,7 +2177,8 @@ mod tests {
 			"the init needs no generation"
 		);
 		let manifest = broadcaster.manifest(None).unwrap().expect("manifest");
-		assert!(manifest.contains("media=\"video/video0/seg/run-1.656e3d1b.t$Time$.m4s\""));
+		let run = broadcaster.instance();
+		assert!(manifest.contains(&format!("media=\"@{run}/video/video0/seg/run-1.656e3d1b.t$Time$.m4s\"")));
 
 		broadcaster.set_generation(Some("run-2")).unwrap();
 		assert!(
@@ -2430,7 +2447,8 @@ mod tests {
 		);
 		assert!(manifest.contains("id=\"video/video0\""));
 		assert!(manifest.contains("id=\"audio/audio0\""));
-		assert!(manifest.contains("media=\"video/video0/seg/656e3d1b.t$Time$.m4s\""));
+		let run = broadcaster.instance();
+		assert!(manifest.contains(&format!("media=\"@{run}/video/video0/seg/656e3d1b.t$Time$.m4s\"")));
 		// Both renditions list the same aligned segment spans (the live edge is not listed).
 		assert_eq!(manifest.matches("<S t=\"0\" d=\"2000\"/>").count(), 2);
 		assert_eq!(manifest.matches("<S t=\"2000\" d=\"2000\"/>").count(), 2);
@@ -2441,10 +2459,16 @@ mod tests {
 			.manifest(Some("jwt=abc.def"))
 			.unwrap()
 			.expect("manifest renders");
-		let hash = between(&signed, "initialization=\"video/video0/init.", ".mp4?jwt=abc.def\"");
+		let hash = between(
+			&signed,
+			&format!("initialization=\"@{run}/video/video0/init."),
+			".mp4?jwt=abc.def\"",
+		);
 		let init = video_rendition.init().await.unwrap().expect("init segment");
 		assert_eq!(video_rendition.init_versioned(hash).await.unwrap(), Some(init));
-		assert!(signed.contains("media=\"video/video0/seg/656e3d1b.t$Time$.m4s?jwt=abc.def\""));
+		assert!(signed.contains(&format!(
+			"media=\"@{run}/video/video0/seg/656e3d1b.t$Time$.m4s?jwt=abc.def\""
+		)));
 
 		// $Time$ resolves to the same bytes the aligned number does; unknown times miss.
 		let by_time = video_rendition

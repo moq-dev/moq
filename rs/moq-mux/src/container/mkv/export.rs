@@ -76,7 +76,7 @@ struct MkvTrack {
 	/// The inferred decode clock of a rendition that declares no `reorder`.
 	clock: DecodeClock<crate::jitter::Arrival<Frame>>,
 	/// The current group's clock, when its rendition declared `reorder` at the group's start.
-	declared: Option<crate::container::decode::DeclaredClock<crate::jitter::Arrival<Frame>>>,
+	declared: Option<crate::container::declared::DeclaredClock<crate::jitter::Arrival<Frame>>>,
 	config: Option<VideoConfig>,
 	restart: u64,
 	reorder: Option<(u64, u64)>,
@@ -163,14 +163,14 @@ impl MkvTrack {
 	/// rendition declares now, or on the inferred clock when it declares none.
 	fn start_group(&mut self, name: &str, jitter: &mut crate::jitter::Buffer<String, Frame>) -> Result<()> {
 		let depth = match &self.config {
-			Some(config) => crate::container::decode::declared(config)?,
+			Some(config) => crate::container::declared::depth(config)?,
 			None => None,
 		};
 		// The inferred clock spans groups, so it is only flushed when a declaration replaces it.
 		if self.declared.is_some() || depth.is_some() {
 			self.release(name, jitter, true)?;
 		}
-		self.declared = depth.map(crate::container::decode::DeclaredClock::new);
+		self.declared = depth.map(crate::container::declared::DeclaredClock::new);
 		Ok(())
 	}
 

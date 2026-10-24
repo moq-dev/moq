@@ -2,10 +2,7 @@
 
 ## Goal
 
-The work in flight now. Relay hardening: legal moq-transport input never fails
-a session in current interop coverage, every resource a peer can make the
-relay hold is bounded by what it sent or by a budget, and no peer input panics
-the process. Alongside it: fixes for the `release` line, CI cost, and the
+The work in flight now: fixes for the `release` line, CI cost, and the
 recurring audits.
 
 ## Plan
@@ -14,8 +11,7 @@ The release API gates (#3829..#3878) and the release that followed them are
 done.
 
 Per-session request caps landed in #4820, idle fronts in #5054, and the
-lost demand-poll wake in #5091. The rest of the 2026-09-29 DoS review remains
-in m1 with relay session limits (status refreshed in the 2026-10-10 audit).
+lost demand-poll wake in #5091.
 
 Routing: Wildcard landed in #4403, so a service claims the prefix it could
 serve instead of enumerating broadcasts. Serving the relay's ingested-only

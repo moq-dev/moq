@@ -4,7 +4,7 @@
 
 moq-tokio, moq-uring, moq-relay, moq-ffi and moq-wasm no longer depend on
 `web-transport-trait`. Native QUIC already implements moq-net's traits
-([native WebTransport](/quest/m1/quic-api/native-web.md)); the qmux, iroh, wasm and ffi backends implement moq-net's
+([native WebTransport](/quest/m1/quic-api/native-web.md)); the iroh, wasm and ffi backends implement moq-net's
 `transport::poll` traits, either directly or through a thin adapter per
 backend. The generic adapters over `web_transport_trait` are deleted:
 moq-tokio's `transport::Session<S>` with its async-to-poll emulation, and
@@ -21,7 +21,7 @@ sealed the adapters' bound to the crate's own backends, so a foreign
 `web_transport_trait::Session` no longer fits them. This quest removes the
 layer instead of reopening it.
 
-- qmux and iroh get their own impls. Flat backends use `Ungrouped`.
+- iroh gets its own impl. Flat backends use `Ungrouped`.
 - The browser backend in moq-wasm and the ffi backend implement the traits
   directly. Their adapters already clamp priorities themselves.
 - Report the public API impact per crate: deleted generic `Session<S>`

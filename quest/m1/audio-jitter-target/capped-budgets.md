@@ -21,8 +21,7 @@ from before the one-ring removal also carry `-isolated` rows; grade only the
 Decided 2026-10-22 (maintainer): the Opus near-zero budgets quest folded in
 here, so one pass over the same seven nightlies covers both. The cap
 ([#6164](https://github.com/moq-dev/moq/pull/6164)) merged 2026-10-22T00:10Z,
-after the build flush, so post-cap nightlies are also post-flush; none had run
-yet.
+after the build flush, so post-cap nightlies are also post-flush.
 
 The first post-cap scheduled run, [2026-10-22 nightly](https://github.com/moq-dev/moq/actions/runs/39779729461),
 failed only the browser Opus `wide` target ceilings: `isolated` p95 was
