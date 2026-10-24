@@ -48,13 +48,13 @@ pub struct Config {
 	/// How often a snapshot is published, e.g. "1s" or "500ms". Defaults to 1
 	/// second.
 	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_duration")]
-	pub interval: Duration,
+	#[serde(with = "humantime_serde")]
+	pub interval: Option<Duration>,
 
 	/// How often stats snapshots are published. Defaults to 1s.
 	#[usage(long = "stats-interval", env = "MOQ_STATS_INTERVAL", setting = "stats.interval")]
 	#[serde(default, rename = "__cli_interval", skip_serializing_if = "Option::is_none")]
-	pub(crate) interval_arg: Option<crate::duration::Duration>,
+	pub(crate) interval_arg: Option<moq_tokio::cli::Duration>,
 
 	/// Node identifier appended to the advertised stats path to disambiguate
 	/// broadcasts when multiple relays share a cluster origin. Without this,
@@ -72,7 +72,7 @@ pub struct Config {
 	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
 	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
 	/// announce-scope to just that group rather than slurping every node's full
-	/// stats. See [`moq_stats::produce::Config::depth`].
+	/// stats.
 	#[usage(
 		long = "stats-depth",
 		env = "MOQ_STATS_DEPTH",
@@ -88,13 +88,13 @@ pub struct Config {
 	/// returns after it announces under a new epoch. Only applies at `depth` 1
 	/// or more. See [`moq_stats::produce::Config::linger`].
 	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_option")]
+	#[serde(with = "humantime_serde")]
 	pub linger: Option<Duration>,
 
 	/// How long an empty group's stats broadcast stays announced. Defaults to 5m.
 	#[usage(long = "stats-linger", env = "MOQ_STATS_LINGER", setting = "stats.linger")]
 	#[serde(default, rename = "__cli_linger", skip_serializing_if = "Option::is_none")]
-	pub(crate) linger_arg: Option<crate::duration::Duration>,
+	pub(crate) linger_arg: Option<moq_tokio::cli::Duration>,
 }
 
 impl Default for Config {
@@ -102,7 +102,7 @@ impl Default for Config {
 		Self {
 			enabled: false,
 			prefix: ".stats".into(),
-			interval: Duration::from_secs(1),
+			interval: None,
 			interval_arg: None,
 			node: None,
 			depth: 0,
@@ -113,16 +113,14 @@ impl Default for Config {
 }
 
 impl Config {
-	/// The interval after command-line overrides.
-	pub(crate) fn interval(&self) -> Duration {
-		self.interval_arg
-			.map(crate::duration::Duration::into_std)
-			.unwrap_or(self.interval)
+	/// The interval after command-line overrides; `None` keeps the producer's default.
+	pub(crate) fn interval(&self) -> Option<Duration> {
+		self.interval_arg.map(Into::into).or(self.interval)
 	}
 
 	/// The linger after command-line overrides; `None` keeps the producer's default.
 	pub(crate) fn linger(&self) -> Option<Duration> {
-		self.linger_arg.map(crate::duration::Duration::into_std).or(self.linger)
+		self.linger_arg.map(Into::into).or(self.linger)
 	}
 
 	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.
@@ -138,7 +136,7 @@ impl Config {
 		}
 		let prefix = self.prefix.clone();
 		let interval = self.interval();
-		anyhow::ensure!(!interval.is_zero(), "stats.interval must be non-zero");
+		anyhow::ensure!(interval != Some(Duration::ZERO), "stats.interval must be non-zero");
 		let node = self.node.clone().map(PathOwned::from);
 		let depth = self.depth;
 		let linger = self.linger();
@@ -146,9 +144,11 @@ impl Config {
 		let mut config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
-			.with_interval(interval)
 			.with_node(node)
 			.with_depth(depth);
+		if let Some(interval) = interval {
+			config = config.with_interval(interval);
+		}
 		if let Some(linger) = linger {
 			config = config.with_linger(linger);
 		}

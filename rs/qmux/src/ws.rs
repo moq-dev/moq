@@ -88,7 +88,8 @@ impl Default for KeepAlive {
 /// Use this when the WebSocket handshake was performed by an external
 /// framework (e.g. axum) and the caller already has the negotiated
 /// `Sec-WebSocket-Protocol` value, which names the QMux wire-format version and
-/// application protocol.
+/// application protocol. Disable Nagle on the TCP socket underneath, as with
+/// [`Server::accept`].
 pub struct Upgraded<T> {
 	ws: T,
 	alpn: String,
@@ -287,15 +288,16 @@ impl Client {
 
 		let ws_config = capped(self.config, &self.session);
 
+		// `true` disables Nagle: records are already batched, see `Server::accept`.
 		#[cfg(feature = "wss")]
 		let (ws_stream, response) = {
-			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), false, self.connector.clone())
+			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), true, self.connector.clone())
 				.await
 				.map_err(Error::from)?
 		};
 
 		#[cfg(not(feature = "wss"))]
-		let (ws_stream, response) = tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false)
+		let (ws_stream, response) = tokio_tungstenite::connect_async_with_config(request, Some(ws_config), true)
 			.await
 			.map_err(Error::from)?;
 
@@ -394,6 +396,9 @@ impl Server {
 	}
 
 	/// Accept a WebSocket connection, negotiating an offered `(alpn, version)`.
+	///
+	/// Disable Nagle on a TCP `socket` first (`set_nodelay(true)`): records are
+	/// already batched, so Nagle would only hold a batch's tail for the peer's ACK.
 	pub async fn accept<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
 		&self,
 		socket: T,
@@ -517,7 +522,7 @@ mod tests {
 		frame.extend_from_slice(&[0; 4]);
 		client.write_all(&frame).await.unwrap();
 
-		tokio::time::timeout(Duration::from_secs(1), session.closed())
+		moq_clock::timeout(Duration::from_secs(1), session.closed())
 			.await
 			.expect("the socket waited to buffer a frame larger than a record");
 	}

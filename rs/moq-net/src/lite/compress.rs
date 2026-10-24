@@ -323,7 +323,11 @@ impl AnnounceEncoder {
 		let base = next - id;
 		let keep = keep as u64;
 		let chain = |hops: &[Hop]| {
-			varint_size(hops.len() as u64, form) + hops.iter().map(|hop| varint_size(hop.id(), form)).sum::<usize>()
+			varint_size(hops.len() as u64, form)
+				+ hops
+					.iter()
+					.map(|hop| varint_size(hop.wire_id(form), form))
+					.sum::<usize>()
 		};
 		let size = varint_size(base, form) + chain(head) + varint_size(keep, form);
 		match size < varint_size(0, form) * 2 + chain(hops.as_slice()) {
@@ -356,7 +360,7 @@ mod tests {
 	const VERSION: Version = Version::Lite07;
 
 	fn hops(ids: &[u64]) -> Hops {
-		Hops::try_from(ids.iter().map(|id| Hop::from_wire(*id).unwrap()).collect::<Vec<_>>()).unwrap()
+		Hops::try_from(ids.iter().map(|id| Hop::from_wire(*id)).collect::<Vec<_>>()).unwrap()
 	}
 
 	fn path(base: u64, keep: u64, rest: &str) -> PathRef<'static> {

@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Connection state
+
+`Dial` returns a connecting native client. Replace `Session.Status`, `Connects`, and `Failure` with `State()` and `StateChanged(ctx, state.Revision)`. `ConnectionState` carries `Phase`, `Connects`, `Failure`, and `Version`; `ConnectionPhase` replaces `ConnectionStatus`. Cancelling a state wait only cancels that wait. Cancel the session itself to stop its dial.
+
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate{Numerator: 30000, Denominator: 1001}` and construct producers with `(catalog, ProducerOptions{Input: input, Output: output, Track: track, Bandwidth: bandwidth})` under the matching audio/video package.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
 ### Video rendition preference
 
 `media.Video` gains `Preference int32`. Update unkeyed struct literals or use keyed fields, leaving `Preference: 0` for the default ranking. Upgrade the matching FFI module too. Higher values are preferred; compatibility transcodes use `-1`.
@@ -17,6 +28,21 @@ How to update your code for each breaking change, newest first.
 
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.Resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: pass a `ctx` with a deadline.
+
+### Shutdown drains
+
+`Session.Shutdown()` keeps its signature, but it now requests a draining close instead of cancelling.
+Call `Session.Closed(ctx)` to wait for the drain and receive delivery failures, or `Session.Cancel(0)` to close at once, as `Shutdown()` did.
+`Client.Close()` now waits for the drain and returns its error instead of always `nil`; allow for that wait in cleanup.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast `Finish` no longer closes
+
+`BroadcastProducer.Finish()` was a deprecated alias for `Close()`; it no longer ends the broadcast at once.
+Call `BroadcastProducer.Close()` where you called `Finish()`.
 
 ### JSON snapshot `DeltaRatio` is `Deltas`
 
@@ -144,14 +170,14 @@ config := media.TrackConfig{Rendition: media.VideoRendition(id, video)}
 ### Native codecs have `audio` and `video` packages (#5694)
 
 `BroadcastProducer.EncodeAudio` / `EncodeVideo` are `audio.NewProducer` / `video.NewProducer` (`moq.dev/moq/audio`, `moq.dev/moq/video`), built from a `media.CatalogProducer`.
-The audio track name moves into `EncoderOutput.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `audio.Frame.Timestamp`, `video.Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
+The audio track name belongs to `ProducerOptions.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `audio.Frame.Timestamp`, `video.Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
 `BroadcastConsumer.DecodeAudio` / `DecodeVideo` are `audio.Subscribe` / `video.Subscribe`, taking the broadcast after the context.
 Producers expose subscriber state only through `Demand()`, and a video GOP is `video.Keyframe(interval)`.
 `audio.NewEncoder` / `video.NewEncoder` encode without publishing.
 
 ```go
 catalog, err := moqmedia.NewCatalogProducer(broadcast)
-video, err := moqvideo.NewProducer(catalog, moqvideo.EncoderInput{...}, moqvideo.EncoderOutput{...}, nil)
+video, err := moqvideo.NewProducer(catalog, moqvideo.ProducerOptions{Input: input, Output: output})
 err = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 frames, err := moqvideo.Subscribe(ctx, consumer, name, rendition, output)
 ```
@@ -216,6 +242,8 @@ A frame timestamp is a `*time.Duration`, `nil` on a frame read from an untimed t
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 A raw write to a timed track without a timestamp fails with `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `media.CatalogProducer.Now()` samples the broadcast clock for local-event stamps.
 Set `Timestamp` on every write to a timed track.
@@ -248,10 +276,6 @@ Read `Enabled` where you read `!Stalled`.
 `VideoDecodedFrame` is a handle with `TimestampUs()`, `Width()`, `Height()`, `Pixels(format)`, `Surface()`, and `Close()`.
 `VideoDecoderOutput.Format` is gone; set `Surface: true` to keep the decoder's native surface.
 Call `frame.Pixels(moq.VideoPixelFormatRgba)` instead of reading `frame.Data`, and `Close()` the frame when done.
-
-### `BroadcastProducer.Finish()` is removed (#4152)
-
-Call `Close()` instead.
 
 ## 0.5 -> 0.7
 

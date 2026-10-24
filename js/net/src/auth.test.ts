@@ -366,7 +366,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 
 	test("a request waits for its token and survives union renewal", async () => {
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		const logged = spyOn(console, "debug");
 		const origin = new OriginProducer();
 		const broadcast = origin.createBroadcast(Path.from("room/x"));
@@ -421,7 +421,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 			server.abort();
 			await adding.catch(() => void 0);
 			logged.mockRestore();
-			restore();
+			installed.close();
 		}
 	});
 
@@ -597,60 +597,6 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		const empty = await waitFor(client.auth.grant, (g) => g !== undefined);
 		expect(empty?.publish.size).toBe(0);
 		expect(empty?.subscribe.size).toBe(0);
-		client.abort();
-		server.abort();
-	});
-});
-
-// moq-transport carries namespace prefixes, so a grant that is not a union of subtrees
-// is refused there rather than widened.
-describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
-	test("a grant namespace prefixes cannot carry is unsupported and leaves the rest alone", async () => {
-		const { client, server, transport } = await connect({ publish: new OriginProducer(), protocol });
-		const requests = server.auth.requests();
-		const issued: Issued[] = [];
-		void (async () => {
-			for (;;) {
-				const request = await requests.next();
-				if (!request) break;
-				const token = new TextDecoder().decode(request.token);
-				const unions: Record<string, string[]> = {
-					exact: ["room/alice"],
-					mixed: ["room/**", "lobby"],
-					wildcard: ["room/*/cam"],
-				};
-				const union = unions[token];
-				const granted = union
-					? { publish: new Path.Patterns(union.map((p) => Path.Pattern.parse(p))), subscribe: patterns() }
-					: token === "t1"
-						? grant(["b"], [])
-						: grant(["a"], []);
-				issued.push(request.accept(granted));
-			}
-		})();
-
-		await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
-		for (const token of ["exact", "mixed", "wildcard"]) {
-			await expect(client.auth.add(token)).rejects.toBeInstanceOf(Unsupported);
-		}
-		expect(client.auth.grant.peek()?.publish.equals(patterns("a"))).toBe(true);
-
-		// An update namespace prefixes cannot carry revokes that token's grant, and only that one.
-		const t1 = await client.auth.add("t1");
-		await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a", "b")) === true);
-		issued[issued.length - 1]?.update({
-			publish: new Path.Patterns([Path.Pattern.literal("b/exact")]),
-			subscribe: patterns(),
-		});
-		await t1.closed;
-		await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
-
-		let closed = false;
-		void transport.closed.then(() => {
-			closed = true;
-		});
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(closed).toBe(false);
 		client.abort();
 		server.abort();
 	});
@@ -1092,38 +1038,41 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 	},
 );
 
-test("lite-07 carries literal and wildcard grants exactly", async () => {
-	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
-	const requests = server.auth.requests();
-	const unions: Record<string, [string[], string[]]> = {
-		"": [["a/**"], []],
-		exact: [["room/alice"], []],
-		wildcard: [["room/*/cam"], ["**/demo.hang"]],
-		mixed: [["room/**", "lobby", "cam-*.hang"], []],
-		root: [[""], ["**"]],
-	};
-	const parse = (texts: string[]) => new Path.Patterns(texts.map((text) => Path.Pattern.parse(text)));
-	const issued: Issued[] = [];
-	void (async () => {
-		for (;;) {
-			const request = await requests.next();
-			if (!request) break;
-			const [publish, subscribe] = unions[new TextDecoder().decode(request.token)] ?? [[], []];
-			issued.push(request.accept({ publish: parse(publish), subscribe: parse(subscribe) }));
-		}
-	})();
+test.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])(
+	"%s carries literal and wildcard grants exactly",
+	async (protocol) => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		const requests = server.auth.requests();
+		const unions: Record<string, [string[], string[]]> = {
+			"": [["a/**"], []],
+			exact: [["room/alice"], []],
+			wildcard: [["room/*/cam"], ["**/demo.hang"]],
+			mixed: [["room/**", "lobby", "cam-*.hang"], []],
+			root: [[""], ["**"]],
+		};
+		const parse = (texts: string[]) => new Path.Patterns(texts.map((text) => Path.Pattern.parse(text)));
+		const issued: Issued[] = [];
+		void (async () => {
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				const [publish, subscribe] = unions[new TextDecoder().decode(request.token)] ?? [[], []];
+				issued.push(request.accept({ publish: parse(publish), subscribe: parse(subscribe) }));
+			}
+		})();
 
-	await waitFor(client.auth.grant, (g) => g !== undefined);
-	for (const token of ["exact", "wildcard", "mixed", "root"]) {
-		const [publish, subscribe] = unions[token];
-		const added = await client.auth.add(token);
-		const got = added.grant.peek();
-		expect(got?.publish.equals(parse(publish))).toBe(true);
-		expect(got?.subscribe.equals(parse(subscribe))).toBe(true);
-	}
-	client.abort();
-	server.abort();
-});
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		for (const token of ["exact", "wildcard", "mixed", "root"]) {
+			const [publish, subscribe] = unions[token];
+			const added = await client.auth.add(token);
+			const got = added.grant.peek();
+			expect(got?.publish.equals(parse(publish))).toBe(true);
+			expect(got?.subscribe.equals(parse(subscribe))).toBe(true);
+		}
+		client.abort();
+		server.abort();
+	},
+);
 
 // moq-transport keeps the token for the requests that name it, with no grant of its own.
 test.each([

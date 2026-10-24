@@ -656,6 +656,10 @@ impl SubscriberDriver {
 			for (prefix, machine) in &mut self.prefixes {
 				match machine.poll(waiter) {
 					Poll::Ready(Ok(())) => ended.push(prefix.clone()),
+					Poll::Ready(Err(Error::NoStreamCredit)) => {
+						tracing::warn!(%prefix, "announce interest refused without stream credit");
+						ended.push(prefix.clone());
+					}
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 					Poll::Pending => {}
 				}
@@ -1624,7 +1628,7 @@ impl AnnouncePrefix {
 		loop {
 			match &mut self.state {
 				PrefixState::Open => {
-					let mut stream = ready!(Stream::poll_open(
+					let mut stream = ready!(Stream::poll_open_request(
 						&mut self.subscriber.session,
 						self.subscriber.version,
 						&mut cx
@@ -1642,7 +1646,7 @@ impl AnnouncePrefix {
 					// (`origin::Consumer::with_hidden`).
 					stream.writer.buffer(&lite::AnnounceRequest {
 						prefix: self.prefix.as_path(),
-						exclude_hop: self.subscriber.self_origin.id(),
+						exclude_hop: self.subscriber.self_origin,
 						hidden: true,
 					})?;
 					self.state = PrefixState::Send { stream };
@@ -1893,7 +1897,7 @@ impl TracksRecv {
 		let stream = match &mut self.stream {
 			Some(stream) => stream,
 			None => {
-				let mut stream = ready!(Stream::poll_open(&mut self.session, version, &mut cx))?;
+				let mut stream = ready!(Stream::poll_open_request(&mut self.session, version, &mut cx))?;
 				stream = stream.with_stats(source.subscriber.origin.stats());
 				stream.writer.buffer(&lite::ControlType::Tracks)?;
 				stream.writer.buffer(&lite::Tracks {
@@ -3735,8 +3739,43 @@ mod tests {
 		);
 	}
 
+	#[moq_clock::test]
+	async fn announce_interest_without_credit_keeps_the_session_alive() {
+		use std::sync::atomic::Ordering;
+		for version in [Version::Lite04, Version::Lite07] {
+			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let interest = origin.consume().announced();
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
+			let log = session.log.clone();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session),
+				origin,
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+				cost: Some(1),
+				peer_hop: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let mut driver = SubscriberDriver::new(subscriber, Vec::new(), false);
+			assert!(driver.poll(&kio::Waiter::noop()).is_pending());
+			assert_eq!(log.request_attempts.load(Ordering::Relaxed), 1, "{version}");
+			moq_clock::sleep(std::time::Duration::from_secs(20)).await;
+			assert!(driver.poll(&kio::Waiter::noop()).is_pending());
+			assert_eq!(
+				log.request_attempts.load(Ordering::Relaxed),
+				1,
+				"{version}: interest was not retried"
+			);
+			assert!(log.closes().is_empty());
+			assert!(interest.is_synced(), "a refused interest releases its snapshot");
+		}
+	}
+
 	/// A track still waiting on TRACK_INFO ends once nobody wants it, whether its TRACK
-	/// stream never opened (the peer's stream credit is spent), its request is stuck in
+	/// transport header never finished, its request is stuck in
 	/// send, or its peer never answers.
 	/// Otherwise every request a relay's front abandons (a failover, a reader leaving)
 	/// holds a task, a stream, and the track until the peer answers, which may be never.
@@ -6545,7 +6584,7 @@ impl Establish {
 		loop {
 			match &mut self.state {
 				EstablishState::Open => {
-					let mut stream = ready!(Stream::poll_open(
+					let mut stream = ready!(Stream::poll_open_request(
 						&mut self.session,
 						self.serve.subscriber.version,
 						&mut cx
@@ -6881,7 +6920,11 @@ impl TrackInfoFetch {
 		loop {
 			match &mut self.state {
 				TrackInfoState::Open => {
-					let mut stream = ready!(Stream::poll_open(&mut self.session, serve.subscriber.version, &mut cx))?;
+					let mut stream = ready!(Stream::poll_open_request(
+						&mut self.session,
+						serve.subscriber.version,
+						&mut cx
+					))?;
 					stream = stream.with_stats(serve.subscriber.origin.stats());
 					stream.writer.buffer(&lite::ControlType::Track)?;
 					stream.writer.buffer(&lite::Track {
@@ -7178,8 +7221,13 @@ impl ServeLoop {
 			true => request.request_start(None),
 			false => request,
 		};
-		let serving = request.accept(info);
+		// Marked received before any reader sees it, so none resolves an anchor this wire dropped.
+		let serving = request.stage(info);
 		serving.received();
+		if serve.subscriber.version.resolves_anchors() {
+			serving.anchored();
+		}
+		let serving = serving.commit();
 		Self {
 			edge: serving.consume(),
 			largest: None,
@@ -7646,7 +7694,7 @@ impl kio::Task for FetchServeRun {
 			match &mut self.state {
 				FetchRunState::Open { request } => {
 					ready!(self.gate.poll_ready(waiter));
-					let mut stream = match ready!(Stream::poll_open(
+					let mut stream = match ready!(Stream::poll_open_request(
 						&mut self.session,
 						self.serve.subscriber.version,
 						&mut cx
@@ -7660,7 +7708,7 @@ impl kio::Task for FetchServeRun {
 						}
 					};
 
-					// Only once the stream opens: the open parks on stream credit and
+					// Only once the stream opens: its header can wait for send capacity and
 					// re-polls this state, so logging before it repeats per poll.
 					tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
 

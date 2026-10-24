@@ -22,7 +22,7 @@ pub struct ImportArgs {
 
 	/// Publish each fMP4 fragment whole as CMAF instead of splitting it into one frame per
 	/// sample. Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
-	#[usage(long)]
+	#[usage(long = "cmaf")]
 	pub passthrough: bool,
 }
 
@@ -36,27 +36,127 @@ pub struct ExportArgs {
 
 	/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
 	#[usage(flatten)]
-	pub tls: moq_tokio::tls::Listen,
+	pub tls: Tls,
 
 	/// Minimum media listed in each rendition's playlist window, at most 256 segments.
 	/// Keep it within the relay's group-cache retention, since segments are fetched from
 	/// there on request.
 	#[usage(long, default = "16s")]
-	pub window: crate::duration::Duration,
+	pub window: moq_tokio::cli::Duration,
 
 	/// Browser CORS policy for the HLS listener.
 	#[usage(flatten)]
 	pub cors: crate::web::Cors,
 }
 
+/// TLS for the HLS HTTP listener, independent of the MoQ listener's environment.
+#[derive(usage_rs::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct Tls {
+	/// Load the HLS listener's PEM certificate.
+	#[usage(long = "listen-tls-cert", env = "MOQ_HLS_TLS_CERT", value_hint = usage_rs::ValueHint::FilePath)]
+	pub cert: Vec<PathBuf>,
+	/// Load the HLS listener's PEM private key.
+	#[usage(long = "listen-tls-key", env = "MOQ_HLS_TLS_KEY", value_hint = usage_rs::ValueHint::FilePath)]
+	pub key: Vec<PathBuf>,
+	/// Generate the HLS listener's self-signed certificate for these hostnames.
+	#[usage(long = "listen-tls-generate", env = "MOQ_HLS_TLS_GENERATE", delimiter = ',')]
+	pub generate: Vec<String>,
+	/// Trust these PEM roots for optional HLS client certificates.
+	#[usage(long = "listen-tls-root", env = "MOQ_HLS_TLS_ROOT", delimiter = ',', value_hint = usage_rs::ValueHint::FilePath)]
+	pub root: Vec<PathBuf>,
+	#[usage(
+		name = "hls-legacy-cert",
+		long = "tls-cert",
+		alias = "server-tls-cert",
+		env = "MOQ_SERVER_TLS_CERT",
+		hide = true
+	)]
+	legacy_cert: Vec<PathBuf>,
+
+	#[usage(
+		name = "hls-legacy-key",
+		long = "tls-key",
+		alias = "server-tls-key",
+		env = "MOQ_SERVER_TLS_KEY",
+		hide = true
+	)]
+	legacy_key: Vec<PathBuf>,
+
+	#[usage(
+		name = "hls-legacy-generate",
+		long = "tls-generate",
+		alias = "server-tls-generate",
+		env = "MOQ_SERVER_TLS_GENERATE",
+		delimiter = ',',
+		hide = true
+	)]
+	legacy_generate: Vec<String>,
+
+	#[usage(
+		name = "hls-legacy-root",
+		long = "server-tls-root",
+		env = "MOQ_SERVER_TLS_ROOT",
+		delimiter = ',',
+		hide = true
+	)]
+	legacy_root: Vec<PathBuf>,
+}
+
+impl Tls {
+	pub(super) fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
+		if !self.legacy_cert.is_empty() {
+			found.flag(
+				"--tls-cert",
+				Some("MOQ_SERVER_TLS_CERT"),
+				"--listen-tls-cert / MOQ_HLS_TLS_CERT",
+			);
+		}
+		if !self.legacy_key.is_empty() {
+			found.flag(
+				"--tls-key",
+				Some("MOQ_SERVER_TLS_KEY"),
+				"--listen-tls-key / MOQ_HLS_TLS_KEY",
+			);
+		}
+		if !self.legacy_generate.is_empty() {
+			found.flag(
+				"--tls-generate",
+				Some("MOQ_SERVER_TLS_GENERATE"),
+				"--listen-tls-generate / MOQ_HLS_TLS_GENERATE",
+			);
+		}
+		if !self.legacy_root.is_empty() {
+			found.flag(
+				"--server-tls-root",
+				Some("MOQ_SERVER_TLS_ROOT"),
+				"--listen-tls-root / MOQ_HLS_TLS_ROOT",
+			);
+		}
+		found
+	}
+
+	fn into_config(self) -> anyhow::Result<moq_tokio::tls::Listen> {
+		let deprecated = self.deprecated();
+		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+		let mut config = moq_tokio::tls::Listen::default();
+		config.cert = self.cert;
+		config.key = self.key;
+		config.generate = self.generate;
+		config.root = self.root;
+		Ok(config)
+	}
+}
+
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
-/// announced under `epoch`. Once the playlist ends, serve the finished broadcast until its
-/// media is stale.
+/// announced under `epoch`. Once the playlist ends, serve the finished broadcast for the linger.
 pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoch) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
 		name,
 		max_age,
+		linger,
 		bandwidth,
 	} = target;
 	let mut producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
@@ -89,11 +189,11 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 		return Err(err);
 	}
 
-	// The playlist ended: serve the finished broadcast until its media is stale, so
-	// subscribers still catching up drain the tail. An interrupt drops it at once.
-	let finish = importer.finish()?;
-	tracing::info!(linger = ?finish.linger(), "playlist ended; serving the finished broadcast until its media is stale");
-	finish.wait().await;
+	// The playlist ended: serve the finished broadcast for the linger, so a subscriber that
+	// arrives after the end still gets the tail. An interrupt drops it at once.
+	importer.finish()?;
+	tracing::info!(?linger, "playlist ended; serving the finished broadcast");
+	moq_mux::Linger::new([producer], importer, linger).wait().await;
 	Ok(())
 }
 
@@ -155,15 +255,16 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 
 	let mut config = moq_hls::export::Config::default();
-	config.window = args.window.into_std();
+	config.window = args.window.into();
 	let server = moq_hls::Server::new(scoped, config);
 	let app = server.router().layer(args.cors.layer([Method::GET])?);
 
-	let tls = if args.tls.cert.is_empty() && args.tls.generate.is_empty() {
+	let tls = args.tls.into_config()?;
+	let tls = if tls.cert.is_empty() && tls.generate.is_empty() {
 		None
 	} else {
 		let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-		Some(args.tls.server_config(alpn)?)
+		Some(tls.server_config(alpn)?)
 	};
 
 	let listener = moq_tokio::bind::tcp(args.listen)?;
@@ -323,6 +424,7 @@ mod test {
 			origin,
 			name: "hls".to_string(),
 			max_age: None,
+			linger: moq_mux::Linger::DEFAULT,
 			bandwidth: Default::default(),
 		};
 		let args = ImportArgs {

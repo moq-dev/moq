@@ -2203,9 +2203,7 @@ mod tests {
         assert_eq!(high.write(&[0; 200]).unwrap(), 200);
         assert_eq!(server.pending.len(), 2);
 
-        // Requeue the high priority stream to lowest priority. The initial send
-        // still uses high priority since it's queued that way. After that it will
-        // switch to low priority
+        // Lowering the queued high priority stream moves it behind mid at once.
         let mut high = SendStream {
             id: id_high,
             state: &mut server,
@@ -2213,16 +2211,9 @@ mod tests {
             conn_state: &state,
         };
         high.set_priority(-1).unwrap();
-
-        let mut buf = Vec::with_capacity(1000);
-        let meta = server.write_frames(&mut buf, 0..40, true).streams;
-        assert_eq!(meta.len(), 1);
-        assert_eq!(meta[0].id, id_high);
-
-        // After requeuing we should end up with 2 priorities - not 3
         assert_eq!(server.pending.len(), 2);
 
-        // Send the remaining data. The initial mid priority one should go first now
+        let mut buf = Vec::with_capacity(1000);
         let meta = server.write_frames(&mut buf, 0..1000, true).streams;
         assert_eq!(meta.len(), 2);
         assert_eq!(meta[0].id, id_mid);
@@ -2230,6 +2221,63 @@ mod tests {
 
         assert!(!server.can_send_stream_data());
         assert_eq!(server.pending.len(), 0);
+    }
+
+    /// A stream starved behind higher priorities that keep requeueing sends next once raised
+    /// above them, without waiting to be popped at its old priority.
+    #[test]
+    fn raising_a_starved_stream_sends_it_next() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_bidi: 3u32.into(),
+            initial_max_data: 1000u32.into(),
+            initial_max_stream_data_bidi_remote: 1000u32.into(),
+            ..TransportParameters::default()
+        });
+
+        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+        let mut streams = Streams {
+            state: &mut server,
+            conn_state: &state,
+        };
+        let ids: Vec<_> = (0..3)
+            .map(|_| streams.open(Dir::Bi, Default::default()).unwrap())
+            .collect();
+        let (busy, starved) = (&ids[..2], ids[2]);
+
+        for (&id, priority) in ids.iter().zip([5, 5, 0]) {
+            let mut stream = SendStream {
+                id,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &state,
+            };
+            stream.set_priority(priority).unwrap();
+            stream.write(&[0; 200]).unwrap();
+        }
+
+        let mut buf = Vec::with_capacity(1000);
+        for _ in 0..4 {
+            let start = buf.len();
+            let meta = server
+                .write_frames(&mut buf, start..start + 40, true)
+                .streams;
+            assert!(busy.contains(&meta[0].id), "{meta:?}");
+        }
+
+        SendStream {
+            id: starved,
+            state: &mut server,
+            pending: &mut pending,
+            conn_state: &state,
+        }
+        .set_priority(10)
+        .unwrap();
+        let start = buf.len();
+        let meta = server
+            .write_frames(&mut buf, start..start + 40, true)
+            .streams;
+        assert_eq!(meta[0].id, starved);
     }
 
     #[test]
@@ -3763,36 +3811,70 @@ mod tests {
         assert!(!client.leased(ids[0]).unwrap().evicted);
     }
 
-    /// A reader waiting on tiny frames holds copies of their bytes, not the receive buffers they
-    /// arrived in, so a byte of credit cannot pin a whole batch of datagrams.
+    /// However its reader consumes tiny frames, and however many arrive, the lease holds copies
+    /// of their bytes, not the receive buffers they arrived in, so a byte of credit cannot pin a
+    /// whole batch of datagrams, and the copies stay few chunks.
     #[test]
-    fn waiting_lease_releases_datagram_buffers() {
-        let mut client = make(Side::Client);
-        let id = StreamId::new(Side::Server, Dir::Uni, 0);
-        let buffers: Vec<Bytes> = (0..8).map(|_| Bytes::from(vec![0u8; 64 * 1024])).collect();
-        for (offset, buffer) in buffers.iter().enumerate() {
-            let _ = client
-                .received(
-                    frame::Stream {
-                        id,
-                        offset: offset as u64,
-                        fin: false,
-                        data: buffer.slice(..1),
-                    },
-                    // One datagram of a receive batch: too little over-allocation for the
-                    // assembler to copy it out.
-                    1200,
-                )
-                .unwrap();
-            assert!(matches!(
-                wait(&mut client, id, buffers.len() + 1),
-                Err(LeaseError::Blocked(_))
-            ));
+    fn lease_releases_datagram_buffers() {
+        #[derive(Debug, Clone, Copy)]
+        enum Reader {
+            /// Waits for more than has arrived, as a reader decoding a message does.
+            Wait,
+            /// Leases what arrived and parks without consuming it.
+            Park,
+            /// Takes each byte as it arrives and keeps it, as a reader handing payload on does.
+            Take,
         }
-        assert!(buffers.into_iter().all(|buffer| buffer.is_unique()));
-        let leased = client.leased(id).unwrap();
-        assert_eq!(leased.len(), 8);
-        assert!(leased.chunks().count() <= 4, "merged as they arrive");
+        for (reader, frames) in [Reader::Wait, Reader::Park, Reader::Take]
+            .into_iter()
+            .flat_map(|reader| [(reader, 8), (reader, 1024)])
+        {
+            let mut client = make(Side::Client);
+            let id = StreamId::new(Side::Server, Dir::Uni, 0);
+            let buffers: Vec<Bytes> = (0..frames).map(|_| Bytes::from(vec![0u8; 4096])).collect();
+            let mut taken = Vec::new();
+            for (offset, buffer) in buffers.iter().enumerate() {
+                let _ = client
+                    .received(
+                        frame::Stream {
+                            id,
+                            offset: offset as u64,
+                            fin: false,
+                            data: buffer.slice(..1),
+                        },
+                        // One datagram of a receive batch: too little over-allocation for the
+                        // assembler to copy it out.
+                        1200,
+                    )
+                    .unwrap();
+                let mut pending = Retransmits::default();
+                let mut recv = recv(&mut client, &mut pending, id);
+                match reader {
+                    Reader::Wait => assert!(matches!(
+                        recv.lease(buffers.len() + 1),
+                        Err(LeaseError::Blocked(_))
+                    )),
+                    Reader::Park => {
+                        let _ = recv.lease(1).unwrap();
+                    }
+                    Reader::Take => {
+                        let _ = recv.lease(1).unwrap();
+                        taken.push(recv.take(usize::MAX));
+                    }
+                }
+            }
+            assert!(
+                buffers.into_iter().all(|buffer| buffer.is_unique()),
+                "{reader:?} pins a receive buffer of {frames}"
+            );
+            let leased = client.leased(id).unwrap();
+            assert_eq!(leased.len() + taken.len(), frames);
+            assert!(
+                leased.chunks().count() <= frames.ilog2() as usize + 1,
+                "{reader:?} keeps {} chunks of {frames}",
+                leased.chunks().count()
+            );
+        }
     }
 
     /// A peer can spend the window across many streams before any reader looks, so every reader

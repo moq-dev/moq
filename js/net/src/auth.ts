@@ -22,7 +22,7 @@ import type { Getter } from "@moq/signals";
 import type { SessionCode } from "./error.ts";
 import type * as Path from "./path.ts";
 
-export { Duplicate, grantsEqual, Handle, Unsupported } from "./auth_session.ts";
+export { Duplicate, Handle, Unsupported } from "./auth_session.ts";
 
 /**
  * What a peer lets this side do, in this side's own paths (relative to the session).
@@ -58,7 +58,11 @@ export interface Auth {
 	close(): void;
 }
 
-/** A token the peer presented, waiting for an answer. Answer every one. */
+/**
+ * A token the peer presented, waiting for an answer. Answer every one.
+ *
+ * @internal Answering tokens is for direct peer sessions, which have no consumer yet.
+ */
 export interface Request {
 	/** The token the peer presented. Empty means the credential its connection carried. */
 	readonly token: Uint8Array;
@@ -75,7 +79,11 @@ export interface Request {
 	reject(code: SessionCode, reason: string): void;
 }
 
-/** A grant issued to one of the peer's tokens. */
+/**
+ * A grant issued to one of the peer's tokens.
+ *
+ * @internal See {@link Request}.
+ */
 export interface Issued {
 	/** Replace the grant, such as with a lowered expiry. */
 	update(grant: Grant): void;
@@ -87,7 +95,11 @@ export interface Issued {
 	readonly closed: PromiseLike<Error | null>;
 }
 
-/** The tokens the peer presents, for an application that answers them itself. */
+/**
+ * The tokens the peer presents, for an application that answers them itself.
+ *
+ * @internal See {@link Request}.
+ */
 export interface Requests {
 	/** The next token the peer presents, or undefined once the handle ends. */
 	next(): Promise<Request | undefined>;

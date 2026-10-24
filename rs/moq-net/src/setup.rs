@@ -1,8 +1,8 @@
 //! The SETUP exchange, the extensions a side offers in it, and the credential a peer may
 //! present in it.
 //!
-//! Only [`Extensions`] and [`Token`] are public; the SETUP messages themselves are wire
-//! internals.
+//! Only [`Extensions`], [`Token`], and [`Role`] are public; the SETUP messages themselves
+//! are wire internals.
 
 use bytes::Bytes;
 
@@ -12,18 +12,64 @@ use crate::{
 	ietf, lite,
 };
 
+/// The session direction a client advertises in its SETUP (moq-lite-05+).
+pub use crate::lite::Role;
+
 // SETUP only carries negotiation parameters. Bound it independently of control messages.
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) const MAX_SETUP_SIZE: usize = u16::MAX as usize;
 
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 const CLIENT_SETUP: u8 = 0x20;
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 const SERVER_SETUP: u8 = 0x21;
 
 /// Draft-17 unified SETUP message type (varint 0x2F00)
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) const SETUP_V17: u64 = 0x2F00;
+
+/// Decode a SETUP Implementation value, refusing one that is not UTF-8.
+pub(crate) fn decode_implementation(bytes: Option<&[u8]>) -> Result<Option<String>, crate::DecodeError> {
+	bytes
+		.map(|bytes| {
+			std::str::from_utf8(bytes)
+				.map(str::to_owned)
+				.map_err(|_| crate::DecodeError::InvalidValue)
+		})
+		.transpose()
+}
+
+/// The implementation the peer advertised in SETUP, published once that SETUP is read.
+///
+/// `None` until then. The protocol holds a clone for the life of its driver, so a
+/// dropped driver closes the channel; `Session::peer_implementation` also watches the
+/// session's end, for a finished driver the caller keeps.
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+#[derive(Clone, Default)]
+pub(crate) struct PeerImplementation(kio::Producer<Option<Option<String>>>);
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+impl PeerImplementation {
+	/// A slot for a SETUP read before the session started, or a version that carries none.
+	pub fn known(value: Option<String>) -> Self {
+		Self(kio::Producer::new(Some(value)))
+	}
+
+	/// Record what the peer's SETUP advertised. The first SETUP wins.
+	pub fn set(&self, value: Option<String>) {
+		if let Ok(mut slot) = self.0.write()
+			&& slot.is_none()
+		{
+			*slot = Some(value);
+		}
+	}
+
+	pub(crate) fn consume(&self) -> kio::Consumer<Option<Option<String>>> {
+		self.0.consume()
+	}
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+/// Our Implementation value to send, or `None` when the caller configured it empty.
+pub(crate) fn implementation(value: &str) -> Option<String> {
+	(!value.is_empty()).then(|| value.to_owned())
+}
 
 /// The SETUP extensions this side offers.
 ///
@@ -77,13 +123,11 @@ impl Token {
 
 /// Draft-17+ unified SETUP message, with the same encoding for both client and server.
 #[derive(Debug, Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Setup {
 	pub parameters: Bytes,
 }
 
 impl Setup {
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn check_version(v: Version) {
 		match v {
 			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16)
@@ -119,7 +163,6 @@ impl Decode<Version> for Setup {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 enum SetupVersion {
 	Draft14,
 	Draft15Plus,
@@ -130,7 +173,6 @@ enum SetupVersion {
 }
 
 impl SetupVersion {
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn from_version(v: Version) -> Self {
 		match v {
 			Version::Ietf(ietf::Version::Draft14) => Self::Draft14,
@@ -149,7 +191,6 @@ impl SetupVersion {
 
 /// A version-agnostic setup message sent by the client.
 #[derive(Debug, Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Client {
 	/// The list of supported versions in preferred order.
 	pub versions: coding::Versions,
@@ -159,7 +200,6 @@ pub(crate) struct Client {
 }
 
 impl Client {
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn encode_inner(&self, w: &mut Encoder<'_>, v: Version) -> Result<(), EncodeError> {
 		match SetupVersion::from_version(v) {
 			SetupVersion::Draft15Plus => {
@@ -214,7 +254,6 @@ impl Encode<Version> for Client {
 }
 
 /// Read a pre-draft-17 SETUP body: its size, then that many bytes.
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 fn decode_body<'a>(r: &mut Decoder<'a>, v: Version) -> Result<Decoder<'a>, DecodeError> {
 	let size = match SetupVersion::from_version(v) {
 		SetupVersion::Draft14 | SetupVersion::Draft15Plus => r.u16()? as usize,
@@ -231,7 +270,6 @@ fn decode_body<'a>(r: &mut Decoder<'a>, v: Version) -> Result<Decoder<'a>, Decod
 }
 
 /// Reserve the size prefix of a pre-draft-17 SETUP body.
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 fn prefix_body(w: &mut Encoder<'_>, v: Version) -> Result<coding::Prefix, EncodeError> {
 	match SetupVersion::from_version(v) {
 		SetupVersion::Draft14 | SetupVersion::Draft15Plus => Ok(w.prefix_u16()),
@@ -241,7 +279,6 @@ fn prefix_body(w: &mut Encoder<'_>, v: Version) -> Result<coding::Prefix, Encode
 }
 
 /// Size a pre-draft-17 SETUP body, refusing one our own receiver would refuse.
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 fn fill_body(w: &mut Encoder<'_>, prefix: coding::Prefix) -> Result<(), EncodeError> {
 	if w.since(&prefix) > MAX_SETUP_SIZE {
 		w.discard(prefix);
@@ -252,7 +289,6 @@ fn fill_body(w: &mut Encoder<'_>, prefix: coding::Prefix) -> Result<(), EncodeEr
 
 /// Sent by the server in response to a client setup.
 #[derive(Debug, Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Server {
 	/// The list of supported versions in preferred order.
 	pub version: coding::Version,
@@ -262,7 +298,6 @@ pub(crate) struct Server {
 }
 
 impl Server {
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn encode_inner(&self, w: &mut Encoder<'_>, v: Version) -> Result<(), EncodeError> {
 		match SetupVersion::from_version(v) {
 			SetupVersion::Draft15Plus => {

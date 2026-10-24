@@ -130,9 +130,6 @@ pub struct MoqAudioEncoderInput {
 pub struct MoqAudioEncoderOutput {
 	/// The codec used to encode this rendition.
 	pub codec: Arc<MoqAudioCodec>,
-	/// Track name for a broadcast-bound producer. `None` derives one from the codec.
-	#[uniffi(default = None)]
-	pub track: Option<String>,
 	/// The encoded samples per second. Absent matches a producer's input rate,
 	/// or 48000 for a standalone encoder, which has no input to match.
 	#[uniffi(default = None)]
@@ -153,6 +150,21 @@ pub struct MoqAudioEncoderOutput {
 	/// `frame_duration_us`; AAC keeps its 1024-sample frames either way.
 	#[uniffi(default = None)]
 	pub preset: Option<MoqAudioPreset>,
+}
+
+/// Input, codec settings, and publication ownership for an audio producer.
+#[derive(uniffi::Record)]
+pub struct MoqAudioProducerOptions {
+	/// The raw PCM the caller writes.
+	pub input: MoqAudioEncoderInput,
+	/// The codec settings used to encode that PCM.
+	pub output: MoqAudioEncoderOutput,
+	/// Published track name; `None` derives one from the codec.
+	#[uniffi(default = None)]
+	pub track: Option<String>,
+	/// Session bandwidth allocator; absent reserves no share.
+	#[uniffi(default = None)]
+	pub bandwidth: Option<Arc<MoqBandwidth>>,
 }
 
 impl MoqAudioEncoderOutput {
@@ -362,7 +374,7 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 /// passed at publish time.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
-	inner: std::sync::Mutex<Option<moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>>>,
+	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
 	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqBandwidth>>,
@@ -432,20 +444,24 @@ impl MoqAudioProducer {
 	/// registered immediately so subscribers can find the track even
 	/// before the first frame is written.
 	///
-	/// Pass `bandwidth` to reserve this track's bitrate against the session's
+	/// Set `options.bandwidth` to reserve this track's bitrate against the session's
 	/// allocator. Following the grant waits on the Rust audio producer; this
 	/// call only claims the share so a co-resident video encoder sizes itself
 	/// against what is left.
-	#[uniffi::constructor(default(bandwidth = None))]
+	#[uniffi::constructor]
 	pub fn new(
 		catalog: &crate::media::MoqMediaCatalogProducer,
-		input: MoqAudioEncoderInput,
-		output: MoqAudioEncoderOutput,
-		bandwidth: Option<Arc<MoqBandwidth>>,
+		options: MoqAudioProducerOptions,
 	) -> Result<Arc<MoqAudioProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let broadcast = catalog.broadcast()?;
 
+		let MoqAudioProducerOptions {
+			input,
+			output,
+			track,
+			bandwidth,
+		} = options;
 		let format = input.format.into();
 		let layout = moq_audio::Layout::from_channels(input.channels)?;
 		let mut input = moq_audio::encode::Input::new(input.sample_rate, layout);
@@ -453,7 +469,7 @@ impl MoqAudioProducer {
 		// The binding surface takes an explicit track name, so pin it here rather
 		// than letting the codec derive one.
 		let mut options = moq_audio::encode::Options::default();
-		options.track = output.track.clone();
+		options.track = track;
 		options.settings = moq_audio::encode::Settings::from_input(output.codec.codec(), &input);
 		if let Some(sample_rate) = output.sample_rate {
 			options.settings.sample_rate = sample_rate;
@@ -710,21 +726,23 @@ mod tests {
 		for index in 0..4 {
 			let audio = MoqAudioProducer::new(
 				&catalog,
-				MoqAudioEncoderInput {
-					format: MoqAudioSampleFormat::F32,
-					sample_rate: 48_000,
-					channels: 1,
-				},
-				MoqAudioEncoderOutput {
-					codec: MoqAudioCodec::opus(),
+				MoqAudioProducerOptions {
+					input: MoqAudioEncoderInput {
+						format: MoqAudioSampleFormat::F32,
+						sample_rate: 48_000,
+						channels: 1,
+					},
+					output: MoqAudioEncoderOutput {
+						codec: MoqAudioCodec::opus(),
+						sample_rate: None,
+						channels: None,
+						bitrate: None,
+						frame_duration_us: 0,
+						preset: None,
+					},
 					track: Some(format!("audio-{index}")),
-					sample_rate: None,
-					channels: None,
-					bitrate: None,
-					frame_duration_us: 0,
-					preset: None,
+					bandwidth: None,
 				},
-				None,
 			)
 			.unwrap();
 			// A partial codec frame makes finish publish the final packet and lookahead.
@@ -765,7 +783,6 @@ mod tests {
 	fn codec_only_encoder_uses_the_codec_frame_default() {
 		let output = MoqAudioEncoderOutput {
 			codec: MoqAudioCodec::opus(),
-			track: None,
 			sample_rate: None,
 			channels: None,
 			bitrate: None,
@@ -782,7 +799,6 @@ mod tests {
 	fn opus_output(preset: Option<MoqAudioPreset>, frame_duration_us: u32) -> MoqAudioEncoderOutput {
 		MoqAudioEncoderOutput {
 			codec: MoqAudioCodec::opus(),
-			track: None,
 			sample_rate: Some(48_000),
 			channels: Some(2),
 			bitrate: None,

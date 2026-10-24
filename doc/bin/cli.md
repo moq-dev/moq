@@ -118,7 +118,7 @@ service; `export ts --passthrough` writes it back out. FLV accepts the same
 legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
 fMP4 import splits each fragment into one frame per sample, so players need no
-MP4 parser. `import fmp4 --passthrough` publishes each fragment whole as
+MP4 parser. `import fmp4 --cmaf` publishes each fragment whole as
 [`cmaf`](/concept/hang#container) instead, keeping the source's exact sample
 timing.
 
@@ -209,7 +209,8 @@ closes. Playback starts when the name is announced. A
 [restarted publisher](#publisher-runs) starts it over on the new run, with a
 fresh catalog, decoders, and clock. When the announcement ends, what is playing
 finishes and the player waits for the name to return. The log names each run's
-epoch. A catalog with nothing this build can play still ends the player.
+epoch. A refused broadcast request or a catalog with nothing this build can
+play ends the player.
 
 Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
@@ -269,6 +270,10 @@ from H.264 rather than a larger H.265 or AV1 one. When the source changes
 resolution, rungs are resolved again: one that no longer fits finishes, and
 one whose size changed comes back under a new name (`video/360p.2`). Requires
 the `transcode` feature, plus `openh264` on a host without a hardware encoder.
+A restarted source retires the old ladder and publishes a fresh derivative
+instance at the same output path. A clean end waits for the source to return;
+stop the command to finish following. A refused source request or an encoding
+failure ends the command.
 
 ## Announced
 
@@ -381,7 +386,7 @@ MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
 so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
-`--cluster-connect-api`) share `--connect-bind` with `--connect`, and each binds
+`--cluster-api-url`) share `--connect-bind` with `--connect`, and each binds
 it, while LAN dials take an ephemeral port. So a fixed `--connect-bind` port with
 both `--connect` and a WAN cluster peer is refused at startup: use port 0, or drop
 `--connect` (unset `MOQ_CONNECT` if it supplies the URL).
@@ -410,15 +415,20 @@ fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export 
 and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.
-At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
-subscriber still catching up can drain it; Ctrl-C ends that early. A gateway
+At stdin EOF, `import` keeps the finished broadcast announced for
+`--linger` (default 30 s) from the end, so a subscriber that arrives late, such
+as a player that read the final catalog after the end, still gets the tail;
+`--linger 0s` closes it at once, and Ctrl-C ends the wait early. A gateway
 import does the same at a clean end: an RTMP unpublish (`deleteStream`) or
 completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS playlist
 ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
-broadcast at once, and a reconnect, which publishes a newer
-[epoch](/concept/moq-lite#publisher-epochs) at the same path, ends the wait.
+broadcast at once. A reconnect publishes a newer
+[epoch](/concept/moq-lite#publisher-epochs) at the same path, which takes over
+the path while the old broadcast finishes its linger. `import rtsp` redials
+after every session, so it closes each run at once and refuses `--linger`, as
+do `import archive`, `import capture`, and a WHEP pull (`import rtc --connect`).
 
-`export ts`, `export flv`, and `export mkv` take `--delay` instead, like an SRT
+`export ts`, `export flv`, `export rtmp`, and `export mkv` take `--delay` instead, like an SRT
 receiver's latency, all tracks in decode order, so two exporters of one broadcast
 emit the same order. FLV and MKV mux each frame that long after its decode time
 (default 500 ms). TS output runs that far behind the source (default 1 s): the
@@ -429,7 +439,7 @@ top. A frame arriving after its deadline is dropped, and video resumes at its
 next keyframe. The delay also bounds how stale a group may get, so `--delay 0`
 writes each frame as soon as it is read and drops none as late, but still skips
 a stalled group once a newer one is ready.
-FLV and MKV reject their former `--max-delay` spelling with a migration
+FLV, MKV and RTMP refuse the released `--max-age` spelling with a migration
 message. The output follows the source's clock within what ISO/IEC 13818-1
 allows a TS PCR. A source further off fails the export, naming its rate, once
 it has used half the delay; a brief network stall only drops what it made late.

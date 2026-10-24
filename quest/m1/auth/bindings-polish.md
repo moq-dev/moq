@@ -22,7 +22,3 @@ Public API: Swift additive. Wire: none.
 ## Required
 
 - [Token in band](/quest/m1/auth/token-in-band.md) - tokens that ride SETUP, which the OBS reconnect needs
-
-## Related
-
-- [First dial failures in Go](/quest/m2/go-first-dial-failure.md) - the m2 half of this binding cleanup

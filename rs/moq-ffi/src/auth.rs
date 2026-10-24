@@ -25,7 +25,7 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 			publish: patterns(&grant.publish),
 			subscribe: patterns(&grant.subscribe),
 			expires_us: grant.expires.map(|expires| {
-				let remaining = expires.saturating_duration_since(moq_net::time::now());
+				let remaining = expires.saturating_duration_since(moq_net::time::Instant::now());
 				u64::try_from(remaining.as_micros()).unwrap_or(u64::MAX)
 			}),
 		}
@@ -200,10 +200,10 @@ mod tests {
 
 		let (drop_tx, drop_rx) = tokio::sync::oneshot::channel::<()>();
 		let serving = tokio::spawn(async move {
-			let request = listener.accept().await.expect("accept");
+			let mut request = listener.accept().await.expect("accept");
 			// Nothing redials: the client stays disconnected once the session drops.
 			drop(listener);
-			let mut requests = request.auth().requests().unwrap();
+			let mut requests = request.requests();
 			let (session, driver) = request.ok().await.unwrap();
 			let mut issued = Vec::new();
 			for _ in 0..2 {

@@ -13,16 +13,6 @@
 
 /** Re-export of {@link https://jsr.io/@moq/clock | @moq/clock}, the time units this package's signatures take. */
 export * as Clock from "@moq/clock";
-/** Re-export of {@link https://jsr.io/@moq/hang | @moq/hang}, the media layer. */
-export * as Hang from "@moq/hang";
-/** Re-export of {@link https://jsr.io/@moq/net | @moq/net}, the transport. */
-export * as Net from "@moq/net";
-/** Re-export of `@moq/publish`, which publishes each participant's media. */
-export * as Publish from "@moq/publish";
-/** Re-export of {@link https://jsr.io/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
-export * as Signals from "@moq/signals";
-/** Re-export of `@moq/watch`, which plays each participant's media. */
-export * as Watch from "@moq/watch";
 
 /** Chat messages exchanged in the room. */
 export * as Chat from "./chat.ts";

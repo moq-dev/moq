@@ -9,6 +9,7 @@ import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
+import { IMPLEMENTATION } from "../implementation.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -66,6 +67,8 @@ export interface ConnectionProps {
 	 * Defaults to true.
 	 */
 	client?: boolean;
+	/** The implementation our SETUP advertises (lite-05+). Defaults to {@link IMPLEMENTATION}; empty sends nothing. */
+	implementation?: string;
 }
 
 /**
@@ -124,6 +127,13 @@ export class Connection implements Established {
 
 	// Whether we dialed; see {@link ConnectionProps.client}.
 	#client: boolean;
+	// What our SETUP advertises; see {@link ConnectionProps.implementation}.
+	#implementation: string;
+	#peerImplementation = Promise.withResolvers<string | undefined>();
+
+	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
+	readonly peerImplementation = this.#peerImplementation.promise;
+
 	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
 	#goaway = new Once<Drain>();
 
@@ -145,7 +155,16 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor({ url, quic, version, session, publish, handle, client = true }: ConnectionProps) {
+	constructor({
+		url,
+		quic,
+		version,
+		session,
+		publish,
+		handle,
+		client = true,
+		implementation = IMPLEMENTATION,
+	}: ConnectionProps) {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
@@ -198,6 +217,9 @@ export class Connection implements Established {
 			this.#auth,
 		);
 		this.#client = client;
+		this.#implementation = implementation;
+		// Only the lite-05+ Setup Stream carries it.
+		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
 			goaway: this.#goaway,
@@ -278,6 +300,8 @@ export class Connection implements Established {
 			fatal = await sessionCause(this.#quic, err);
 		} finally {
 			probes.close();
+			// A session that ends before the peer's SETUP never learns its implementation.
+			this.#peerImplementation.resolve(undefined);
 			// The session died under every track it was receiving, so they end with its
 			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
 			this.#subscriber.close(fatal ?? (await closeError(this.#quic)));
@@ -317,7 +341,10 @@ export class Connection implements Established {
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			await new Setup({ probe, hop: this.hop }).encode(writer, this.#version);
+			await new Setup({ probe, hop: this.hop, implementation: this.#implementation }).encode(
+				writer,
+				this.#version,
+			);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);
@@ -442,6 +469,7 @@ export class Connection implements Established {
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
 			this.#peerRole.set(setup.role);
+			this.#peerImplementation.resolve(setup.implementation);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}

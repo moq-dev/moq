@@ -24,8 +24,9 @@ export interface Broadcast {
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
-	largest(name: string): track.Location | undefined;
-	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
+	largest(name: string): track.Position | undefined;
+	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
+	fetchGroup?(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 	/** List the broadcast's tracks for `owner`, ending its older listing of this broadcast with CANCELLED. */
@@ -58,7 +59,6 @@ export interface OriginProducer {
 		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): origin.Dynamic;
 	attach(discovery: boolean): Dispose;
-	expect(): Dispose;
 	/**
 	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
 	 * the returned dispose: a session holds one while its peer's initial set is in flight.
@@ -127,6 +127,9 @@ export interface Established {
 	readonly auth: import("./auth_session.ts").AuthSession;
 }
 
+/** A produced broadcast's view, which always fetches from its own cache. */
+export type Produced = Broadcast & Required<Pick<Broadcast, "fetchGroup">>;
+
 type View = Broadcast | OriginProducer | OriginConsumer | Established;
 const views = new WeakMap<object, View>();
 
@@ -150,6 +153,7 @@ export function overrideBroadcastWire(
 	views.set(handle, { ...(view as Broadcast), ...overrides, fromSession: true });
 }
 
+export function wireOf(handle: broadcast.Producer): Produced;
 export function wireOf(handle: broadcast.Producer | broadcast.Consumer): Broadcast;
 export function wireOf(handle: origin.Producer): OriginProducer;
 export function wireOf(handle: origin.Consumer): OriginConsumer;

@@ -78,7 +78,7 @@ const handover = Milli(200);
 
 test("an empty GOAWAY migrates the announced request to the replacement session", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { dials, origin } = fleet();
 	const broadcast = origin.createBroadcast(Path.from("cam"));
 	broadcast.announce();
@@ -124,13 +124,13 @@ test("an empty GOAWAY migrates the announced request to the replacement session"
 		reload.close();
 		consume.close();
 		broadcast.close();
-		restore();
+		installed.close();
 	}
 });
 
 test("a GOAWAY without a timeout hands over at the configured cap", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { dials } = fleet();
 	const reload = new Reload({
 		url,
@@ -153,7 +153,7 @@ test("a GOAWAY without a timeout hands over at the configured cap", async () => 
 		expect(Nano.toMilli(Instant.durationSince(clock.now(), sent))).toBeGreaterThanOrEqual(handover);
 	} finally {
 		reload.close();
-		restore();
+		installed.close();
 	}
 });
 
@@ -161,7 +161,7 @@ test("a refused redirect ends the connection instead of reconnecting", async () 
 	const refused = ["https://other.example/", "not a url", "http://relay.example/", "https://127.0.0.1/"];
 	for (const uri of refused) {
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		const { dials } = fleet();
 		const reload = new Reload({ url, websocket: { enabled: false }, delay: { initial: Milli(1) } });
 
@@ -181,7 +181,7 @@ test("a refused redirect ends the connection instead of reconnecting", async () 
 			expect(dials.length, uri).toBe(1);
 		} finally {
 			reload.close();
-			restore();
+			installed.close();
 		}
 	}
 });
@@ -212,7 +212,7 @@ const moved = new URL("https://relay.example:5443/room");
 
 test("a redirect moves the pool key while the handle keeps its origin", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { dials } = fleet();
 
 	const handle = new Connection({ url });
@@ -242,13 +242,13 @@ test("a redirect moves the pool key while the handle keeps its origin", async ()
 		fresh.close();
 	} finally {
 		handle.close();
-		restore();
+		installed.close();
 	}
 });
 
 test("a redirect onto an already pooled key leaves both entries to their handles", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { dials } = fleet();
 
 	const redirected = new Connection({ url });
@@ -286,7 +286,7 @@ test("a redirect onto an already pooled key leaves both entries to their handles
 	} finally {
 		redirected.close();
 		resident.close();
-		restore();
+		installed.close();
 	}
 });
 
@@ -417,7 +417,7 @@ test.each([
 	[" even with fresh userinfo on every redirect", "userinfo"],
 ] as const)("two peers redirecting to each other escalate the backoff instead of cycling%s", async (_, rotate) => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { dials } = fleet();
 	const reload = new Reload({
 		url,
@@ -442,13 +442,13 @@ test.each([
 		expect(reload.error.peek()).toBeUndefined();
 	} finally {
 		reload.close();
-		restore();
+		installed.close();
 	}
 });
 
 test("redirect endpoint keys omit userinfo without changing the dial URL", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { dials } = fleet();
 	const from = new URL("https://first:secret@relay.example/room?jwt=a#x");
 	const to = new URL("https://second:other@relay.example:5443/room?jwt=b#y");
@@ -472,13 +472,13 @@ test("redirect endpoint keys omit userinfo without changing the dial URL", async
 	} finally {
 		reload.close();
 		moves.mockRestore();
-		restore();
+		installed.close();
 	}
 });
 
 test("a redirect loop stops at the retry window", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { dials } = fleet();
 	const reload = new Reload({
 		url,
@@ -497,13 +497,13 @@ test("a redirect loop stops at the retry window", async () => {
 		expect(reload.error.peek()?.message).toContain("redirect loop");
 	} finally {
 		reload.close();
-		restore();
+		installed.close();
 	}
 });
 
 test("a loop no faster than the capped delay migrates without backing off", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { dials } = fleet();
 	const reload = new Reload({
 		url,
@@ -520,13 +520,13 @@ test("a loop no faster than the capped delay migrates without backing off", asyn
 		}
 	} finally {
 		reload.close();
-		restore();
+		installed.close();
 	}
 });
 
 test("a one-way rolling restart migrates without backing off", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { dials } = fleet();
 	const reload = new Reload({
 		url,
@@ -544,13 +544,13 @@ test("a one-way rolling restart migrates without backing off", async () => {
 		expect(await elapse(clock, () => dials.length === 2)).toBe(Milli(0));
 	} finally {
 		reload.close();
-		restore();
+		installed.close();
 	}
 });
 
 test("repeated GOAWAYs back to the same place are restarts, not a loop", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { dials } = fleet();
 	const reload = new Reload({
 		url,
@@ -570,6 +570,6 @@ test("repeated GOAWAYs back to the same place are restarts, not a loop", async (
 		}
 	} finally {
 		reload.close();
-		restore();
+		installed.close();
 	}
 });

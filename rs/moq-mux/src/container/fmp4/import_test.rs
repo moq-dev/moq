@@ -1964,7 +1964,7 @@ struct Imported {
 	video: String,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
 	/// The first record the video timeline published, the index an archive replays from.
 	record: moq_net::Timestamp,
 	/// Why a chunk was refused, if one was.
@@ -1986,7 +1986,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	let section = snapshot.archive.clone().expect("the import advertises its timelines");
 	let mut timeline = subscribe(&consumer, &section, &video).await;
 
-	let before = std::time::SystemTime::now();
+	let before = moq_clock::wall();
 	let mut after = before;
 	let mut refused = None;
 	for (i, chunk) in chunks.iter().enumerate() {
@@ -1995,7 +1995,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 			break;
 		}
 		if i == 0 {
-			after = std::time::SystemTime::now();
+			after = moq_clock::wall();
 		}
 	}
 	fmp4.finish().unwrap();
@@ -2863,7 +2863,7 @@ async fn ttml_samples_become_timed_text_with_source_metadata() {
 /// The source joins a catalog clock another input already fixed, so its TTML times move with it.
 #[tokio::test(start_paused = true)]
 async fn ttml_follows_a_shifted_source_clock() {
-	let wall = std::time::SystemTime::now();
+	let wall = moq_clock::wall();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
@@ -3008,6 +3008,19 @@ fn unsignalled_color_stays_absent() {
 	let video = catalog.video.renditions.values().next().unwrap();
 	assert_eq!(video.color, None);
 	assert!(serde_json::to_value(video).unwrap().get("color").is_none());
+}
+
+/// A field-coded SPS in the avcC marks the rendition interlaced, so the player picks a decoder that accepts it.
+#[test]
+fn field_coded_sps_marks_interlaced() {
+	for (sps, interlaced) in [
+		(crate::codec::h264::fixtures::SPS_IPB, false),
+		(crate::codec::h264::fixtures::SPS_FIELD, true),
+	] {
+		let catalog = run_fmp4(&avc1_init(sps, None));
+		let video = catalog.video.renditions.values().next().unwrap();
+		assert_eq!(video.interlaced, interlaced);
+	}
 }
 
 /// An SDR init imported to the catalog and exported again is byte-identical.

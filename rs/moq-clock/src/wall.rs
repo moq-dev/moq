@@ -42,6 +42,12 @@ impl Wall {
 		self.0.checked_add(nanos).map(Self)
 	}
 
+	/// This time moved forward by `duration`, stopping at the last time in 2554.
+	pub fn saturating_add(&self, duration: Duration) -> Self {
+		let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+		Self(self.0.saturating_add(nanos))
+	}
+
 	/// This time moved back by `duration`, or `None` before 1970.
 	pub fn checked_sub(&self, duration: Duration) -> Option<Self> {
 		let nanos = u64::try_from(duration.as_nanos()).ok()?;
@@ -116,6 +122,13 @@ mod tests {
 		assert_eq!(back.checked_duration_since(wall), None);
 		assert_eq!(back.saturating_duration_since(wall), Duration::ZERO);
 		assert_eq!(Wall::UNIX_EPOCH.checked_sub(Duration::from_nanos(1)), None);
+		let last = Wall::UNIX_EPOCH.saturating_add(Duration::MAX);
+		assert_eq!(last, Wall::UNIX_EPOCH + Duration::from_nanos(u64::MAX));
+		assert_eq!(last.saturating_add(Duration::from_nanos(1)), last);
+		assert_eq!(
+			wall.saturating_add(Duration::from_secs(1)),
+			wall + Duration::from_secs(1)
+		);
 	}
 
 	#[test]

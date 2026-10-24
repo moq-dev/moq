@@ -41,7 +41,7 @@ Decided 2026-10-23 (API audit follow-up, maintainer):
 Kept, so the next audit skips them: `largest()` stays a snapshot on
 `track::Producer` and a stream on readers, and `subscription()` stays the
 aggregate on producers and requests: the receiver type tells them apart.
-`server::Activity` and `stats::Refusal` stay in moq-net.
+`server::Activity` and `stats::RefusalKind` stay in moq-net.
 
 Public API: moq-net, `@moq/net`, moq-tokio, moq-ffi and its wrappers renamed.
 Wire: none.

@@ -11,7 +11,7 @@ Call `server.publish_router(publisher)` and `server.subscribe_router(subscriber)
 
 ### A WHIP `DELETE` lingers
 
-After a `DELETE`, a WHIP server session's `Response::run` finishes the ingest and resolves only once the finished broadcast goes stale.
+After a `DELETE`, a WHIP server session's `Response::run` finishes the ingest and resolves only once the finished broadcast has stayed up for `server::Config::linger` (default 30 s).
 Drop the future to close the broadcast early. A peer that disconnects without one still closes it at once.
 
 ### Sessions return their UDP wire source (#5632)

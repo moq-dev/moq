@@ -23,8 +23,8 @@ type (
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
 	// AudioFrame is one audio frame: PCM payload plus a presentation timestamp in microseconds.
 	AudioFrame = ffi.MoqAudioFrame
-	// ConnectionStatus is a connection lifecycle transition reported by Session.Status.
-	ConnectionStatus = ffi.MoqConnectionStatus
+	// ConnectionPhase is a connection lifecycle transition reported by Session.State.
+	ConnectionPhase = ffi.MoqConnectionPhase
 	// CongestionControl is the congestion control family for a QUIC connection.
 	CongestionControl = ffi.MoqCongestionControl
 	// ErrorScope is whether a protocol code is from the session or stream registry.
@@ -82,7 +82,7 @@ type (
 	VideoPixelFormat = ffi.MoqVideoPixelFormat
 	// VideoEncoderInput declares the pixel layout, resolution, and framerate of frames written to a video producer.
 	VideoEncoderInput = ffi.MoqVideoEncoderInput
-	// VideoEncoderOutput configures the video track name, codec, bitrate, keyframe interval, and backend preference.
+	// VideoEncoderOutput configures the video codec, bitrate, keyframe interval, and backend preference.
 	VideoEncoderOutput = ffi.MoqVideoEncoderOutput
 	// VideoFrame is one raw video frame: pixels in the configured layout plus a presentation timestamp in microseconds.
 	VideoFrame = ffi.MoqVideoFrame
@@ -159,14 +159,18 @@ const (
 	OrderDescending = ffi.MoqOrderDescending
 )
 
-// ConnectionStatus values: the lifecycle of a client session's connection.
+// ConnectionPhase values: the lifecycle of a client session's connection.
 const (
-	// ConnectionStatusConnected means a session connected (the first connect, or a reconnect after a drop).
-	ConnectionStatusConnected = ffi.MoqConnectionStatusConnected
-	// ConnectionStatusDisconnected means the session dropped; a reconnect attempt follows.
-	ConnectionStatusDisconnected = ffi.MoqConnectionStatusDisconnected
-	// ConnectionStatusMigrating means the peer sent a GOAWAY; the replacement is being dialed while the old session keeps serving.
-	ConnectionStatusMigrating = ffi.MoqConnectionStatusMigrating
+	// ConnectionPhaseConnecting means no session has connected yet.
+	ConnectionPhaseConnecting = ffi.MoqConnectionPhaseConnecting
+	// ConnectionPhaseClosed means the connection has stopped for good.
+	ConnectionPhaseClosed = ffi.MoqConnectionPhaseClosed
+	// ConnectionPhaseConnected means a session connected (the first connect, or a reconnect after a drop).
+	ConnectionPhaseConnected = ffi.MoqConnectionPhaseConnected
+	// ConnectionPhaseDisconnected means the session dropped; a reconnect attempt follows.
+	ConnectionPhaseDisconnected = ffi.MoqConnectionPhaseDisconnected
+	// ConnectionPhaseMigrating means the peer sent a GOAWAY; the replacement is being dialed while the old session keeps serving.
+	ConnectionPhaseMigrating = ffi.MoqConnectionPhaseMigrating
 )
 
 // CongestionControl values.
@@ -180,12 +184,12 @@ const (
 )
 
 // Versions lists the protocol versions offered by default, most preferred
-// first, spelled the way WithVersions takes them.
+// first, spelled the way ClientConfig.Versions takes them.
 func Versions() []string {
 	return ffi.MoqVersions()
 }
 
-// QlogSupported reports whether this build can write qlog traces for WithQUICQlog.
+// QlogSupported reports whether this build can write qlog traces for QUICConfig.Qlog.
 func QlogSupported() bool {
 	return ffi.MoqQlogSupported()
 }

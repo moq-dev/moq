@@ -6,9 +6,10 @@
 //! (`/<broadcast>/<kind>/<rendition>/media.m3u8`), so they resolve against the rendition
 //! directory.
 
+use moq_clock::Wall;
 use std::fmt::Write;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// fMP4 segments via `EXT-X-MAP` require protocol version 6.
 const VERSION: u32 = 6;
@@ -31,7 +32,7 @@ pub(crate) struct Snapshot {
 	pub finished: bool,
 	/// Wall-clock time of the first listed segment (`EXT-X-PROGRAM-DATE-TIME`), when the
 	/// catalog advertises its root broadcast clock.
-	pub program_date_time: Option<SystemTime>,
+	pub program_date_time: Option<Wall>,
 	/// The publisher run every segment URL carries (`seg/{generation}.{tag}.{segment}.m4s`).
 	pub generation: Option<Arc<str>>,
 }
@@ -88,7 +89,7 @@ pub(crate) fn render_media(snapshot: &Snapshot, init: &str, query: Option<&str>)
 			let _ = writeln!(
 				out,
 				"#EXT-X-PROGRAM-DATE-TIME:{}",
-				humantime::format_rfc3339_millis(pdt)
+				humantime::format_rfc3339_millis(pdt.into())
 			);
 		}
 		if segment.discontinuity {
@@ -137,7 +138,7 @@ mod tests {
 				},
 			],
 			finished: false,
-			program_date_time: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
+			program_date_time: Some(Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
 			generation: None,
 		};
 

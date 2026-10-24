@@ -4,16 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### An auth handle can outlive its session (#6109)
-
-`Auth.Handle` is now a class: `new Auth.Handle()` backs no session yet, and `connect({ auth })` builds the session on it, so every session built on one presents the tokens it holds.
-A reconnecting `Connection` owns one as `connection.auth`; a route naming one of its `Auth.Auth`s keeps that token across a reconnect, so drop the code that added the token again and re-announced after one.
-A handle backs one active session at a time, plus the ones draining after a GOAWAY: connecting another while one is still active rejects with `Auth.Duplicate`, and so does a second `requests()` call, which threw a plain `Error` before.
-`Established.auth` returns the session's handle, so its `grant` and each `Auth.Auth`'s `grant` read undefined once the session closes, instead of an empty grant.
-`Auth.Auth.closed` settles only on the peer's verdict or the handle's end (`handle.abort()`); a session ending is not one, except for a handle the session created for itself.
-`Auth.None` is removed; nothing returned it.
-On moq-lite, a token refused with a code that may pass (`Internal`, `TooManyRequests`, `Timeout`) is presented again after a backoff of 1s doubling to 30s, instead of `add` rejecting with that code.
-
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
@@ -57,9 +47,11 @@ Treat a rejected group read as the loss of that group and keep reading the track
 ### A claim answers by publishing (#5678)
 
 `Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `Origin.Request` with `request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
+Answer each `Origin.Request` with `using prepared = request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
 Only `publish` announces it: `prepared.broadcast.announce()` throws.
-Call `prepared.reject(err)` to refuse instead; JS has no destructor, so an abandoned `Prepared` holds its request open.
+`Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned producer live.
+Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
+Construct a `Prepared` only with `request.prepare()`. Its constructor and the `Request.publisher`, `publishPrepared`, and `rejectPrepared` completion hooks are no longer public.
 `Dynamic.update` and `Request.accept` are no longer part of the public API, and `accept` throws on a request from `dynamic`.
 Close the claim and claim again to change it, and close an answer's producer to end that output.
 
