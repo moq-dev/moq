@@ -400,7 +400,8 @@ func (c *Client) Session() *Session {
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		if c.session != nil {
-			c.closeErr = c.session.Shutdown(context.Background())
+			c.session.Shutdown()
+            c.closeErr = c.session.Closed(context.Background())
 		}
 		if c.inner != nil {
 			c.inner.Cancel()

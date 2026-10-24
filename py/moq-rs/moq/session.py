@@ -31,7 +31,8 @@ class Session:
         # A body error is the failure worth reporting. Draining behind it would wait
         # out the deadline and replace it with a delivery timeout.
         if exc[0] is None:
-            await self.shutdown()
+            self.shutdown()
+            await self.closed()
         else:
             self.cancel(0)
 
@@ -40,9 +41,10 @@ class Session:
 
         A client session resolves when its connection stops for good: it raises the
         terminal error when the connection gave up, and returns normally after a local
-        :meth:`shutdown`/:meth:`cancel`. Transient drops the reconnect loop rides out
+        :meth:`cancel`. After :meth:`shutdown`, it waits for the drain and raises
+        delivery failures. Transient drops the reconnect loop rides out
         do not resolve this; watch :meth:`state_changed` for those. A server-accepted session
-        raises the session's close reason."""
+        reports a requested drain's result, otherwise raises the session's close reason."""
         await self._inner.closed()
 
     def state(self) -> ConnectionState:
@@ -62,14 +64,14 @@ class Session:
         """Close the session with the given error code."""
         self._inner.cancel(code)
 
-    async def shutdown(self) -> None:
-        """Drain within one second, raising on failure.
+    def shutdown(self) -> None:
+        """Request a draining close now; await :meth:`closed` for its result.
 
         Explicit ``moq-lite-07-wip`` waits for the peer to receive finished tails;
         older Lite versions, including the default lite-06, wait only for transport
         ACKs. IETF also waits for transport ACKs.
         """
-        await self._inner.shutdown()
+        self._inner.shutdown()
 
     def publish(self) -> OriginProducer:
         """The publish-side origin: where local broadcasts are advertised to

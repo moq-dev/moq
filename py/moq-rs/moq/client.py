@@ -178,7 +178,8 @@ class Client:
                 # rather than skip: dropping the last session closes the transport, so
                 # one the caller kept a reference to would otherwise stay open.
                 if exc[0] is None:
-                    await self._session.shutdown()
+                    self._session.shutdown()
+                    await self._session.closed()
                 else:
                     self._session.cancel(0)
         finally:
