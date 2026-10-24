@@ -45,7 +45,7 @@ const RETRY: Duration = Duration::from_millis(RAMP.as_millis() as u64 / HYSTERES
 ///
 /// `#[non_exhaustive]`: construct via [`Policy::new`] and set fields, so new
 /// knobs stay additive.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Policy {
 	/// Upper bound, normally the bitrate the caller asked for. The estimate can only
@@ -282,7 +282,8 @@ pub struct Follower {
 	control: Control,
 	/// Armed at the control's deadline, created on first use.
 	timer: Option<moq_clock::Sleep>,
-	/// Feed the current grant on the next poll, after a [`restart`](Self::restart).
+	/// Feed the current grant on the next poll, after [`set_policy`](Self::set_policy)
+	/// changed it.
 	refeed: bool,
 }
 
@@ -302,11 +303,14 @@ impl Follower {
 		&self.control.policy
 	}
 
-	/// Start over under `policy`, as a fresh [`Follower`] at [`Policy::max`], and feed
-	/// the current grant on the next poll.
-	pub fn restart(&mut self, policy: Policy) {
-		self.control = Control::new(policy);
-		self.refeed = true;
+	/// Follow under `policy` from now on. A different policy starts over at its
+	/// [`Policy::max`], as a fresh [`Follower`] would, and the next poll feeds it the
+	/// current grant.
+	pub fn set_policy(&mut self, policy: Policy) {
+		if policy != self.control.policy {
+			self.control = Control::new(policy);
+			self.refeed = true;
+		}
 	}
 
 	/// Poll for the next target the sender should produce at, or the error that
@@ -780,25 +784,52 @@ mod tests {
 		assert!(applied.windows(2).all(|pair| pair[0] < pair[1]), "{applied:?}");
 	}
 
-	/// A restart feeds the unchanged grant through the new policy at once.
+	/// A new policy feeds the unchanged grant through it at once, and setting the same
+	/// policy again changes nothing.
 	#[tokio::test(start_paused = true)]
-	async fn a_restart_feeds_the_current_grant() {
+	async fn a_new_policy_feeds_the_current_grant() {
 		let grant = bandwidth::Producer::new();
 		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
 		grant.set(Some(bps(3_000_000))).unwrap();
 		assert_eq!(follower.next().await.unwrap(), bps(3_000_000));
 
-		follower.restart(Policy::new(bps(2_000_000)));
+		follower.set_policy(Policy::new(bps(2_000_000)));
 		assert_eq!(follower.policy().max, bps(2_000_000));
 		// The 3 Mbps grant no longer fits under the new 2 Mbps ceiling, which is where a
-		// restart starts, so nothing moves until the grant does.
+		// new policy starts, so nothing moves until the grant does.
 		assert!(
 			moq_clock::timeout(Duration::from_secs(60), follower.next())
 				.await
 				.is_err()
 		);
 
-		follower.restart(Policy::new(bps(4_000_000)));
+		follower.set_policy(Policy::new(bps(4_000_000)));
+		assert_eq!(follower.next().await.unwrap(), bps(3_000_000));
+		follower.set_policy(Policy::new(bps(4_000_000)));
+		assert!(
+			moq_clock::timeout(Duration::from_secs(60), follower.next())
+				.await
+				.is_err()
+		);
+	}
+
+	/// A raised ceiling set before the follower polls a grant between the old and new
+	/// ceilings follows that grant, rather than clamping it to the old ceiling and
+	/// reporting nothing while the sender runs at the new one.
+	#[tokio::test(start_paused = true)]
+	async fn a_raised_policy_follows_the_next_grant() {
+		let grant = bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), Policy::new(bps(2_000_000)));
+		grant.set(Some(bps(2_000_000))).unwrap();
+		assert!(
+			moq_clock::timeout(Duration::from_secs(60), follower.next())
+				.await
+				.is_err(),
+			"settled at the 2 Mbps ceiling"
+		);
+
+		grant.set(Some(bps(3_000_000))).unwrap();
+		follower.set_policy(Policy::new(bps(4_000_000)));
 		assert_eq!(follower.next().await.unwrap(), bps(3_000_000));
 	}
 

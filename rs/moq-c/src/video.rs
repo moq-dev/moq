@@ -224,7 +224,22 @@ async fn follow_reservation(
 	ceiling: moq_net::bandwidth::Rate,
 ) {
 	let mut follower = moq_mux::rate::Follower::new(consumer, moq_mux::rate::Policy::new(ceiling));
-	while let Ok(bitrate) = follower.next().await {
+	loop {
+		// The ceiling is read under the encoder lock on every wake, before the follower
+		// filters a grant against it. `moq_encode_video_bitrate` updates the reservation
+		// after moving it, which wakes this poll.
+		let next = kio::wait(|waiter| {
+			let guard = inner.lock();
+			let Some(producer) = guard.as_ref() else {
+				return std::task::Poll::Ready(None);
+			};
+			follower.set_policy(moq_mux::rate::Policy::new(producer.ceiling));
+			follower.poll_next(waiter).map(Some)
+		})
+		.await;
+		let Some(Ok(bitrate)) = next else {
+			return;
+		};
 		let mut guard = inner.lock();
 		let Some(producer) = guard.as_mut() else {
 			return;
@@ -238,17 +253,18 @@ async fn follow_reservation(
 }
 
 /// Retune through `set` to the follower's next `bitrate`, unless the manual `ceiling`
-/// moved since it was asked for: then restart the follower under the new ceiling,
-/// which `moq_encode_video_bitrate` already applied. Returns the bitrate applied, or `Err` with the
-/// name of an encoder that cannot follow at all.
+/// moved since it was asked for: then follow under the new ceiling, which
+/// `moq_encode_video_bitrate` already applied, instead. Returns the bitrate applied, or
+/// `Err` with the name of an encoder that cannot follow at all.
 fn retune(
 	follower: &mut moq_mux::rate::Follower,
 	ceiling: moq_net::bandwidth::Rate,
 	bitrate: moq_net::bandwidth::Rate,
 	set: impl FnOnce(moq_net::bandwidth::Rate) -> Result<(), moq_video::Error>,
 ) -> Result<Option<moq_net::bandwidth::Rate>, &'static str> {
-	if ceiling != follower.policy().max {
-		follower.restart(moq_mux::rate::Policy::new(ceiling));
+	let policy = moq_mux::rate::Policy::new(ceiling);
+	if *follower.policy() != policy {
+		follower.set_policy(policy);
 		return Ok(None);
 	}
 	match set(bitrate) {
