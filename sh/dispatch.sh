@@ -294,6 +294,7 @@ for module in "${selected[@]}"; do
             cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
             ;;
         check:quest) quest check ;;
+        check:py) just py::check py::test ;;
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
         check:flake) nix flake check ;;
@@ -326,12 +327,11 @@ done
 if [[ "$verb" == check ]]; then
     for module in "${selected[@]}"; do
         case "$module" in
-            rs | js | py | gh) begin "test $module" ;;
+            rs | js | gh) begin "test $module" ;;
         esac
         case "$module" in
             rs) just rs test-changed "$rs_list" ;;
             js) just js test-changed "$js_list" ;;
-            py) just py test ;;
             gh) just gh test ;;
         esac
         finish

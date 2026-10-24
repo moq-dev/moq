@@ -210,6 +210,12 @@ class QueryTests(unittest.TestCase):
         self.assertLess(next(i for i, call in enumerate(calls) if call.startswith("rs lint-changed ")),
                         next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
 
+    def test_python_checks_and_tests_share_one_invocation(self):
+        self.change("py/moq-rs/moq/__init__.py")
+        calls = self.run_ci()
+        self.assertEqual([call for call in calls if call.startswith("py")],
+                         ["py::check py::test"])
+
     def test_flake_checks_follow_nix_inputs_instead_of_rust_source(self):
         for path, expected in (("rs/moq-net/src/lib.rs", False),
                                ("rs/moq-net/Cargo.toml", True),
@@ -228,6 +234,57 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
                 self.assertEqual("nix flake check" in calls, expected)
         self.assertIn("nix flake check", self.run_ci("--all"))
+
+
+class PythonPreparationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / "py").mkdir()
+        shutil.copy(ROOT / "py/justfile", self.root / "py/justfile")
+        (self.root / "justfile").write_text("set unstable\nmod py\n")
+        samples = self.root / "sh/py/samples.sh"
+        samples.parent.mkdir(parents=True)
+        samples.write_text("#!/bin/sh\nexit 0\n")
+        samples.chmod(0o755)
+        self.calls = self.root / "calls"
+        binary = self.root / "bin"
+        binary.mkdir()
+        uv = binary / "uv"
+        uv.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$CALLS"\n'
+                      '[ "$*" != "${FAIL:-}" ]\n')
+        uv.chmod(0o755)
+        self.env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}", CALLS=str(self.calls))
+
+    def run_recipes(self, *recipes):
+        self.calls.write_text("")
+        result = subprocess.run(["just", "--justfile", str(self.root / "justfile"), *recipes],
+                                cwd=self.root, env=self.env, text=True, capture_output=True)
+        return result, self.calls.read_text().splitlines()
+
+    def test_preparation_is_shared_only_within_one_invocation(self):
+        for recipes in (("py::check", "py::test"), ("py::test", "py::check"),
+                        ("py::check",), ("py::test",)):
+            with self.subTest(recipes=recipes):
+                result, calls = self.run_recipes(*recipes)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(calls.count("sync --locked --no-install-workspace"), 1)
+                self.assertEqual(calls.count("run --no-sync maturin develop --locked --uv --features testing,openh264"), 1)
+                self.assertEqual(calls.count("pip install --no-deps -e moq-rs"), 1)
+                self.assertEqual(calls.count("run --no-sync pyright"), int("py::check" in recipes))
+                self.assertEqual(calls.count("run --no-sync pytest moq-rs/tests/ moq-ffi/tests/"),
+                                 int("py::test" in recipes))
+
+    def test_preparation_failure_stops_checks_and_tests(self):
+        for failure in ("sync --locked --no-install-workspace",
+                        "run --no-sync maturin develop --locked --uv --features testing,openh264",
+                        "pip install --no-deps -e moq-rs"):
+            with self.subTest(failure=failure):
+                self.env["FAIL"] = failure
+                result, calls = self.run_recipes("py::check", "py::test")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls[-1], failure)
 
 
 def benchmark():
