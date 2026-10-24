@@ -54,10 +54,9 @@ released:
 
 - moxygen: the Rust client offered `moq-00` over WebTransport, so moxygen
   picked draft-14 over draft-16. That cell passed live from `main`. The
-  draft-14 QUIC cell stays red until [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md)
-  lands: the CLI asks draft-14 for no namespace, so it discovers nothing
-  from moxygen. A CLI subtree scope was tried and dropped, since it lost
-  the sibling broadcasts a catalog references.
+  draft-14 QUIC cell discovered nothing, since the CLI asked draft-14 for no
+  namespace; it passed live once Rust asked for the watched prefixes
+  ([moq-dev/moq#6530](https://github.com/moq-dev/moq/pull/6530)).
 - js/net dialed `moqt://` as a WebTransport CONNECT with `:scheme: moqt`,
   which moq-relay refuses; the runner's moq-dev-js `remote-quic` cells
   failed with an empty message.
@@ -123,4 +122,3 @@ waits on [JavaScript FETCH](/quest/m1/js-fetch.md).
 - [Runner teardown](/quest/m3/interop-runner-approval.md) - the runner's moq.dev clients move to the withdrawing `close()` once it ships
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - Moxygen's filter type, waiting upstream
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS publisher serves FETCH, which most red `js-web` publisher cells need
-- [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - asks for watched prefixes, which the red moxygen draft-14 cell needs

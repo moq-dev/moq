@@ -493,8 +493,8 @@ impl MoqOriginConsumer {
 	///
 	/// Calling this straight after connecting therefore races the session's announcements
 	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first. A
-	/// moq-lite client only asks the relay about paths something watches, through `announced`
-	/// or `announced_broadcast`, so a path nothing watches stays unroutable.
+	/// client only asks the relay about paths something watches, through `announced` or
+	/// `announced_broadcast`, so a path nothing watches stays unroutable.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self
 			.driver
