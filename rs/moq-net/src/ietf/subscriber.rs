@@ -21,6 +21,7 @@ use crate::tail::{Reading, Settle, Tail};
 
 use kio::Lock;
 
+mod namespaces;
 mod tracks;
 
 const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
@@ -807,19 +808,17 @@ pub(super) struct Subscriber {
 	listings: Lock<tracks::Listings>,
 }
 
-/// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
-/// relative to its root.
-///
-/// The scope is what we may ASK the peer for; the root is where what comes back
-/// MOUNTS locally. Those are independent, and only coincide when the peer shares
-/// our namespace -- a peer outside it has never heard of our root, so a rooted
-/// subscriber asks for its scope and mounts the replies under the root.
-///
-/// Asked unconditionally: a peer with nothing to advertise answers with an empty set,
-/// which costs one stream. [`Subscriber::run_subscribe_namespace`] holds back the empty
-/// prefix from a foreign draft-14/15 peer.
-pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<PathOwned> {
-	crate::model::interest_prefixes(&origin.allowed())
+/// One SUBSCRIBE_NAMESPACE on its stream.
+struct NamespaceRequest {
+	stream: Stream<Transport, Version>,
+	messages: super::request_stream::Messages,
+	prefix: PathOwned,
+	/// Set once the request goes out.
+	request_id: Option<RequestId>,
+	/// The suffixes this stream advertised, with the advertisement each one holds, so a
+	/// repeat is recognized as an update to it rather than a second one (which would
+	/// leak the refcount).
+	live: HashMap<PathOwned, Advertisement>,
 }
 
 /// The initial set of a SUBSCRIBE_NAMESPACE still to read, under MoQ Active Count.
@@ -1154,7 +1153,8 @@ impl Subscriber {
 		self.origin.stats()
 	}
 
-	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
+	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream, and read what it reports
+	/// until the peer ends it or `live` closes.
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
 	///
@@ -1165,23 +1165,60 @@ impl Subscriber {
 	/// `snapshot` holds the origin's announce consumers under the prefix short of
 	/// synced. It drops once the NAMESPACE messages MoQ Active Count promised are
 	/// in, on REQUEST_OK without the extension, or when no request goes out at all.
-	pub async fn run_subscribe_namespace(
+	///
+	/// [`Ended::Local`](namespaces::Ended::Local) means `live` closed, and the request is
+	/// off the wire by the time this returns.
+	async fn run_subscribe_namespace(
 		&mut self,
-		mut stream: Stream<Transport, Version>,
+		stream: Stream<Transport, Version>,
 		prefix: PathOwned,
 		snapshot: crate::model::Snapshot,
-	) -> Result<(), Error> {
-		stream = if self.version == Version::Draft16 {
+		live: kio::Consumer<()>,
+	) -> Result<namespaces::Ended, Error> {
+		let stream = if self.version == Version::Draft16 {
 			stream.with_stats(self.origin.stats())
 		} else {
 			super::request_stream::with_stats(stream, self.origin.stats(), self.version)
 		};
+		let mut request = NamespaceRequest {
+			stream,
+			messages: super::request_stream::Messages::new(self.session.clone(), self.control.client()),
+			prefix,
+			request_id: None,
+			live: HashMap::new(),
+		};
+		let res = self.subscribe_namespace(&mut request, snapshot, &live).await;
+
+		// The stream owns every advertisement it carried, so release them however it
+		// ends: a clean close, a decode error, the peer resetting it, or the session
+		// ending it. Without this each namespace keeps its refcount and the source never
+		// detaches.
+		for (path, advert) in std::mem::take(&mut request.live) {
+			if let Some(id) = advert.id {
+				let _ = self.stop_announce(path, id, false);
+			}
+		}
+
+		if let Ok(namespaces::Ended::Local) = res {
+			self.unsubscribe_namespace(request).await;
+		}
+		res
+	}
+
+	/// Send the request and read its answers until either side ends it.
+	async fn subscribe_namespace(
+		&mut self,
+		request: &mut NamespaceRequest,
+		snapshot: crate::model::Snapshot,
+		live: &kio::Consumer<()>,
+	) -> Result<namespaces::Ended, Error> {
 		// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
 		// peer into the origin and each local reader opts in on its own. The parameter
 		// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
 		// to say whether it does (MoQ Hidden).
 		let declared = self.peer_setup.get().await;
 		let hidden = declared.hidden;
+		let prefix = request.prefix.clone();
 
 		// Draft-16 is the first to allow a zero-field namespace, so the empty prefix is a
 		// protocol violation on draft-14/15. A peer that never declared MoQ Solicit is not
@@ -1192,10 +1229,24 @@ impl Subscriber {
 			&& matches!(self.version, Version::Draft14 | Version::Draft15)
 		{
 			tracing::debug!(version = ?self.version, "not asking a foreign peer for the empty namespace");
-			return Ok(());
+			return Ok(namespaces::Ended::Peer);
 		}
 
-		let request_id = self.control.next_request_id(&self.runtime).await?;
+		// No ID is spent on a request that ends while it waits for credit, so the peer
+		// never sees a gap in our sequential request IDs.
+		let mut timeout = crate::time::Deadline::after(&self.runtime, Control::REQUEST_ID_TIMEOUT);
+		let request_id = kio::wait(|waiter| {
+			if live.poll_closed(waiter).is_ready() {
+				return Poll::Ready(Ok(None));
+			}
+			self.control.poll_credit(waiter, &mut timeout).map(|id| id.map(Some))
+		})
+		.await?;
+		let Some(request_id) = request_id else {
+			return Ok(namespaces::Ended::Local);
+		};
+		request.request_id = Some(request_id);
+		let stream = &mut request.stream;
 
 		// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the legacy
 		// 0x11 message with a Subscribe Options field.
@@ -1222,8 +1273,11 @@ impl Subscriber {
 		tracing::debug!(%prefix, "subscribe_namespace sent");
 
 		// Read response
-		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
-		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
+		let Some(framed) = self.next_namespace_message(request, live).await? else {
+			return Ok(namespaces::Ended::Local);
+		};
+		let super::request_stream::Framed(type_id, body) =
+			framed.ok_or_else(|| request.messages.failed(Error::ProtocolViolation))?;
 		let mut data = body.decoder(self.version);
 
 		let count = match type_id {
@@ -1266,66 +1320,114 @@ impl Subscriber {
 			epoch: declared.epoch,
 		};
 
-		// Suffixes live on this stream, with the advertisement each one holds, so a repeat
-		// is recognized as an update to it rather than a second one (which would leak the
-		// refcount).
-		let mut live: HashMap<PathOwned, Advertisement> = HashMap::new();
-
-		// The stream owns every advertisement it carried, so release them however it
-		// ends: a clean close, a decode error, or the peer resetting it. Without this
-		// each namespace keeps its refcount and the source never detaches.
-		//
-		// This is what moq-lite already does, where the equivalent map is a local whose
-		// guards drop.
-		let res = self
-			.run_namespace_entries(
-				&mut stream,
-				&prefix,
-				&peer,
-				negotiated,
-				&mut live,
-				Initial { initial, snapshot },
-				&mut messages,
-			)
-			.await;
-		for (path, advert) in live {
-			if let Some(id) = advert.id {
-				let _ = self.stop_announce(path, id, false);
-			}
-		}
-		res
+		self.run_namespace_entries(request, &peer, negotiated, Initial { initial, snapshot }, live)
+			.await
 	}
 
-	/// Read NAMESPACE / NAMESPACE_DONE entries until the stream closes.
+	/// The next message on a SUBSCRIBE_NAMESPACE stream: `None` once `live` closes,
+	/// `Some(None)` once the peer finishes the stream.
+	async fn next_namespace_message(
+		&self,
+		request: &mut NamespaceRequest,
+		live: &kio::Consumer<()>,
+	) -> Result<Option<Option<super::request_stream::Framed>>, Error> {
+		let NamespaceRequest { stream, messages, .. } = request;
+		kio::wait(|waiter| {
+			if live.poll_closed(waiter).is_ready() {
+				return Poll::Ready(Ok(None));
+			}
+			let mut cx = waiter.context();
+			messages
+				.poll_next(&mut stream.reader, &mut cx)
+				.map(|next| next.map(Some))
+		})
+		.await
+	}
+
+	/// End a request the session ended, and wait for it to leave the wire, so an
+	/// overlapping one can go out: a peer may refuse a prefix that overlaps one it still
+	/// holds.
 	///
-	/// `live` tracks the suffixes this stream has advertised, so a repeat is recognized
-	/// as an update rather than a second advertisement, and the caller can release
-	/// whatever is still held when the stream ends.
-	#[expect(
-		clippy::too_many_arguments,
-		reason = "private plumbing; a single-use argument struct would only rename the parameters"
-	)]
+	/// Draft-14 and 15 ride the control stream, whose virtual streams have no close of
+	/// their own, so UNSUBSCRIBE_NAMESPACE is all the peer ever sees, and anything after
+	/// it on that ordered stream reaches the peer later. Later drafts close the stream
+	/// (a FIN until draft-19 makes it a reset) and read until the peer closes its half.
+	async fn unsubscribe_namespace(&self, request: NamespaceRequest) {
+		let NamespaceRequest {
+			stream: Stream { mut writer, mut reader },
+			mut messages,
+			prefix,
+			request_id,
+			..
+		} = request;
+		// Nothing went out, so there is nothing to end.
+		let Some(request_id) = request_id else {
+			return;
+		};
+		tracing::debug!(%prefix, "unsubscribe_namespace");
+
+		if matches!(self.version, Version::Draft14 | Version::Draft15) {
+			let msg = ietf::UnsubscribeNamespace { prefix, request_id };
+			let written = async {
+				writer.varint(ietf::UnsubscribeNamespace::ID).await?;
+				writer.encode(&msg).await
+			};
+			if let Err(err) = written.await {
+				tracing::debug!(%err, "failed to write unsubscribe_namespace");
+			}
+			let _ = writer.close().await;
+			return;
+		}
+
+		match super::request_stream::fin_cancels(self.version) {
+			true => {
+				let _ = writer.finish();
+			}
+			false => writer.abort(&Error::Cancel),
+		}
+		let mut session = self.session.clone();
+		kio::wait(|waiter| {
+			let mut cx = waiter.context();
+			if session.poll_closed(&mut cx).is_ready() {
+				return Poll::Ready(());
+			}
+			loop {
+				match ready!(messages.poll_next(&mut reader, &mut cx)) {
+					Ok(Some(_)) => continue,
+					Ok(None) | Err(_) => return Poll::Ready(()),
+				}
+			}
+		})
+		.await;
+	}
+
+	/// Read NAMESPACE / NAMESPACE_DONE entries until either side ends the request.
+	///
+	/// `request.live` tracks the suffixes this stream has advertised, so a repeat is
+	/// recognized as an update rather than a second advertisement, and the caller can
+	/// release whatever is still held when the stream ends.
 	async fn run_namespace_entries(
 		&mut self,
-		stream: &mut Stream<Transport, Version>,
-		prefix: &PathOwned,
+		request: &mut NamespaceRequest,
 		peer: &cluster::Peer,
 		negotiated: ietf::Negotiated,
-		live: &mut HashMap<PathOwned, Advertisement>,
 		mut initial: Initial,
-		messages: &mut super::request_stream::Messages,
-	) -> Result<(), Error> {
+		live: &kio::Consumer<()>,
+	) -> Result<namespaces::Ended, Error> {
 		loop {
 			// Every counted NAMESPACE is in the origin by now, dropped ones included.
 			if initial.initial == 0 {
 				initial.snapshot = None;
 			}
-			let super::request_stream::Framed(type_id, body) = match messages.next(&mut stream.reader).await? {
-				Some(message) => message,
+			let super::request_stream::Framed(type_id, body) = match self.next_namespace_message(request, live).await? {
+				Some(Some(message)) => message,
+				None => return Ok(namespaces::Ended::Local),
 				// A stream ending inside the counted set cut it short.
-				None if initial.initial > 0 => return Err(Error::ProtocolViolation),
-				None => break,
+				Some(None) if initial.initial > 0 => return Err(Error::ProtocolViolation),
+				Some(None) => return Ok(namespaces::Ended::Peer),
 			};
+			let prefix = &request.prefix;
+			let live = &mut request.live;
 			let mut data = body.decoder(self.version);
 
 			match type_id {
@@ -1410,8 +1512,6 @@ impl Subscriber {
 				}
 			}
 		}
-
-		Ok(())
 	}
 
 	/// Handle an incoming bidi stream dispatched by the session.
@@ -6044,6 +6144,13 @@ mod tests {
 
 	use super::*;
 
+	/// What keeps a SUBSCRIBE_NAMESPACE open until the peer ends it, while the first lives.
+	fn live() -> (kio::Producer<()>, kio::Consumer<()>) {
+		let live = kio::Producer::new(());
+		let consumer = live.consume();
+		(live, consumer)
+	}
+
 	#[moq_clock::test]
 	async fn internal_alias_resolution_ends_with_its_session() {
 		let aliases = TrackAliases::default();
@@ -6332,7 +6439,7 @@ mod tests {
 			Default::default(),
 		);
 
-		let mut namespaces = subscribe_prefixes(&subscriber.origin);
+		let mut namespaces = crate::model::interest_prefixes(&subscriber.origin.allowed());
 		assert_eq!(
 			namespaces,
 			vec![crate::Path::new("cam").to_owned()],
@@ -6340,11 +6447,12 @@ mod tests {
 		);
 		let prefix = namespaces.pop().unwrap();
 
+		let (_live, live) = live();
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Draft16)
 			.await
 			.unwrap();
 		let mut run =
-			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed(), live));
 		// Parks awaiting the peer's response; the request is already on the wire.
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
@@ -6419,13 +6527,16 @@ mod tests {
 			Default::default(),
 		);
 
-		let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
+		let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
+			.pop()
+			.expect("one prefix");
+		let (_live, live) = live();
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
 		let mut run =
-			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed(), live));
 		for _ in 0..100 {
 			// The result is deliberately ignored: a regressed mount lands out of scope
 			// and errors here, which the assertions below name far better than a poll
@@ -6517,12 +6628,19 @@ mod tests {
 				Default::default(),
 			);
 
-			let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
+			let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
+				.pop()
+				.expect("one prefix");
+			let (_live, live) = live();
 			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
-			let mut run =
-				std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
+			let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
+				stream,
+				prefix,
+				crate::model::Snapshot::landed(),
+				live
+			));
 			let mut result = None;
 			for _ in 0..100 {
 				if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {
@@ -6606,12 +6724,15 @@ mod tests {
 		);
 		subscriber.announces = crate::session::Slots::new(1);
 
-		let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
+		let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
+			.pop()
+			.expect("one prefix");
+		let (_live, live) = live();
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run =
-			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed(), live));
 		let mut result = None;
 		for _ in 0..100 {
 			if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {
@@ -6672,6 +6793,7 @@ mod tests {
 				Default::default(),
 			);
 
+			let (_live, live) = live();
 			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
@@ -6680,6 +6802,7 @@ mod tests {
 					stream,
 					crate::Path::new("").to_owned(),
 					crate::model::Snapshot::landed(),
+					live,
 				)
 				.await;
 			assert!(
@@ -6774,11 +6897,16 @@ mod tests {
 				crate::lite::test_transport::ScriptedSession::new(counted_response(VERSION, Some(2), entries).await);
 			let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
 			let mut cursor = consumer.announced();
+			let (_live, live) = live();
 			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
-			let mut run =
-				std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot));
+			let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
+				stream,
+				crate::Path::new("").to_owned(),
+				snapshot,
+				live
+			));
 			for _ in 0..10 {
 				assert!(futures::poll!(run.as_mut()).is_pending());
 				settle().await;
@@ -6798,11 +6926,12 @@ mod tests {
 		let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, false, session.clone());
 		let cursor = consumer.announced();
 		assert!(!cursor.is_synced());
+		let (_live, live) = live();
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run =
-			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot));
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot, live));
 		for _ in 0..10 {
 			assert!(futures::poll!(run.as_mut()).is_pending());
 			settle().await;
@@ -6821,11 +6950,12 @@ mod tests {
 				session.close(crate::lite::test_transport::Close::Fin);
 			}
 			let (mut subscriber, _consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
+			let (_live, live) = live();
 			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let res = subscriber
-				.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot)
+				.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot, live)
 				.await;
 			assert!(matches!(res, Err(Error::ProtocolViolation)), "{entries:?}: {res:?}");
 		}
@@ -9152,6 +9282,7 @@ mod tests {
 			Default::default(),
 		);
 
+		let (_live, live) = live();
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
@@ -9160,6 +9291,7 @@ mod tests {
 				stream,
 				crate::Path::new("").to_owned(),
 				crate::model::Snapshot::landed(),
+				live,
 			)
 			.await
 			.expect("a clean FIN is not an error");
@@ -9241,13 +9373,15 @@ mod tests {
 			Default::default(),
 		);
 
+		let (_live, live) = live();
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
 			stream,
 			crate::Path::new("").to_owned(),
-			crate::model::Snapshot::landed()
+			crate::model::Snapshot::landed(),
+			live
 		));
 		for _ in 0..100 {
 			assert!(

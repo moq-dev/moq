@@ -22,7 +22,7 @@ use axum::Router;
 use axum::http::{HeaderValue, StatusCode, Uri};
 use tokio::sync::{OnceCell, oneshot};
 
-use crate::{Error, Result};
+use crate::Result;
 use mux::Mux;
 
 /// The result of a WHIP/WHEP [`whip::accept`] / [`whep::accept`]: the SDP answer
@@ -86,8 +86,7 @@ impl AcceptedSession {
 			}
 		};
 		if let Some(res) = ended {
-			crate::session::log_session_end(self.role, &res);
-			return normalize_session_result(res);
+			return crate::session::end(self.role, res);
 		}
 
 		// A DELETE is the peer's clean end after its final media. An ingest serves the
@@ -107,15 +106,6 @@ impl AcceptedSession {
 impl Drop for AcceptedSession {
 	fn drop(&mut self) {
 		self.server.unregister_session(&self.resource_id);
-	}
-}
-
-/// Fold an ordinary peer disconnect into `Ok` so [`Response::run`] only errors
-/// on genuine failures.
-fn normalize_session_result(result: Result<()>) -> Result<()> {
-	match result {
-		Ok(()) | Err(Error::SessionClosed) => Ok(()),
-		Err(err) => Err(err),
 	}
 }
 
@@ -321,11 +311,6 @@ mod tests {
 		let _cancel = server.register_session(id.to_string());
 		server.unregister_session(id);
 		assert!(!server.terminate(id), "unregistered session can't be terminated");
-	}
-
-	#[test]
-	fn peer_close_is_a_successful_session_result() {
-		assert!(normalize_session_result(Err(Error::SessionClosed)).is_ok());
 	}
 
 	#[cfg(feature = "server")]

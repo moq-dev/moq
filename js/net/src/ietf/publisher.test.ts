@@ -2652,7 +2652,7 @@ test("drafts 14 to 16 refuse a namespace update without ending the subscription"
 			ask.writer.close();
 		} else {
 			await peer.writer.u53(UnsubscribeNamespace.id);
-			await new UnsubscribeNamespace({ requestId: 0n }).encode(peer.writer, version);
+			await new UnsubscribeNamespace({ prefix: asked.namespace, requestId: 0n }).encode(peer.writer, version);
 		}
 		await running;
 		origin.close();

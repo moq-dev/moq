@@ -70,7 +70,6 @@ Rejected in planning:
 - [The origin announces](/quest/m1/api-audit/announce-owner.md) - a broadcast producer cannot announce; the origin hands out the announcement, so `Prepared` and standalone broadcasts lose methods that always fail
 - [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - the dead and test-only moq-net, `@moq/net`, and moq-ffi items the follow-up audit found go private or away
-- [Derived origins borrow](/quest/m1/api-audit/derived-origin-close.md) - closing a JS `scope()` handle releases only that handle
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
 - [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
 - [One frame rate name](/quest/m1/api-audit/frame-rate.md) - core `moq_video::Rate` becomes `FrameRate`, as the bindings name it
@@ -87,6 +86,5 @@ Rejected in planning:
 ## Related
 
 - [Claim request type](/quest/m1/api-audit/claim-request-type.md) - removes `accept` from application requests; [the origin announces](/quest/m1/api-audit/announce-owner.md) narrows `Prepared` beside it
-- [Readers follow restarts](/quest/m1/sink-restart-follow.md) - moves readers onto the follow operation that [two broadcast resolutions](/quest/m1/api-audit/resolve.md) names
 - [API-diff check on release PRs](/quest/m1/api-diff.md) - the backstop that catches breaks this epic misses
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - the other release-readiness check

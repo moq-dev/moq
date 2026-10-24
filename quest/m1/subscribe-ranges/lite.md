@@ -54,8 +54,7 @@ list.
 
 Update `drafts/draft-lcurley-moq-lite.md` in the same PR: the SUBSCRIBE and
 SUBSCRIBE_UPDATE fields, the Group Order section (the order is now a field),
-the removal of FETCH, and the lite-07 changelog. Fix the stale "offset by 1"
-sentence on Group Start while there. This quest also owns the Order row of
+the removal of FETCH, and the lite-07 changelog. This quest also owns the Order row of
 the priority table in `doc/concept/moq-lite.md`: it now describes the field
 (decided 2026-10-08, since subscribe ranges owns group order). Published versions (lite-03..06) keep
 FETCH, answered through the model's ranges. Run `just drafts check` and

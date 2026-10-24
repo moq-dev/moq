@@ -518,17 +518,20 @@ test("a forged datagram does not burn the identity", async () => {
 	expect(datagramText(event)).toBe("two");
 });
 
-test("a datagram no publisher could seal is dropped as a bad datagram", async () => {
+test("a datagram no publisher could seal is dropped with its code", async () => {
 	const p = await pair("audio");
 	const sealedAt = await sealed(p, DATAGRAM, 0, 0, "x");
 	p.net.insertDatagram(1, ms(1), new Uint8Array(MAX_DATAGRAM_PAYLOAD + 1));
 	p.net.insertDatagram(2, ms(2), sealedAt.subarray(0, 3));
 	p.net.insertDatagram(2 ** 53, ms(3), sealedAt);
+	p.net.insertDatagram(2 ** 53 + 2, ms(3), sealedAt.subarray(0, 3));
 	await p.producer.insertDatagram(2 ** 53 - 1, ms(4), text("last"));
 
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 1 });
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 2 });
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 2 ** 53 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "oversize", sequence: 1 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "oversize", sequence: 2 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "identity", sequence: 2 ** 53 });
+	// Identity is checked before size, as in every core.
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "identity", sequence: 2 ** 53 + 2 });
 	expect(datagramText(await p.consumer.recvDatagram())).toBe("last");
 });
 
