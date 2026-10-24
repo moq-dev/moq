@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Rendition URLs name the publisher instance
+
+`Server` follows each instance that takes over a broadcast, and every URL the
+master playlist and DASH manifest list now sits under that instance:
+`/{broadcast}/@{instance}/{kind}/{rendition}/...` instead of
+`/{broadcast}/{kind}/{rendition}/...`. `Route::parse` refuses the old layout,
+and `Resource::{Media, Init, Segment, SegmentAt}` carry the `instance` they
+name. `Broadcaster::master_playlist` and `Broadcaster::manifest` render the new
+layout. An embedder that answers through `Server::respond` needs no change; one
+that routes rendition URLs itself must pass the `@{instance}` segment through.
+
 ### Denied broadcast references report authorization failure
 
 A rendition whose referenced broadcast is outside the source origin's scope now

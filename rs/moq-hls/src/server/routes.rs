@@ -41,21 +41,25 @@ pub struct Route {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Resource {
-	/// `master.m3u8`: the HLS multivariant playlist.
+	/// `master.m3u8`: the HLS multivariant playlist of the instance serving the broadcast now.
 	Master,
-	/// `manifest.mpd`: the DASH manifest.
+	/// `manifest.mpd`: the DASH manifest of the instance serving the broadcast now.
 	Manifest,
-	/// `{kind}/{rendition}/media.m3u8`: a rendition's HLS media playlist.
+	/// `@{instance}/{kind}/{rendition}/media.m3u8`: a rendition's HLS media playlist.
 	#[non_exhaustive]
 	Media {
+		/// The publisher instance the URL names, without its `@`.
+		instance: String,
 		/// The rendition's kind.
 		kind: Kind,
 		/// The rendition's name, percent-decoded.
 		rendition: String,
 	},
-	/// `{kind}/{rendition}/init.{hash}.mp4`: a rendition's CMAF init segment.
+	/// `@{instance}/{kind}/{rendition}/init.{hash}.mp4`: a rendition's CMAF init segment.
 	#[non_exhaustive]
 	Init {
+		/// The publisher instance the URL names, without its `@`.
+		instance: String,
 		/// The rendition's kind.
 		kind: Kind,
 		/// The rendition's name, percent-decoded.
@@ -63,10 +67,12 @@ pub enum Resource {
 		/// The hash of the init bytes the URL names.
 		hash: String,
 	},
-	/// `{kind}/{rendition}/seg/[{generation}.]{reference}.{sequence}.m4s`: a segment by its HLS
-	/// number.
+	/// `@{instance}/{kind}/{rendition}/seg/[{generation}.]{reference}.{sequence}.m4s`: a segment
+	/// by its HLS number.
 	#[non_exhaustive]
 	Segment {
+		/// The publisher instance the URL names, without its `@`.
+		instance: String,
 		/// The rendition's kind.
 		kind: Kind,
 		/// The rendition's name, percent-decoded.
@@ -78,10 +84,12 @@ pub enum Resource {
 		/// The segment's aligned number.
 		sequence: u64,
 	},
-	/// `{kind}/{rendition}/seg/[{generation}.]{reference}.t{pts}.m4s`: the same bytes, addressed
-	/// by the DASH timeline pts (`$Time$`).
+	/// `@{instance}/{kind}/{rendition}/seg/[{generation}.]{reference}.t{pts}.m4s`: the same
+	/// bytes, addressed by the DASH timeline pts (`$Time$`).
 	#[non_exhaustive]
 	SegmentAt {
+		/// The publisher instance the URL names, without its `@`.
+		instance: String,
 		/// The rendition's kind.
 		kind: Kind,
 		/// The rendition's name, percent-decoded.
@@ -96,10 +104,11 @@ pub enum Resource {
 }
 
 impl Route {
-	/// Parse a request path such as `/project/live/video/hd/media.m3u8`, or `None` when it
-	/// addresses nothing.
+	/// Parse a request path such as `/project/live/@{instance}/video/hd/media.m3u8`, or `None`
+	/// when it addresses nothing.
 	///
-	/// The broadcast occupies every segment before the resource suffix. Each segment is
+	/// The broadcast occupies every segment before the resource suffix, which for every
+	/// resource but the master and manifest starts with the `@{instance}` segment. Each segment is
 	/// percent-decoded, and one that decodes to a `/` is refused, so an encoded separator
 	/// cannot smuggle a different broadcast past a policy check on [`broadcast`](Self::broadcast).
 	pub fn parse(path: &str) -> Option<Self> {
@@ -120,22 +129,25 @@ impl Route {
 		let (broadcast, resource) = match parts.as_slice() {
 			[broadcast @ .., file] if file == "master.m3u8" => (broadcast, Resource::Master),
 			[broadcast @ .., file] if file == "manifest.mpd" => (broadcast, Resource::Manifest),
-			[broadcast @ .., kind, rendition, file] if file == "media.m3u8" => (
+			[broadcast @ .., instance, kind, rendition, file] if file == "media.m3u8" => (
 				broadcast,
 				Resource::Media {
+					instance: instance_id(instance)?,
 					kind: Kind::parse(kind)?,
 					rendition: rendition.clone(),
 				},
 			),
-			[broadcast @ .., kind, rendition, file] if init_hash(file).is_some() => (
+			[broadcast @ .., instance, kind, rendition, file] if init_hash(file).is_some() => (
 				broadcast,
 				Resource::Init {
+					instance: instance_id(instance)?,
 					kind: Kind::parse(kind)?,
 					rendition: rendition.clone(),
 					hash: init_hash(file)?.to_string(),
 				},
 			),
-			[broadcast @ .., kind, rendition, directory, file] if directory == "seg" => {
+			[broadcast @ .., instance, kind, rendition, directory, file] if directory == "seg" => {
+				let instance = instance_id(instance)?;
 				let kind = Kind::parse(kind)?;
 				let rendition = rendition.clone();
 				let stem = file.strip_suffix(".m4s")?;
@@ -148,6 +160,7 @@ impl Route {
 				};
 				let resource = match stem.strip_prefix('t') {
 					Some(pts) => Resource::SegmentAt {
+						instance,
 						kind,
 						rendition,
 						generation,
@@ -155,6 +168,7 @@ impl Route {
 						pts: pts.parse().ok()?,
 					},
 					None => Resource::Segment {
+						instance,
 						kind,
 						rendition,
 						generation,
@@ -175,6 +189,13 @@ impl Route {
 			resource,
 		})
 	}
+}
+
+/// The publisher instance an `@{instance}` path segment names.
+fn instance_id(part: &str) -> Option<String> {
+	part.strip_prefix('@')
+		.filter(|instance| !instance.is_empty())
+		.map(str::to_string)
 }
 
 /// The content hash in an `init.{hash}.mp4` file name.
@@ -204,27 +225,40 @@ impl Server {
 		match &route.resource {
 			Resource::Master => master(self, broadcast, query).await,
 			Resource::Manifest => manifest(self, broadcast, query).await,
-			Resource::Media { kind, rendition } => media(self, broadcast, *kind, rendition, query).await,
-			Resource::Init { kind, rendition, hash } => init(self, broadcast, *kind, rendition, hash).await,
+			Resource::Media {
+				instance,
+				kind,
+				rendition,
+			} => media(self, At::new(broadcast, instance, *kind, rendition), query).await,
+			Resource::Init {
+				instance,
+				kind,
+				rendition,
+				hash,
+			} => init(self, At::new(broadcast, instance, *kind, rendition), hash).await,
 			Resource::Segment {
+				instance,
 				kind,
 				rendition,
 				generation,
 				reference,
 				sequence,
 			} => {
-				let at = SegmentAt::Sequence(reference, *sequence);
-				segment(self, broadcast, *kind, rendition, generation.as_deref(), at).await
+				let at = At::new(broadcast, instance, *kind, rendition);
+				let by = SegmentAt::Sequence(reference, *sequence);
+				segment(self, at, generation.as_deref(), by).await
 			}
 			Resource::SegmentAt {
+				instance,
 				kind,
 				rendition,
 				generation,
 				reference,
 				pts,
 			} => {
-				let at = SegmentAt::Pts(reference, *pts);
-				segment(self, broadcast, *kind, rendition, generation.as_deref(), at).await
+				let at = At::new(broadcast, instance, *kind, rendition);
+				let by = SegmentAt::Pts(reference, *pts);
+				segment(self, at, generation.as_deref(), by).await
 			}
 		}
 	}
@@ -264,12 +298,12 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 	}
 }
 
-async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, query: Option<&str>) -> Response {
+async fn media(server: &Server, at: At<'_>, query: Option<&str>) -> Response {
 	let (range, child_query) = match playlist_range(query) {
 		Ok(parsed) => parsed,
 		Err(()) => return bad_request(),
 	};
-	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
+	let Some(rendition) = rendition_for(server, at).await else {
 		return not_found();
 	};
 	match moq_clock::timeout(READY_TIMEOUT, rendition.playlist(range, child_query.as_deref())).await {
@@ -318,8 +352,8 @@ fn media_time(value: &str) -> Result<Duration, ()> {
 	Duration::try_from_secs_f64(seconds).map_err(|_| ())
 }
 
-async fn init(server: &Server, broadcast: &str, kind: Kind, rendition: &str, hash: &str) -> Response {
-	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
+async fn init(server: &Server, at: At<'_>, hash: &str) -> Response {
+	let Some(rendition) = rendition_for(server, at).await else {
 		return not_found();
 	};
 	media_result(rendition.init_versioned(hash).await, server)
@@ -333,15 +367,8 @@ enum SegmentAt<'a> {
 	Pts(&'a str, u64),
 }
 
-async fn segment(
-	server: &Server,
-	broadcast: &str,
-	kind: Kind,
-	rendition: &str,
-	generation: Option<&str>,
-	at: SegmentAt<'_>,
-) -> Response {
-	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
+async fn segment(server: &Server, at: At<'_>, generation: Option<&str>, by: SegmentAt<'_>) -> Response {
+	let Some(rendition) = rendition_for(server, at).await else {
 		return not_found();
 	};
 	// Only the current run's URLs are served: a restart reuses segment numbers, so another
@@ -350,7 +377,7 @@ async fn segment(
 	if !current() {
 		return not_found();
 	}
-	let result = match at {
+	let result = match by {
 		SegmentAt::Sequence(reference, sequence) => rendition.segment(reference, sequence).await,
 		SegmentAt::Pts(reference, pts) => rendition.segment_at(reference, pts).await,
 	};
@@ -361,11 +388,31 @@ async fn segment(
 	media_result(result, server)
 }
 
+/// A rendition of one publisher instance, as an instance-scoped URL names it.
+#[derive(Clone, Copy)]
+struct At<'a> {
+	broadcast: &'a str,
+	instance: &'a str,
+	kind: Kind,
+	rendition: &'a str,
+}
+
+impl<'a> At<'a> {
+	fn new(broadcast: &'a str, instance: &'a str, kind: Kind, rendition: &'a str) -> Self {
+		Self {
+			broadcast,
+			instance,
+			kind,
+			rendition,
+		}
+	}
+}
+
 /// Resolve a rendition, waiting for the catalog to populate.
-async fn rendition_for(server: &Server, broadcast: &str, kind: Kind, rendition: &str) -> Option<Arc<Rendition>> {
-	let broadcaster = server.broadcaster(broadcast).await?;
+async fn rendition_for(server: &Server, at: At<'_>) -> Option<Arc<Rendition>> {
+	let broadcaster = server.instance(at.broadcast, at.instance).await?;
 	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
-	broadcaster.rendition(kind, rendition)
+	broadcaster.rendition(at.kind, at.rendition)
 }
 
 fn m3u8(body: String) -> Response {
@@ -391,11 +438,11 @@ fn media_result(result: crate::Result<Option<Bytes>>, server: &Server) -> Respon
 }
 
 fn media_bytes(body: Bytes, server: &Server) -> Response {
-	// Init/segment bytes never change while their URL is listed, but a segment URL without a
-	// generation is not globally unique: a restarted publisher starts a new timeline whose
-	// segment numbers and pts can repeat the old ones with different media. Cap shared caching
-	// at the playlist window - every concurrent viewer of the live window still hits the cache,
-	// while a stale run's bytes age out as fast as the window that stopped listing them.
+	// Init/segment bytes never change while their URL is listed, but a run spliced into one
+	// instance without a generation (see `Broadcaster::set_generation`) can repeat the old run's
+	// segment numbers and pts with different media. Cap shared caching at the playlist window -
+	// every concurrent viewer of the live window still hits the cache, while a stale run's bytes
+	// age out as fast as the window that stopped listing them.
 	let max_age = server.inner.config.window.as_secs().max(1);
 	(
 		[
@@ -473,10 +520,11 @@ mod tests {
 	#[test]
 	fn parses_multisegment_broadcast_and_encoded_rendition() {
 		assert_eq!(
-			Route::parse("/project/live/video/cam%231%2Fmain%3Falt/media.m3u8"),
+			Route::parse("/project/live/@run/video/cam%231%2Fmain%3Falt/media.m3u8"),
 			Some(Route {
 				broadcast: "project/live".to_string(),
 				resource: Resource::Media {
+					instance: "run".to_string(),
 					kind: Kind::Video,
 					rendition: "cam#1/main?alt".to_string(),
 				},
@@ -499,22 +547,19 @@ mod tests {
 		};
 
 		// The manifest for broadcast `live` and rendition `video/1080p` emits these paths.
-		// Unencoded, the same name is broadcast `live/video`, rendition `1080p`.
+		// Unencoded, the same name names no instance.
 		let cases = [
-			("/live/video/video%2F1080p/init.0123abcd.mp4", "video/1080p"),
-			("/live/video/video%2F1080p/seg/ab12cd34.t2000.m4s", "video/1080p"),
-			("/live/video/cam%3F1/init.0123abcd.mp4", "cam?1"),
-			("/live/video/cam%231/media.m3u8", "cam#1"),
-			("/live/audio/100%25/init.0123abcd.mp4", "100%"),
-			("/live/video/price%249/seg/ab12cd34.t0.m4s", "price$9"),
+			("/live/@run/video/video%2F1080p/init.0123abcd.mp4", "video/1080p"),
+			("/live/@run/video/video%2F1080p/seg/ab12cd34.t2000.m4s", "video/1080p"),
+			("/live/@run/video/cam%3F1/init.0123abcd.mp4", "cam?1"),
+			("/live/@run/video/cam%231/media.m3u8", "cam#1"),
+			("/live/@run/audio/100%25/init.0123abcd.mp4", "100%"),
+			("/live/@run/video/price%249/seg/ab12cd34.t0.m4s", "price$9"),
 		];
 		for (path, rendition) in cases {
 			assert_eq!(parsed(path), Some(("live".into(), rendition.into())), "{path}");
 		}
-		assert_eq!(
-			parsed("/live/video/video/1080p/init.0123abcd.mp4"),
-			Some(("live/video".into(), "1080p".into()))
-		);
+		assert_eq!(parsed("/live/@run/video/video/1080p/init.0123abcd.mp4"), None);
 	}
 
 	#[test]
@@ -523,16 +568,18 @@ mod tests {
 		assert_eq!(resource("/project/live/master.m3u8"), Some(Resource::Master));
 		assert_eq!(resource("/project/live/manifest.mpd"), Some(Resource::Manifest));
 		assert_eq!(
-			resource("/project/live/audio/main/init.0123abcd.mp4"),
+			resource("/project/live/@run/audio/main/init.0123abcd.mp4"),
 			Some(Resource::Init {
+				instance: "run".to_string(),
 				kind: Kind::Audio,
 				rendition: "main".to_string(),
 				hash: "0123abcd".to_string(),
 			})
 		);
 		assert_eq!(
-			resource("/project/live/video/main/seg/ab12cd34.42.m4s"),
+			resource("/project/live/@run/video/main/seg/ab12cd34.42.m4s"),
 			Some(Resource::Segment {
+				instance: "run".to_string(),
 				kind: Kind::Video,
 				rendition: "main".to_string(),
 				generation: None,
@@ -541,8 +588,9 @@ mod tests {
 			})
 		);
 		assert_eq!(
-			resource("/project/live/video/main/seg/run-1.ab12cd34.42.m4s"),
+			resource("/project/live/@run/video/main/seg/run-1.ab12cd34.42.m4s"),
 			Some(Resource::Segment {
+				instance: "run".to_string(),
 				kind: Kind::Video,
 				rendition: "main".to_string(),
 				generation: Some("run-1".to_string()),
@@ -551,8 +599,9 @@ mod tests {
 			})
 		);
 		assert_eq!(
-			resource("/project/live/video/main/seg/ab12cd34.t2000.m4s"),
+			resource("/project/live/@run/video/main/seg/ab12cd34.t2000.m4s"),
 			Some(Resource::SegmentAt {
+				instance: "run".to_string(),
 				kind: Kind::Video,
 				rendition: "main".to_string(),
 				generation: None,
@@ -561,8 +610,9 @@ mod tests {
 			})
 		);
 		assert_eq!(
-			resource("/project/live/video/main/seg/init.ab12cd34.t2000.m4s"),
+			resource("/project/live/@run/video/main/seg/init.ab12cd34.t2000.m4s"),
 			Some(Resource::SegmentAt {
+				instance: "run".to_string(),
 				kind: Kind::Video,
 				rendition: "main".to_string(),
 				generation: Some("init".to_string()),
@@ -571,16 +621,21 @@ mod tests {
 			})
 		);
 		assert!(Route::parse("/master.m3u8").is_none());
-		assert!(Route::parse("/project/live/video/main/unknown").is_none());
-		assert!(Route::parse("/project/live/data/main/media.m3u8").is_none());
-		assert!(Route::parse("/project/live/video/main/init.mp4").is_none());
-		assert!(Route::parse("/project/live/video/main/init..mp4").is_none());
-		assert!(Route::parse("/project/live/video/main/seg/ab12cd34.tx.m4s").is_none());
 		assert!(
-			Route::parse("/project/live/video/main/seg/42.m4s").is_none(),
+			Route::parse("/project/live/video/main/media.m3u8").is_none(),
+			"a rendition URL names its instance"
+		);
+		assert!(Route::parse("/project/live/@/video/main/media.m3u8").is_none());
+		assert!(Route::parse("/project/live/@run/video/main/unknown").is_none());
+		assert!(Route::parse("/project/live/@run/data/main/media.m3u8").is_none());
+		assert!(Route::parse("/project/live/@run/video/main/init.mp4").is_none());
+		assert!(Route::parse("/project/live/@run/video/main/init..mp4").is_none());
+		assert!(Route::parse("/project/live/@run/video/main/seg/ab12cd34.tx.m4s").is_none());
+		assert!(
+			Route::parse("/project/live/@run/video/main/seg/42.m4s").is_none(),
 			"a segment URL names its reference"
 		);
-		assert!(Route::parse("/project/live/video/main/seg/1.ts").is_none());
+		assert!(Route::parse("/project/live/@run/video/main/seg/1.ts").is_none());
 	}
 
 	#[test]
@@ -595,6 +650,23 @@ mod tests {
 	}
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
+
+	/// The epoch each test's catalog broadcast announces, and so the instance its URLs name.
+	const RUN: &str = "01920000-0000-7000-8000-000000000000";
+
+	fn run() -> moq_net::origin::Route {
+		moq_net::origin::Route::default().with_epoch(RUN.parse().unwrap())
+	}
+
+	/// The instance `server` lists for `broadcast`, which it mints for a session older than
+	/// lite-07, since those carry no epoch.
+	async fn listed(server: &Server, broadcast: &str) -> String {
+		let broadcaster = tokio::time::timeout(TIMEOUT, server.broadcaster(broadcast))
+			.await
+			.expect("resolve timed out")
+			.expect("announced");
+		broadcaster.instance().to_string()
+	}
 
 	fn vp8_frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
 		let payload = if keyframe {
@@ -759,7 +831,8 @@ mod tests {
 		write_three_gops(&mut media);
 
 		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
-		let mut route = Route::parse("/tenant/live/video/video0/media.m3u8").expect("media route");
+		let run = listed(&server, "live").await;
+		let mut route = Route::parse(&format!("/tenant/live/@{run}/video/video0/media.m3u8")).expect("media route");
 		route.broadcast = route.broadcast.strip_prefix("tenant/").expect("scoped").to_string();
 
 		let deadline = tokio::time::Instant::now() + TIMEOUT;
@@ -873,7 +946,7 @@ mod tests {
 	async fn master_answers_404_until_a_rendition_can_start() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
-		broadcast.announce(Default::default()).expect("announce");
+		broadcast.announce(run()).expect("announce");
 		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 
 		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
@@ -883,13 +956,57 @@ mod tests {
 		wait_listed(&app, "/live/master.m3u8", "video/video0/media.m3u8").await;
 	}
 
+	/// A restarted publisher gets URLs of its own, whose numbering starts over: the master lists
+	/// the replacement, while a player already on the old instance keeps its playlist until that
+	/// instance's broadcast closes.
+	#[tokio::test(start_paused = true)]
+	async fn a_restart_lists_the_replacement_under_its_own_urls() {
+		let origin = moq_tokio::origin::spawn();
+		let mut old = origin.create_broadcast("live").expect("publish");
+		old.announce(run()).expect("announce");
+		let (old_catalog, _, old_track, mut old_media) = publish_video(&mut old, video_config(), timed());
+		write_three_gops(&mut old_media);
+
+		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
+		let old_segment = format!("/live/@{RUN}/video/video0/seg/656e3d1b.0.m4s");
+		wait_listed(&app, "/live/master.m3u8", &format!("@{RUN}/video/video0/media.m3u8")).await;
+		wait_listed(&app, &old_playlist, "seg/656e3d1b.0.m4s").await;
+
+		let next = moq_net::Epoch::mint();
+		let mut new = origin.create_broadcast("live").expect("publish");
+		new.announce(moq_net::origin::Route::default().with_epoch(next.clone()))
+			.expect("announce");
+		let (_new_catalog, _, _new_track, mut new_media) = publish_video(&mut new, video_config(), timed());
+		write_three_gops(&mut new_media);
+		let new_playlist = format!("/live/@{}/video/video0/media.m3u8", next.as_str());
+		wait_listed(
+			&app,
+			"/live/master.m3u8",
+			&format!("@{}/video/video0/media.m3u8", next.as_str()),
+		)
+		.await;
+		wait_listed(&app, &new_playlist, "seg/656e3d1b.0.m4s").await;
+		assert_eq!(status(&app, &old_playlist).await, StatusCode::OK);
+		assert_eq!(status(&app, &old_segment).await, StatusCode::OK);
+
+		drop((old_catalog, old_track, old_media, old));
+		let deadline = tokio::time::Instant::now() + TIMEOUT;
+		while status(&app, &old_playlist).await != StatusCode::NOT_FOUND {
+			assert!(tokio::time::Instant::now() < deadline, "the closed instance kept serving");
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+		assert_eq!(status(&app, &old_segment).await, StatusCode::NOT_FOUND);
+		assert_eq!(status(&app, &new_playlist).await, StatusCode::OK);
+	}
+
 	/// A failed timeline answers every listing, a clip included, with an uncacheable error
 	/// rather than ending it as a complete recording or refusing the range.
 	#[tokio::test(start_paused = true)]
 	async fn a_failed_timeline_answers_an_uncacheable_error() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
-		broadcast.announce(Default::default()).expect("announce");
+		broadcast.announce(run()).expect("announce");
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let name = hang::timeline::default_name("video0");
 		catalog
@@ -919,7 +1036,7 @@ mod tests {
 			..Default::default()
 		};
 		let app = Server::new(origin.consume(), config).router();
-		wait_listed(&app, "/live/video/video0/media.m3u8", ".2.m4s").await;
+		wait_listed(&app, &format!("/live/@{RUN}/video/video0/media.m3u8"), ".2.m4s").await;
 		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
 
 		drop(timeline);
@@ -927,8 +1044,8 @@ mod tests {
 			.abort(moq_net::Error::Transport("connection lost".into()))
 			.unwrap();
 		for uri in [
-			"/live/video/video0/media.m3u8",
-			"/live/video/video0/media.m3u8?start=0&end=2",
+			&format!("/live/@{RUN}/video/video0/media.m3u8"),
+			&format!("/live/@{RUN}/video/video0/media.m3u8?start=0&end=2"),
 			"/live/manifest.mpd",
 		] {
 			let deadline = tokio::time::Instant::now() + TIMEOUT;
@@ -951,17 +1068,17 @@ mod tests {
 	async fn serves_only_versioned_media_urls() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
-		broadcast.announce(Default::default()).expect("announce");
+		broadcast.announce(run()).expect("announce");
 		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 		write_three_gops(&mut media);
 
 		let server = Server::new(origin.consume(), crate::export::Config::default());
 		let app = server.router();
-		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
+		wait_listed(&app, &format!("/live/@{RUN}/video/video0/media.m3u8"), "seg/656e3d1b.0.m4s").await;
 		let broadcaster = server.broadcaster("live").await.expect("broadcaster");
 		broadcaster.set_generation(Some("run-1")).unwrap();
 
-		let response = oneshot(app.clone(), "/live/video/video0/media.m3u8").await;
+		let response = oneshot(app.clone(), &format!("/live/@{RUN}/video/video0/media.m3u8")).await;
 		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
 		let playlist = String::from_utf8(body.to_vec()).unwrap();
 		assert!(playlist.contains("\nseg/run-1.656e3d1b.0.m4s\n"), "{playlist}");
@@ -973,36 +1090,36 @@ mod tests {
 			.unwrap();
 
 		assert_eq!(
-			status(&app, &format!("/live/video/video0/{init}")).await,
+			status(&app, &format!("/live/@{RUN}/video/video0/{init}")).await,
 			StatusCode::OK
 		);
-		assert_eq!(status(&app, "/live/video/video0/init.mp4").await, StatusCode::NOT_FOUND);
+		assert_eq!(status(&app, &format!("/live/@{RUN}/video/video0/init.mp4")).await, StatusCode::NOT_FOUND);
 		assert_eq!(
-			status(&app, "/live/video/video0/init.0000000000000000.mp4").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/init.0000000000000000.mp4")).await,
 			StatusCode::NOT_FOUND
 		);
 
 		assert_eq!(
-			status(&app, "/live/video/video0/seg/run-1.656e3d1b.0.m4s").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.656e3d1b.0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, "/live/video/video0/seg/run-1.656e3d1b.t0.m4s").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.656e3d1b.t0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, "/live/video/video0/seg/656e3d1b.0.m4s").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/656e3d1b.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 		assert_eq!(
-			status(&app, "/live/video/video0/seg/run-0.656e3d1b.0.m4s").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-0.656e3d1b.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 
 		// A new run: the previous generation's URLs are refused even for numbers it reuses.
 		broadcaster.set_generation(Some("run-2")).unwrap();
 		assert_eq!(
-			status(&app, "/live/video/video0/seg/run-1.656e3d1b.0.m4s").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.656e3d1b.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 	}
@@ -1022,10 +1139,12 @@ mod tests {
 		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 		write_three_gops(&mut media);
 
-		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
-		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
+		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
+		let run = listed(&server, "live").await;
+		let app = server.router();
+		wait_listed(&app, &format!("/live/@{run}/video/video0/media.m3u8"), "seg/656e3d1b.0.m4s").await;
 
-		let response = oneshot(app, "/live/video/video0/seg/656e3d1b.0.m4s").await;
+		let response = oneshot(app, &format!("/live/@{run}/video/video0/seg/656e3d1b.0.m4s")).await;
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
@@ -1040,8 +1159,10 @@ mod tests {
 		let (catalog, registration, track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 		write_three_gops(&mut media);
 
-		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
-		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
+		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
+		let run = listed(&server, "live").await;
+		let app = server.router();
+		wait_listed(&app, &format!("/live/@{run}/video/video0/media.m3u8"), "seg/656e3d1b.0.m4s").await;
 
 		let remote = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("live", None))
 			.await
@@ -1052,7 +1173,7 @@ mod tests {
 			.await
 			.expect("publisher close timed out");
 
-		let response = oneshot(app, "/live/video/video0/seg/656e3d1b.0.m4s").await;
+		let response = oneshot(app, &format!("/live/@{run}/video/video0/seg/656e3d1b.0.m4s")).await;
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
@@ -1128,7 +1249,7 @@ mod tests {
 	async fn denied_sibling_media_answers_403_without_poisoning_allowed_siblings() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("room/live").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce(run()).unwrap();
 		let source = origin.create_broadcast("room/source").unwrap();
 		source.announce(Default::default()).unwrap();
 		let secret = origin.create_broadcast("room/secret").unwrap();
@@ -1165,15 +1286,15 @@ mod tests {
 		let server = Server::new(restricted, Default::default());
 		let broadcaster = server.broadcaster("room/live").await.unwrap();
 		broadcaster.ready().await;
-		let allowed_uri = "/room/live/video/video0/seg/656e3d1b.0.m4s";
-		let denied_uri = "/room/live/video/video1/seg/656e3d1b.0.m4s";
+		let allowed_uri = &format!("/room/live/@{RUN}/video/video0/seg/656e3d1b.0.m4s");
+		let denied_uri = &format!("/room/live/@{RUN}/video/video1/seg/656e3d1b.0.m4s");
 		let app = server.router();
 		assert_eq!(oneshot(app.clone(), allowed_uri).await.status(), StatusCode::OK);
 		for uri in [
 			denied_uri,
-			"/room/live/video/video1/media.m3u8",
-			"/room/live/video/video1/media.m3u8?start=0&end=2",
-			"/room/live/video/video1/init.unknown.mp4",
+			&format!("/room/live/@{RUN}/video/video1/media.m3u8"),
+			&format!("/room/live/@{RUN}/video/video1/media.m3u8?start=0&end=2"),
+			&format!("/room/live/@{RUN}/video/video1/init.unknown.mp4"),
 		] {
 			let response = oneshot(app.clone(), uri).await;
 			assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
@@ -1208,7 +1329,7 @@ mod tests {
 		assert_eq!(oneshot(app.clone(), denied_uri).await.status(), StatusCode::FORBIDDEN);
 		assert_eq!(oneshot(app.clone(), allowed_uri).await.status(), StatusCode::OK);
 		assert_eq!(
-			oneshot(app, "/room/live/video/video0/seg/656e3d1b.9999.m4s")
+			oneshot(app, &format!("/room/live/@{RUN}/video/video0/seg/656e3d1b.9999.m4s"))
 				.await
 				.status(),
 			StatusCode::NOT_FOUND
@@ -1264,8 +1385,10 @@ mod tests {
 		drop(reserved);
 		write_three_gops(&mut media);
 
-		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
-		wait_listed(&app, "/room/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
+		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
+		let run = listed(&server, "room/live").await;
+		let app = server.router();
+		wait_listed(&app, &format!("/room/live/@{run}/video/video0/media.m3u8"), "seg/656e3d1b.0.m4s").await;
 
 		// Waited on rather than requested once: a client only asks about what it watches.
 		let remote_media = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().routed_broadcast("room/source"))
@@ -1279,7 +1402,7 @@ mod tests {
 			.await
 			.expect("sibling close timed out");
 
-		let response = oneshot(app, "/room/live/video/video0/seg/656e3d1b.0.m4s").await;
+		let response = oneshot(app, &format!("/room/live/@{run}/video/video0/seg/656e3d1b.0.m4s")).await;
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
