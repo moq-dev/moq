@@ -288,7 +288,7 @@ pub(crate) fn resolve_rungs(ladder: &Ladder, source_name: &str, source: &VideoCo
 
 	let mut resolved: Vec<Resolved> = Vec::new();
 	for rung in ladder.rungs() {
-		let side = u64::from(rung.size);
+		let side = u64::from(rung.short_side);
 		let source_side = source_width.min(source_height);
 		if side > source_side {
 			continue;
@@ -307,8 +307,8 @@ pub(crate) fn resolve_rungs(ladder: &Ladder, source_name: &str, source: &VideoCo
 			continue;
 		}
 		resolved.push(Resolved {
-			name: format!("video/{}p", rung.size),
-			short_side: rung.size,
+			name: format!("video/{}p", rung.short_side),
+			short_side: rung.short_side,
 			size: moq_video::Size::new(width as u32, height as u32),
 			bitrate: rung.bitrate,
 			framerate,

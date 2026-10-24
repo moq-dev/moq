@@ -151,6 +151,17 @@ pub struct Config {
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,
 
+	/// The implementation to advertise in SETUP, as space-separated `name/version`
+	/// product tokens. Defaults to the binary's own; empty advertises nothing.
+	#[usage(
+		name = "listen-implementation",
+		long = "listen-implementation",
+		env = "MOQ_LISTEN_IMPLEMENTATION",
+		setting = "listen.implementation"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub implementation: Option<String>,
+
 	/// Maximum time for one accepted connection to finish its handshake: the
 	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, whatever the
 	/// server runs under [`crate::server::Request::within`] (admission, say), through
@@ -280,6 +291,7 @@ impl Default for Config {
 			unix: Default::default(),
 			version: Vec::new(),
 			extensions: Default::default(),
+			implementation: None,
 			timeout: Some(DEFAULT_TIMEOUT),
 			timeout_arg: None,
 			tls: Default::default(),

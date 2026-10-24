@@ -16,10 +16,14 @@ An `End` now drains the decoder, so the last picture before a pause arrives with
 On Wayland the main display and any non-`x11:` id now fail with `Error::Unsupported` instead of opening the system picker with a selection shared by every publication in the process.
 Pass `Source::Portal(portal::Selection::new(portal::Kind::Screen))` to ask the picker, and keep that selection for the publication's reopens.
 
-### `Control::cut` is not rate limited, and capture advertises refresh (#6048)
+### Native frame imports use platform and format roles
 
-`encode::Control::cut` no longer spaces keyframes 500 ms apart: every request forces one on the next frame, so frequent calls produce all-keyframe video.
-Debounce your own calls if you relied on the spacing.
+`frame::macos` is `frame::apple`.
+`frame::vulkan::Channels` is `Format`. `Image` exposes `device`, `memory`, `size`, `allocation_size`, and `format` as fields; replace `device_uuid()` with `device.device_uuid`, `size()` with `size`, `allocation_size()` with `allocation_size`, and `channels()` with `format`.
+Construct `Handles { memory, timeline }` directly instead of calling `Handles::new`.
+
+### Capture advertises refresh (#6048)
+
 Capture tracks now advertise `refresh: Some(2)` when every backend the selection may open honors a cut, and the driver forces a keyframe when `Demand::wanted` passes the largest group.
 
 ### OpenH264 is opt-in (#5771)
@@ -44,18 +48,11 @@ Set `encode::Config::color` to the first frame's `frame.surface.color()`, and re
 `encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the `catalog::Producer`, so the caller declares the encoder's GOP as the timeline hint.
 Pass `catalog.reserve().with_timeline_hint(gop)` instead of the catalog.
 
-### Capture takes one `encode::Capture`, and `Control::new` returns the driver
+### Capture takes one `encode::Capture`
 
 `publish_capture(broadcast, catalog, capture, encode, clock)` is `publish_capture(broadcast, catalog, encode::Capture)`.
 `Capture` has no clock: the driver stamps on `catalog.clock()`.
-`encode::Control::new` returns the control handle and the driver; dropping the last `Control` cancels an in-flight open or encode.
 Build it from `encode::Capture::default()`, setting `capture` and `encode`.
-
-### `Control::cut` returns a `Result`
-
-`cut()` fails with `Error::CutUnsupported` once the driver knows its backend cannot force a keyframe, and the publish carries on at its cadence.
-It counts cadence keyframes too, so a request may be served without forcing one.
-On `Error::CutUnsupported`, wait for the next cadence keyframe.
 
 ### `Encoded` marks keyframes (#4295)
 

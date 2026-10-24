@@ -37,7 +37,7 @@ Rules every child follows:
   this release breaks anyway. Otherwise it joins the later quest that
   reshapes it (the ordered track reader joins
   [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md); binding durations get
-  [their own m2 quest](/quest/m2/ffi-durations.md)).
+  [their own quest](/quest/m1/ffi-durations.md)).
 - Each child lists its public API and wire impact in its PR, and its Impact
   bullet says how to migrate.
 
@@ -66,7 +66,6 @@ Rejected in planning:
 
 ## Required
 
-- [MIGRATE matches release](/quest/m1/api-audit/migrate.md) - every break already on main has a correct entry measured against release, and entries for unreleased packages are gone
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
 - [The origin announces](/quest/m1/api-audit/announce-owner.md) - a broadcast producer cannot announce; the origin hands out the announcement, so `Prepared` and standalone broadcasts lose methods that always fail
 - [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone

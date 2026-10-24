@@ -331,9 +331,8 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
-	// Subscriptions the peer holds live on this session.
+	// Subscriptions the peer holds, PUBLISHes for its listings capped by `Limits.requests`.
 	#subscriptions: Slots;
-	#fetches: Slots;
 	#listings = new Set<Path.Valid>();
 	#trackClaims = new Map<string, "publish" | number>();
 
@@ -424,8 +423,7 @@ export class Publisher {
 		limits?: Limits;
 	}) {
 		this.#quic = quic;
-		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
-		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
+		this.#subscriptions = new Slots(limits.requests, { reason: "too many requests" });
 		this.#grant = grant;
 		this.#gate = new Gate(grant);
 		this.#auth = auth;
@@ -482,9 +480,9 @@ export class Publisher {
 			return;
 		}
 		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
-		// once. A peer past the cap loses the session.
+		// once. Stream credit bounds them, so none is refused here.
 		const charged = !msg.rangeFilters && this.#gate.allows(msg.trackNamespace);
-		if (charged) this.#subscriptions.acquire();
+		if (charged) this.#subscriptions.hold();
 		if (claimed) this.#trackClaims.set(key, ((this.#trackClaims.get(key) as number | undefined) ?? 0) + 1);
 		try {
 			await this.#serveSubscribe(msg, request);
@@ -2836,20 +2834,15 @@ export class Publisher {
 
 	async #runFetch(msg: Fetch, request: RequestStream) {
 		this.#pinned(msg.epoch);
-		this.#fetches.acquire();
-		try {
-			if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
-				await refuseReserved(request);
-				return;
-			}
-			await request.refuse("fetch", {
-				requestId: msg.requestId,
-				condition: msg.rangeFilters ? "invalid_filter" : "not_supported",
-				reasonPhrase: msg.rangeFilters ? "Range Filters exceed MAX_FILTER_RANGES=0" : "FETCH is not supported",
-			});
-		} finally {
-			this.#fetches.release();
+		if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(request);
+			return;
 		}
+		await request.refuse("fetch", {
+			requestId: msg.requestId,
+			condition: msg.rangeFilters ? "invalid_filter" : "not_supported",
+			reasonPhrase: msg.rangeFilters ? "Range Filters exceed MAX_FILTER_RANGES=0" : "FETCH is not supported",
+		});
 	}
 
 	/** What a request that failed to resolve is refused with. */

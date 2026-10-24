@@ -3,8 +3,29 @@ import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import { type Auth, type Grant, type Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
-import type { Stream } from "./stream.ts";
+import type { Reader, Stream, Writer } from "./stream.ts";
 import { nextTask } from "./util/yield.ts";
+
+/** Write a grant's patterns as a count and each one's canonical text, the encoding both wires' AUTH_OK share. @internal */
+export async function encodePatterns(w: Writer, patterns: Path.Patterns) {
+	await w.u53(patterns.size);
+	for (const pattern of patterns) await w.string(pattern.text);
+}
+
+/** Read a grant's patterns, refusing any that is invalid or not canonical. @internal */
+export async function decodePatterns(r: Reader): Promise<Path.Patterns> {
+	const count = await r.u53();
+	const patterns: Path.Pattern[] = [];
+	for (let i = 0; i < count; i++) {
+		const text = await r.string();
+		const pattern = Path.Pattern.parse(text);
+		// Only the canonical spelling is valid, so each pattern has one encoding.
+		if (pattern.text !== text) throw new Error(`non-canonical pattern: ${text}`);
+		patterns.push(pattern);
+	}
+	// Reduce once, so a peer's count never turns into quadratic work.
+	return new Path.Patterns(patterns);
+}
 
 /** Whether two grants allow the same paths and lapse together. */
 function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
