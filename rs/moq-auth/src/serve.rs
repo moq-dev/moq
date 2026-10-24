@@ -114,7 +114,10 @@ pub enum Denial {
 	/// The token's key could not be found or loaded: its `kid` is malformed or matches no key, or the key source is unreadable.
 	#[error("the token's key is unknown")]
 	UnknownKey,
-	/// The token failed to decode, verify, or authorize.
+	/// The token does not parse as a JWT.
+	#[error("the token is not a JWT: {0}")]
+	MalformedToken(String),
+	/// The token failed to verify or authorize.
 	#[error("the token is invalid: {0}")]
 	InvalidToken(String),
 	/// The token's root does not overlap the dialed path.
@@ -181,6 +184,7 @@ impl Denial {
 		let reason = match self {
 			Self::Expired { .. } => Reason::Expired,
 			Self::RootMismatch { .. } | Self::NoAccess { .. } => Reason::Forbidden,
+			Self::MalformedToken(_) => Reason::Malformed,
 			_ => Reason::Refused,
 		};
 		let root = match self {
@@ -248,13 +252,15 @@ impl Policy {
 
 	async fn verify(&self, jwt: &str) -> Result<crate::Claims, Denial> {
 		let keys = self.keys.as_ref().ok_or(Denial::NoKeys)?;
+		// Every key source reads the header first, so a token that is not a JWT fails here
+		// whichever one is configured.
+		let header = jsonwebtoken::decode_header(jwt).map_err(|err| Denial::MalformedToken(err.to_string()))?;
 		let claims = match keys {
 			Keys::File(path) => Key::from_file_async(path)
 				.await
 				.map_err(|_| Denial::UnknownKey)?
 				.verify_claims(jwt),
 			Keys::Dir(dir) => {
-				let header = jsonwebtoken::decode_header(jwt).map_err(|err| Denial::InvalidToken(err.to_string()))?;
 				let kid = header.kid.ok_or(Denial::MissingKeyId)?;
 				let kid = KeyId::decode(&kid).map_err(|_| Denial::UnknownKey)?;
 				Key::from_file_async(dir.join(format!("{kid}.jwk")))
@@ -310,7 +316,7 @@ fn jwt(request: &Request) -> Result<Option<Cow<'_, str>>, Denial> {
 		(Some(_), Some(_)) => Err(Denial::TwoTokens),
 		(Some(token), None) if token.kind == Token::OUT_OF_BAND => std::str::from_utf8(&token.value)
 			.map(|jwt| Some(jwt.into()))
-			.map_err(|_| Denial::InvalidToken("the SETUP token is not UTF-8".into())),
+			.map_err(|_| Denial::MalformedToken("the SETUP token is not UTF-8".into())),
 		(Some(token), None) => Err(Denial::UnsupportedToken(token.kind)),
 		(None, jwt) => Ok(jwt),
 	}
@@ -719,7 +725,7 @@ mod tests {
 
 		// Garbage, and a token with no keys configured at all.
 		let err = policy.decide(&with_token(request("/demo"), "nope")).await.unwrap_err();
-		assert!(matches!(err, Denial::InvalidToken(_)), "{err}");
+		assert!(matches!(err, Denial::MalformedToken(_)), "{err}");
 		let keyless = Policy {
 			public: rules(&["**"], &["**"]),
 			..Default::default()
@@ -847,6 +853,15 @@ mod tests {
 			.await
 			.unwrap_err();
 		assert!(matches!(err, Denial::InvalidToken(_)), "{err}");
+
+		// Bytes that are not text cannot be a JWT, whoever signed them.
+		let mut binary = request("/demo");
+		binary.token = Some(Token {
+			kind: Token::OUT_OF_BAND,
+			value: vec![0xff],
+		});
+		let err = policy.decide(&binary).await.unwrap_err();
+		assert!(matches!(err, Denial::MalformedToken(_)), "{err}");
 	}
 
 	#[tokio::test]
@@ -1373,6 +1388,7 @@ mod tests {
 					Some("tenant"),
 				),
 				("/attacker/path", Some(forged_jwt.as_str()), Reason::Refused, None),
+				("/attacker/path", Some("nope"), Reason::Malformed, None),
 				("/attacker/path", None, Reason::Refused, None),
 			] {
 				let mut request = request(path);

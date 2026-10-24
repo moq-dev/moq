@@ -24,6 +24,7 @@ import type { IetfVersion } from "./version.ts";
 /** The REQUEST_ERROR codes AUTH_ERROR carries. */
 const UNAUTHORIZED = 0x1;
 const NOT_SUPPORTED = 0x3;
+const MALFORMED_AUTH_TOKEN = 0x4;
 const EXPIRED_AUTH_TOKEN = 0x5;
 /** Draft-17 assigned it, the first draft this extension negotiates on. */
 const GOING_AWAY = 0x6;
@@ -191,6 +192,9 @@ export class AuthError {
 	/** What the refusal means to the presenter, preserving an actionable expiry. */
 	toError(): Error {
 		if (this.code === NOT_SUPPORTED) return new Unsupported(this.reason);
+		if (this.code === MALFORMED_AUTH_TOKEN) {
+			return new SessionError(SessionCode.MalformedAuthToken, { reason: this.reason });
+		}
 		if (this.code === EXPIRED_AUTH_TOKEN) return new SessionError(SessionCode.Expired, { reason: this.reason });
 		if (this.code === GOING_AWAY) return new StreamError(StreamCode.GoingAway, { reason: this.reason });
 		return new SessionError(SessionCode.Unauthorized, { reason: this.reason });
@@ -253,9 +257,11 @@ export class IetfAuthWire implements AuthWire {
 		const wire =
 			code === SessionCode.Version || code === SessionCode.Unsupported
 				? NOT_SUPPORTED
-				: code === SessionCode.Expired
-					? EXPIRED_AUTH_TOKEN
-					: UNAUTHORIZED;
+				: code === SessionCode.MalformedAuthToken
+					? MALFORMED_AUTH_TOKEN
+					: code === SessionCode.Expired
+						? EXPIRED_AUTH_TOKEN
+						: UNAUTHORIZED;
 		await new AuthError(wire, reason).encode(stream.writer, this.#version);
 	}
 

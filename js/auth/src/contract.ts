@@ -206,7 +206,7 @@ export type Grant = z.infer<typeof GrantSchema>;
 /** The reason and verified attribution an auth server returns with HTTP 403. */
 export const RefusalSchema = z.object({
 	/** Unknown reason strings read as `refused`. */
-	reason: z.pipe(z.string(), z.catch(z.enum(["refused", "forbidden", "expired"]), "refused")),
+	reason: z.pipe(z.string(), z.catch(z.enum(["refused", "forbidden", "expired", "malformed"]), "refused")),
 	/** A root named by a verified credential, never an unverified request path. */
 	root: z.optional(PathSchema),
 	/** The tier resolved by the decider; absent uses the default tier. */

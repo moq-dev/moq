@@ -54,6 +54,8 @@ export const SessionCode = Object.freeze(
 		AuthTokenCacheOverflow: 0x13 as SessionCode,
 		/** No version could be negotiated. */
 		Version: 0x15 as SessionCode,
+		/** The token could not be parsed. Retrying with the same token will fail again. */
+		MalformedAuthToken: 0x16 as SessionCode,
 		/** A token named an alias that was never registered. */
 		UnknownAuthTokenAlias: 0x17 as SessionCode,
 		/** An AUTHORITY the peer may not send, such as a server sending one at all. */

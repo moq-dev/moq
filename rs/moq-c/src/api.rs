@@ -1716,9 +1716,8 @@ pub extern "C" fn moq_session_request_reject(request: u32, code: u16) -> i32 {
 		let request = ffi::parse_id(request)?;
 		let request = State::lock().server.request_take(request)?;
 		let reject = match code {
-			401 => moq_tokio::server::Reject::Unauthorized,
-			403 => moq_tokio::server::Reject::Forbidden,
-			code => moq_tokio::server::Reject::App(code),
+			401 | 403 => moq_net::SessionError::Unauthorized,
+			code => moq_net::SessionError::App(code),
 		};
 		// Rejecting only queues the close, so this never waits on the network.
 		Ok::<_, Error>(pollster::block_on(request.reject(reject))?)

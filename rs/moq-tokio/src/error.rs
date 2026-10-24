@@ -272,6 +272,7 @@ impl Error {
 				moq_net::SessionError::from(err),
 				moq_net::SessionError::Unauthorized
 					| moq_net::SessionError::Expired
+					| moq_net::SessionError::MalformedAuthToken
 					| moq_net::SessionError::ProtocolViolation
 					| moq_net::SessionError::KeyValueFormatting
 					| moq_net::SessionError::InvalidRequestId
@@ -333,9 +334,14 @@ impl Error {
 	/// True if the server rejected us for auth reasons, so retrying won't help without new credentials.
 	#[cfg(feature = "net")]
 	pub fn is_auth(&self) -> bool {
-		// Expiry has no HTTP status, so it has no `ConnectError` to report.
-		matches!(self, Self::MoqNet(err) if moq_net::SessionError::from(err) == moq_net::SessionError::Expired)
-			|| self.connect_error().is_some_and(|err| err.is_auth())
+		// Neither code has an HTTP status, so neither has a `ConnectError` to report.
+		matches!(
+			self,
+			Self::MoqNet(err) if matches!(
+				moq_net::SessionError::from(err),
+				moq_net::SessionError::Expired | moq_net::SessionError::MalformedAuthToken
+			)
+		) || self.connect_error().is_some_and(|err| err.is_auth())
 	}
 
 	/// The HTTP status a server answered a connection attempt with, if it answered with one at all.
@@ -479,6 +485,14 @@ mod tests {
 		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_terminal());
 		assert!(Error::MoqNet(moq_net::Error::Expired).is_auth());
 		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_auth());
+	}
+
+	/// Redialing with a token the peer could not parse sends the same bytes again.
+	#[test]
+	fn malformed_credentials_are_terminal() {
+		let err = Error::MoqNet(moq_net::SessionError::MalformedAuthToken.into());
+		assert!(err.is_terminal());
+		assert!(err.is_auth());
 	}
 
 	/// Every raced address building the same malformed request is as terminal as one address doing so.

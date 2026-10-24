@@ -572,8 +572,8 @@ export class Reload {
 			this.#deadline = undefined;
 		}
 
-		// An auth rejection stops this URL however long the session lived. UNAUTHORIZED and
-		// EXPIRED_AUTH_TOKEN are specified codes rather than ones we guessed at, so this is the
+		// An auth rejection stops this URL however long the session lived. UNAUTHORIZED,
+		// MALFORMED_AUTH_TOKEN, and EXPIRED_AUTH_TOKEN are specified codes rather than ones we guessed at, so this is the
 		// peer saying these credentials will never work again; retrying them just burns the
 		// window, and an expired token needs the app to refresh it via a new URL. Matches
 		// moq-tokio's reconnect loop, which stops on the same close. A new URL or a
@@ -584,7 +584,9 @@ export class Reload {
 		// for good.
 		if (
 			cause instanceof SessionError &&
-			(cause.code === SessionCode.Unauthorized || cause.code === SessionCode.Expired)
+			(cause.code === SessionCode.Unauthorized ||
+				cause.code === SessionCode.MalformedAuthToken ||
+				cause.code === SessionCode.Expired)
 		) {
 			console.warn("session rejected as unauthorized, not retrying");
 			this.#giveUp(cause);

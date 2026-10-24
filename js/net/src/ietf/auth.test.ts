@@ -130,6 +130,8 @@ test("AUTH_ERROR preserves actionable refusal kinds", async () => {
 	expect((await AuthError.decode(r, Version.DRAFT_17)).toError()).toBeInstanceOf(Unsupported);
 	const expired = new AuthError(0x5, "expired").toError() as SessionError;
 	expect(expired.code).toBe(SessionCode.Expired);
+	const malformed = new AuthError(0x4, "not a JWT").toError() as SessionError;
+	expect(malformed.code).toBe(SessionCode.MalformedAuthToken);
 	const unauthorized = new AuthError(0x1, "bad").toError() as SessionError;
 	expect(unauthorized.code).toBe(SessionCode.Unauthorized);
 	// Past the acceptor's GOAWAY: the request is refused, not the token.

@@ -1074,7 +1074,7 @@ mod tests {
 	#[tokio::test]
 	async fn typed_refusal_preserves_reason_root_and_tier() {
 		use crate::refusal::Reason;
-		for reason in [Reason::Refused, Reason::Forbidden, Reason::Expired] {
+		for reason in [Reason::Refused, Reason::Forbidden, Reason::Expired, Reason::Malformed] {
 			for root in [None, Some("tenant")] {
 				for tier in [None, Some("edge")] {
 					let expected = crate::Refusal {

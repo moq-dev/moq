@@ -1,22 +1,21 @@
 use crate::{auth, cluster, incoming::Incoming, refusals::RefusalKind};
 
-use axum::http;
 use tracing::Instrument;
 
-/// An error carrying the HTTP status to send when closing the request.
+/// An admission refusal carrying the session code to close the request with.
 ///
 /// Used only on the pre-accept auth path so the caller can close once with
 /// the right code instead of sprinkling close/return at each failure site.
-pub(crate) struct StatusError {
-	pub(crate) status: http::StatusCode,
+pub(crate) struct Rejection {
+	pub(crate) code: moq_net::SessionError,
 	refusal: Option<RefusalKind>,
 	pub(crate) source: anyhow::Error,
 }
 
-impl From<auth::Error> for StatusError {
+impl From<auth::Error> for Rejection {
 	fn from(err: auth::Error) -> Self {
 		Self {
-			status: (&err).into(),
+			code: (&err).into(),
 			refusal: Some((&err).into()),
 			source: err.into(),
 		}
@@ -98,7 +97,7 @@ impl<R: Incoming> Connection<R> {
 		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {
-				request.reject(err.status).await;
+				request.reject(err.code).await;
 				return Err(err.source);
 			}
 		};
@@ -264,7 +263,7 @@ impl Lifecycle {
 	pub(crate) async fn admit(
 		&self,
 		request: moq_auth::Request,
-	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), StatusError> {
+	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), Rejection> {
 		self.span.record("session", &request.id);
 		let admitted = self.shutdown.admit(self.authorize(request)).await;
 		// Cluster admission records its own refusals; LAN and drain refusals are recorded here.
@@ -279,11 +278,11 @@ impl Lifecycle {
 	async fn authorize(
 		&self,
 		request: moq_auth::Request,
-	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), StatusError> {
+	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), Rejection> {
 		if cluster::Cluster::is_lan_path(&request.path) {
 			let Some(presented) = cluster::Cluster::lan_credential(&request.path) else {
-				return Err(StatusError {
-					status: http::StatusCode::FORBIDDEN,
+				return Err(Rejection {
+					code: moq_net::SessionError::Unauthorized,
 					refusal: Some(RefusalKind::Lan),
 					source: anyhow::anyhow!("LAN peer did not present a membership proof"),
 				});
@@ -295,15 +294,15 @@ impl Lifecycle {
 					return Ok((self.cluster.scope(lease, &request)?, None));
 				}
 				Some(false) => {
-					return Err(StatusError {
-						status: http::StatusCode::FORBIDDEN,
+					return Err(Rejection {
+						code: moq_net::SessionError::Unauthorized,
 						refusal: Some(RefusalKind::Lan),
 						source: anyhow::anyhow!("LAN peer did not present this listener's membership proof"),
 					});
 				}
 				None => {
-					return Err(StatusError {
-						status: http::StatusCode::FORBIDDEN,
+					return Err(Rejection {
+						code: moq_net::SessionError::Unauthorized,
 						refusal: Some(RefusalKind::Lan),
 						source: anyhow::anyhow!("/.cluster request refused: LAN discovery is not enabled"),
 					});
@@ -319,7 +318,7 @@ impl Lifecycle {
 			.await
 			.map_err(|err| {
 				// Cluster admission owns this refusal; only local/drain refusals remain here.
-				let mut error = StatusError::from(err);
+				let mut error = Rejection::from(err);
 				error.refusal = None;
 				error
 			})?;

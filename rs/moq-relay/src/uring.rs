@@ -810,15 +810,7 @@ async fn serve_request(
 	let (admitted, registration) = match decided {
 		Ok(admitted) => admitted,
 		Err(err) => {
-			// The status is what separates "your credential is bad" from "the auth
-			// server is down". Collapsing both into Unauthorized tells a client to
-			// stop reconnecting through an outage it could have waited out.
-			request.close(match err.status {
-				axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
-					moq_net::Error::Unauthorized
-				}
-				other => moq_net::Error::App(other.as_u16()),
-			});
+			request.close(err.code.into());
 			return Err(err.source);
 		}
 	};
