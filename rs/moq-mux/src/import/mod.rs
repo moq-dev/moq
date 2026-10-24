@@ -206,7 +206,8 @@ mod tests {
 
 		assert_released("fmp4", &container(ContainerFormat::Fmp4, &data, CHUNK));
 		assert_released("fmp4 passthrough", &|broadcast, catalog| {
-			let mut import = crate::container::fmp4::Import::new(broadcast.clone(), catalog.reserve()).with_passthrough(true);
+			let mut import =
+				crate::container::fmp4::Import::new(broadcast.clone(), catalog.reserve()).with_passthrough(true);
 			for chunk in data.chunks(CHUNK) {
 				import.decode(chunk).unwrap();
 			}
