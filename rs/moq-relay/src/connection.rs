@@ -146,6 +146,7 @@ impl<R: Incoming> Connection<R> {
 		};
 		let serving = lifecycle.shutdown.serve();
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
+		// Abandoning the reply refuses the session with the timeout code, which its stats count.
 		let (session, driver) = lifecycle
 			.shutdown
 			.until_deadline(request.ok())

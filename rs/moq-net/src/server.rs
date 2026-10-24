@@ -847,6 +847,8 @@ impl Handshake {
 
 	/// Refuse the session with [`Error::Timeout`] if [`ok`](Self::ok) has not answered
 	/// SETUP by `at`, as when the peer withholds flow-control credit for the reply.
+	///
+	/// Dropping a pending `ok` refuses it the same way, so a caller's own deadline counts too.
 	pub fn with_deadline(mut self, at: Instant) -> Self {
 		self.inner_mut().deadline = Some(at);
 		self
@@ -870,7 +872,8 @@ impl Handshake {
 		} = self.inner.take().expect("request already responded");
 
 		let stats = server.stats.clone();
-		let (mut refused, version) = handshake.transport();
+		let (session, version) = handshake.transport();
+		let unanswered = Unanswered(Some((session, version, stats.clone())));
 		let reply = async move {
 			match handshake {
 				PausedHandshake::LiteBare { session, version } => {
@@ -890,12 +893,11 @@ impl Handshake {
 			}
 		};
 		let res = match deadline {
-			Some(at) => moq_clock::timeout_at(at, reply).await.unwrap_or_else(|_| {
-				close(&mut refused, &Error::Timeout, Some(version));
-				Err(Error::Timeout)
-			}),
+			// The guard refuses the session on the way out.
+			Some(at) => moq_clock::timeout_at(at, reply).await.map_err(|_| Error::Timeout)?,
 			None => reply.await,
 		};
+		unanswered.answered();
 		if let Err(err) = &res {
 			stats.end(err);
 		}
@@ -914,6 +916,26 @@ impl RequestInner {
 		self.server.stats.end(&err);
 		let (mut session, version) = self.handshake.transport();
 		close(&mut session, &err, Some(version));
+	}
+}
+
+/// A SETUP reply the peer has not taken yet. Dropped unanswered, it refuses the session with
+/// [`Error::Timeout`]: the reply waits only on the peer, so giving up on it means the peer
+/// took too long.
+struct Unanswered(Option<(Transport, Version, stats::Session)>);
+
+impl Unanswered {
+	fn answered(mut self) {
+		self.0 = None;
+	}
+}
+
+impl Drop for Unanswered {
+	fn drop(&mut self) {
+		if let Some((mut session, version, stats)) = self.0.take() {
+			close(&mut session, &Error::Timeout, Some(version));
+			stats.end(&Error::Timeout);
+		}
 	}
 }
 
@@ -1315,6 +1337,30 @@ mod tests {
 		};
 		assert!(matches!(err, Error::Timeout), "{err:?}");
 		assert_eq!(moq_clock::now(), deadline);
+		assert_eq!(
+			session.close_code(),
+			Some(Version::Ietf(version).session_code(&SessionError::Timeout))
+		);
+		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
+		assert_eq!(failed.count(stats::Failure::Application), 1, "{failed:?}");
+	}
+
+	/// A reply the caller stops waiting for, as a relay does at its drain deadline, is
+	/// refused like one past the handshake's own deadline.
+	#[moq_clock::test]
+	async fn an_abandoned_reply_fails_like_the_deadline() {
+		let registry = stats::Registry::new(Default::default());
+		let version = ietf::Version::Draft16;
+		let session = FakeSession::new(ALPN_16, [])
+			.with_bi(legacy_setup(version, ietf::Parameters::default()))
+			.withholding_credit();
+		let request = Server::new()
+			.accept_request(moq_clock::now(), session.clone())
+			.await
+			.unwrap()
+			.with_stats(registry.tier(Default::default()).session("room"));
+		let abandoned = moq_clock::timeout(std::time::Duration::from_secs(1), request.ok()).await;
+		assert!(abandoned.is_err(), "a reply the peer never took completed");
 		assert_eq!(
 			session.close_code(),
 			Some(Version::Ietf(version).session_code(&SessionError::Timeout))
