@@ -29,9 +29,11 @@ the matching generated bindings and native library.
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.Resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: pass a `ctx` with a deadline.
 
-### Shutdown takes a context and returns an error
+### Shutdown drains
 
-`Session.Shutdown()` is `Shutdown(ctx) error`. Pass the drain context and handle the returned error. `Client.Close()` now waits for the session drain rather than only requesting it; allow for that wait in cleanup.
+`Session.Shutdown()` keeps its signature, but it now requests a draining close instead of cancelling.
+Call `Session.Closed(ctx)` to wait for the drain and receive delivery failures, or `Session.Cancel(0)` to close at once, as `Shutdown()` did.
+`Client.Close()` now waits for the drain and returns its error instead of always `nil`; allow for that wait in cleanup.
 
 ### Media track names belong to the target
 

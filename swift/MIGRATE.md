@@ -200,7 +200,8 @@ The `Client` setters are `Client(...)` arguments, with `tls`, `quic`, `websocket
 `setReconnect(false)` is `once: true`.
 A value the native side cannot use throws `MoqError.Config`, including a bad bind address.
 `Server` takes its config at init too, and a request takes its origins in `accept(publish:consume:)`, where `nil` inherits the server's origin.
-`Session.shutdown()` is `async throws` and drains before returning.
+`Session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling; `try await session.closed()` waits for the drain and throws delivery failures.
+Call `session.cancel(code: 0)` to close at once, as `shutdown()` did, and replace the release line's awaited `drain()` with `shutdown()` followed by `try await session.closed()`.
 
 ```swift
 let client = try Client(tls: ClientTls(insecure: true), consume: origin)

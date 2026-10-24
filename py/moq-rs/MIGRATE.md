@@ -29,9 +29,12 @@ the matching generated bindings and native library.
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve()` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel the task or wrap it in `asyncio.wait_for`.
 
-### Await session shutdown
+### Session shutdown drains
 
-`Session.shutdown()` changes from a synchronous call to an async operation. Use `await session.shutdown()` and handle its error; an un-awaited call does not initiate shutdown.
+`Session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling.
+`await session.closed()` waits for the drain and raises delivery failures, and a clean `async with` exit now waits for it too.
+Call `session.cancel(0)` to close at once, as `shutdown()` did.
+If you adopted the release line's async `drain()`, call `session.shutdown()` and then `await session.closed()` instead.
 
 ### Media track names belong to the target
 

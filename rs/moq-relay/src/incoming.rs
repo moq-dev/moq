@@ -5,22 +5,25 @@ use axum::http;
 
 /// A session whose SETUP awaits the relay's reply: what a [`Connection`](crate::Connection) serves.
 ///
-/// Sealed: implemented by [`moq_tokio::server::Request`] and [`Accepted`].
+/// Sealed: native requests, plus in-memory accepted sessions with `test-support`.
 pub trait Incoming: Sealed {}
 
 impl Incoming for moq_tokio::server::Request {}
 
+#[cfg(feature = "test-support")]
 impl Incoming for Accepted {}
 
 /// A session accepted on any moq-net transport, its SETUP awaiting the relay's reply.
 ///
 /// The auth decider sees the path, query, token, and role the SETUP carried, so the
 /// client must send its path in-band.
+#[cfg(feature = "test-support")]
 pub struct Accepted {
 	handshake: moq_net::server::Handshake,
 	transport: moq_auth::Transport,
 }
 
+#[cfg(feature = "test-support")]
 impl Accepted {
 	/// Wrap `handshake`, reported to the auth decider as arriving over `transport`.
 	pub fn new(handshake: moq_net::server::Handshake, transport: moq_auth::Transport) -> Self {
@@ -62,7 +65,8 @@ pub trait Sealed: Sized {
 	}
 
 	fn auth(&self) -> moq_net::auth::Handle;
-	fn role(&self) -> Option<moq_net::Role>;
+	fn requests(&mut self) -> moq_net::auth::Requests;
+	fn role(&self) -> Option<moq_net::setup::Role>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self;
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self;
@@ -114,7 +118,11 @@ impl Sealed for moq_tokio::server::Request {
 		moq_tokio::server::Request::auth(self)
 	}
 
-	fn role(&self) -> Option<moq_net::Role> {
+	fn requests(&mut self) -> moq_net::auth::Requests {
+		moq_tokio::server::Request::requests(self)
+	}
+
+	fn role(&self) -> Option<moq_net::setup::Role> {
 		moq_tokio::server::Request::role(self)
 	}
 
@@ -147,6 +155,7 @@ impl Sealed for moq_tokio::server::Request {
 	}
 }
 
+#[cfg(feature = "test-support")]
 impl Sealed for Accepted {
 	/// Polled on the connection's own task, so it needs no runtime to spawn on.
 	type Driver = moq_net::Driver;
@@ -179,7 +188,11 @@ impl Sealed for Accepted {
 		self.handshake.auth()
 	}
 
-	fn role(&self) -> Option<moq_net::Role> {
+	fn requests(&mut self) -> moq_net::auth::Requests {
+		self.handshake.requests()
+	}
+
+	fn role(&self) -> Option<moq_net::setup::Role> {
 		self.handshake.role()
 	}
 

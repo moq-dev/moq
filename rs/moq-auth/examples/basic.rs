@@ -5,7 +5,7 @@
 	reason = "`Claims` takes `SystemTime`, so the example reads the host clock"
 )]
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
 	// Generate an HMAC key with a random key ID.
@@ -20,8 +20,8 @@ fn main() -> anyhow::Result<()> {
 		.with_root("demo")
 		.with_publish(["my-stream/**".parse()?]) // Can publish to demo/my-stream and below
 		.with_subscribe(["**".parse()?]) // Can subscribe to anything under demo/
-		.with_expires(SystemTime::now() + Duration::from_secs(3600))
-		.with_issued(SystemTime::now());
+		.with_expires(moq_clock::wall() + Duration::from_secs(3600))
+		.with_issued(moq_clock::wall());
 
 	// Validate the claims (ensures at least one publish or subscribe path).
 	claims.validate()?;

@@ -36,9 +36,11 @@ Custom implementations of generated interfaces must return `UniffiRustFuture<T>`
 Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: add a `.timeout` to the future.
 
-### Await shutdown and client close
+### Shutdown drains and `Moq.close()` is async
 
-`Session.shutdown()` is asynchronous and can fail rather than returning immediately. Await it to initiate and finish the drain. `Moq.close()` now returns `Future<void>`; await that future to finish client cleanup.
+`session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling.
+`await session.closed()` waits for the drain and reports delivery failures; call `session.cancel(code: 0)` to close at once, as `shutdown()` did.
+`Moq.close()` returns `Future<void>` and drains before stopping the client, so await it.
 
 ### Media track names belong to the target
 

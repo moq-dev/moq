@@ -1,8 +1,10 @@
-"""Root records that carry durations, owned here so they read as ``timedelta``.
+"""Root records the wrapper owns, so durations read as ``timedelta``.
 
 moq-ffi spells every duration as integer microseconds, because not every target
 language has a duration type. Python does, so these mirror the generated records
-with ``timedelta`` fields and convert at the boundary.
+with ``timedelta`` fields and convert at the boundary. ``ClientTls`` carries no
+duration but lives here with the rest of the client config, so a bare string
+passed for a list is refused instead of splitting into characters.
 """
 
 from __future__ import annotations
@@ -13,14 +15,18 @@ from datetime import timedelta
 
 from moq_ffi import (
     MoqBackoff,
+    MoqClientTls,
+    MoqCongestionControl,
     MoqConnectionStats,
     MoqDatagram,
     MoqFrame,
     MoqGrant,
     MoqOrder,
+    MoqQuicConfig,
     MoqRange,
     MoqSubscription,
     MoqTrackInfo,
+    MoqWebSocketConfig,
 )
 
 _MICROSECOND = timedelta(microseconds=1)
@@ -94,21 +100,22 @@ class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
-    ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
-    zero skips at once, and it caps every range. ``ranges`` are the spans of the track to
-    deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which pending
-    group the publisher sends first, ``None`` for newest first.
+    ``max_delay`` is how far a non-latest group may fall behind before it is skipped,
+    ``None`` for moq-net's default of zero, which skips at once; it caps every range.
+    ``ranges`` are the spans of the track to deliver, ``None`` for everything ``max_delay``
+    still allows. ``order`` is which pending group the publisher sends first, ``None`` for
+    newest first.
     """
 
     priority: int = 0
-    max_delay: timedelta = timedelta(0)
+    max_delay: timedelta | None = None
     ranges: Sequence[MoqRange] | None = None
     order: MoqOrder | None = None
 
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
             priority=self.priority,
-            max_delay_us=_to_us(self.max_delay, "max_delay"),
+            max_delay_us=_opt_us(self.max_delay, "max_delay"),
             ranges=None if self.ranges is None else list(self.ranges),
             order=self.order,
         )
@@ -184,6 +191,92 @@ class Backoff:
             max_us=_opt_us(self.max, "max"),
             timeout_us=_opt_us(self.timeout, "timeout"),
         )
+
+
+@dataclass(frozen=True)
+class ClientTls:
+    """Certificate trust and the mTLS identity for a :class:`Client`.
+
+    ``insecure`` skips certificate verification, for local development only. ``roots``
+    are PEM root certificate files to trust instead of the platform roots, and
+    ``system_roots`` whether to also trust the platform roots (``None`` trusts them only
+    when ``roots`` is empty). ``fingerprints`` pin the peer to hex SHA-256 certificate
+    fingerprints, accepting what :meth:`Server.cert_fingerprints` reports. ``cert`` and
+    ``key`` are the paired PEM chain and private key to present for mTLS. ``host_name``
+    verifies the certificate against another name (SNI) than the URL's host.
+    """
+
+    insecure: bool = False
+    roots: Sequence[str] = ()
+    system_roots: bool | None = None
+    fingerprints: Sequence[str] = ()
+    cert: str | None = None
+    key: str | None = None
+    host_name: str | None = None
+
+    def _ffi(self) -> MoqClientTls:
+        return MoqClientTls(
+            insecure=self.insecure,
+            roots=_strs(self.roots, "roots"),
+            system_roots=self.system_roots,
+            fingerprints=_strs(self.fingerprints, "fingerprints"),
+            cert=self.cert,
+            key=self.key,
+            host_name=self.host_name,
+        )
+
+
+@dataclass(frozen=True)
+class QuicConfig:
+    """QUIC transport tuning for a :class:`Client`; the WebSocket fallback ignores it.
+
+    ``max_streams`` caps the concurrent streams the peer may open toward this endpoint
+    (0 is refused); MoQ opens one per group, so a subscriber to many tracks wants it
+    raised. ``idle_timeout`` is how long an idle connection survives, and ``keep_alive``
+    the ping interval (zero disables it). ``gso``, ``mtu_discovery``, and
+    ``congestion_control`` leave the choice to the backend when ``None``. ``qlog`` is a
+    directory, which must exist, for qlog traces when :func:`qlog_supported`.
+    ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
+    decrypting a capture; without ``SSLKEYLOGFILE`` the client refuses to build.
+    ``None`` keeps the library default throughout.
+    """
+
+    max_streams: int | None = None
+    idle_timeout: timedelta | None = None
+    keep_alive: timedelta | None = None
+    gso: bool | None = None
+    mtu_discovery: bool | None = None
+    congestion_control: MoqCongestionControl | None = None
+    qlog: str | None = None
+    keylog: bool = False
+
+    def _ffi(self) -> MoqQuicConfig:
+        return MoqQuicConfig(
+            max_streams=self.max_streams,
+            idle_timeout_us=_opt_us(self.idle_timeout, "idle_timeout"),
+            keep_alive_us=_opt_us(self.keep_alive, "keep_alive"),
+            gso=self.gso,
+            mtu_discovery=self.mtu_discovery,
+            congestion_control=self.congestion_control,
+            qlog=self.qlog,
+            keylog=self.keylog,
+        )
+
+
+@dataclass(frozen=True)
+class WebSocketConfig:
+    """The WebSocket fallback, raced against QUIC for ``http(s)`` URLs.
+
+    ``enabled=False`` stops the fallback, for a relay that only serves QUIC, so a failed
+    QUIC dial reports its own error. ``delay`` is the head start QUIC gets before the
+    fallback joins the race; ``None`` uses 200 ms, and zero races both at once.
+    """
+
+    enabled: bool | None = None
+    delay: timedelta | None = None
+
+    def _ffi(self) -> MoqWebSocketConfig:
+        return MoqWebSocketConfig(enabled=self.enabled, delay_us=_opt_us(self.delay, "delay"))
 
 
 @dataclass(frozen=True)

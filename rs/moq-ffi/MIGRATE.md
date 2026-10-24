@@ -35,9 +35,11 @@ To re-announce an observed route, copy its `cost` and `epoch`.
 Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel it or race it against a timeout.
 
-### Session shutdown is asynchronous
+### Session shutdown drains
 
-`MoqSession::shutdown()` changes from a synchronous request returning `()` to an async operation returning `Result<(), MoqError>`. Await it to initiate and complete the graceful drain, and handle failure. Calling it without polling the returned future does not request shutdown.
+`MoqSession::shutdown()` still returns `()` at once, but it now requests a draining close instead of cancelling with code 0.
+Await `closed()` to wait for the drain and receive delivery failures, or call `cancel(0)` to close at once, as `shutdown()` did.
+If you adopted the release line's async `drain()`, call `shutdown()` and then await `closed()` instead.
 
 ### Media track naming moves out of init
 

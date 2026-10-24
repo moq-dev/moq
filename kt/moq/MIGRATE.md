@@ -29,9 +29,12 @@ the matching generated bindings and native library.
 Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel the coroutine or wrap it in `withTimeout`.
 
-### Shutdown suspends until drained
+### Shutdown drains
 
-`Session.shutdown()` is now a suspending operation that can throw, rather than a synchronous request. Call it from a coroutine and handle failure.
+`session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling.
+Await the suspending `session.closed()` to wait for the drain and catch delivery failures.
+`Moq.close()` now cancels at once; to drain a `Moq`, call `moq.shutdown()`, await `moq.session.closed()`, then close it.
+If you adopted the release line's async `drain()`, call `shutdown()` and then await `closed()` instead.
 
 ### Media track names belong to the target
 
