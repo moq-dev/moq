@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Decoded reads carry gaps and encoder ends (#6475)
+
+`decode::Consumer::read()` returns `decode::Read` events instead of bare frames, the same shape as `moq_audio::decode::Read`: `Frame(frame)`, `Gap { timestamp, duration }` for lost media, and `End { end }` where the publisher stopped its encoder; `None` still means the track is finished.
+Match `decode::Read::Frame(frame)` where you took the frame before, and skip the other variants to keep the old behavior.
+An `End` now drains the decoder, so the last picture before a pause arrives without waiting for the next one.
+
 ### `Source::Display` no longer opens the portal on Wayland
 
 `capture::Source::Display` captures X11 displays only, including XWayland's `x11:` ids.
