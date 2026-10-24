@@ -202,6 +202,8 @@ struct Group {
     ended: Option<Instant>,
     /// When it was reset as expired
     reset: Option<Instant>,
+    /// When each of its frames was written
+    written: Vec<Instant>,
     /// Frame bytes written that the stream had no credit for yet
     backlog: Vec<u8>,
     finished: bool,
@@ -262,8 +264,6 @@ fn run(scenario: &Scenario) -> Outcome {
     let mut outcome = Outcome::default();
     let mut groups: Vec<Group> = Vec::new();
     let mut readings: HashMap<StreamId, Reading> = HashMap::new();
-    // When each frame was written, by group and frame index
-    let mut written: Vec<Vec<Instant>> = Vec::new();
     let mut next_frame = 0u64;
     let mut next_sample = start;
     let mut next_rate = 1;
@@ -296,7 +296,6 @@ fn run(scenario: &Scenario) -> Outcome {
                     &mut pair,
                     client_ch,
                     &mut groups,
-                    &mut written,
                     scenario.keyframe,
                     next_frame,
                     now,
@@ -317,14 +316,12 @@ fn run(scenario: &Scenario) -> Outcome {
         pair.drive_client();
         pair.drive_server();
 
-        let base = groups[0].id.index();
         receive(
             &mut pair,
             server_ch,
-            base,
             scenario.keyframe,
             &mut readings,
-            &written,
+            &groups,
             now,
             &mut outcome,
         );
@@ -378,10 +375,10 @@ fn run(scenario: &Scenario) -> Outcome {
     }
 
     // Frames still missing count as late
-    for (group, frames) in written.iter().enumerate() {
-        let id = groups[group].id;
-        let completed = readings.get(&id).map_or(0, |r| r.frame);
-        outcome.late += frames.len() as u64 - completed.min(frames.len() as u64);
+    for group in &groups {
+        let frames = group.written.len() as u64;
+        let completed = readings.get(&group.id).map_or(0, |r| r.frame);
+        outcome.late += frames - completed.min(frames);
     }
     outcome.delays.sort();
     let stats = pair.client_conn_mut(client_ch).stats();
@@ -396,7 +393,6 @@ fn write_frame(
     pair: &mut Pair,
     ch: ConnectionHandle,
     groups: &mut Vec<Group>,
-    written: &mut Vec<Vec<Instant>>,
     keyframe: u64,
     n: u64,
     now: Instant,
@@ -421,16 +417,16 @@ fn write_frame(
             id,
             ended: None,
             reset: None,
+            written: Vec::new(),
             backlog: Vec::new(),
             finished: false,
         });
-        written.push(Vec::new());
     }
     let group = groups.last_mut().unwrap();
     if group.reset.is_none() {
         let data = [(n % 251) as u8].repeat(frame_size(keyframe, index) as usize);
         group.backlog.extend(data);
-        written.last_mut().unwrap().push(now);
+        group.written.push(now);
     }
 }
 
@@ -485,10 +481,9 @@ fn expire(
 fn receive(
     pair: &mut Pair,
     ch: ConnectionHandle,
-    base: u64,
     keyframe: u64,
     readings: &mut HashMap<StreamId, Reading>,
-    written: &[Vec<Instant>],
+    groups: &[Group],
     now: Instant,
     outcome: &mut Outcome,
 ) {
@@ -521,7 +516,8 @@ fn receive(
         }
         let _ = chunks.finalize();
 
-        let frames = &written[(id.index() - base) as usize];
+        // The sender opens each group's stream in order, after any it opened before the media
+        let frames = &groups[(id.index() - groups[0].id.index()) as usize].written;
         let mut end: u64 = (0..reading.frame).map(|i| frame_size(keyframe, i)).sum();
         while (reading.frame as usize) < frames.len() {
             end += frame_size(keyframe, reading.frame);
@@ -595,11 +591,14 @@ fn steps() -> Scenario {
     }
 }
 
-/// A constant bitrate never fills its estimate, so only the probe finds the path opened up
+/// A constant bitrate never fills its estimate, so only the probe finds the path opened up: at
+/// this 100ms round trip the baseline's estimate stays at the first path's 3 Mbit/s
 #[test]
 fn rises_to_target() {
     let _guard = subscribe();
     let scenario = Scenario {
+        latency: Duration::from_millis(50),
+        buffer: 170_000,
         keyframe: 0,
         rates: vec![
             (Duration::ZERO, 375_000),

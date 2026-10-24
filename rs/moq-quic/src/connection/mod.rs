@@ -644,7 +644,7 @@ impl Connection {
                         send_blocked = true;
                         false
                     }
-                    bandwidth_probe::Ready::Ready => true,
+                    bandwidth_probe::Ready::Send => true,
                 };
             if (can_send.is_empty()
                 && !bandwidth_probe

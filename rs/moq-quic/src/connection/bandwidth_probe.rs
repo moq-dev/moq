@@ -45,7 +45,7 @@ pub(super) enum Ready {
     /// the sender as pacing does; a held-back pace ends at the instant given
     Blocked(Option<Instant>),
     /// Send one
-    Ready,
+    Send,
 }
 
 impl BandwidthProbe {
@@ -129,7 +129,7 @@ impl Connection {
             .delay_at_rate(target, bytes, mtu, now)
         {
             Some(at) => Ready::Blocked(Some(at)),
-            None => Ready::Ready,
+            None => Ready::Send,
         }
     }
 
