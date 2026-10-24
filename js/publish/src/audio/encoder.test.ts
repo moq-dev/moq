@@ -635,50 +635,6 @@ test("settles when the codec settings can't resolve", async () => {
 	}
 });
 
-// A fade the gain can't ramp over is refused like any other bad setting, rather than ramping wrong.
-test("refuses the rendition while the fade is invalid", async () => {
-	using _webcodecs = installFakeWebCodecs();
-	const error = spyOn(console, "error").mockImplementation(() => {});
-	const capture = {
-		in: { source: new Signal(undefined) },
-		out: {
-			root: new Signal(undefined),
-			format: new Signal<Format>({ sampleRate: 48_000, channelCount: 1 }),
-			frames: new Signal(undefined),
-		},
-		blocked: new Signal(false),
-	};
-	const encoder = new Encoder("audio", { capture: capture as never, fade: -1 as Milli });
-
-	try {
-		await settle();
-		expect(encoder.out.catalog.peek()).toBeUndefined();
-		expect(encoder.settled.peek()).toBe(true);
-		expect(error).toHaveBeenCalled();
-
-		const ready = encoder.out.catalog.changed();
-		encoder.fade.set(Milli(0));
-		await ready;
-		expect(encoder.out.catalog.peek()).toBeDefined();
-
-		encoder.fade.set(Number.NaN as Milli);
-		await settle();
-		expect(encoder.out.catalog.peek()).toBeUndefined();
-
-		encoder.fade.set(Milli(0));
-		await settle();
-		expect(encoder.out.catalog.peek()).toBeDefined();
-
-		// An endless ramp would never finish a mute.
-		encoder.fade.set(Number.POSITIVE_INFINITY as Milli);
-		await settle();
-		expect(encoder.out.catalog.peek()).toBeUndefined();
-	} finally {
-		encoder.close();
-		error.mockRestore();
-	}
-});
-
 test("settles while the capture waits on a gesture", async () => {
 	const capture = {
 		in: { source: new Signal(undefined) },

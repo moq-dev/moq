@@ -371,8 +371,15 @@ impl Reader {
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
-	#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
+	#![expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "tests read the host clock directly"
+	)]
 
 	use bytes::Bytes;
 	use moq_net::Timestamp;

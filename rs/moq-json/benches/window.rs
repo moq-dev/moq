@@ -4,7 +4,11 @@
 //! frames are built outside the measured section.
 //!
 //! Run `cargo bench -p moq-json --bench window` and compare the table across revisions.
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "host time measures benchmark throughput"
+)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
@@ -50,7 +54,7 @@ unsafe impl GlobalAlloc for Counter {
 
 /// A stats-shaped record: flat counters plus one nested object, nothing owned on the heap.
 #[derive(serde::Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "the bench only measures deserializing it")]
 struct Record {
 	bytes: u64,
 	frames: u64,
@@ -60,7 +64,7 @@ struct Record {
 }
 
 #[derive(serde::Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "the bench only measures deserializing it")]
 struct Nested {
 	bytes: u64,
 	frames: u64,

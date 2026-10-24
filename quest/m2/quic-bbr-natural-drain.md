@@ -20,7 +20,7 @@ one study, since both reuse the same media profiles, harness, and baseline.
 
 ### Natural drains
 
-Use `moq-quic`'s BBR3, which carries the released fork's corrections, as
+Use `moq-congestion`'s BBR3, which carries the released fork's corrections, as
 baseline. ProbeRTT targets half the
 estimated BDP, floored at the minimum pipe window; entering the mode need
 not withhold useful bytes. First locate actual cwnd stalls and deadline
@@ -66,7 +66,7 @@ restart from idle resets the gain to 1.0.
 The 2026-09-21 audit compared noq-proto 1.3.0 / upstream `1a26a8b` with
 Google Linux BBRv3 `90210de4` and Google QUICHE `535a2730`. Recheck current
 upstream sources before testing. The audit describes noq; `moq-quic`'s BBR3
-was ported from it (#4921), so recheck each difference against `moq-quic`.
+was ported from it (#4921), so recheck each difference against `moq-congestion`.
 Use QUICHE's actual `bbr3_sender.cc` with
 its shared `bbr2_*` model; the older BBR2 sender is not a substitute for its
 BBR3 state machine.
@@ -104,6 +104,10 @@ fairness. Surviving an independent random-loss percentage is not a reason
 to weaken the congestion response or precautionary probe stop. This study
 still decides natural-drain credit, growth recognition, and probe behavior
 separately; it does not adopt any of them in advance.
+
+## Required
+
+- [Portable controller trait](/quest/m1/congestion/trait.md) - followers land in `moq-congestion` on its trait
 
 ## Related
 
