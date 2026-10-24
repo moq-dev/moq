@@ -2121,7 +2121,7 @@ enum FetchServe {
 		stamp: Option<Stamp>,
 		prev_ts: u64,
 		frame: Option<frame::Consumer>,
-		chunk: Option<bytes::Bytes>,
+		chunk: Option<crate::frame::Payload>,
 		batch: Box<Objects>,
 		batch_pos: usize,
 		/// The `ietf` extension's object records, when negotiated.
@@ -2233,7 +2233,7 @@ impl Request for FetchServe {
 							}
 						} else if let Some(pending) = frame {
 							match ready!(pending.poll_read_chunk(waiter))? {
-								Some(next) => *chunk = Some(next),
+								Some(next) => *chunk = Some(next.into()),
 								None => *frame = None,
 							}
 						} else if *batch_pos < batch.len() {
@@ -4243,7 +4243,7 @@ enum GroupState {
 	Serve {
 		writer: Writer<crate::transport::boxed::SendStream, Version>,
 		frame: Option<frame::Consumer>,
-		chunk: Option<bytes::Bytes>,
+		chunk: Option<crate::frame::Payload>,
 		batch: Box<Objects>,
 		batch_pos: usize,
 		/// The `ietf` extension's object records, when negotiated.
@@ -4462,7 +4462,7 @@ impl GroupServe {
 								}
 							} else if let Some(pending) = frame {
 								match pending.poll_read_chunk(waiter) {
-									Poll::Ready(Ok(Some(next))) => *chunk = Some(next),
+									Poll::Ready(Ok(Some(next))) => *chunk = Some(next.into()),
 									Poll::Ready(Ok(None)) => *frame = None,
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,

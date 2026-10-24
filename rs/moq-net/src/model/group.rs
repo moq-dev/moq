@@ -16,7 +16,7 @@
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use super::flate;
 use crate::cache;
-use crate::frame::{self, Frame, FrameBuf};
+use crate::frame::{self, Cached, FrameBuf, Payload};
 use crate::{Cap, Timescale, stats, track};
 use bytes::Bytes;
 use std::collections::VecDeque;
@@ -59,7 +59,7 @@ pub(super) const CACHE_OVERHEAD: u64 = (kio::Producer::<GroupState>::HEAP
 	// straight after.
 	+ 2 * size_of::<usize>()
 	+ size_of::<Alive>()
-	+ FRAME_SLOTS * size_of::<Frame>()) as u64;
+	+ FRAME_SLOTS * size_of::<Cached>()) as u64;
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
@@ -145,7 +145,7 @@ pub(super) struct GroupState {
 	// Completed frames, each a contiguous payload. `offset` is the first frame this
 	// handle holds, raised by [`Producer::start_at`]. A compressed group stores DEFLATE
 	// slices here.
-	pub(super) frames: VecDeque<Frame>,
+	pub(super) frames: VecDeque<Cached>,
 	// IETF relay state, boxed so a group that never carries any pays one pointer.
 	relay: Option<Box<Relay>>,
 	// Compressed-track state, boxed so a plain group pays one pointer.
@@ -212,7 +212,7 @@ pub(super) struct Head {
 	start: usize,
 	// Whether `start` is the group's first object.
 	first_object: bool,
-	frames: Vec<Frame>,
+	frames: Vec<Cached>,
 	// Relay metadata for `frames`, at the same index; frames past its end carry none.
 	objects: Vec<Option<Arc<super::object::Fields>>>,
 	// A compressed group's inflated sizes for `frames`, at the same index; `None` for a
@@ -267,7 +267,7 @@ impl Head {
 	fn bytes(&self) -> u64 {
 		let payload: u64 = self.frames.iter().map(|frame| frame.payload.len() as u64).sum();
 		let fields: u64 = self.objects.iter().flatten().map(|fields| fields.heap()).sum();
-		let slots = self.frames.len() * size_of::<Frame>()
+		let slots = self.frames.len() * size_of::<Cached>()
 			+ self.objects.len() * size_of::<Option<Arc<super::object::Fields>>>()
 			+ self.sizes.as_ref().map_or(0, |sizes| sizes.len() * size_of::<u64>());
 		payload + fields + slots as u64
@@ -430,7 +430,7 @@ struct Inflate {
 	// Local index of the first slice: the copy's inflated length when the read took them.
 	from: usize,
 	// Each slice with its declared inflated size.
-	slices: Vec<(Bytes, u64)>,
+	slices: Vec<(Payload, u64)>,
 }
 
 impl Inflate {
@@ -456,7 +456,7 @@ impl Inflate {
 						bill.add(flate::DECODER_HEAP);
 						flate::Decoder::new()
 					});
-					decoder.frame(slice, size)
+					decoder.frame(&slice.contiguous(0), size)
 				});
 			match frame {
 				Ok(frame) => {
@@ -801,7 +801,7 @@ impl GroupState {
 		let before = self.frames.capacity().saturating_sub(FRAME_SLOTS);
 		self.frames.reserve(1);
 		let after = self.frames.capacity().saturating_sub(FRAME_SLOTS);
-		((after - before) * size_of::<Frame>()) as u64
+		((after - before) * size_of::<Cached>()) as u64
 	}
 
 	/// Reserve a metadata slot for the next completed frame, returning the growth.
@@ -1237,9 +1237,9 @@ impl Producer {
 		state.cache += size;
 		let slots = state.reserve_frame();
 		let now = state.charge.add(size + slots);
-		state.frames.push_back(Frame {
+		state.frames.push_back(Cached {
 			timestamp,
-			payload,
+			payload: payload.into(),
 			arrived: super::clock::now(),
 		});
 		if let Some(flate) = &mut state.flate {
@@ -1347,7 +1347,7 @@ impl Producer {
 			now = state.charge.add(size + slots);
 			state.stamp(frame.timestamp);
 			latest = frame.timestamp;
-			state.frames.push_back(frame);
+			state.frames.push_back(frame.into());
 		}
 		state.next_index = next_index;
 		state.committed = next_index;
@@ -1399,7 +1399,8 @@ impl Producer {
 	pub(crate) fn create_object(mut self, frame: frame::Header) -> Result<frame::Producer> {
 		let meter = self.chunk_meter(frame.inflated);
 		let size = frame.info.size as usize;
-		let reserved = self.handle.cache.frames().reserve(size);
+		// Only the segment being written is ever allocated ahead of its bytes.
+		let reserved = self.handle.cache.frames().reserve(size.min(frame::SEGMENT));
 		let buf = match reserved {
 			Some(_) => FrameBuf::new(size),
 			None => FrameBuf::growing(size),
@@ -1540,7 +1541,7 @@ impl Producer {
 	}
 
 	/// Commit the in-flight frame as a completed frame (called by [`frame::Producer::finish`]).
-	pub(super) fn frame_commit(&mut self, frame: Frame) -> Result<()> {
+	pub(super) fn frame_commit(&mut self, frame: Cached) -> Result<()> {
 		let mut state = modify(&self.handle.state)?;
 		// Completing the frame charges whatever it wrote since the last notify, and is a
 		// write access like any chunk, and the only one the payload is guaranteed to get:
@@ -1554,7 +1555,7 @@ impl Producer {
 		if partial.as_ref().is_some_and(|partial| partial.scratch) {
 			let flate = state.flate.as_mut().expect("scratch only opens on a compressed group");
 			let inflated = frame.payload.len() as u64;
-			frame.payload = flate.deflate(&frame.payload);
+			frame.payload = flate.deflate(&frame.payload.contiguous(0)).into();
 			flate.push(inflated);
 			let size = frame.payload.len() as u64;
 			// The frame already counts against the group's frames.
@@ -1763,7 +1764,7 @@ impl Handle {
 
 		let before = state.frames.capacity().saturating_sub(FRAME_SLOTS);
 		state.frames.reserve(count);
-		let mut growth = ((state.frames.capacity().saturating_sub(FRAME_SLOTS) - before) * size_of::<Frame>()) as u64;
+		let mut growth = ((state.frames.capacity().saturating_sub(FRAME_SLOTS) - before) * size_of::<Cached>()) as u64;
 		for frame in frames.iter().rev() {
 			state.frames.push_front(frame.clone());
 		}
@@ -2258,7 +2259,7 @@ impl Demand {
 #[derive(Default)]
 struct Prefetch {
 	// Initialized, not-yet-taken frames are `frames[pos..len]`; the rest are uninitialized.
-	frames: Option<Box<[MaybeUninit<Frame>; Self::CAP]>>,
+	frames: Option<Box<[MaybeUninit<Cached>; Self::CAP]>>,
 	// Relay metadata for `frames`, allocated by the first batch that carries any.
 	fields: Option<Box<[Option<Arc<super::object::Fields>>; Self::CAP]>>,
 	// Inflated sizes for `frames`, filled only by a batch of a compressed group's stored slices.
@@ -2276,7 +2277,7 @@ impl Prefetch {
 	}
 
 	/// Take the next buffered frame, or `None` if the batch is drained.
-	fn pop(&mut self) -> Option<Frame> {
+	fn pop(&mut self) -> Option<Cached> {
 		if self.pos == self.len {
 			return None;
 		}
@@ -2347,7 +2348,7 @@ impl Prefetch {
 		for i in self.pos..self.len {
 			match job.get(local + i) {
 				// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
-				Ok(payload) => unsafe { frames[i].assume_init_mut() }.payload = payload,
+				Ok(payload) => unsafe { frames[i].assume_init_mut() }.payload = payload.into(),
 				Err(err) => {
 					for slot in &mut frames[i..self.len] {
 						// SAFETY: as above, and `len` drops below them right after.
@@ -2890,6 +2891,11 @@ impl Consumer {
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+		Poll::Ready(Ok(ready!(self.poll_read_cached(waiter))?.map(Cached::into_frame)))
+	}
+
+	/// Read the next frame as stored, so a frame in segments stays in them.
+	fn poll_read_cached(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Cached>>> {
 		if self.recover.is_none() {
 			return self.poll_read_frame_once(waiter);
 		}
@@ -2900,7 +2906,7 @@ impl Consumer {
 	#[cfg(feature = "async")]
 	pub(crate) fn poll_read_object(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Object>>> {
 		// Every frame is served through the cursor's prefetch, which holds its fields.
-		let frame = ready!(self.poll_read_frame(waiter))?;
+		let frame = ready!(self.poll_read_cached(waiter))?;
 		Poll::Ready(Ok(frame.map(|frame| frame::Object {
 			frame,
 			fields: self.cursor.prefetch.take_fields(),
@@ -2908,7 +2914,7 @@ impl Consumer {
 		})))
 	}
 
-	fn poll_read_frame_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+	fn poll_read_frame_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Cached>>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -2928,7 +2934,7 @@ impl Consumer {
 		{
 			self.cursor.refresh_if_stale();
 			self.cursor.index += 1;
-			return Ok(Some(frame));
+			return Ok(Some(frame.into_frame()));
 		}
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
@@ -3137,7 +3143,7 @@ impl Cursor {
 					fields,
 					inflated: None,
 				};
-				(header, frame::Source::Complete(payload))
+				(header, frame::Source::Complete(payload.into()))
 			}
 		};
 
@@ -3152,7 +3158,7 @@ impl Cursor {
 		})))
 	}
 
-	fn poll_read_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<Frame>>> {
+	fn poll_read_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<Cached>>> {
 		if self.capped() {
 			return Poll::Ready(Ok(None));
 		}
@@ -3286,6 +3292,7 @@ pub struct Request {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use crate::frame::Frame;
 	use crate::model::test_tracing::count_drop_warnings;
 	use bytes::Bytes;
 	#[cfg(feature = "async")]
@@ -3457,7 +3464,7 @@ mod test {
 			assert!(capacity > FRAME_SLOTS);
 			assert_eq!(
 				pool.used() - before,
-				((capacity - FRAME_SLOTS) * size_of::<Frame>()) as u64
+				((capacity - FRAME_SLOTS) * size_of::<Cached>()) as u64
 			);
 			let consumer = group.consume();
 			group.abort(Error::Cancel).unwrap();
@@ -3810,7 +3817,7 @@ mod test {
 		let head = Head {
 			start: 0,
 			first_object: true,
-			frames: vec![Frame::new(None, Bytes::from_static(b"ab"))],
+			frames: vec![Frame::new(None, Bytes::from_static(b"ab")).into()],
 			objects: Vec::new(),
 			sizes: None,
 		};
@@ -3837,8 +3844,8 @@ mod test {
 			start: 0,
 			first_object: true,
 			frames: vec![
-				Frame::new(None, Bytes::from_static(b"a")),
-				Frame::new(None, Bytes::from_static(b"b")),
+				Frame::new(None, Bytes::from_static(b"a")).into(),
+				Frame::new(None, Bytes::from_static(b"b")).into(),
 			],
 			objects: vec![None, fields(1)],
 			sizes: None,
@@ -3885,7 +3892,7 @@ mod test {
 			let mut whole = tail.consume();
 			let mut read = Vec::new();
 			while let Poll::Ready(Ok(Some(object))) = whole.poll_read_object(&waiter) {
-				read.push((object.frame.payload, object.fields.map(|fields| fields.id)));
+				read.push((object.frame.payload.contiguous(0), object.fields.map(|fields| fields.id)));
 			}
 			assert_eq!(
 				read,
@@ -4726,6 +4733,29 @@ mod test {
 		assert_eq!(third.allocated(), 1024, "the finished frame did not return its share");
 	}
 
+	/// A frame past one segment reserves and allocates a segment rather than its declared
+	/// size, so a peer declaring the largest frame commits no more than a small one.
+	#[test]
+	fn a_large_frame_allocates_one_segment_ahead() {
+		let budget = frame::Budget::new(2 * frame::SEGMENT);
+		let pool = cache::Pool::unbounded();
+		let group = |sequence| {
+			let cache = cache::Track::new(pool.clone(), budget.clone(), kio::Weak::new());
+			Producer::new(Info { sequence }, track::Info::timed(), cache)
+		};
+
+		let frames: Vec<_> = (0..2)
+			.map(|sequence| {
+				let mut frame = group(sequence).create_frame(sized(MAX_CACHE_BYTES)).unwrap();
+				frame.write(Bytes::from_static(b"x")).unwrap();
+				frame
+			})
+			.collect();
+		for frame in &frames {
+			assert_eq!(frame.allocated(), frame::SEGMENT, "reserved other than one segment");
+		}
+	}
+
 	/// A repetitive frame DEFLATE shrinks, distinct per index.
 	fn verbose(index: usize) -> Bytes {
 		Bytes::from(format!("{index}:{}", "moq".repeat(300)))
@@ -4814,7 +4844,7 @@ mod test {
 			};
 			let size = object.inflated.expect("a stored slice carries its size");
 			assert_eq!(size, verbose(index).len() as u64);
-			let frame = decoder.frame(&object.frame.payload, size as usize).unwrap();
+			let frame = decoder.frame(&object.frame.payload.contiguous(0), size as usize).unwrap();
 			assert_eq!(frame, verbose(index), "slice {index}");
 		}
 
