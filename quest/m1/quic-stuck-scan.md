@@ -10,15 +10,18 @@ grow.
 
 ## Plan
 
-Starts after [moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)
-merges, which adds the receive leases and the stuck check. Its last fix
+[moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878) added the
+receive leases and the stuck check. Its last fix
 already skips the check for arrivals that move no credit
 (`creditless_arrivals_skip_the_stuck_check`). What remains: a RESET_STREAM
 that frees credit into shrink debt still pays one scan of every stream,
 which needs a local window shrink plus many streams each holding data.
 
-Decided 2026-10-22 (maintainer): m2, because it bounds CPU rather than fixing
-a correctness bug.
+Moved to m1 on 2026-10-23 (maintainer), so the cut that first publishes
+moq-quic ships without this peer-driven scan.
+[Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) reworks the same
+stuck-window code and eviction ranking; land it first and build on its
+shape.
 
 - Benchmark first: a RESET_STREAM storm under a shrunk window with N streams
   holding data, swept over N, to show the per-frame slope before and the

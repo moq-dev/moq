@@ -199,8 +199,8 @@ interface PendingIncomingStream<T> {
  * mark; `desiredSize` is only a backpressure signal. QMux cannot stop reading
  * its underlying byte stream, so keep new streams in this explicit queue and
  * transfer ownership only in response to an application read. The peer's
- * MAX_STREAMS credit is replenished by `onAccept`, which bounds this pending
- * queue to the stream count we advertised.
+ * MAX_STREAMS credit waits on `onAccept`, which bounds this pending queue to the
+ * stream count we advertised.
  */
 class IncomingStreamQueue<T> {
 	readonly readable: ReadableStream<T>;
@@ -518,6 +518,8 @@ interface StreamFlowState {
 	recvMax: bigint;
 	recvOffset: bigint;
 	recvConsumed: bigint;
+	/** Runs once when the send half ends, for a peer stream whose credit waits on it. */
+	onSendEnd?: () => void;
 }
 
 /** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
@@ -1372,12 +1374,20 @@ export default class Session implements WebTransport {
 			// For send side on bidi: peer's bidi_local is our send limit
 			const sendMax = frame.id.dir === Stream.Dir.Bi ? this.#peerParams.initialMaxStreamDataBidiLocal : 0n;
 
+			// Stream credit returns once the application has the stream and both halves have
+			// ended, as in QUIC, so it bounds the streams a peer holds open.
+			let holds = frame.id.dir === Stream.Dir.Bi ? 3 : 2;
+			const release = () => {
+				if (--holds === 0) this.#replenishStreamCredit(frame.id.dir);
+			};
+
 			this.#streamFlow.set(streamId, {
 				sendCredit: new Credit(sendMax),
 				sendOffset: 0n,
 				recvMax,
 				recvOffset: 0n,
 				recvConsumed: 0n,
+				onSendEnd: frame.id.dir === Stream.Dir.Bi ? release : undefined,
 			});
 
 			// Validate recv flow control before accepting
@@ -1386,23 +1396,6 @@ export default class Session implements WebTransport {
 				this.#abort(1002, "flow control error");
 				return;
 			}
-
-			let accepted = false;
-			let terminal = false;
-			let streamCreditReplenished = false;
-			const maybeReplenishStreamCredit = () => {
-				if (!accepted || !terminal || streamCreditReplenished) return;
-				streamCreditReplenished = true;
-				this.#replenishStreamCredit(frame.id.dir);
-			};
-			const onAccept = () => {
-				accepted = true;
-				maybeReplenishStreamCredit();
-			};
-			const onTerminal = () => {
-				terminal = true;
-				maybeReplenishStreamCredit();
-			};
 
 			const recvStream = new RecvStream(
 				(bytes) => {
@@ -1420,7 +1413,7 @@ export default class Session implements WebTransport {
 					this.#recvStreams.delete(streamId);
 					this.#maybeDeleteStreamFlow(streamId);
 				},
-				onTerminal,
+				release,
 			);
 			this.#recvStreams.set(streamId, recvStream);
 			recv = recvStream;
@@ -1434,14 +1427,14 @@ export default class Session implements WebTransport {
 				// Incoming bidirectional stream
 				const writer = this.#sendWritable(frame.id, DEFAULT_SEND_ORDER);
 
-				if (!this.#incomingBidirectionalQueue.push({ readable: reader, writable: writer }, onAccept, onDrop)) {
+				if (!this.#incomingBidirectionalQueue.push({ readable: reader, writable: writer }, release, onDrop)) {
 					// Keep the refused stream registered until FIN/RESET so in-flight frames
 					// cannot repeatedly reopen it. RecvStream rejects subsequent pushes,
 					// letting the receive path account them as deliberately discarded.
 					onDrop(new Error("incoming stream acceptor cancelled"));
 				}
 			} else {
-				if (!this.#incomingUnidirectionalQueue.push(reader, onAccept, onDrop)) {
+				if (!this.#incomingUnidirectionalQueue.push(reader, release, onDrop)) {
 					onDrop(new Error("incoming stream acceptor cancelled"));
 				}
 			}
@@ -1548,7 +1541,6 @@ export default class Session implements WebTransport {
 
 		const stopped = new StreamError(streamCode(frame.code.value), "STOP_SENDING");
 		stream.error(stopped);
-		this.#sendStreams.delete(streamId);
 		this.#scheduler?.dropStream(streamId, stopped);
 		// A write parked on stream credit isn't interrupted by error(); fail it here,
 		// even though a live receive half keeps the flow state around.
@@ -1561,6 +1553,13 @@ export default class Session implements WebTransport {
 			finalSize: this.#sendFinalSize(streamId),
 		});
 
+		this.#endSend(streamId);
+	}
+
+	/** End a stream's send half once its FIN or RESET_STREAM is sent. */
+	#endSend(streamId: bigint) {
+		if (!this.#sendStreams.delete(streamId)) return;
+		this.#streamFlow.get(streamId)?.onSendEnd?.();
 		this.#maybeDeleteStreamFlow(streamId);
 	}
 
@@ -1827,8 +1826,7 @@ export default class Session implements WebTransport {
 				finalSize: this.#sendFinalSize(streamId),
 			});
 
-			this.#sendStreams.delete(streamId);
-			this.#maybeDeleteStreamFlow(streamId);
+			this.#endSend(streamId);
 		};
 		const writable = new WritableStream<Uint8Array>({
 			start: (controller) => {
@@ -1865,9 +1863,8 @@ export default class Session implements WebTransport {
 					return;
 				}
 
-				this.#sendStreams.delete(streamId);
 				this.#scheduler?.forget(streamId);
-				this.#maybeDeleteStreamFlow(streamId);
+				this.#endSend(streamId);
 			},
 		});
 		this.#attachSendOrder(writable, streamId, sendOrder);

@@ -37,10 +37,12 @@ fn track_error_of(sink: &gst::Element, pad: &str) -> Option<String> {
 
 /// A publisher pointed at a relay that cannot answer. Connect runs in the background, so the element
 /// still reaches PAUSED and creates its producers, which is all these tests need.
+/// A sink that closes its broadcast at the end of stream, for tests not about the linger.
 fn publisher() -> gst::Element {
 	gst::ElementFactory::make("moqsink")
 		.property("url", "https://127.0.0.1:1")
 		.property("broadcast", "test")
+		.property("linger", 0u64)
 		.build()
 		.expect("create moqsink")
 }
@@ -226,10 +228,10 @@ fn play_one_frame(sink: &gst::Element) -> gst::Pad {
 	pad
 }
 
-// The end of stream closes the broadcast and posts EOS at once, even with media a late subscriber
-// could still have drained.
+// With no linger, the end of stream closes the broadcast and posts EOS at once, even with media a
+// late subscriber could still have drained.
 #[test]
-fn published_media_posts_the_eos_at_once() {
+fn published_media_posts_the_eos_at_once_without_a_linger() {
 	init();
 	let sink = publisher();
 	let seen = recording_bus(&sink);
@@ -238,6 +240,25 @@ fn published_media_posts_the_eos_at_once() {
 	assert!(pad.send_event(gst::event::Eos::new()));
 	assert_eq!(posted_eos(&seen), 1);
 	let _ = sink.set_state(gst::State::Null);
+}
+
+// By default, published media is served for the linger, so the EOS that ends `gst-launch` waits for
+// it. Stopping the pipeline is the interrupt: it closes the broadcast at once, and the run it ended
+// owes no EOS.
+#[test]
+fn a_lingering_sink_holds_the_eos_until_the_pipeline_stops() {
+	init();
+	let sink = publisher();
+	sink.set_property("linger", 30_000u64);
+	let seen = recording_bus(&sink);
+	let pad = play_one_frame(&sink);
+
+	assert!(pad.send_event(gst::event::Eos::new()));
+	assert_eq!(status_of(&sink, "sink_0"), "ended");
+	assert_eq!(posted_eos(&seen), 0, "the finished broadcast is still serving its tail");
+
+	assert_eq!(sink.set_state(gst::State::Null), Ok(gst::StateChangeSuccess::Success));
+	assert_eq!(posted_eos(&seen), 0, "the stopped run owes no EOS");
 }
 
 // After the publication ends, a buffer that got past the pad's own EOS flag (a flush clears it) must
