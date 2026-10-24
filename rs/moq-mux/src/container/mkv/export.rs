@@ -73,7 +73,10 @@ pub struct Export<S: Stream> {
 }
 
 struct MkvTrack {
+	/// The inferred decode clock of a rendition that declares no `reorder`.
 	clock: DecodeClock<crate::jitter::Arrival<Frame>>,
+	/// The current group's clock, when its rendition declared `reorder` at the group's start.
+	declared: Option<crate::container::decode::DeclaredClock<crate::jitter::Arrival<Frame>>>,
 	config: Option<VideoConfig>,
 	restart: u64,
 	reorder: Option<(u64, u64)>,
@@ -98,6 +101,7 @@ impl MkvTrack {
 	fn new(source: ExportSource, kind: TrackKind, config: Option<VideoConfig>, track_number: u64) -> Self {
 		Self {
 			clock: Default::default(),
+			declared: None,
 			config,
 			restart: 0,
 			reorder: None,
@@ -123,6 +127,7 @@ impl MkvTrack {
 	) -> Result<()> {
 		self.release(name, jitter, true)?;
 		self.clock = Default::default();
+		self.declared = None;
 		self.reorder = None;
 		self.source = source.continuing(&self.source);
 		self.finished = false;
@@ -154,7 +159,49 @@ impl MkvTrack {
 		}
 	}
 
+	/// Start a group: release the last one's frames, then clock this one at the depth its
+	/// rendition declares now, or on the inferred clock when it declares none.
+	fn start_group(&mut self, name: &str, jitter: &mut crate::jitter::Buffer<String, Frame>) -> Result<()> {
+		let depth = match &self.config {
+			Some(config) => crate::container::decode::declared(config)?,
+			None => None,
+		};
+		// The inferred clock spans groups, so it is only flushed when a declaration replaces it.
+		if self.declared.is_some() || depth.is_some() {
+			self.release(name, jitter, true)?;
+		}
+		self.declared = depth.map(crate::container::decode::DeclaredClock::new);
+		Ok(())
+	}
+
+	/// Hold a video frame on its clock, then release what it settles.
+	fn push(
+		&mut self,
+		name: &str,
+		arrival: crate::jitter::Arrival<Frame>,
+		jitter: &mut crate::jitter::Buffer<String, Frame>,
+	) -> Result<()> {
+		let pts = (arrival.item.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64;
+		match &mut self.declared {
+			Some(clock) => clock.push(arrival, pts)?,
+			None => {
+				let arrived = arrival.arrived;
+				self.clock.push(arrival, pts, arrived)
+			}
+		}
+		self.release(name, jitter, false)
+	}
+
 	fn release(&mut self, name: &str, jitter: &mut crate::jitter::Buffer<String, Frame>, flush: bool) -> Result<()> {
+		if let Some(clock) = &mut self.declared {
+			while let Some((mut arrival, dts)) = clock.pop(flush)? {
+				if !self.finished && !flush {
+					arrival.arrived = arrival.arrived.max(self.latest);
+				}
+				arrival.decode = crate::jitter::Decode::from_ticks(dts);
+				jitter.push(name.to_owned(), arrival)?;
+			}
+		}
 		let Some(config) = &self.config else { return Ok(()) };
 		let (floor, lookahead) = *self.reorder.get_or_insert_with(|| {
 			let declared = self.source.description().and_then(|description| match config.codec {
@@ -188,7 +235,7 @@ impl MkvTrack {
 			if !self.finished && !flush {
 				arrival.arrived = arrival.arrived.max(self.latest);
 			}
-			arrival.decode = moq_net::Timestamp::from_scale(dts, 90_000)?;
+			arrival.decode = moq_net::Timestamp::from_scale(dts, 90_000)?.into();
 			jitter.push(name.to_owned(), arrival)?;
 		}
 		Ok(())
@@ -415,6 +462,16 @@ impl<S: Stream> Export<S> {
 		self.jitter.len() + self.tracks.values().map(|track| track.clock.len()).sum::<usize>()
 	}
 
+	/// How many video frames wait on a declared clock for their DTS.
+	#[cfg(test)]
+	pub(super) fn held(&self) -> usize {
+		self.tracks
+			.values()
+			.filter_map(|track| track.declared.as_ref())
+			.map(|clock| clock.len())
+			.sum()
+	}
+
 	#[cfg(test)]
 	pub(super) fn with_replay(mut self) -> Self {
 		self.jitter = self.jitter.replay();
@@ -439,7 +496,14 @@ impl<S: Stream> Export<S> {
 					}
 					let (frame, arrived) = match track.source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame { frame, arrived })) => (frame, arrived.max(track.subscribed)),
-						Poll::Ready(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut)) => continue,
+						// A group that ended or was cut short holds frames no later one can precede.
+						Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => {
+							if track.declared.is_some() {
+								track.release(name, &mut self.jitter, true)?;
+							}
+							continue;
+						}
+						Poll::Ready(Some(Event::FrameEnd { .. })) => continue,
 						Poll::Ready(None) => {
 							track.finished = true;
 							break;
@@ -470,7 +534,7 @@ impl<S: Stream> Export<S> {
 					crate::jitter::Arrival {
 						arrived,
 						read: moq_clock::now(),
-						decode: frame.timestamp,
+						decode: frame.timestamp.into(),
 						restart: track.source.markers(),
 						skip: track.source.skips(),
 						cut: track.source.cuts(),
@@ -483,16 +547,19 @@ impl<S: Stream> Export<S> {
 					track.pending = Some(arrival);
 					break;
 				}
-				if track.kind == TrackKind::Video && !self.delay.is_zero() {
-					if arrival.restart != track.restart {
-						track.release(name, &mut self.jitter, true)?;
-						track.clock = Default::default();
-						track.restart = arrival.restart;
-					}
-					let pts = (arrival.item.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64;
-					let arrived = arrival.arrived;
-					track.clock.push(arrival, pts, arrived);
-					track.release(name, &mut self.jitter, false)?;
+				let video = track.kind == TrackKind::Video;
+				if video && arrival.restart != track.restart {
+					track.release(name, &mut self.jitter, true)?;
+					track.clock = Default::default();
+					track.declared = None;
+					track.restart = arrival.restart;
+				}
+				if video && arrival.item.keyframe {
+					track.start_group(name, &mut self.jitter)?;
+				}
+				// A declared depth is checked even when nothing is scheduled by decode time.
+				if video && (track.declared.is_some() || !self.delay.is_zero()) {
+					track.push(name, arrival, &mut self.jitter)?;
 				} else {
 					self.jitter.push(name.clone(), arrival)?;
 				}
