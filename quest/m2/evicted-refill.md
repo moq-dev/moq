@@ -33,4 +33,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - refills the parts of a group the cache sheds under pressure
+- [Unbounded groups](/quest/m1/unbounded-groups/README.md) - refills the parts of a group the cache sheds under pressure

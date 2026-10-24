@@ -9,14 +9,17 @@ frame gets it refilled in place. The refill comes from upstream over a
 frame-precise range, or from the publisher's `track::Dynamic` handler, and
 the reader gets `Error::Evicted` only when neither exists.
 `MAX_GROUP_FRAMES` and the group byte cap are removed. The frame cap stays
-until [Byte holes](/quest/m2/unbounded-groups/byte-holes.md).
+until [Byte holes](/quest/m1/unbounded-groups/byte-holes.md). A moq-json
+`Stream` accepts appends for its track's life: its encoder's pre-check against
+the removed constants goes with them, and so do the docs promising "8192
+records".
 
 ## Plan
 
-See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
+See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
 - Storage comes from the
-  [group storage benchmark](/quest/m2/group-storage-bench.md) (decided
+  [group storage benchmark](/quest/m1/group-storage-bench.md) (decided
   2026-10-20, maintainer): sorted runs of frames in place of one
   `VecDeque` + `offset`, or the
   [append-only log](/quest/m2/perf/kio-channel-contention/log.md) or a ring
@@ -60,8 +63,8 @@ groups. A reader that used to see `GroupTooLarge` now refills or sees
 
 ## Required
 
-- [Group storage benchmark](/quest/m2/group-storage-bench.md) - picks the group storage this builds on
-- [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) - frame storage the cache can account for without whole-frame preallocation
+- [Group storage benchmark](/quest/m1/group-storage-bench.md) - picks the group storage this builds on
+- [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - frame storage the cache can account for without whole-frame preallocation
 
 ## Related
 

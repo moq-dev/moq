@@ -18,6 +18,14 @@ moq-transport.
 
 ## Plan
 
+Decided 2026-10-23 (maintainer): moved from m2 to m1 with the
+[group storage benchmark](/quest/m1/group-storage-bench.md), holding the next
+breaking cut, so a long-lived log such as a moq-json `Stream` has no record
+ceiling in that release. Making `Stream` roll groups instead was rejected:
+its readers reject a second group (`Rolled`), and a `Window` that never pops
+is already the rolling log. Pointing `Stream`'s docs at `Window` in the
+meantime was declined.
+
 Decided 2026-10-16 (maintainer interview):
 
 - #3585 replaced front eviction with a `GroupTooLarge` abort because a reader
@@ -48,7 +56,7 @@ Decided 2026-10-16 (maintainer interview):
   `committed` so they never race the tail writer. They replace today's
   separate `Slot.head` copy. Whether the state is sorted runs or the
   [append-only log](/quest/m2/perf/kio-channel-contention/log.md) (or a ring
-  buffer) is the [group storage benchmark](/quest/m2/group-storage-bench.md)'s
+  buffer) is the [group storage benchmark](/quest/m1/group-storage-bench.md)'s
   call (decided 2026-10-20, maintainer, leaning log because hot-path
   performance matters more than evicting the middle).
 - Readers pin nothing: reads refresh recency as today. A reader that
@@ -81,10 +89,10 @@ moq-transport, with memory held near the pool size.
 
 ## Required
 
-- [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) - large frames store as sealed segments, preallocate at most one, and release receive credit per segment
-- [Front eviction](/quest/m2/unbounded-groups/front-eviction.md) - groups shed whole frames from their front under pressure and refill them in place; the group caps go
-- [Byte holes](/quest/m2/unbounded-groups/byte-holes.md) - segments inside a frame evict and refill by `(frame, byte)` on the next lite version; the frame cap goes
-- [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - `@moq/net` drops its caps, streams huge frames, and matches front eviction
+- [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - large frames store as sealed segments, preallocate at most one, and release receive credit per segment
+- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - groups shed whole frames from their front under pressure and refill them in place; the group caps go
+- [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame evict and refill by `(frame, byte)` on the next lite version; the frame cap goes
+- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - `@moq/net` drops its caps, streams huge frames, and matches front eviction
 
 ## Related
 
