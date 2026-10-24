@@ -66,6 +66,9 @@ The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/587
 - [Undeclared track names](/quest/m2/e2ee/undeclared-names.md) - an encrypted
   broadcast's `dynamic()` serves names nobody created or reserved, under
   semantic names, in Rust
+- [JS undeclared track names](/quest/m2/e2ee/js-undeclared-names.md) -
+  `@moq/net` exposes a broadcast request handler and `@moq/e2ee` serves
+  undeclared names through it
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust
   publishers emit encrypted catalogs and no plaintext semantic catalog in
   E2EE mode, through the moq-net traits

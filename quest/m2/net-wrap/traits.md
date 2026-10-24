@@ -41,6 +41,10 @@ the methods exactly as moq-net has them today.
     with the same group, datagram, and control surface. moq-json's snapshot
     and window consumers, moq-mux, and moq-stats read through `ordered()`,
     so without it they stay concrete.
+  - Listing (maintainer, 2026-10-24): a broadcast consumer's `tracks`
+    returns its own `Tracks` reader, so a wrapper reports the tracks it
+    lists under its own names, and moq-archive's listing reader can take
+    the trait.
 - `poll_*` methods are the required ones; the async forms are provided
   methods over them, so no `async fn` in a trait forces a `Send` bound.
 - Demand (`demand`, `subscription_changed`, `Request::accept` and `reject`)
