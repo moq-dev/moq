@@ -48,7 +48,8 @@ impl Client {
 
 	/// Attach a per-connection [`stats::Session`] context. The session's publish
 	/// (egress) and subscribe (ingress) origin handles are tagged with it, so all
-	/// traffic counters are attributed through the model for this session's lifetime.
+	/// traffic counters are attributed through the model for this session's lifetime,
+	/// and how the session ended is recorded there.
 	/// Pass [`stats::Session::default`] (a no-op context) to opt out.
 	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.stats = stats;
@@ -540,9 +541,13 @@ mod tests {
 
 	impl std::error::Error for FakeError {}
 
+	/// Only this side ever closes a fake session, and like QUIC it says only that.
 	impl crate::transport::Error for FakeError {
+		fn close_kind(&self) -> crate::transport::CloseKind {
+			crate::transport::CloseKind::Closed
+		}
 		fn session_error(&self) -> Option<(u32, String)> {
-			Some((0, "closed".to_string()))
+			None
 		}
 	}
 
@@ -973,6 +978,38 @@ mod tests {
 		drop(clone);
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
 		assert_eq!(fake.state.close_events.read().len(), closes);
+	}
+
+	// A transport that only knows this side closed it leaves the reason to the session,
+	// which reports it from `closed()` and records it in the session's stats.
+	#[test]
+	fn a_local_close_reports_this_sides_reason() {
+		use crate::stats::{Failure, Failures, Registry, Tier};
+		let ended = |abort: Error| {
+			let registry = Registry::new(Default::default());
+			let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+			let client = Client::new()
+				.with_versions(Version::Lite(lite::Version::Lite04).into())
+				.with_stats(registry.tier(Tier::default()).session("root"));
+			let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
+			let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake)).unwrap();
+			session.abort(abort);
+			// One poll closes the transport, the next publishes how it ended.
+			let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+			let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+			let err = futures::executor::block_on(session.closed());
+			drop((client, session, driver));
+			(err, registry.snapshot().sessions()[0].1.sessions_failed)
+		};
+
+		let (err, failed) = ended(Error::Expired);
+		assert!(matches!(err, Error::Expired), "{err:?}");
+		assert_eq!(failed.count(Failure::Expired), 1);
+
+		// Anything the peer is told is "no error" is a clean close.
+		let (err, failed) = ended(Error::GoingAway);
+		assert!(matches!(err, Error::Cancel), "{err:?}");
+		assert_eq!(failed, Failures::default());
 	}
 
 	// Dropping the driver instead of running it tears the session

@@ -72,8 +72,7 @@ pub trait Sealed: Sized {
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self;
 	fn with_subscriber(self, subscribe: moq_net::origin::Producer) -> Self;
 
-	/// Answer the SETUP. A MoQ failure comes back as a bare [`moq_net::Error`], so
-	/// its cause classifies the failure.
+	/// Answer the SETUP. A MoQ failure comes back as a bare [`moq_net::Error`].
 	async fn ok(self) -> anyhow::Result<(moq_net::Session, Self::Driver)>;
 
 	/// Run the session's protocol until it ends, alongside its supervision.

@@ -98,7 +98,8 @@ impl Server {
 
 	/// Attach a per-connection [`stats::Session`] context. The session's publish
 	/// (egress) and subscribe (ingress) origin handles are tagged with it, so all
-	/// traffic counters are attributed through the model for this session's lifetime.
+	/// traffic counters are attributed through the model for this session's lifetime,
+	/// and how the session ended is recorded there.
 	/// Pass [`stats::Session::default`] (a no-op context) to opt out.
 	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.stats = stats;
@@ -278,6 +279,7 @@ impl Server {
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
+				deadline: None,
 				handshake,
 			}),
 		})
@@ -432,6 +434,7 @@ impl Server {
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
+				deadline: None,
 				handshake: PausedHandshake::Legacy(PausedLegacy {
 					session,
 					stream,
@@ -467,6 +470,7 @@ impl Server {
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
+				deadline: None,
 				handshake: PausedHandshake::IetfModern(PausedIetfModern {
 					session,
 					version,
@@ -505,6 +509,8 @@ struct RequestInner {
 	server: Server,
 	/// Supplies the clock and timers for the accepted session.
 	runtime: Deadlines,
+	/// When [`Handshake::ok`] gives up on a peer that has not taken the SETUP reply.
+	deadline: Option<Instant>,
 	handshake: PausedHandshake,
 }
 
@@ -839,6 +845,13 @@ impl Handshake {
 		self
 	}
 
+	/// Refuse the session with [`Error::Timeout`] if [`ok`](Self::ok) has not answered
+	/// SETUP by `at`, as when the peer withholds flow-control credit for the reply.
+	pub fn with_deadline(mut self, at: Instant) -> Self {
+		self.inner_mut().deadline = Some(at);
+		self
+	}
+
 	fn inner_mut(&mut self) -> &mut RequestInner {
 		self.inner.as_mut().expect("request already responded")
 	}
@@ -852,25 +865,41 @@ impl Handshake {
 		let RequestInner {
 			server,
 			runtime,
+			deadline,
 			handshake,
 		} = self.inner.take().expect("request already responded");
 
-		match handshake {
-			PausedHandshake::LiteBare { session, version } => {
-				server.start_lite(runtime, session, version, None, peer_hop, auth)
+		let stats = server.stats.clone();
+		let (mut refused, version) = handshake.transport();
+		let reply = async move {
+			match handshake {
+				PausedHandshake::LiteBare { session, version } => {
+					server.start_lite(runtime, session, version, None, peer_hop, auth)
+				}
+				PausedHandshake::LiteSetup {
+					session,
+					version,
+					client_setup,
+				} => {
+					server.stats.control(stats::Control::Session, client_setup.size, true);
+					server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
+				}
+				PausedHandshake::IetfModern(paused) => paused.ok(server, runtime, peer_hop, auth),
+				// Boxed so the bidi SETUP write of these old versions doesn't size every caller's future.
+				PausedHandshake::Legacy(paused) => Box::pin(paused.ok(server, runtime, peer_hop, auth)).await,
 			}
-			PausedHandshake::LiteSetup {
-				session,
-				version,
-				client_setup,
-			} => {
-				server.stats.control(stats::Control::Session, client_setup.size, true);
-				server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
-			}
-			PausedHandshake::IetfModern(paused) => paused.ok(server, runtime, peer_hop, auth),
-			// Boxed so the bidi SETUP write of these old versions doesn't size every caller's future.
-			PausedHandshake::Legacy(paused) => Box::pin(paused.ok(server, runtime, peer_hop, auth)).await,
+		};
+		let res = match deadline {
+			Some(at) => moq_clock::timeout_at(at, reply).await.unwrap_or_else(|_| {
+				close(&mut refused, &Error::Timeout, Some(version));
+				Err(Error::Timeout)
+			}),
+			None => reply.await,
+		};
+		if let Err(err) = &res {
+			stats.end(err);
 		}
+		res
 	}
 
 	/// Reject the session, closing the transport with `err`'s wire code.
@@ -882,13 +911,22 @@ impl Handshake {
 
 impl RequestInner {
 	fn close(self, err: Error) {
-		let (mut session, version) = match self.handshake {
-			PausedHandshake::LiteBare { session, version } => (session, version.into()),
-			PausedHandshake::LiteSetup { session, version, .. } => (session, version.into()),
-			PausedHandshake::IetfModern(paused) => (paused.session, paused.version.into()),
-			PausedHandshake::Legacy(paused) => (paused.session, paused.version),
-		};
+		self.server.stats.end(&err);
+		let (mut session, version) = self.handshake.transport();
 		close(&mut session, &err, Some(version));
+	}
+}
+
+impl PausedHandshake {
+	/// The transport, and the version whose codes close it.
+	fn transport(&self) -> (Transport, Version) {
+		match self {
+			Self::LiteBare { session, version } | Self::LiteSetup { session, version, .. } => {
+				(session.clone(), (*version).into())
+			}
+			Self::IetfModern(paused) => (paused.session.clone(), paused.version.into()),
+			Self::Legacy(paused) => (paused.session.clone(), paused.version),
+		}
 	}
 }
 
@@ -953,6 +991,8 @@ mod tests {
 		bi: Arc<Mutex<VecDeque<Vec<u8>>>>,
 		closed: Arc<Mutex<Option<u32>>>,
 		stops: Arc<Mutex<Vec<u32>>>,
+		/// The peer grants no credit, so nothing this side writes is ever taken.
+		withheld: bool,
 	}
 
 	impl FakeSession {
@@ -964,7 +1004,13 @@ mod tests {
 				bi: Default::default(),
 				closed: Default::default(),
 				stops: Default::default(),
+				withheld: false,
 			}
+		}
+
+		fn withholding_credit(mut self) -> Self {
+			self.withheld = true;
+			self
 		}
 
 		fn with_bi(self, bi: Vec<u8>) -> Self {
@@ -1001,7 +1047,9 @@ mod tests {
 		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			match self.bi.lock().unwrap().pop_front() {
 				Some(data) => std::task::Poll::Ready(Ok((
-					FakeSend,
+					FakeSend {
+						withheld: self.withheld,
+					},
 					crate::transport::poll::Buffered::new(FakeChunks {
 						data: data.into(),
 						stops: self.stops.clone(),
@@ -1073,7 +1121,9 @@ mod tests {
 	}
 
 	#[derive(Clone, Default)]
-	struct FakeSend;
+	struct FakeSend {
+		withheld: bool,
+	}
 	impl crate::transport::poll::SendStream for FakeSend {
 		type Error = FakeError;
 		type Group = crate::transport::poll::Ungrouped;
@@ -1082,7 +1132,10 @@ mod tests {
 			_cx: &mut std::task::Context<'_>,
 			buf: &[u8],
 		) -> std::task::Poll<Result<usize, Self::Error>> {
-			std::task::Poll::Ready(Ok(buf.len()))
+			match self.withheld {
+				true => std::task::Poll::Pending,
+				false => std::task::Poll::Ready(Ok(buf.len())),
+			}
 		}
 		fn set_priority(&mut self, _order: i64) {}
 		fn set_group(&mut self, group: &Self::Group) {
@@ -1237,6 +1290,61 @@ mod tests {
 			assert_eq!(received.token().as_ref(), b"jwt", "{version:?}");
 			let _issued = received.accept(crate::auth::Grant::all());
 			assert!(verdict.grant().await.is_ok(), "granting admits at {version:?}");
+		}
+	}
+
+	/// A peer that never takes the SETUP reply is refused at the handshake's deadline
+	/// with the timeout code, and the session's stats count it.
+	#[moq_clock::test]
+	async fn a_reply_the_peer_never_takes_fails_at_the_deadline() {
+		let registry = stats::Registry::new(Default::default());
+		let version = ietf::Version::Draft16;
+		let session = FakeSession::new(ALPN_16, [])
+			.with_bi(legacy_setup(version, ietf::Parameters::default()))
+			.withholding_credit();
+		let start = moq_clock::now();
+		let deadline = start + std::time::Duration::from_secs(10);
+		let request = Server::new()
+			.accept_request(start, session.clone())
+			.await
+			.unwrap()
+			.with_stats(registry.tier(Default::default()).session("room"))
+			.with_deadline(deadline);
+		let Err(err) = request.ok().await else {
+			panic!("a reply the peer never took completed");
+		};
+		assert!(matches!(err, Error::Timeout), "{err:?}");
+		assert_eq!(moq_clock::now(), deadline);
+		assert_eq!(
+			session.close_code(),
+			Some(Version::Ietf(version).session_code(&SessionError::Timeout))
+		);
+		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
+		assert_eq!(failed.count(stats::Failure::Application), 1, "{failed:?}");
+	}
+
+	/// A rejection counts by the code the peer is told, so a "no error" close is clean
+	/// however this side spelled it.
+	#[moq_clock::test]
+	async fn a_rejection_counts_by_its_code() {
+		for (err, failed) in [
+			(Error::GoingAway, None),
+			(Error::Session(SessionError::Cancel), None),
+			(Error::Unauthorized, Some(stats::Failure::Application)),
+		] {
+			let registry = stats::Registry::new(Default::default());
+			let session = FakeSession::new(ALPN_19, [ietf_setup(ietf::Version::Draft19, None)]);
+			Server::new()
+				.accept_request(moq_clock::now(), session)
+				.await
+				.unwrap()
+				.with_stats(registry.tier(Default::default()).session("room"))
+				.close(err.clone());
+			let failures = registry.snapshot().sessions()[0].1.sessions_failed;
+			for kind in stats::Failure::ALL {
+				let expected = u64::from(failed == Some(*kind));
+				assert_eq!(failures.count(*kind), expected, "{err:?}: {kind:?}");
+			}
 		}
 	}
 
@@ -1453,6 +1561,7 @@ mod tests {
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
 				runtime: Deadlines::new(moq_clock::now()),
+				deadline: None,
 				handshake: PausedHandshake::IetfModern(PausedIetfModern {
 					session: Transport::new(transport),
 					version,
