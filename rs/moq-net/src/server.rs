@@ -637,7 +637,7 @@ impl PausedLegacy {
 				// The client's requests, admitted up to our limits and granted back as they close.
 				parameters.set_varint(
 					ietf::ParameterVarInt::MaxRequestId,
-					ietf::initial_max_request_id(server.limits.requests(), true),
+					ietf::initial_max_request_id(server.limits.window(), true),
 				);
 				parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 				if server.extensions.solicit {
@@ -833,7 +833,7 @@ impl Handshake {
 		self
 	}
 
-	/// Set request caps after authorizing the peer and before answering SETUP.
+	/// Set the session's limits after authorizing the peer and before answering SETUP.
 	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
 		self.inner_mut().server.limits = limits;
 		self

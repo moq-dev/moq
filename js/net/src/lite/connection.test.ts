@@ -208,7 +208,7 @@ function mockDeadline() {
 	const clock = new Manual();
 	return {
 		expire: () => clock.advance(Nano.fromMilli(Milli(1000))),
-		restore: clock.install(),
+		installed: clock.install(),
 	};
 }
 
@@ -335,7 +335,7 @@ test("a lite-07 subscriber withholding FIN holds close until the deadline", asyn
 		expect(await failure).toHaveProperty("message", "session close timed out");
 		expect(served.closed()).toBe(true);
 	} finally {
-		deadline.restore();
+		deadline.installed.close();
 		served.cleanup();
 	}
 });
@@ -352,7 +352,7 @@ test("a lite-07 subscriber FIN releases close", async () => {
 		await closing;
 		expect(served.closed()).toBe(true);
 	} finally {
-		deadline.restore();
+		deadline.installed.close();
 		served.cleanup();
 	}
 });
@@ -369,7 +369,7 @@ test("abort during the close drain ends the session at once", async () => {
 		await closing;
 		expect(served.closed()).toBe(true);
 	} finally {
-		deadline.restore();
+		deadline.installed.close();
 		served.cleanup();
 	}
 });
@@ -416,7 +416,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 		await closing;
 		expect(closed).toBe(true);
 	} finally {
-		deadline.restore();
+		deadline.installed.close();
 		fin.release();
 		server.abort();
 		broadcast.close();
@@ -479,7 +479,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 		await closing;
 		expect(closed).toBe(true);
 	} finally {
-		deadline.restore();
+		deadline.installed.close();
 		fin.release();
 		client.abort();
 		server.abort();

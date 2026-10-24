@@ -1060,9 +1060,9 @@ impl Issue {
 	}
 }
 
-/// A request's slot against the session's cap, shared with the application's verification
-/// of its token so work still in flight stays counted after the request ends. Opaque here:
-/// auth only keeps it alive.
+/// A request's slot in the session's count, shared with the application's verification of its
+/// token so work still in flight stays counted after the request ends. Opaque here: auth only
+/// keeps it alive.
 pub(crate) type Hold = std::sync::Arc<dyn std::any::Any + Send + Sync>;
 
 /// The serving task's hold on one peer token's [`Issue`].

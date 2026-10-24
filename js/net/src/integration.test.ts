@@ -1293,7 +1293,9 @@ test("integration: ietf fetch group is unsupported", async () => {
 	]);
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow("fetch group is not supported for moq-transport");
+	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow(
+		"fetch group is not supported by this session's version",
+	);
 
 	remote.close();
 	client.abort();

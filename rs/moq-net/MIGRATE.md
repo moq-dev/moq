@@ -4,14 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Smaller public API
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
-- `origin::Producer::peer()` is `with_link(origin::Link::Peer)`, and a handle marked upstream uses `with_link(origin::Link::Upstream)`. The last call wins, so a `Peer` link no longer leaves an upstream handle upstream.
-- `moq_net::Role` is `moq_net::setup::Role`.
-- `origin::DEFAULT_UPDATE_HOLD` is private; read the default from `origin::Config::default().update_hold`.
-- A server answers the client's tokens with `server::Handshake::requests()` (or `moq_tokio::server::Request::requests()`) instead of `handshake.auth().requests()`. It cannot fail: a second call ends the queue the first returned.
-- `Client::with_cost` takes `impl Into<origin::Cost>`, like `Route::with_cost`. A `u64` still works.
-- Without the default `async` feature, the `auth`, `goaway`, and `setup` modules are private, since only sessions hand out their types.
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
 
 ### Published names refuse navigation segments
 
@@ -23,6 +19,7 @@ Path normalization, relative references, and subscription paths retain their sem
 ### A listing says whether a removed track finished (#6399)
 
 `broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
+`broadcast::Lister::finish()`, which ended every reader as if the broadcast ended, is `Lister::end()`. `Lister::finish(name)` now unlists a track as finished, beside `remove(name)` for one that left unfinished.
 
 ### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
@@ -137,8 +134,8 @@ It asks only under the prefixes its subscribe origin's readers watch, with `anno
 `request_broadcast` watches nothing, so on a client it fails with `Error::Unroutable` for a path no reader watches, even when the peer announces it.
 Resolve a path with `routed_broadcast` or `announced_broadcast`, or hold an `announced()` stream over its prefix while requesting, the way `routed` already did after connecting.
 A broadcast resolved through a discovered route keeps its path watched until dropped.
-A server session, and a client fed a handle `with_link(origin::Link::Peer)` or `Link::Upstream`, still asks for everything it may, so a relay discovers as before.
-Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.with_link(origin::Link::Upstream)` (or `Link::Peer`) instead of a plain handle.
+A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
+Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.
 moq-transport sessions, and moq-lite-03/04 sessions (whose announce streams mark no initial set), are unchanged.
 
 ### Frames carry their arrival time
@@ -345,9 +342,9 @@ Give it a budget to replay or tolerate reordering.
 let sub = track::Subscription::default().with_max_delay(Duration::from_secs(1));
 ```
 
-### `cache::Pool::gc` is `poll` and takes a waiter
+### `cache::Pool::gc` takes a waiter
 
-Call `pool.poll(now, &waiter)`, and call it again when the waiter wakes, since a parked read can arm an earlier deadline than the one returned.
+Call `pool.gc(now, &waiter)`, and call it again when the waiter wakes, since a parked read can arm an earlier deadline than the one returned.
 
 ### A replacement track owns its start sequence (#5068)
 
@@ -442,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)

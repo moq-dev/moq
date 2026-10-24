@@ -8,7 +8,7 @@ typealias Encoder = uniffi.moq.MoqVideoEncoder
 typealias Consumer = uniffi.moq.MoqVideoConsumer
 /** The pixel layout, resolution, and framerate written to a [Producer]. */
 typealias EncoderInput = uniffi.moq.MoqVideoEncoderInput
-/** The track name, codec, bitrate, group mode, and backend preference. */
+/** The codec, bitrate, group mode, and backend preference. */
 typealias EncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 /** What a [Consumer] delivers: an optional resize, a max delay, and the decoder's surface (macOS only). */
 typealias DecoderOutput = uniffi.moq.MoqVideoDecoderOutput
@@ -24,3 +24,9 @@ typealias Codec = uniffi.moq.MoqVideoCodec
 typealias PixelFormat = uniffi.moq.MoqVideoPixelFormat
 /** The encoder backend preference. */
 typealias EncoderKind = uniffi.moq.MoqVideoEncoderKind
+
+/** Input, codec settings, and publication ownership for a producer. */
+typealias ProducerOptions = uniffi.moq.MoqVideoProducerOptions
+
+/** An exact video frame rate in frames per second. */
+typealias FrameRate = uniffi.moq.MoqVideoFrameRate

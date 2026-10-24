@@ -1060,7 +1060,7 @@ where
 	S: moq_net::transport::poll::Boxable + Send + Sync,
 {
 	let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
-	let accept = async { Ok(server.accept_request(moq_net::time::now(), session).await?) };
+	let accept = async { Ok(server.accept_request(moq_net::time::Instant::now(), session).await?) };
 	let request = Deadline::bound(deadline.as_ref(), accept).await?;
 	Ok((request, deadline))
 }
@@ -2415,7 +2415,9 @@ mod tests {
 		let client = tokio::spawn({
 			let recorder = crate::transport::Session::new(recorder.clone(), moq_net::transport::Binding::Uri);
 			async move {
-				let _ = moq_net::Client::new().connect(moq_net::time::now(), recorder).await;
+				let _ = moq_net::Client::new()
+					.connect(moq_net::time::Instant::now(), recorder)
+					.await;
 			}
 		});
 		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -2474,7 +2476,7 @@ mod tests {
 		let transport = client.clone();
 		let connect = tokio::spawn(async move {
 			let (session, driver) = moq_net::Client::new()
-				.connect(moq_net::time::now(), transport)
+				.connect(moq_net::time::Instant::now(), transport)
 				.await
 				.expect("client handshake");
 			tokio::spawn(moq_net::time::run(driver));
@@ -2518,7 +2520,7 @@ mod tests {
 				.await
 				.expect("upgrade");
 			let (_session, driver) = moq_net::Client::new()
-				.connect(moq_net::time::now(), session)
+				.connect(moq_net::time::Instant::now(), session)
 				.await
 				.expect("client handshake");
 			moq_net::time::run(driver).await

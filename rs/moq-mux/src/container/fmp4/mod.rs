@@ -491,7 +491,9 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 		defaults,
 	} = track;
 
-	let mut cursor = std::io::Cursor::new(&data);
+	// A slice cursor like the other fMP4 decodes: mp4-atom's `Any` decoder is large and compiles
+	// once per reader type.
+	let mut cursor = std::io::Cursor::new(data.as_ref());
 	let mut moof = None;
 	let mut mdat = None;
 

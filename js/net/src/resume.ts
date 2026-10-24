@@ -1058,7 +1058,7 @@ interface Fetch {
 }
 
 function startFetch(
-	wire: BroadcastWire,
+	fetchGroup: NonNullable<BroadcastWire["fetchGroup"]>,
 	name: string,
 	sequence: number,
 	generation: number,
@@ -1077,7 +1077,7 @@ function startFetch(
 			if (fetch.outcome && "group" in fetch.outcome) fetch.outcome.group.close();
 		},
 	};
-	wire.fetchGroup(name, sequence, { signal: controller.signal })
+	fetchGroup(name, sequence, { signal: controller.signal })
 		.then(
 			(group) => {
 				// A copy that already failed continues nothing: that is the route failing again.
@@ -1252,15 +1252,21 @@ class Recover implements GroupRecover {
 					const cached = hooks.cachedGroup(serving.sub, this.sequence);
 					if (cached) return this.#replacement(cached, serving);
 				}
-				// Otherwise ask for it. The subscription may still deliver it first.
-				if (fetch?.generation !== generation) {
-					fetch = startFetch(serving.source.wire, route.name, this.sequence, generation, signal);
+				// Otherwise ask for it, if the route's version can fetch. The subscription may still
+				// deliver it first. Without FETCH only a copy continues a failed group, and none
+				// holds it, so it ends as the failed copy left it.
+				const fetchGroup = serving.source.wire.fetchGroup;
+				if (!fetchGroup && failed) throw failed;
+				if (fetchGroup && fetch?.generation !== generation) {
+					fetch = startFetch(fetchGroup, route.name, this.sequence, generation, signal);
 					started(fetch);
 				}
+				// A fetch from an earlier route answers for that route, not this one.
+				const asked = fetch?.generation === generation ? fetch : undefined;
 				const stale = hooks.staleAt(serving.sub, this.sequence);
 				if (stale.expired()) throw new StreamError(StreamCode.Old, { message: "group is past the budget" });
-				waits.push(...stale.changed, ...(fetch.outcome ? [] : [fetch.settled]));
-				const outcome = fetch.outcome;
+				waits.push(...stale.changed, ...(asked && !asked.outcome ? [asked.settled] : []));
+				const outcome = asked?.outcome;
 				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
 				// That route failing too waits for the next one, and a refusal is a verdict only for
 				// a copy that failed.
@@ -1706,7 +1712,9 @@ export class Front {
 			const signal = options?.signal ? AbortSignal.any([options.signal, retired]) : retired;
 			try {
 				await until(this.#verify(name, source), signal);
-				const group = await source.wire.fetchGroup(name, sequence, { ...options, signal });
+				const fetchGroup = source.wire.fetchGroup;
+				if (!fetchGroup) throw new Error("fetch group is not supported by this session's version");
+				const group = await fetchGroup(name, sequence, { ...options, signal });
 				// A copy that already failed continues nothing: that is the route failing again.
 				const failed = group.closed.peek();
 				if (failed instanceof Error) {

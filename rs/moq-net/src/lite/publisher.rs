@@ -52,9 +52,8 @@ pub(super) struct PublisherConfig {
 	pub estimate: kio::ProducerWeak<crate::session::Estimate>,
 	/// Whether we dialed: only then does a publication outside our grant abort.
 	pub client: bool,
-	/// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
+	/// Counts the subscriptions the peer holds, for the session's subscriptions peak.
 	pub subscriptions: crate::session::Slots,
-	pub fetches: crate::session::Slots,
 }
 
 /// Context shared by every control-stream child.
@@ -83,10 +82,10 @@ struct Shared {
 	peer_grant: crate::auth::Grant,
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
-	interests: Interests,
+	// The subscriptions the peer holds, counted for the stats peak.
+	subscriptions: crate::session::Slots,
 	/// Holds this session's listings: one per broadcast, the newest replacing the rest.
 	lister: crate::broadcast::Owner,
-	fetches: crate::session::Slots,
 	// The send time an untimed track's frames carry on Lite05/06, which can't mark them
 	// untimed (see `wire_timestamp`).
 	runtime: crate::time::Deadlines,
@@ -215,9 +214,8 @@ impl Publisher {
 				auth: config.auth,
 				peer_grant: config.peer_grant,
 				owed: AtomicUsize::new(0),
-				interests: Interests::new(config.subscriptions),
+				subscriptions: config.subscriptions,
 				lister: crate::broadcast::Owner::new(),
-				fetches: config.fetches,
 				runtime: config.runtime.clone(),
 				estimate: config.estimate,
 			}),
@@ -1497,10 +1495,9 @@ trait Request: Sized {
 	/// Whether we answer the requester's FIN with our own. Otherwise we reset: the reply
 	/// would end short, and a FIN there would read as a whole one.
 	const GRACEFUL: bool;
-	/// What the request counts as against the session's subscription cap while it is open.
-	const CHARGE: Option<Charge>;
-	/// Whether the incoming request holds an independent FETCH slot.
-	const FETCH: bool = false;
+	/// Whether the request counts toward the session's subscriptions peak while it is open.
+	/// Its stream's credit, not a count, bounds how many the peer holds.
+	const SUBSCRIPTION: bool = false;
 	/// Whether the request stays open past its reply, keeping what serving it took, until
 	/// the requester closes its side.
 	const HOLDS: bool;
@@ -1555,9 +1552,8 @@ struct RequestServe<R: Request> {
 	state: RequestState<R::Message, R>,
 	// Counted in `Shared::owed` until the reply is delivered, so a draining close waits for it.
 	owing: bool,
-	// The request's place under the session's subscription cap.
-	_charged: Option<Charged>,
-	_fetch: Option<crate::session::Slot>,
+	// A subscription's place in the session's subscriptions peak.
+	_subscription: Option<crate::session::Slot>,
 	// The latest update to arrive before the reply started. Each one replaces the last.
 	update: Option<R::Update>,
 	/// Ends the request, even mid-reply, once the session stops allowing its broadcast.
@@ -1601,8 +1597,7 @@ impl<R: Request> RequestServe<R> {
 			stream: Some(stream),
 			state: RequestState::Decode,
 			owing: true,
-			_charged: None,
-			_fetch: None,
+			_subscription: None,
 			update: None,
 			gate: None,
 			absolute: Default::default(),
@@ -1671,33 +1666,11 @@ impl<R: Request> RequestServe<R> {
 			match &mut self.state {
 				RequestState::Decode => {
 					let msg = ready!(stream.reader.poll_decode::<R::Message>(&mut cx))?;
-					if R::FETCH {
-						self._fetch = match self.shared.fetches.acquire() {
-							Ok(slot) => Some(slot),
-							Err(err) => {
-								self.shared.session.clone().close(
-									crate::lite::error::to_session_code(&crate::SessionError::from(&err)),
-									"too many fetches",
-								);
-								return Poll::Ready(Err(err));
-							}
-						};
-					}
 					let (broadcast, track) = R::target(&msg);
 					self.absolute = self.shared.origin.absolute(broadcast).to_owned();
 					self.track = track.to_string();
-					if let Some(charge) = R::CHARGE {
-						match self.shared.interests.charge(broadcast, track, charge) {
-							Ok(charged) => self._charged = Some(charged),
-							// A peer past its limits loses the session, not just this request.
-							Err(err) => {
-								self.shared.session.clone().close(
-									crate::lite::error::to_session_code(&crate::SessionError::from(&err)),
-									"too many subscriptions",
-								);
-								return Poll::Ready(Err(err));
-							}
-						}
+					if R::SUBSCRIPTION {
+						self._subscription = Some(self.shared.subscriptions.hold());
 					}
 					tracing::info!(broadcast = %self.absolute, track = %self.track, request = ?msg, "{} started", R::KIND);
 					// Checked before anything is resolved, so a broadcast the session does not
@@ -1827,109 +1800,6 @@ impl<R: Request> Drop for RequestServe<R> {
 	}
 }
 
-/// What a request counts as against the session's subscription cap.
-#[derive(Clone, Copy)]
-enum Charge {
-	/// A TRACK stream, held open as interest in the track.
-	Track,
-	/// A subscription.
-	Subscribe,
-	/// A TRACKS stream listing the broadcast, charged under the empty track name on top
-	/// of any interest in a track of that name. Each listing is charged until it is gone,
-	/// replaced or not: which listing a newer one replaces is known only once both
-	/// resolve, so like a repeated SUBSCRIBE, a replacement must fit under the cap.
-	Tracks,
-}
-
-/// A session's subscription cap, charged per track.
-///
-/// A TRACK stream held open and the SUBSCRIBE that follows it are one interest in the
-/// track, so a track costs the larger of its two counts: a peer at the cap can still
-/// subscribe to the tracks it holds.
-struct Interests {
-	slots: crate::session::Slots,
-	tracks: kio::Lock<HashMap<(crate::PathOwned, String), Interest>>,
-}
-
-/// The requests open on one track, and the slots they take.
-#[derive(Default)]
-struct Interest {
-	tracks: usize,
-	subscribes: usize,
-	listings: usize,
-	slots: Vec<crate::session::Slot>,
-}
-
-impl Interest {
-	fn count(&mut self, charge: Charge) -> &mut usize {
-		match charge {
-			Charge::Track => &mut self.tracks,
-			Charge::Subscribe => &mut self.subscribes,
-			Charge::Tracks => &mut self.listings,
-		}
-	}
-
-	fn cost(&self) -> usize {
-		self.tracks.max(self.subscribes) + self.listings
-	}
-}
-
-impl Interests {
-	fn new(slots: crate::session::Slots) -> Self {
-		Self {
-			slots,
-			tracks: kio::Lock::new(HashMap::new()),
-		}
-	}
-
-	/// Charge a request for `broadcast`'s `track` until the returned guard drops, or
-	/// [`Error::TooManyRequests`] past the cap.
-	fn charge(&self, broadcast: &crate::Path, track: &str, charge: Charge) -> Result<Charged, Error> {
-		let key = (broadcast.to_owned(), track.to_string());
-		let mut tracks = self.tracks.lock();
-		let interest = tracks.entry(key.clone()).or_default();
-		*interest.count(charge) += 1;
-		if interest.cost() > interest.slots.len() {
-			match self.slots.acquire() {
-				Ok(slot) => interest.slots.push(slot),
-				Err(err) => {
-					*interest.count(charge) -= 1;
-					if interest.cost() == 0 {
-						tracks.remove(&key);
-					}
-					return Err(err);
-				}
-			}
-		}
-		Ok(Charged {
-			tracks: self.tracks.clone(),
-			key,
-			charge,
-		})
-	}
-}
-
-/// One request's charge on its track, released on drop.
-struct Charged {
-	tracks: kio::Lock<HashMap<(crate::PathOwned, String), Interest>>,
-	key: (crate::PathOwned, String),
-	charge: Charge,
-}
-
-impl Drop for Charged {
-	fn drop(&mut self) {
-		let mut tracks = self.tracks.lock();
-		let Some(interest) = tracks.get_mut(&self.key) else {
-			return;
-		};
-		*interest.count(self.charge) -= 1;
-		interest.slots.truncate(interest.cost());
-		if interest.cost() == 0 {
-			tracks.remove(&self.key);
-		}
-	}
-}
-
 /// Answers a TRACK stream with the track's TRACK_INFO.
 ///
 /// The open stream is interest in the track: the query that answered it stays until the
@@ -1941,7 +1811,6 @@ struct TrackInfoServe {
 impl Request for TrackInfoServe {
 	const KIND: &'static str = "track info";
 	const GRACEFUL: bool = false;
-	const CHARGE: Option<Charge> = Some(Charge::Track);
 	const HOLDS: bool = true;
 	type Message = lite::Track<'static>;
 	type Update = NoUpdate;
@@ -1996,7 +1865,6 @@ struct TracksServe {
 impl Request for TracksServe {
 	const KIND: &'static str = "tracks";
 	const GRACEFUL: bool = false;
-	const CHARGE: Option<Charge> = Some(Charge::Tracks);
 	const HOLDS: bool = false;
 	type Message = lite::Tracks<'static>;
 	type Update = NoUpdate;
@@ -2078,7 +1946,7 @@ impl Request for SubscribeServe {
 	const KIND: &'static str = "subscribed";
 	// Ending a subscription early is still a valid end.
 	const GRACEFUL: bool = true;
-	const CHARGE: Option<Charge> = Some(Charge::Subscribe);
+	const SUBSCRIPTION: bool = true;
 	const HOLDS: bool = false;
 	type Message = lite::Subscribe<'static>;
 	type Update = lite::SubscribeUpdate;
@@ -2266,10 +2134,8 @@ type Objects = arrayvec::ArrayVec<frame::Object, 8>;
 
 impl Request for FetchServe {
 	const KIND: &'static str = "fetch";
-	const FETCH: bool = true;
 	// The response carries no header, so a run cut short would read as whole.
 	const GRACEFUL: bool = false;
-	const CHARGE: Option<Charge> = None;
 	const HOLDS: bool = false;
 	type Message = lite::Fetch<'static>;
 	type Update = NoUpdate;
@@ -7041,7 +6907,6 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
-			fetches: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 
@@ -7218,7 +7083,6 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
-			fetches: Default::default(),
 			estimate: estimate.weak(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
@@ -7519,7 +7383,6 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
-			fetches: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 
@@ -7649,7 +7512,6 @@ mod tests {
 						goaway,
 						peer_hop: None,
 						subscriptions: Default::default(),
-						fetches: Default::default(),
 						auth: crate::auth::Handle::new(false),
 						peer_grant: Default::default(),
 						client: false,
@@ -7747,7 +7609,6 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
-			fetches: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 
@@ -7863,7 +7724,6 @@ mod tests {
 			goaway,
 			peer_hop: None,
 			subscriptions: Default::default(),
-			fetches: Default::default(),
 			auth: crate::auth::Handle::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -7966,81 +7826,6 @@ mod tests {
 		);
 	}
 
-	/// A SUBSCRIBE or a TRACK past the session's cap closes the session with
-	/// TOO_MANY_REQUESTS.
-	#[moq_clock::test]
-	async fn requests_past_the_cap_close_the_session() {
-		use crate::coding::Encode as _;
-
-		const VERSION: Version = Version::Lite06;
-		let encode = |kind: lite::ControlType, msg: &dyn Fn(&mut Vec<u8>)| {
-			let mut script = Vec::new();
-			kind.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
-				.unwrap();
-			msg(&mut script);
-			script
-		};
-		let subscribe = encode(lite::ControlType::Subscribe, &|script| {
-			lite::Subscribe {
-				order: crate::track::Order::Descending,
-				epoch: None,
-				id: 0,
-				broadcast: crate::Path::new("room"),
-				track: "video".into(),
-				priority: 0,
-				max_delay: Duration::ZERO,
-				start_group: None,
-				end_group: None,
-				start_frame: 0,
-				end_frame: None,
-			}
-			.encode(&mut crate::coding::Encoder::new(script, VERSION.into()), VERSION)
-			.unwrap()
-		});
-		let track = encode(lite::ControlType::Track, &|script| {
-			lite::Track {
-				epoch: None,
-				broadcast: crate::Path::new("room"),
-				track: "video".into(),
-			}
-			.encode(&mut crate::coding::Encoder::new(script, VERSION.into()), VERSION)
-			.unwrap()
-		});
-
-		for script in [subscribe, track] {
-			let session =
-				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
-			let log = session.log.clone();
-
-			let origin = Hop::random().produce();
-			let (_, goaway) = crate::goaway::Handle::new(true);
-			let mut publisher = Publisher::new(PublisherConfig {
-				estimate: kio::Producer::default().weak(),
-				runtime: crate::time::sim(),
-				session: crate::driver::Transport::new(session.clone()),
-				origin: origin.consume(),
-				version: VERSION,
-				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
-				goaway,
-				peer_hop: None,
-				subscriptions: crate::session::Slots::new(0),
-				fetches: Default::default(),
-				auth: crate::auth::Handle::new(false),
-				peer_grant: Default::default(),
-				client: false,
-			});
-
-			let _ = publisher.poll(&kio::Waiter::noop());
-			assert_eq!(
-				log.closes(),
-				vec![(
-					crate::SessionError::TooManyRequests.to_code(),
-					"too many subscriptions".to_string()
-				)]
-			);
-		}
-	}
-
 	/// A FETCH whose own budget gives up on its group partway resets as too old: a FIN
 	/// would tell the requester the prefix it got is the whole group.
 	#[moq_clock::test]
@@ -8068,7 +7853,6 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
-			fetches: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 		let mut script = Vec::new();
@@ -8107,138 +7891,6 @@ mod tests {
 		}
 		assert!(drive(&mut serve).await, "the budget ends the response");
 		assert_eq!(session.log.resets(), vec![crate::StreamError::Old.to_code()]);
-	}
-
-	/// Shared model demand never shares admission slots between wire FETCH streams.
-	#[moq_clock::test]
-	async fn coalesced_fetches_each_hold_their_own_slot() {
-		const VERSION: Version = Version::Lite06;
-		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let track = broadcast
-			.create_track("video", track::Info::default().with_timescale(None))
-			.unwrap();
-		let groups = track.dynamic();
-		broadcast.announce(Default::default()).unwrap();
-		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
-		peer_setup.set(crate::lite::Setup::default());
-		let (_, goaway) = crate::goaway::Handle::new(true);
-		let session = ScriptedSession::new(Vec::new());
-		let log = session.log.clone();
-		let publisher = Publisher::new(PublisherConfig {
-			runtime: crate::time::sim(),
-			session: crate::driver::Transport::new(session),
-			origin: origin.consume(),
-			version: VERSION,
-			peer_setup,
-			goaway,
-			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
-			peer_grant: Default::default(),
-			client: false,
-			subscriptions: crate::session::Slots::new(0),
-			fetches: crate::session::Slots::new(2),
-			estimate: kio::Producer::default().weak(),
-		});
-		let mut script = Vec::new();
-		lite::Fetch {
-			epoch: None,
-			broadcast: crate::Path::new("room"),
-			track: "video".into(),
-			priority: 0,
-			max_delay: None,
-			group: 7,
-			start_frame: 0,
-			end_frame: None,
-		}
-		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
-		.unwrap();
-		let waiter = kio::Waiter::noop();
-		let mut held = Vec::new();
-		for count in 0..3 {
-			let mut session = ScriptedSession::new(script.clone());
-			let (send, recv) = futures::future::poll_fn(|cx| {
-				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
-			})
-			.await
-			.unwrap();
-			let stream = Stream::<Transport, Version> {
-				writer: Writer::new(crate::transport::boxed::SendStream::new(send), VERSION),
-				reader: crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), VERSION),
-			};
-			let mut request = RequestServe::<FetchServe>::new(publisher.shared.clone(), stream);
-			if count < 2 {
-				assert!(!drive(&mut request).await);
-				held.push(request);
-			} else {
-				assert!(matches!(
-					request.poll(&waiter),
-					Poll::Ready(Err(Error::TooManyRequests))
-				));
-			}
-		}
-		let _request = groups
-			.requested_group()
-			.now_or_never()
-			.expect("one shared fetch")
-			.unwrap();
-		assert!(
-			groups.requested_group().now_or_never().is_none(),
-			"same group coalesces in the model"
-		);
-		assert_eq!(
-			log.closes(),
-			vec![(
-				crate::SessionError::TooManyRequests.to_code(),
-				"too many fetches".to_owned()
-			)]
-		);
-		assert!(publisher.shared.fetches.acquire().is_err());
-		drop(held.pop());
-		assert!(
-			publisher.shared.fetches.acquire().is_ok(),
-			"drop returns exactly one incoming slot"
-		);
-	}
-
-	/// A TRACK held open and the SUBSCRIBE for the same track are one interest, whichever
-	/// arrives first, while another track costs a slot of its own.
-	#[test]
-	fn a_track_and_its_subscription_share_a_slot() {
-		let slots = crate::session::Slots::new(1);
-		let interests = Interests::new(slots.clone());
-		let room = crate::Path::new("room");
-
-		for (first, second) in [(Charge::Track, Charge::Subscribe), (Charge::Subscribe, Charge::Track)] {
-			let a = interests.charge(&room, "video", first).expect("the first fits");
-			let b = interests
-				.charge(&room, "video", second)
-				.expect("shares the first's slot");
-			assert!(matches!(
-				interests.charge(&room, "audio", Charge::Track),
-				Err(Error::TooManyRequests)
-			));
-			// Either leaving keeps the slot for the other.
-			drop(a);
-			assert!(slots.acquire().is_err(), "the remaining request lost its slot");
-			drop(b);
-			drop(slots.acquire().expect("the slot was not returned"));
-		}
-
-		// Each listing is its own interest, even one that will replace another.
-		let listing = interests.charge(&room, "", Charge::Tracks).expect("the listing fits");
-		assert!(matches!(
-			interests.charge(&room, "", Charge::Tracks),
-			Err(Error::TooManyRequests)
-		));
-		drop(listing);
-
-		// Two of a kind are two interests.
-		let _a = interests.charge(&room, "video", Charge::Subscribe).unwrap();
-		assert!(matches!(
-			interests.charge(&room, "video", Charge::Subscribe),
-			Err(Error::TooManyRequests)
-		));
 	}
 
 	#[moq_clock::test]
@@ -8564,7 +8216,6 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
-			fetches: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 		(publisher, log)

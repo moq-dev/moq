@@ -82,7 +82,7 @@
 //!   its final nonnegative delta. Unsupported transports contribute zero.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
 //!   announcements, or subscriptions, any one session under the label held
-//!   at once, to compare against its `crate::session::Limits`. A peak never
+//!   at once, to compare against what bounds them. A peak never
 //!   goes down; a rollup takes the largest rather than the sum.
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
@@ -147,7 +147,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::{AsPath, PathOwned, Pattern, Patterns, util::SendCell};
 
 mod outcomes;
-pub use outcomes::{Failure, Failures, Refusal, Refusals};
+pub use outcomes::{Failure, Failures, RefusalKind, Refusals};
 use outcomes::{FailureCounters, RefusalCounters};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
@@ -673,9 +673,9 @@ impl Traffic {
 }
 
 /// Request admissions and connected-session presence for a label on a tier, or their sum.
-/// The session counters are cumulative connects and disconnects. `sessions_started
-/// - sessions_ended` is the current live session count. The peaks show how close
-/// one session came to its `crate::session::Limits`.
+/// The session counters are cumulative connects and disconnects, so
+/// `sessions_started - sessions_ended` is the current live session count. The peaks
+/// show how close one session came to the bounds on what it holds.
 ///
 /// Like [`Traffic`], this is also the wire shape of one entry on a published
 /// sessions, presence, or totals track. Serialize writes both the canonical names and the legacy
@@ -1411,7 +1411,7 @@ pub struct Handle {
 
 impl Handle {
 	/// Count a session refused outside relay admission under its resolved label and tier.
-	pub fn refuse(&self, label: impl AsPath, reason: Refusal) {
+	pub fn refuse(&self, label: impl AsPath, reason: RefusalKind) {
 		if let Some(presence) = self.stats.session_counters(&self.tier, label) {
 			presence
 				.sessions_refused
@@ -1604,7 +1604,7 @@ pub struct Session {
 	inner: Option<SendCell<Arc<SessionInner>>>,
 }
 
-/// Which of a session's `crate::session::Limits` a [`Session::hold`] counts against.
+/// Which peak a [`Session::hold`] raises.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Cap {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -2242,7 +2242,7 @@ mod tests {
 	fn outcomes_survive_clones_tier_changes_and_pruning() {
 		let stats = test_stats();
 		let handle = stats.tier(Tier::new("gateway"));
-		handle.refuse("root", Refusal::Forbidden);
+		handle.refuse("root", RefusalKind::Forbidden);
 		let session = handle.session("root");
 		let clone = session.clone();
 		session.retag(Tier::new("next"), "root");
@@ -2272,7 +2272,7 @@ mod tests {
 		let after = stats.snapshot();
 		assert_eq!(before.sessions(), after.sessions(), "retirement keeps outcomes once");
 		let disabled = Registry::disabled();
-		disabled.tier(Tier::default()).refuse("root", Refusal::Refused);
+		disabled.tier(Tier::default()).refuse("root", RefusalKind::Refused);
 		disabled.tier(Tier::default()).session("root").fail(Failure::Expired);
 		assert!(disabled.snapshot().sessions().is_empty());
 	}

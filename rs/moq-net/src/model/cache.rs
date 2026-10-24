@@ -1,7 +1,9 @@
-//! A shared byte budget for cached groups, repaid by write-time eviction.
+//! A shared byte budget for cached groups and buffered datagrams, repaid by write-time eviction.
 //!
 //! Every group charges its cached bytes into a [`Pool`] through a crate-internal
-//! `Charge`, billed to its track's `Track` account. The pool itself never evicts: it is
+//! `Charge`, billed to its track's `Track` account. A track's datagram send buffer bills
+//! each datagram it holds the same way, both payload forms of a compressed one included,
+//! and pays debt by dropping its oldest once the groups' payment falls short. The pool itself never evicts: it is
 //! a handful of atomic counters. While the pool is over capacity, each track accrues
 //! eviction debt as it writes (`accrue`),
 //! sized proportionally to what it wrote, and pays that debt by aborting its own oldest
@@ -121,10 +123,10 @@ impl Config {
 
 /// A shared cache policy and byte budget; cloning shares both.
 ///
-/// The pool tracks how many payload bytes are cached across every registered group,
-/// plus the mean last-access time of the evictable ones. It never evicts on its own:
-/// tracks accrue eviction debt as they write and evict their own oldest groups to
-/// pay it. Idle expiration runs during [`Self::poll`]. The capacity is
+/// The pool tracks how many payload bytes are cached across every registered group and
+/// datagram buffer, plus the mean last-access time of the evictable groups. It never
+/// evicts on its own: tracks accrue eviction debt as they write and evict their own
+/// oldest groups and datagrams to pay it. Idle expiration runs during [`Self::poll`]. The capacity is
 /// therefore a target usage converges toward, not a hard limit: carried debt, capped
 /// payments, and the always-protected live edge all let usage transiently exceed it.
 #[derive(Clone)]
@@ -241,7 +243,7 @@ impl Pool {
 		}
 	}
 
-	/// Bytes currently cached across every registered group.
+	/// Bytes currently cached across every registered group and datagram buffer.
 	pub fn used(&self) -> u64 {
 		self.inner.used.load(Ordering::Relaxed)
 	}
@@ -901,6 +903,17 @@ impl Track {
 		})
 	}
 
+	/// Bill `bytes` of a buffered datagram, which accrue eviction debt like a group's frames.
+	pub(super) fn bill(self: &Arc<Self>, bytes: u64) -> Bill {
+		self.pool.add(bytes);
+		self.written.fetch_add(bytes, Ordering::Relaxed);
+		Bill {
+			track: self.clone(),
+			bytes,
+			at: self.pool.now(),
+		}
+	}
+
 	/// Take everything written since the last call, to be turned into eviction debt.
 	pub(super) fn take_written(&self) -> u64 {
 		self.written.swap(0, Ordering::Relaxed)
@@ -940,7 +953,7 @@ impl Track {
 		// its teardown on its own clone count rather than the state's.
 		let Some(state) = self.state.upgrade() else {
 			// An ended track's channel is closed, but a stale consumer can still hold its
-			// groups: the sweep expires them in place, or they would never go.
+			// groups and datagrams: the sweep expires them in place, or they would never go.
 			if full && scan_expiry {
 				self.state.read(|state| state.expire_closed(state.expiry_scan_drain()));
 			}
@@ -1011,7 +1024,8 @@ impl Drop for Track {
 	}
 }
 
-/// The bytes a held head of a failed group bills to its track's pool, released on drop.
+/// The bytes a held head of a failed group or a buffered datagram bills to its track's
+/// pool, released on drop.
 pub(super) struct Bill {
 	track: Arc<Track>,
 	bytes: u64,
@@ -1020,6 +1034,11 @@ pub(super) struct Bill {
 }
 
 impl Bill {
+	/// What it bills the pool.
+	pub(super) fn bytes(&self) -> u64 {
+		self.bytes
+	}
+
 	/// Whether the pool's idle window passed since it was billed.
 	pub(super) fn expired(&self) -> bool {
 		let pool = &self.track.pool;
