@@ -144,7 +144,7 @@ pub struct moq_audio_frame {
 /// An audio producer, shared so the Opus encode in `write` runs with the global
 /// lock released. See [`Shared`].
 pub(crate) struct AudioEncoder {
-	producer: moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>,
+	producer: moq_audio::encode::Producer,
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
 	finished: crate::publish::Finished,
 }

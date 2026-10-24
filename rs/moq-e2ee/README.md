@@ -1,18 +1,14 @@
-[![Documentation](https://docs.rs/moq-e2ee/badge.svg)](https://docs.rs/moq-e2ee/)
-[![Crates.io](https://img.shields.io/crates/v/moq-e2ee.svg)](https://crates.io/crates/moq-e2ee)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
 
 # moq-e2ee
+
+Workspace-only implementation; this crate is not published.
 
 End-to-end encryption for [Media over QUIC](https://moq.dev) groups, datagrams,
 and track names. Profile `moq-e2ee-00` from
 [draft-lcurley-moq-e2ee](https://datatracker.ietf.org/doc/draft-lcurley-moq-e2ee/).
 
 Relays forward ciphertext. Content keys never enter `moq-net`.
-
-```bash
-cargo add moq-e2ee
-```
 
 ## Shape
 

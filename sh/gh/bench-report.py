@@ -134,13 +134,6 @@ def measurement_unit(column):
 def javascript_file(path):
     entries, headers = [], None
     for line_number, line in enumerate(path.read_text().splitlines(), 1):
-        # The interests sweep reports dimensions and elapsed time in one line.
-        interests = re.fullmatch(r'broadcasts=(\d+) tracks=(\d+) acquire\+release=([\d.eE+-]+) us', line)
-        if interests:
-            broadcasts, tracks, elapsed = interests.groups()
-            entries.append({'name': f'js/{path.stem}/broadcasts={broadcasts}/tracks={tracks}/acquire+release',
-                            'unit': 'us', 'value': value(float(elapsed))})
-            continue
         row = [field.strip() for field in next(csv.reader([line]))]
         if len(row) > 1 and any(measurement_unit(field) for field in row):
             if len(set(row)) != len(row):

@@ -525,8 +525,8 @@ impl Consumer {
 	/// List the broadcast's tracks: each one with its info, then
 	/// [`TracksEvent::Synced`], then changes as they happen.
 	///
-	/// Lists the tracks the producer created and any a handler answers with through a
-	/// [`Lister`], such as a relay's copy listing its upstream's. A track served only on
+	/// Lists the tracks the producer created and any a session answers with, such as a
+	/// relay's copy listing its upstream's. A track served only on
 	/// request is never listed, and listing never requests one. Fails with
 	/// [`Error::Unroutable`] once the broadcast has ended.
 	pub fn tracks(&self) -> Result<Tracks, Error> {
@@ -564,7 +564,7 @@ impl Consumer {
 /// [`sync`](Self::synced) before reporting [`TracksEvent::Synced`]. Answer while [`poll_used`](Self::poll_used): list what the
 /// publisher behind the handler holds and keep it current, then [`clear`](Self::clear)
 /// once [`poll_unused`](Self::poll_unused). Dropping it clears what it listed.
-pub struct Lister {
+pub(crate) struct Lister {
 	state: kio::Shared<BroadcastState>,
 }
 

@@ -161,7 +161,7 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 ///
 /// Exports `Display`, which the bindings surface as the error's string form.
 /// Diagnostic payloads are named `reason`; structured protocol failures use `details`.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
 #[uniffi::export(Display)]
 #[non_exhaustive]
 pub enum MoqError {
@@ -391,7 +391,11 @@ impl From<moq_net::Error> for MoqError {
 				reason: "transport idle timeout".into(),
 			},
 			moq_net::Error::NotFound | moq_net::Error::NotFetchable => Self::NotFound,
-			moq_net::Error::Closed | moq_net::Error::GoingAway | moq_net::Error::SessionClosed => Self::Closed,
+			// A track whose own session closed aborts its open groups with this; a remote
+			// SESSION_CLOSED decodes as `Internal`, so only the local close lands here.
+			moq_net::Error::Closed
+			| moq_net::Error::GoingAway
+			| moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel)) => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
 			moq_net::Error::Unauthorized => Self::Unauthorized,
 			moq_net::Error::Expired => Self::Expired,
@@ -665,6 +669,19 @@ mod tests {
 			}
 			other => panic!("expected Protocol, got {other}"),
 		}
+	}
+
+	/// A group cut by its own session closing is a shutdown; one reset by a peer is not.
+	#[test]
+	fn local_session_close_is_closed() {
+		let local = moq_net::StreamError::Session(moq_net::SessionError::Cancel);
+		assert!(matches!(MoqError::from(moq_net::Error::from(local)), MoqError::Closed));
+
+		let received = moq_net::StreamError::from_code(0x3);
+		let MoqError::Protocol { details } = MoqError::from(moq_net::Error::from(received)) else {
+			panic!("a peer's SESSION_CLOSED lost its code");
+		};
+		assert_eq!(details.kind, MoqProtocolKind::SessionClosed);
 	}
 
 	#[test]

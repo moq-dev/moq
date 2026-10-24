@@ -996,7 +996,7 @@ struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
 	/// Why a chunk was refused, if one was.
 	refused: Option<crate::Error>,
 }
@@ -1009,7 +1009,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 
-	let before = std::time::SystemTime::now();
+	let before = moq_clock::wall();
 	let mut refused = None;
 	for piece in data.chunks(chunk) {
 		if let Err(err) = mkv.decode(piece) {
@@ -1017,7 +1017,7 @@ async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
 			break;
 		}
 	}
-	let after = std::time::SystemTime::now();
+	let after = moq_clock::wall();
 	mkv.finish().unwrap();
 
 	let snapshot = catalog.snapshot();

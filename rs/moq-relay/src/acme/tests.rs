@@ -18,6 +18,7 @@ use axum::{
 	response::{IntoResponse, Response},
 	routing::{get, post},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::*;
@@ -124,6 +125,7 @@ impl Directory {
 		self.state.issued.borrow().clone()
 	}
 
+	#[cfg(all(target_os = "linux", feature = "_quic"))]
 	async fn wait_issued(&self, count: usize) -> Vec<CertificateDer<'static>> {
 		let mut issued = self.state.issued.subscribe();
 		tokio::time::timeout(TIMEOUT, issued.wait_for(|issued| issued.len() >= count))
@@ -365,7 +367,7 @@ fn relay_config(directory: &Url, dir: &Path, domains: &[&str]) -> RelayConfig {
 	config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config.acme.domains = domains.iter().map(|domain| domain.to_string()).collect();
-	config.acme.dir = Some(dir.to_path_buf());
+	config.acme.cache = Some(dir.to_path_buf());
 	config.acme.directory = Some(directory.clone());
 	config
 }
@@ -424,6 +426,7 @@ impl Running {
 	}
 
 	/// Wait for HTTPS to serve `leaf`, which deploys just after the directory hands it out.
+	#[cfg(all(target_os = "linux", feature = "_quic"))]
 	async fn wait_served(&self, directory: &Directory, leaf: &CertificateDer<'static>) {
 		tokio::time::timeout(TIMEOUT, async {
 			while self.served(directory, DOMAIN).await != *leaf {
@@ -715,7 +718,7 @@ fn config_refuses_what_acme_cannot_serve() {
 		let mut config = RelayConfig::default();
 		config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
 		config.acme.domains = vec![DOMAIN.into()];
-		config.acme.dir = Some(dir.path().to_path_buf());
+		config.acme.cache = Some(dir.path().to_path_buf());
 		config
 	};
 	let init = |config: RelayConfig| {
@@ -738,7 +741,7 @@ fn config_refuses_what_acme_cannot_serve() {
 			config.web.https.cert = vec!["cert.pem".into()]
 		}),
 		("wildcard", |config| config.acme.domains = vec!["*.relay.test".into()]),
-		("acme.dir", |config| config.acme.dir = None),
+		("acme.cache", |config| config.acme.cache = None),
 		("require acme.domains", |config| config.acme.domains.clear()),
 	];
 	for (expected, mutate) in cases {

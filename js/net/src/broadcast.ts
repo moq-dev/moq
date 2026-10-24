@@ -259,7 +259,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 }
 
 // The newest frame cached for `name`, without subscribing: undefined when nobody serves it yet.
-function largest(state: BroadcastState, name: string): track.Location | undefined {
+function largest(state: BroadcastState, name: string): track.Position | undefined {
 	const producer = lookup(state, name);
 	return producer && hooks.cachedLargest(producer);
 }
@@ -325,7 +325,11 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
 
 let makeDemand: (state: BroadcastState) => Demand;
 
-/** A watch-only view of demand for any track in a broadcast. */
+/**
+ * A watch-only view of demand for any track in a broadcast.
+ *
+ * @internal Tests only; nothing outside the package consumes it.
+ */
 export class Demand {
 	#state: BroadcastState;
 	private constructor(state: BroadcastState) {
@@ -406,7 +410,11 @@ export class Producer {
 		return this.#state.closed;
 	}
 
-	/** Watch demand for the broadcast's tracks. */
+	/**
+	 * Watch demand for the broadcast's tracks.
+	 *
+	 * @internal Tests only; nothing outside the package consumes it.
+	 */
 	demand(): Demand {
 		return this.#demand;
 	}

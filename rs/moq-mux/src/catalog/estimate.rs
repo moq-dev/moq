@@ -1,5 +1,3 @@
-use moq_clock::Instant;
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -28,7 +26,6 @@ const FRAMERATES: [f64; 11] = [
 /// How far a measurement may sit from the rate it snaps to: half the 0.1% gap between an NTSC
 /// rate and its integer neighbour, so no measurement is ambiguous between them.
 const FRAMERATE_TOLERANCE: f64 = 0.0005;
-const JITTER_WINDOW: Duration = Duration::from_secs(10);
 
 /// The catalog fields an [`Estimator`] can measure from the frames fed to it.
 ///
@@ -38,11 +35,11 @@ const JITTER_WINDOW: Duration = Duration::from_secs(10);
 #[derive(Clone, Default, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Estimate {
-	/// The maximum delay between a frame being ready and the publisher flushing it.
+	/// The largest batch span or reorder delay written.
 	pub jitter: Option<Duration>,
 	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// The most this track's minimum flush lateness has trailed the broadcast's earliest track.
+	/// The most a frame's timestamp has trailed one already written by another track.
 	pub delay: Option<Duration>,
 	/// The maximum frame rate in frames per second, when it is a standard one.
 	pub framerate: Option<f64>,
@@ -61,7 +58,7 @@ impl Estimate {
 		self
 	}
 
-	/// Set the delay behind the broadcast's earliest track (or clear it with `None`).
+	/// Set the delay behind the other tracks (or clear it with `None`).
 	pub fn with_delay(mut self, delay: impl Into<Option<Duration>>) -> Self {
 		self.delay = delay.into();
 		self
@@ -74,11 +71,11 @@ impl Estimate {
 	}
 }
 
-/// Measures the catalog jitter, bitrate, and framerate of one track from the frames written to it.
+/// Measures the catalog jitter, bitrate, delay, and framerate of one track from the frames written
+/// to it, without reading a clock.
 ///
 /// A [`container::Producer`](crate::container::Producer) created through the catalog owns one,
-/// feeds it as you write, and publishes the result automatically. Local encoders also call
-/// `flush` for each frame they hand to the transport:
+/// feeds it as you write, and publishes the result automatically:
 ///
 /// ```no_run
 /// # fn example<E: moq_mux::catalog::hang::CatalogExt>(
@@ -110,18 +107,17 @@ impl Estimate {
 /// let estimate = estimator.estimate();
 /// ```
 ///
+/// A standalone estimator has no other tracks to order against, so it never measures a delay.
+///
 /// Move-only (not `Clone`): it owns the running measurement for exactly one track.
 #[derive(Default)]
 pub struct Estimator {
 	jitter: Jitter,
 	bitrate: Bitrate,
 	framerate: Framerate,
-	/// This track's recent minimum flush lateness.
-	baseline: Window,
-	/// The recent minimum across every track sharing it. A standalone estimator's is its own, so
-	/// it never measures a delay.
-	broadcast: Baseline,
-	/// The largest amount [`baseline`](Self::baseline) has trailed [`broadcast`](Self::broadcast).
+	/// This track's place in the write order of every track sharing it.
+	seat: Seat,
+	/// The most a written timestamp has trailed the highest one another track had written.
 	delay: Duration,
 }
 
@@ -131,10 +127,10 @@ impl Estimator {
 		Self::default()
 	}
 
-	/// Measure `delay` against the tracks sharing `broadcast`.
-	pub(crate) fn with_broadcast(broadcast: Baseline) -> Self {
+	/// Measure `delay` against the other tracks sharing `order`.
+	pub(crate) fn with_order(order: Order) -> Self {
 		Self {
-			broadcast,
+			seat: order.seat(),
 			..Self::default()
 		}
 	}
@@ -142,20 +138,24 @@ impl Estimator {
 	/// Observe a frame of `bytes` encoded bytes at presentation time `timestamp`, as written by
 	/// [`container::Producer::write`](crate::container::Producer::write).
 	pub fn write(&mut self, timestamp: Timestamp, bytes: usize) {
+		self.rate(timestamp, bytes);
+		self.order(timestamp);
+	}
+
+	/// Count a write toward the bitrate and framerate only.
+	pub(crate) fn rate(&mut self, timestamp: Timestamp, bytes: usize) {
 		let timestamp = nanos(timestamp);
 		self.bitrate.write(timestamp, bytes);
 		self.framerate.write(timestamp);
 	}
 
-	/// Measure when an encoder handed a frame to the transport. Only locally encoded frames should
-	/// call this; imports keep clock-free batch and reorder estimates. Jitter is the spread above
-	/// this track's own recent minimum lateness, so a constant encoder delay is not jitter. Delay
-	/// is how far that minimum trails the earliest track on the same catalog.
-	pub fn flush(&mut self, timestamp: Timestamp, now: Instant) {
-		let (lateness, earliest) = self.broadcast.observe(timestamp, now);
-		let minimum = self.baseline.observe(now, lateness);
-		self.jitter.max = self.jitter.max.max(nanos_between(minimum, lateness));
-		self.delay = self.delay.max(nanos_between(earliest, minimum));
+	/// Place a frame stamped `timestamp` in the write order. Its delay is how far it trails the
+	/// highest timestamp another track has already written: a frame the transport carries after
+	/// later media from another track has to be waited for by a consumer playing both.
+	pub(crate) fn order(&mut self, timestamp: Timestamp) {
+		if let Some(behind) = self.seat.write(nanos(timestamp)) {
+			self.delay = self.delay.max(behind);
+		}
 	}
 
 	/// Close the current span at `end`, as [`container::Producer::cut`](crate::container::Producer::cut)
@@ -169,16 +169,13 @@ impl Estimator {
 		self.framerate.cut();
 	}
 
-	/// Discard the open bitrate span and the flush baselines, so nothing is measured across a break
-	/// in the timeline. See [`container::Producer::discontinuity`](crate::container::Producer::discontinuity).
-	///
-	/// The broadcast baseline is cleared too: a pause usually stops every track, and the others'
-	/// pre-pause minimum would otherwise read as a delay until it left the window.
+	/// Discard the open bitrate span and this track's place in the write order, so nothing is
+	/// measured across a break in the timeline. See
+	/// [`container::Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) {
 		self.bitrate.discontinuity();
 		self.framerate.discontinuity();
-		self.baseline = Window::default();
-		self.broadcast.discontinuity();
+		self.seat.discontinuity();
 	}
 
 	/// Observe a frame's reorder delay (`PTS - DTS`), which raises the jitter to the decode buffer a
@@ -375,7 +372,7 @@ fn bits_per_second(bytes: u64, duration: Duration) -> u64 {
 	bits_per_second.min(u64::MAX as u128) as u64
 }
 
-/// The largest measured flush delay, batch span, or reorder delay. Once advertised it never falls.
+/// The largest batch span or reorder delay. Once advertised it never falls.
 #[derive(Default)]
 struct Jitter {
 	max: Duration,
@@ -387,72 +384,144 @@ impl Jitter {
 	}
 }
 
-/// The flush clock shared by every track on one catalog: a common epoch, so lateness compares
-/// across tracks, and the minimum lateness any of them flushed with over the recent window.
+/// The highest timestamp each track on one catalog has written, which every frame's `delay` is
+/// measured against.
 ///
-/// An `Instant` has no public mapping to the broadcast's media epoch. The first observation
-/// chooses a local origin; its unknown offset cancels when subtracting one minimum from another.
+/// A frame is compared with the other tracks only: its own track's earlier frames say nothing
+/// about the interleave, and a B-frame trailing its own reference picture is already reorder
+/// jitter.
 #[derive(Clone, Default)]
-pub(crate) struct Baseline(Arc<Mutex<Shared>>);
+pub(crate) struct Order(Arc<Mutex<Highs>>);
 
-#[derive(Default)]
-struct Shared {
-	epoch: Option<Instant>,
-	window: Window,
+impl Order {
+	/// Take a place in the order for a new track.
+	fn seat(&self) -> Seat {
+		let index = self.0.lock().unwrap_or_else(PoisonError::into_inner).join();
+		Seat {
+			order: self.clone(),
+			index,
+		}
+	}
 }
 
-impl Baseline {
-	/// Return the frame's lateness on the shared epoch and the broadcast's minimum including it.
-	fn observe(&self, timestamp: Timestamp, now: Instant) -> (i128, i128) {
-		let mut shared = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-		let epoch = *shared.epoch.get_or_insert(now);
-		let elapsed = match now.checked_duration_since(epoch) {
-			Some(duration) => duration.as_nanos() as i128,
-			None => -(epoch.duration_since(now).as_nanos() as i128),
+/// Every seated track's highest timestamp, plus the two largest, so a write is constant time
+/// however many tracks share the catalog.
+#[derive(Default)]
+struct Highs {
+	/// Indexed by seat; `None` is a free seat, `Some(None)` a track that has written nothing since
+	/// it joined or broke its timeline.
+	seats: Vec<Option<Option<u128>>>,
+	/// The largest high and its seat.
+	first: Option<(usize, u128)>,
+	/// The largest high on any other seat.
+	second: Option<(usize, u128)>,
+}
+
+impl Highs {
+	fn join(&mut self) -> usize {
+		if let Some(index) = self.seats.iter().position(Option::is_none) {
+			self.seats[index] = Some(None);
+			return index;
+		}
+		self.seats.push(Some(None));
+		self.seats.len() - 1
+	}
+
+	/// Raise `index`'s high to `timestamp` and return how far `timestamp` trails the others' highest.
+	fn write(&mut self, index: usize, timestamp: u128) -> Option<Duration> {
+		let others = match self.first {
+			Some((first, _)) if first == index => self.second,
+			first => first,
 		};
-		let lateness = elapsed - timestamp.as_nanos() as i128;
-		(lateness, shared.window.observe(now, lateness))
+
+		let high = self.seats[index]
+			.as_mut()
+			.expect("a seated track")
+			.get_or_insert(timestamp);
+		*high = (*high).max(timestamp);
+		let high = *high;
+
+		// Highs only rise, so the top two stay ordered by updating them in place.
+		match (self.first, self.second) {
+			(Some((first, _)), _) if first == index => self.first = Some((index, high)),
+			(Some((_, top)), _) if high > top => {
+				self.second = self.first;
+				self.first = Some((index, high));
+			}
+			(None, _) => self.first = Some((index, high)),
+			(_, Some((second, low))) if second == index || high > low => self.second = Some((index, high)),
+			(_, None) => self.second = Some((index, high)),
+			_ => {}
+		}
+
+		let (_, others) = others?;
+		elapsed(timestamp, others)
 	}
 
-	fn discontinuity(&self) {
-		self.0.lock().unwrap_or_else(PoisonError::into_inner).window = Window::default();
-	}
-}
-
-/// The minimum lateness over the last [`JITTER_WINDOW`], so a media clock drifting against the
-/// wall clock does not ratchet forever. A monotonic deque makes insertion and expiry amortized
-/// O(1).
-#[derive(Default)]
-struct Window {
-	samples: VecDeque<Sample>,
-}
-
-struct Sample {
-	at: Instant,
-	lateness: i128,
-}
-
-impl Window {
-	/// Insert a lateness observed at `now` and return the window's minimum.
-	fn observe(&mut self, now: Instant, lateness: i128) -> i128 {
-		while self
-			.samples
-			.front()
-			.is_some_and(|sample| now.saturating_duration_since(sample.at) > JITTER_WINDOW)
+	/// Forget `index`'s high, freeing its seat when `leave` is set.
+	fn clear(&mut self, index: usize, leave: bool) {
+		self.seats[index] = if leave { None } else { Some(None) };
+		if [self.first, self.second]
+			.iter()
+			.flatten()
+			.any(|(seat, _)| *seat == index)
 		{
-			self.samples.pop_front();
+			self.rank();
 		}
-		while self.samples.back().is_some_and(|sample| sample.lateness >= lateness) {
-			self.samples.pop_back();
+	}
+
+	/// Recompute the top two from every seat.
+	fn rank(&mut self) {
+		self.first = None;
+		self.second = None;
+		for (index, seat) in self.seats.iter().enumerate() {
+			let Some(high) = seat.flatten() else { continue };
+			match self.first {
+				Some((_, top)) if high <= top => {
+					if self.second.is_none_or(|(_, low)| high > low) {
+						self.second = Some((index, high));
+					}
+				}
+				first => {
+					self.second = first;
+					self.first = Some((index, high));
+				}
+			}
 		}
-		self.samples.push_back(Sample { at: now, lateness });
-		self.samples.front().expect("the current sample was inserted").lateness
 	}
 }
 
-/// `to - from` as a duration, clamped at zero.
-fn nanos_between(from: i128, to: i128) -> Duration {
-	Duration::from_nanos(u64::try_from(to - from).unwrap_or(if to > from { u64::MAX } else { 0 }))
+/// One track's place in an [`Order`], released when the track's estimator drops.
+struct Seat {
+	order: Order,
+	index: usize,
+}
+
+impl Default for Seat {
+	fn default() -> Self {
+		Order::default().seat()
+	}
+}
+
+impl Seat {
+	fn write(&self, timestamp: u128) -> Option<Duration> {
+		self.lock().write(self.index, timestamp)
+	}
+
+	/// A break in the timeline may resume anywhere, so the old high must not hold others back.
+	fn discontinuity(&self) {
+		self.lock().clear(self.index, false);
+	}
+
+	fn lock(&self) -> std::sync::MutexGuard<'_, Highs> {
+		self.order.0.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+}
+
+impl Drop for Seat {
+	fn drop(&mut self) {
+		self.lock().clear(self.index, true);
+	}
 }
 
 #[cfg(test)]
@@ -474,130 +543,122 @@ mod tests {
 		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(80)));
 	}
 
-	#[test]
-	fn batch_flush_at_its_end_reports_its_media_span() {
-		let mut estimator = Estimator::new();
-		let anchor = moq_clock::now();
-		estimator.flush(micros(0), anchor);
-		estimator.flush(micros(0), anchor + Duration::from_millis(120));
-		estimator.flush(micros(40_000), anchor + Duration::from_millis(120));
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(120)));
+	/// Estimators sharing one order, as the tracks of one catalog do.
+	fn tracks<const N: usize>() -> [Estimator; N] {
+		let order = Order::default();
+		std::array::from_fn(|_| Estimator::with_order(order.clone()))
 	}
 
-	#[test]
-	fn constant_encoder_delay_is_not_jitter() {
-		let mut estimator = Estimator::new();
-		let anchor = moq_clock::now();
-		estimator.flush(micros(0), anchor + Duration::from_millis(200));
-		estimator.flush(micros(240_000), anchor + Duration::from_millis(440));
-		assert_eq!(estimator.estimate().jitter, None);
+	fn ms(value: u64) -> Duration {
+		Duration::from_millis(value)
 	}
 
+	/// Video at 20 ms and audio at 15 ms, written `v0 v20 a0 a15 v40 a30 v60 a45 a60`: audio's
+	/// first frame lands after video has already written 20 ms ahead of it.
 	#[test]
-	fn discontinuity_resets_the_flush_baseline() {
-		let mut estimator = Estimator::new();
-		let anchor = moq_clock::now();
-		estimator.flush(micros(0), anchor);
-		estimator.flush(micros(40_000), anchor + Duration::from_millis(50));
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(10)));
-
-		// Resumed at the previous live edge after a 2 s pause: the pause is not jitter.
-		estimator.discontinuity();
-		estimator.flush(micros(40_000), anchor + Duration::from_millis(2_050));
-		estimator.flush(micros(80_000), anchor + Duration::from_millis(2_090));
-		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(10)));
-	}
-
-	#[test]
-	fn baseline_expires_drift() {
-		let mut estimator = Estimator::new();
-		let anchor = moq_clock::now();
-		for second in 0..100u64 {
-			estimator.flush(
-				micros(second * 1_000_000),
-				anchor + Duration::from_millis(second * 1_001),
-			);
+	fn interleave_measures_the_worst_trail() {
+		let [mut video, mut audio] = tracks();
+		for (video_frame, pts) in [
+			(true, 0),
+			(true, 20),
+			(false, 0),
+			(false, 15),
+			(true, 40),
+			(false, 30),
+			(true, 60),
+			(false, 45),
+			(false, 60),
+		] {
+			let track = if video_frame { &mut video } else { &mut audio };
+			track.write(micros(pts * 1_000), 1);
 		}
-		let jitter = estimator.estimate().jitter.unwrap();
-		assert!(jitter <= Duration::from_millis(10), "{jitter:?}");
+		assert_eq!(audio.estimate().delay, Some(ms(20)));
+		assert_eq!(video.estimate().delay, None);
 	}
 
 	#[test]
-	fn early_flush_keeps_lowering_the_baseline() {
-		let mut estimator = Estimator::new();
-		let anchor = moq_clock::now();
-		for second in 0..100u64 {
-			estimator.flush(micros(second * 2_000_000), anchor + Duration::from_secs(second));
+	fn a_lone_track_never_measures_a_delay() {
+		let [mut video] = tracks();
+		// Decode order with B-frames: each trails a reference picture written before it.
+		for pts in [0, 120_000, 40_000, 80_000] {
+			video.write(micros(pts), 1);
 		}
-		assert_eq!(estimator.estimate(), Estimate::default());
+		assert_eq!(video.estimate(), Estimate::default());
 	}
 
-	/// Two tracks on one broadcast baseline, flushed every 100 ms for `seconds` with the lateness
-	/// each closure returns (in ms) at a given frame's media time.
-	fn pair(seconds: u64, fast: impl Fn(u64) -> u64, slow: impl Fn(u64) -> u64) -> (Estimate, Estimate) {
-		let broadcast = Baseline::default();
-		let mut estimators = [
-			Estimator::with_broadcast(broadcast.clone()),
-			Estimator::with_broadcast(broadcast),
-		];
-		let anchor = moq_clock::now();
-		for frame in 0..seconds * 10 {
-			let pts = frame * 100;
-			for (estimator, lateness) in estimators.iter_mut().zip([fast(pts), slow(pts)]) {
-				estimator.flush(micros(pts * 1_000), anchor + Duration::from_millis(pts + lateness));
+	/// A B-frame trailing its own track is reorder jitter, not a delay behind the other tracks.
+	#[test]
+	fn reorder_within_a_track_is_not_delay() {
+		let [mut video, mut audio] = tracks();
+		audio.write(micros(0), 1);
+		for pts in [0, 120_000, 40_000, 80_000] {
+			video.write(micros(pts), 1);
+		}
+		assert_eq!(video.estimate().delay, None);
+	}
+
+	/// A track that breaks its timeline may resume behind where it was, so its old high no longer
+	/// holds the others back.
+	#[test]
+	fn a_discontinuity_drops_the_tracks_high() {
+		let [mut ahead, mut steady] = tracks();
+		ahead.write(micros(10_000_000), 1);
+		ahead.discontinuity();
+		ahead.write(micros(1_000_000), 1);
+		steady.write(micros(1_000_000), 1);
+		assert_eq!(steady.estimate().delay, None);
+	}
+
+	#[test]
+	fn a_dropped_track_stops_holding_others_back() {
+		let order = Order::default();
+		let mut ahead = Estimator::with_order(order.clone());
+		ahead.write(micros(10_000_000), 1);
+		drop(ahead);
+
+		let mut steady = Estimator::with_order(order.clone());
+		let mut other = Estimator::with_order(order);
+		other.write(micros(1_000_000), 1);
+		steady.write(micros(1_000_000), 1);
+		assert_eq!(steady.estimate().delay, None);
+	}
+
+	/// The top two kept incrementally agree with a scan over every seat, through joins, leaves,
+	/// and breaks.
+	#[test]
+	fn highs_match_a_full_scan() {
+		let mut highs = Highs::default();
+		let mut live: Vec<usize> = Vec::new();
+		let mut state = 0x9e37_79b9_7f4a_7c15u64;
+		let mut next = |bound: u64| {
+			state ^= state << 13;
+			state ^= state >> 7;
+			state ^= state << 17;
+			state % bound
+		};
+
+		for step in 0..10_000u64 {
+			match next(10) {
+				0 if live.len() < 6 => live.push(highs.join()),
+				1 if !live.is_empty() => {
+					let index = live.swap_remove(next(live.len() as u64) as usize);
+					highs.clear(index, true);
+				}
+				2 if !live.is_empty() => highs.clear(live[next(live.len() as u64) as usize], false),
+				_ if !live.is_empty() => {
+					let index = live[next(live.len() as u64) as usize];
+					let timestamp = (step + next(500)) as u128;
+					let others = live
+						.iter()
+						.filter(|seat| **seat != index)
+						.filter_map(|seat| highs.seats[*seat].flatten())
+						.max();
+					let expected = others.and_then(|others| elapsed(timestamp, others));
+					assert_eq!(highs.write(index, timestamp), expected, "step {step}");
+				}
+				_ => live.push(highs.join()),
 			}
 		}
-		let [fast, slow] = estimators.map(|estimator| estimator.estimate());
-		(fast, slow)
-	}
-
-	#[test]
-	fn a_constant_offset_is_delay_on_the_slower_track() {
-		let (fast, slow) = pair(5, |_| 0, |_| 200);
-		assert_eq!(fast, Estimate::default());
-		assert_eq!(slow, Estimate::default().with_delay(Duration::from_millis(200)));
-	}
-
-	#[test]
-	fn a_common_drift_stays_bounded() {
-		// Both media clocks run 0.1% slow for 100 s, so each lateness climbs 100 ms together.
-		let (fast, slow) = pair(100, |pts| pts / 1_000, |pts| 200 + pts / 1_000);
-		assert_eq!(fast.delay, None);
-		assert_eq!(slow.delay, Some(Duration::from_millis(200)));
-		for jitter in [fast.jitter, slow.jitter] {
-			assert!(jitter.unwrap() <= Duration::from_millis(10), "{jitter:?}");
-		}
-	}
-
-	/// The earliest track starts at 0 and the other at 200 ms, then the first drifts to 500 ms. The
-	/// delays no longer share an origin, but the drifting track's own `delay` covers the new offset,
-	/// so the largest `delay + jitter` never falls below the real spread.
-	#[test]
-	fn the_earliest_track_changing_does_not_under_buffer() {
-		let drift = |pts: u64| pts.saturating_sub(10_000).min(50_000) / 100;
-		let (drifted, steady) = pair(80, drift, |_| 200);
-		assert_eq!(steady.delay, Some(Duration::from_millis(200)));
-		assert_eq!(drifted.delay, Some(Duration::from_millis(300)));
-	}
-
-	#[test]
-	fn a_discontinuity_clears_the_broadcast_baseline() {
-		let broadcast = Baseline::default();
-		let mut audio = Estimator::with_broadcast(broadcast.clone());
-		let mut video = Estimator::with_broadcast(broadcast);
-		let anchor = moq_clock::now();
-		audio.flush(micros(0), anchor);
-		video.flush(micros(0), anchor + Duration::from_millis(50));
-		assert_eq!(video.estimate().delay, Some(Duration::from_millis(50)));
-
-		// Both resume at the previous live edge after a 2 s pause: the pause is not a delay.
-		audio.discontinuity();
-		video.discontinuity();
-		video.flush(micros(40_000), anchor + Duration::from_millis(2_090));
-		audio.flush(micros(40_000), anchor + Duration::from_millis(2_040));
-		video.flush(micros(80_000), anchor + Duration::from_millis(2_130));
-		assert_eq!(video.estimate().delay, Some(Duration::from_millis(50)));
-		assert_eq!(audio.estimate().delay, None);
 	}
 
 	#[test]

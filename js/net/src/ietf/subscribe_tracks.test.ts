@@ -20,7 +20,7 @@ import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const drafts = [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21, Version.DRAFT_22];
 
-function fixture(version: IetfVersion, subscriptions = 10, grant = new Signal<Grant | undefined>(undefined)) {
+function fixture(version: IetfVersion, requests = 10, grant = new Signal<Grant | undefined>(undefined)) {
 	const pair = createMockTransportPair(ALPN.DRAFT_22);
 	const origin = new Origin();
 	const session = new NativeSession(pair.server, version, false);
@@ -30,7 +30,7 @@ function fixture(version: IetfVersion, subscriptions = 10, grant = new Signal<Gr
 		publish: origin.consume(),
 		requiresSolicitation: true,
 		grant,
-		limits: { announces: 10, subscriptions, fetches: 10 },
+		limits: { announces: 10, requests },
 	});
 	const tasks: Promise<void>[] = [];
 	const streams: Stream[] = [];
@@ -399,6 +399,19 @@ test("PUBLISH carries listing defaults and honors INCLUDE_PROPERTIES", async () 
 	expect(publish.parameters?.subscriberPriority).toBe(42);
 	expect(publish.parameters?.groupOrder).toBe(1);
 	expect(publish.parameters?.subscriptionFilter).toEqual({ kind: "relative", groups: 2n });
+});
+
+// An omitted SUBSCRIBER_PRIORITY is the drafts' 128, so the PUBLISH restates 128, not the unset 127.
+test("PUBLISH restates an omitted listing priority as 128", async () => {
+	const version = Version.DRAFT_22;
+	const fx = fixture(version);
+	const listing = await fx.list("room", false, new Parameters());
+	await ok(listing, version);
+	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
+	broadcast.announce();
+	broadcast.createTrack("later");
+	const { publish } = await fx.offered();
+	expect(publish.parameters?.subscriberPriority).toBe(128);
 });
 
 test("an update ends only its listing and frees its prefix", async () => {

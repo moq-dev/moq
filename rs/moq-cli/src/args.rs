@@ -6,7 +6,7 @@
 //! `moq <MoQ side> fetch <track>` to read one group.
 //!
 //! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
-//!   and `--cluster-connect` / `--cluster-connect-api`; all optional, at least
+//!   and `--cluster-connect` / `--cluster-api-url`; all optional, at least
 //!   one) attaches the shared Origin to the MoQ network, and comes before the
 //!   first stage. They compose: dial a relay, accept incoming sessions, mesh
 //!   with the LAN, and join a cluster all at once.
@@ -318,6 +318,12 @@ impl Invocation {
 			{
 				anyhow::bail!("--report names a track in the catalog the import builds, but {reason}");
 			}
+			if let Command::Import(import) = command
+				&& import.linger.is_some()
+				&& let Some(reason) = import.source.linger_refusal()
+			{
+				anyhow::bail!("--linger keeps a cleanly ended broadcast up, but {reason}");
+			}
 			let Command::Export(export) = command else {
 				continue;
 			};
@@ -537,9 +543,9 @@ impl MoqSide {
 	}
 
 	/// Whether a WAN cluster dial is configured (`--cluster-connect` or
-	/// `--cluster-connect-api`).
+	/// `--cluster-api-url`).
 	fn cluster_dials(&self) -> bool {
-		!self.cluster.connect.is_empty() || self.cluster.connect_api.is_some()
+		!self.cluster.connect.is_empty() || self.cluster.api.url.is_some()
 	}
 
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
@@ -557,7 +563,7 @@ impl MoqSide {
 			!(self.client.url.is_some()
 				&& self.cluster_dials()
 				&& self.client.bind.is_some_and(|bind| bind.port() != 0)),
-			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-connect-api, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
+			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-api-url, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
 		);
 		#[cfg(feature = "cluster-lan")]
 		{
@@ -745,10 +751,19 @@ pub struct Import {
 	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
 	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
-	/// which is retained unconditionally. A stdin import also stays up this long after EOF, so
-	/// a subscriber still catching up can drain the finished broadcast.
+	/// which is retained unconditionally.
 	#[usage(long)]
 	pub max_age: Option<moq_tokio::cli::Duration>,
+
+	/// How long a cleanly ended broadcast stays up, counted from its end, e.g. "30s"; "0s"
+	/// closes it at once. Defaults to 30s.
+	///
+	/// Subscribers already reading get the tail either way; this serves one that arrives after
+	/// the end, such as a player that read the final catalog late. A clean end is stdin EOF, an
+	/// RTMP unpublish or completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS
+	/// playlist's `EXT-X-ENDLIST`. A failure, and Ctrl-C, close the broadcast at once.
+	#[usage(long)]
+	pub linger: Option<moq_tokio::cli::Duration>,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
@@ -841,6 +856,28 @@ impl ImportSource {
 			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
 		}
 	}
+
+	/// Why `--linger` can't apply to this source, or `None` when it can: only a source with a
+	/// clean end has a finished broadcast to keep up.
+	fn linger_refusal(&self) -> Option<&'static str> {
+		match self {
+			// Every run is followed by a redial publishing the next one, so a run's end is not
+			// the end of the content, and its finished catalog would tell readers to stop.
+			Self::Rtsp(_) => Some("`import rtsp` redials after every session, so a run's end is not the content's"),
+			Self::Rtc(rtc) if rtc.connect.is_some() => Some("a WHEP pull has no clean end"),
+			Self::Archive(_) => Some("`import archive` serves its recording until stopped"),
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => Some("`import capture` has no clean end"),
+			Self::Avc3
+			| Self::Fmp4(_)
+			| Self::Ts(_)
+			| Self::Flv
+			| Self::Hls(_)
+			| Self::Rtmp(_)
+			| Self::Srt(_)
+			| Self::Rtc(_) => None,
+		}
+	}
 }
 
 /// The fMP4 stdin container: whether to unwrap its fragments.
@@ -849,7 +886,7 @@ impl ImportSource {
 pub struct Fmp4Import {
 	/// Publish each fragment whole as CMAF instead of splitting it into one frame per sample.
 	/// Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
-	#[usage(long)]
+	#[usage(long = "cmaf")]
 	pub passthrough: bool,
 }
 
@@ -977,8 +1014,8 @@ impl Export {
 			ExportSink::Ts(args) => found.extend(args.deprecated()),
 			ExportSink::Flv(args) => found.extend(args.deprecated()),
 			ExportSink::H264(args) | ExportSink::H265(args) => found.extend(args.deprecated()),
-			ExportSink::Hls(hls) => found.extend(hls.tls.deprecated()),
 			ExportSink::Rtmp(rtmp) => found.extend(rtmp.deprecated()),
+			ExportSink::Hls(hls) => found.extend(hls.tls.deprecated()),
 			_ => {}
 		}
 		found
@@ -1156,9 +1193,6 @@ pub struct Buffered {
 	/// Accepted only to refuse a nonzero value: only TS can mark a broadcast restart.
 	#[usage(long, default = "0s", hide = true)]
 	pub linger: moq_tokio::cli::Duration,
-	/// The retired staleness-only setting.
-	#[usage(long, hide = true)]
-	max_delay: Option<moq_tokio::cli::Duration>,
 	/// An older spelling of the staleness setting.
 	#[usage(long = "max-age", hide = true)]
 	max_age: Option<moq_tokio::cli::Duration>,
@@ -1171,7 +1205,6 @@ impl Buffered {
 	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
 		for (present, flag) in [
-			(self.max_delay.is_some(), "--max-delay"),
 			(self.max_age.is_some(), "--max-age"),
 			(self.latency_max.is_some(), "--latency-max"),
 		] {
@@ -1326,6 +1359,164 @@ mod tests {
 				panic!("{old} must not start a run");
 			};
 			assert!(err.to_string().contains(&format!("{old} -> --delay")), "{err}");
+		}
+	}
+
+	#[test]
+	fn hls_tls_environment_is_independent_of_the_moq_listener() {
+		if !test_env::Env::default()
+			.set("MOQ_LISTEN_TLS_CERT", "moq.pem")
+			.set("MOQ_HLS_TLS_CERT", "hls.pem")
+			.set("MOQ_HLS_TLS_KEY", "hls.key")
+			.set("MOQ_HLS_TLS_ROOT", "root.pem")
+			.isolate()
+		{
+			return;
+		}
+		let cli = Invocation::try_parse_from(["moq", "export", "hls"]).unwrap();
+		assert_eq!(cli.moq.server.tls.cert, [std::path::PathBuf::from("moq.pem")]);
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("expected export")
+		};
+		let ExportSink::Hls(hls) = &export.sink else {
+			panic!("expected HLS")
+		};
+		assert_eq!(hls.tls.cert, [std::path::PathBuf::from("hls.pem")]);
+		assert_eq!(hls.tls.key, [std::path::PathBuf::from("hls.key")]);
+		assert_eq!(hls.tls.root, [std::path::PathBuf::from("root.pem")]);
+	}
+
+	macro_rules! released_environment {
+		($test:ident, $old:literal, $replacement:literal, $value:literal) => {
+			#[test]
+			fn $test() {
+				if !test_env::Env::default().set($old, $value).isolate() {
+					return;
+				}
+				let err = Invocation::try_parse_from(["moq", "import", "ts"])
+					.err()
+					.expect("released environment must not be ignored");
+				assert!(
+					err.to_string().contains($old) && err.to_string().contains($replacement),
+					"{err}"
+				);
+			}
+		};
+	}
+
+	released_environment!(
+		released_backoff_initial_env,
+		"MOQ_BACKOFF_INITIAL",
+		"MOQ_CONNECT_BACKOFF_INITIAL",
+		"2s"
+	);
+	released_environment!(
+		released_backoff_multiplier_env,
+		"MOQ_BACKOFF_MULTIPLIER",
+		"MOQ_CONNECT_BACKOFF_MULTIPLIER",
+		"3"
+	);
+	released_environment!(
+		released_backoff_max_env,
+		"MOQ_BACKOFF_MAX",
+		"MOQ_CONNECT_BACKOFF_MAX",
+		"2s"
+	);
+	released_environment!(
+		released_backoff_timeout_env,
+		"MOQ_BACKOFF_TIMEOUT",
+		"MOQ_CONNECT_BACKOFF_TIMEOUT",
+		"2s"
+	);
+	released_environment!(
+		released_goaway_redirect_env,
+		"MOQ_GOAWAY_REDIRECT",
+		"MOQ_CONNECT_GOAWAY_REDIRECT",
+		"ignore"
+	);
+	released_environment!(
+		released_goaway_handover_env,
+		"MOQ_GOAWAY_HANDOVER",
+		"MOQ_CONNECT_GOAWAY_HANDOVER",
+		"2s"
+	);
+
+	#[test]
+	fn connection_prefixes_refuse_released_spellings() {
+		for (family, names) in [
+			("backoff", &["initial", "multiplier", "max", "timeout"][..]),
+			("goaway", &["redirect", "handover"][..]),
+		] {
+			for name in names {
+				let value = match *name {
+					"multiplier" => "3",
+					"redirect" => "ignore",
+					_ => "2s",
+				};
+				let current = format!("--connect-{family}-{name}");
+				Invocation::try_parse_from(["moq", current.as_str(), value, "import", "ts"]).unwrap();
+				let old = format!("--{family}-{name}");
+				let err = Invocation::try_parse_from(["moq", old.as_str(), value, "import", "ts"])
+					.err()
+					.expect("released spelling refused");
+				assert!(
+					err.to_string().contains(&old) && err.to_string().contains(&current),
+					"{err}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn audited_flags_parse_the_consumer_policy() {
+		for format in ["fmp4", "hls"] {
+			let mut argv = vec!["moq", "import", format];
+			if format == "hls" {
+				argv.push("input.m3u8");
+			}
+			argv.push("--cmaf");
+			let cli = Invocation::try_parse_from(argv).expect("explicit CMAF publishing");
+			let Command::Import(import) = &cli.stages[0] else {
+				panic!("expected import")
+			};
+			match &import.source {
+				ImportSource::Fmp4(args) => assert!(args.passthrough),
+				ImportSource::Hls(args) => assert!(args.passthrough),
+				_ => panic!("expected fragment input"),
+			}
+		}
+		Invocation::try_parse_from([
+			"moq",
+			"export",
+			"rtmp",
+			"--connect",
+			"rtmp://localhost/live/key",
+			"--delay",
+			"2s",
+		])
+		.expect("RTMP paced release");
+	}
+
+	#[test]
+	fn unpublished_spellings_have_no_migration_shim() {
+		for format in ["fmp4", "hls"] {
+			let mut argv = vec!["moq", "import", format];
+			if format == "hls" {
+				argv.push("input.m3u8");
+			}
+			argv.push("--passthrough");
+			let err = Invocation::try_parse_from(argv).err().expect("CMAF is explicit");
+			assert_eq!(err.kind(), ParseErrorKind::UnknownArgument);
+		}
+		for format in ["flv", "mkv", "rtmp"] {
+			let mut argv = vec!["moq", "export", format, "--max-delay", "2s"];
+			if format == "rtmp" {
+				argv.extend(["--connect", "rtmp://localhost/live/key"]);
+			}
+			let err = Invocation::try_parse_from(argv)
+				.err()
+				.expect("unreleased spelling is unknown");
+			assert_eq!(err.kind(), ParseErrorKind::UnknownArgument);
 		}
 	}
 
@@ -1670,7 +1861,7 @@ mod tests {
 
 	/// A stage carries config of its own, and the check has to reach it.
 	///
-	/// `export hls` flattens `tls::Listen`. Its listener decides whether to serve
+	/// `export hls` adapts its TLS arguments. Its listener decides whether to serve
 	/// TLS at all from the canonical `cert`/`generate` fields, so a released
 	/// `--tls-cert` left it serving plaintext HTTP without ever reaching the builder
 	/// that refuses: the certificate and the mTLS roots both silently gone.
@@ -2163,7 +2354,7 @@ mod tests {
 		for format in ["flv", "mkv"] {
 			assert_eq!(stdout(&[format]), Duration::from_millis(500));
 			assert_eq!(stdout(&[format, "--delay", "2s"]), Duration::from_secs(2));
-			for old in ["--max-delay", "--max-age", "--latency-max"] {
+			for old in ["--max-age", "--latency-max"] {
 				let Err(err) = export(&[format, old, "2s"]) else {
 					panic!("{old} must be refused")
 				};
@@ -2178,18 +2369,18 @@ mod tests {
 		assert!(export(&["ts", "--max-delay", "2s"]).is_err(), "ts spells it --delay");
 
 		let rtmp = |flag: &str| export(&["rtmp", "--connect", "rtmp://example.com/live/key", flag, "2s"]);
-		let cli = rtmp("--max-delay").unwrap();
+		let cli = rtmp("--delay").unwrap();
 		let Command::Export(export_rtmp) = &cli.stages[0] else {
 			panic!("expected export")
 		};
 		let ExportSink::Rtmp(args) = &export_rtmp.sink else {
 			panic!("expected rtmp")
 		};
-		assert_eq!(Duration::from(args.max_delay), Duration::from_secs(2));
+		assert_eq!(Duration::from(args.delay), Duration::from_secs(2));
 		let Err(err) = rtmp("--max-age") else {
 			panic!("rtmp: --max-age must not start a run");
 		};
-		assert!(err.to_string().contains("--max-age -> --max-delay"), "rtmp: {err}");
+		assert!(err.to_string().contains("--max-age -> --delay"), "rtmp: {err}");
 
 		assert!(
 			Invocation::try_parse_from(["moq", "import", "--max-delay", "5s", "ts"]).is_err(),
@@ -2252,11 +2443,7 @@ mod tests {
 			("--listen-tcp-bind", "127.0.0.1:0", "--listen-tcp-bind"),
 			("--broadcast", "room", "--broadcast"),
 			("--cluster-connect", "https://relay.example", "--cluster-connect"),
-			(
-				"--cluster-connect-api",
-				"https://api.example/peers",
-				"--cluster-connect-api",
-			),
+			("--cluster-api-url", "https://api.example/peers", "--cluster-api-url"),
 			("--cluster-node", "https://self.example", "--cluster-node"),
 			("--cluster-token", "cluster.jwt", "--cluster-token"),
 			("--cluster-id", "1", "--cluster-id"),
@@ -2334,7 +2521,7 @@ mod tests {
 		let dial: &[&[&str]] = &[
 			&["--connect", "https://relay.example"],
 			&["--connect-tls-insecure"],
-			&["--backoff-initial", "2s"],
+			&["--connect-backoff-initial", "2s"],
 			&["--quic-idle-timeout", "10s"],
 			#[cfg(feature = "iroh")]
 			&["--iroh-enabled"],
@@ -2406,7 +2593,7 @@ mod tests {
 		};
 		for peer in [
 			["--cluster-connect", "https://relay.example"],
-			["--cluster-connect-api", "https://api.example/peers"],
+			["--cluster-api-url", "https://api.example/peers"],
 		] {
 			let both = [
 				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:4443"][..],
@@ -2440,7 +2627,7 @@ mod tests {
 			.expect("--connect alone owns a fixed bind");
 	}
 
-	/// `--cluster-connect` / `--cluster-connect-api` attach the process as a
+	/// `--cluster-connect` / `--cluster-api-url` attach the process as a
 	/// cluster peer, so they are a MoQ side on their own. `--cluster-node` is
 	/// identity, not an attachment.
 	#[test]
@@ -2449,14 +2636,8 @@ mod tests {
 			.expect("parse");
 		assert!(cli.moq.validate().is_ok(), "a cluster dial is a MoQ side on its own");
 
-		let cli = Invocation::try_parse_from([
-			"moq",
-			"--cluster-connect-api",
-			"https://api.example/peers",
-			"import",
-			"ts",
-		])
-		.expect("parse");
+		let cli = Invocation::try_parse_from(["moq", "--cluster-api-url", "https://api.example/peers", "import", "ts"])
+			.expect("parse");
 		assert!(cli.moq.validate().is_ok(), "a cluster API is a MoQ side on its own");
 
 		let cli = Invocation::try_parse_from(["moq", "--cluster-node", "https://self.example", "import", "ts"])
@@ -2684,6 +2865,27 @@ mod tests {
 			panic!("expected play")
 		};
 		assert!(play.validate().is_ok());
+	}
+
+	#[test]
+	fn flag_help_uses_plain_names() {
+		for command in [
+			vec![],
+			vec!["import", "fmp4"],
+			vec!["import", "hls"],
+			vec!["export", "rtmp"],
+			vec!["export", "hls"],
+			vec!["auth", "serve"],
+		] {
+			let mut argv = vec!["moq"];
+			argv.extend(command);
+			argv.push("--help");
+			let help = Invocation::try_parse_from(argv)
+				.err()
+				.expect("help request")
+				.to_string();
+			assert!(!help.contains("[`"), "{help}");
+		}
 	}
 
 	/// Help and version are answered with their actual page, not an empty string.

@@ -27,7 +27,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import type { Location, Producer as TrackProducer } from "./track.ts";
+import type { Position, Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -2778,7 +2778,7 @@ async function runSessionDeath(
 	protocol: string,
 	version?: number,
 	local = false,
-): Promise<[Error | null, Error | null, Location | undefined]> {
+): Promise<[Error | null, Error | null, Position | undefined]> {
 	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
 
