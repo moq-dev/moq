@@ -69,8 +69,13 @@ class FakeWorklet {
 				this.ring = new AudioRingBuffer(msg);
 				this.#playing = msg.playing ?? true;
 			} else if (msg.type === "data") this.ring?.write(msg.timestamp, msg.data);
-			else if (msg.type === "latency") this.ring?.resize(msg.latency);
-			else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
+			else if (msg.type === "latency") {
+				this.ring?.setLatency(msg.latency);
+				if (msg.park !== undefined) {
+					this.ring?.park();
+					this.#epoch = msg.park;
+				}
+			} else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
 			else if (msg.type === "reset") {
 				this.ring?.reset();
 				this.#epoch = msg.epoch;
@@ -344,6 +349,8 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			consumer = producer.consume();
 			frameTimestamp = 0;
 		},
+		// The resolved playout target.
+		target: () => sync.out.delay.peek(),
 		// The rings written to, and the timestamps of every frame that reached one.
 		rings: () => worklets.filter((worklet) => worklet.ring && insert.mock.contexts.includes(worklet.ring)),
 		inserted: () => insert.mock.calls.map(([timestamp]) => timestamp as number),
@@ -401,16 +408,59 @@ for (const cmaf of [false, true]) {
 			}
 			expect(playback.inserted()).toEqual([]);
 
-			// The live edge moves on, so the head is complete and plays from its oldest frame.
+			// The live edge moves on, so the head is complete and plays from its oldest frame, refilling
+			// the 100 ms floor.
 			frameTimestamp = 140_000;
 			playback.push({ ...frame(), group: 8 });
 			await microtasks();
-			expect(playback.inserted()).toEqual([0, 20_000, 40_000, 60_000, 80_000, 100_000]);
+			expect(playback.inserted()).toEqual([0, 20_000, 40_000, 60_000, 80_000]);
 		} finally {
 			playback.close();
 			await microtasks();
 		}
 	});
+
+	// A buffered head above the decoded floor waits in the reorder buffer, not the consumer, until it
+	// runs past the target. Those frames are what cover the part of the target held encoded.
+	it(`starts a ${cmaf ? "CMAF" : "legacy"} buffered head held past a target above the floor`, async () => {
+		const playback = await play(Milli(1000), true, cmaf);
+		try {
+			const target = playback.target();
+			expect(target).toBeGreaterThan(500);
+			while (frameTimestamp <= target * 1000 + 20_000) {
+				playback.push(frame());
+				await microtasks();
+			}
+			expect(playback.inserted()[0]).toBe(20_000);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
+	// Pre-skip longer than the decoded floor discards every output the refill released toward it, so
+	// the refill has to count what reaches the ring, not what it released.
+	if (!cmaf) {
+		it("starts a buffered Opus head whose pre-skip outlasts the floor", async () => {
+			const playback = await play(Milli(1000), true);
+			try {
+				// OpusHead, version 1, stereo, a 520 ms pre-skip of 24,960 samples: past the 500 ms floor, yet
+				// within the head the harness covers, since it queues nothing behind a released batch.
+				playback.restore({ description: "4f707573486561640102" + "8061" + "80bb0000" + "0000" + "00" });
+				await microtasks();
+				const target = playback.target();
+				while (frameTimestamp <= (target + 2000) * 1000) {
+					playback.push(frame());
+					await microtasks();
+				}
+				// The first output to outlast the pre-skip lands at the start of the timeline.
+				expect(playback.inserted()[0]).toBe(20_000);
+			} finally {
+				playback.close();
+				await microtasks();
+			}
+		});
+	}
 
 	// A fresh encoder after a declared end may restart its timeline below the old one, and the decoder
 	// resets for it before anything is judged out of order.
@@ -1051,6 +1101,35 @@ it("keeps audio's opening buffered while an enabled video track fills", async ()
 	}
 });
 
+it("starts above the decoded audio floor without expanding PCM storage", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const playback = await play(Milli(1000), true);
+	const video = new Signal<{ start: Milli; end: Milli } | null>(null);
+	const remove = playback.sync.register(new Signal(Milli(1000)), video);
+	try {
+		await playback.play(80);
+		await clock.advance(Nano.zero);
+		const ring = playback.rings()[0];
+		expect(ring).toBeDefined();
+		expect(ring.ring?.length).toBeLessThanOrEqual(24_000);
+		expect(playback.sync.playing.peek()).toBe(false);
+		const opening = ring.ring?.timestamp;
+		for (let i = 0; i < 5; i++) expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(0);
+		await clock.advance(Nano.fromMilli(Milli(500)));
+		expect(ring.ring?.timestamp).toBe(opening);
+		video.set({ start: Milli(20), end: Milli(1020) });
+		await clock.advance(Nano.zero);
+		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
+		expect(ring.ring?.timestamp).toBe(Micro((opening ?? 0) + 20_000));
+	} finally {
+		remove();
+		playback.close();
+		await microtasks();
+		installed.close();
+	}
+});
+
 it("waits for video support before allowing audio-only startup", async () => {
 	const playback = await play(Milli(100), true);
 	let resolve!: (supported: boolean) => void;
@@ -1114,35 +1193,38 @@ it("does not count flushed audio toward a new startup floor after a gap", async 
 	}
 });
 
-it("closing during shared startup releases the audio graph and backpressured reader", async () => {
-	const playback = await play(Milli(100), true);
-	const video = new Signal<{ start: Milli; end: Milli } | null>(null);
-	const remove = playback.sync.register(new Signal(Milli(100)), video);
-	const disconnect = spyOn(FakeWorklet.prototype, "disconnect");
-	const closeTrack = spyOn(Moq.Track.Subscriber.prototype, "close");
-	try {
-		await playback.play(20);
-		expect(playback.sync.playing.peek()).toBe(false);
-		const context = playback.context.peek() as unknown as FakeContext;
-		expect(context).toBeDefined();
-		const decoded = playback.inserted().length;
-		playback.close();
-		await microtasks();
-		expect(context.calls.close).toBe(1);
-		expect(disconnect).toHaveBeenCalled();
-		expect(closeTrack).toHaveBeenCalled();
-		// The other track becoming ready cannot revive the cancelled audio reader.
-		video.set({ start: Milli(0), end: Milli(100) });
-		await microtasks();
-		expect(playback.inserted()).toHaveLength(decoded);
-	} finally {
-		remove();
-		playback.close();
-		await microtasks();
-		disconnect.mockRestore();
-		closeTrack.mockRestore();
-	}
-});
+it.each([100, 1000])(
+	"closing during shared startup at %dms releases the audio graph and backpressured reader",
+	async (delay) => {
+		const playback = await play(Milli(delay), true);
+		const video = new Signal<{ start: Milli; end: Milli } | null>(null);
+		const remove = playback.sync.register(new Signal(Milli(delay)), video);
+		const disconnect = spyOn(FakeWorklet.prototype, "disconnect");
+		const closeTrack = spyOn(Moq.Track.Subscriber.prototype, "close");
+		try {
+			await playback.play(delay / 20 + 30);
+			expect(playback.sync.playing.peek()).toBe(false);
+			const context = playback.context.peek() as unknown as FakeContext;
+			expect(context).toBeDefined();
+			const decoded = playback.inserted().length;
+			playback.close();
+			await microtasks();
+			expect(context.calls.close).toBe(1);
+			expect(disconnect).toHaveBeenCalled();
+			expect(closeTrack).toHaveBeenCalled();
+			// The other track becoming ready cannot revive the cancelled audio reader.
+			video.set({ start: Milli(0), end: Milli(delay) });
+			await microtasks();
+			expect(playback.inserted()).toHaveLength(decoded);
+		} finally {
+			remove();
+			playback.close();
+			await microtasks();
+			disconnect.mockRestore();
+			closeTrack.mockRestore();
+		}
+	},
+);
 
 it("a rejected audio support probe does not leave buffered video waiting on a pending track", async () => {
 	const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });

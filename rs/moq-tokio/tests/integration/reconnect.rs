@@ -267,7 +267,7 @@ async fn a_redirect_to_another_host_is_refused_by_default() {
 	);
 }
 
-/// `--goaway-redirect follow` is the opt-in that hands the peer the host, so the
+/// `--connect-goaway-redirect follow` is the opt-in that hands the peer the host, so the
 /// same redirect is followed. Without this the default above would be
 /// indistinguishable from ignoring the URI outright.
 #[tokio::test]

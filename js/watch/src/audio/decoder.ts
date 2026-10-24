@@ -1,4 +1,4 @@
-import { Micro, Milli } from "@moq/clock";
+import { Micro, Milli, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
@@ -21,7 +21,7 @@ import type { Sync } from "../sync";
 import { AudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
-import { AUTO_MAX_DELAY, ringSamples, target } from "./latency";
+import { AUTO_MAX_DELAY, ringHold, target } from "./latency";
 import { Order } from "./order";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
@@ -111,6 +111,7 @@ export class Decoder {
 
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<Container.BufferedRanges>([]);
+	#queued = new Signal<Micro | undefined>(undefined);
 
 	// Audio ring bridging the main thread and the worklet.
 	#ring = new Signal<AudioBuffer | undefined>(undefined);
@@ -178,7 +179,13 @@ export class Decoder {
 			if (effect.get(this.source.pending)) return null;
 			if (!effect.get(this.source.out.config)) return undefined;
 			const span = effect.get(this.#decodeBuffered)[0];
-			return span ? { ...span } : null;
+			if (!span) return null;
+			// The target above the PCM floor stays encoded. Count only the hold already queued
+			// behind decoded output, so startup neither demands unbounded PCM nor skips its floor.
+			const queued = effect.get(this.#queued);
+			const hold = Milli.fromMicro(ringHold(effect.get(this.sync.out.delay)));
+			const end = Math.max(span.end, Math.min(span.end + hold, Milli.fromMicro(queued ?? Micro.zero)));
+			return { start: span.start, end: Milli(end) };
 		});
 		this.#signals.cleanup(this.sync.register(playout, startup));
 		this.#identity = this.#signals.computed((effect) => {
@@ -272,16 +279,11 @@ export class Decoder {
 			});
 			effect.cleanup(() => worklet.disconnect());
 
-			// Initial ring depth in samples.
-			const delay = this.sync.out.delay.peek();
-			const latencySamples = ringSamples(sampleRate, delay);
-			const buffered = this.sync.out.buffered.peek();
-
 			const ring = new AudioBuffer(worklet, {
 				channels: channelCount,
 				rate: sampleRate,
-				latency: latencySamples,
-				buffered,
+				delay: this.sync.out.delay.peek(),
+				buffered: this.sync.out.buffered.peek(),
 				playing: this.sync.playing,
 			});
 			effect.cleanup(() => ring.close());
@@ -343,11 +345,10 @@ export class Decoder {
 		const ring = effect.get(this.#ring);
 		if (!ring) return;
 
-		// A rise parks playback until the ring refills to the new floor, which is what keeps audio in
-		// step with video. The measured target moves a bucket at a time, and a rise the buffered
-		// slack already covers costs no silence at all.
-		const delay = effect.get(this.sync.out.delay);
-		ring.setLatency(ringSamples(ring.rate, delay));
+		// A rise parks playback until the queued media covers the new target, which is what keeps
+		// audio in step with video. The measured target moves a bucket at a time, and a rise the
+		// buffered slack already covers costs no silence at all.
+		ring.setLatency(effect.get(this.sync.out.delay));
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -460,7 +461,7 @@ export class Decoder {
 			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
-		const consumer = this.#consume(effect, sub, format, { config, path });
+		const { consumer, read } = this.#consume(effect, sub, format, { config, path });
 
 		spawnFatal(effect, failure, async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -472,6 +473,8 @@ export class Decoder {
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
+				// Closing drops what is still decoding, which a refill would otherwise wait on.
+				this.#ring.peek()?.dropped();
 			});
 
 			// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
@@ -490,7 +493,10 @@ export class Decoder {
 			decoder.configure(decoderConfig);
 
 			const order = this.#order();
-			const play = (reads: FrameRead[]) => this.#play(effect, decoder, decoderConfig, order, reads);
+			const play = (reads: FrameRead[]) => {
+				read.set(order.newest(reads) as Micro | undefined);
+				return this.#play(effect, decoder, decoderConfig, order, reads);
+			};
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (next?.kind !== "frame") {
@@ -550,7 +556,7 @@ export class Decoder {
 					? Util.Hex.toBytes(config.description)
 					: init.description;
 
-		const consumer = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
+		const { consumer, read } = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
 
 		spawnFatal(effect, failure, async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -562,6 +568,8 @@ export class Decoder {
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
+				// Closing drops what is still decoding, which a refill would otherwise wait on.
+				this.#ring.peek()?.dropped();
 			});
 
 			// Configure decoder with description from catalog
@@ -574,7 +582,10 @@ export class Decoder {
 			decoder.configure(decoderConfig);
 
 			const order = this.#order();
-			const play = (reads: FrameRead[]) => this.#play(effect, decoder, decoderConfig, order, reads);
+			const play = (reads: FrameRead[]) => {
+				read.set(order.newest(reads) as Micro | undefined);
+				return this.#play(effect, decoder, decoderConfig, order, reads);
+			};
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (next?.kind !== "frame") {
@@ -635,8 +646,9 @@ export class Decoder {
 		const ring = await this.#ready(effect);
 		if (!ring) return false;
 
-		// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
-		// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
+		// Backpressure: this holds the encoded frame until the playhead nears it or, for the part of
+		// the target above the decoded floor, until enough media is queued behind it. A no-op for live
+		// playback whose whole target fits the floor.
 		await ring.wait(frame.timestamp, effect.abort);
 		if (effect.abort.aborted) return false;
 
@@ -672,7 +684,7 @@ export class Decoder {
 		sub: Moq.Track.Subscriber,
 		format: Container.Format,
 		{ config, path }: { config: DecoderConfig; path: Moq.Path.Valid },
-	): Container.Consumer {
+	): { consumer: Container.Consumer; read: Signal<Micro | undefined> } {
 		const outgoing = this.#consumer;
 		const continues = outgoing?.path === path;
 		const consumer = new Container.Consumer(sub, {
@@ -695,10 +707,27 @@ export class Decoder {
 			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
 
+		// What has arrived but not been decoded is what covers the part of the target held encoded, so
+		// the decode loop's held frame is released once enough is queued behind it. That includes the
+		// frames the loop has read but not decoded yet: a buffered head waits in the reorder buffer
+		// until it spans the whole target, leaving the consumer empty.
+		const read = new Signal<Micro | undefined>(undefined);
+		effect.run((inner) => {
+			const ring = inner.get(this.#ring);
+			if (!ring) return;
+			let newest = inner.get(read);
+			for (const { end } of inner.get(consumer.buffered)) {
+				const micro = Micro.fromMilli(end);
+				if (newest === undefined || micro > newest) newest = micro;
+			}
+			inner.set(this.#queued, newest);
+			ring.queued(newest);
+		});
+
 		// Feed the arrival estimate into the playout target. It outlives this consumer, so the target
 		// holds until the replacement takes over; see #retire.
 		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));
-		return consumer;
+		return { consumer, read };
 	}
 
 	// No consumer replaces the outgoing one, so its estimate stops holding the buffer open.
@@ -719,6 +748,21 @@ export class Decoder {
 	}
 
 	#emit(sample: AudioData) {
+		// Whatever becomes of it, the output answers the frames it was decoded from, so the gate counts
+		// only what still decodes. Reported after any insert, so the gate always counts the frame as
+		// either decoding or in the ring.
+		const decoded = (sample.timestamp +
+			Micro.fromSecond((sample.numberOfFrames / sample.sampleRate) as Second)) as Micro;
+		let landed: Micro | undefined;
+		try {
+			landed = this.#place(sample);
+		} finally {
+			this.#ring.peek()?.decoded(decoded, landed);
+		}
+	}
+
+	// Trim the output and write it to the ring, returning where the PCM written ends.
+	#place(sample: AudioData): Micro | undefined {
 		const { timestamp, frameOffset, frames } = this.#terminal.span(sample);
 		const timestampMilli = Milli.fromMicro(timestamp);
 		if (frames === 0) {
@@ -781,6 +825,7 @@ export class Decoder {
 		ring.insert(timestamp, channelData);
 
 		sample.close();
+		return (timestamp + durationMicro) as Micro;
 	}
 
 	#addDecodeBuffered(start: Milli, end: Milli): void {
@@ -828,6 +873,7 @@ export class Decoder {
 	 */
 	reset(): void {
 		this.#decodeBuffered.set([]);
+		this.#queued.set(undefined);
 		this.#ring.peek()?.reset();
 	}
 

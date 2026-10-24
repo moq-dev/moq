@@ -490,10 +490,11 @@ export class Subscriber {
 		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
 			// Nothing marks where what it tells unasked starts or ends, so there is nothing to wait for.
 			announced.synced();
-			// No request stream ends this wait, so the session's end has to.
+			// No request stream ends this wait, so the session's end has to. `race`, so a
+			// consumer that ends first leaves no reaction on the session's close behind.
 			const ends: PromiseLike<unknown>[] = [announced.closed];
-			if (this.#quic) ends.push(this.#quic.closed.catch(() => undefined));
-			await Promise.race(ends);
+			if (this.#quic) ends.push(this.#quic.closed);
+			await race(ends).catch(() => undefined);
 			return;
 		}
 

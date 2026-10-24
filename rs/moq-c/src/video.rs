@@ -278,7 +278,7 @@ async fn follow_reservation(
 /// owns the thread instead, so every caller is welcome.
 pub(crate) struct VideoEncoder {
 	encoder: moq_video::encode::Sink,
-	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	producer: moq_video::encode::Producer,
 	format: moq_video_pixel_format,
 	/// The encoded resolution, from the publish config. Frames carry only pixels,
 	/// so this is what says how to read them.
@@ -359,7 +359,7 @@ pub struct DecoderOutput {
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	mut producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	mut producer: moq_video::encode::Producer,
 	drained: Result<(), moq_video::Error>,
 	finished: &crate::publish::Finished,
 ) -> Result<(), Error> {
@@ -1013,10 +1013,7 @@ mod tests {
 
 	/// A video track wired up without an encoder, plus a subscriber on it: enough
 	/// to pin what [`finalize`] shows the far end.
-	async fn track_under_test() -> (
-		moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
-		moq_net::track::Subscriber,
-	) {
+	async fn track_under_test() -> (moq_video::encode::Producer, moq_net::track::Subscriber) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = moq_mux::catalog::Config::default()
 			.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default());

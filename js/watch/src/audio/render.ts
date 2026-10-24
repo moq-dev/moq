@@ -9,8 +9,8 @@ export interface Init {
 	channels: number;
 	rate: number;
 	latency: Milli;
-	// Buffered mode: anchor to the first frame and play through; the ring is sized to the floor and
-	// the lookahead above it is held back upstream (the main thread applies the backpressure).
+	// Buffered mode: anchor to the first frame and play through. The ring holds the floor; the
+	// lookahead above it is held back upstream (the main thread applies the backpressure).
 	buffered: boolean;
 	playing?: boolean;
 }
@@ -36,10 +36,13 @@ export interface Data {
 	timestamp: Micro;
 }
 
-/** Latency update. */
+/** Latency update: the floor held as decoded PCM. */
 export interface Latency {
 	type: "latency";
 	latency: Milli;
+	// When set, also hold playback, keeping what is buffered, until the next latency message without
+	// it. Echoed like a reset's epoch, so state from before the park cannot report the ring playing.
+	park?: number;
 }
 
 /** State update from the worklet back to the main thread. */
@@ -51,7 +54,7 @@ export interface State {
 	anchored: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;
-	// The epoch of the last reset the worklet applied.
+	// The epoch of the last reset or park the worklet applied.
 	epoch: number;
 }
 

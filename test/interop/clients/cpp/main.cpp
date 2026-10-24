@@ -70,7 +70,8 @@ std::shared_ptr<moq::Session> open_session;
 [[noreturn]] void exit_failed() {
     // Taken first, so a failure while closing cannot close it again.
     if (auto session = std::exchange(open_session, nullptr)) {
-        session->shutdown().wait_for(std::chrono::seconds(5));
+        session->shutdown();
+        session->closed().wait_for(std::chrono::seconds(5));
     }
     std::exit(1);
 }
@@ -153,7 +154,8 @@ std::shared_ptr<moq::Session> connect(const std::string &url, const Dial &dial, 
 // once, and stopping the runtime right after it can leave the relay to time the connection out.
 void close_session(const std::shared_ptr<moq::Session> &session) {
     open_session = nullptr;
-    until(session->shutdown(), Clock::now() + std::chrono::seconds(5), "session shutdown");
+    session->shutdown();
+    until(session->closed(), Clock::now() + std::chrono::seconds(5), "session shutdown");
 }
 
 // Feeds the encoder a real-time tone per channel, interleaved, until `stop` is set.

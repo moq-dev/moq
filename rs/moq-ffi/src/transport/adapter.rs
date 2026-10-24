@@ -93,6 +93,17 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 				})
 			})
 	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: moq_net::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as moq_net::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
+	}
 	fn send_group(&mut self, _: i64) -> Option<poll::Ungrouped> {
 		None
 	}
@@ -249,6 +260,7 @@ mod tests {
 		fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<backend::BiStreams<Self>, Failure>> {
 			backend::Session::poll_accept_bi(self, cx)
 		}
+
 		fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Failure>> {
 			self.0.set(payload.len() as u32);
 			Poll::Ready(Ok(()))
