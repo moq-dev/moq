@@ -11,9 +11,8 @@ split into smaller reads, without changing accepted media or parse errors.
 BytesMut, constructs a fresh WebmIterator and skips handled tags only after
 parsing them (lines 227-252). A B-byte partial block arriving in c-byte
 chunks can copy O(B²/c) bytes before completion; replay can add parse work.
-This is before the reorder queues covered by the
-[release audit](https://github.com/moq-dev/moq/pull/6311); recheck its final
-scope before implementation.
+This is before the reorder queues, which
+[moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453) bounded.
 
 Benchmark block size × input chunk size with identical complete media,
 including large keyframes, lacing, bounded BlockGroups and unknown-size live
