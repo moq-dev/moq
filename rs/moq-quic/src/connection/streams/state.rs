@@ -3763,36 +3763,70 @@ mod tests {
         assert!(!client.leased(ids[0]).unwrap().evicted);
     }
 
-    /// A reader waiting on tiny frames holds copies of their bytes, not the receive buffers they
-    /// arrived in, so a byte of credit cannot pin a whole batch of datagrams.
+    /// However its reader consumes tiny frames, and however many arrive, the lease holds copies
+    /// of their bytes, not the receive buffers they arrived in, so a byte of credit cannot pin a
+    /// whole batch of datagrams, and the copies stay few chunks.
     #[test]
-    fn waiting_lease_releases_datagram_buffers() {
-        let mut client = make(Side::Client);
-        let id = StreamId::new(Side::Server, Dir::Uni, 0);
-        let buffers: Vec<Bytes> = (0..8).map(|_| Bytes::from(vec![0u8; 64 * 1024])).collect();
-        for (offset, buffer) in buffers.iter().enumerate() {
-            let _ = client
-                .received(
-                    frame::Stream {
-                        id,
-                        offset: offset as u64,
-                        fin: false,
-                        data: buffer.slice(..1),
-                    },
-                    // One datagram of a receive batch: too little over-allocation for the
-                    // assembler to copy it out.
-                    1200,
-                )
-                .unwrap();
-            assert!(matches!(
-                wait(&mut client, id, buffers.len() + 1),
-                Err(LeaseError::Blocked(_))
-            ));
+    fn lease_releases_datagram_buffers() {
+        #[derive(Debug, Clone, Copy)]
+        enum Reader {
+            /// Waits for more than has arrived, as a reader decoding a message does.
+            Wait,
+            /// Leases what arrived and parks without consuming it.
+            Park,
+            /// Takes each byte as it arrives and keeps it, as a reader handing payload on does.
+            Take,
         }
-        assert!(buffers.into_iter().all(|buffer| buffer.is_unique()));
-        let leased = client.leased(id).unwrap();
-        assert_eq!(leased.len(), 8);
-        assert!(leased.chunks().count() <= 4, "merged as they arrive");
+        for (reader, frames) in [Reader::Wait, Reader::Park, Reader::Take]
+            .into_iter()
+            .flat_map(|reader| [(reader, 8), (reader, 1024)])
+        {
+            let mut client = make(Side::Client);
+            let id = StreamId::new(Side::Server, Dir::Uni, 0);
+            let buffers: Vec<Bytes> = (0..frames).map(|_| Bytes::from(vec![0u8; 4096])).collect();
+            let mut taken = Vec::new();
+            for (offset, buffer) in buffers.iter().enumerate() {
+                let _ = client
+                    .received(
+                        frame::Stream {
+                            id,
+                            offset: offset as u64,
+                            fin: false,
+                            data: buffer.slice(..1),
+                        },
+                        // One datagram of a receive batch: too little over-allocation for the
+                        // assembler to copy it out.
+                        1200,
+                    )
+                    .unwrap();
+                let mut pending = Retransmits::default();
+                let mut recv = recv(&mut client, &mut pending, id);
+                match reader {
+                    Reader::Wait => assert!(matches!(
+                        recv.lease(buffers.len() + 1),
+                        Err(LeaseError::Blocked(_))
+                    )),
+                    Reader::Park => {
+                        let _ = recv.lease(1).unwrap();
+                    }
+                    Reader::Take => {
+                        let _ = recv.lease(1).unwrap();
+                        taken.push(recv.take(usize::MAX));
+                    }
+                }
+            }
+            assert!(
+                buffers.into_iter().all(|buffer| buffer.is_unique()),
+                "{reader:?} pins a receive buffer of {frames}"
+            );
+            let leased = client.leased(id).unwrap();
+            assert_eq!(leased.len() + taken.len(), frames);
+            assert!(
+                leased.chunks().count() <= frames.ilog2() as usize + 1,
+                "{reader:?} keeps {} chunks of {frames}",
+                leased.chunks().count()
+            );
+        }
     }
 
     /// A peer can spend the window across many streams before any reader looks, so every reader
