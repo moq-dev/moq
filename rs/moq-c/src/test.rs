@@ -5769,12 +5769,36 @@ fn server_accepts_a_session() {
 	let consumed = id(announced_cb.recv());
 	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
 	assert_eq!(announced_cb.recv_terminal(), 0);
-	assert_eq!(moq_consume_close(consumed), 0);
-
-	// Closing the accepted session is a clean terminal close.
+	// Prime the subscription, then queue a finished tail before closing the accepted
+	// session. Its terminal callback must not report success after aborting the tail.
+	let track = publish_named_track(broadcast, b"tail");
+	let (consumer, frames) = subscribe_named_track(consumed, b"tail");
+	let first = b"ready";
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, first.as_ptr(), first.len(), 0) },
+		0
+	);
+	assert_eq!(moq_consume_track_frame_free(id(frames.recv())), 0);
+	let tail = vec![42; 64 * 1024];
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, tail.as_ptr(), tail.len(), 1) },
+		0
+	);
+	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_session_close(session), 0);
+	let frame_id = id(frames.recv());
+	let mut frame: moq_frame = unsafe { std::mem::zeroed() };
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
+		tail
+	);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(frames.recv_terminal(), 0, "the tail ends cleanly");
 	let terminal = session_cb.recv_terminal();
 	assert_eq!((terminal.failure, terminal.connects), (0, 1));
+	assert!(moq_consume_track_cancel(consumer) < 0, "the consumer ended");
+	assert_eq!(moq_consume_close(consumed), 0);
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
 

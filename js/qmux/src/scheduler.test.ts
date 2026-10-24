@@ -234,7 +234,7 @@ describe("SendScheduler", () => {
 		expect(sink.written).toEqual([]); // nothing written
 	});
 
-	test("close rejects pending stream frames but flushes queued control", async () => {
+	test("close drops everything queued and resolves once the final frame is written", async () => {
 		const sink = new GatedSink();
 		const sched = new SendScheduler(sink);
 		sched.setSendOrder(1n, 0);
@@ -244,14 +244,20 @@ describe("SendScheduler", () => {
 			() => "resolved",
 			() => "rejected",
 		);
-		sched.enqueueControl(frame(99));
-		sched.close(new Error("closing"));
+		sched.enqueueControl(frame(98));
+		let flushed = false;
+		const closed = sched.close(new Error("closing"), frame(99)).then(() => {
+			flushed = true;
+		});
+
+		await tick(5);
+		expect(flushed).toBe(false); // the sink hasn't taken it yet
 
 		sink.release(5);
-		await until(() => sink.written.length === 1, 50);
+		await closed;
 
 		expect(await settled).toBe("rejected");
-		expect(sink.written).toEqual([99]); // control flushed, stream dropped
+		expect(sink.written).toEqual([99]); // only the final frame
 	});
 
 	test("a failed write rejects that stream's promise and tears the scheduler down", async () => {
