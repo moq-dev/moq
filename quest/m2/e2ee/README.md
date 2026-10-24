@@ -59,10 +59,6 @@ The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/587
 
 ## Required
 
-- [Reversible physical names](/quest/m2/e2ee/reversible-names.md) - both
-  cores and the shared vectors derive physical names by the draft's
-  HMAC-nonce AES-128-GCM construction, and a producing generation recovers the
-  semantic name of any name issued under it
 - [Undeclared track names](/quest/m2/e2ee/undeclared-names.md) - an encrypted
   broadcast's `dynamic()` serves names nobody created or reserved, under
   semantic names, in Rust

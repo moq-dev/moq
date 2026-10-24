@@ -3,13 +3,17 @@
 	"constants": {
 		"salt": "6d6f712d653265652d3030",
 		"path_label": "6d6f712d653265652d30302070617468",
-		"name_label": "6d6f712d653265652d3030206e616d65",
+		"name_mac_label": "6d6f712d653265652d3030206e616d652d6d6163",
+		"name_key_label": "6d6f712d653265652d3030206e616d652d6b6579",
 		"key_label": "6d6f712d653265652d3030206b6579",
 		"domain_group": 0,
 		"domain_datagram": 1,
 		"tag_len": 16,
 		"key_len": 16,
-		"name_len": 16,
+		"path_len": 16,
+		"name_mac_len": 32,
+		"name_nonce_len": 12,
+		"name_block": 16,
 		"max_u53": 9007199254740991,
 		"max_u32": 4294967295,
 		"max_invocations": 16777216,
@@ -52,11 +56,15 @@
 			"semantic_name_bytes": "766964656f",
 			"domain": 0,
 			"prk": "a8230410bf77bc88af14260a5ed0ec320e3b174d5a8f4f76780b27df2230f080",
-			"name_info": "6d6f712d653265652d3030206e616d6500176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d32623663316139643865376600000000000000070005766964656f",
-			"name_material": "09acdd8db273226b6205c0e1c4a638b4",
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
-			"key_info": "6d6f712d653265652d3030206b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d3262366331613964386537660000000000000007001643617a646a624a7a496d746942634468784b5934744100",
-			"key": "d8dc8d99d669c4a1af5f5d4f85c3dd0f"
+			"name_mac_info": "6d6f712d653265652d3030206e616d652d6d616300176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d3262366331613964386537660000000000000007",
+			"name_mac": "1e3c908543a6a9e1a2fe0145346276fb54e2c0cd2161d54a6e52cba872e598ff",
+			"name_key_info": "6d6f712d653265652d3030206e616d652d6b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d3262366331613964386537660000000000000007",
+			"name_key": "8e68f2ac0acf65a8d44049840cb81270",
+			"padded": "766964656f8000000000000000000000",
+			"name_nonce": "8364a633b84ae3758702719b",
+			"physical_name": "g2SmM7hK43WHAnGbk6fgf6seNwpWpk0jhOIsVvLrMneRK_-DQOih0Bc3oFk",
+			"key_info": "6d6f712d653265652d3030206b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d32623663316139643865376600000000000000070005766964656f00",
+			"key": "21f9d72d77e7a0a733ef0ca64c4e1010"
 		},
 		{
 			"id": "datagram-audio",
@@ -68,11 +76,15 @@
 			"semantic_name_bytes": "617564696f",
 			"domain": 1,
 			"prk": "a8230410bf77bc88af14260a5ed0ec320e3b174d5a8f4f76780b27df2230f080",
-			"name_info": "6d6f712d653265652d3030206e616d6500176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d32623663316139643865376600000000000000070005617564696f",
-			"name_material": "82f98eced99c919b2f1c4625f013891c",
-			"physical_name": "gvmOztmckZsvHEYl8BOJHA",
-			"key_info": "6d6f712d653265652d3030206b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d3262366331613964386537660000000000000007001667766d4f7a746d636b5a73764845596c38424f4a484101",
-			"key": "fb477f21bea4e5e7087073b433b733bc"
+			"name_mac_info": "6d6f712d653265652d3030206e616d652d6d616300176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d3262366331613964386537660000000000000007",
+			"name_mac": "1e3c908543a6a9e1a2fe0145346276fb54e2c0cd2161d54a6e52cba872e598ff",
+			"name_key_info": "6d6f712d653265652d3030206e616d652d6b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d3262366331613964386537660000000000000007",
+			"name_key": "8e68f2ac0acf65a8d44049840cb81270",
+			"padded": "617564696f8000000000000000000000",
+			"name_nonce": "c551cd1a1ce8806a407920c4",
+			"physical_name": "xVHNGhzogGpAeSDEjy2_Sc6-ixrLb6U3JNdNLvXEA2QIhNHu5UZwhV218w0",
+			"key_info": "6d6f712d653265652d3030206b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d32623663316139643865376600000000000000070005617564696f01",
+			"key": "c9695fc6ede7da6db6fde74c7a4645b4"
 		},
 		{
 			"id": "catalog-json",
@@ -84,11 +96,15 @@
 			"semantic_name_bytes": "636174616c6f672e6a736f6e",
 			"domain": 0,
 			"prk": "a8230410bf77bc88af14260a5ed0ec320e3b174d5a8f4f76780b27df2230f080",
-			"name_info": "6d6f712d653265652d3030206e616d6500176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d3262366331613964386537660000000000000007000c636174616c6f672e6a736f6e",
-			"name_material": "0376117d68d185ae51673b5555a569a8",
-			"physical_name": "A3YRfWjRha5RZztVVaVpqA",
-			"key_info": "6d6f712d653265652d3030206b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d326236633161396438653766000000000000000700164133595266576a52686135525a7a745656615670714100",
-			"key": "13077065cc73de4261f2967d8d1e6a30"
+			"name_mac_info": "6d6f712d653265652d3030206e616d652d6d616300176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d3262366331613964386537660000000000000007",
+			"name_mac": "1e3c908543a6a9e1a2fe0145346276fb54e2c0cd2161d54a6e52cba872e598ff",
+			"name_key_info": "6d6f712d653265652d3030206e616d652d6b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d3262366331613964386537660000000000000007",
+			"name_key": "8e68f2ac0acf65a8d44049840cb81270",
+			"padded": "636174616c6f672e6a736f6e80000000",
+			"name_nonce": "b3508b58a0d340f9c8effa7c",
+			"physical_name": "s1CLWKDTQPnI7_p8NJkBo-IVyJ8KI4S5a11t1f8ZaPxZeq-yFiTMjDGiAGw",
+			"key_info": "6d6f712d653265652d3030206b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d336332612d376431652d396630622d3262366331613964386537660000000000000007000c636174616c6f672e6a736f6e00",
+			"key": "6cc09aa5c8eb08dcf46111f460a5a035"
 		},
 		{
 			"id": "other-epoch",
@@ -100,11 +116,15 @@
 			"semantic_name_bytes": "766964656f",
 			"domain": 0,
 			"prk": "a8230410bf77bc88af14260a5ed0ec320e3b174d5a8f4f76780b27df2230f080",
-			"name_info": "6d6f712d653265652d3030206e616d6500176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d396531302d376634322d386133632d35643765326231633066396100000000000000070005766964656f",
-			"name_material": "c395ab3535014a0772271a1255fcc88b",
-			"physical_name": "w5WrNTUBSgdyJxoSVfzIiw",
-			"key_info": "6d6f712d653265652d3030206b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d396531302d376634322d386133632d35643765326231633066396100000000000000070016773557724e545542536764794a786f5356667a49697700",
-			"key": "5f02513d2ac2f8ccedf0ea4fd67a361e"
+			"name_mac_info": "6d6f712d653265652d3030206e616d652d6d616300176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d396531302d376634322d386133632d3564376532623163306639610000000000000007",
+			"name_mac": "e4905659848d0769bd8aa8c03aa76611e792e61e79029b6963041b58d7d6a320",
+			"name_key_info": "6d6f712d653265652d3030206e616d652d6b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d396531302d376634322d386133632d3564376532623163306639610000000000000007",
+			"name_key": "af047a90ee325c4b9dbe6895d73c9c25",
+			"padded": "766964656f8000000000000000000000",
+			"name_nonce": "a6655d0a525c9070c6516178",
+			"physical_name": "pmVdClJckHDGUWF4ggfWbpBhuj909KNESw8qCBxOXmClyxyAUvY4a8jBVU4",
+			"key_info": "6d6f712d653265652d3030206b657900176578616d706c652e636f6d2f6d656574696e672d313233002430313939623766342d396531302d376634322d386133632d35643765326231633066396100000000000000070005766964656f00",
+			"key": "5c87079e55b0b1e453f7667abf293682"
 		}
 	],
 	"naming": [
@@ -112,29 +132,73 @@
 			"id": "group-video",
 			"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
 			"semantic_name": "video",
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
-			"name_material": "09acdd8db273226b6205c0e1c4a638b4"
+			"semantic_name_bytes": "766964656f",
+			"padded": "766964656f8000000000000000000000",
+			"physical_name": "g2SmM7hK43WHAnGbk6fgf6seNwpWpk0jhOIsVvLrMneRK_-DQOih0Bc3oFk"
 		},
 		{
 			"id": "datagram-audio",
 			"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
 			"semantic_name": "audio",
-			"physical_name": "gvmOztmckZsvHEYl8BOJHA",
-			"name_material": "82f98eced99c919b2f1c4625f013891c"
+			"semantic_name_bytes": "617564696f",
+			"padded": "617564696f8000000000000000000000",
+			"physical_name": "xVHNGhzogGpAeSDEjy2_Sc6-ixrLb6U3JNdNLvXEA2QIhNHu5UZwhV218w0"
 		},
 		{
 			"id": "catalog-json",
 			"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
 			"semantic_name": "catalog.json",
-			"physical_name": "A3YRfWjRha5RZztVVaVpqA",
-			"name_material": "0376117d68d185ae51673b5555a569a8"
+			"semantic_name_bytes": "636174616c6f672e6a736f6e",
+			"padded": "636174616c6f672e6a736f6e80000000",
+			"physical_name": "s1CLWKDTQPnI7_p8NJkBo-IVyJ8KI4S5a11t1f8ZaPxZeq-yFiTMjDGiAGw"
 		},
 		{
 			"id": "other-epoch",
 			"epoch": "0199b7f4-9e10-7f42-8a3c-5d7e2b1c0f9a",
 			"semantic_name": "video",
-			"physical_name": "w5WrNTUBSgdyJxoSVfzIiw",
-			"name_material": "c395ab3535014a0772271a1255fcc88b"
+			"semantic_name_bytes": "766964656f",
+			"padded": "766964656f8000000000000000000000",
+			"physical_name": "pmVdClJckHDGUWF4ggfWbpBhuj909KNESw8qCBxOXmClyxyAUvY4a8jBVU4"
+		},
+		{
+			"id": "length-0",
+			"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+			"semantic_name": "",
+			"semantic_name_bytes": "",
+			"padded": "80000000000000000000000000000000",
+			"physical_name": "fjxOPU-GXW8BqUnov3GFcVirn0bmyvifzfvet_VxAVLImts5Xa_MgVnLe1g"
+		},
+		{
+			"id": "length-15",
+			"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+			"semantic_name": "0123456789abcde",
+			"semantic_name_bytes": "303132333435363738396162636465",
+			"padded": "30313233343536373839616263646580",
+			"physical_name": "9Cm5wwN-VtnYN_iZAdevLFoeW202w20a9L9U6_xh9ApoRcjS_YFaKzPYdso"
+		},
+		{
+			"id": "length-16",
+			"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+			"semantic_name": "0123456789abcdef",
+			"semantic_name_bytes": "30313233343536373839616263646566",
+			"padded": "3031323334353637383961626364656680000000000000000000000000000000",
+			"physical_name": "fjRIIBWV6EferOKawMbXaCRQy9emXMYaK_Vn_qInyyJarpiClvuJ3wQ_eOLPjHIdlKLKQMpM3J7jNhhL"
+		},
+		{
+			"id": "length-31",
+			"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+			"semantic_name": "0123456789abcdef0123456789abcde",
+			"semantic_name_bytes": "30313233343536373839616263646566303132333435363738396162636465",
+			"padded": "3031323334353637383961626364656630313233343536373839616263646580",
+			"physical_name": "lK7GToyQ2wldNqvL-uzwsyhDMCXUq2iWap6FTRCpY-8-O6jQgcqR_z_ay9EYJ920MeOsOIzZDvd2xQuW"
+		},
+		{
+			"id": "length-32",
+			"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+			"semantic_name": "0123456789abcdef0123456789abcdef",
+			"semantic_name_bytes": "3031323334353637383961626364656630313233343536373839616263646566",
+			"padded": "303132333435363738396162636465663031323334353637383961626364656680000000000000000000000000000000",
+			"physical_name": "DjgxwJwxTeQ8gcB1aXQrIi5MsTrjF2mFM5K-rs26DHGU41HPSSILJVV1QjIzXEzMmJ-vMCHH1VY7WGxuMzHDcWwz_SJSuUrKBZadkA"
 		}
 	],
 	"groups": [
@@ -145,15 +209,15 @@
 			"kid": 7,
 			"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121",
 			"semantic_name": "video",
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"physical_name": "g2SmM7hK43WHAnGbk6fgf6seNwpWpk0jhOIsVvLrMneRK_-DQOih0Bc3oFk",
 			"domain": 0,
 			"group": 42,
 			"frame": 0,
 			"nonce": "000000000000002a00000000",
 			"plaintext": "6672616d652d7a65726f",
-			"payload": "86bad1dfab59ea30717f073689ca86556b774d4c65bb1fafb9b1",
+			"payload": "2e0c066233eb7441b0700a4a92d82facf4e45d54439f549e0e80",
 			"payload_limit": 33554432,
-			"key": "d8dc8d99d669c4a1af5f5d4f85c3dd0f"
+			"key": "21f9d72d77e7a0a733ef0ca64c4e1010"
 		},
 		{
 			"id": "group-1",
@@ -162,15 +226,15 @@
 			"kid": 7,
 			"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121",
 			"semantic_name": "video",
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"physical_name": "g2SmM7hK43WHAnGbk6fgf6seNwpWpk0jhOIsVvLrMneRK_-DQOih0Bc3oFk",
 			"domain": 0,
 			"group": 42,
 			"frame": 1,
 			"nonce": "000000000000002a00000001",
 			"plaintext": "6672616d652d6f6e65",
-			"payload": "1a552af905e91661f58e713dda382cb42b6c2355d77e89b8dd",
+			"payload": "535e8554c166a9a7920f64090d48d00b5cc8c70935858ae451",
 			"payload_limit": 33554432,
-			"key": "d8dc8d99d669c4a1af5f5d4f85c3dd0f"
+			"key": "21f9d72d77e7a0a733ef0ca64c4e1010"
 		},
 		{
 			"id": "group-next",
@@ -179,15 +243,15 @@
 			"kid": 7,
 			"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121",
 			"semantic_name": "video",
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"physical_name": "g2SmM7hK43WHAnGbk6fgf6seNwpWpk0jhOIsVvLrMneRK_-DQOih0Bc3oFk",
 			"domain": 0,
 			"group": 43,
 			"frame": 0,
 			"nonce": "000000000000002b00000000",
 			"plaintext": "6e6578742d67726f7570",
-			"payload": "c01f7d57034a936a36062cd9e7c3d84430dd3ceb5246f644de0b",
+			"payload": "c9f34f670d3e70066a60a2c8c585735f87237554d85193623054",
 			"payload_limit": 33554432,
-			"key": "d8dc8d99d669c4a1af5f5d4f85c3dd0f"
+			"key": "21f9d72d77e7a0a733ef0ca64c4e1010"
 		},
 		{
 			"id": "empty",
@@ -196,15 +260,15 @@
 			"kid": 7,
 			"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121",
 			"semantic_name": "video",
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"physical_name": "g2SmM7hK43WHAnGbk6fgf6seNwpWpk0jhOIsVvLrMneRK_-DQOih0Bc3oFk",
 			"domain": 0,
 			"group": 1,
 			"frame": 0,
 			"nonce": "000000000000000100000000",
 			"plaintext": "",
-			"payload": "6f58cffa57d7fe8ba5e993ef48af93d3",
+			"payload": "8ed863e607f52545ca2e3b8fada026c1",
 			"payload_limit": 33554432,
-			"key": "d8dc8d99d669c4a1af5f5d4f85c3dd0f"
+			"key": "21f9d72d77e7a0a733ef0ca64c4e1010"
 		},
 		{
 			"id": "restart-new-epoch",
@@ -213,15 +277,15 @@
 			"kid": 7,
 			"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121",
 			"semantic_name": "video",
-			"physical_name": "w5WrNTUBSgdyJxoSVfzIiw",
+			"physical_name": "pmVdClJckHDGUWF4ggfWbpBhuj909KNESw8qCBxOXmClyxyAUvY4a8jBVU4",
 			"domain": 0,
 			"group": 42,
 			"frame": 0,
 			"nonce": "000000000000002a00000000",
 			"plaintext": "726573746172746564",
-			"payload": "4b2d478f8b32abb0ca1e079a0f862879764330152f31e1c91c",
+			"payload": "b53c9748bd208d47c3951c5e4caf9b00ee90a73df3fa31482a",
 			"payload_limit": 33554432,
-			"key": "5f02513d2ac2f8ccedf0ea4fd67a361e"
+			"key": "5c87079e55b0b1e453f7667abf293682"
 		}
 	],
 	"datagrams": [
@@ -232,15 +296,15 @@
 			"kid": 7,
 			"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121",
 			"semantic_name": "audio",
-			"physical_name": "gvmOztmckZsvHEYl8BOJHA",
+			"physical_name": "xVHNGhzogGpAeSDEjy2_Sc6-ixrLb6U3JNdNLvXEA2QIhNHu5UZwhV218w0",
 			"domain": 1,
 			"group": 99,
 			"frame": 0,
 			"nonce": "000000000000006300000000",
 			"plaintext": "6f707573",
-			"payload": "a264d86a3d9073305a4791a0a119c43e28dcb3ea",
+			"payload": "db04d9e65485aa79895ee39b7bc159165fec8db3",
 			"payload_limit": 1176,
-			"key": "fb477f21bea4e5e7087073b433b733bc"
+			"key": "c9695fc6ede7da6db6fde74c7a4645b4"
 		}
 	],
 	"negative": [
@@ -254,12 +318,12 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"semantic_name": "video",
 			"domain": 0,
 			"group": 42,
 			"frame": 0,
-			"key": "d8dc8d99d669c4a1af5f5d4f85c3dd0f",
-			"payload": "87bad1dfab59ea30717f073689ca86556b774d4c65bb1fafb9b1",
+			"key": "21f9d72d77e7a0a733ef0ca64c4e1010",
+			"payload": "2f0c066233eb7441b0700a4a92d82facf4e45d54439f549e0e80",
 			"payload_limit": 33554432
 		},
 		{
@@ -272,12 +336,12 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"semantic_name": "video",
 			"domain": 0,
 			"group": 42,
 			"frame": 0,
-			"key": "06008bbd803ca98127c24750e98bc8b4",
-			"payload": "86bad1dfab59ea30717f073689ca86556b774d4c65bb1fafb9b1",
+			"key": "bddc87cb9e579c45a745afb4da96ba8d",
+			"payload": "2e0c066233eb7441b0700a4a92d82facf4e45d54439f549e0e80",
 			"payload_limit": 33554432
 		},
 		{
@@ -290,12 +354,12 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"semantic_name": "video",
 			"domain": 0,
 			"group": 42,
 			"frame": 0,
-			"key": "4fd105d00a327dfbaf15089458e45091",
-			"payload": "86bad1dfab59ea30717f073689ca86556b774d4c65bb1fafb9b1",
+			"key": "5c87079e55b0b1e453f7667abf293682",
+			"payload": "2e0c066233eb7441b0700a4a92d82facf4e45d54439f549e0e80",
 			"payload_limit": 33554432
 		},
 		{
@@ -308,12 +372,12 @@
 				"kid": 8,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"semantic_name": "video",
 			"domain": 0,
 			"group": 42,
 			"frame": 0,
-			"key": "ddcc8b66a038ea7d0f45a81aad3ee055",
-			"payload": "86bad1dfab59ea30717f073689ca86556b774d4c65bb1fafb9b1",
+			"key": "725aebb38b310c332bdf9f9d697f290b",
+			"payload": "2e0c066233eb7441b0700a4a92d82facf4e45d54439f549e0e80",
 			"payload_limit": 33554432
 		},
 		{
@@ -326,12 +390,12 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "gvmOztmckZsvHEYl8BOJHA",
+			"semantic_name": "audio",
 			"domain": 0,
 			"group": 42,
 			"frame": 0,
-			"key": "881e7b5c864bc1adc1b931e8ac8ae63f",
-			"payload": "86bad1dfab59ea30717f073689ca86556b774d4c65bb1fafb9b1",
+			"key": "86684201e208365b44487c17e440365b",
+			"payload": "2e0c066233eb7441b0700a4a92d82facf4e45d54439f549e0e80",
 			"payload_limit": 33554432
 		},
 		{
@@ -344,12 +408,12 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"semantic_name": "video",
 			"domain": 1,
 			"group": 42,
 			"frame": 0,
-			"key": "9e469a08f28cedcfe2e7133f92cc528c",
-			"payload": "86bad1dfab59ea30717f073689ca86556b774d4c65bb1fafb9b1",
+			"key": "33a6316413d2aec4a97b3c41773765b0",
+			"payload": "2e0c066233eb7441b0700a4a92d82facf4e45d54439f549e0e80",
 			"payload_limit": 33554432
 		},
 		{
@@ -362,12 +426,12 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"semantic_name": "video",
 			"domain": 0,
 			"group": 43,
 			"frame": 0,
-			"key": "d8dc8d99d669c4a1af5f5d4f85c3dd0f",
-			"payload": "86bad1dfab59ea30717f073689ca86556b774d4c65bb1fafb9b1",
+			"key": "21f9d72d77e7a0a733ef0ca64c4e1010",
+			"payload": "2e0c066233eb7441b0700a4a92d82facf4e45d54439f549e0e80",
 			"payload_limit": 33554432
 		},
 		{
@@ -380,12 +444,12 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"semantic_name": "video",
 			"domain": 0,
 			"group": 42,
 			"frame": 1,
-			"key": "d8dc8d99d669c4a1af5f5d4f85c3dd0f",
-			"payload": "86bad1dfab59ea30717f073689ca86556b774d4c65bb1fafb9b1",
+			"key": "21f9d72d77e7a0a733ef0ca64c4e1010",
+			"payload": "2e0c066233eb7441b0700a4a92d82facf4e45d54439f549e0e80",
 			"payload_limit": 33554432
 		},
 		{
@@ -501,7 +565,7 @@
 		},
 		{
 			"id": "physical-name-short",
-			"operation": "key",
+			"operation": "name",
 			"error": "identity",
 			"generation": {
 				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
@@ -509,25 +573,11 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "abc",
-			"domain": 0
-		},
-		{
-			"id": "physical-name-long",
-			"operation": "key",
-			"error": "identity",
-			"generation": {
-				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
-				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
-				"kid": 7,
-				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
-			},
-			"physical_name": "aaaaaaaaaaaaaaaaaaaaaaa",
-			"domain": 0
+			"physical_name": "abc"
 		},
 		{
 			"id": "physical-name-charset",
-			"operation": "key",
+			"operation": "name",
 			"error": "identity",
 			"generation": {
 				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
@@ -535,12 +585,11 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "!!!!!!!!!!!!!!!!!!!!!!",
-			"domain": 0
+			"physical_name": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 		},
 		{
 			"id": "physical-name-padded",
-			"operation": "key",
+			"operation": "name",
 			"error": "identity",
 			"generation": {
 				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
@@ -548,8 +597,115 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "abcdefghijklmnopqrstu=",
-			"domain": 0
+			"physical_name": "g2SmM7hK43WHAnGbk6fgf6seNwpWpk0jhOIsVvLrMneRK_-DQOih0Bc3oFk="
+		},
+		{
+			"id": "physical-name-trailing-bits",
+			"operation": "name",
+			"error": "identity",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "g2SmM7hK43WHAnGbk6fgf6seNwpWpk0jhOIsVvLrMneRK_-DQOih0Bc3oFl"
+		},
+		{
+			"id": "physical-name-no-block",
+			"operation": "name",
+			"error": "identity",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+		},
+		{
+			"id": "physical-name-unaligned",
+			"operation": "name",
+			"error": "identity",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+		},
+		{
+			"id": "name-forged",
+			"operation": "name",
+			"error": "authentication",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "g2SmM7hK43WHAnGbkqfgf6seNwpWpk0jhOIsVvLrMneRK_-DQOih0Bc3oFk"
+		},
+		{
+			"id": "name-other-epoch",
+			"operation": "name",
+			"error": "authentication",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "pmVdClJckHDGUWF4ggfWbpBhuj909KNESw8qCBxOXmClyxyAUvY4a8jBVU4"
+		},
+		{
+			"id": "name-nonce-mismatch",
+			"operation": "name",
+			"error": "authentication",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "gmSmM7hK43WHAnGbpdECQ0U8dXBmjeopS4VWy5HOcF2Pj94S9_MGuyMIil0"
+		},
+		{
+			"id": "name-padding-overlong",
+			"operation": "name",
+			"error": "authentication",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "LBJsAqLKDfnK10kTKvRpoQwrPIpnGfskzrTJwwSd8ke0-DZ7fUdDO7hdGKo29npqdyoXF89KZlxQO1qf"
+		},
+		{
+			"id": "name-padding-unmarked",
+			"operation": "name",
+			"error": "authentication",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "WN7Q9JprYt9_GVVTzZOH4Uptu71rkFULqD3AENheDnEa_ydKxaUTaqxAlG8"
+		},
+		{
+			"id": "name-not-utf8",
+			"operation": "name",
+			"error": "authentication",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "xdDKCWvvsepgx6mEJcYYs5fWzUbczBBGba1qTqut8wnwsEiWstNUWlzEsfU"
 		},
 		{
 			"id": "context-too-long",
@@ -576,7 +732,7 @@
 			"id": "grouped-oversize",
 			"operation": "protect",
 			"error": "oversize",
-			"key": "d8dc8d99d669c4a1af5f5d4f85c3dd0f",
+			"key": "21f9d72d77e7a0a733ef0ca64c4e1010",
 			"group": 0,
 			"frame": 0,
 			"plaintext_len": 33554417,
@@ -586,7 +742,7 @@
 			"id": "datagram-oversize",
 			"operation": "protect",
 			"error": "oversize",
-			"key": "fb477f21bea4e5e7087073b433b733bc",
+			"key": "c9695fc6ede7da6db6fde74c7a4645b4",
 			"group": 99,
 			"frame": 0,
 			"plaintext_len": 1161,
@@ -602,11 +758,11 @@
 				"kid": 7,
 				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 			},
-			"physical_name": "CazdjbJzImtiBcDhxKY4tA",
+			"semantic_name": "video",
 			"domain": 0,
 			"group": 0,
 			"frame": 0,
-			"key": "d8dc8d99d669c4a1af5f5d4f85c3dd0f",
+			"key": "21f9d72d77e7a0a733ef0ca64c4e1010",
 			"payload": "00",
 			"payload_limit": 33554432
 		}

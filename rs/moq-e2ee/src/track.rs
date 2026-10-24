@@ -22,7 +22,7 @@ pub struct Producer {
 	next: u64,
 }
 
-/// A physical name's grouped-frame and datagram keys; clones share their accounting.
+/// A semantic name's grouped-frame and datagram keys; clones share their accounting.
 #[derive(Clone, Debug)]
 pub(crate) struct Keys {
 	pub group: Arc<Mutex<TrackKey>>,
@@ -210,14 +210,21 @@ impl fmt::Debug for Request {
 pub struct Subscribing {
 	inner: kio::Pending<moq_net::track::Subscribing>,
 	generation: crate::generation::Consumer,
+	// Keys derive from the name subscribed to, never from the name a relay hands back.
+	semantic: String,
 }
 
 impl Subscribing {
 	pub(crate) fn new(
 		inner: kio::Pending<moq_net::track::Subscribing>,
 		generation: crate::generation::Consumer,
+		semantic: String,
 	) -> Self {
-		Self { inner, generation }
+		Self {
+			inner,
+			generation,
+			semantic,
+		}
 	}
 
 	/// Poll until the track is found, yielding a decrypting [`Consumer`].
@@ -227,7 +234,7 @@ impl Subscribing {
 	/// A net error if the track is aborted or not found.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Consumer>> {
 		let subscriber = ready!(self.inner.poll_ok(waiter))?;
-		Poll::Ready(self.generation.consume(subscriber))
+		Poll::Ready(self.generation.consume(subscriber, &self.semantic))
 	}
 
 	/// Change the subscription preferences before (or after) it resolves.
