@@ -7,6 +7,8 @@
 
 #[cfg(feature = "async")]
 use crate::coding::Stream;
+#[cfg(feature = "async")]
+use crate::driver::Transport;
 
 use crate::{
 	DecodeError, Error, SessionError,
@@ -108,8 +110,8 @@ pub(super) fn reason(err: &DecodeError) -> &'static str {
 /// Section 8.9 rejects the message rather than the session. Every request starts with its
 /// Request ID, so it is read from the undecoded `body`.
 #[cfg(feature = "async")]
-pub(super) async fn reject<S: crate::transport::poll::Session>(
-	mut stream: Stream<S, Version>,
+pub(super) async fn reject(
+	mut stream: Stream<Transport, Version>,
 	kind: request::Kind,
 	body: super::Body,
 	err: DecodeError,

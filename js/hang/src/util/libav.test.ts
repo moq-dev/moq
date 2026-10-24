@@ -47,6 +47,9 @@ test("the fallback decodes AAC without a native AudioDecoder", async () => {
 		description: audioSpecificConfig(SAMPLE_RATE, 2),
 	};
 	expect((await AudioDecoder.isConfigSupported(config)).supported).toBe(true);
+	for (const codec of ["mp4a.40.02", "mp4a.40.5", "mp4a.40.05", "mp4a.40.29", "mp4a.67"]) {
+		expect((await AudioDecoder.isConfigSupported({ ...config, codec })).supported).toBe(true);
+	}
 
 	const planes: Float32Array[][] = [[], []];
 	let failure: Error | undefined;

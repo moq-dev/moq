@@ -789,7 +789,7 @@ pub enum ImportSource {
 	Ts(TsImport),
 	/// FLV / RTMP container from stdin.
 	Flv,
-	/// Pull a remote HLS / LL-HLS playlist (http/https URL or local file) into MoQ.
+	/// Follow a remote live HLS / LL-HLS playlist (http/https URL or local file) into MoQ.
 	Hls(crate::hls::ImportArgs),
 	/// RTMP: pull a remote play (`--connect`) or accept incoming publishes (`--listen`).
 	Rtmp(crate::rtmp::Args),

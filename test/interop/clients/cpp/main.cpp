@@ -198,11 +198,14 @@ int publish(
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
-    output.track = AUDIO_TRACK;
     output.frame_duration_us = AUDIO_FRAME_DURATION_US;
     auto audio = ok(
         moq::AudioProducer::init(
-            catalog, {moq::AudioSampleFormat::kF32, AUDIO_RATE, static_cast<uint32_t>(tones.size())}, output, nullptr
+            catalog,
+            moq::AudioProducerOptions{
+                {moq::AudioSampleFormat::kF32, AUDIO_RATE, static_cast<uint32_t>(tones.size())},
+                output, AUDIO_TRACK, nullptr
+            }
         ),
         "audio producer"
     );

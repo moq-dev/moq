@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate(30000u, 1001u)` and construct producers with `(catalog, ProducerOptions(input, output, track, bandwidth))` under the matching audio/video namespace.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
 ### Video rendition preference
 
 `dev.moq.media.Video` gains `preference: Int`, defaulting to `0`. Update positional constructors and use the matching moq-ffi package. Higher values are preferred; compatibility transcodes use `-1`.
@@ -139,13 +146,13 @@ val config = TrackConfig(rendition = VideoRendition(id, video))
 ### Native codecs have `audio` and `video` packages (#5694)
 
 `BroadcastProducer.encodeAudio` / `encodeVideo` are the `dev.moq.audio.Producer` / `dev.moq.video.Producer` constructors, which take a `CatalogProducer`.
-The audio track name moves into the encoder output's `track`, and a zero `frameDurationUs` takes the codec's own frame.
+The audio track name belongs to the producer's publication options, and a zero `frameDurationUs` takes the codec's own frame.
 `BroadcastConsumer.decodeAudio` / `decodeVideo` are `dev.moq.audio.Consumer.subscribe(broadcast, ...)` / `dev.moq.video.Consumer.subscribe(broadcast, ...)`.
 Producers expose subscriber state only through `demand()`, and a video `gop` is `MoqVideoGop.Keyframe(interval)`.
 `dev.moq.audio.Encoder` / `dev.moq.video.Encoder` encode without publishing.
 
 ```kotlin
-val video = dev.moq.video.Producer(CatalogProducer(broadcast), input, output)
+val video = dev.moq.video.Producer(CatalogProducer(broadcast), dev.moq.video.ProducerOptions(input, output))
 val frames = dev.moq.video.Consumer.subscribe(consumer, name, rendition, decoder)
 ```
 

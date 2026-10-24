@@ -106,17 +106,17 @@ async fn decode(
 
 	let want = audio_ms * u64::from(rate) / 1000;
 	let mut decoded = 0;
-	let mut timeline = None;
 	while decoded < want {
-		let read = decoder.read().await?;
-		let Some(moq_audio::decode::Read::Frame { discontinuity, frame }) = read else {
-			anyhow::bail!("{name}: audio track ended early");
+		let read = decoder
+			.read()
+			.await?
+			.with_context(|| format!("{name}: audio track ended early"))?;
+		let frame = match read {
+			moq_audio::decode::Read::Frame(frame) => frame,
+			// moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
+			moq_audio::decode::Read::Gap { .. } => anyhow::bail!("{name}: audio gap after {decoded} samples"),
+			moq_audio::decode::Read::End { .. } => anyhow::bail!("{name}: audio track ended early"),
 		};
-		// moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
-		ensure!(
-			*timeline.get_or_insert(discontinuity) == discontinuity,
-			"{name}: audio discontinuity after {decoded} samples"
-		);
 		let samples = frame.data.len() as u64 / (4 * channels as u64);
 		writeln!(log, "{} {samples}", frame.timestamp.as_micros())?;
 		pcm.write_all(&frame.data)?;
