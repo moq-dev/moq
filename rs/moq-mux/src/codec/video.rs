@@ -82,26 +82,12 @@ pub(crate) struct Reorder {
 	/// One picture's duration as `(units, scale)`, i.e. `units / scale` seconds, when the header
 	/// declares a fixed picture rate.
 	pub period: Option<(u64, u64)>,
-	/// Whether a picture may be a single field (H.264 `frame_mbs_only_flag` 0), while
-	/// [`Self::depth`] counts frames and field pairs.
-	pub fields: bool,
 }
 
 impl Reorder {
 	/// The deepest reordering a conforming sequence header declares: no decoded picture buffer
 	/// holds more than 16 frames (H.264 A.3.1, HEVC A.4.2).
 	pub(crate) const MAX_DEPTH: u32 = 16;
-
-	/// The most frames, each one picture, that can precede one in decode order and follow it in
-	/// output order: the depth, or with fields both fields of each pair it counts and the other
-	/// field of the frame's own pair.
-	pub(crate) fn pictures(self) -> usize {
-		let depth = usize::try_from(self.depth).unwrap_or(usize::MAX);
-		match self.fields {
-			true => depth.saturating_mul(2).saturating_add(1),
-			false => depth,
-		}
-	}
 
 	/// The minimum decode delay and lookahead in 90 kHz ticks.
 	pub(crate) fn timing(self, framerate: Option<f64>) -> (u64, u64) {

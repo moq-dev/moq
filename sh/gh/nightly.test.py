@@ -1,5 +1,6 @@
 """Nightly groups report a failure without hiding independent later benchmarks."""
 
+import json
 import os
 from pathlib import Path
 import re
@@ -14,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class NightlyTest(unittest.TestCase):
-    def run_group(self, group, fail=""):
+    def run_group(self, group, fail="", **environment):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
             calls = scratch / "calls"
@@ -23,14 +24,47 @@ class NightlyTest(unittest.TestCase):
                 stub.write_text(
                     '#!/usr/bin/env bash\n'
                     'printf "%s %s\n" "${0##*/}" "$*" >> "$NIGHTLY_CALLS"\n'
+                    'printf "%s\n" "${MOQ_BENCH_BASE:-}" >> "$NIGHTLY_CALLS.base"\n'
                     '[[ "$*" != "$NIGHTLY_FAIL" ]]\n'
                 )
                 stub.chmod(0o755)
+            # Answers `gh run list` by applying its --jq filter to NIGHTLY_RUNS.
+            gh = scratch / "gh"
+            gh.write_text('#!/usr/bin/env bash\nwhile [[ $1 != --jq ]]; do shift; done\n'
+                          'printf "%s" "$NIGHTLY_RUNS" | jq -r "$2"\n')
+            gh.chmod(0o755)
             env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
                        MOQ_BENCH_RESULTS=str(scratch / "results"), NIGHTLY_CALLS=str(calls), NIGHTLY_FAIL=fail, BASH_ENV="/dev/null")
+            env.pop("MOQ_BENCH_BASE", None)
+            env.update(environment)
             result = subprocess.run(["bash", "sh/gh/nightly.sh", group], cwd=ROOT,
                                     env=env, capture_output=True, text=True)
+            self.bases = set(Path(f"{calls}.base").read_text().splitlines()) if calls.exists() else set()
             return result, calls.read_text().splitlines() if calls.exists() else []
+
+    def test_paired_base_is_the_previous_scheduled_nightly(self):
+        head, parent = (subprocess.run(["git", "rev-parse", revision], cwd=ROOT, capture_output=True, text=True,
+                                       check=True).stdout.strip() for revision in ("HEAD", "HEAD~1"))
+        # This run is the newest scheduled one; the previous run's commit is the base.
+        runs = json.dumps([{"databaseId": 2, "headSha": parent}, {"databaseId": 1, "headSha": head}])
+        result, _ = self.run_group("rust-uring", MOQ_BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2", NIGHTLY_RUNS=runs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.bases, {head})
+        # A named revision reaches the runner as its commit.
+        result, _ = self.run_group("rust-uring", MOQ_BENCH_BASE="HEAD~1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.bases, {parent})
+        result, calls = self.run_group("rust-uring", MOQ_BENCH_BASE="previous-nightly", GITHUB_RUN_ID="1",
+                                       NIGHTLY_RUNS=json.dumps([{"databaseId": 1, "headSha": head}]))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no previous scheduled Nightly", result.stderr)
+        self.assertEqual(calls, [])
+
+    def test_paired_base_applies_only_to_rust_bench_groups(self):
+        for group in ("js", "rust-test"):
+            result, calls = self.run_group(group, MOQ_BENCH_BASE="HEAD")
+            self.assertEqual(result.returncode, 2, group)
+            self.assertEqual(calls, [])
 
     def test_failed_js_benchmark_does_not_hide_later_work(self):
         result, calls = self.run_group("js", "js bench reader")
@@ -43,9 +77,15 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust-bench")
         self.assertEqual(result.returncode, 0, result.stderr)
         release = [call for call in calls if call.startswith("just gh criterion")]
-        self.assertEqual(len(release), 5)  # moq-net, its CPU clock, kio, the shared build, then GStreamer.
-        self.assertTrue(any("--bench session -- session_delivery_group_cost_cpu" in call for call in release))
-        shared = [call for call in release if "-p moq-relay" in call]
+        self.assertEqual(len(release), 4)  # moq-net, its CPU clock, kio, then GStreamer.
+        # The CPU clock reuses moq-net's build instead of rebuilding it without fuzz.
+        self.assertTrue(any("-p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu" in call
+                            for call in release))
+        self.assertEqual(release[-1], "just gh criterion -p moq-gst --bench catalog")
+        self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
+        result, calls = self.run_group("rust-shared")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        shared = [call for call in calls if call.startswith("just gh criterion")]
         self.assertEqual(len(shared), 1)
         self.assertIn("--no-fail-fast", shared[0])
         self.assertIn("--bench http_idle", shared[0])
@@ -57,13 +97,11 @@ class NightlyTest(unittest.TestCase):
         self.assertIn("-p moq-quic", shared[0])
         self.assertIn("moq-quic/fuzz", shared[0])
         self.assertIn("--bench wire", shared[0])
-        self.assertEqual(release[-1], "just gh criterion -p moq-gst --bench catalog")
-        self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
 
     def test_every_cargo_bench_target_runs_nightly(self):
         covered = set()
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
-        for group in ("rust-bench", "rust-extra", "rust-uring"):
+        for group in ("rust-bench", "rust-shared", "rust-extra", "rust-uring"):
             self.assertIn(f"recipe: gh nightly {group}\n", workflow)
             result, calls = self.run_group(group)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -133,7 +171,7 @@ class NightlyTest(unittest.TestCase):
     def test_failed_release_build_does_not_hide_later_work(self):
         _, calls = self.run_group("rust-bench")
         build = next(call.removeprefix("just ") for call in calls
-                     if call.startswith("just gh criterion") and "-p moq-relay" in call)
+                     if call.startswith("just gh criterion") and "-p moq-net" in call)
         result, calls = self.run_group("rust-bench", build)
         self.assertEqual(result.returncode, 1)
         # A failed group publishes no report, but every later target still runs.

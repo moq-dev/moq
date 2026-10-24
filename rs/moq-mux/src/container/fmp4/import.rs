@@ -1328,6 +1328,8 @@ fn unwrap<E: crate::catalog::hang::CatalogExt>(
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
+		// No input follows, so the buffer that waited for the rest of an atom is done.
+		self.buffer = BytesMut::new();
 		for track in self.text.values_mut() {
 			track.producer.finish()?;
 		}
