@@ -1006,7 +1006,9 @@ async fn uring_workers_offer_the_configured_extensions() {
 					assert!(admission.attached(), "an AUTH token arrived as a new session");
 					admission.grant(grant());
 				});
-				token.expect("the token was never answered").expect("the token was refused");
+				token
+					.expect("the token was never answered")
+					.expect("the token was refused");
 			}
 			false => {
 				let err = presented.await.expect("the token was never answered").err();
