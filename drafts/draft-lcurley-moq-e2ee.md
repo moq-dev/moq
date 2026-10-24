@@ -200,7 +200,8 @@ physical  = nonce || AES-128-GCM(name_key, nonce, padded)
 `padded` is `semantic_name`, one `0x80` byte, and the fewest zero bytes that make its length a multiple of 16.
 `nonce` is the first 12 bytes of the HMAC output.
 AES-128-GCM uses an empty AAD and outputs ciphertext followed by its 16-byte tag ({{RFC5116}}).
-The physical track name is the unpadded base64url encoding of `physical` ({{RFC4648}} Section 5), a valid moq-lite track name of at least 59 characters.
+The physical track name is the unpadded base64url encoding of `physical` ({{RFC4648}} Section 5), a valid moq-lite track name of `ceil(4 * (28 + len(padded)) / 3)` characters, at least 59.
+The 65535-byte semantic bound does not make that fit a transport request: the transport refuses a request whose physical name is too long for its message, as it refuses any oversized track name, so applications keep semantic names to about three quarters of that budget.
 This function may hide any track-shaped name the application wants a relay not to read; it is not limited to media tracks.
 
 The nonce is a function of the name, so equal semantic names under one generation share one physical name, and relays deduplicate and cache requests for it.
