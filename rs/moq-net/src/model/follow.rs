@@ -479,7 +479,7 @@ mod tests {
 
 	/// Nothing more is handed out past the origin's update hold.
 	async fn none(announced: &mut AnnouncedBroadcast) {
-		let hold = crate::origin::DEFAULT_UPDATE_HOLD * 2;
+		let hold = super::super::origin_impl::DEFAULT_UPDATE_HOLD * 2;
 		if let Ok(result) = moq_clock::timeout(hold, announced.available()).await {
 			panic!(
 				"expected nothing, got {:?}",
@@ -543,7 +543,7 @@ mod tests {
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
 			let _unanswered = requested(&dynamic).await;
 			drop(dynamic);
-			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD * 2).await;
+			moq_clock::sleep(super::super::origin_impl::DEFAULT_UPDATE_HOLD * 2).await;
 			origin.publish("live", Route::default()).unwrap()
 		});
 		none(&mut announced).await;

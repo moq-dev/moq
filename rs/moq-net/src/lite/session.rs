@@ -344,7 +344,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			started: false,
 			_setup: setup_token,
 		},
-		local_close: Default::default(),
+		closing: Default::default(),
 		setup: version
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version, stats.clone())),
@@ -370,7 +370,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 pub(crate) struct Driver {
 	/// Presenting our tokens, one AUTH stream each.
 	auth: Present,
-	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	pub(crate) closing: std::sync::Arc<crate::session::Closing>,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
 	setup: Option<SendSetup>,
@@ -396,6 +396,7 @@ impl Driver {
 				Ok(()) => Error::Cancel,
 				Err(err) => err.clone(),
 			});
+			self.closing.record(res.as_ref().err().unwrap_or(&Error::Cancel));
 			match &res {
 				Err(Error::Transport(_) | Error::IdleTimeout) => {
 					tracing::info!("session terminated");
@@ -413,7 +414,7 @@ impl Driver {
 					self.session.close(SessionError::Cancel.to_code(), "");
 				}
 			}
-			if self.local_close.load(std::sync::atomic::Ordering::Relaxed) {
+			if self.closing.is_local() {
 				self.subscriber.close();
 				return Poll::Ready(res);
 			}
@@ -601,7 +602,7 @@ impl PresentToken {
 						return Poll::Ready(Error::GoingAway);
 					}
 					let token = token.clone();
-					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
+					let mut stream = match ready!(Stream::poll_open_request(&mut self.session, self.version, &mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
 					};
@@ -1309,6 +1310,19 @@ mod tests {
 			assert!(log.closes().is_empty(), "{version}");
 			assert!(!log.stops().is_empty(), "{version}: data stream was not refused");
 		}
+	}
+
+	// GOAWAY is not a request: refusing it without credit would leave the peer
+	// unaware that we are draining.
+	#[moq_clock::test]
+	async fn goaway_is_sent_without_request_credit() {
+		let transport = ScriptedSession::new(Vec::new()).without_credit();
+		let log = transport.log.clone();
+		let mut server = raw_session(transport, Version::Lite07, false, None);
+		server.goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		let _ = server.driver.poll(&kio::Waiter::noop());
+		assert_eq!(log.bi_opens(), 1, "GOAWAY stream was not opened");
+		assert!(log.closes().is_empty());
 	}
 
 	#[moq_clock::test]
