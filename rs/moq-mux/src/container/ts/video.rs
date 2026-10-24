@@ -25,7 +25,8 @@ impl Codec {
 		}
 	}
 
-	/// Whether this NAL begins a picture or its leading non-VCL data.
+	/// Whether this NAL begins a picture or its leading non-VCL data
+	/// (H.264 7.4.1.2.3, H.265 7.4.2.4.4), and whether it is a slice.
 	fn boundary(self, nal: &[u8]) -> anyhow::Result<(bool, bool)> {
 		match self {
 			Self::Avc => {
@@ -46,7 +47,7 @@ impl Codec {
 						.map_err(unit_error)?
 						& 0x80 != 0
 				} else {
-					matches!(kind, 6..=9)
+					matches!(kind, 6..=9 | 14..=18)
 				};
 				Ok((first, slice))
 			}
@@ -68,7 +69,7 @@ impl Codec {
 						.map_err(unit_error)?
 						& 0x80 != 0
 				} else {
-					matches!(kind, 32..=35 | 39)
+					matches!(kind, 32..=35 | 39 | 41..=44 | 48..=55)
 				};
 				Ok((first, slice))
 			}
@@ -179,15 +180,20 @@ impl Assembly {
 			};
 			// A new picture's header closes the preceding AU even while its final
 			// NAL is still arriving. Never treat a PES boundary as this evidence.
-			if self.has_slice
-				&& self.tail.len()
-					>= start
-						+ match self.codec {
-							Codec::Avc => 2,
-							Codec::Hevc => 3,
-						} && self.codec.boundary(&self.tail[start..])?.0
-			{
-				return self.emit();
+			if self.has_slice {
+				let header = match self.codec {
+					Codec::Avc => 2,
+					Codec::Hevc => 3,
+				};
+				if self.tail.len() < start + header {
+					// Until the boundary is decided, this prefix may own the next AU's
+					// stamp, so it must not be scanned into the spent spans below.
+					if !eof {
+						return Ok(None);
+					}
+				} else if self.codec.boundary(&self.tail[start..])?.0 {
+					return self.emit();
+				}
 			}
 			if self.stamp.is_none() {
 				// The optional zero_byte may be a trailing zero from the preceding
@@ -441,32 +447,78 @@ mod tests {
 		}
 	}
 
+	fn drain(assembly: &mut Assembly, eof: bool, units: &mut Vec<Unit>) {
+		while let Some(unit) = assembly.next(eof).unwrap() {
+			units.push(unit);
+		}
+	}
+
 	#[test]
 	fn prefix_ownership_and_staging_follow_the_bytes() {
-		// Every cut of the required prefix and slice, for both 3/4-byte
-		// prefixes. A continuation's unrelated PTS never restamps this AU.
-		for prefix in [&[0, 0, 1][..], &[0, 0, 0, 1][..]] {
-			let data = [prefix, &[0x65, 0x80, 0xab, 0xcd]].concat();
-			for cut in 1..data.len() {
+		// Every cut of the required prefix and slice, for both 3/4-byte prefixes,
+		// with and without a preceding AU awaiting its boundary. A continuation's
+		// unrelated PTS never restamps this AU.
+		for lead in [false, true] {
+			for prefix in [&[0, 0, 1][..], &[0, 0, 0, 1][..]] {
+				let data = [prefix, &[0x65, 0x80, 0xab, 0xcd]].concat();
+				for cut in 1..data.len() {
+					let staging = Arc::default();
+					let mut assembly = Assembly::new(Codec::Avc);
+					let mut units = Vec::new();
+					if lead {
+						assembly
+							.push(pending(&staging, &[0, 0, 1, 0x65, 0x80, 0x11], None))
+							.unwrap();
+					}
+					assembly.push(pending(&staging, &data[..cut], Some(90_000))).unwrap();
+					drain(&mut assembly, false, &mut units);
+					if !lead {
+						assert_eq!(staging.bytes.load(Ordering::Relaxed), cut);
+					}
+					assembly.push(pending(&staging, &data[cut..], Some(180_000))).unwrap();
+					drain(&mut assembly, false, &mut units);
+					drain(&mut assembly, true, &mut units);
+					assert_eq!(units.len(), 1 + usize::from(lead));
+					let unit = units.last().unwrap();
+					let owner = if prefix.len() == 4 && cut == 1 { 2 } else { 1 };
+					assert_eq!(unit.pts.unwrap().as_secs(), owner, "lead {lead} cut {cut}");
+					assert_eq!(
+						unit.data.as_ref(),
+						[START_CODE.as_ref(), &[0x65, 0x80, 0xab, 0xcd]].concat()
+					);
+					if !lead {
+						assert_eq!(staging.bytes.load(Ordering::Relaxed), unit.data.len());
+					}
+					drop(units);
+					assembly.reset();
+					assert_eq!(staging.bytes.load(Ordering::Relaxed), 0);
+					assert_eq!(staging.units.load(Ordering::Relaxed), 0);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn every_standard_opener_starts_the_next_au() {
+		let avc = [6, 7, 8, 9, 14, 15, 16, 17, 18].map(|kind| vec![kind]);
+		let hevc = [32, 33, 34, 35, 39, 41, 44, 48, 55].map(|kind| vec![kind << 1, 0x01]);
+		let cases = [
+			(Codec::Avc, vec![0x65, 0x80], vec![0x61, 0x80], avc),
+			(Codec::Hevc, vec![0x26, 0x01, 0x80], vec![0x02, 0x01, 0x80], hevc),
+		];
+		for (codec, first, next, openers) in cases {
+			for opener in openers {
 				let staging = Arc::default();
-				let mut assembly = Assembly::new(Codec::Avc);
-				assembly.push(pending(&staging, &data[..cut], Some(90_000))).unwrap();
-				assert!(assembly.next(false).unwrap().is_none());
-				assert_eq!(staging.bytes.load(Ordering::Relaxed), cut);
-				assembly.push(pending(&staging, &data[cut..], Some(180_000))).unwrap();
-				assert!(assembly.next(false).unwrap().is_none());
-				let unit = assembly.next(true).unwrap().unwrap();
-				let owner = if prefix.len() == 4 && cut == 1 { 2 } else { 1 };
-				assert_eq!(unit.pts.unwrap().as_secs(), owner);
+				let mut assembly = Assembly::new(codec);
+				let data = [&[0, 0, 1][..], &first, &[0, 0, 1], &opener, &[0, 0, 1], &next].concat();
+				assembly.push(pending(&staging, &data, Some(90_000))).unwrap();
+				let mut units = Vec::new();
+				drain(&mut assembly, true, &mut units);
+				assert_eq!(units.len(), 2, "opener {opener:?}");
 				assert_eq!(
-					unit.data.as_ref(),
-					[START_CODE.as_ref(), &[0x65, 0x80, 0xab, 0xcd]].concat()
+					&units[1].data[..START_CODE.len() + opener.len()],
+					[START_CODE.as_ref(), &opener].concat()
 				);
-				assert_eq!(staging.bytes.load(Ordering::Relaxed), unit.data.len());
-				drop(unit);
-				assembly.reset();
-				assert_eq!(staging.bytes.load(Ordering::Relaxed), 0);
-				assert_eq!(staging.units.load(Ordering::Relaxed), 0);
 			}
 		}
 	}
