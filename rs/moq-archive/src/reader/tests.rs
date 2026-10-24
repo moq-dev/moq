@@ -209,6 +209,14 @@ async fn fetch(
 	Ok(frames)
 }
 
+/// Whether reading the whole fetched group from past its `len` frames ends cleanly.
+async fn fetch_past_end(broadcast: &broadcast::Producer, track: &str, sequence: u64, len: usize) -> bool {
+	let track = broadcast.consume().track(track).unwrap();
+	let group = track.fetch_group(sequence, None).await.unwrap();
+	let mut past = group.with_range(len as u64 + 1..);
+	past.read_frame().await.unwrap().is_none()
+}
+
 fn expected(track: &str, sequence: u64, frames: std::ops::Range<u64>) -> Vec<(u64, Bytes)> {
 	frames
 		.map(|i| {
@@ -703,6 +711,10 @@ async fn evicted_timeline_groups_remain_fetchable() {
 	pool.poll(now, &kio::Waiter::noop());
 	pool.poll(now + Duration::from_secs(1), &kio::Waiter::noop());
 	assert_eq!(fetch(&broadcast, &timeline("video"), 0).await.unwrap(), expected);
+	// Past the end of an evicted complete group is EOF, as it is for a cached one.
+	pool.poll(now + Duration::from_secs(2), &kio::Waiter::noop());
+	pool.poll(now + Duration::from_secs(3), &kio::Waiter::noop());
+	assert!(fetch_past_end(&broadcast, &timeline("video"), 0, expected.len()).await);
 	serve.abort();
 	let _ = serve.await;
 }
@@ -736,6 +748,8 @@ async fn enrolled_timeline_fetch_survives_finish() {
 		matches!(missing, Err(moq_net::Error::NotFound)),
 		"unknown timeline group: {missing:?}"
 	);
+	// Complete groups retain their known end, so a read past it is EOF.
+	assert!(fetch_past_end(&broadcast, &timeline("audio"), 0, expected.len()).await);
 	serving.abort();
 	let _ = serving.await;
 }
@@ -770,7 +784,7 @@ async fn benchmark_timeline_fetch_fanout() {
 					broadcast.info().pool.poll(now, &kio::Waiter::noop());
 				}
 				let subscription = moq_net::track::Subscription::default()
-					.with_groups(0..)
+					.with_range(0..)
 					.with_max_delay(Duration::from_secs(60));
 				let mut retained = broadcast
 					.consume()

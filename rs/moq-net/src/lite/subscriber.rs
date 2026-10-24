@@ -1646,7 +1646,7 @@ impl AnnouncePrefix {
 					// (`origin::Consumer::with_hidden`).
 					stream.writer.buffer(&lite::AnnounceRequest {
 						prefix: self.prefix.as_path(),
-						exclude_hop: self.subscriber.self_origin.id(),
+						exclude_hop: self.subscriber.self_origin,
 						hidden: true,
 					})?;
 					self.state = PrefixState::Send { stream };
@@ -2221,7 +2221,7 @@ mod tests {
 			}
 			moq_clock::sleep(crate::tail::GRACE * 2).await;
 
-			let lowered = Some(Subscription::default().with_groups(2..));
+			let lowered = Some(Subscription::default().with_range(2..));
 			// The SUBSCRIBE in force, already answered.
 			let floor = if update { 5 } else { 2 };
 			let mut sub = Sub::Active(SubStream {
@@ -6101,14 +6101,15 @@ impl TrackServe {
 			Some(mut subscription) => {
 				// The wire carries one range: the span of every range asked for, which the
 				// subscribers' own reads narrow again.
-				subscription.set_bounds(subscription.start(), subscription.end());
+				let start = subscription.start();
+				subscription = subscription.with_start(start);
 				match sub {
 					Sub::None => {
 						// An idle copy is asked from the head of the newest group it cached when
 						// the subscriber has no start of its own: a quiet track (a catalog) sends
 						// that group again, which says the cache is current.
 						if subscription.start().is_none() {
-							subscription.set_bounds(producer.idle_newest(), subscription.end());
+							subscription = subscription.with_start(producer.idle_newest());
 						}
 						// Open an upstream SUBSCRIBE for the first subscriber.
 						Ok(Begin::Establish(self.prepare_establish(producer, subscription)))

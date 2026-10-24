@@ -1456,6 +1456,12 @@ impl Connection {
         self.streams.leased(id)
     }
 
+    /// Assert that the receive lease books balance, for the fuzz target.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) fn check_leases(&self) {
+        self.streams.check_leases();
+    }
+
     /// Ping the remote endpoint
     ///
     /// Causes an ACK-eliciting packet to be transmitted.

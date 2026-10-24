@@ -470,6 +470,7 @@ A receiver MUST discard an announcement whose reconstructed path contains its ow
 This is the only loop defense moq-lite requires, and it catches loops of any length.
 A conforming sender never sends one (see below), so a receiver MAY instead close the session with a protocol violation; discarding is what keeps a mesh working when one member does not conform.
 A Hop ID of 0 means unknown and never matches anything; withholding an ID trades loop detection for privacy.
+A Hop ID spans 64 bits; a relay sends 0 in place of one that a peer's [Variable-Length Integer](#varint) cannot carry.
 A receiver MAY assign an identity of its own to a peer that declared 0, as local selection state for filtering that session; it MUST NOT forward that identity as a Hop ID.
 
 A publisher MUST NOT advertise a path whose entries contain the Hop ID the subscriber declared in its SETUP (see [Hop Parameter](#hop-parameter)).
@@ -1798,6 +1799,8 @@ The `Message Length` describes the payload size on the wire.
 ## moq-lite-07
 
 - Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens. Earlier versions with a Setup Stream ignore it as an unknown parameter.
+
+- Hop IDs span 64 bits; a relay sends 0 in place of one an earlier version's varint cannot carry.
 
 - Allow a negotiated extension to preserve timestamps with explicitly unchecked provenance.
 

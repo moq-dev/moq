@@ -69,7 +69,7 @@ in the generated binding, not the wrapper: see
 One PR, private and behavior-preserving: moq-mux's `import::Track` and
 `TrackStream` expand their codec arms through one macro each, and nine
 importers lost a deleted method's doc left on `cut`. The H.264 and H.265
-exporters were already planned as [one Annex-B exporter](/quest/m1/annexb-export.md),
+exporters were already planned as [one Annex-B exporter](https://github.com/moq-dev/moq/pull/6575),
 ordered after the rendition rebind, so this run left them alone. Search the
 quest tree before fixing a duplicate: the 2026-10-22 refactor audit filed
 several.

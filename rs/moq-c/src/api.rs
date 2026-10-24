@@ -2080,8 +2080,8 @@ pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
 /// Resolves against what is announced *now*, where [moq_origin_announced_broadcast] waits
 /// indefinitely: it returns an announced broadcast at once, and fails when none is reachable,
 /// including a broadcast created but not announced. It does NOT wait for a later
-/// announcement. Serve on-demand paths with [moq_origin_dynamic]. A moq-lite client session
-/// only asks its peer about paths something watches, through [moq_origin_announced] or
+/// announcement. Serve on-demand paths with [moq_origin_dynamic]. A client session only
+/// asks its peer about paths something watches, through [moq_origin_announced] or
 /// [moq_origin_announced_broadcast], so a path nothing watches is unreachable on it.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more

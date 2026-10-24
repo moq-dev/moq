@@ -850,14 +850,14 @@ fn bench_subscriber_join(c: &mut Criterion) {
 /// Each held reader asks for distinct values, so the aggregate's tables grow with the audience.
 fn bench_subscriber_preferences(c: &mut Criterion) {
 	let ordinary = track::Subscription::default()
-		.with_groups(100..200)
+		.with_range(100..200)
 		.with_order(track::Order::Ascending);
 	let held = |i: usize| {
 		let i = i as u64;
 		track::Subscription::default()
 			.with_priority(((i % 255) as i16 - 128) as i8)
 			.with_max_delay(Duration::from_micros(i))
-			.with_groups(100 + i..200 + i)
+			.with_range(100 + i..200 + i)
 			.with_order(track::Order::Ascending)
 	};
 	let extreme = track::Subscription::default()
@@ -913,7 +913,7 @@ fn bench_range_demand(c: &mut Criterion) {
 	// Far past every held range, so each move adds one run and removes another.
 	let away = |offset: u64| {
 		let group = (1 << 40) + offset;
-		track::Subscription::default().with_groups(group..=group)
+		track::Subscription::default().with_range(group..=group)
 	};
 	let mut group = c.benchmark_group("track_range_demand");
 	for steady in STEADY {
@@ -925,7 +925,7 @@ fn bench_range_demand(c: &mut Criterion) {
 					// Overlapping, so the held ranges union into one run.
 					let start = (i % distinct) as u64 * 10;
 					subscriber
-						.update(track::Subscription::default().with_groups(start..start + 1000))
+						.update(track::Subscription::default().with_range(start..start + 1000))
 						.unwrap();
 				}
 				let mut viewer = setup.track.subscribe(away(0));
@@ -952,7 +952,7 @@ fn bench_subscription_ranges(c: &mut Criterion) {
 			let viewers: Vec<_> = (0..ranges)
 				.map(|i| {
 					let start = i * (span + 1);
-					track.subscribe(track::Subscription::default().with_groups(start..start + span))
+					track.subscribe(track::Subscription::default().with_range(start..start + span))
 				})
 				.collect();
 			assert_eq!(track.subscription().unwrap().ranges.len(), ranges as usize);
@@ -1534,7 +1534,7 @@ fn bench_range_widening(c: &mut Criterion) {
 				}
 				let narrow = track::Subscription::default()
 					.with_max_delay(AGED_BUDGET)
-					.with_groups(0..1);
+					.with_range(0..1);
 				let mid = cached / 2;
 				let wide = narrow
 					.clone()

@@ -2652,7 +2652,7 @@ test("drafts 14 to 16 refuse a namespace update without ending the subscription"
 			ask.writer.close();
 		} else {
 			await peer.writer.u53(UnsubscribeNamespace.id);
-			await new UnsubscribeNamespace({ requestId: 0n }).encode(peer.writer, version);
+			await new UnsubscribeNamespace({ prefix: asked.namespace, requestId: 0n }).encode(peer.writer, version);
 		}
 		await running;
 		origin.close();
@@ -3451,16 +3451,21 @@ test("draft-20: an inline terminal reset after its FIN falls back to a standalon
 		const header = await GroupMessage.decode(reader, V20);
 		for (let i = 0; i < 5; i++) await reader.decode((c) => Frame.decode(c, header.flags, undefined));
 
-		// The group stream's close fails from here on, like a reset after its FIN.
+		// The group stream's close fails once it FINs, like a reset after its FIN.
 		const closed = Object.getOwnPropertyDescriptor(Writer.prototype, "closed")?.get;
 		if (!closed) throw new Error("Writer.closed is not a getter");
+		const stream = opened[0];
+		const fin = stream.close.bind(stream);
 		let reset = false;
-		Object.defineProperty(opened[0], "closed", {
+		stream.close = () => {
+			reset = true;
+			fin();
+		};
+		Object.defineProperty(stream, "closed", {
 			get(this: Writer) {
 				return reset ? Promise.reject(new Error("reset after FIN")) : closed.call(this);
 			},
 		});
-		reset = true;
 
 		track.finishAt({ group: 5, frame: 5 });
 		group.close();

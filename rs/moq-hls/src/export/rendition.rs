@@ -1352,13 +1352,10 @@ async fn fetch(
 	broadcast: &moq_net::broadcast::Consumer,
 ) -> Result<std::result::Result<moq_net::group::Consumer, moq_net::Error>> {
 	match track.fetch_group(start.group, None).await {
-		Ok(mut group) => {
-			match end {
-				Some(end) => group.set_frames(start.frame..end),
-				None => group.set_frames(start.frame..),
-			}
-			Ok(Ok(group))
-		}
+		Ok(group) => Ok(Ok(match end {
+			Some(end) => group.with_range(start.frame..end),
+			None => group.with_range(start.frame..),
+		})),
 		Err(err) if is_unservable(&err, broadcast) => Ok(Err(err)),
 		Err(err) => Err(err.into()),
 	}

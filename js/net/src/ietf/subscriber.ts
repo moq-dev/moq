@@ -563,7 +563,7 @@ export class Subscriber {
 					// For v14/v15: send UnsubscribeNamespace before closing
 					if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
 						try {
-							const unsub = new UnsubscribeNamespace({ requestId });
+							const unsub = new UnsubscribeNamespace({ prefix, requestId });
 							await Message.write(request.writer, UnsubscribeNamespace.id, unsub, version);
 						} catch {
 							// Stream might already be closed

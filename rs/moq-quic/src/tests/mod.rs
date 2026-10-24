@@ -7170,17 +7170,14 @@ fn lease_spends_connection_window_only() {
     assert_eq!(sent, msg.len());
     assert_eq!(leased(&mut pair, server_ch, s), WINDOW + 50 - 100);
 
-    assert_eq!(
-        pair.server_recv(server_ch, s).read(true).err(),
-        Some(ReadableError::ClosedStream),
-        "finished and reclaimed while its tail is still leased"
-    );
     assert!(pair.server_conn_mut(server_ch).leased(s).unwrap().is_fin());
     let all = leased(&mut pair, server_ch, s);
     let mut recv = pair.server_recv(server_ch, s);
     recv.advance(all);
     let _ = recv.release();
     assert_eq!(pair.server_conn_mut(server_ch).stats().credit.leased, 0);
+    pair.server_recv(server_ch, s).stop(0u32.into()).unwrap();
+    assert!(pair.server_conn_mut(server_ch).leased(s).is_none());
 }
 
 #[test]

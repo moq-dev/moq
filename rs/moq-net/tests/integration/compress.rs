@@ -160,7 +160,7 @@ async fn a_start_group_arrives_whole() {
 							.create_group(moq_net::group::Info { sequence: 5 })
 							.unwrap();
 						write(&mut group, 0..head);
-						let mut fixture = relay(published, hops, Subscription::default().with_groups(5..)).await;
+						let mut fixture = relay(published, hops, Subscription::default().with_range(5..)).await;
 						if lite {
 							assert_eq!(
 								fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
