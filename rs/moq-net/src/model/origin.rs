@@ -3695,12 +3695,8 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					Err(_closed) => Err(Error::Unroutable),
 				}));
 			}
-			if let Some(id) = front.serving()
-				&& let Some(source) = sources.get(&id)
-				&& source.poll_closed(waiter).is_ready()
-			{
-				return Poll::Ready(Step::SourceClosed(id));
-			}
+			// The listing first: a source ends its listing before it closes, so this forwards
+			// the tracks it finished last before its close detaches it.
 			match &mut listing {
 				None => {
 					if front.serving().is_some() && matches!(lister.poll_used(waiter), Poll::Ready(Ok(()))) {
@@ -3720,6 +3716,12 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						return Poll::Ready(Step::Listed(result));
 					}
 				}
+			}
+			if let Some(id) = front.serving()
+				&& let Some(source) = sources.get(&id)
+				&& source.poll_closed(waiter).is_ready()
+			{
+				return Poll::Ready(Step::SourceClosed(id));
 			}
 			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
 				let Some(io) = tracks.get_mut(&name) else { continue };
@@ -8790,6 +8792,33 @@ mod tests {
 
 		drop(source);
 		assert_eq!(listed(&mut tracks).await, "end");
+	}
+
+	/// A source closing right after its tracks finished, held or not, ends the front's
+	/// listing after those finishes, never ahead of them.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_forwards_the_finishes_before_its_source_closed() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let source = producer.publish("room/alice", Route::default()).unwrap();
+		let dropped = source.create_track("dropped", None).unwrap();
+		let held = source.create_track("held", None).unwrap();
+		let _live = source.create_track("live", None).unwrap();
+
+		let front = consumer.request_broadcast("room/alice", None).await.unwrap();
+		let mut tracks = front.tracks().unwrap();
+		for event in ["+dropped", "+held", "+live", "synced"] {
+			assert_eq!(listed(&mut tracks).await, event);
+		}
+
+		dropped.finish().unwrap();
+		drop(dropped);
+		held.finish().unwrap();
+		source.close();
+		for event in ["~dropped", "~held", "end"] {
+			assert_eq!(listed(&mut tracks).await, event);
+		}
 	}
 
 	/// A source's handler ending its listing while the source stays, as a session does on

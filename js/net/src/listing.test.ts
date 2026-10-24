@@ -196,6 +196,41 @@ test("the broadcast ending ends the listing", async () => {
 	expect(() => consumer.tracks()).toThrow("broadcast is closed");
 });
 
+// A clean end reports each track that left before it, and how, but not one the reader never
+// saw; an error ends at once.
+test("a clean end follows the removals before it", async () => {
+	const broadcast = new BroadcastProducer();
+	const a = broadcast.createTrack("a");
+	broadcast.createTrack("b");
+	const live = broadcast.createTrack("live");
+	const tracks = list(broadcast);
+	expect(await tracks.drain()).toEqual(["+a", "+b", "+live", "synced"]);
+	a.close();
+	broadcast.removeTrack("a");
+	broadcast.removeTrack("b");
+	broadcast.createTrack("unseen");
+	live.close();
+	broadcast.close();
+	expect(await tracks.drain()).toEqual(["~a", "-b", "~live", "end"]);
+
+	for (const abort of [false, true]) {
+		const answered = new BroadcastProducer();
+		const lister = wireOf(answered).lister();
+		const reader = list(answered);
+		lister.add("up", { priority: 0 });
+		lister.synced();
+		expect(await reader.drain()).toEqual(["+up", "synced"]);
+		lister.finish("up");
+		if (abort) {
+			lister.abort(new NotFound("broadcast"));
+			expect(await reader.drain()).toEqual([`error: ${StreamCode.NotFound}`]);
+		} else {
+			lister.end();
+			expect(await reader.drain()).toEqual(["~up", "end"]);
+		}
+	}
+});
+
 test("a closed listing reads nothing more, and leaving a loop early closes it", async () => {
 	const broadcast = new BroadcastProducer();
 	broadcast.createTrack("a");

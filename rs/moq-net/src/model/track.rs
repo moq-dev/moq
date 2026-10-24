@@ -3876,6 +3876,11 @@ impl TrackWeak {
 		true
 	}
 
+	/// Whether its producer declared the track's end, which is how its listing ends too.
+	pub(super) fn is_finished(&self) -> bool {
+		self.state.read().end.is_some()
+	}
+
 	/// Whether anyone is consuming the track right now. A closed track doesn't
 	/// count even if consumers linger to drain its cache: no new work is owed.
 	pub(super) fn is_used(&self) -> bool {

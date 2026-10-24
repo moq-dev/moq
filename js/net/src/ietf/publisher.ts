@@ -2468,7 +2468,14 @@ export class Publisher {
 			const source = await this.#resolve(namespace, hold.signal, epoch);
 			listing = source.tracks();
 			for (;;) {
-				const event = await untilAborted(listing.next(), hold.signal);
+				const next = listing.next();
+				// A closed broadcast's listing has already ended, after the tracks that left
+				// before it, so it is read to that end whatever withdrew the broadcast: a
+				// PUBLISH whose track finished ends with TRACK_ENDED.
+				const event = await untilAborted(next, hold.signal).catch((err: unknown) => {
+					if (source.closed.peek() === undefined) throw err;
+					return next;
+				});
 				if (!event) break;
 				if (event.kind === "synced") continue;
 				if (event.kind === "removed" || event.kind === "finished") {
