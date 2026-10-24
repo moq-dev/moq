@@ -509,7 +509,7 @@ mod tests {
 	/// A client session and the server session `lease` was prepared for, before supervision.
 	async fn connect(lease: super::super::Lease) -> (moq_net::Session, moq_net::Session, super::super::Lease) {
 		let (client, server) = transports().await;
-		let now = moq_net::time::now();
+		let now = moq_net::time::Instant::now();
 		let client = async {
 			let origin = moq_tokio::origin::spawn();
 			let (session, driver) = moq_net::Client::new()
@@ -596,7 +596,7 @@ mod tests {
 		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
 		let lease = super::super::Lease::new("/room", consumer).with_stats(stats.clone());
 		let (client_transport, server) = transports().await;
-		let now = moq_net::time::now();
+		let now = moq_net::time::Instant::now();
 		let origin = moq_tokio::origin::spawn();
 		let client = moq_net::Client::new()
 			.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())

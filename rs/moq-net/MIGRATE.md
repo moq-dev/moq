@@ -16,6 +16,11 @@ To count a SETUP reply the peer never takes, bound it with `Handshake::with_dead
 When the transport reports only that this side closed it, the error is this side's reason, such as the `abort` error, the protocol failure, or `GoawayTimeout`, where it was always a clean close.
 Match `Error::Cancel` alone for a clean end.
 
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
+
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
