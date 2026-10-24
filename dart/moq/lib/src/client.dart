@@ -265,7 +265,8 @@ final class Moq {
   /// IETF also waits for transport ACKs.
   Future<void> close() async {
     try {
-      await session.shutdown();
+      session.shutdown();
+      await session.closed();
     } finally {
       _client.cancel();
     }

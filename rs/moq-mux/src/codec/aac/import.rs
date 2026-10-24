@@ -66,8 +66,6 @@ impl Import {
 		self.track.abort(err);
 	}
 
-	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
-	/// the fields its config didn't supply.
 	/// Record the media duration emitted together by the TS importer.
 	pub(crate) fn burst(&mut self, duration: std::time::Duration) -> crate::Result<()> {
 		self.track.burst(duration)

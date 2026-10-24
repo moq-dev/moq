@@ -153,7 +153,7 @@ client = moq.Client(
   - `.cancel()`. Cancel an in-flight `accept()`/`reject()` call.
 - **`Session`**. A connection, connecting or connected. Holding it keeps the connection alive; it is also an `async with` context manager that drains on a clean exit and cancels on an error.
   - `await .closed()`. Wait until the session closes.
-  - `.cancel(code)`, `await session.shutdown()`. Cancel immediately, or drain within one second, raising on failure. Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older Lite versions, including default lite-06, wait only for transport ACKs. IETF also waits for transport ACKs.
+  - `.cancel(code)`, `session.shutdown()`. Cancel immediately, or request a drain now and await `session.closed()` for its result, including a delivery timeout after one second. Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older Lite versions, including default lite-06, wait only for transport ACKs. IETF also waits for transport ACKs.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
   - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; first-dial failures and reconnects share the same session.
