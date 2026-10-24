@@ -264,12 +264,17 @@ fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Receiv
             let _ = conn.recv_stream(id).stop(VarInt::from_u32(0));
             return;
         }
-        let leased = conn.leased(id).expect("leased above");
-        let (len, fin) = (leased.len(), leased.is_fin());
+        let fin = conn.leased(id).expect("leased above").is_fin();
         let mut stream = conn.recv_stream(id);
-        stream.advance(len);
+        // Taken a chunk at a time, as moq-net hands a frame's payload on.
+        loop {
+            let chunk = stream.take(usize::MAX);
+            if chunk.is_empty() {
+                break;
+            }
+            received.bytes += chunk.len() as u64;
+        }
         let _ = stream.release();
-        received.bytes += len as u64;
         if fin {
             received.finished += 1;
             let _ = stream.stop(VarInt::from_u32(0));

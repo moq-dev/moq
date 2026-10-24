@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { type Installed, Manual, Milli, Nano } from "@moq/clock";
 import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
@@ -35,6 +35,8 @@ class FakePeer {
 	/** Raw chunks the Session has written. */
 	sent: Uint8Array[] = [];
 	closeInfo: { closeCode?: number; reason?: string } | undefined;
+	/** How many chunks the Session had written when it closed the socket. */
+	sentAtClose: number | undefined;
 
 	/** `options` mirrors the native `WebSocketStream` constructor, which
 	 *  `openWebSocketStream` calls with `{protocols, signal}` — hence `protocol`
@@ -68,6 +70,7 @@ class FakePeer {
 
 	close(info: { closeCode?: number; reason?: string } = {}) {
 		this.closeInfo = info;
+		this.sentAtClose ??= this.sent.length;
 		this.#closedResolve(info);
 	}
 	/** The socket errored out, rather than closing — `WebSocketStream.closed` rejects. */
@@ -315,6 +318,111 @@ describe("Session integration (scripted peer)", () => {
 		await waitFor(() => peer.has("reset_stream"));
 		const reset = peer.received().find((f) => f.type === "reset_stream") as Frame.ResetStream;
 		expect(reset.code.value).toBe(0n);
+		session.close();
+	});
+
+	// Abort is local: a write parked on the peer's credit must not hold the
+	// RESET_STREAM back until the peer grants credit it may never grant.
+	for (const [kind, params] of [
+		["stream", { initialMaxStreamDataUni: 0n }],
+		["connection", { initialMaxData: 0n }],
+	] as const) {
+		test(`aborting a write parked on ${kind} credit sends RESET_STREAM at once`, async () => {
+			const { session, peer } = connect();
+			await session.ready;
+			peer.send({ type: "transport_parameters", params: peerParams(params) });
+
+			const writer = (await session.createUnidirectionalStream()).getWriter();
+			const write = settleTo(writer.write(new Uint8Array(10)));
+			await settle();
+
+			const reason = new StreamError(7, "RESET_STREAM");
+			await writer.abort(reason);
+			expect(await write).toBe(reason);
+
+			await waitFor(() => peer.has("reset_stream"));
+			const reset = peer.received().find((f) => f.type === "reset_stream") as Frame.ResetStream;
+			expect(reset.code.value).toBe(7n);
+			expect(reset.finalSize).toBe(0n);
+			expect(peer.has("stream")).toBe(false);
+			session.close();
+		});
+	}
+
+	test("aborting a write queued behind a wedged socket doesn't wait for it to drain", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await waitFor(() => peer.has("transport_parameters"));
+		const writer = (await session.createUnidirectionalStream()).getWriter();
+
+		// The ping response sticks in the socket; our write queues behind it.
+		peer.blockWrites();
+		peer.send({ type: "ping_request", sequence: 1n });
+		await settle();
+		const write = settleTo(writer.write(new Uint8Array(10)));
+		await settle();
+
+		const reason = new StreamError(7, "RESET_STREAM");
+		await writer.abort(reason);
+		expect(await write).toBe(reason);
+
+		peer.unblockWrites();
+		await waitFor(() => peer.has("reset_stream"));
+		expect(peer.has("stream")).toBe(false);
+		session.close();
+	});
+
+	test("aborting a close queued behind a wedged socket resets the stream", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await waitFor(() => peer.has("transport_parameters"));
+		const writer = (await session.createUnidirectionalStream()).getWriter();
+		await writer.write(new Uint8Array(3));
+		await waitFor(() => peer.has("stream"));
+
+		// The ping response sticks in the socket; the FIN queues behind it.
+		peer.blockWrites();
+		peer.send({ type: "ping_request", sequence: 1n });
+		await settle();
+		const closed = settleTo(writer.close());
+		await settle();
+
+		await writer.abort(new StreamError(7, "RESET_STREAM"));
+		expect(await closed).toBeUndefined();
+
+		peer.unblockWrites();
+		await waitFor(() => peer.has("reset_stream"));
+		const reset = peer.received().find((f) => f.type === "reset_stream") as Frame.ResetStream;
+		expect(reset.code.value).toBe(7n);
+		expect(reset.finalSize).toBe(3n);
+		expect(peer.received().some((f) => f.type === "stream" && f.fin)).toBe(false);
+		session.close();
+	});
+
+	test("aborting mid-write sends no more of that write", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await waitFor(() => peer.has("transport_parameters"));
+		const writer = (await session.createUnidirectionalStream()).getWriter();
+
+		// Three frames' worth, with the first stuck in the socket.
+		peer.blockWrites();
+		const write = settleTo(writer.write(new Uint8Array(3 * Number(DEFAULT_MAX_RECORD_SIZE))));
+		await settle();
+		const aborted = writer.abort(new Error("cancel"));
+		await settle();
+		peer.unblockWrites();
+		await aborted;
+
+		await waitFor(() => peer.has("reset_stream"));
+		expect(await write).toBeInstanceOf(Error);
+		const frames = peer.received().filter((f): f is Frame.Data => f.type === "stream");
+		expect(frames.length).toBe(1);
+		const reset = peer.received().find((f) => f.type === "reset_stream") as Frame.ResetStream;
+		expect(reset.finalSize).toBe(BigInt(frames[0].data.byteLength));
 		session.close();
 	});
 
@@ -967,6 +1075,80 @@ describe("Session integration (scripted peer)", () => {
 		expect(await session.closed).toEqual({ closeCode: 42, reason: "bye" });
 	});
 
+	test("a close before TRANSPORT_PARAMETERS is written still sends them first", async () => {
+		const { session, peer } = connect();
+		peer.blockWrites();
+		await session.ready;
+
+		session.close({ closeCode: 42, reason: "bye" });
+		await settle();
+		peer.unblockWrites();
+		await waitFor(() => peer.has("application_close"));
+		expect(peer.received().map((f) => f.type)).toEqual(["transport_parameters", "application_close"]);
+	});
+
+	// A close never waits on the peer to read: the socket closes once the close frame
+	// is handed to it, or at the close deadline if the socket is still wedged then.
+	describe("close behind a wedged socket", () => {
+		let clock: Manual;
+		let installed: Installed;
+		beforeEach(() => {
+			clock = new Manual();
+			installed = clock.install();
+		});
+		afterEach(() => installed.close());
+
+		/** Wedge the socket with a write in flight, a stream write and a RESET_STREAM
+		 *  queued behind it, and return how many chunks reached the wire before. */
+		async function wedge(session: Session, peer: FakePeer): Promise<number> {
+			await session.ready;
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await waitFor(() => peer.has("transport_parameters"));
+			const writer = (await session.createUnidirectionalStream()).getWriter();
+			const aborted = await session.createUnidirectionalStream();
+
+			peer.blockWrites();
+			peer.send({ type: "ping_request", sequence: 1n });
+			await settle();
+			void settleTo(writer.write(new Uint8Array(10)));
+			await aborted.abort(new Error("cancel"));
+			await settle();
+			return peer.sent.length;
+		}
+
+		test("a socket that drains before the deadline delivers APPLICATION_CLOSE first", async () => {
+			const { session, peer } = connect();
+			const before = await wedge(session, peer);
+
+			session.close({ closeCode: 42, reason: "bye" });
+			await clock.advance(Nano.fromMilli(Milli(1000)));
+			await settle();
+			expect(peer.closeInfo).toBeUndefined();
+
+			peer.unblockWrites();
+			await waitFor(() => peer.closeInfo !== undefined);
+			// Nothing queued behind the wedge goes out ahead of the close.
+			const after = peer.sent.slice(before).flatMap((b) => Frame.decodeRecord(b));
+			expect(after.map((f) => f.type)).toEqual(["ping_response", "application_close"]);
+			expect(peer.sentAtClose).toBe(peer.sent.length);
+		});
+
+		test("a socket still wedged at the deadline closes without it", async () => {
+			const { session, peer } = connect();
+			await wedge(session, peer);
+
+			session.close({ closeCode: 42, reason: "bye" });
+			await clock.advance(Nano.fromMilli(Milli(2999)));
+			await settle();
+			expect(peer.closeInfo).toBeUndefined();
+
+			await clock.advance(Nano.fromMilli(Milli(1)));
+			await settle();
+			expect(peer.closeInfo).toBeDefined();
+			expect(peer.has("application_close")).toBe(false);
+		});
+	});
+
 	// The WebTransport contract: `closed` fulfills only on a graceful end, and rejects
 	// with a WebTransportError (source "session") on an abnormal one. Without that
 	// split a consumer cannot tell a dropped session from a clean shutdown — the close
@@ -1463,6 +1645,69 @@ describe("Session integration (scripted peer)", () => {
 		peer.send({ type: "stream", id, offset: 1n, data: new Uint8Array(), fin: true });
 		await waitFor(() => peer.count("max_streams_uni") === 1);
 		session.close();
+	});
+
+	// Stream credit bounds open streams only if a bidi stream holds it until both halves end.
+	describe("a half-closed bidi stream keeps its stream-count credit", () => {
+		const id = Stream.Id.create(0n, Stream.Dir.Bi, true);
+
+		async function accept() {
+			const { session, peer } = connect({ maxStreamsBidi: 1n });
+			await session.ready;
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			peer.send({ type: "stream", id, data: new Uint8Array([1]), fin: false });
+			const accepted = await session.incomingBidirectionalStreams.getReader().read();
+			if (accepted.done || !accepted.value) throw new Error("expected an incoming stream");
+			return { session, peer, stream: accepted.value };
+		}
+
+		// A ping round trip flushes any MAX_STREAMS the frames before it produced.
+		async function expectCredit(peer: FakePeer, count: number) {
+			const pongs = peer.count("ping_response");
+			peer.send({ type: "ping_request", sequence: BigInt(pongs + 1) });
+			await waitFor(() => peer.count("ping_response") > pongs);
+			expect(peer.count("max_streams_bidi")).toBe(count);
+		}
+
+		test("until our send half finishes", async () => {
+			const { session, peer, stream } = await accept();
+			peer.send({ type: "stream", id, offset: 1n, data: new Uint8Array(), fin: true });
+			await expectCredit(peer, 0);
+
+			await stream.writable.close();
+			await waitFor(() => peer.count("max_streams_bidi") === 1);
+			session.close();
+		});
+
+		test("until the peer's send half finishes", async () => {
+			const { session, peer, stream } = await accept();
+			await stream.writable.close();
+			await expectCredit(peer, 0);
+
+			peer.send({ type: "stream", id, offset: 1n, data: new Uint8Array(), fin: true });
+			await waitFor(() => peer.count("max_streams_bidi") === 1);
+			session.close();
+		});
+
+		test("until our send half is reset", async () => {
+			const { session, peer, stream } = await accept();
+			await stream.readable.cancel();
+			await expectCredit(peer, 0);
+
+			await stream.writable.abort();
+			await waitFor(() => peer.count("max_streams_bidi") === 1);
+			session.close();
+		});
+
+		test("until the peer stops our send half", async () => {
+			const { session, peer } = await accept();
+			peer.send({ type: "reset_stream", id, code: VarInt.from(0), finalSize: 1n });
+			await expectCredit(peer, 0);
+
+			peer.send({ type: "stop_sending", id, code: VarInt.from(0) });
+			await waitFor(() => peer.count("max_streams_bidi") === 1);
+			session.close();
+		});
 	});
 
 	// Regression: a STREAM frame delivered by the read loop after the session has

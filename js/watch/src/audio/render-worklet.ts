@@ -26,7 +26,11 @@ class Render extends AudioWorkletProcessor {
 			} else if (msg.type === "data") {
 				this.#ring?.write(msg.timestamp, msg.data);
 			} else if (msg.type === "latency") {
-				this.#ring?.resize(msg.latency);
+				this.#ring?.setLatency(msg.latency);
+				if (msg.park !== undefined) {
+					this.#ring?.park();
+					this.#epoch = msg.park;
+				}
 			} else if (msg.type === "truncate") {
 				this.#ring?.truncate(msg.timestamp);
 			} else if (msg.type === "reset") {

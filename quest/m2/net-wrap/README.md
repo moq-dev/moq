@@ -16,7 +16,7 @@ moq-flate, so moq-flate is out of scope.
 
 Non-goals:
 - The runtime seam: [Runtime trait](/quest/m2/runtime-trait.md).
-- The transport seam: [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md).
+- The transport seam: [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md).
 
 ## Plan
 

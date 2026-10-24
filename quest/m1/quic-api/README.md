@@ -12,7 +12,7 @@ workarounds quinn's shape forced on them.
 Non-goals: the congestion controller API (redesigned in another quest), a
 buffer pool ([QUIC I/O boundary](/quest/m2/quic-io-boundary.md)), and the
 non-QUIC backends' move off `web_transport_trait`
-([drop web-transport-trait](/quest/m2/drop-web-transport-trait.md)).
+([drop web-transport-trait](/quest/m1/drop-web-transport-trait.md)).
 
 ## Plan
 
@@ -30,7 +30,7 @@ Decided with the maintainer:
 - An m1 epic of its own, linked from the
   [API audit](/quest/m1/api-audit/README.md), whose consumer rule it follows.
 - The audit's bugs are standalone m1 quests ranked ahead of this epic.
-- No docs page: rustdoc and each crate's `MIGRATE.md` carry it.
+- No docs page: rustdoc and each PR's Impact bullet carry it.
 - A third read-only audit listed the workarounds quinn's shape forced on
   moq-tokio, moq-uring, qmux, and moq-relay; each child names the ones its
   change deletes. The maintainer pulled the driver's poll forms and native
@@ -54,7 +54,5 @@ side by side and fix any name or signature that still differs, and check
 
 ## Related
 
-- [Receive pinning](/quest/m1/quic-receive-pinning.md) - audit fix ranked ahead
-- [Priority requeue](/quest/m1/quic-priority-requeue.md) - audit fix ranked ahead
 - [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - audit fix ranked ahead
 - [poll_acked](/quest/m2/quic-ack-hook.md) - the m2 consumer that keeps `send::Stream::acked` in the API

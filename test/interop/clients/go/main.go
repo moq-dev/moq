@@ -44,6 +44,9 @@ const readChunk = 64 * 1024
 // media.TrackConsumer max delay: how much reordering the jitter buffer tolerates.
 const maxDelay = time.Second
 
+// durationPtr is d as the optional duration the wrapper's options take.
+func durationPtr(d time.Duration) *time.Duration { return &d }
+
 // Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 const (
 	audioTrack     = "tone"
@@ -98,11 +101,11 @@ type dialOptions struct {
 // dial connects to url, printing the relay's grant in the Rust client's
 // `auth granted` shape when asked.
 func dial(ctx context.Context, url string, opts dialOptions, timeout time.Duration) (*moq.Client, error) {
-	options := []moq.ClientOption{moq.WithTLSVerify(false)}
+	config := moq.ClientConfig{TLS: moq.ClientTLS{Insecure: true}}
 	if opts.version != "" {
-		options = append(options, moq.WithVersions(opts.version))
+		config.Versions = []string{opts.version}
 	}
-	client, err := moq.Dial(ctx, url, options...)
+	client, err := moq.Dial(ctx, url, config)
 	if err != nil || !opts.grant {
 		return client, err
 	}
@@ -263,7 +266,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if command != "complete\n" {
 		return errors.New("expected finish completion acknowledgement")
 	}
-	if client.Session().Connects() != 1 {
+	if client.Session().State().Connects != 1 {
 		return errors.New("publisher reconnected during finish")
 	}
 	fmt.Println("finish acknowledged")
@@ -333,7 +336,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	for id, video = range catalog.Video {
 		break
 	}
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: maxDelay}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: durationPtr(maxDelay)}})
 	if err != nil {
 		return err
 	}
@@ -434,7 +437,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 		next.Cancel()
 		return errors.New("session health track did not end after one group")
 	}
-	if client.Session().Connects() != 1 {
+	if client.Session().State().Connects != 1 {
 		return errors.New("subscriber reconnected during finish")
 	}
 	fmt.Printf("finish clean frames=%d catalog=eof announce=end health=ok\n", frames)
@@ -449,7 +452,7 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 	out += "." + codec
 	decoder, err := moqaudio.Subscribe(ctx, consumer, id, rendition, moqaudio.DecoderOutput{
 		Format:   moq.AudioSampleFormatF32,
-		MaxDelay: func() *time.Duration { d := maxDelay; return &d }(),
+		MaxDelay: durationPtr(maxDelay),
 	})
 	if err != nil {
 		return err
@@ -540,7 +543,7 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 		break
 	}
 
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: maxDelay}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: durationPtr(maxDelay)}})
 	if err != nil {
 		return err
 	}

@@ -443,9 +443,7 @@ async fn spawn_moq(
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Attached> {
-	let cluster = cluster
-		.with_client_tls(moq.client.tls.build()?)
-		.with_connect(moq.client.clone(), moq.quic.clone());
+	let cluster = cluster.with_connect(moq.client.clone(), moq.quic.clone());
 	#[cfg(feature = "iroh")]
 	let cluster = match net.iroh.clone() {
 		Some(iroh) => cluster.with_iroh(iroh),
@@ -709,12 +707,14 @@ fn spawn_import(
 	}
 
 	let max_age = import.max_age.map(Into::into);
+	let linger = import.linger.map_or(moq_mux::Linger::DEFAULT, Into::into);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
 	let target = |name: String| crate::moq::ImportTarget {
 		origin: origin.clone(),
 		name,
 		max_age,
+		linger,
 		bandwidth: bandwidth.clone(),
 	};
 
@@ -735,7 +735,8 @@ fn spawn_import(
 		} else {
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config)?
-		};
+		}
+		.with_linger(linger);
 		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
@@ -842,7 +843,7 @@ fn spawn_export(
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
-				let max_delay = rtmp.max_delay.into();
+				let max_delay = rtmp.delay.into();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
 					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_delay));
@@ -1421,38 +1422,28 @@ mod tests {
 		tasks.abort_all();
 	}
 
-	/// An HTTP `--cluster-connect-api` is a MoQ side, so start-up must attach
+	/// An HTTP `--cluster-api-url` is a MoQ side, so start-up must attach
 	/// client TLS the way the relay does rather than refuse after validate.
 	#[tokio::test]
-	async fn cluster_connect_api_http_attaches_client_tls() {
+	async fn cluster_api_url_http_attaches_client_tls() {
 		let _ = moq_tokio::crypto::install_default();
-		let invocation = Invocation::try_parse_from([
-			"moq",
-			"--cluster-connect-api",
-			"https://api.example/peers",
-			"import",
-			"ts",
-		])
-		.expect("parse");
+		let invocation =
+			Invocation::try_parse_from(["moq", "--cluster-api-url", "https://api.example/peers", "import", "ts"])
+				.expect("parse");
 		assert!(invocation.moq.validate().is_ok());
-		let cluster = invocation
-			.moq
-			.cluster()
-			.expect("cluster")
-			.with_connect(invocation.moq.client.clone(), invocation.moq.quic.clone());
+		let cluster = invocation.moq.cluster().expect("cluster");
 		let err = cluster
 			.clone()
 			.start()
 			.await
-			.expect_err("http API without TLS")
+			.expect_err("HTTP API needs a dial template")
 			.to_string();
-		assert!(err.contains("client TLS"), "{err}");
-
+		assert!(err.contains("Cluster::with_connect"), "{err}");
 		cluster
-			.with_client_tls(invocation.moq.client.tls.build().expect("tls"))
+			.with_connect(invocation.moq.client.clone(), invocation.moq.quic.clone())
 			.start()
 			.await
-			.expect("http API with TLS");
+			.expect("HTTP API uses the dial template's TLS");
 	}
 
 	/// Without `--connect`, only the cluster binds `--connect-bind`, so a fixed

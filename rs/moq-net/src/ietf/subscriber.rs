@@ -510,11 +510,11 @@ fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info
 		.with_compress(properties.compress)
 		.with_timescale(properties.timescale)
 		.with_max_age(properties.max_cache_duration)
-		.with_priority(
-			properties
-				.priority
-				.map_or(super::priority::ABSENT, super::priority::from_wire),
-		)
+		// Drafts 14 and 15 carry only per-subgroup priorities, which the model does not keep,
+		// so they get the later drafts' default too.
+		.with_priority(super::priority::from_wire(
+			properties.priority.unwrap_or(super::priority::DEFAULT_WIRE),
+		))
 		// A publisher answering NEW_GROUP_REQUEST refreshes on any join with a delta to skip;
 		// this session carries the request back to it.
 		.with_refresh(properties.dynamic_groups.then_some(0));
@@ -1205,8 +1205,7 @@ impl Subscriber {
 					subscribe_options: ietf::SubscribeOptions::Namespace,
 					hidden,
 				};
-				stream.writer.varint(ietf::SubscribeNamespaceLegacy::ID).await?;
-				stream.writer.encode(&msg).await?;
+				stream.writer.encode_message(&msg).await?;
 			}
 			_ => {
 				let msg = ietf::SubscribeNamespace {
@@ -1214,8 +1213,7 @@ impl Subscriber {
 					namespace: prefix.clone(),
 					hidden,
 				};
-				stream.writer.varint(ietf::SubscribeNamespace::ID).await?;
-				stream.writer.encode(&msg).await?;
+				stream.writer.encode_message(&msg).await?;
 			}
 		}
 
@@ -2193,14 +2191,15 @@ impl Subscriber {
 	async fn write_ok(&self, stream: &mut Stream<Transport, Version>, request_id: RequestId) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => {
-				stream.writer.buffer_varint(ietf::PublishNamespaceOk::ID)?;
-				stream.writer.encode(&ietf::PublishNamespaceOk { request_id }).await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 				stream
 					.writer
-					.encode(&ietf::RequestOk {
+					.encode_message(&ietf::PublishNamespaceOk { request_id })
+					.await?;
+			}
+			Version::Draft15 | Version::Draft16 => {
+				stream
+					.writer
+					.encode_message(&ietf::RequestOk {
 						largest: None,
 						request_id: Some(request_id),
 						active: None,
@@ -2208,10 +2207,9 @@ impl Subscriber {
 					.await?;
 			}
 			_ => {
-				stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 				stream
 					.writer
-					.encode(&ietf::RequestOk {
+					.encode_message(&ietf::RequestOk {
 						largest: None,
 						request_id: None,
 						active: None,
@@ -2900,7 +2898,7 @@ impl Subscriber {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 					validity.check(waiter)?;
-					Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+					Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 				})
 				.await
 				{
@@ -3006,10 +3004,9 @@ impl Subscriber {
 			}
 			None => {
 				async {
-					stream.writer.varint(ietf::Subscribe::ID).await?;
 					stream
 						.writer
-						.encode(&ietf::Subscribe {
+						.encode_message(&ietf::Subscribe {
 							max_age,
 							new_group,
 							request_id,
@@ -3471,16 +3468,21 @@ impl Subscriber {
 							&& largest_group(&track, largest).is_some_and(|largest| value > largest)
 							&& requested.is_none_or(|requested| value > requested)
 					});
-					let update = Update {
+					let mut update = Update {
 						start_location,
 						priority: (priority != sent_priority).then_some(priority),
 						max_age: wanted_max_age.filter(|_| wanted_max_age != sent_max_age),
 						new_group,
 					};
-					match update.priority.is_some() || update.max_age.is_some() || update.new_group.is_some() {
-						true => Poll::Ready(End::Update(update)),
-						false => Poll::Pending,
+					if update.priority.is_none() && update.max_age.is_none() && update.new_group.is_none() {
+						return Poll::Pending;
 					}
+					// Draft-14's SUBSCRIBE_UPDATE cannot omit the priority, so it restates the one
+					// in force rather than resetting it to the omission default.
+					if self.version == Version::Draft14 {
+						update.priority = Some(priority);
+					}
+					Poll::Ready(End::Update(update))
 				})
 				.await;
 
@@ -3799,9 +3801,8 @@ impl Subscriber {
 		update: Update,
 	) -> Result<(), Error> {
 		let request_id = self.control.next_request_id(&self.runtime).await?;
-		writer.varint(ietf::SubscribeUpdate::ID).await?;
 		writer
-			.encode(&ietf::SubscribeUpdate {
+			.encode_message(&ietf::SubscribeUpdate {
 				max_age: update.max_age,
 				request_id,
 				subscription_request_id: matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
@@ -3867,8 +3868,7 @@ impl Subscriber {
 		writer: &mut crate::coding::Writer<crate::transport::boxed::SendStream, Version>,
 		request_id: RequestId,
 	) -> Result<(), Error> {
-		writer.varint(ietf::Unsubscribe::ID).await?;
-		writer.encode(&ietf::Unsubscribe { request_id }).await?;
+		writer.encode_message(&ietf::Unsubscribe { request_id }).await?;
 		Ok(())
 	}
 
@@ -3899,7 +3899,7 @@ impl Subscriber {
 					if let Poll::Ready(err) = track.poll_closed(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					Stream::poll_open(&mut opening, this.version, &mut waiter.context())
+					Stream::poll_open_request(&mut opening, this.version, &mut waiter.context())
 				})
 				.await?;
 				stream = super::request_stream::with_stats(stream, this.origin.stats(), this.version);
@@ -3925,10 +3925,9 @@ impl Subscriber {
 					}
 				}
 				if let Err(err) = async {
-					stream.writer.varint(ietf::Fetch::ID).await?;
 					stream
 						.writer
-						.encode(&ietf::Fetch {
+						.encode_message(&ietf::Fetch {
 							request_id: fetch_id,
 							subscriber_priority: super::priority::to_wire(
 								track.subscription().map(|s| s.priority).unwrap_or(0),
@@ -4105,7 +4104,7 @@ impl Subscriber {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
 			validity.check(waiter)?;
-			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 		})
 		.await
 		{
@@ -4134,10 +4133,9 @@ impl Subscriber {
 		};
 
 		let written = async {
-			stream.writer.varint(ietf::TrackStatus::ID).await?;
 			stream
 				.writer
-				.encode(&ietf::TrackStatus {
+				.encode_message(&ietf::TrackStatus {
 					request_id,
 					track_namespace: broadcast_path.to_owned(),
 					track_name: track_name.into(),
@@ -4222,8 +4220,10 @@ impl Subscriber {
 		let dynamic = request.dynamic();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge. Idle
 		// from the accept, so no reader takes it as live in between.
-		let track = request.idle().accept(accepted_info(&ok.properties, self.version));
+		let track = request.idle().stage(accepted_info(&ok.properties, self.version));
+		// Marked received before any reader sees it, so none resolves an anchor this wire dropped.
 		track.received();
+		let track = track.commit();
 		Some(Idle {
 			demand: track.demand(),
 			track,
@@ -5208,7 +5208,7 @@ impl Subscriber {
 			if let Poll::Ready(err) = track::TrackState::poll_closed(&request.state, waiter) {
 				return Poll::Ready(Err(err));
 			}
-			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 		})
 		.await
 		{
@@ -5265,10 +5265,9 @@ impl Subscriber {
 			},
 		};
 		let res = async {
-			stream.writer.varint(ietf::Fetch::ID).await?;
 			stream
 				.writer
-				.encode(&ietf::Fetch {
+				.encode_message(&ietf::Fetch {
 					request_id: fetch_id,
 					subscriber_priority: super::priority::to_wire(request.priority()),
 					group_order: GroupOrder::Ascending,
@@ -5480,8 +5479,7 @@ impl Subscriber {
 				// The adapter has no transport reset, so deliver FETCH_CANCEL without a
 				// subsequent writer drop discarding unacknowledged control bytes.
 				let res = async {
-					stream.writer.varint(ietf::FetchCancel::ID).await?;
-					stream.writer.encode(&ietf::FetchCancel { request_id }).await?;
+					stream.writer.encode_message(&ietf::FetchCancel { request_id }).await?;
 					stream.writer.close().await
 				}
 				.await;
@@ -8095,6 +8093,78 @@ mod tests {
 		assert_eq!(update.forward, Some(true));
 	}
 
+	/// Draft-14's SUBSCRIBE_UPDATE cannot omit the priority, so an update for the max age
+	/// alone restates the unset priority in force instead of the omission default 128.
+	#[moq_clock::test]
+	async fn a_draft14_max_age_update_restates_the_priority() {
+		const VERSION: Version = Version::Draft14;
+
+		let subscribe_ok = message(
+			ietf::SubscribeOk::ID,
+			&ietf::SubscribeOk {
+				request_id: Some(RequestId(0)),
+				track_alias: 7,
+				largest: None,
+				properties: Default::default(),
+			},
+			VERSION,
+		);
+		let session = crate::lite::test_transport::ScriptedSession::new(subscribe_ok);
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(session),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::declared(peer::Peer {
+				max_age: true,
+				..Default::default()
+			}),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let _short = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let _serving = moq_clock::sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
+		});
+		settle().await;
+
+		let _long = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(5)));
+		settle().await;
+
+		let writes = log.writes.lock().unwrap().clone();
+		let mut buf = Decoder::new(&writes, VERSION.into());
+		let mut updates = Vec::new();
+		while !buf.is_empty() {
+			let type_id = buf.varint().unwrap();
+			let size = buf.u16().unwrap() as usize;
+			let mut body = Decoder::new(buf.slice(size).unwrap(), VERSION.into());
+			if type_id == ietf::SubscribeUpdate::ID {
+				updates.push(ietf::SubscribeUpdate::decode_msg(&mut body, VERSION).unwrap());
+			}
+		}
+
+		let [update] = updates.as_slice() else {
+			panic!("one update, not {updates:?}");
+		};
+		assert_eq!(update.max_age, Some(5_000));
+		assert_eq!(update.subscriber_priority, Some(super::super::priority::to_wire(0)));
+	}
+
 	/// Establish a subscription on `version`, then drop its last consumer, and hand back
 	/// what the session recorded on the way out.
 	async fn cancel_a_subscription(version: Version) -> crate::lite::test_transport::Log {
@@ -8310,7 +8380,8 @@ mod tests {
 				.expect("the subscription is registered");
 			assert_eq!(
 				track.producer.as_ref().unwrap().publisher_priority(),
-				priority.map_or(0, super::super::priority::from_wire),
+				// An omitted priority is the drafts' 128, one step below the unset 127.
+				priority.map_or(-1, super::super::priority::from_wire),
 				"SUBSCRIBE_OK priority must be committed before alias registration"
 			);
 			// The answer's largest is known before any group arrives.
@@ -10134,7 +10205,7 @@ mod tests {
 		let path = crate::Path::new("room/host").to_owned();
 		let hold: crate::auth::Hold = std::sync::Arc::new(subscriber.announces.acquire().unwrap());
 		let auth = crate::auth::Handle::new(true);
-		let mut requests = auth.requests().unwrap();
+		let mut requests = auth.requests();
 		let token = crate::setup::Token {
 			kind: crate::setup::Token::OUT_OF_BAND,
 			value: vec![0x00, 0xff],
@@ -10609,7 +10680,7 @@ mod tests {
 		peer_setup.set(peer::Peer::default());
 
 		let auth = crate::auth::Handle::new(true);
-		let requests = auth.requests().unwrap();
+		let requests = auth.requests();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(
 			0,
@@ -11986,7 +12057,7 @@ mod tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 
-		let requests = auth.requests().unwrap();
+		let requests = auth.requests();
 
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
@@ -16009,6 +16080,31 @@ mod joining_fetch_tests {
 				);
 				assert_eq!(log.bi_opens(), 0);
 			}
+		}
+	}
+
+	#[moq_clock::test]
+	async fn refusing_a_joining_fetch_spends_no_request_credit() {
+		for version in JOINING_DRAFTS {
+			let session = ScriptedSession::new(Vec::new()).without_credit();
+			let (mut subscriber, track, _tasks) = pending_join(crate::driver::Transport::new(session), version);
+			subscriber.control = Control::new(
+				match version {
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(RequestId(2)),
+					_ => None,
+				},
+				false,
+			);
+			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
+			assert!(
+				joining.poll(&kio::Waiter::noop()).is_ready(),
+				"{version}: refusal must be immediate"
+			);
+			assert_eq!(
+				subscriber.control.poll_next_request_id(&kio::Waiter::noop()),
+				Poll::Ready(RequestId(1)),
+				"{version}: refusal spends neither an ID nor MAX_REQUEST_ID credit"
+			);
 		}
 	}
 

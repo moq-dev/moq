@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Connection state
+
+`MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.
+
 ### Exact encoder rates and publication options
 
 Encoder configuration is breaking: `MoqVideoEncoderInput.framerate` is now a
@@ -30,6 +34,22 @@ To re-announce an observed route, copy its `cost` and `epoch`.
 
 Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel it or race it against a timeout.
+
+### Session shutdown drains
+
+`MoqSession::shutdown()` still returns `()` at once, but it now requests a draining close instead of cancelling with code 0.
+Await `closed()` to wait for the drain and receive delivery failures, or call `cancel(0)` to close at once, as `shutdown()` did.
+If you adopted the release line's async `drain()`, call `shutdown()` and then await `closed()` instead.
+
+### Media track naming moves out of init
+
+`MoqAudioInit::track` and `MoqVideoInit::track` are removed.
+Pass that name through `MoqMediaTarget::Named { name }` when constructing `MoqMediaTrackProducer::audio` or `video`; init records describe the codec and media only.
+
+### Broadcast `finish` no longer closes
+
+`MoqBroadcastProducer::finish()` was a deprecated alias for `close()`; it no longer ends the broadcast at once.
+Call `MoqBroadcastProducer::close()` where you called `finish()`.
 
 ### JSON snapshot `delta_ratio` is `deltas`
 
@@ -86,13 +106,6 @@ It defaults to `false` in every generated binding; a Rust struct literal adds `c
 
 `MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.
 `MoqTrackConsumer::update` now returns `Result<(), MoqError>`, failing with `TimestampMismatch` on a time anchor an untimed track can't serve.
-
-### Regenerate bindings after the API documentation update
-
-The new documentation on `MoqAudioProducer::write` and `finish` changes their
-UniFFI metadata checksums, even though their signatures and behavior are unchanged.
-Regenerate each language's bindings from the rebuilt library and update them together.
-Older generated bindings with active checksum guards reject this library during initialization.
 
 ### JSON consumers return `MoqJsonValue` (#5677)
 
@@ -251,7 +264,8 @@ The Display text is unchanged.
 
 `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` are optional, null on a frame read from an untimed track, and default to null.
 `MoqTrackInfo.timescale` is null on a received untimed track, and a null timescale on publish makes the track untimed.
-A raw track you publish is timed by default, so a raw write without a timestamp fails with `TimestampMismatch` instead of going out at 0.
+A raw track you publish is now untimed by default: a null `timescale` no longer selects microseconds.
+Set `timescale: Some(1_000_000)` to keep the released default, and provide a timestamp on each timed write.
 Data operations take an optional timestamp in microseconds, and whole-frame media writes require one.
 `MoqMediaCatalogProducer::now()` samples the broadcast clock for local-event stamps.
 Wrap raw frame timestamps in `Some`.
@@ -279,10 +293,6 @@ An exhaustive match needs one more arm, and a `Quic` check that meant any QUIC s
 `MoqVideoConsumer::next` returns an `Arc<MoqVideoDecodedFrame>` object with `timestamp_us()`, `width()`, `height()`, `pixels(format)`, and `surface()`.
 `MoqVideoDecoderOutput.format` is gone; set `surface: true` to keep the decoder's native surface, readable as a `MoqVideoSurface`.
 Read RGBA with `pixels(MoqVideoPixelFormat::Rgba)` instead of `data`.
-
-### Broadcast `finish` is removed (#4152)
-
-`MoqBroadcastProducer::finish()` is gone; close the broadcast instead.
 
 ### The `android-logcat` feature is removed (#4608)
 

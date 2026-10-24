@@ -7,3 +7,5 @@ disallowed-methods = [
     { path = "tokio::time::timeout", reason = "use the ambient clock: moq_clock::timeout()" },
     { path = "tokio::time::interval", reason = "use the ambient clock: moq_clock::interval()" },
 ]
+
+disallowed-types = [{ path = "std::time::SystemTime", reason = "use moq_clock::Wall" }]

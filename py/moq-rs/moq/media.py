@@ -50,7 +50,7 @@ from moq_ffi import (
 )
 
 from . import subscribe as _subscribe
-from ._records import Frame, Subscription, _from_us, _subscription, _to_us
+from ._records import Frame, Subscription, _from_us, _subscription
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
 from .subscribe import BroadcastConsumer
@@ -166,16 +166,8 @@ class TrackProducer:
         """Write one encoded frame with a presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
-    def flush(self, timestamp: timedelta) -> None:
-        """Record a local encoder's frame handoff on the broadcast media clock.
-
-        Call this after ``write_frame`` only for encoded live output. File, pipe,
-        and network imports should leave their jitter estimate clock free.
-        """
-        self._inner.flush(_to_us(timestamp, "timestamp"))
-
     def discontinuity(self) -> None:
-        """Mark a timeline break and restart handoff measurement, preserving advertised jitter."""
+        """Mark a timeline break, preserving the advertised jitter and delay."""
         self._inner.discontinuity()
 
     def cut(self) -> None:

@@ -4,12 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Congestion controllers moved to `moq-congestion`
-
-Add `moq-congestion` as a dependency and replace `moq_quic::congestion::` imports with `moq_congestion::`.
-
-`Controller` callbacks receive `moq_congestion::SpaceId`, mirroring the transport packet spaces. `Controller::on_ack` now receives `moq_congestion::RttEstimator`, a read-only snapshot with `get()`. `moq_quic::RttEstimator` is now internal to the transport, which retains its RTT recovery state. Controller callbacks and factory time still use `moq_clock::Instant`; controller behavior and the wire format are unchanged.
-
 ### `mux` is an internal integration surface
 
 The `mux` module is hidden from public API documentation; use the `qmux` crate for reliable-transport sessions. It remains public only so qmux can share the stream state machine.

@@ -19,7 +19,8 @@ export interface Datagram {
  * Outcome of reading one protected datagram.
  *
  * - `datagram`: authenticated plaintext.
- * - `authentication`: AEAD open failed; the datagram was dropped and the track continues.
+ * - `authentication`: the datagram failed to authenticate, or had a sequence or size no publisher
+ *   could seal; it was dropped and the track continues.
  * - `duplicate`: the sequence was already opened inside the retained window; dropped, track continues.
  */
 export type Event =

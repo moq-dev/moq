@@ -23,6 +23,8 @@ pub(crate) struct SessionStart {
 	pub goaway: crate::goaway::Handle,
 	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
 	pub auth: crate::auth::Handle,
+	/// The implementation the peer's SETUP advertised, stored on the public [`crate::Session`].
+	pub peer_implementation: crate::setup::PeerImplementation,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -275,7 +277,14 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// reads the peer's Setup stream; capability-gated streams (PROBE) wait on it.
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
-	let peer_setup_slot = PeerSetup::new(client, session.binding()).offer_ietf(our_setup.ietf);
+	let peer_implementation = crate::setup::PeerImplementation::default();
+	let peer_setup_slot = PeerSetup::new(client, session.binding())
+		.offer_ietf(our_setup.ietf)
+		.with_implementation(peer_implementation.clone());
+	// A version without a Setup Stream advertises nothing, so there is nothing to wait for.
+	if !version.has_setup_stream() {
+		peer_implementation.set(None);
+	}
 	let early = if let Some(accepted) = peer_setup {
 		peer_setup_slot.set(accepted.setup);
 		accepted.early
@@ -331,6 +340,16 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	});
 	subscriber.announces = announces;
 
+	// SendSetup only logs a failure, so refuse a SETUP that cannot encode (one past the
+	// size bound, such as a long implementation or path) here rather than leave the peer waiting.
+	if version.has_setup_stream() {
+		crate::coding::Encode::encode(
+			&our_setup,
+			&mut crate::coding::Encoder::new(&mut Vec::new(), version.into()),
+			version,
+		)?;
+	}
+
 	let driver = Driver {
 		auth: Present {
 			stats: stats.clone(),
@@ -344,7 +363,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			started: false,
 			_setup: setup_token,
 		},
-		local_close: Default::default(),
+		closing: Default::default(),
 		setup: version
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version, stats.clone())),
@@ -362,6 +381,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		driver,
 		goaway: goaway_handle,
 		auth,
+		peer_implementation,
 	})
 }
 
@@ -370,7 +390,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 pub(crate) struct Driver {
 	/// Presenting our tokens, one AUTH stream each.
 	auth: Present,
-	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	pub(crate) closing: std::sync::Arc<crate::session::Closing>,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
 	setup: Option<SendSetup>,
@@ -396,6 +416,7 @@ impl Driver {
 				Ok(()) => Error::Cancel,
 				Err(err) => err.clone(),
 			});
+			self.closing.record(res.as_ref().err().unwrap_or(&Error::Cancel));
 			match &res {
 				Err(Error::Transport(_) | Error::IdleTimeout) => {
 					tracing::info!("session terminated");
@@ -413,7 +434,7 @@ impl Driver {
 					self.session.close(SessionError::Cancel.to_code(), "");
 				}
 			}
-			if self.local_close.load(std::sync::atomic::Ordering::Relaxed) {
+			if self.closing.is_local() {
 				self.subscriber.close();
 				return Poll::Ready(res);
 			}
@@ -601,7 +622,7 @@ impl PresentToken {
 						return Poll::Ready(Error::GoingAway);
 					}
 					let token = token.clone();
-					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
+					let mut stream = match ready!(Stream::poll_open_request(&mut self.session, self.version, &mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
 					};
@@ -1309,6 +1330,19 @@ mod tests {
 			assert!(log.closes().is_empty(), "{version}");
 			assert!(!log.stops().is_empty(), "{version}: data stream was not refused");
 		}
+	}
+
+	// GOAWAY is not a request: refusing it without credit would leave the peer
+	// unaware that we are draining.
+	#[moq_clock::test]
+	async fn goaway_is_sent_without_request_credit() {
+		let transport = ScriptedSession::new(Vec::new()).without_credit();
+		let log = transport.log.clone();
+		let mut server = raw_session(transport, Version::Lite07, false, None);
+		server.goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		let _ = server.driver.poll(&kio::Waiter::noop());
+		assert_eq!(log.bi_opens(), 1, "GOAWAY stream was not opened");
+		assert!(log.closes().is_empty());
 	}
 
 	#[moq_clock::test]
