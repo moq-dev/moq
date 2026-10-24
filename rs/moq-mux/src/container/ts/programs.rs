@@ -273,13 +273,7 @@ impl Programs {
 		if self.pat.is_none() && listed.is_empty() {
 			return Ok(());
 		}
-		let mut index = 0;
-		while index < self.programs.len() {
-			match listed.contains_key(&self.programs[index].number) {
-				true => index += 1,
-				false => self.retire(index)?,
-			}
-		}
+		self.retire(&listed)?;
 		let mut moved = Vec::new();
 		self.waiting.retain(|pid, waiting| {
 			waiting.programs.retain(|number, pats| match listed.get(number) {
@@ -341,45 +335,66 @@ impl Programs {
 		);
 	}
 
-	/// End program `index`, which the PAT no longer lists: finish its tracks, then its catalog,
-	/// and close its broadcast, so it is unannounced now rather than lingering. Subscribers
-	/// already reading a track read it to its end, and the other programs carry on. What it
-	/// counted beyond them is kept.
+	/// End every started program `listed` no longer names: finish its tracks, announcing it
+	/// as the end of the input would, then its catalog, and close its broadcast, so it is
+	/// unannounced now rather than lingering. Subscribers already reading a track read it to
+	/// its end, and the other programs carry on. What the retired counted beyond them is kept.
 	///
-	/// Fails when the program cannot finish, as an import does at the end of its input.
-	fn retire(&mut self, index: usize) -> anyhow::Result<()> {
-		let program = &mut self.programs[index];
-		tracing::info!(
-			program = program.number,
-			"TS program left the PAT; retiring its broadcast"
-		);
-		// A refusal leaves the program listed, so the caller's abort reaches it with the rest.
-		program.import.finish()?;
-		program.catalog.finish()?;
-		let program = self.programs.remove(index);
-		for &pid in &program.claims {
-			self.readers[usize::from(pid)].retain(|&reader| reader != index);
+	/// The programs and the PIDs they read are rebuilt once, so a PAT costs what the programs
+	/// claim however many it drops. Fails when a program cannot finish, as an import does at
+	/// the end of its input.
+	fn retire(&mut self, listed: &HashMap<u16, u16>) -> anyhow::Result<()> {
+		let leaving = |program: &Program| !listed.contains_key(&program.number);
+		if !self.programs.iter().any(leaving) {
+			return Ok(());
 		}
-		// Each later program moves down a place, in order, so no two share an index meanwhile.
-		for (at, later) in self.programs.iter().enumerate().skip(index) {
-			for &pid in &later.claims {
-				for reader in &mut self.readers[usize::from(pid)] {
-					if *reader == at + 1 {
-						*reader = at;
-					}
-				}
+		// A refusal leaves every program listed, so the caller's abort reaches them all.
+		for program in self.programs.iter_mut().filter(|program| leaving(program)) {
+			tracing::info!(
+				program = program.number,
+				"TS program left the PAT; retiring its broadcast"
+			);
+			program.import.finish()?;
+			self.announced |= program.announce_if_listed()?;
+			program.catalog.finish()?;
+		}
+		let mut kept = 0;
+		let moved: Vec<Option<usize>> = self
+			.programs
+			.iter()
+			.map(|program| {
+				(!leaving(program)).then(|| {
+					kept += 1;
+					kept - 1
+				})
+			})
+			.collect();
+		for program in &self.programs {
+			for &pid in &program.claims {
+				self.readers[usize::from(pid)].clear();
 			}
 		}
-		self.touched.retain(|&touched| touched != index);
-		for touched in &mut self.touched {
-			if *touched > index {
-				*touched -= 1;
+		let (gone, programs): (Vec<_>, Vec<_>) = std::mem::take(&mut self.programs)
+			.into_iter()
+			.partition(|program| leaving(program));
+		self.programs = programs;
+		for (index, program) in self.programs.iter().enumerate() {
+			for &pid in &program.claims {
+				self.readers[usize::from(pid)].push(index);
 			}
 		}
-		self.announced |= program.pending.is_none();
-		program.broadcast.close();
+		self.touched.retain_mut(|index| match moved[*index] {
+			Some(to) => {
+				*index = to;
+				true
+			}
+			None => false,
+		});
 		let mut counts = Counts::default();
-		counts.merge(&program.import);
+		for program in &gone {
+			program.broadcast.close();
+			counts.merge(&program.import);
+		}
 		let mut retired = counts.beyond(&self.running());
 		retired.add(&self.retired);
 		self.retired = retired;
@@ -504,7 +519,7 @@ impl Programs {
 		program.claims = claims;
 	}
 
-	/// Every program's counters in one map: PIDs are unique across a multiplex.
+	/// Every program's counters in one map, a PID several programs read counted once.
 	///
 	/// The multiplex is graded once. Programs sharing a PMT PID read the same PMT sections, so
 	/// a dropped section counts once however many read it, and programs sharing a PCR PID
@@ -775,6 +790,55 @@ mod test {
 			assert_eq!(programs.programs.len(), listed.len());
 			assert_eq!(programs.stats().streams[&0x61].units, 6, "{} running", listed.len());
 		}
+	}
+
+	/// One PAT dropping programs on either side of those it keeps rebuilds who reads each PID
+	/// at once: the programs left read on, their own PIDs and the shared ones alike.
+	#[test]
+	fn a_pat_dropping_several_programs_keeps_the_rest_reading() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut mux = Mux::default();
+		let step = |mux: &mut Mux, listed: &[(u16, u16)], cc: u8| {
+			mux.pat(listed);
+			for (program, pid) in [(1, 0x100), (2, 0x100), (3, 0x300), (4, 0x100)] {
+				mux.pmt(pid, program, 0x61, &[(MP2, 0x61), (MP2, 0x70 + program)], 0);
+			}
+			for pid in [0x61, 0x71, 0x72, 0x73, 0x74] {
+				mux.out
+					.extend(mp2_pes(pid, cc, 90_000 + u64::from(cc) * 18_000, [pid as u8; 2]));
+			}
+		};
+		step(&mut mux, &[(1, 0x100), (2, 0x100), (3, 0x300), (4, 0x100)], 0);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.programs.len(), 4);
+		step(&mut mux, &[(2, 0x100), (4, 0x100)], 1);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		programs.finish().unwrap();
+		let running: Vec<_> = epochs(&programs).into_iter().map(|(number, _)| number).collect();
+		assert_eq!(running, [2, 4]);
+		let units = |pid| programs.stats().streams[&pid].units;
+		assert_eq!([0x61, 0x72, 0x74].map(units), [4; 3], "the programs kept read on");
+		assert_eq!(
+			[0x71, 0x73].map(units),
+			[2; 2],
+			"the dropped programs' frames stay counted"
+		);
+	}
+
+	/// A program that starts and leaves within one call is announced as it retires, as the
+	/// same bytes fed in two calls announce it, so the input declared a track.
+	#[test]
+	fn a_program_that_starts_and_leaves_in_one_call_is_announced() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut mux = Mux::default();
+		mux.pat(&[(1, 0x100)]).pmt(0x100, 1, 0x61, &[(MP2, 0x61)], 0);
+		mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+		mux.pat(&[]);
+		programs.decode(&mux.out).unwrap();
+		assert!(programs.programs.is_empty());
+		programs.finish().unwrap();
 	}
 
 	/// A PAT naming another transport stream is refused while a program runs, before it retires
