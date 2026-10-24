@@ -81,7 +81,13 @@ export class Backpressure {
 		// parking a ring that is still stalled changes nothing.
 		const playhead = this.#playhead;
 		this.#parked = (rise || this.#parked) && playhead !== undefined && !this.#covered(playhead + this.#headroom);
-		if (this.#parked) this.#stalled = true;
+		if (this.#parked) {
+			// Only a write resumes a parked ring, so the park starts a fresh refill: the frames an
+			// earlier refill released must not hold back the one that resumes it.
+			this.#stalled = true;
+			this.#first = undefined;
+			this.#last = undefined;
+		}
 		this.#release();
 		return this.#parked;
 	}

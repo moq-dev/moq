@@ -319,6 +319,22 @@ describe("Backpressure", () => {
 		expect(Bun.peek.status(gate.wait(ms(520), signal))).toBe("pending");
 	});
 
+	// A park holds the ring until its next write, so it starts a fresh refill: the frames a refill
+	// released before the ring reported playing must not hold back the write that resumes it.
+	it("releases the frame that resumes a buffered ring parked after a refill", () => {
+		const gate = new Backpressure(1000, true, Milli(1000));
+		gate.received(ms(1000));
+		const signal = new AbortController().signal;
+		for (let t = 0; t <= 500; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		gate.observe(ms(0), true);
+		expect(gate.setLatency(Milli(2000))).toBe(true);
+		const wait = gate.wait(ms(520), signal);
+		gate.received(ms(2019));
+		expect(Bun.peek.status(wait)).toBe("pending");
+		gate.received(ms(2020));
+		expect(Bun.peek.status(wait)).toBe("fulfilled");
+	});
+
 	// An utterance that arrived whole before the reset changes nothing queued, so nothing would
 	// report it again: forgetting it would hold its first frame until the next utterance.
 	it("keeps what is queued across a reset", () => {
