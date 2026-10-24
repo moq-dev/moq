@@ -239,8 +239,12 @@ impl Session {
 				// Close the transport now rather than whenever the last clone drops.
 				if let Link::Accepted(Some(accepted)) = &entry.link
 					&& let Err(error) = ffi::run(async {
-						accepted.session.abort(moq_net::Error::Cancel);
-						let _ = accepted.session.closed().await;
+						if res.is_ok() {
+							accepted.session.clone().close().await?;
+						} else {
+							accepted.session.abort(moq_net::Error::Cancel);
+							let _ = accepted.session.closed().await;
+						}
 						Ok(())
 					})
 					.await

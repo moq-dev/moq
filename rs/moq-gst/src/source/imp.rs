@@ -40,25 +40,22 @@ static NEXT_AUDIO_PAD_ID: AtomicU64 = AtomicU64::new(0);
 struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
-	versions: Option<String>,
-	tls_disable_verify: bool,
-	quic_keylog: bool,
+	connection: crate::connection::Settings,
 }
 
 #[derive(Debug, Clone)]
 struct ResolvedSettings {
 	url: url::Url,
 	broadcast: String,
-	/// Empty offers every supported version.
-	versions: Vec<moq_net::Version>,
-	tls_disable_verify: bool,
-	quic_keylog: bool,
+	connect: moq_tokio::connect::Config,
+	quic: moq_tokio::quic::Config,
 }
 
 impl TryFrom<Settings> for ResolvedSettings {
 	type Error = anyhow::Error;
 
 	fn try_from(value: Settings) -> Result<Self> {
+		let (connect, quic) = value.connection.resolve()?;
 		Ok(Self {
 			url: url::Url::parse(value.url.as_ref().context("url property is required")?)?,
 			broadcast: value
@@ -66,16 +63,8 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.as_ref()
 				.context("broadcast property is required")?
 				.clone(),
-			versions: value
-				.versions
-				.iter()
-				.flat_map(|versions| versions.split(','))
-				.map(str::trim)
-				.filter(|version| !version.is_empty())
-				.map(|version| version.parse().map_err(anyhow::Error::msg))
-				.collect::<Result<_>>()?,
-			tls_disable_verify: value.tls_disable_verify,
-			quic_keylog: value.quic_keylog,
+			connect,
+			quic,
 		})
 	}
 }
@@ -218,11 +207,7 @@ impl SessionController {
 
 /// The dial's configuration: versions and TLS as set, retrying without a budget.
 fn connect_config(settings: &ResolvedSettings) -> moq_tokio::connect::Config {
-	let mut config = moq_tokio::connect::Config::default();
-	config.version = settings.versions.clone();
-	config.tls.insecure = Some(settings.tls_disable_verify);
-	config.backoff.timeout = Some((std::time::Duration::ZERO).into());
-	config
+	settings.connect.clone()
 }
 
 /// Start the reconnecting dial and the origin its announcements land in.
@@ -235,10 +220,7 @@ fn connect(
 	let _rt = RUNTIME.enter();
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let mut quic = moq_tokio::quic::Config::default();
-	quic.keylog = settings
-		.quic_keylog
-		.then(|| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
+	let quic = settings.quic.clone();
 	let client = config.init(quic)?.with_subscriber(origin);
 	let connection = client.connect(settings.url.clone());
 	Ok((client, connection, consumer))
@@ -275,26 +257,10 @@ impl ObjectImpl for MoqSrc {
 					.blurb("The broadcast name to subscribe to")
 					.mutable_ready()
 					.build(),
-				glib::ParamSpecString::builder("versions")
-					.nick("Versions")
-					.blurb("Comma-separated protocol versions to offer, most preferred first, like moq-lite-06; unset offers every stable version")
-					.mutable_ready()
-					.build(),
-				glib::ParamSpecBoolean::builder("tls-disable-verify")
-					.nick("TLS Disable Verify")
-					.blurb("Disable TLS certificate verification")
-					.default_value(false)
-					.mutable_ready()
-					.build(),
-				glib::ParamSpecBoolean::builder("quic-keylog")
-					.nick("QUIC TLS key log")
-					.blurb(
-						"Danger: write TLS session secrets to the file SSLKEYLOGFILE names; without it the start fails",
-					)
-					.default_value(false)
-					.mutable_ready()
-					.build(),
 			]
+			.into_iter()
+			.chain(crate::connection::properties())
+			.collect()
 		});
 		PROPS.as_ref()
 	}
@@ -322,10 +288,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
-			"versions" => settings.versions = value.get().unwrap(),
-			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
-			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
-			_ => unreachable!(),
+			name => settings.connection.set(name, value),
 		}
 	}
 
@@ -334,10 +297,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url.to_value(),
 			"broadcast" => settings.broadcast.to_value(),
-			"versions" => settings.versions.to_value(),
-			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
-			"quic-keylog" => settings.quic_keylog.to_value(),
-			_ => unreachable!(),
+			name => settings.connection.get(name),
 		}
 	}
 }
@@ -623,9 +583,9 @@ async fn follow_path(
 	mut shutdown: watch::Receiver<bool>,
 	lost: impl Future<Output = anyhow::Error>,
 ) -> Result<()> {
-	use moq_net::announce::Event;
+	use moq_mux::follow::{Event, Instances};
 
-	let mut follow = origin.follow(path)?;
+	let mut follow = Instances::new(origin, path, None)?;
 	let pads = Pads::default();
 	let mut runs = tokio::task::JoinSet::new();
 	// Cancels the latest run.
@@ -634,37 +594,41 @@ async fn follow_path(
 
 	tracing::info!(%path, "waiting for broadcast to be announced");
 	let result = loop {
-		let start = tokio::select! {
+		let broadcast = tokio::select! {
 			_ = shutdown.changed() => break Ok(()),
 			err = &mut lost => break Err(err),
 			event = follow.next() => match event {
-				// The origin is gone, so nothing can announce the path again.
-				None => break Ok(()),
-				Some(Event::Start(announce) | Event::Restart(announce)) => {
-					tracing::info!(%path, epoch = announce.route.epoch.as_ref().map(tracing::field::display), "online");
-					true
+				Ok(Event::Start(broadcast)) => {
+					tracing::info!(%path, epoch = broadcast.info().epoch.as_ref().map(tracing::field::display), "online");
+					Some(broadcast)
 				}
-				// The same instance, re-priced or failed over, which the run rides out.
-				Some(Event::Update(_)) => false,
-				Some(Event::End(_)) => {
+				Ok(Event::End) => {
 					tracing::info!(%path, "offline, holding pads until it returns");
-					false
+					None
 				}
+				Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => break Ok(()),
+				Err(err) => break Err(anyhow::Error::from(err).context("broadcast refused")),
 			},
 			joined = runs.join_next(), if !runs.is_empty() => match joined.expect("guarded by is_empty") {
-				Ok(Ok(())) => false,
+				Ok(Ok(())) => None,
 				Ok(Err(err)) => break Err(err),
 				Err(err) => break Err(anyhow::Error::from(err).context("run panicked")),
 			},
 		};
 
-		if start {
+		if let Some(broadcast) = broadcast {
 			// Cut over at once: the old run's readers hand their pads back without waiting for their
 			// subscriptions to end.
 			if let Some(cancel) = latest.take() {
 				let _ = cancel.send(true);
 			}
-			latest = Some(play(&mut runs, origin, path, &pads, &element, &shutdown));
+			latest = Some(play(
+				&mut runs,
+				moq_mux::Source::new(origin.clone(), broadcast),
+				&pads,
+				&element,
+				&shutdown,
+			));
 		}
 	};
 
@@ -677,39 +641,18 @@ async fn follow_path(
 	result
 }
 
-/// Start a run: one request for the path and the catalog it serves, until it ends or the next
-/// start or restart replaces it. Returns what cancels it.
+/// Start the instance handed out by the follower until it ends or is replaced, returning its cancel handle.
 fn play(
 	runs: &mut tokio::task::JoinSet<Result<()>>,
-	origin: &moq_net::origin::Consumer,
-	path: &str,
+	source: moq_mux::Source,
 	pads: &Pads,
 	element: &glib::WeakRef<super::MoqSrc>,
 	shutdown: &watch::Receiver<bool>,
 ) -> watch::Sender<bool> {
 	let (cancel, mut cancelled) = watch::channel(false);
-	let (origin, path, pads, task_element, shutdown) = (
-		origin.clone(),
-		path.to_string(),
-		pads.clone(),
-		element.clone(),
-		shutdown.clone(),
-	);
+	let (pads, task_element, shutdown) = (pads.clone(), element.clone(), shutdown.clone());
 	runs.spawn_on(
 		STREAMING.scope(element.clone(), async move {
-			let broadcast = tokio::select! {
-				_ = cancelled.changed() => return Ok(()),
-				broadcast = origin.request_broadcast(&path, None) => match broadcast {
-					Ok(broadcast) => broadcast,
-					// The route went between the announcement and the request.
-					Err(err) if source_lost(&err) => {
-						tracing::warn!(%path, %err, "broadcast unavailable, holding pads");
-						return Ok(());
-					}
-					Err(err) => return Err(anyhow::Error::from(err).context("broadcast refused")),
-				},
-			};
-			let source = moq_mux::Source::new(origin, broadcast);
 			follow_catalog(source, &pads, task_element, &shutdown, &mut cancelled).await
 		}),
 		RUNTIME.handle(),
@@ -1532,6 +1475,8 @@ impl Reader {
 		}
 
 		let mut sent_segment = false;
+		// Each reader starts a new stream on the pad, which opusdec decodes from a fresh state.
+		let mut pre_skip = PreSkip::new(&shape.caps);
 		loop {
 			tokio::select! {
 				// The follower stopped this reader (the instance changed, the rendition was
@@ -1546,7 +1491,7 @@ impl Reader {
 				frame = track.read() => match frame {
 					Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
 					Ok(Some(moq_mux::container::Read::Frame { frame, .. })) => {
-						let buffer = match build_buffer(frame, kind) {
+						let mut buffer = match build_buffer(frame, kind) {
 							Ok(buffer) => buffer,
 							Err(err) => {
 								if let Some(obj) = element.upgrade() {
@@ -1555,6 +1500,14 @@ impl Reader {
 								return Exit::Done;
 							}
 						};
+						if let Some(pre_skip) = &mut pre_skip
+							&& let Err(err) = pre_skip.apply(buffer.get_mut().unwrap())
+						{
+							if let Some(obj) = element.upgrade() {
+								gst::element_error!(obj, gst::StreamError::Format, ("track {name} has an invalid Opus packet"), ["{err:#}"]);
+							}
+							return Exit::Done;
+						}
 						let segment = (!sent_segment).then(|| {
 							let base = element.upgrade().and_then(|obj| obj.current_running_time()).unwrap_or(gst::ClockTime::ZERO);
 							sent_segment = true;
@@ -1700,6 +1653,55 @@ fn build_buffer(frame: moq_mux::container::Frame, kind: TrackKind) -> Result<gst
 	buffer_mut.set_flags(flags);
 
 	Ok(buffer)
+}
+
+/// The Opus pre-skip moqsrc clips: opusdec trims only what a buffer's `GstAudioClippingMeta`
+/// asks for, never the OpusHead's pre-skip, and stamps each output at its input's pts.
+struct PreSkip {
+	/// The OpusHead's pre-skip, in 48 kHz samples.
+	total: u64,
+	/// What the next packets still have to clip.
+	remaining: u64,
+}
+
+impl PreSkip {
+	/// The pre-skip of an `audio/x-opus` caps' OpusHead, or `None` for other caps or none to skip.
+	fn new(caps: &gst::CapsRef) -> Option<Self> {
+		let structure = caps.structure(0).filter(|s| s.name() == "audio/x-opus")?;
+		let headers = structure.get_optional::<gst::Array>("streamheader").ok()??;
+		let head = headers.first()?.get::<gst::Buffer>().ok()?;
+		let head = head.map_readable().ok()?;
+		let total = moq_mux::codec::opus::Config::parse(&mut head.as_slice())
+			.ok()?
+			.pre_skip
+			.into();
+		(total > 0).then_some(Self {
+			total,
+			remaining: total,
+		})
+	}
+
+	/// Clip this packet's share of the pre-skip, and stamp it where its first kept sample plays.
+	/// A packet's timestamp is where its decode would start without the pre-skip, so each one plays
+	/// the pre-skip earlier, less what it clips itself.
+	fn apply(&mut self, buffer: &mut gst::BufferRef) -> Result<()> {
+		let mut clip = 0;
+		if self.remaining > 0 {
+			let samples =
+				moq_mux::codec::opus::packet_samples(&buffer.map_readable()?).context("malformed Opus packet")?;
+			clip = self.remaining.min(samples.into());
+			self.remaining -= clip;
+			gst_audio::AudioClippingMeta::add(buffer, gst::format::Default::from_u64(clip), gst::format::Default::ZERO);
+		}
+		let early = gst::ClockTime::from_nseconds(
+			(self.total - clip)
+				.mul_div_round(gst::ClockTime::SECOND.nseconds(), 48_000)
+				.context("pre-skip overflows the clock")?,
+		);
+		// Only a packet clipped whole can reach before zero, and it plays nothing.
+		buffer.set_pts(buffer.pts().map(|pts| pts.saturating_sub(early)));
+		Ok(())
+	}
 }
 
 fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
@@ -1922,6 +1924,47 @@ mod tests {
 		}
 	}
 
+	/// opusdec only clips what a buffer's meta asks, one packet at a time, and stamps what's left
+	/// at the packet's pts, so the pre-skip spreads over as many packets as it spans and every
+	/// packet moves to where its first kept sample plays.
+	#[test]
+	fn opus_pre_skip_is_clipped_across_packets() {
+		gst::init().unwrap();
+		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		assert!(super::PreSkip::new(&super::audio_caps(&config).unwrap()).is_none());
+		config.description = Some(
+			moq_mux::codec::opus::Config::new(48_000, 2)
+				.with_pre_skip(312)
+				.encode()
+				.unwrap(),
+		);
+		let caps = super::audio_caps(&config).unwrap();
+
+		// TOC configs 28 and 31: a 2.5 ms (120-sample) and a 20 ms (960-sample) CELT packet.
+		for (toc, micros, expected) in [
+			(0xe0, 2_500, &[(120, 0), (120, 0), (72, 0), (0, 1_000), (0, 3_500)][..]),
+			(0xf8, 20_000, &[(312, 0), (0, 13_500)][..]),
+		] {
+			let mut pre_skip = super::PreSkip::new(&caps).unwrap();
+			for (index, &(clip, pts)) in expected.iter().enumerate() {
+				let mut buffer = gst::Buffer::from_slice([toc]);
+				let buffer = buffer.get_mut().unwrap();
+				buffer.set_pts(gst::ClockTime::from_useconds(index as u64 * micros));
+				pre_skip.apply(buffer).unwrap();
+				let clipped = buffer.meta::<gst_audio::AudioClippingMeta>().map(|meta| {
+					assert_eq!(meta.end(), gst::format::Default::ZERO.into());
+					meta.start().value() as u64
+				});
+				assert_eq!(clipped.unwrap_or(0), clip, "packet {index} of {micros}us");
+				assert_eq!(
+					buffer.pts(),
+					Some(gst::ClockTime::from_useconds(pts)),
+					"packet {index} of {micros}us"
+				);
+			}
+		}
+	}
+
 	#[test]
 	fn the_first_frame_fixes_the_segment_start_and_base() {
 		gst::init().unwrap();
@@ -1978,9 +2021,7 @@ mod session_tests {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoCodec, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{
-		NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, Settings, TrackKind, follow_catalog, follow_path,
-	};
+	use super::{NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, TrackKind, follow_catalog, follow_path};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -2023,7 +2064,7 @@ mod session_tests {
 		}
 		for err in [
 			moq_net::Error::Closed,
-			moq_net::Error::SessionClosed,
+			moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel)),
 			moq_net::Error::Cancel,
 		] {
 			assert!(super::source_lost(&err), "{err:?}");
@@ -2944,29 +2985,9 @@ mod session_tests {
 		ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
 			broadcast: "test".into(),
-			versions: Vec::new(),
-			tls_disable_verify: false,
-			quic_keylog: false,
+			connect: crate::connection::Settings::default().resolve().unwrap().0,
+			quic: Default::default(),
 		}
-	}
-
-	/// `versions` reaches the dial in order, and an unknown name fails the start instead of
-	/// offering the defaults.
-	#[test]
-	fn versions_reach_the_dial() {
-		let settings = |versions: &str| Settings {
-			url: Some("https://127.0.0.1:1".into()),
-			broadcast: Some("test".into()),
-			versions: Some(versions.into()),
-			..Default::default()
-		};
-		let resolved = ResolvedSettings::try_from(settings(" moq-transport-14 , moq-lite-06 ")).unwrap();
-		let config = super::connect_config(&resolved);
-		let expected: Vec<moq_net::Version> = vec!["moq-transport-14".parse().unwrap(), "moq-lite-06".parse().unwrap()];
-		assert_eq!(config.version, expected);
-
-		let err = ResolvedSettings::try_from(settings("moq-lite-06,moq-lite-99")).unwrap_err();
-		assert!(err.to_string().contains("moq-lite-99"), "{err}");
 	}
 
 	/// The source retries without a budget, so an outage of any length is ridden out
@@ -2987,8 +3008,10 @@ mod session_tests {
 		if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
 			return;
 		}
+		let mut connection = crate::connection::Settings::default();
+		connection.set("quic-keylog", &true.to_value());
 		let keylog = ResolvedSettings {
-			quic_keylog: true,
+			quic: connection.resolve().unwrap().1,
 			..unreachable()
 		};
 		let err = super::connect(&keylog)
@@ -3481,6 +3504,33 @@ mod session_tests {
 
 		stop(session);
 		handler.abort();
+		recorder.assert_one_pad_held();
+	}
+
+	/// A route that never answers must not hold the reader on a stale resolution once a
+	/// replacement serves the path. An answer arriving late cannot replace the chosen run.
+	#[test]
+	fn a_replacement_supersedes_a_pending_broadcast_request() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let pool = origin.dynamic_route("", epoch()).unwrap();
+		let session = follow(&element, &origin);
+		let pending = super::RUNTIME.block_on(async {
+			tokio::time::timeout(Duration::from_secs(10), pool.requested_broadcast())
+				.await
+				.unwrap()
+				.unwrap()
+		});
+		let mut new = Publisher::new(&origin, epoch(), video_rendition());
+		recorder.written(&mut new, 2);
+		let mut old = Publisher::standalone(video_rendition());
+		pending.accept(old.broadcast.consume());
+		old.write(1);
+		recorder.written(&mut new, 3);
+		stop(session);
+		assert!(!recorder.seen().iter().any(|seen| matches!(seen, Seen::Buffer(_, 1))));
 		recorder.assert_one_pad_held();
 	}
 

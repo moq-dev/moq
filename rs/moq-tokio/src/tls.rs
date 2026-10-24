@@ -1279,11 +1279,11 @@ pub struct Listen {
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
 	/// When set, clients *may* present a certificate during the TLS handshake.
-	/// Valid presentations are reported via [`crate::server::Request::peer_identity`]
+	/// Valid presentations are reported as the accepted request's peer identity
 	/// and can be used by the application to grant elevated access. Clients that
 	/// do not present a certificate are unaffected.
 	///
-	/// Plain-TLS listeners built via [`Self::server_config`] also use these roots
+	/// Plain-TLS listeners also use these roots
 	/// for optional mTLS. Root files are hot reloaded for new handshakes.
 	#[usage(
 		long = "listen-tls-root",
@@ -1396,8 +1396,7 @@ impl Listen {
 	/// The released spellings in use, each paired with what replaced it.
 	///
 	/// Public for the same reason as [`Connect::deprecated`]: this type is flattened
-	/// into parsers of its own (moq-cli's `export hls` is one), not only through
-	/// [`crate::listen::Config`]. The methods that build a server config refuse
+	/// into custom listener parsers, not only through [`crate::listen::Config`]. The methods that build a server config refuse
 	/// anyway, since a dropped `--server-tls-root` would take the mTLS client CAs
 	/// with it and leave the listener accepting unauthenticated peers.
 	pub fn deprecated(&self) -> crate::cli::Deprecated {

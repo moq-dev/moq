@@ -37,6 +37,16 @@ describe("Order", () => {
 		expect(timestamps(order.push(read(0, 0)))).toEqual([0, 20, 40, 60]);
 	});
 
+	// The newest frame still to decode covers the hold, wherever it waits: a head arrives newest-first,
+	// so the frame just read is often the oldest.
+	it("reports the newest frame held or released", () => {
+		const order = new Order<Read>(() => ({ floor: 100, maxDelay: 60 }));
+		expect(order.newest([])).toBeUndefined();
+		for (const t of [60, 40, 20]) expect(order.newest(order.push(read(t / 20, t)))).toBe(60);
+		expect(order.newest(order.push(read(0, 0)))).toBe(60);
+		expect(order.newest([])).toBeUndefined();
+	});
+
 	it("releases the head as it stands on a flush", () => {
 		const order = new Order<Read>(() => ({ floor: 100, maxDelay: 1000 }));
 		order.push(read(1, 20));

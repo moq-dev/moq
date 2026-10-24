@@ -423,7 +423,9 @@ The advertised floor is the one term that can exceed that bound, and it is
 deliberately not clamped to it. The ceiling is a property of the histogram's
 size; the floor is a number the publisher declared about itself, so clamping
 the floor to the ceiling would under-buffer precisely the publisher that was
-honest about a long flush.
+honest about a long flush. Honoring it must not cost memory in proportion to
+the declared number, so the browser decodes at most 500 ms of any target and
+holds the rest as the encoded frames it actually received.
 
 Policy limits sit above the algorithm. A receiver's own configured maximum and
 the track's retention window both cap what it may hold, and neither is the

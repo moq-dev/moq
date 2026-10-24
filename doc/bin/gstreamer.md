@@ -49,6 +49,10 @@ and stereo use a family 0 head, and three to eight channels need
 `channel-mapping-family`, `stream-count`, `coupled-count`, and
 `channel-mapping`. Caps that omit that mapping, or that contradict the header,
 are refused. `opusenc` supplies both, so a 5.1 encode plays as six channels.
+Opus buffers are read the way `opusenc` and `moqsrc` stamp them: at the time
+their first kept sample plays, with `GstAudioClippingMeta` clipping the
+pre-skip. Each is published the pre-skip, less its own clipping, later, since
+a frame timestamp counts the pre-skip.
 
 A `text/x-raw` pad is how captions get in: ffmpeg cannot mux a subtitle track
 into fragmented MP4, so `moq import fmp4` can't carry one, while a demuxer that
@@ -61,11 +65,15 @@ Each `sink_%u` request pad is one track. Pad properties: `track` names it
 [LOC](/concept/standard#loc) instead of the legacy hang container,
 `encoder=true` marks it as fed by a local encoder, and
 `track-status`/`track-error` report its lifecycle. Element properties:
-`url`, `broadcast`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
-`quic-keep-alive`, `linger`, and read-only `status`, `connected`, `moq-version`, and
+`url`, `broadcast`, `connect-version`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
+`quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. The sink reconnects for as long as the pipeline runs and only
 reports `failed` on an answer redialing can't change, such as a rejected token.
+Both elements accept the same connection properties. `connect-version` is a
+comma-separated list, matching the CLI's repeatable `--connect-version`;
+unknown versions fail startup. QUIC durations are milliseconds, with zero
+disabling the local idle timeout or keep-alive.
 Each run from `READY` publishes under a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
 or moq-transport draft 17 and later, viewers switch to a restarted pipeline at once instead of stalling on the old
@@ -77,12 +85,7 @@ it is released, reaches EOS, or fails; a flush or new stream after that EOS
 holds it back again. Opaque data pads are not listed. Later
 catalog updates do not wait for newly requested pads.
 
-Once every pad reaches EOS, the sink finishes the broadcast and posts EOS.
-With `linger=true` it first keeps serving the finished broadcast until its
-media is stale (30 seconds for audio and video), so a viewer still catching up
-gets the tail, and posts EOS only then, which is when `gst-launch-1.0 -e`
-exits. Stopping the pipeline, such as a second Ctrl-C under `-e`, closes the
-broadcast at once.
+Once every pad reaches EOS, the sink closes the broadcast and posts EOS.
 
 All pads share one media timeline on one wall clock. The first timed buffer places
 it using UNIX or NTP reference timestamp metadata; other clock domains use the
@@ -134,7 +137,10 @@ every returning rendition; one it omits gets EOS instead of keeping its old pad.
 Within each run, the first media frame fixes one timestamp reference and segment
 base for every pad. Audio and video keep their relative broadcast timing, even
 when their tracks use different timescales or arrive at different times. Frames
-before that reference keep an earlier PTS for downstream to clip. A new broadcast
+before that reference keep an earlier PTS for downstream to clip. Opus packets
+covering the OpusHead pre-skip carry `GstAudioClippingMeta` for it, and each
+Opus packet that keeps samples is stamped where the first one plays, so `opusdec`
+drops the priming samples and the audio lines up with video. A new broadcast
 chooses a fresh reference on the same pads; playback does not require a wall clock.
 A rendition that leaves the catalog
 gets EOS once its track ends. A broadcast that ends or loses its publisher holds
@@ -143,9 +149,9 @@ on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A refused
 connection, refused path or catalog, or malformed protocol input or catalog posts
 an error. Properties: `url`,
-`broadcast`, `versions` (comma-separated protocol versions to offer, most
+`broadcast`, `connect-version` (comma-separated protocol versions to offer, most
 preferred first; every stable version by default), `tls-disable-verify`,
-`quic-keylog`.
+`quic-idle-timeout`, `quic-keep-alive`, and `quic-keylog`.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
 To decrypt a capture, set `quic-keylog=true` on either element along with

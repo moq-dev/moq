@@ -12,11 +12,10 @@ packages that were never published carry no migration entries.
 Decided 2026-10-22 (API audit). Known gaps, verify each against
 `git show origin/release:<path>`:
 
-- Bindings: `MoqSession::shutdown` went from sync `()` to async `Result`
-  (7bbac32721); only `swift/MIGRATE.md` says so. Add it to `rs/moq-ffi`,
-  `py/moq-rs` (an un-awaited call is now a silent no-op), `go/wrapper`
-  (`Shutdown(ctx) error`, and `Client.Close()` now blocks while draining),
-  `kt/moq`, `dart/moq` (`Moq.close()` returns `Future<void>`).
+- Bindings: the synchronous shutdown request and awaited `closed()` result are
+  synchronized by [the shutdown change](https://github.com/moq-dev/moq/pull/6436).
+  Verify its entries against `release`, including the additive async `drain()`
+  backport mapping, rather than documenting the intermediate async shutdown.
 - Bindings: merge the contradictory `finish` entries ("removed (#4152)" and
   "the new `finish` lets go (#6157)") into one that names the final API:
   once [stateless broadcasts](/quest/m1/broadcast-lifecycle/stateless.md)

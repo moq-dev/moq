@@ -1472,11 +1472,11 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 		config
 	};
 
-	let untaken = Relay::load(config()).await.expect("load relay");
+	let untaken = Relay::load(config()).await.expect("load relay").with_signals(false);
 	let err = untaken.run().await.expect_err("nobody can authenticate");
 	assert!(err.to_string().contains("nobody can authenticate"), "{err}");
 
-	let mut relay = Relay::load(config()).await.expect("load relay");
+	let mut relay = Relay::load(config()).await.expect("load relay").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
 	assert!(relay.admissions().is_none(), "taken once");
@@ -1511,7 +1511,7 @@ async fn connect_through_embedded_admission(
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	config.listen.timeout = Some((timeout).into());
 	config.drain_timeout = Some((Duration::from_millis(100)).into());
-	let mut relay = Relay::load(config).await.expect("load relay");
+	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
 	let url = room_url("tcp", port);

@@ -59,6 +59,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "the probe times real Direct3D calls on the host clock"
+)]
 mod probe {
 	use std::ffi::c_void;
 	use std::mem::{ManuallyDrop, size_of};
