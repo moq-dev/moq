@@ -12,6 +12,10 @@ A reader narrowing its ranges can leave a single group while the fill stays used
 A refusal carries no application code: `drop_groups` fails the waiting fetches with `moq.Error.NotFound`.
 `Subscription.max_delay` also accepts `None`, leaving the publisher's max age alone to bound delivery.
 
+### Connection state
+
+Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
+
 ### Exact encoder rates and publication options
 
 Raw video input framerates are exact numerator/denominator records, not integers.

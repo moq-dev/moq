@@ -12,6 +12,10 @@ A reader narrowing its ranges can leave a single group while the fill stays used
 A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
 `Subscription.maxDelayUs` is a `UInt64?`, where nil leaves the publisher's max age alone to bound delivery.
 
+### Connection state
+
+`Client.connect(to:)` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `stateChanged(after: state.revision)`. Use `ConnectionState.phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
 ### Exact encoder rates and publication options
 
 Raw video input framerates are exact numerator/denominator records, not integers.

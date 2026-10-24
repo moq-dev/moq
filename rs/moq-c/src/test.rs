@@ -171,6 +171,85 @@ extern "C" fn channel_callback(user_data: *mut c_void, code: i32) {
 /// FFI callback for tests that only inspect the registrar's immediate return code.
 extern "C" fn ignore_callback(_user_data: *mut c_void, _code: i32) {}
 
+/// A [moq_connection_state] copied out of an `on_state` callback.
+#[derive(Debug)]
+struct Seen {
+	phase: moq_connection_phase,
+	connects: u64,
+	failure: i32,
+	/// What `moq_error` said about `failure` during the callback.
+	error: Option<String>,
+	/// What `moq_error_protocol` said about `failure` during the callback.
+	protocol: Option<moq_protocol_error>,
+	version: String,
+}
+
+/// Collects every snapshot a session's `on_state` delivers.
+struct States {
+	rx: mpsc::Receiver<Seen>,
+	ptr: *mut c_void,
+}
+
+impl States {
+	fn new() -> Self {
+		let (tx, rx) = mpsc::channel();
+		let ptr = Box::into_raw(Box::new(tx)) as *mut c_void;
+		Self { rx, ptr }
+	}
+
+	fn recv(&self) -> Seen {
+		self.rx.recv_timeout(TIMEOUT).expect("state callback timed out")
+	}
+
+	/// Skip to the terminal snapshot, which must be the last one.
+	fn recv_terminal(&self) -> Seen {
+		loop {
+			let seen = self.recv();
+			if seen.phase == moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED {
+				assert!(
+					self.rx.recv_timeout(Duration::from_millis(50)).is_err(),
+					"a snapshot followed the terminal one"
+				);
+				return seen;
+			}
+		}
+	}
+}
+
+impl Drop for States {
+	fn drop(&mut self) {
+		unsafe { drop(Box::from_raw(self.ptr as *mut mpsc::Sender<Seen>)) };
+	}
+}
+
+extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connection_state) {
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<Seen>) };
+	let state = unsafe { &*state };
+	let mut protocol = moq_protocol_error {
+		scope: 0,
+		code: 0,
+		kind: 0,
+	};
+	let failed = state.failure < 0;
+	let error = failed.then(|| {
+		unsafe { std::ffi::CStr::from_ptr(moq_error()) }
+			.to_string_lossy()
+			.into_owned()
+	});
+	let protocol = (failed && unsafe { moq_error_protocol(&mut protocol) } == 0).then_some(protocol);
+	let _ = tx.send(Seen {
+		phase: state.phase,
+		connects: state.connects,
+		failure: state.failure,
+		error,
+		protocol,
+		version: borrowed_string(state.protocol.data, state.protocol.len).unwrap_or_default(),
+	});
+}
+
+/// FFI state callback for tests that only inspect the immediate return code.
+extern "C" fn ignore_state(_user_data: *mut c_void, _state: *const moq_connection_state) {}
+
 /// Build a valid OpusHead init buffer (RFC 7845 §5.1).
 fn opus_head() -> Vec<u8> {
 	let mut head = Vec::with_capacity(19);
@@ -4982,7 +5061,7 @@ fn session_connect_invalid_url() {
 
 #[test]
 fn session_connect_and_close() {
-	let cb = Callback::new();
+	let cb = States::new();
 	let url = b"moqt://localhost:1";
 	let session = id(unsafe {
 		moq_session_connect(
@@ -4991,22 +5070,25 @@ fn session_connect_and_close() {
 			std::ptr::null(),
 			0,
 			0,
-			Some(channel_callback),
+			Some(state_callback),
 			cb.ptr,
 		)
 	});
 
-	// close() requests shutdown; the task still delivers exactly one terminal
-	// callback (0 = clean close, or a negative connect error), after which
-	// user_data is safe to free.
+	// close() requests shutdown; the task still delivers exactly one terminal snapshot, after
+	// which user_data is safe to free and the handle is already gone.
 	assert_eq!(moq_session_close(session), 0);
-	assert!(cb.recv() <= 0, "session close delivers a terminal code");
+	let terminal = cb.recv_terminal();
+	assert_eq!(terminal.failure, 0, "a requested close is clean: {terminal:?}");
+	assert!(
+		moq_session_close(session) < 0,
+		"the terminal snapshot released the handle"
+	);
 }
 
-/// A dial that keeps failing never fires `on_status`, so `moq_session_failure` is the only
-/// place its reason shows while the loop retries.
+/// Every failed dial reaches `on_state` while the loop retries, before any connect.
 #[test]
-fn session_failure_names_a_failing_dial() {
+fn a_failing_dial_reports_its_failure() {
 	// Hang up on every connection, so a WebSocket dial fails fast. Holding the listener
 	// keeps a parallel test from taking the port.
 	let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -5017,7 +5099,7 @@ fn session_failure_names_a_failing_dial() {
 		}
 	});
 	let url = format!("ws://127.0.0.1:{port}/");
-	let cb = Callback::new();
+	let cb = States::new();
 	let session = id(unsafe {
 		moq_session_connect(
 			url.as_ptr() as *const c_char,
@@ -5025,34 +5107,25 @@ fn session_failure_names_a_failing_dial() {
 			std::ptr::null(),
 			0,
 			0,
-			Some(channel_callback),
+			Some(state_callback),
 			cb.ptr,
 		)
 	});
 
-	let deadline = std::time::Instant::now() + TIMEOUT;
-	let code = loop {
-		let code = moq_session_failure(session);
-		if code != 0 {
-			break code;
-		}
-		assert!(
-			std::time::Instant::now() < deadline,
-			"the refused dial never reported a failure"
-		);
-		std::thread::sleep(Duration::from_millis(10));
-	};
-	assert_ne!(
-		code,
-		Error::SessionNotFound.code(),
-		"the session ended instead of retrying: {:?}",
-		cb.rx.try_recv()
+	let failed = cb.recv();
+	assert_eq!(failed.phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTING);
+	assert_eq!(failed.connects, 0);
+	assert!(failed.failure < 0, "the refused dial reports why: {failed:?}");
+	assert!(
+		failed.error.is_some_and(|error| !error.is_empty()),
+		"moq_error describes the failure during the callback"
 	);
-	assert!(!moq_error().is_null(), "the failure is recorded like a failed call");
-	assert!(cb.rx.try_recv().is_err(), "a failed dial fires no status");
+	assert!(failed.version.is_empty(), "nothing is serving");
 
 	assert_eq!(moq_session_close(session), 0);
-	assert!(cb.recv() <= 0, "session close delivers a terminal code");
+	let terminal = cb.recv_terminal();
+	assert_eq!(terminal.failure, 0, "a requested close is clean: {terminal:?}");
+	assert_eq!(terminal.connects, 0);
 }
 
 /// Borrow a `&str` as the `moq_string` the list setters take.
@@ -5079,7 +5152,7 @@ fn dial(config: Option<&moq_client_config>) -> i32 {
 			config.map_or(std::ptr::null(), |c| c as *const _),
 			0,
 			0,
-			Some(ignore_callback),
+			Some(ignore_state),
 			std::ptr::null_mut(),
 		)
 	}
@@ -5429,7 +5502,7 @@ fn dial_applies_the_config() {
 	config.connect_timeout_us = 100_000;
 	config.has_connect_timeout = true;
 
-	let cb = Callback::new();
+	let cb = States::new();
 	let url = b"moqt://localhost:1";
 	let session = id(unsafe {
 		moq_session_connect(
@@ -5438,13 +5511,13 @@ fn dial_applies_the_config() {
 			&config,
 			0,
 			0,
-			Some(channel_callback),
+			Some(state_callback),
 			cb.ptr,
 		)
 	});
 
 	assert_eq!(moq_session_close(session), 0);
-	assert!(cb.recv() <= 0, "session close delivers a terminal code");
+	cb.recv_terminal();
 }
 
 fn test_allocator() -> (u32, moq_net::bandwidth::Producer) {
@@ -5663,13 +5736,7 @@ fn listen(cb: &Callback) -> (u32, String, String) {
 }
 
 /// Dial `url`, pinning `fingerprint`, with `consume` receiving the peer's broadcasts.
-fn dial_pinned(
-	url: &str,
-	fingerprint: &str,
-	consume: u32,
-	on_status: extern "C" fn(*mut c_void, i32),
-	user_data: *mut c_void,
-) -> u32 {
+fn dial_pinned(url: &str, fingerprint: &str, consume: u32, user_data: *mut c_void) -> u32 {
 	let fingerprints = [moq_str(fingerprint)];
 	let mut config = client_config();
 	config.tls_fingerprints = fingerprints.as_ptr();
@@ -5683,7 +5750,7 @@ fn dial_pinned(
 			&config,
 			0,
 			consume,
-			Some(on_status),
+			Some(state_callback),
 			user_data,
 		)
 	})
@@ -5698,12 +5765,11 @@ fn server_accepts_a_session() {
 	let (server, addr, fingerprint) = listen(&server_cb);
 
 	let received = id(moq_origin_create());
-	let client_cb = Callback::new();
+	let client_cb = States::new();
 	let client = dial_pinned(
 		&format!("https://{addr}/room?jwt=abc"),
 		&fingerprint,
 		received,
-		channel_callback,
 		client_cb.ptr,
 	);
 
@@ -5716,16 +5782,21 @@ fn server_accepts_a_session() {
 	assert_eq!(unsafe { moq_session_request_query(request, &mut query) }, 0);
 	assert_eq!(borrowed_string(query.data, query.len).as_deref(), Some("jwt=abc"));
 
-	let session_cb = Callback::new();
-	let session = id(unsafe { moq_session_request_accept(request, served, 0, Some(channel_callback), session_cb.ptr) });
+	let session_cb = States::new();
+	let session = id(unsafe { moq_session_request_accept(request, served, 0, Some(state_callback), session_cb.ptr) });
 	assert!(
 		unsafe { moq_session_request_path(request, &mut path) } < 0,
 		"accept consumes the request"
 	);
 
-	// Both sides report the first (and, for the server, only) connect.
-	assert_eq!(session_cb.recv(), 1);
-	assert_eq!(client_cb.recv(), 1);
+	// Both sides report the first (and, for the server, only) connect, with its protocol.
+	for cb in [&session_cb, &client_cb] {
+		let connected = cb.recv();
+		assert_eq!(connected.phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED);
+		assert_eq!(connected.connects, 1);
+		assert_eq!(connected.failure, 0);
+		assert!(!connected.version.is_empty(), "a live session names its protocol");
+	}
 
 	let mut stats: moq_connection_stats = unsafe { std::mem::zeroed() };
 	assert_eq!(unsafe { moq_session_stats(session, &mut stats) }, 0);
@@ -5752,7 +5823,8 @@ fn server_accepts_a_session() {
 
 	// Closing the accepted session is a clean terminal close.
 	assert_eq!(moq_session_close(session), 0);
-	assert_eq!(session_cb.recv_terminal(), 0);
+	let terminal = session_cb.recv_terminal();
+	assert_eq!((terminal.failure, terminal.connects), (0, 1));
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
 
@@ -5774,14 +5846,8 @@ fn server_rejects_a_session() {
 	let server_cb = Callback::new();
 	let (server, addr, fingerprint) = listen(&server_cb);
 
-	let client_cb = ProtocolCallback::new();
-	let client = dial_pinned(
-		&format!("https://{addr}/"),
-		&fingerprint,
-		0,
-		protocol_callback,
-		client_cb.ptr,
-	);
+	let client_cb = States::new();
+	let client = dial_pinned(&format!("https://{addr}/"), &fingerprint, 0, client_cb.ptr);
 
 	let request = id(server_cb.recv());
 	let mut path = moq_str("x");
@@ -5796,13 +5862,9 @@ fn server_rejects_a_session() {
 
 	// The rejection closes a session the transport already established, so the client
 	// may see it connect first. It then gives up on the auth rejection rather than redialing.
-	let mut status = client_cb.recv();
-	if status.0 == 1 {
-		status = client_cb.recv();
-	}
-	let (code, protocol) = status;
-	assert_eq!(code, MOQ_ERROR_MOQ);
-	let protocol = protocol.expect("the rejection carries a protocol close");
+	let terminal = client_cb.recv_terminal();
+	assert_eq!(terminal.failure, MOQ_ERROR_MOQ);
+	let protocol = terminal.protocol.expect("the rejection carries a protocol close");
 	assert_eq!(protocol.scope, moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
 	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32);
 	assert!(moq_session_close(client) < 0, "the client session already ended");

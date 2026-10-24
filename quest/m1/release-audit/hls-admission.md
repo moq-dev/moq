@@ -28,6 +28,6 @@ Planning settled from the 2026-10-22 security audit:
   which keeps local fixtures working.
 - A caller-supplied `Config::client` keeps its own redirect policy, which the
   importer cannot override per request. It has no in-repo consumer, so
-  propose dropping or narrowing it on `main` (a `MIGRATE.md` entry if it
+  propose dropping or narrowing it on `main` (a migration note if it
   changes); a release port that keeps the API documents that the caller's
   client owns redirect handling.

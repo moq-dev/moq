@@ -16,6 +16,10 @@ A refusal carries no application code: `DropGroups` fails the waiting fetches wi
 `Subscription.MaxDelay` is a `*time.Duration`, where nil leaves the publisher's max age alone to bound delivery.
 A zero-value `Subscription` now means that rather than live edge only: point `MaxDelay` at a zero duration to keep skipping at once.
 
+### Connection state
+
+`Dial` returns a connecting native client. Replace `Session.Status`, `Connects`, and `Failure` with `State()` and `StateChanged(ctx, state.Revision)`. `ConnectionState` carries `Phase`, `Connects`, `Failure`, and `Version`; `ConnectionPhase` replaces `ConnectionStatus`. Cancelling a state wait only cancels that wait. Cancel the session itself to stop its dial.
+
 ### Exact encoder rates and publication options
 
 Raw video input framerates are exact numerator/denominator records, not integers.

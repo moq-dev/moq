@@ -11,6 +11,13 @@ The ABI is unchanged. A track's dynamic handler now also gets group requests for
 A request whose group nobody reads any more, because every subscriber narrowed past it, is withdrawn and the next group follows: answering it then fails as not found.
 `moq_subscription.max_delay_us` always sets a budget, so a C subscriber cannot ask for the publisher's max age alone.
 
+### Sessions report a lifecycle snapshot
+
+`moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
+Each change delivers a `moq_connection_state` with `phase`, `connects`, `failure`, and the live `protocol`; copy what you keep, since it is valid only during the callback.
+Read `state->connects` where you read a positive status code. A failed dial or dropped connection now fires the callback with a negative `failure`, so drop your `moq_session_failure` polling; `moq_error()` describes it during the callback.
+The terminal call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after a requested close or the error that ended the session, where the terminal status code used to be. Release `user_data` there, as before.
+
 ### Exact encoder rates and publication options
 
 `moq_video_encoder_input.framerate` is now `moq_video_frame_rate { numerator,

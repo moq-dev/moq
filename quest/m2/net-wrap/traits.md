@@ -55,8 +55,8 @@ the methods exactly as moq-net has them today.
   their dev-dependencies.
 - Decide whether the existing `Consume<T>` in `model/origin.rs` folds into
   these traits or stays separate.
-- Update `doc/concept` where it names the concrete types, and add the traits
-  to `MIGRATE.md`.
+- Update `doc/concept` where it names the concrete types, and say in the
+  Impact bullet how to migrate to the traits.
 
 Public API: new moq-net traits, plus the hidden test-wrapper feature. Wire: none.
 

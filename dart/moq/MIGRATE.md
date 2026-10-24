@@ -12,6 +12,10 @@ A reader narrowing its ranges can leave a single group while the fill stays used
 A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
 `Subscription.maxDelayUs` and `maxDelay` are nullable, where null leaves the publisher's max age alone to bound delivery.
 
+### Connection state
+
+`Moq.connect` returns a connecting native session. Replace status, connect-count, and failure polls with `session.state()` and `session.stateChanged(after: state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
 ### Exact encoder rates and publication options
 
 Raw video input framerates are exact numerator/denominator records, not integers.

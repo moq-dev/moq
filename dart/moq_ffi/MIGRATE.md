@@ -14,6 +14,10 @@ A fill also arrives for history a subscription covers that the cache lacks, not 
 `MoqSubscription.maxDelayUs` is nullable, where null leaves the publisher's max age alone to bound delivery.
 Regenerate the bindings with `just dart generate` for the changed types and checksums.
 
+### Connection state
+
+Generated connection APIs now expose `MoqConnectionState` and `MoqConnectionPhase`, with `state()` and revision-based `state_changed(after)` instead of status, connect-count, and failure polls. Connect returns before its first dial completes. Regenerate bindings from the matching Rust metadata.
+
 ### Exact encoder rates and publication options
 
 Encoder configuration is breaking: `MoqVideoEncoderInput.framerate` is now a

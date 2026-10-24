@@ -13,6 +13,10 @@ A refusal carries no application code: `drop_groups` fails the waiting fetches a
 A fill also arrives for history a subscription covers that the cache lacks, not only for a fetch.
 `Subscription::max_delay_us` is a `std::optional<uint64_t>` that still defaults to 0, where `std::nullopt` leaves the publisher's max age alone to bound delivery.
 
+### Connection state
+
+`Client::connect` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `state_changed(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
 ### Exact encoder rates and publication options
 
 Raw video input framerates are exact numerator/denominator records, not integers.
