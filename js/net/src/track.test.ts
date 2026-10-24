@@ -1230,6 +1230,52 @@ test("a parked read wakes at its wall deadline", async () => {
 	}
 });
 
+// A held group's recorded successor that failed hands the wall clock on to the next live
+// group, even when the write that brings that group in also evicts the failed one before the
+// guard looks again, rather than convicting by the failed one's arrival.
+test("a failed successor hands the wall clock on after the cache evicts it", async () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	try {
+		const budget = 2 * CACHE_WINDOW_MS;
+		const track = producer.subscribe({ maxDelay: Milli(budget) });
+		const held = producer.appendGroup();
+		held.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
+		held.close();
+		const group = track.tryRecvGroup();
+		if (!group) throw new Error("missing group");
+		expect(await group.readString()).toBe("x");
+
+		let stale = false;
+		const guarded = hooks
+			.guardGroup(group, () => new Promise<never>(() => {}))
+			.catch((err: unknown) => {
+				stale = true;
+				return err;
+			});
+		const failed = producer.appendGroup();
+		await settle();
+
+		// Past the cache window, so the next write evicts the failed successor at once.
+		const replacement = 10_000 + CACHE_WINDOW_MS + 10_000;
+		await clock.advance(replacement);
+		failed.close(new Error("upstream failed"));
+		const live = producer.appendGroup();
+		live.writeFrame({ payload: enc.encode("y"), timestamp: Timestamp.fromMillis(0) });
+		live.close();
+
+		await clock.advance(10_000 + budget + 1);
+		expect(stale).toBe(false);
+		await clock.advance(replacement + budget - 1);
+		expect(stale).toBe(false);
+		await clock.advance(replacement + budget);
+		expect(await guarded).toMatchObject({ code: StreamCode.Old });
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
 // Empty groups are handed out like any other and retired by the wall clock like an untimed
 // one, whether they finished without a frame or are still open with none. A publisher
 // flooding a run of them cannot pin the group before the run either.

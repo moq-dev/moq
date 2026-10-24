@@ -1345,10 +1345,11 @@ impl TrackState {
 	}
 
 	/// When a group was superseded, given `arrival`, its cached successor in `servable`: when
-	/// `arrival` arrived, or once the successor `superseded` recorded has left the cache, when
-	/// that one did, unless a group landed between them since. Without the record, an evicted
+	/// `arrival` arrived, or when the successor `superseded` recorded did, unless a group landed
+	/// between them since. The record outlives the successor's eviction: otherwise an evicted
 	/// successor restarts the clock at whichever newer group the cache still holds, which a
-	/// budget past the cache window never reaches.
+	/// budget past the cache window never reaches. A recorded successor that failed hands the
+	/// clock on, as a re-read does, whether or not the cache has reclaimed it yet.
 	fn superseded_at(
 		&self,
 		arrival: Option<&Slot>,
@@ -1359,18 +1360,17 @@ impl TrackState {
 			return arrival.map(|slot| slot.arrived);
 		};
 		let mut last = superseded.0.lock().unwrap_or_else(PoisonError::into_inner);
-		// One still cached but aborted hands the clock on, as a re-read does.
-		if let Some(evicted) = *last
-			&& !self.is_current(evicted.sequence, evicted.stamp)
-			&& servable.contains(evicted.sequence)
-			&& arrival.is_none_or(|slot| slot.group.sequence > evicted.sequence)
+		if let Some(recorded) = &*last
+			&& !recorded.fate.failed()
+			&& servable.contains(recorded.sequence)
+			&& arrival.is_none_or(|slot| slot.group.sequence > recorded.sequence)
 		{
-			return Some(evicted.arrived);
+			return Some(recorded.arrived);
 		}
 		*last = arrival.map(|slot| Successor {
 			sequence: slot.group.sequence,
-			stamp: slot.stamp,
 			arrived: slot.arrived,
+			fate: slot.group.fate(),
 		});
 		arrival.map(|slot| slot.arrived)
 	}
@@ -5341,12 +5341,11 @@ struct FetchExpiry {
 #[derive(Default)]
 struct Superseded(Mutex<Option<Successor>>);
 
-/// A successor's slot incarnation, and when it arrived.
-#[derive(Clone, Copy)]
+/// A successor, when it arrived, and whether it has since failed.
 struct Successor {
 	sequence: u64,
-	stamp: u32,
 	arrived: crate::time::Instant,
+	fate: group::Fate,
 }
 
 impl group::Expiry for FetchExpiry {
@@ -9801,6 +9800,101 @@ mod test {
 		}
 		elapse(&producer, budget * 2);
 		assert!(!newest.poll_expired_while_pending(&waiter, true), "the newest group");
+	}
+
+	/// A recorded successor that failed hands the clock on to the next live group even once
+	/// the cache reclaimed it before the reader looked again, rather than convicting by the
+	/// failed one's arrival. A subscribed group and a fetched one are judged alike.
+	#[test]
+	fn a_reclaimed_failed_successor_hands_the_clock_on() {
+		let mut producer = track_producer_expiring("test", cache::DEFAULT_EXPIRY);
+		let budget = cache::DEFAULT_EXPIRY * 2;
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let waiter = kio::Waiter::noop();
+		let expired = |held: &mut [group::Consumer; 2]| {
+			held.each_mut()
+				.map(|group| group.poll_expired_while_pending(&waiter, true))
+		};
+
+		append_at(&mut producer, 0);
+		let fetch = group::Fetch::default().with_max_delay(budget);
+		let mut held = [
+			subscriber.assert_group(),
+			producer
+				.consume()
+				.fetch_group(0, fetch)
+				.now_or_never()
+				.unwrap()
+				.unwrap(),
+		];
+		for group in &mut held {
+			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
+			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+		}
+
+		let failed = producer.append_group().unwrap();
+		assert_eq!(expired(&mut held), [false; 2], "the successor is recorded");
+		failed.abort(Error::Cancel).unwrap();
+		let replacement = Duration::from_secs(10);
+		elapse(&producer, replacement);
+		append_at(&mut producer, 0);
+		producer.broadcast.pool.sweep();
+		assert!(!producer.state.read().lookup.contains_key(&1), "reclaimed");
+
+		elapse(&producer, budget - replacement);
+		assert_eq!(
+			expired(&mut held),
+			[false; 2],
+			"the failed successor arrived a budget ago"
+		);
+
+		elapse(&producer, replacement);
+		assert_eq!(expired(&mut held), [true; 2], "the next live one arrived a budget ago");
+	}
+
+	/// On an ended track the cache expires idle groups in place rather than reclaiming them,
+	/// so the reads skip them like any aborted group. A recorded successor that aged out that
+	/// way still convicts the group before it once it arrived a budget ago.
+	#[test]
+	fn an_ended_track_judges_by_its_expired_successor() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		let budget = cache::DEFAULT_EXPIRY * 2;
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let waiter = kio::Waiter::noop();
+
+		append_at(&mut producer, 0);
+		let mut held = subscriber.assert_group();
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_none());
+
+		pool.step(Duration::from_secs(1));
+		append_at(&mut producer, 0); // the successor
+		assert!(
+			!held.poll_expired_while_pending(&waiter, true),
+			"the successor is recorded"
+		);
+		let state = producer.state.downgrade();
+		producer.finish().unwrap();
+		drop(producer);
+
+		// The first sweep dates the groups idle, the second expires them.
+		let idle = cache::DEFAULT_EXPIRY + Duration::from_secs(1);
+		pool.sweep();
+		pool.step(idle);
+		pool.sweep();
+		assert_eq!(
+			state.read(|state| state.lookup.get(&1).is_some_and(Slot::is_aborted)),
+			Some(true),
+			"expired in place"
+		);
+		assert!(!held.poll_expired_while_pending(&waiter, true), "early");
+
+		pool.step(budget - idle);
+		assert!(
+			held.poll_expired_while_pending(&waiter, true),
+			"the successor arrived a budget ago"
+		);
 	}
 
 	/// Empty groups are handed out like any other and retired by the wall clock like an

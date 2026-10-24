@@ -75,6 +75,16 @@ const HOLES: ReadonlySet<number> = new Set([
 	StreamCode.Evicted,
 ]);
 
+// The errors this cache closes a group with when it evicts it unfinished: an aged-out group,
+// not a failed one. Mirrors Rust's cache-policy aborts in `group::Handle::commit_abort`.
+const EVICTED = new WeakSet<Error>();
+
+// Whether `group` failed: closed with an error other than its eviction from this cache.
+function failed(group: GroupConsumer): boolean {
+	const closed = group.closed.peek();
+	return closed instanceof Error && !EVICTED.has(closed);
+}
+
 /**
  * A position within a track: a group's sequence and a frame's index inside it.
  *
@@ -1130,7 +1140,11 @@ export class Producer {
 		// the mirrors below would otherwise report a clean finish to a reader that had
 		// drained it. The usual case, an already-closed group aging out, keeps its own
 		// terminal state.
-		if (!entry.group.isClosed) entry.group.close(new TooFarBehind());
+		if (!entry.group.isClosed) {
+			const evicted = new TooFarBehind();
+			EVICTED.add(evicted);
+			entry.group.close(evicted);
+		}
 		const mirrors = [...entry.mirrors.values()];
 		for (const mirror of mirrors) hooks.evictGroup(mirror);
 		this.#unlink(entry);
@@ -1936,21 +1950,22 @@ export class Subscriber {
 		);
 	}
 
-	// The successor whose arrival starts the wall clock: the cached `arrival`, or once the one
-	// `held` recorded leaves the timeline, that one, unless a group landed between them since.
-	// Otherwise an evicted successor restarts the clock at whichever newer group the cache
-	// still holds, which a budget past the cache window never reaches. One still in the
-	// timeline but aborted hands the clock on, as a re-read does.
+	// The successor whose arrival starts the wall clock: the cached `arrival`, or the one `held`
+	// recorded, unless a group landed between them since. The record outlives the successor's
+	// eviction: otherwise an evicted successor restarts the clock at whichever newer group the
+	// cache still holds, which a budget past the cache window never reaches. A recorded
+	// successor that failed hands the clock on, as a re-read does, whether or not the cache
+	// has evicted it yet.
 	#supersededBy(arrival: GroupConsumer | undefined, drift: Drift, held?: Superseded): GroupConsumer | undefined {
 		if (!held) return arrival;
-		const evicted = held.successor;
+		const recorded = held.successor;
 		if (
-			evicted &&
-			this.#state.timeline[timelineIndex(this.#state.timeline, evicted.sequence)] !== evicted &&
-			(drift.end === undefined || evicted.sequence < drift.end) &&
-			(!arrival || arrival.sequence > evicted.sequence)
+			recorded &&
+			!failed(recorded) &&
+			(drift.end === undefined || recorded.sequence < drift.end) &&
+			(!arrival || arrival.sequence > recorded.sequence)
 		) {
-			return evicted;
+			return recorded;
 		}
 		held.successor = arrival;
 		return arrival;
