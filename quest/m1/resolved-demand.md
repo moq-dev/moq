@@ -115,7 +115,7 @@ with no wire change.
   with the same idle window as the groups they sit between, under the same
   fold-or-`TooFarBehind` rule, so there are at most about one per cached
   sequence and the record grows no faster than the JS cache. The JS byte
-  bound is [JS unbounded groups](/quest/m2/unbounded-groups/js.md).
+  bound is [JS unbounded groups](/quest/m1/unbounded-groups/js.md).
 - **Drops are final for now**, decided by the maintainer on 2026-10-19. A
   widening re-offers only groups this cursor never reported in
   SUBSCRIBE_DROP; a reported group stays dropped, as today. That leaves a
@@ -175,4 +175,4 @@ max age or the range.
 ## Related
 
 - [Drop set](/quest/m1/drop-set.md) - closes the gap this leaves for groups already reported dropped
-- [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the cursor runs between them
+- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - the JS byte bound for groups and the cursor runs between them

@@ -43,6 +43,7 @@ test:
     python3 bench/ffi.test.py
     python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
+    python3 sh/large-files.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/dispatch-query.test.py --bench
     bun test sh/gh/setup.test.ts

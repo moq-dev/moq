@@ -71,6 +71,11 @@ catalog-bench:
     bun install --frozen-lockfile
     bun publish/bench/catalog.ts
 
+# Sweep QMux record decoding over record size x frames per record.
+qmux-record-bench:
+    bun install --frozen-lockfile
+    bun qmux/bench/record.ts
+
 # Sweep CMAF fragment decode over mdat bytes x declared sample count, including a hostile count.
 cmaf-bench:
     bun install --frozen-lockfile

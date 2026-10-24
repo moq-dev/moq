@@ -55,7 +55,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 	for (const mode of ["refuse", "queue", "open"] as const) {
 		test(`${protocol}: ${mode} has one fatal request deadline`, async () => {
 			const clock = new Manual();
-			const restore = clock.install();
+			const installed = clock.install();
 			const transport = limited(mode);
 			const subscriber =
 				protocol === "lite"
@@ -94,7 +94,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 				track.close();
 				broadcast.close();
 				subscriber.close();
-				restore();
+				installed.close();
 			}
 		});
 	}
@@ -104,7 +104,7 @@ for (const legacy of [false, true]) {
 	for (const mode of ["refuse", "queue", "open"] as const) {
 		test(`${legacy ? "solicited draft-15" : "unsolicited draft-17"} advertisement: ${mode} is terminal`, async () => {
 			const clock = new Manual();
-			const restore = clock.install();
+			const installed = clock.install();
 			const transport = limited(mode);
 			const version = legacy ? Ietf.DRAFT_15 : Ietf.DRAFT_17;
 			const origin = new Origin();
@@ -155,7 +155,7 @@ for (const legacy of [false, true]) {
 				origin.close();
 				await loop;
 				publisher.close();
-				restore();
+				installed.close();
 			}
 		});
 	}
@@ -165,7 +165,7 @@ for (const operation of ["info", "fetch"] as const) {
 	for (const mode of ["refuse", "queue", "open"] as const) {
 		test(`lite standalone ${operation}: ${mode} has a fatal deadline`, async () => {
 			const clock = new Manual();
-			const restore = clock.install();
+			const installed = clock.install();
 			const transport = limited(mode);
 			const subscriber = new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n));
 			let failure: unknown;
@@ -193,7 +193,7 @@ for (const operation of ["info", "fetch"] as const) {
 				expect(transport.options).toEqual([{ sendOrder: undefined, waitUntilAvailable: false }]);
 			} finally {
 				subscriber.close();
-				restore();
+				installed.close();
 			}
 		});
 	}
@@ -203,7 +203,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 	for (const mode of ["refuse", "queue", "open"] as const) {
 		test(`${protocol} discovery: ${mode} bounds only the create`, async () => {
 			const clock = new Manual();
-			const restore = clock.install();
+			const installed = clock.install();
 			const transport = limited(mode);
 			const subscriber =
 				protocol === "lite"
@@ -228,7 +228,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			} finally {
 				announced.close();
 				subscriber.close();
-				restore();
+				installed.close();
 			}
 		});
 	}
@@ -237,7 +237,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 for (const protocol of ["lite", "ietf-17"] as const) {
 	test(`${protocol}: credit granted in the deadline task cannot send a late request`, async () => {
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		const transport = limited("queue");
 		const subscriber =
 			protocol === "lite"
@@ -257,7 +257,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			track.close();
 			broadcast.close();
 			subscriber.close();
-			restore();
+			installed.close();
 		}
 	});
 }
