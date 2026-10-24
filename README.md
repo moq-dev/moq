@@ -140,6 +140,8 @@ CPU load and available memory before builds or test timeout clocks start;
 nested checks reuse that admission. Hosted GitHub Actions keeps its runner
 scheduling. Rust builds still use the dev shell's mbx Cargo shim.
 
+`just check` and `just ci` run three module lanes at once, each admitted per
+command; set `MOQ_CHECK_JOBS` to change that, or to 1 to run them in order.
 Local nextest runs default to at most four test workers; set
 `NEXTEST_TEST_THREADS` to override it. Bun workspace scripts run sequentially
 locally, preserving dependency order, while CI keeps its workspace parallelism.
