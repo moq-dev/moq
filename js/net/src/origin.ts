@@ -1152,6 +1152,10 @@ export class Producer implements Table {
 	#preference = Preference.default;
 	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
 
+	// Set on a derived handle, which borrows the origin: what it registered, so its close
+	// releases only that. The owner has none, since its close ends the whole origin.
+	#borrowed?: { releases: Set<Dispose>; closed: boolean };
+
 	// The reader backing the passthroughs, so holding a Producer never requires the
 	// consume().x() stutter for everyday reads. One instance, so `discovery` keeps its
 	// identity across reads.
@@ -1161,14 +1165,29 @@ export class Producer implements Table {
 		const thisProducer = this;
 		registerWire(this, {
 			receive: (prefix, route) => this.#receive(prefix, route),
-			interests: (listener) =>
-				this.#state.interests((absolute, wanted) => {
-					for (const prefix of this.#scope.interests(absolute)) listener(prefix, wanted);
-				}),
+			interests: (listener) => {
+				if (this.#borrowed?.closed) return () => {};
+				// What the listener currently wants, so a derived handle's close can retract it
+				// and its session stops asking the peer for announcements nothing will land.
+				const wants = new Map<Path.Valid, number>();
+				const unlisten = this.#state.interests((absolute, wanted) => {
+					for (const prefix of this.#scope.interests(absolute)) {
+						const count = (wants.get(prefix) ?? 0) + (wanted ? 1 : -1);
+						if (count > 0) wants.set(prefix, count);
+						else wants.delete(prefix);
+						listener(prefix, wanted);
+					}
+				});
+				return this.#hold(() => {
+					unlisten();
+					for (const [prefix, count] of wants) for (let i = 0; i < count; i++) listener(prefix, false);
+				});
+			},
 			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),
-			snapshot: (prefix) => this.#state.addSnapshot(this.#scope.prefix(prefix)),
+			snapshot: (prefix) =>
+				this.#borrowed?.closed ? () => {} : this.#hold(this.#state.addSnapshot(this.#scope.prefix(prefix))),
 			get requests() {
 				if (thisProducer.#scope === Scope.all) return thisProducer.#state.requests;
 				thisProducer.#requests ??= new Derived([thisProducer.#state.requests], (requests) =>
@@ -1183,15 +1202,12 @@ export class Producer implements Table {
 		});
 	}
 
-	/** Narrow this handle to patterns beneath root, presenting paths relative to that root. */
+	/**
+	 * Narrow this handle to patterns beneath root, presenting paths relative to that root.
+	 * The result borrows the origin; see {@link close}.
+	 */
 	scope(root: Path.Valid, patterns: Path.Patterns): Producer {
-		const scope = this.#scope.narrow(root, patterns);
-		const producer = new Producer();
-		producer.#state = this.#state;
-		producer.#scope = scope;
-		producer.#preference = this.#preference;
-		producer.#reader = makeConsumer(this.#state, scope);
-		return producer;
+		return this.#derive(this.#scope.narrow(root, patterns), this.#preference);
 	}
 
 	/**
@@ -1206,11 +1222,18 @@ export class Producer implements Table {
 	 * `origin::Producer::with_preference` in rs/moq-net.
 	 */
 	withPreference(preference: Preference): Producer {
+		return this.#derive(this.#scope, preference);
+	}
+
+	// A handle borrowing this origin: closing it releases what it registered, never the origin.
+	#derive(scope: Scope, preference: Preference): Producer {
+		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
 		const producer = new Producer();
 		producer.#state = this.#state;
-		producer.#scope = this.#scope;
+		producer.#scope = scope;
 		producer.#preference = preference;
-		producer.#reader = makeConsumer(this.#state, this.#scope);
+		producer.#reader = makeConsumer(this.#state, scope);
+		producer.#borrowed = { releases: new Set(), closed: false };
 		return producer;
 	}
 
@@ -1238,6 +1261,7 @@ export class Producer implements Table {
 	 */
 	createBroadcast(path: Path.Valid): broadcast.Producer {
 		path = this.#scope.path(path);
+		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
 		publishPath(path);
 		const created = this.#state.created;
 		if (!created) throw new Error("origin is closed");
@@ -1262,12 +1286,15 @@ export class Producer implements Table {
 			previous.close();
 		}
 
-		// Drop it when the broadcast closes, unless a recreate already replaced it: a
-		// stale broadcast closing must not unpublish the live one.
-		void front.closed.then(() => {
+		// Drop it when the broadcast closes, unless a recreate already replaced it: a stale
+		// broadcast closing must not unpublish the live one. Clearing `created` also stops a
+		// later announce, since a consumer clone can keep the broadcast open past this close.
+		const release = this.#hold(() => {
 			this.#retractExact(path, front);
 			if (this.#state.created?.get(path) === front) this.#state.created.delete(path);
+			front.close();
 		});
+		void front.closed.then(release);
 
 		return producer;
 	}
@@ -1364,16 +1391,18 @@ export class Producer implements Table {
 		};
 		server.onReject = (path, err) => this.#state.refuse(path, entry, err);
 
-		let closed = false;
-		this.#state.routes.mutate((routes) => {
-			if (!routes) {
-				closed = true;
-				return;
-			}
-			const entries = routes.get(prefix);
-			if (entries) entries.unshift(entry);
-			else routes.set(prefix, [entry]);
-		});
+		let closed = this.#borrowed?.closed ?? false;
+		if (!closed) {
+			this.#state.routes.mutate((routes) => {
+				if (!routes) {
+					closed = true;
+					return;
+				}
+				const entries = routes.get(prefix);
+				if (entries) entries.unshift(entry);
+				else routes.set(prefix, [entry]);
+			});
+		}
 		if (closed) {
 			server.close();
 			return makeDynamic(prefix, entry, this.#state, () => {}, publishes ? this : undefined);
@@ -1381,7 +1410,7 @@ export class Producer implements Table {
 		this.#state.rebuildOriginated();
 		this.#state.refreshPrefix(prefix);
 
-		const retract = () => {
+		const retract = this.#hold(() => {
 			this.#state.routes.mutate((routes) => {
 				const entries = routes?.get(prefix);
 				if (!entries) return;
@@ -1393,7 +1422,7 @@ export class Producer implements Table {
 			server.close();
 			this.#state.rebuildOriginated();
 			this.#state.refreshPrefix(prefix);
-		};
+		});
 
 		return makeDynamic(prefix, entry, this.#state, retract, publishes ? this : undefined);
 	}
@@ -1405,15 +1434,13 @@ export class Producer implements Table {
 	 * @internal
 	 */
 	#attach(discovery: boolean): Dispose {
+		if (this.#borrowed?.closed) return () => {};
 		this.#sessions(1, discovery);
 		const release = this.#expect();
-		let detached = false;
-		return () => {
-			if (detached) return;
-			detached = true;
+		return this.#hold(() => {
 			this.#sessions(-1, discovery);
 			release();
-		};
+		});
 	}
 
 	#sessions(delta: number, discovery: boolean): void {
@@ -1436,15 +1463,26 @@ export class Producer implements Table {
 	 * @internal
 	 */
 	#expect(): Dispose {
+		if (this.#borrowed?.closed) return () => {};
 		this.#state.answerers.update((count) => count + 1);
-		let released = false;
-		return () => {
-			if (released) return;
-			released = true;
-			// Clamped because closing the origin zeroes the count, and the sessions attached at
-			// the time still release afterwards.
-			this.#state.answerers.update((count) => Math.max(0, count - 1));
+		// Clamped because closing the origin zeroes the count, and the sessions attached at
+		// the time still release afterwards.
+		return this.#hold(() => this.#state.answerers.update((count) => Math.max(0, count - 1)));
+	}
+
+	// Run `release` once, at the first of its own call or this derived handle's close, so a
+	// borrower's close withdraws what it registered. The owner's close tears down everything.
+	#hold(release: Dispose): Dispose {
+		const borrowed = this.#borrowed;
+		let done = false;
+		const held = () => {
+			if (done) return;
+			done = true;
+			borrowed?.releases.delete(held);
+			release();
 		};
+		borrowed?.releases.add(held);
+		return held;
 	}
 
 	/**
@@ -1476,14 +1514,14 @@ export class Producer implements Table {
 	 */
 	#answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined {
 		const slot = this.#state.requests.peek()?.get(path);
-		if (!slot || slot.answer !== undefined) {
+		if (!slot || slot.answer !== undefined || this.#borrowed?.closed) {
 			front.close();
 			return undefined;
 		}
 		slot.answer = front;
 		this.#state.refresh(path);
 
-		return () => {
+		return this.#hold(() => {
 			if (slot.answer === front) {
 				// A request the answer resolved ends with its session: the next session is another
 				// publisher instance, since nothing (no epoch) says it serves the same bytes.
@@ -1498,7 +1536,7 @@ export class Producer implements Table {
 				}
 			}
 			front.close();
-		};
+		});
 	}
 
 	/** A read handle for this origin, the side a connection's `publish` option borrows. */
@@ -1521,8 +1559,22 @@ export class Producer implements Table {
 		return this.#reader.announced(scope, options);
 	}
 
-	/** Close the origin, every broadcast it still routes, and its announcement streams. Idempotent. */
+	/**
+	 * Close the origin, every broadcast it still routes, and its announcement streams. Idempotent.
+	 *
+	 * A handle from {@link scope} or {@link withPreference} borrows the origin: closing it
+	 * withdraws only the broadcasts, routes, and sessions (with their answers) registered
+	 * through it and refuses new ones, ignoring `abort`. Only the handle made with `new Producer()` closes the origin.
+	 */
 	close(abort?: Error) {
+		const borrowed = this.#borrowed;
+		if (borrowed) {
+			if (borrowed.closed) return;
+			borrowed.closed = true;
+			for (const release of [...borrowed.releases]) release();
+			borrowed.releases.clear();
+			return;
+		}
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.closed.set(abort ?? null);
 		for (const watch of this.#state.watchers.values()) watch.version.update((n) => n + 1);
