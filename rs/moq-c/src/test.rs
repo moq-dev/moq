@@ -2517,7 +2517,6 @@ fn media_cut_bounds_audio_groups() {
 			unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), i * 20_000) },
 			0
 		);
-		assert_eq!(moq_publish_media_flush(media, i * 20_000), 0);
 		assert_eq!(moq_publish_media_cut(media), 0, "each packet is its own group");
 	}
 
@@ -2530,8 +2529,6 @@ fn media_cut_bounds_audio_groups() {
 	assert_eq!(moq_publish_media_discontinuity(media), 0);
 
 	// Both report a missing importer rather than panicking on an unknown id.
-	assert!(moq_publish_media_flush(9999, 0) < 0);
-	assert!(moq_publish_media_flush(media, u64::MAX) < 0);
 	assert!(moq_publish_media_discontinuity(9999) < 0);
 	assert!(moq_publish_media_discontinuity(0) < 0);
 	assert!(moq_publish_media_cut(9999) < 0);
@@ -3789,7 +3786,7 @@ fn consume_announced_follows_a_restart() {
 /// Another instance taking over while the wait resolves is the one it delivers, so the restart
 /// that announced it must not deliver it again. `dynamic_at` is where the route the wait first
 /// resolves through covers the path: above it, the takeover's restart lands while resolving;
-/// at it, the origin holds that restart for [`moq_net::origin::DEFAULT_UPDATE_HOLD`].
+/// at it, the origin holds that restart for the default [`moq_net::origin::Config::update_hold`].
 fn consume_announced_delivers_a_takeover_once(dynamic_at: &str) {
 	let origin = id(moq_origin_create());
 	let dynamic = {
@@ -3820,7 +3817,9 @@ fn consume_announced_delivers_a_takeover_once(dynamic_at: &str) {
 	let takeover = publish(origin, "live", moq_net::origin::Route::default());
 	let delivered = id(cb.recv());
 	assert!(
-		cb.rx.recv_timeout(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).is_err(),
+		cb.rx
+			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
+			.is_err(),
 		"the takeover was delivered twice"
 	);
 
@@ -3972,11 +3971,13 @@ fn consume_announced_delivers_a_gap_while_resolving_once() {
 		let _runtime = crate::ffi::RUNTIME.enter();
 		drop(dynamic);
 	}
-	std::thread::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2);
+	std::thread::sleep(moq_net::origin::Config::default().update_hold * 2);
 	let arrival = publish(origin, "live", moq_net::origin::Route::default());
 	let delivered = id(cb.recv());
 	assert!(
-		cb.rx.recv_timeout(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).is_err(),
+		cb.rx
+			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
+			.is_err(),
 		"the arrival was delivered twice"
 	);
 

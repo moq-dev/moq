@@ -278,7 +278,7 @@ impl Publisher {
 			prefix: prefix.clone(),
 			forward: msg.forward,
 			params: Params {
-				priority: msg.subscriber_priority.unwrap_or(crate::ietf::priority::ABSENT_WIRE),
+				priority: msg.subscriber_priority.unwrap_or(crate::ietf::priority::DEFAULT_WIRE),
 				order: msg.group_order,
 				filter: msg.filter.unwrap_or(Filter::Unfiltered),
 				max_age: None,
@@ -2255,6 +2255,22 @@ mod tests {
 				"{version}"
 			);
 			assert_eq!(publish.filter, stated.then_some(Filter::NextObject), "{version}");
+		}
+	}
+
+	/// An omitted SUBSCRIBER_PRIORITY is the drafts' 128, so each PUBLISH restates 128 rather
+	/// than this stack's unset 127.
+	#[moq_clock::test]
+	async fn a_listing_without_a_priority_states_the_default() {
+		for version in DRAFTS.into_iter().filter(|version| Filter::is_draft20(*version)) {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut stream = timeout(Stream::accept(&mut h.peer, version)).await.unwrap();
+			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
+			let body: ietf::Body = stream.reader.decode().await.unwrap();
+			let publish: ietf::Publish = body.message(version).unwrap();
+			assert_eq!(publish.subscriber_priority, Some(128), "{version}");
 		}
 	}
 

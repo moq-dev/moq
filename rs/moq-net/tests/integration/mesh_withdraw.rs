@@ -17,7 +17,7 @@ use moq_net::{Hop, Version, announce, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	produce(hop, origin::DEFAULT_UPDATE_HOLD)
+	produce(hop, origin::Config::default().update_hold)
 }
 
 /// An origin holding route updates for `hold`. Its cache never expires idle

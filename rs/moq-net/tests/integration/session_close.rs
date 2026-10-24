@@ -428,3 +428,44 @@ async fn an_unknown_lite_range_abort_is_unspecified_on_every_wire() {
 		}
 	}
 }
+
+/// How the server's session ended, as `closed` reports it and as its stats record it.
+async fn ended(version: &str, close: impl FnOnce(&MockPair)) -> (Error, moq_net::stats::Failures) {
+	let registry = moq_net::stats::Registry::new(Default::default());
+	let mut options = MockConnectOptions::new(version.parse().unwrap());
+	options.server_stats = registry.tier(Default::default()).session("room");
+	let pair = connect_mock(options).await;
+	close(&pair);
+	let err = moq_clock::timeout(TIMEOUT, pair.server.closed())
+		.await
+		.expect("the session closes");
+	drop(pair);
+	// The drivers release the stats once the transport has closed under them.
+	moq_clock::sleep(Duration::from_secs(1)).await;
+	let presence = registry.snapshot().sessions()[0].1;
+	assert_eq!(presence.sessions_ended, 1, "{version}: the session ended");
+	(err, presence.sessions_failed)
+}
+
+/// A clean close is `Error::Cancel` and no failure, whichever side closed. Anything else
+/// counts by its kind, without the caller recording it.
+#[moq_clock::test]
+async fn a_session_records_how_it_ended() {
+	use moq_net::stats::Failures;
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-16", "moq-transport-22"] {
+		let (err, failed) = ended(version, |pair| pair.client.abort(Error::Cancel)).await;
+		assert!(matches!(err, Error::Cancel), "{version}: {err:?}");
+		assert_eq!(failed, Failures::default(), "{version}");
+
+		// A drain that gave up is still this side ending the session on purpose.
+		let (err, failed) = ended(version, |pair| pair.server.abort(Error::GoingAway)).await;
+		assert!(matches!(err, Error::Cancel), "{version}: {err:?}");
+		assert_eq!(failed, Failures::default(), "{version}");
+
+		let (_, failed) = ended(version, |pair| pair.client.abort(Error::App(7))).await;
+		assert_eq!(failed.application, 1, "{version}: {failed:?}");
+
+		let (_, failed) = ended(version, |pair| pair.server.abort(Error::Expired)).await;
+		assert_eq!(failed.expired, 1, "{version}: {failed:?}");
+	}
+}

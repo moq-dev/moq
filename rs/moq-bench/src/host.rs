@@ -16,9 +16,10 @@
 
 #[cfg(target_os = "linux")]
 mod linux {
+	use moq_clock::Wall;
 	use std::collections::HashMap;
 	use std::io::Write;
-	use std::time::{Duration, SystemTime, UNIX_EPOCH};
+	use std::time::Duration;
 
 	use anyhow::Context;
 	use procfs::CurrentSI;
@@ -230,9 +231,8 @@ mod linux {
 		target.ctx.retain(|tid| live.contains(&tid));
 
 		Ok(Sample {
-			timestamp_ms: SystemTime::from(moq_clock::wall())
-				.duration_since(UNIX_EPOCH)
-				.unwrap_or_default()
+			timestamp_ms: moq_clock::wall()
+				.saturating_duration_since(Wall::UNIX_EPOCH)
 				.as_millis(),
 			pid: target.proc.pid,
 			comm: stat.comm.clone(),

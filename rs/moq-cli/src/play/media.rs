@@ -1507,7 +1507,7 @@ mod tests {
 		// A restart without an epoch waits out the origin's update hold, since a
 		// withdrawal wave's stale route looks just like one, and the player joins the
 		// new broadcast at its live edge.
-		tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD).await;
+		tokio::time::sleep(moq_net::origin::Config::default().update_hold).await;
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;

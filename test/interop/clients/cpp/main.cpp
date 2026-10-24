@@ -467,7 +467,7 @@ int main(int argc, char **argv) {
         fail("--url and --broadcast are required");
     }
     // Warnings and errors from the Rust layer, such as a publication outside the grant.
-    ok(moq::moq_log_level("warn"), "log level");
+    ok(moq::log_level("warn"), "log level");
 
     if (role == "publish") {
         if (tones.empty()) {

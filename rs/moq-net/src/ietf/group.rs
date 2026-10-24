@@ -324,7 +324,7 @@ impl Decode<Version> for GroupHeader {
 		let publisher_priority = if flags.has_priority {
 			r.u8()?
 		} else {
-			super::priority::ABSENT_WIRE
+			super::priority::DEFAULT_WIRE
 		};
 
 		let result = Self {

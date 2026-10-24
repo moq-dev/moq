@@ -360,8 +360,8 @@ impl Cluster {
 		// whole origin, hidden broadcasts included, and subscribes into it.
 		for server in 0..shape.relays {
 			for client in 0..server {
-				let client = this.relays[client].clone().peer();
-				let server = this.relays[server].clone().peer();
+				let client = this.relays[client].clone().with_link(moq_net::origin::Link::Peer);
+				let server = this.relays[server].clone().with_link(moq_net::origin::Link::Peer);
 				let mut options = MockConnectOptions::new(this.version);
 				options.transport.stream_buffer = this.window;
 				options.client_publish = Some(client.consume().with_hidden(true));
@@ -609,7 +609,7 @@ impl Room {
 	fn tick(&mut self) {
 		self.cache_now += Duration::from_secs(1);
 		for pool in self.pools() {
-			pool.gc(self.cache_now, &kio::Waiter::noop());
+			pool.poll(self.cache_now, &kio::Waiter::noop());
 		}
 	}
 

@@ -296,8 +296,8 @@ async fn a_relay_link_asks_for_everything() {
 		for upstream in [false, true] {
 			let relay = produce_origin(2);
 			let link = match upstream {
-				true => relay.clone().upstream(),
-				false => relay.clone().peer(),
+				true => relay.clone().with_link(moq_net::origin::Link::Upstream),
+				false => relay.clone().with_link(moq_net::origin::Link::Peer),
 			};
 			let lazy = Lazy::with(version, link).await;
 			assert_eq!(lazy.requests(), 1, "{version}");

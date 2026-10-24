@@ -31,7 +31,10 @@ Decided with the maintainer on 2026-10-23; see the epic for why.
   its `CACHE_WINDOW` use there.
 - Update `doc/concept` with one paragraph on the model (online = announced,
   end of content = track FIN, retention = app policy), plus `doc/lib/*`, and
-  the Impact bullet says how to migrate every affected package.
+  the Impact bullet says how to migrate every affected package. It
+  supersedes the `MIGRATE.md` entries on `finish` (#5795, #6157, and the
+  binding entries measured against release's `finish()` alias for
+  `close()`), for the cut to collapse.
 - Coordinate with [JS origin publications](/quest/m1/api-audit/js-publication.md)
   and [binding publications](/quest/m1/api-audit/binding-publication.md),
   which touch the same handles.

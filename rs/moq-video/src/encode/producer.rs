@@ -193,13 +193,11 @@ impl Producer {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
-					import.flush(frame.timestamp, moq_net::time::Instant::now())?;
 				}
 				Codecs::H265 { split, import } => {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
-					import.flush(frame.timestamp, moq_net::time::Instant::now())?;
 				}
 			}
 		}
@@ -1144,7 +1142,8 @@ mod tests {
 	/// published timestamp may land up to `SAMPLING` early, never late.
 	#[cfg(all(feature = "capture", feature = "openh264"))]
 	mod clock {
-		use std::time::{Duration, SystemTime};
+		use moq_clock::Wall;
+		use std::time::Duration;
 
 		use moq_clock::Instant;
 
@@ -1183,7 +1182,7 @@ mod tests {
 
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
-			async fn start(behind: Duration, wall: SystemTime) -> Self {
+			async fn start(behind: Duration, wall: Wall) -> Self {
 				let epoch = moq_clock::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
@@ -1339,7 +1338,7 @@ mod tests {
 		async fn a_late_first_frame_publishes_its_acquisition() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(5), SystemTime::now()).await;
+					let fixture = Fixture::start(Duration::from_secs(5), moq_clock::wall()).await;
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 
@@ -1362,7 +1361,7 @@ mod tests {
 		async fn a_device_clock_restart_continues_forward() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(1), SystemTime::now()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 
@@ -1405,7 +1404,7 @@ mod tests {
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let idle = Duration::from_millis(300);
-					let fixture = Fixture::start(Duration::from_secs(1), SystemTime::now()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
 
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
@@ -1441,8 +1440,8 @@ mod tests {
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					// Whole seconds, so the advertised mapping holds it exactly.
-					let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-					let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
+					let now = moq_clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
+					let wall = Wall::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 					let fixture = Fixture::start(Duration::from_secs(1), wall).await;
 					let advertised = fixture.catalog.snapshot().clock;
 					assert_eq!(advertised, fixture.clock.wall());
@@ -1469,7 +1468,7 @@ mod tests {
 		async fn retained_archive_playback_keeps_the_live_timestamps() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(1), SystemTime::now()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
 					let section = fixture
 						.catalog
 						.snapshot()
