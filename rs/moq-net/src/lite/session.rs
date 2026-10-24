@@ -1016,7 +1016,7 @@ mod tests {
 			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
-			session: transport,
+			session: crate::driver::Transport::new(transport),
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
