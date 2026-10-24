@@ -2143,6 +2143,25 @@ test("closing a derived handle releases only what it registered", async () => {
 	expect(owned.closed.peek()).toBeNull();
 });
 
+test("a broadcast a derived handle released cannot announce again", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const path = Path.from("room");
+	const broadcast = publish(scoped, path);
+	const held = await routed(consumer, path);
+
+	scoped.close();
+
+	// The application's clone keeps the broadcast open, but the released handle no longer routes it.
+	expect(broadcast.closed.peek()).toBeUndefined();
+	expect(() => broadcast.announce()).toThrow("broadcast is closed");
+	expect((await announcedView(origin)).peek().has(path)).toBe(false);
+
+	held?.close();
+	origin.close();
+});
+
 test("a scoped dynamic only serves allowed paths and presents relative requests", async () => {
 	const origin = new Producer();
 	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));

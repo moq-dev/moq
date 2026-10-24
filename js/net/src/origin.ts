@@ -1271,19 +1271,20 @@ export class Producer implements Table {
 			previous.close();
 		}
 
-		const release = () => {
-			this.#retractExact(path, front);
-			front.close();
-		};
-		this.#borrowed?.releases.add(release);
-
-		// Drop it when the broadcast closes, unless a recreate already replaced it: a
-		// stale broadcast closing must not unpublish the live one.
-		void front.closed.then(() => {
+		// Drop it, unless a recreate already replaced it: a stale broadcast closing must not
+		// unpublish the live one. Clearing `created` also stops a later announce.
+		const drop = () => {
 			this.#borrowed?.releases.delete(release);
 			this.#retractExact(path, front);
 			if (this.#state.created?.get(path) === front) this.#state.created.delete(path);
-		});
+		};
+		// A consumer clone can keep the broadcast open past `front.close()`, so drop it first.
+		const release = () => {
+			drop();
+			front.close();
+		};
+		this.#borrowed?.releases.add(release);
+		void front.closed.then(drop);
 
 		return producer;
 	}
