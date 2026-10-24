@@ -21,7 +21,7 @@ Decided 2026-10-21 (maintainer):
 - **Fix upstream, not in-tree.** The iroh backend decodes CONNECT inside
   web-transport-iroh with the same crate, so only an upstream release covers
   every backend, and web-transport-proto stays upstream
-  ([Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) records
+  ([Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) records
   why). This is the one exception to taking no work in moq-dev/web-transport.
 - **Lock-only bumps on both lines.** `cargo update -p web-transport-proto` in
   a PR against `main` and a backport PR against `release`, whose
