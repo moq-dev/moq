@@ -1,4 +1,6 @@
+use crate::driver::Transport;
 use crate::origin;
+use crate::transport::poll::Session as _;
 use crate::{
 	Error, Hop, SessionError, bandwidth,
 	coding::{Reader, Stream, Writer},
@@ -11,13 +13,12 @@ use super::{
 	DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver, Version,
 };
 
-pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
+pub(crate) struct SessionStart {
 	pub recv_bandwidth: Option<bandwidth::Weak>,
 	/// The estimate PROBE reports, published by the session's supervisor.
 	pub estimate: kio::Producer<crate::session::Estimate>,
-	/// The session's protocol machine, named so its `Send`-ness stays inferred
-	/// from the transport instead of being fixed by a box.
-	pub driver: Driver<S>,
+	/// The session's protocol machine over the boxed transport.
+	pub driver: Driver,
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
 	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
@@ -33,11 +34,8 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 ///
 /// Pass the result to [`start`] as its `peer_setup` so capability gating resolves
 /// without re-reading SETUP, and every held stream is handed back to the driver.
-pub async fn accept_setup<S: crate::transport::poll::Session>(
-	session: &mut S,
-	version: Version,
-) -> Result<AcceptedSetup<S>, Error> {
-	let mut accept = SetupAccept::<S> {
+pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<AcceptedSetup, Error> {
+	let mut accept = SetupAccept {
 		version,
 		pending: Vec::new(),
 		early: Vec::new(),
@@ -46,15 +44,15 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 	kio::wait(|waiter| accept.poll(session, waiter)).await
 }
 
-struct SetupAccept<S: crate::transport::poll::Session> {
+struct SetupAccept {
 	version: Version,
-	pending: Vec<Reader<S::RecvStream, Version>>,
-	early: Vec<Reader<S::RecvStream, Version>>,
-	setup: Option<Reader<S::RecvStream, Version>>,
+	pending: Vec<Reader<crate::transport::boxed::RecvStream, Version>>,
+	early: Vec<Reader<crate::transport::boxed::RecvStream, Version>>,
+	setup: Option<Reader<crate::transport::boxed::RecvStream, Version>>,
 }
 
-impl<S: crate::transport::poll::Session> SetupAccept<S> {
-	fn poll(&mut self, session: &mut S, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup<S>, Error>> {
+impl SetupAccept {
+	fn poll(&mut self, session: &mut Transport, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup, Error>> {
 		let Self {
 			version,
 			pending,
@@ -135,17 +133,17 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 }
 
 /// The peer's pre-read SETUP and the streams held until it arrived.
-pub struct AcceptedSetup<S: crate::transport::poll::Session> {
+pub struct AcceptedSetup {
 	/// The SETUP decoded before origin binding.
 	pub setup: Setup,
 	/// The SETUP's encoded size, counted once the session's stats are known.
 	pub size: usize,
 	/// Streams with their type still buffered for the session classifier.
-	pub early: Vec<Reader<S::RecvStream, Version>>,
+	pub early: Vec<Reader<crate::transport::boxed::RecvStream, Version>>,
 }
 
 /// Everything one moq-lite session needs to start.
-pub struct Config<S: crate::transport::poll::Session> {
+pub struct Config {
 	/// The runtime that arms the session's timers.
 	pub runtime: crate::time::Deadlines,
 
@@ -159,11 +157,11 @@ pub struct Config<S: crate::transport::poll::Session> {
 
 	/// The transport carrying the session. Cloned into every loop that outlives
 	/// [`start`], so the connection closes when the last of them drops.
-	pub session: S,
+	pub session: Transport,
 
 	/// The stream used to set up the session, after exchanging setup messages.
 	/// NOTE: No longer used in draft-03.
-	pub setup_stream: Option<Stream<S, Version>>,
+	pub setup_stream: Option<Stream<Transport, Version>>,
 
 	/// We will publish any local broadcasts from this origin, when set.
 	pub publish: Option<origin::Consumer>,
@@ -188,7 +186,7 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The peer's SETUP, when it was already read before [`start`] (e.g. a server that
 	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
-	pub peer_setup: Option<AcceptedSetup<S>>,
+	pub peer_setup: Option<AcceptedSetup>,
 
 	/// The session's auth handle, created before [`start`] so a server can take the
 	/// peer's token requests during its handshake. Supports AUTH exactly when `version`
@@ -201,10 +199,7 @@ pub struct Config<S: crate::transport::poll::Session> {
 /// Start a lite session.
 ///
 /// Returns the receive-bandwidth consumer (if any) plus the driver that runs the session.
-pub fn start<S>(config: Config<S>) -> Result<SessionStart<S>, Error>
-where
-	S: crate::transport::poll::Session,
-{
+pub fn start(config: Config) -> Result<SessionStart, Error> {
 	let Config {
 		runtime,
 		stats,
@@ -372,31 +367,28 @@ where
 
 /// The lite session driver: one poll function racing every protocol arm, in
 /// place of a task set of boxed futures.
-pub(crate) struct Driver<S: crate::transport::poll::Session> {
+pub(crate) struct Driver {
 	/// Presenting our tokens, one AUTH stream each.
-	auth: Present<S>,
+	auth: Present,
 	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
-	setup: Option<SendSetup<S>>,
+	setup: Option<SendSetup>,
 	/// Sending our single GOAWAY if the drain trigger fires, or `None` once done.
-	goaway: Option<SendGoaway<S>>,
+	goaway: Option<SendGoaway>,
 	/// The legacy session stream (pre-lite-03). Only its *error* ends the race, so
 	/// the publisher and subscriber keep running while it sits idle.
-	session_stream: Option<Stream<S, Version>>,
+	session_stream: Option<Stream<Transport, Version>>,
 	/// The first terminal outcome, retained while received streams drain.
 	ending: Option<Result<(), Error>>,
-	publisher: Publisher<S>,
-	subscriber: SubscriberDriver<S>,
+	publisher: Publisher,
+	subscriber: SubscriberDriver,
 	/// For the terminal close: the machine's last act reports the outcome to
 	/// the peer through the transport.
-	session: S,
+	session: Transport,
 }
 
-impl<S> Driver<S>
-where
-	S: crate::transport::poll::Session,
-{
+impl Driver {
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if self.ending.is_none() {
 			let res = std::task::ready!(self.poll_protocol(waiter));
@@ -485,7 +477,7 @@ where
 	}
 }
 
-impl<S: crate::transport::poll::Session> Drop for Driver<S> {
+impl Drop for Driver {
 	fn drop(&mut self) {
 		// Dropped without finishing: release anything still waiting on a token.
 		self.auth.handle.close(Error::Cancel);
@@ -493,14 +485,14 @@ impl<S: crate::transport::poll::Session> Drop for Driver<S> {
 }
 
 /// Opens one AUTH stream per token this side presents.
-struct Present<S: crate::transport::poll::Session> {
+struct Present {
 	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
-	session: S,
+	session: Transport,
 	version: Version,
 	handle: crate::auth::Handle,
 	going_away: crate::goaway::GoingAway,
-	tokens: kio::Tasks<PresentToken<S>>,
+	tokens: kio::Tasks<PresentToken>,
 	/// Set by a token whose peer broke the protocol, which ends the session.
 	violation: kio::Shared<Option<Error>>,
 	/// Whether the first poll decided who answers the peer's tokens.
@@ -509,7 +501,7 @@ struct Present<S: crate::transport::poll::Session> {
 	_setup: Option<crate::auth::Auth>,
 }
 
-impl<S: crate::transport::poll::Session> Present<S> {
+impl Present {
 	/// Resolve only when a token's peer broke the protocol.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
 		if !self.started {
@@ -542,25 +534,30 @@ impl<S: crate::transport::poll::Session> Present<S> {
 
 /// One token's AUTH stream: send the token, then track the grant until either
 /// side ends it.
-struct PresentToken<S: crate::transport::poll::Session> {
+struct PresentToken {
 	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
-	session: S,
+	session: Transport,
 	version: Version,
 	handle: crate::auth::Handle,
 	going_away: crate::goaway::GoingAway,
 	violation: kio::Shared<Option<Error>>,
 	id: u64,
-	state: PresentState<S>,
+	state: PresentState,
 }
 
-enum PresentState<S: crate::transport::poll::Session> {
-	Open { token: bytes::Bytes },
-	Run { stream: Stream<S, Version>, answered: bool },
+enum PresentState {
+	Open {
+		token: bytes::Bytes,
+	},
+	Run {
+		stream: Stream<Transport, Version>,
+		answered: bool,
+	},
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
+impl kio::Task for PresentToken {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -592,7 +589,7 @@ impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> PresentToken<S> {
+impl PresentToken {
 	/// Run the stream, resolving with why the token ended.
 	fn poll_present(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
 		let mut cx = Context::from_waker(waiter.waker());
@@ -683,10 +680,7 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 /// Drain SessionInfo updates off the legacy session stream, resolving only when
 /// the stream dies (a FIN counts: the peer abandoned the session).
 // TODO do something useful with the updates
-fn poll_session_stream<S: crate::transport::poll::Session>(
-	stream: &mut Stream<S, Version>,
-	cx: &mut Context<'_>,
-) -> Poll<Error> {
+fn poll_session_stream(stream: &mut Stream<Transport, Version>, cx: &mut Context<'_>) -> Poll<Error> {
 	loop {
 		match ready!(stream.reader.poll_decode_maybe::<SessionInfo>(cx)) {
 			Ok(Some(_info)) => {}
@@ -699,29 +693,29 @@ fn poll_session_stream<S: crate::transport::poll::Session>(
 /// Advertise our capabilities on a uni Setup Stream, then FIN. Best-effort: an
 /// error is logged and the machine finishes; the peer falls back to "no
 /// capabilities" for us.
-struct SendSetup<S: crate::transport::poll::Session> {
+struct SendSetup {
 	stats: crate::stats::Session,
 	version: Version,
-	state: SendSetupState<S>,
+	state: SendSetupState,
 }
 
-enum SendSetupState<S: crate::transport::poll::Session> {
+enum SendSetupState {
 	/// Waiting for stream credit on our own session handle.
 	Open {
-		session: S,
+		session: Transport,
 		setup: Box<Setup>,
 	},
 	/// Flushing the buffered SETUP, then FIN and wait for the acknowledgement (a
 	/// reset racing the FIN would discard the unacked message).
 	Send {
-		writer: Writer<S::SendStream, Version>,
+		writer: Writer<crate::transport::boxed::SendStream, Version>,
 		finished: bool,
 	},
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> SendSetup<S> {
-	fn new(session: S, setup: Setup, version: Version, stats: crate::stats::Session) -> Self {
+impl SendSetup {
+	fn new(session: Transport, setup: Setup, version: Version, stats: crate::stats::Session) -> Self {
 		Self {
 			stats,
 			version,
@@ -771,30 +765,35 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 
 /// Send our single GOAWAY when the drain trigger fires. The session supervisor
 /// enforces the deadline independently, including on versions with no GOAWAY message.
-struct SendGoaway<S: crate::transport::poll::Session> {
+struct SendGoaway {
 	stats: crate::stats::Session,
 	version: Version,
 	goaway: crate::goaway::Protocol,
 	/// Opening a stream and watching the session close each need their own handle.
-	closed: S,
-	session: S,
-	state: SendGoawayState<S>,
+	closed: Transport,
+	session: Transport,
+	state: SendGoawayState,
 }
 
-enum SendGoawayState<S: crate::transport::poll::Session> {
+enum SendGoawayState {
 	Waiting,
 	Open {
 		payload: crate::goaway::Goaway,
 	},
 	/// Keep the writer through FIN acknowledgement, since dropping it resets the stream.
 	Send {
-		stream: Stream<S, Version>,
+		stream: Stream<Transport, Version>,
 		finished: bool,
 	},
 }
 
-impl<S: crate::transport::poll::Session> SendGoaway<S> {
-	fn new(session: S, goaway: crate::goaway::Protocol, version: Version, stats: crate::stats::Session) -> Self {
+impl SendGoaway {
+	fn new(
+		session: Transport,
+		goaway: crate::goaway::Protocol,
+		version: Version,
+		stats: crate::stats::Session,
+	) -> Self {
 		Self {
 			stats,
 			version,
@@ -938,7 +937,7 @@ mod tests {
 			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
-			session: transport,
+			session: crate::driver::Transport::new(transport.clone()),
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
@@ -971,7 +970,7 @@ mod tests {
 				stats: Default::default(),
 				client: false,
 				limits: Default::default(),
-				session: transport,
+				session: crate::driver::Transport::new(transport.clone()),
 				setup_stream: None,
 				publish: None,
 				subscribe: None,
@@ -1058,7 +1057,7 @@ mod tests {
 			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
-			session: transport,
+			session: crate::driver::Transport::new(transport.clone()),
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
@@ -1090,19 +1089,21 @@ mod tests {
 		Setup::default()
 			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
 			.unwrap();
-		let mut session =
+		let session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
-		let accepted = accept_setup(&mut session, version).await.unwrap();
+		let accepted = accept_setup(&mut crate::driver::Transport::new(session.clone()), version)
+			.await
+			.unwrap();
 		assert_eq!(accepted.early.len(), 1);
 	}
 
 	#[moq_clock::test]
 	async fn accept_setup_refuses_two_incomplete_setup_streams() {
 		use futures::FutureExt;
-		let mut session =
+		let session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1], vec![1]]);
 		assert!(matches!(
-			accept_setup(&mut session, Version::Lite05).now_or_never(),
+			accept_setup(&mut crate::driver::Transport::new(session.clone()), Version::Lite05).now_or_never(),
 			Some(Err(Error::ProtocolViolation))
 		));
 	}
@@ -1126,7 +1127,7 @@ mod tests {
 				let mut started = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
-					session,
+					session: crate::driver::Transport::new(session.clone()),
 					setup_stream: None,
 					publish: None,
 					subscribe: None,
@@ -1181,7 +1182,7 @@ mod tests {
 				let mut started = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
-					session,
+					session: crate::driver::Transport::new(session.clone()),
 					setup_stream: None,
 					publish: None,
 					subscribe: None,
@@ -1209,13 +1210,13 @@ mod tests {
 		transport: ScriptedSession,
 		version: Version,
 		client: bool,
-		peer_setup: Option<AcceptedSetup<ScriptedSession>>,
-	) -> SessionStart<ScriptedSession> {
+		peer_setup: Option<AcceptedSetup>,
+	) -> SessionStart {
 		start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			client,
-			session: transport,
+			session: crate::driver::Transport::new(transport.clone()),
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
@@ -1252,8 +1253,10 @@ mod tests {
 	#[moq_clock::test]
 	async fn unknown_client_role_remains_bidirectional() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let mut transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
-			let setup = accept_setup(&mut transport, version).await.unwrap();
+			let transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
+			let setup = accept_setup(&mut crate::driver::Transport::new(transport.clone()), version)
+				.await
+				.unwrap();
 			assert_eq!(setup.setup.role, None);
 			let log = transport.log.clone();
 			let mut started = raw_session(transport, version, false, Some(setup));

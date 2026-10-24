@@ -174,8 +174,8 @@ first cores, so two relays on one host, or one limited to fewer CPUs than the
 host has, would crowd onto them. Turn it on for a host the relay has to itself.
 
 `io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
-shares the same reloadable TLS identity, serves every configured version
-like the shared runtime, and refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
+shares the same reloadable TLS identity and serves every configured version
+like the shared runtime. A setting the build or host cannot deliver refuses to
 start rather than being ignored. If io\_uring workers fail to start naming
 `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 

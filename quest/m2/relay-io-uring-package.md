@@ -42,7 +42,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [io_uring MTU matches tokio](/quest/m1/uring-mtu.md) - `quic.mtu_discovery` honored and smaller paths reachable
 - [io_uring handle lifecycle](/quest/m2/uring-lifecycle.md) - handles fail with their worker and close on last drop
 - [Ring drain GOAWAY](/quest/m2/uring-ring-drain.md) - closes are delivered on the ring for moq-transport too
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - a one-port config is served on the ring too
