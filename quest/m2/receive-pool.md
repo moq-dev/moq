@@ -26,7 +26,7 @@ iteration:
   atomics; the tokio runtime gets one budget. The cache `Pool` splits the same way,
   so each worker's cache and receive credit draw on one number. This reverses the
   relay's single process-wide cache pool, which this quest must migrate (config,
-  `MIGRATE.md`, `doc/bin/relay/`).
+  a migration note, `doc/bin/relay/`).
 - **Under pressure, stop granting.** Credit already advertised is never revoked.
   New `MAX_DATA` comes from the budget by fair share, so a peer over its share
   stalls rather than evicting anyone else. Eviction stays within one connection, as
@@ -55,7 +55,7 @@ harness. Report peak resident bytes against the budget, evictions, and throughpu
 
 ## Related
 
-- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - drops the frame cap that
+- [Unbounded groups](/quest/m1/unbounded-groups/README.md) - drops the frame cap that
   sets half of `MIN_RECEIVE_WINDOW`
 - [Perf](/quest/m2/perf/README.md) - the per-worker hot paths this budget must not add
   contention to

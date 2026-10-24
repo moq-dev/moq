@@ -56,7 +56,7 @@ and the bindings promote it as a top-level convenience.
   `rs/moq-mux/src/source.rs` (with `moq_mux::follow` on `announced_broadcast`), `rs/moq-hls/src/server/mod.rs` (wall-clock
   `RESOLVE_TIMEOUT`) and `rs/moq-stats/src/aggregate.rs`, the
   `rs/moq-relay/src/web.rs` fetch deadline, the `rs/moq-e2ee/MIGRATE.md`
-  advice to read the epoch via `routed()`, and
+  advice to read the epoch via `routed()` (supersede it in the Impact bullet), and
   `demo/carla/sim/moq_carla_sim/publish.py`, which reads the epoch from an
   announce and then requests unpinned.
 

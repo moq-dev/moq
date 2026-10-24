@@ -756,26 +756,31 @@ impl Drop for Withdrawing {
 	}
 }
 
-/// Caps on what one peer can make a session hold at once.
+/// Bounds on what one peer can make a session hold, where its transport does not already.
 ///
-/// A peer that goes past a cap loses the session, closed with `TOO_MANY_REQUESTS`. The
-/// stats sessions rows report announcement and subscription peaks.
+/// Each moq-lite request, and each moq-transport request from draft 17 on, holds a stream
+/// of its own, so the transport's stream credit bounds those. A peer that announces past
+/// `announces`, or overruns the drafts 14 to 16 request window, loses the session, closed with
+/// `TOO_MANY_REQUESTS`. The stats sessions rows report announcement and subscription peaks.
 ///
-/// On moq-transport drafts 14 to 16 the caps also size the request window, which counts
-/// every request (FETCH, TRACK_STATUS and SUBSCRIBE_UPDATE included), so very low caps
-/// can starve it. Later drafts have no window but still refuse a reused request ID, so a
-/// peer may leave at most twice the sum of these caps runs of skipped IDs; one more closes
-/// the session with `INTERNAL_ERROR` rather than forgetting any.
+/// ```
+/// let mut limits = moq_net::session::Limits::default();
+/// limits.announces = 1_000;
+/// let client = moq_net::Client::new().with_limits(limits);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
 	/// Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us.
 	pub announces: usize,
-	/// Subscriptions the peer may hold on our broadcasts. On moq-lite 05 and later an open
-	/// TRACK stream holds one too, sharing it with a SUBSCRIBE for the same track.
-	pub subscriptions: usize,
-	/// FETCH requests the peer may hold before group coalescing, defaulting to 10,000.
-	pub fetches: usize,
+	/// Other moq-transport requests the peer may hold at once, such as SUBSCRIBE and FETCH.
+	///
+	/// On drafts 14 to 16 this and `announces` size the request window, which every request
+	/// counts against. Later drafts bound the PUBLISHes a peer's track listings hold with it,
+	/// skipping the rest, and still refuse a reused request ID, so a peer may leave at most
+	/// twice the sum of both runs of skipped IDs; one more closes the session with
+	/// `INTERNAL_ERROR` rather than forgetting any. moq-lite ignores it.
+	pub requests: usize,
 }
 
 impl Default for Limits {
@@ -783,8 +788,7 @@ impl Default for Limits {
 	fn default() -> Self {
 		Self {
 			announces: 100_000,
-			subscriptions: 10_000,
-			fetches: 10_000,
+			requests: 20_000,
 		}
 	}
 }
@@ -792,14 +796,10 @@ impl Default for Limits {
 impl Limits {
 	/// How many requests a moq-transport peer may hold open at once (drafts 14 to 16).
 	///
-	/// Twice what the caps admit, so a peer within them is never blocked by request IDs
+	/// Twice what the limits admit, so a peer within them is never blocked by request IDs
 	/// still waiting to be granted back.
-	pub(crate) fn requests(&self) -> u64 {
-		let caps = self
-			.announces
-			.saturating_add(self.subscriptions)
-			.saturating_add(self.fetches) as u64;
-		caps.saturating_mul(2)
+	pub(crate) fn window(&self) -> u64 {
+		(self.announces.saturating_add(self.requests) as u64).saturating_mul(2)
 	}
 }
 
@@ -847,10 +847,21 @@ impl Slots {
 			})
 			.map_err(|_| Error::TooManyRequests)?
 			+ 1;
+		Ok(self.held(held))
+	}
+
+	/// Count one entry the transport already bounds until the returned guard drops, past the
+	/// cap too, so entries taken with [`Self::acquire`] see it.
+	pub(crate) fn hold(&self) -> Slot {
+		let held = self.live.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+		self.held(held)
+	}
+
+	fn held(&self, held: usize) -> Slot {
 		if let Some((stats, cap)) = &self.stats {
 			stats.hold(*cap, held as u64);
 		}
-		Ok(Slot(self.live.clone()))
+		Slot(self.live.clone())
 	}
 }
 

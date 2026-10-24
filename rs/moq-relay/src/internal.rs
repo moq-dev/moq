@@ -626,7 +626,7 @@ fn render_drain(out: &mut String, tally: crate::shutdown::Tally) {
 /// zero so a rate over it is defined from the first scrape. A refused session
 /// never reaches the traffic counters above.
 fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
-	use crate::refusals::Refusal;
+	use crate::refusals::RefusalKind;
 	use std::fmt::Write as _;
 
 	let _ = writeln!(
@@ -635,7 +635,7 @@ fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
 	);
 	let _ = writeln!(out, "# TYPE moq_relay_sessions_refused_total counter");
 	let counts = refusals.snapshot();
-	for &refusal in Refusal::ALL {
+	for &refusal in RefusalKind::ALL {
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_refused_total{{reason=\"{}\"}} {}",
@@ -1178,10 +1178,10 @@ mod tests {
 	/// defined before the first refusal.
 	#[test]
 	fn refusal_metrics_list_every_reason_from_zero() {
-		use crate::refusals::{Refusal, Refusals};
+		use crate::refusals::{RefusalKind, Refusals};
 
 		let refusals = Refusals::default();
-		refusals.record(Refusal::Unavailable);
+		refusals.record(RefusalKind::Unavailable);
 		let mut body = String::new();
 		render_refusals(&mut body, &refusals);
 
@@ -1189,8 +1189,8 @@ mod tests {
 			body.contains("# TYPE moq_relay_sessions_refused_total counter"),
 			"type header:\n{body}"
 		);
-		for &refusal in Refusal::ALL {
-			let expected = u64::from(refusal == Refusal::Unavailable);
+		for &refusal in RefusalKind::ALL {
+			let expected = u64::from(refusal == RefusalKind::Unavailable);
 			let row = format!(
 				"moq_relay_sessions_refused_total{{reason=\"{}\"}} {expected}",
 				refusal.as_str()
