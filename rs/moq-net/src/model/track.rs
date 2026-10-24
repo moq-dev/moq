@@ -3008,9 +3008,7 @@ impl Producer {
 
 	/// Let this received copy's readers resolve relative and time anchors, for a wire that
 	/// reports the live edge and media time and asks for every group the budget allows.
-	/// Private with [`Self::report_largest`], which a custom subscriber needs first.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: capability gap
 	pub(crate) fn anchored(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.anchored = true;

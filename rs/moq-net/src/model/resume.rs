@@ -1311,9 +1311,14 @@ impl Reader {
 					}
 					Poll::Ready(Ok(sub)) => sub,
 				};
-				// The reader's own ranges, which no copy of this route serves either.
+				// Each copy's wire decides what it resolves: a copy it replaced refusing the
+				// reader's ranges leaves the rest to the copy now serving.
 				if let Some(err) = sub.refused() {
-					return Some(Poll::Ready(Err(err)));
+					if !copy.replaced {
+						return Some(Poll::Ready(Err(err)));
+					}
+					copy.done = Some(Err(err));
+					break;
 				}
 				if ordered {
 					sub.skip_ordered(floor);
@@ -3970,6 +3975,54 @@ mod test {
 			matches!(start, track::Anchor::Absolute(position) if position.group >= 10),
 			"the replacement asks from where b resolved the time: {start:?}"
 		);
+	}
+
+	/// Each copy's wire decides which anchors it resolves: a replaced copy that refuses the
+	/// reader's ranges leaves them to the copy serving now, whose own refusal fails the read.
+	#[test]
+	#[cfg(feature = "async")]
+	fn only_the_serving_copy_refuses_an_anchor() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		a.received();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(30));
+		let mut zero = a.create_group(group::Info { sequence: 0 }).unwrap();
+		zero.write_frame(ts(0), b"x".as_ref()).unwrap();
+		assert_eq!(recv(&mut sub).sequence, 0);
+
+		let b = copy();
+		b.received();
+		b.anchored();
+		routes.serve(b.consume());
+		let ranges = [track::Range {
+			start: track::Anchor::Relative(1),
+			end: None,
+		}];
+		sub.update(sub.subscription().with_ranges(ranges)).unwrap();
+		assert!(sub.recv_group().now_or_never().is_none());
+		for sequence in 1..4 {
+			let mut group = b.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(ts(sequence * 1000), b"x".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+		// Asked before b held any group, the relative start resolves at its first.
+		let group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(group.sequence, 1);
+
+		// Served by a copy that can't resolve it, the same range fails.
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		a.received();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(30));
+		sub.update(sub.subscription().with_ranges(ranges)).unwrap();
+		assert!(matches!(
+			sub.recv_group().now_or_never(),
+			Some(Err(Error::Unsupported))
+		));
 	}
 
 	/// Capping a replaced copy never replaces a time end it has not settled: the copy keeps
