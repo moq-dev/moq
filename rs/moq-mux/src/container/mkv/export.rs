@@ -13,6 +13,7 @@ use crate::catalog::Stream;
 use crate::container::ExportSource;
 use crate::container::Frame;
 use crate::container::consumer::Event;
+use crate::container::decode::{DecodeClock, Settle};
 use crate::container::mkv::Error;
 
 /// Matroska TimestampScale: 1 ms (in nanoseconds).
@@ -72,7 +73,7 @@ pub struct Export<S: Stream> {
 }
 
 struct MkvTrack {
-	clock: crate::container::decode::DecodeClock<crate::jitter::Arrival<Frame>>,
+	clock: DecodeClock<crate::jitter::Arrival<Frame>>,
 	config: Option<VideoConfig>,
 	restart: u64,
 	reorder: Option<(u64, u64)>,
@@ -176,7 +177,14 @@ impl MkvTrack {
 				.min(limit);
 			(floor.min(limit), lookahead)
 		});
-		while let Some((mut arrival, dts)) = self.clock.pop(lookahead, floor, flush) {
+		loop {
+			let settle = match flush {
+				true => Settle::All,
+				false => self.clock.settle(lookahead, self.latest, jitter.delay()),
+			};
+			let Some((mut arrival, dts)) = self.clock.pop(lookahead, floor, settle) else {
+				break;
+			};
 			if !self.finished && !flush {
 				arrival.arrived = arrival.arrived.max(self.latest);
 			}
@@ -404,7 +412,7 @@ impl<S: Stream> Export<S> {
 	/// How many frames the export holds between its sources and the output.
 	#[cfg(test)]
 	pub(super) fn buffered(&self) -> usize {
-		self.jitter.len()
+		self.jitter.len() + self.tracks.values().map(|track| track.clock.len()).sum::<usize>()
 	}
 
 	#[cfg(test)]
@@ -482,7 +490,8 @@ impl<S: Stream> Export<S> {
 						track.restart = arrival.restart;
 					}
 					let pts = (arrival.item.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64;
-					track.clock.push(arrival, pts);
+					let arrived = arrival.arrived;
+					track.clock.push(arrival, pts, arrived);
 					track.release(name, &mut self.jitter, false)?;
 				} else {
 					self.jitter.push(name.clone(), arrival)?;

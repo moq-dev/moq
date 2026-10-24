@@ -530,7 +530,8 @@ impl Consumer {
 	///
 	/// Once a timeline fails (the reference's, or this rendition's own), the cursor drains the
 	/// segments it still covers, then fails every call with
-	/// [`TimelineFailed`](crate::Error::TimelineFailed), as [`Rendition::playlist`] does.
+	/// [`TimelineFailed`](crate::Error::TimelineFailed), as [`Rendition::playlist`] does. A
+	/// denied referenced broadcast fails every call with its authorization error.
 	///
 	/// Waits for the next segment to resolve on this rendition, then FETCHes and transmuxes its
 	/// frames. A gap for this rendition is skipped. Missing window rows or unavailable media
@@ -543,7 +544,13 @@ impl Consumer {
 			let Some(row) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
 				return Ok(None);
 			};
-			kio::wait(|waiter| self.rendition.poll_resolved(waiter, &row)).await;
+			kio::wait(|waiter| {
+				// The refusal settles the binding, not this rendition's timeline, so watch both.
+				self.rendition.poll_media(waiter);
+				self.rendition.authorize()?;
+				self.rendition.poll_resolved(waiter, &row).map(Ok::<_, crate::Error>)
+			})
+			.await?;
 			// This rendition's timeline failed before covering the row, so no later row resolves.
 			if let Some(err) = self.rendition.own_failure()
 				&& self.rendition.is_failed(&row)
@@ -572,6 +579,11 @@ impl Consumer {
 
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Row>>> {
 		self.poll_feed(waiter);
+		// A refused binding never held media, so there is nothing to drain. `poll_feed` registered
+		// the wake for a refusal that arrives while the window waits for rows.
+		if let Err(err) = self.rendition.authorize() {
+			return Poll::Ready(Err(err));
+		}
 		let found = match ready!(self.state.poll(waiter, |state| -> Poll<Result<Option<Row>>> {
 			match state.next_at(self.position)? {
 				Next::Ready(row) => Poll::Ready(Ok(Some(row))),

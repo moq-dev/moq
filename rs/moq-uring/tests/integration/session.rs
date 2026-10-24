@@ -94,7 +94,7 @@ fn lite_session_over_the_worker() {
 		let (session, driver) = moq_net::Server::new()
 			.with_publisher(&pub_origin)
 			.accept(
-				moq_net::time::now(),
+				moq_net::time::Instant::now(),
 				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 					quic::web::Session::raw(conn),
 					moq_net::transport::Binding::InBand,
@@ -120,7 +120,7 @@ fn lite_session_over_the_worker() {
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
 				.connect(
-					moq_net::time::now(),
+					moq_net::time::Instant::now(),
 					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						quic::web::Session::raw(conn),
 						moq_net::transport::Binding::InBand,
@@ -232,7 +232,7 @@ fn two_lite_sessions_share_the_server_socket() {
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
 					.accept(
-						moq_net::time::now(),
+						moq_net::time::Instant::now(),
 						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
 							moq_net::transport::Binding::InBand,
@@ -261,7 +261,7 @@ fn two_lite_sessions_share_the_server_socket() {
 				let (session, driver) = moq_net::Client::new()
 					.with_subscriber(sub.clone())
 					.connect(
-						moq_net::time::now(),
+						moq_net::time::Instant::now(),
 						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
 							moq_net::transport::Binding::InBand,
