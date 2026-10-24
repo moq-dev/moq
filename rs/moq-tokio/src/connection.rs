@@ -702,7 +702,7 @@ impl Monitor {
 	}
 
 	/// Poll for a lifecycle revision different from the caller's last snapshot.
-	pub fn poll_state(&self, waiter: &kio::Waiter, after: u64) -> Poll<crate::Result<Observation>> {
+	fn poll_state(&self, waiter: &kio::Waiter, after: u64) -> Poll<crate::Result<Observation>> {
 		match self.state.poll(waiter, |state| {
 			if state.revision != after {
 				Poll::Ready(Ok(state.observation()))
