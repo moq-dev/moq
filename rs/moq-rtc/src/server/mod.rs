@@ -33,8 +33,6 @@ pub struct Response {
 	pub resource_id: String,
 	/// The SDP answer body (`Content-Type: application/sdp`).
 	pub answer: String,
-	/// This peer's cumulative UDP payload bytes, retained after the session ends.
-	pub wire: crate::wire::Source,
 	session: AcceptedSession,
 }
 

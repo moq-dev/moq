@@ -129,10 +129,6 @@ impl Session {
 		})
 	}
 
-	pub(crate) fn wire(&self) -> crate::wire::Source {
-		crate::wire::Source::new(self.agent.wire().clone())
-	}
-
 	/// Open a locally offered media line after its answer has been applied.
 	pub(crate) fn open_media(&mut self, mid: str0m::media::Mid) -> Result<()> {
 		self.handle_media(mid)
@@ -548,11 +544,7 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
 pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<moq_ice::Socket> {
 	let udp = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await?);
 	let locals = advertised_candidates(advertise, udp.local_addr()?)?;
-	Ok(moq_ice::Socket {
-		inbound: moq_ice::reader(udp.clone()),
-		udp,
-		locals,
-	})
+	Ok(moq_ice::Socket::new(udp.clone(), locals, moq_ice::reader(udp))?)
 }
 
 /// Pair configured ICE candidates with the bound UDP port and validate them.
