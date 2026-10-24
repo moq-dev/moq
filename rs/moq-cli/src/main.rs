@@ -442,9 +442,7 @@ async fn spawn_moq(
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Attached> {
-	let cluster = cluster
-		.with_client_tls(moq.client.tls.build()?)
-		.with_connect(moq.client.clone(), moq.quic.clone());
+	let cluster = cluster.with_connect(moq.client.clone(), moq.quic.clone());
 	#[cfg(feature = "iroh")]
 	let cluster = match net.iroh.clone() {
 		Some(iroh) => cluster.with_iroh(iroh),
@@ -1420,38 +1418,28 @@ mod tests {
 		tasks.abort_all();
 	}
 
-	/// An HTTP `--cluster-connect-api` is a MoQ side, so start-up must attach
+	/// An HTTP `--cluster-api-url` is a MoQ side, so start-up must attach
 	/// client TLS the way the relay does rather than refuse after validate.
 	#[tokio::test]
-	async fn cluster_connect_api_http_attaches_client_tls() {
+	async fn cluster_api_url_http_attaches_client_tls() {
 		let _ = moq_tokio::crypto::install_default();
-		let invocation = Invocation::try_parse_from([
-			"moq",
-			"--cluster-connect-api",
-			"https://api.example/peers",
-			"import",
-			"ts",
-		])
-		.expect("parse");
+		let invocation =
+			Invocation::try_parse_from(["moq", "--cluster-api-url", "https://api.example/peers", "import", "ts"])
+				.expect("parse");
 		assert!(invocation.moq.validate().is_ok());
-		let cluster = invocation
-			.moq
-			.cluster()
-			.expect("cluster")
-			.with_connect(invocation.moq.client.clone(), invocation.moq.quic.clone());
+		let cluster = invocation.moq.cluster().expect("cluster");
 		let err = cluster
 			.clone()
 			.start()
 			.await
-			.expect_err("http API without TLS")
+			.expect_err("HTTP API needs a dial template")
 			.to_string();
-		assert!(err.contains("client TLS"), "{err}");
-
+		assert!(err.contains("Cluster::with_connect"), "{err}");
 		cluster
-			.with_client_tls(invocation.moq.client.tls.build().expect("tls"))
+			.with_connect(invocation.moq.client.clone(), invocation.moq.quic.clone())
 			.start()
 			.await
-			.expect("http API with TLS");
+			.expect("HTTP API uses the dial template's TLS");
 	}
 
 	/// Without `--connect`, only the cluster binds `--connect-bind`, so a fixed

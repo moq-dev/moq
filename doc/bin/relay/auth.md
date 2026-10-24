@@ -166,7 +166,7 @@ cannot verify a presented token; both refuse it as unsupported. A moq-transport
 same way on any draft, but its grant authorizes only that request and ends with
 it; it never joins the union. A `PUBLISH_NAMESPACE` grant must cover the whole
 namespace: `room/**`, not just `room`. A session verifies at most
-`verifications` tokens at once (`--auth-verifications`, default 128), counting
+128 tokens at once, counting
 checks still running past the admission timeout. Later tokens wait their turn
 rather than being refused. Each HTTP request is admitted on its own, so an
 HTTP/2 connection carries at most as many requests at once, and the client
@@ -267,14 +267,14 @@ verifies client certificates, so a relay without `listen.bind` refuses
 `listen.tls.root` too.
 
 Cluster peers are admitted the same way, so a mesh runs
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` (or a
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` (or a
 server granting its cluster CA everything with `peer: true`); see
-[Clustering](/bin/relay/cluster). `--mtls-peer` marks every certificate as
+[Clustering](/bin/relay/cluster). `--mtls-link peer` marks every certificate as
 another relay; leave it off when certificates identify clients. Without
 `peer`, a certificate is a client's: it routes like one and sees
 [hidden](/concept/moq-lite#hidden-broadcasts) routes only by asking.
-`--mtls-upstream`, which needs `--mtls-peer`, also marks them
-[upstream](/bin/relay/cluster#upstream-links). Changing either flag ends each
+`--mtls-link upstream` also marks them
+[upstream](/bin/relay/cluster#upstream-links). Changing the link role ends each
 live mTLS session at its next re-check (the `--revalidate` cadence or a
 `moq auth revalidate` push), so the mesh redials once.
 
@@ -300,7 +300,7 @@ map future transport names to `unknown`, which your policy should handle explici
 moq auth serve --listen 127.0.0.1:4440 \
   --key-dir /etc/moq/keys \
   --public-subscribe 'anon/**' --public-publish 'anon/**' \
-  --mtls-publish '**' --mtls-subscribe '**' --mtls-peer \
+  --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer \
   --tier edge --expires 1d --revalidate 1m --limit-remote 64
 ```
 
@@ -350,7 +350,7 @@ patterns: `--auth-public 'PREFIX/**'`.
 | `--auth-public-publish` / `--auth-public-subscribe` | `--public-publish` / `--public-subscribe`, as patterns |
 | `--auth-public-api URL` | your own server answering the contract |
 | `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
-| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-peer` |
+| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` |
 | `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
 | `--auth-domain` | your server reads `server_name` and decides |
 
@@ -375,8 +375,7 @@ session at the grant's `expires`, and a connection whose admission is still
 unanswered at its `listen.timeout` handshake deadline is closed; a token
 presented in band is refused after ten seconds. `Admission::attached()` marks a token presented
 [in band](#in-band-renewal) for a session already admitted under the same id,
-so count sessions only on the others. Gateway accept loops can call `Cluster::admit` for the same
-scoped session as a native connection. See
+so count sessions only on the others. See
 [docs.rs/moq-relay](https://docs.rs/moq-relay) and
 [moq-auth](/lib/rs/moq-auth).
 
