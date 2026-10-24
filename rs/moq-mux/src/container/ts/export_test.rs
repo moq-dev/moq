@@ -4285,7 +4285,9 @@ async fn an_sdt_revision_dropping_the_service_retires_it() {
 	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
 	capture.select(1);
 	let mut revise = |version: u8, services: &[(u16, &[u8])]| {
-		capture.section(0x0011, sdt_actual(version, 0, 0, services)).unwrap();
+		capture
+			.section(0x0011, sdt_actual(version, 0, 0, services).into())
+			.unwrap();
 		capture.flush(Timestamp::ZERO, true).unwrap();
 		catalog
 			.snapshot()
@@ -4328,7 +4330,7 @@ async fn a_corrupt_sdt_keeps_the_last_good_snapshot() {
 	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
 	capture.select(1);
 	let mut feed = |section: Vec<u8>| {
-		capture.section(0x0011, section).unwrap();
+		capture.section(0x0011, section.into()).unwrap();
 		capture.flush(Timestamp::ZERO, true).unwrap();
 		catalog
 			.snapshot()
@@ -4369,7 +4371,7 @@ async fn a_partial_sdt_revision_keeps_the_last_good_snapshot() {
 	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
 	capture.select(1);
 	let mut feed = |section: Vec<u8>| {
-		capture.section(0x0011, section).unwrap();
+		capture.section(0x0011, section.into()).unwrap();
 		capture.flush(Timestamp::ZERO, true).unwrap();
 		catalog
 			.snapshot()
@@ -4419,7 +4421,7 @@ async fn a_selection_filters_eit_schedule() {
 		make_long_section(0x50, service, 0, 0, 0, &body)
 	};
 	for service in [1, 2] {
-		capture.section(0x0012, schedule(service)).unwrap();
+		capture.section(0x0012, schedule(service).into()).unwrap();
 	}
 	capture.finish(Timestamp::ZERO).unwrap();
 
@@ -8308,8 +8310,7 @@ async fn the_same_instance_continues_after_a_drop() {
 /// A returning route serves the same publisher's catalog and monotonically numbered groups.
 #[tokio::test(start_paused = true)]
 async fn a_return_keeps_catalog_and_group_history() {
-	let wall =
-		std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 86_400_000);
+	let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 86_400_000);
 	crate::clock::fake_host_wall(wall);
 	let start = tokio::time::Instant::now();
 	let origin = crate::source::produce_origin();

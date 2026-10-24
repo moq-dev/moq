@@ -175,6 +175,11 @@ trait ErasedSession: MaybeSend + MaybeSync {
 		cx: &mut Context<'_>,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>>;
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: SendOptions<'_, Group>,
+	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>>;
 	fn send_group(&mut self, priority: i64) -> Option<Group>;
 	fn send_datagram(&mut self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error>;
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>>;
@@ -267,6 +272,15 @@ impl<S: poll::Boxable> ErasedSession for S {
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		poll::Session::poll_open_bi(self, cx, unbox(options)).map(|res| res.map(bi::<S>).map_err(Error::new))
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: SendOptions<'_, Group>,
+	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
+		poll::Session::poll_open_request(self, cx, unbox(options))
+			.map(|res| res.map(|streams| streams.map(bi::<S>)).map_err(Error::new))
 	}
 
 	fn send_group(&mut self, priority: i64) -> Option<Group> {
@@ -425,6 +439,14 @@ impl poll::Session for Session {
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		self.0.poll_open_bi(cx, options)
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: SendOptions<'_, Group>,
+	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
+		self.0.poll_open_request(cx, options)
 	}
 
 	fn send_group(&mut self, priority: i64) -> Option<Group> {

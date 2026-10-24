@@ -54,7 +54,7 @@ struct Running {
 
 async fn start(config: Config) -> Running {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let stats = relay.stats().registry().clone();
 	let origin = relay.cluster().origin.consume();
 	let quic = relay.quic_addr().expect("quic listener bound");
@@ -383,7 +383,7 @@ async fn expired_verified_tokens_count_under_the_token_root_and_auth_tier() {
 	let mut claims = moq_auth::Claims::default()
 		.with_root("verified/tenant")
 		.with_subscribe([moq_auth::Pattern::all()]);
-	claims.expires = Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+	claims.expires = Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
 	let token = key.sign(&claims).unwrap();
 	for tier in [None, Some("edge")] {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

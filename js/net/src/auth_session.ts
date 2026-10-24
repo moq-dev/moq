@@ -1,15 +1,6 @@
 import { Instant, Nano, now, wall } from "@moq/clock";
-import { type Dispose, type Getter, Once, Signal } from "@moq/signals";
-import {
-	type Auth,
-	type Grant,
-	grantsEqual,
-	type Handle,
-	type Issued,
-	type Request,
-	type Requests,
-	Unsupported,
-} from "./auth.ts";
+import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
+import { type Auth, type Grant, type Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Reader, Stream, Writer } from "./stream.ts";
@@ -34,6 +25,12 @@ export async function decodePatterns(r: Reader): Promise<Path.Patterns> {
 	}
 	// Reduce once, so a peer's count never turns into quadratic work.
 	return new Path.Patterns(patterns);
+}
+
+/** Whether two grants allow the same paths and lapse together. */
+function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
+	if (a === undefined || b === undefined) return a === b;
+	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && a.expires === b.expires;
 }
 
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
@@ -650,6 +647,9 @@ export async function enforceGrant({
 		() => "closed" as const,
 	);
 	if ((await Promise.race([setupAnswered.then(() => "ready" as const), closed])) === "closed") return;
+	// Ends an authorization wait with the session, without adding a reaction on `closed` per wait.
+	const ended = new AbortController();
+	void closed.then(() => ended.abort());
 
 	// Every broadcast admitted so far that is still published.
 	const live = new Set<Path.Valid>();
@@ -677,7 +677,13 @@ export async function enforceGrant({
 			for (const path of table.keys()) {
 				if (live.has(path)) continue;
 				if (!current.publish.matches(path)) {
-					await auth?.ready(path, "publish");
+					try {
+						await auth?.ready(path, "publish", { signal: ended.signal });
+					} catch (err) {
+						dispose();
+						if (ended.signal.aborted) return;
+						throw err;
+					}
 					// A broadcast withdrawn during the wait is no longer ours to judge.
 					if (!advertised.peek()?.has(path)) continue;
 					if (grant.peek()?.publish.matches(path)) {
@@ -696,7 +702,8 @@ export async function enforceGrant({
 			}
 		}
 
-		const why = await Promise.race([woke, closed]);
+		// `race` drops its reaction on `closed` with the rest, which lives for the session.
+		const why = await race([woke, closed]);
 		dispose();
 		if (why === "closed") return;
 	}

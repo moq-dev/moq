@@ -447,14 +447,12 @@ async fn connect(opts: Options) -> Pair {
 		session
 	};
 	let server_fut = async {
-		let handshake = server
+		let mut handshake = server
 			.accept_request(now(), server_transport)
 			.await
 			.expect("server handshake");
 		// Taken before the session starts, the way a relay verifying tokens would.
-		let requests = opts
-			.server_requests
-			.then(|| handshake.auth().requests().expect("requests available before ok()"));
+		let requests = opts.server_requests.then(|| handshake.requests());
 		let (session, mut driver) = handshake.ok().await.expect("server accept");
 		let driver = moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)

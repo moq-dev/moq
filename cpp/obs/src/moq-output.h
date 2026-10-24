@@ -196,8 +196,8 @@ private:
 	// read empty while disconnected and resume on the next connection.
 	std::shared_ptr<moq::Bandwidth> bandwidth;
 
-	// Retired sessions still draining their finished tracks, which the destructor
-	// waits out. Guarded by signal_mutex.
+	// `closed()` of retired sessions still draining, which the destructor waits
+	// out. Guarded by signal_mutex.
 	std::vector<moq::Future<void>> draining;
 
 	std::string path;
