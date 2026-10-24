@@ -36,10 +36,10 @@ Regenerate the bindings for the changed `resolve` checksum.
 
 ### A client asks only about what it watches (#6165)
 
-A client session asks its relay for announcements only under paths something watches, through `announced()` or `announced_broadcast()`, instead of under its whole scope at connect.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announced_broadcast()`, instead of under its whole scope at connect.
 `MoqOriginConsumer.request_broadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
 Resolve the path with `announced_broadcast()`, or hold `announced()` over its prefix while requesting.
-moq-lite-03/04 sessions are unchanged.
+moq-transport and moq-lite-03/04 sessions are unchanged.
 Regenerate the bindings for the changed `request_broadcast` checksum.
 
 ### Catalog references carry their epoch

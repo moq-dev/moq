@@ -43,10 +43,10 @@ To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 beco
 
 ### A client asks only about what it watches (#6165)
 
-A client session asks its relay for announcements only under paths something watches, through `Announced()` or `AnnouncedBroadcast()`, instead of under its whole scope at connect.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `Announced()` or `AnnouncedBroadcast()`, instead of under its whole scope at connect.
 `OriginConsumer.RequestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
 Resolve the path with `AnnouncedBroadcast()`, or hold `Announced()` over its prefix while requesting.
-moq-lite-03/04 sessions are unchanged.
+moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `media.ContainerFormatFmp4` unwraps to Legacy (#6250)
 
