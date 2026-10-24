@@ -16600,7 +16600,7 @@ mod test {
 		let Poll::Ready(Ok(first)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		let mut group = first.accept(3, None).unwrap();
+		let group = first.accept(3, None).unwrap();
 		drop(fetch);
 		group.abort(Error::Cancel).unwrap();
 		drop(first);
