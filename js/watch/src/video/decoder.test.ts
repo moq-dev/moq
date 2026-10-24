@@ -213,6 +213,7 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	let resets = 0;
 	const errors: VideoDecoderInit["error"][] = [];
 	const frames: VideoDecoderInit["output"][] = [];
+	const configures: VideoDecoderConfig[] = [];
 	// A read that is an Error stands in for a malformed container read.
 	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => {
 		const read = reads.shift() as Read | Error | undefined;
@@ -230,7 +231,8 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 			errors.push(callbacks.error);
 			frames.push(callbacks.output);
 		}
-		configure() {
+		configure(config: VideoDecoderConfig) {
+			configures.push(config);
 			this.state = "configured";
 			this.#keyRequired = true;
 		}
@@ -316,9 +318,10 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		get codecs() {
 			return errors.length;
 		},
-		switchRendition(track = "replacement") {
-			catalog.set({ video: { renditions: { [track]: video } } });
+		switchRendition(track = "replacement", fields: Partial<Catalog.VideoConfig> = {}) {
+			catalog.set({ video: { renditions: { [track]: { ...video, ...fields } } } });
 		},
+		configures,
 		enabled,
 		catalog,
 		// The broadcast the rendition reads, and its first track, for a live playback to publish into.
@@ -392,6 +395,23 @@ it("promoting from no active track holds its picture and timestamp until a frame
 		expect(playback.decoder.out.frame.peek()).toBe(held);
 		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(1));
 		expect((held as unknown as Picture).closed).toBe(false);
+	} finally {
+		playback.close();
+	}
+});
+
+it("decodes an interlaced rendition in software and marks its frames interlaced", async () => {
+	const reads: Read[] = [];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		expect(playback.configures.at(-1)?.hardwareAcceleration).toBeUndefined();
+
+		reads.push(sample(10, 1000));
+		playback.switchRendition("video", { interlaced: true });
+		await microtasks();
+		expect(playback.configures.at(-1)?.hardwareAcceleration).toBe("prefer-software");
+		expect(playback.decoder.out.frame.peek()).toBeDefined();
+		expect(playback.decoder.out.interlaced.peek()).toBe(true);
 	} finally {
 		playback.close();
 	}

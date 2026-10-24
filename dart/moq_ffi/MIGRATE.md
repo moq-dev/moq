@@ -11,6 +11,17 @@ configuration is adapted, creates new Unix logs with mode 0600, and refuses an
 existing group/other-accessible file (for example mode 0644) without changing it.
 Make an existing log private before enabling key logging.
 
+### Exact encoder rates and publication options
+
+Encoder configuration is breaking: `MoqVideoEncoderInput.framerate` is now a
+`MoqVideoFrameRate { numerator, denominator }` (use `{30, 1}` for 30 fps or
+`{30000, 1001}` for NTSC). Zero components and rates above 1,000,000 fps are
+refused. `track` moves out of both encoder output records into
+`MoqAudioProducerOptions` / `MoqVideoProducerOptions`, alongside `input`,
+`output`, and optional `bandwidth`. Producers now take `(catalog, options)`;
+codec-only encoders keep their input/output arguments and take no publication
+settings. Regenerate bindings and rebuild the native library together.
+
 ### Video rendition preference
 
 `MoqVideo` gains `preference`, defaulting to `0`. Regenerate bindings and rebuild with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
