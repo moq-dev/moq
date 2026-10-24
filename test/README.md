@@ -16,7 +16,7 @@ questions to a harness. For builds and CI selection, see the
 | [failure drills](drill/README.md) | `just test drill` | relay and transport failures terminate or recover as expected |
 | [wasm](wasm/README.md) | `just test wasm` | the `@moq/wasm` bindings work in a real browser |
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
-| [native-play](native-play/README.md) | `just test native-play` | the shipped headless player reaches a private Linux null audio device and exits cleanly |
+| [native-play](native-play/README.md) | `just test native-play` | the shipped headless player follows overlapping publishers and fallback through decoded PCM on a private Linux null audio device |
 | [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser and native audio playout stay within budget over an impaired path |
 | [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
 | qmux | `just test qmux` | `@moq/qmux`, as client and as server, interoperates with the Rust qmux 0.6.3 release on every QMux draft |

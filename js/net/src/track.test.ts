@@ -2,6 +2,8 @@ import { expect, setSystemTime, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { Decoder } from "./flate/decoder.ts";
+import { Encoder } from "./flate/encoder.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
@@ -276,6 +278,40 @@ test("datagram buffers drop oldest at capacity without delaying active subscribe
 		expect((await slow.recvDatagram())?.sequence).toBe(sequence);
 	}
 	expect(await slow.recvDatagram()).toBeUndefined();
+});
+
+// A received compressed datagram inflates far past its wire size, so each reader inflates
+// its own copy: a slow reader's queue holds only the slices, never what a fast one realized.
+test("a datagram queue holds no plain copy another reader realized", async () => {
+	const producer = new TrackProducer("test").accept({ compress: true });
+	const slow = producer.subscribe();
+	const fast = producer.subscribe();
+	const plain = new Uint8Array(65535);
+	const slice = new Encoder().frame(plain);
+	expect(slice.length).toBeLessThan(128);
+	const decode = spyOn(Decoder.prototype, "frame");
+	try {
+		const count = 64;
+		for (let sequence = 0; sequence < count; sequence++) {
+			hooks.writeDatagram(producer, { sequence, payload: slice }, plain.length);
+		}
+		const arrived = decode.mock.calls.length;
+		const read = [];
+		for (let sequence = 0; sequence < count; sequence++) {
+			const datagram = await fast.recvDatagram();
+			expect(datagram?.payload).toEqual(plain);
+			read.push(datagram);
+		}
+		expect(decode.mock.calls.length).toBe(arrived + count);
+		for (let sequence = 0; sequence < count; sequence++) {
+			const datagram = await slow.recvDatagram();
+			expect(datagram).not.toBe(read[sequence]);
+			expect(datagram?.payload).toEqual(plain);
+		}
+		expect(decode.mock.calls.length).toBe(arrived + 2 * count);
+	} finally {
+		decode.mockRestore();
+	}
 });
 
 test("insertDatagram preserves an explicit sequence", async () => {
@@ -1227,6 +1263,95 @@ test("a parked read wakes at its wall deadline", async () => {
 			producer.close();
 			clock.installed.close();
 		}
+	}
+});
+
+// Evicting a recorded successor nobody read leaves its mirror a reader-side gap, which is not
+// a failure: the held group is still judged by that successor's arrival, not the next one's.
+test("an evicted successor with unread frames still starts the wall clock", async () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	try {
+		const budget = 2 * CACHE_WINDOW_MS;
+		const track = producer.subscribe({ maxDelay: Milli(budget) });
+		const write = () => {
+			const group = producer.appendGroup();
+			group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
+			group.close();
+		};
+		write();
+		const group = track.tryRecvGroup();
+		if (!group) throw new Error("missing group");
+		expect(await group.readString()).toBe("x");
+
+		let stale = false;
+		const guarded = hooks
+			.guardGroup(group, () => new Promise<never>(() => {}))
+			.catch((err: unknown) => {
+				stale = true;
+				return err;
+			});
+		write(); // the successor, left unread
+		await settle();
+		// A later live edge, so the successor ages out of the cache.
+		await clock.advance(20_000);
+		write();
+
+		await clock.advance(10_000 + budget - 1);
+		expect(stale).toBe(false);
+		await clock.advance(10_000 + budget);
+		expect(stale).toBe(true);
+		expect(await guarded).toMatchObject({ code: StreamCode.Old });
+	} finally {
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+// A held group's recorded successor that failed hands the wall clock on to the next live
+// group, even when the write that brings that group in also evicts the failed one before the
+// guard looks again, rather than convicting by the failed one's arrival.
+test("a failed successor hands the wall clock on after the cache evicts it", async () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	try {
+		const budget = 2 * CACHE_WINDOW_MS;
+		const track = producer.subscribe({ maxDelay: Milli(budget) });
+		const held = producer.appendGroup();
+		held.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
+		held.close();
+		const group = track.tryRecvGroup();
+		if (!group) throw new Error("missing group");
+		expect(await group.readString()).toBe("x");
+
+		let stale = false;
+		const guarded = hooks
+			.guardGroup(group, () => new Promise<never>(() => {}))
+			.catch((err: unknown) => {
+				stale = true;
+				return err;
+			});
+		const failed = producer.appendGroup();
+		await settle();
+
+		// Past the cache window, so the next write evicts the failed successor at once.
+		const replacement = 10_000 + CACHE_WINDOW_MS + 10_000;
+		await clock.advance(replacement);
+		failed.close(new Error("upstream failed"));
+		const live = producer.appendGroup();
+		live.writeFrame({ payload: enc.encode("y"), timestamp: Timestamp.fromMillis(0) });
+		live.close();
+
+		await clock.advance(10_000 + budget + 1);
+		expect(stale).toBe(false);
+		await clock.advance(replacement + budget - 1);
+		expect(stale).toBe(false);
+		await clock.advance(replacement + budget);
+		expect(stale).toBe(true);
+		expect(await guarded).toMatchObject({ code: StreamCode.Old });
+	} finally {
+		producer.close();
+		clock.installed.close();
 	}
 });
 

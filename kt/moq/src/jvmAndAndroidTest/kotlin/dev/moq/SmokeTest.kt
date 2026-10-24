@@ -20,7 +20,15 @@ import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
 import dev.moq.json.StreamConfig
 import dev.moq.json.Timed
+import dev.moq.json.WindowConfig
+import dev.moq.json.WindowConsumer
+import dev.moq.json.WindowEventPop
+import dev.moq.json.WindowEventPush
+import dev.moq.json.WindowProducer
 import dev.moq.json.decode
+import dev.moq.json.events
+import dev.moq.json.push
+import dev.moq.json.timestamp
 import dev.moq.json.update
 import dev.moq.json.valuesAs
 import kotlinx.serialization.Serializable
@@ -107,7 +115,7 @@ class SmokeTest {
 
     /**
      * Exercises the [Moq.connect] facade end to end without a network: a bogus
-     * URL fails fast, and the failure surfaces as a [MoqException]. Also proves
+     * dial failure reaches the returned session through [Session.closed]. Also proves
      * the native lib loads through the transitive `moq-ffi` dependency.
      * One-shot mode, since the default reconnect would retry the dial with
      * backoff instead of failing.
@@ -115,7 +123,9 @@ class SmokeTest {
     @Test
     fun `connect fails fast and surfaces a MoqException`() = runTest {
         val ex = assertFailsWith<MoqException> {
-            Moq.connect("https://localhost:0/test", ClientConfig(tls = ClientTls(insecure = true), once = true))
+            Moq.connect("https://localhost:0/test", ClientConfig(tls = ClientTls(insecure = true), once = true)).use { moq ->
+                moq.session.closed()
+            }
         }
         assertTrue(
             ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,
@@ -138,7 +148,7 @@ class SmokeTest {
                     once = true,
                     websocket = WebSocketConfig(enabled = false, delayUs = 0uL),
                 ),
-            )
+            ).use { moq -> moq.session.closed() }
         }
         assertFailsWith<MoqException.Config> {
             Moq.connect("https://localhost:0/test", ClientConfig(versions = listOf("moq-lite-99")))
@@ -199,14 +209,14 @@ class SmokeTest {
         val server: ServerConfig = ServerConfig(tls = ServerTls(generate = listOf("localhost")))
         assertEquals(4096uL, client.quic.maxStreams)
         assertEquals(listOf("localhost"), server.tls.generate)
-        val status: ConnectionStatus = ConnectionStatus.CONNECTED
+        val status: ConnectionPhase = ConnectionPhase.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(true, snapshot.deltas)
         assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
         assertEquals(500_000uL, backoff.initialUs)
-        assertEquals(ConnectionStatus.CONNECTED, status)
+        assertEquals(ConnectionPhase.CONNECTED, status)
     }
 
     @Test
@@ -446,6 +456,39 @@ class SmokeTest {
     }
 
     @Test
+    fun `json window yields pushes and pops in order`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = WindowConfig(compression = true)
+            val track = broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL))
+            val producer = WindowProducer(track, config)
+            val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null), config)
+            for (n in 1..3) producer.push(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
+            producer.pop(2uL, 4_000uL)
+
+            for (n in 0..2) {
+                val timed = checkNotNull(consumer.next())
+                val push = assertIs<WindowEventPush>(timed.event)
+                assertEquals(n.toULong(), push.index)
+                assertEquals(Status(state = "live${n + 1}"), push.decode<Status>())
+                assertEquals((n + 1).milliseconds, timed.timestamp)
+            }
+            val pop = checkNotNull(consumer.next())
+            assertEquals(WindowEventPop(0uL, 2uL), pop.event)
+            assertEquals(4.milliseconds, pop.timestamp)
+
+            // The cut's new group restates record 2, which this reader already has.
+            producer.cut()
+            producer.push(Status(state = "live4"), timestampUs = 5_000uL)
+            producer.finish()
+            val events = consumer.events().toList()
+            assertEquals(1, events.size)
+            val push = assertIs<WindowEventPush>(events[0].event)
+            assertEquals(3uL, push.index)
+            assertEquals(Status(state = "live4"), push.decode<Status>())
+        }
+    }
+
+    @Test
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false, compression = false)
@@ -675,24 +718,17 @@ class SmokeTest {
         }
     }
 
-    /**
-     * Cancelling the client aborts a connect parked on a server that never
-     * accepts, and the connect reports it as [MoqException.Cancelled].
-     */
+    /** The returned Session owns its pending dial even after Client cancellation. */
     @Test
-    fun `client cancel aborts a pending connect`() = runTest {
+    fun `session owns and cancels its first dial`() = runTest {
         Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
-            // A reconnecting client would redial instead of failing the connect.
             val client = Client(ClientConfig(bind = "127.0.0.1:0", tls = ClientTls(insecure = true), once = true))
-
-            // runCatching, because a failed `async` would cancel the test scope
-            // before `await` ever reported it.
-            val connect = async { runCatching { client.connect("https://${server.localAddr}") } }
-            yield()
+            val session = client.connect("https://${server.localAddr}")
             client.cancel()
-
-            val connected = connect.await().exceptionOrNull()
-            assertTrue(connected is MoqException.Cancelled, "expected a cancelled connect, got: $connected")
+            assertEquals(0uL, session.state().connects)
+            session.cancel(0u)
+            session.closed()
+            assertEquals(ConnectionPhase.CLOSED, session.state().phase)
         }
     }
 
