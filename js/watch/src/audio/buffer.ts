@@ -54,6 +54,9 @@ export class Backpressure {
 	// before the decoder's output reaches the ring and un-stalls it.
 	#first?: Micro;
 	#last?: Micro;
+	// Where output the decoder discarded whole (codec warmup) ends, since the ring stalled. The ring
+	// holds nothing before it, so a refill counts the floor from there.
+	#discarded?: Micro;
 
 	#waiters: Array<{ timestamp: Micro; resolve: () => void }> = [];
 
@@ -98,6 +101,7 @@ export class Backpressure {
 		if (!stalled) {
 			this.#first = undefined;
 			this.#last = undefined;
+			this.#discarded = undefined;
 		}
 		this.#release();
 	}
@@ -116,14 +120,15 @@ export class Backpressure {
 	}
 
 	/**
-	 * Note that decoded output before `timestamp` was discarded (codec warmup), so a ring that has not
-	 * reported a playhead anchors no earlier. A refill measured from the first frame released would
-	 * otherwise stop before anything reached the ring.
+	 * Note that decoded output before `timestamp` was discarded (codec warmup). A refill counts the
+	 * floor from there, or a warmup longer than the floor would use it up before anything reached the
+	 * ring, and a ring that has not reported a playhead anchors no earlier.
 	 */
 	discarded(timestamp: Micro): void {
-		if (this.#playhead !== undefined) return;
-		if (this.#first !== undefined && timestamp > this.#first) this.#first = timestamp;
-		if (this.#anchor !== undefined && timestamp > this.#anchor) this.#anchor = timestamp;
+		if (this.#discarded === undefined || timestamp > this.#discarded) this.#discarded = timestamp;
+		if (this.#playhead === undefined && this.#anchor !== undefined && timestamp > this.#anchor) {
+			this.#anchor = timestamp;
+		}
 		this.#release();
 	}
 
@@ -155,6 +160,7 @@ export class Backpressure {
 		this.#parked = false;
 		this.#first = undefined;
 		this.#last = undefined;
+		this.#discarded = undefined;
 		this.#release();
 	}
 
@@ -207,7 +213,8 @@ export class Backpressure {
 		const first = this.#first;
 		const last = this.#last;
 		if (first !== undefined && last !== undefined) {
-			const from = playhead ?? first;
+			let from: number = playhead ?? first;
+			if (this.#discarded !== undefined && this.#discarded > from) from = this.#discarded;
 			if (timestamp - this.#headroom > from && last - this.#headroom >= from) return false;
 		}
 		this.#first ??= timestamp;

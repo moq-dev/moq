@@ -359,6 +359,21 @@ describe("Backpressure", () => {
 		expect(Bun.peek.status(gate.wait(ms(1040), signal))).toBe("pending");
 	});
 
+	// A replacement rendition keeps the ring and its playhead, and its warmup can outlast the floor.
+	it("refills a stalled ring past output discarded behind its playhead", () => {
+		const gate = new Backpressure(1000, true, Milli(2000));
+		gate.queued(ms(60_000));
+		gate.observe(ms(1000), true);
+		const signal = new AbortController().signal;
+		for (let t = 1000; t <= 1500; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		const wait = gate.wait(ms(1520), signal);
+		expect(Bun.peek.status(wait)).toBe("pending");
+		gate.discarded(ms(2000));
+		expect(Bun.peek.status(wait)).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(2500), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(2520), signal))).toBe("pending");
+	});
+
 	// An utterance that arrived whole before the reset changes nothing queued, so nothing would
 	// report it again: forgetting it would hold its first frame until the next utterance.
 	it("keeps what is queued across a reset", () => {
