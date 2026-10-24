@@ -116,7 +116,7 @@ mod tests {
 			("RELAY_COST", cluster::RELAY_COST, 0x40B56),
 			("SOLICIT", solicit::SOLICIT, 0x40B5A),
 			("HIDDEN", hidden::HIDDEN, 0x40B5C),
-			("AUTH", auth::AUTH, 0x40B60),
+			("AUTH", auth::AUTH, 0x40B70),
 			("ACTIVE_COUNT", active_count::ACTIVE_COUNT, 0x40B64),
 			("EPOCH", epoch::EPOCH, 0x40B68),
 		] {
