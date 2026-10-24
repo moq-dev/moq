@@ -11,7 +11,8 @@ use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
 use crate::flate::{MoqFlateConfig, MoqFlateSnapshotProducer, MoqFlateStreamProducer};
 use crate::json::{
 	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConfig,
-	MoqJsonStreamConsumer, MoqJsonStreamProducer,
+	MoqJsonStreamConsumer, MoqJsonStreamProducer, MoqJsonWindowConfig, MoqJsonWindowConsumer, MoqJsonWindowEvent,
+	MoqJsonWindowProducer, MoqJsonWindowTimed,
 };
 use crate::media::*;
 use crate::session::{
@@ -544,21 +545,23 @@ async fn raw_audio_activity() {
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
 	let audio = MoqAudioProducer::new(
 		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		MoqAudioEncoderInput {
-			format: MoqAudioSampleFormat::F32,
-			sample_rate: SAMPLE_RATE,
-			channels: 1,
-		},
-		MoqAudioEncoderOutput {
+		crate::audio::MoqAudioProducerOptions {
+			input: MoqAudioEncoderInput {
+				format: MoqAudioSampleFormat::F32,
+				sample_rate: SAMPLE_RATE,
+				channels: 1,
+			},
+			output: MoqAudioEncoderOutput {
+				codec: MoqAudioCodec::opus(),
+				sample_rate: None,
+				channels: None,
+				bitrate: None,
+				frame_duration_us: FRAME_DURATION_US,
+				preset: None,
+			},
 			track: Some("microphone".into()),
-			codec: MoqAudioCodec::opus(),
-			sample_rate: None,
-			channels: None,
-			bitrate: None,
-			frame_duration_us: FRAME_DURATION_US,
-			preset: None,
+			bandwidth: None,
 		},
-		None,
 	)
 	.unwrap();
 	assert_eq!(audio.demand().unwrap().name(), "microphone");
@@ -677,7 +680,6 @@ async fn audio_raw_publish_from_many_threads() {
 	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let output = MoqAudioEncoderOutput {
-		track: Some("tone".into()),
 		codec: MoqAudioCodec::opus(),
 		sample_rate: None,
 		channels: None,
@@ -687,13 +689,16 @@ async fn audio_raw_publish_from_many_threads() {
 	};
 	let audio = MoqAudioProducer::new(
 		&catalog,
-		MoqAudioEncoderInput {
-			format: MoqAudioSampleFormat::F32,
-			sample_rate: 48_000,
-			channels: 2,
+		MoqAudioProducerOptions {
+			input: MoqAudioEncoderInput {
+				format: MoqAudioSampleFormat::F32,
+				sample_rate: 48_000,
+				channels: 2,
+			},
+			output,
+			track: Some("tone".into()),
+			bandwidth: None,
 		},
-		output,
-		None,
 	)
 	.unwrap();
 	let snapshot = catalogs.next().await.unwrap().unwrap();
@@ -756,21 +761,23 @@ async fn audio_raw_publish_rejects_bad_frames() {
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let audio = MoqAudioProducer::new(
 		&catalog,
-		MoqAudioEncoderInput {
-			format: MoqAudioSampleFormat::F32,
-			sample_rate: 48_000,
-			channels: 2,
-		},
-		MoqAudioEncoderOutput {
+		MoqAudioProducerOptions {
+			input: MoqAudioEncoderInput {
+				format: MoqAudioSampleFormat::F32,
+				sample_rate: 48_000,
+				channels: 2,
+			},
+			output: MoqAudioEncoderOutput {
+				codec: MoqAudioCodec::opus(),
+				sample_rate: None,
+				channels: None,
+				bitrate: None,
+				frame_duration_us: 20_000,
+				preset: None,
+			},
 			track: None,
-			codec: MoqAudioCodec::opus(),
-			sample_rate: None,
-			channels: None,
-			bitrate: None,
-			frame_duration_us: 20_000,
-			preset: None,
+			bandwidth: None,
 		},
-		None,
 	)
 	.unwrap();
 	for size in [1, 4, 7] {
@@ -804,21 +811,23 @@ async fn raw_audio_decode_delay() {
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
 	let audio = MoqAudioProducer::new(
 		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		MoqAudioEncoderInput {
-			format: MoqAudioSampleFormat::F32,
-			sample_rate: 48_000,
-			channels: 1,
-		},
-		MoqAudioEncoderOutput {
+		crate::audio::MoqAudioProducerOptions {
+			input: MoqAudioEncoderInput {
+				format: MoqAudioSampleFormat::F32,
+				sample_rate: 48_000,
+				channels: 1,
+			},
+			output: MoqAudioEncoderOutput {
+				codec: MoqAudioCodec::opus(),
+				sample_rate: None,
+				channels: None,
+				bitrate: None,
+				frame_duration_us: FRAME_US as u32,
+				preset: None,
+			},
 			track: Some("microphone".into()),
-			codec: MoqAudioCodec::opus(),
-			sample_rate: None,
-			channels: None,
-			bitrate: None,
-			frame_duration_us: FRAME_US as u32,
-			preset: None,
+			bandwidth: None,
 		},
-		None,
 	)
 	.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
@@ -900,8 +909,7 @@ async fn raw_audio_frame_durations() {
 		channels: 1,
 	};
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
-	let output = |track: &str, frame_duration_us| MoqAudioEncoderOutput {
-		track: Some(track.into()),
+	let output = |frame_duration_us| MoqAudioEncoderOutput {
 		codec: MoqAudioCodec::opus(),
 		sample_rate: None,
 		channels: None,
@@ -910,7 +918,16 @@ async fn raw_audio_frame_durations() {
 		preset: None,
 	};
 
-	let audio = MoqAudioProducer::new(&catalog, input(), output("fine", 2_500), None).unwrap();
+	let audio = MoqAudioProducer::new(
+		&catalog,
+		crate::audio::MoqAudioProducerOptions {
+			input: input(),
+			output: output(2_500),
+			track: Some("fine".into()),
+			bandwidth: None,
+		},
+	)
+	.unwrap();
 	// 2.5 ms of silence at 48 kHz, mono f32: exactly one encoded frame.
 	audio
 		.write(MoqAudioFrame {
@@ -920,7 +937,15 @@ async fn raw_audio_frame_durations() {
 		.unwrap();
 	audio.finish().unwrap();
 
-	let coarse = MoqAudioProducer::new(&catalog, input(), output("coarse", 2_000), None);
+	let coarse = MoqAudioProducer::new(
+		&catalog,
+		crate::audio::MoqAudioProducerOptions {
+			input: input(),
+			output: output(2_000),
+			track: Some("coarse".into()),
+			bandwidth: None,
+		},
+	);
 	assert!(
 		matches!(coarse, Err(MoqError::Audio { .. })),
 		"2 ms is not an opus frame duration"
@@ -943,8 +968,7 @@ async fn raw_audio_codec_default_frame() {
 		channels: 2,
 	};
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
-	let output = |track: &str, codec| MoqAudioEncoderOutput {
-		track: Some(track.into()),
+	let output = |codec| MoqAudioEncoderOutput {
 		codec,
 		sample_rate: None,
 		channels: None,
@@ -953,28 +977,48 @@ async fn raw_audio_codec_default_frame() {
 		preset: None,
 	};
 
-	let opus = MoqAudioProducer::new(&catalog, input(), output("opus", MoqAudioCodec::opus()), None).unwrap();
+	let opus = MoqAudioProducer::new(
+		&catalog,
+		crate::audio::MoqAudioProducerOptions {
+			input: input(),
+			output: output(MoqAudioCodec::opus()),
+			track: Some("opus".into()),
+			bandwidth: None,
+		},
+	)
+	.unwrap();
 	opus.finish().unwrap();
 
 	assert_eq!(MoqAudioCodec::aac().codec(), moq_audio::encode::Codec::Aac);
-	let aac = MoqAudioProducer::new(&catalog, input(), output("aac", MoqAudioCodec::aac()), None);
+	let aac = MoqAudioProducer::new(
+		&catalog,
+		crate::audio::MoqAudioProducerOptions {
+			input: input(),
+			output: output(MoqAudioCodec::aac()),
+			track: Some("aac".into()),
+			bandwidth: None,
+		},
+	);
 	let Err(MoqError::Audio { reason: message }) = aac else {
 		panic!("no platform AAC encoder on this host");
 	};
 	assert!(message.contains("no aac audio encoder"), "{message}");
 
 	// 0 still means 1024 samples after an output-rate override, not the input rate.
-	let mut resampled = output("aac-rate", MoqAudioCodec::aac());
+	let mut resampled = output(MoqAudioCodec::aac());
 	resampled.sample_rate = Some(48_000);
 	let aac = MoqAudioProducer::new(
 		&catalog,
-		MoqAudioEncoderInput {
-			format: MoqAudioSampleFormat::F32,
-			sample_rate: 44_100,
-			channels: 2,
+		crate::audio::MoqAudioProducerOptions {
+			input: MoqAudioEncoderInput {
+				format: MoqAudioSampleFormat::F32,
+				sample_rate: 44_100,
+				channels: 2,
+			},
+			output: resampled,
+			track: Some("aac-rate".into()),
+			bandwidth: None,
 		},
-		resampled,
-		None,
 	);
 	let Err(MoqError::Audio { reason: message }) = aac else {
 		panic!("no platform AAC encoder on this host");
@@ -1410,6 +1454,235 @@ async fn json_demand() {
 	assert!(matches!(stream.demand(), Err(MoqError::Closed)));
 	assert!(matches!(snapshot_demand.until_wanted().await, Err(MoqError::Closed)));
 	assert!(matches!(stream_demand.until_wanted().await, Err(MoqError::Closed)));
+}
+
+/// Read the next window event, failing the test if none arrives.
+async fn next_window(consumer: &MoqJsonWindowConsumer) -> Option<MoqJsonWindowTimed> {
+	tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.expect("timed out waiting for a json window event")
+		.unwrap()
+}
+
+fn window_push(index: u64, n: u64) -> MoqJsonWindowEvent {
+	MoqJsonWindowEvent::Push {
+		index,
+		value: format!(r#"{{"n":{n}}}"#),
+	}
+}
+
+/// A live reader sees each push and pop in order, with its timestamp.
+#[tokio::test]
+async fn json_window_roundtrip() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: true,
+		checkpoint_records: None,
+	};
+	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	assert!(
+		matches!(track.demand(), Err(MoqError::Closed)),
+		"the producer takes over the track"
+	);
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await, config).unwrap();
+
+	for n in 0..3 {
+		producer.push(format!(r#"{{"n":{n}}}"#), Some(n * 1000)).unwrap();
+	}
+	producer.pop(2, Some(3000)).unwrap();
+
+	for n in 0..3 {
+		let event = next_window(&consumer).await.expect("expected a push");
+		assert_eq!(
+			event,
+			MoqJsonWindowTimed {
+				event: window_push(n, n),
+				timestamp_us: Some(n * 1000),
+			}
+		);
+	}
+	assert_eq!(
+		next_window(&consumer).await,
+		Some(MoqJsonWindowTimed {
+			event: MoqJsonWindowEvent::Pop { start: 0, end: 2 },
+			timestamp_us: Some(3000),
+		})
+	);
+
+	producer.finish().unwrap();
+	assert!(matches!(
+		producer.push(r#"{"n":3}"#.into(), Some(4000)),
+		Err(MoqError::Closed)
+	));
+	assert!(matches!(producer.pop(1, Some(4000)), Err(MoqError::Closed)));
+	assert_eq!(next_window(&consumer).await, None);
+}
+
+/// A cut closes the open group, so the next push opens a new group whose header restates the
+/// retained window, while a live reader sees only the new record.
+#[tokio::test]
+async fn json_window_cut_restates_the_window() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: false,
+		checkpoint_records: None,
+	};
+	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	let raw = subscribe(&broadcast, "log").await;
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await, config).unwrap();
+
+	for n in 0..3 {
+		producer.push(format!(r#"{{"n":{n}}}"#), None).unwrap();
+	}
+	producer.pop(1, None).unwrap();
+	let events = [
+		window_push(0, 0),
+		window_push(1, 1),
+		window_push(2, 2),
+		MoqJsonWindowEvent::Pop { start: 0, end: 1 },
+	];
+	for event in events {
+		assert_eq!(
+			next_window(&consumer).await,
+			Some(MoqJsonWindowTimed {
+				event,
+				timestamp_us: None,
+			})
+		);
+	}
+
+	producer.cut().unwrap();
+	producer.cut().unwrap();
+	producer.push(r#"{"n":3}"#.into(), None).unwrap();
+
+	let group = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let group = raw.recv_group().await.unwrap().expect("expected a group");
+			if group.sequence() > 0 {
+				return group;
+			}
+		}
+	})
+	.await
+	.expect("timed out waiting for the cut's group");
+	assert_eq!(group.sequence(), 1, "a repeated cut opens no extra group");
+	let header = group.read_frame().await.unwrap().expect("expected the header");
+	assert_eq!(
+		serde_json::from_slice::<serde_json::Value>(&header.payload).unwrap(),
+		serde_json::json!({ "offset": 1, "records": [{ "n": 1 }, { "n": 2 }, { "n": 3 }] })
+	);
+
+	// The restated records are already delivered, so the live reader sees only the new one.
+	assert_eq!(
+		next_window(&consumer).await,
+		Some(MoqJsonWindowTimed {
+			event: window_push(3, 3),
+			timestamp_us: None,
+		})
+	);
+
+	producer.finish().unwrap();
+	assert!(matches!(producer.cut(), Err(MoqError::Closed)));
+}
+
+/// A joiner past the refresh ratio gets the window restated in a fresh group, holding only the
+/// checkpoint's records, so it learns of the older ones as a skip.
+#[tokio::test]
+async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast
+		.publish_track(
+			"log".into(),
+			Some(MoqTrackInfo {
+				priority: 127,
+				max_age_us: None,
+				refresh: Some(1),
+				timescale: None,
+				compress: false,
+			}),
+		)
+		.unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: false,
+		checkpoint_records: Some(2),
+	};
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	for n in 0..5 {
+		producer.push(format!(r#"{{"n":{n}}}"#), None).unwrap();
+	}
+
+	// The join crosses the ratio, so the producer restates the window without another edit.
+	let joiner = subscribe(&broadcast, "log").await;
+	tokio::time::timeout(TIMEOUT, async {
+		while joiner.recv_group().await.unwrap().expect("expected a group").sequence() == 0 {}
+	})
+	.await
+	.expect("timed out waiting for the refresh");
+
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await, config).unwrap();
+	let events = [
+		MoqJsonWindowEvent::Skip { start: 0, end: 3 },
+		window_push(3, 3),
+		window_push(4, 4),
+	];
+	for event in events {
+		assert_eq!(
+			next_window(&consumer).await,
+			Some(MoqJsonWindowTimed {
+				event,
+				timestamp_us: None,
+			})
+		);
+	}
+
+	producer.finish().unwrap();
+}
+
+#[test]
+fn json_window_refuses_zero_checkpoint_records() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: false,
+		checkpoint_records: Some(0),
+	};
+	assert!(matches!(
+		MoqJsonWindowProducer::new(&track, config),
+		Err(MoqError::JsonTrack { .. })
+	));
+	assert!(track.demand().is_ok(), "a refused config leaves the track open");
+}
+
+/// The window producer reports subscriber demand, and drops it once finished.
+#[tokio::test]
+async fn json_window_demand() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: false,
+		checkpoint_records: None,
+	};
+	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	let demand = producer.demand().unwrap();
+	assert_eq!(demand.name(), "log");
+	assert!(demand.wanted().is_none());
+
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await, config).unwrap();
+	tokio::time::timeout(TIMEOUT, demand.until_wanted())
+		.await
+		.expect("timed out waiting for the json window to become used")
+		.unwrap();
+	drop(consumer);
+	tokio::time::timeout(TIMEOUT, demand.until_unwanted())
+		.await
+		.expect("timed out waiting for the json window to become unused")
+		.unwrap();
+
+	producer.finish().unwrap();
+	assert!(matches!(producer.demand(), Err(MoqError::Closed)));
+	assert!(matches!(demand.until_wanted().await, Err(MoqError::Closed)));
 }
 
 /// A demand handle waits without the producer, and fails once the track is gone.
@@ -3234,22 +3507,27 @@ async fn video_raw_publish_consume() {
 
 	let video = crate::video::MoqVideoProducer::new(
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		MoqVideoEncoderInput {
-			format: MoqVideoPixelFormat::Rgba,
-			width: 320,
-			height: 240,
-			framerate: 30,
-		},
-		MoqVideoEncoderOutput {
-			codec: MoqVideoCodec::H264,
+		crate::video::MoqVideoProducerOptions {
+			input: MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: crate::video::MoqVideoFrameRate {
+					numerator: 30_000,
+					denominator: 1001,
+				},
+			},
+			output: MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				bitrate: None,
+				gop: None,
+				// Software so the test is deterministic everywhere: `Auto` would
+				// reach for a hardware backend that CI runners don't have.
+				kind: MoqVideoEncoderKind::Software,
+			},
 			track: Some("camera".into()),
-			bitrate: None,
-			gop: None,
-			// Software so the test is deterministic everywhere: `Auto` would
-			// reach for a hardware backend that CI runners don't have.
-			kind: MoqVideoEncoderKind::Software,
+			bandwidth: None,
 		},
-		None,
 	)
 	.unwrap();
 	assert_eq!(video.demand().unwrap().name(), "camera");
@@ -3272,7 +3550,7 @@ async fn video_raw_publish_consume() {
 	for i in 0..5u64 {
 		video
 			.write(MoqVideoFrame {
-				timestamp_us: i * 33_333,
+				timestamp_us: i * 1_001_000 / 30,
 				data: rgba.clone(),
 			})
 			.unwrap();
@@ -3302,6 +3580,7 @@ async fn video_raw_publish_consume() {
 	assert_eq!(coded.width, 320);
 	assert_eq!(coded.height, 240);
 	assert!(catalog.audio.is_empty());
+	assert!((rendition.framerate.unwrap() - 30_000.0 / 1001.0).abs() < 0.001);
 
 	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&broadcast_consumer,
@@ -3321,7 +3600,7 @@ async fn video_raw_publish_consume() {
 	for i in 5..20u64 {
 		video
 			.write(MoqVideoFrame {
-				timestamp_us: i * 33_333,
+				timestamp_us: i * 1_001_000 / 30,
 				data: rgba.clone(),
 			})
 			.unwrap();
@@ -3353,21 +3632,26 @@ async fn video_decode_frame_ownership() {
 
 	let video = crate::video::MoqVideoProducer::new(
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		MoqVideoEncoderInput {
-			format: MoqVideoPixelFormat::Rgba,
-			width: 320,
-			height: 240,
-			framerate: 30,
-		},
-		MoqVideoEncoderOutput {
-			codec: MoqVideoCodec::H264,
+		crate::video::MoqVideoProducerOptions {
+			input: MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: crate::video::MoqVideoFrameRate {
+					numerator: 30,
+					denominator: 1,
+				},
+			},
+			output: MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				bitrate: None,
+				gop: None,
+				// Software so the encode is deterministic everywhere.
+				kind: MoqVideoEncoderKind::Software,
+			},
 			track: Some("camera".into()),
-			bitrate: None,
-			gop: None,
-			// Software so the encode is deterministic everywhere.
-			kind: MoqVideoEncoderKind::Software,
+			bandwidth: None,
 		},
-		None,
 	)
 	.unwrap();
 
@@ -3500,22 +3784,27 @@ async fn video_raw_publish_from_many_threads() {
 
 	let video = crate::video::MoqVideoProducer::new(
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		MoqVideoEncoderInput {
-			format: MoqVideoPixelFormat::Rgba,
-			width: 320,
-			height: 240,
-			framerate: 30,
-		},
-		MoqVideoEncoderOutput {
-			codec: MoqVideoCodec::H264,
+		crate::video::MoqVideoProducerOptions {
+			input: MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: crate::video::MoqVideoFrameRate {
+					numerator: 30,
+					denominator: 1,
+				},
+			},
+			output: MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				// An explicit ceiling so the retunes below stay under the rate the
+				// encoder opened at, which openh264 requires.
+				bitrate: Some(1_000_000),
+				gop: None,
+				kind: MoqVideoEncoderKind::Software,
+			},
 			track: None,
-			// An explicit ceiling so the retunes below stay under the rate the
-			// encoder opened at, which openh264 requires.
-			bitrate: Some(1_000_000),
-			gop: None,
-			kind: MoqVideoEncoderKind::Software,
+			bandwidth: None,
 		},
-		None,
 	)
 	.unwrap();
 
@@ -3579,10 +3868,12 @@ async fn video_raw_publish_rejects_bad_frames() {
 		format: MoqVideoPixelFormat::Rgba,
 		width,
 		height,
-		framerate: 30,
+		framerate: crate::video::MoqVideoFrameRate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let output = || MoqVideoEncoderOutput {
-		track: None,
 		codec: MoqVideoCodec::H264,
 		bitrate: None,
 		gop: None,
@@ -3593,21 +3884,30 @@ async fn video_raw_publish_rejects_bad_frames() {
 	assert!(
 		crate::video::MoqVideoProducer::new(
 			&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-			MoqVideoEncoderInput {
-				framerate: 0,
-				..input(320, 240)
-			},
-			output(),
-			None,
+			crate::video::MoqVideoProducerOptions {
+				input: MoqVideoEncoderInput {
+					framerate: crate::video::MoqVideoFrameRate {
+						numerator: 0,
+						denominator: 1
+					},
+					..input(320, 240)
+				},
+				output: output(),
+				track: None,
+				bandwidth: None
+			}
 		)
 		.is_err()
 	);
 
 	let video = crate::video::MoqVideoProducer::new(
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		input(320, 240),
-		output(),
-		None,
+		crate::video::MoqVideoProducerOptions {
+			input: input(320, 240),
+			output: output(),
+			track: None,
+			bandwidth: None,
+		},
 	)
 	.unwrap();
 
@@ -6354,20 +6654,25 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let video = crate::video::MoqVideoProducer::new(
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		MoqVideoEncoderInput {
-			format: MoqVideoPixelFormat::Rgba,
-			width: 320,
-			height: 240,
-			framerate: 30,
-		},
-		MoqVideoEncoderOutput {
-			codec: MoqVideoCodec::H264,
+		crate::video::MoqVideoProducerOptions {
+			input: MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: crate::video::MoqVideoFrameRate {
+					numerator: 30,
+					denominator: 1,
+				},
+			},
+			output: MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				bitrate: Some(4_000_000),
+				gop: None,
+				kind: MoqVideoEncoderKind::Software,
+			},
 			track: Some("camera".into()),
-			bitrate: Some(4_000_000),
-			gop: None,
-			kind: MoqVideoEncoderKind::Software,
+			bandwidth: Some(bandwidth),
 		},
-		Some(bandwidth),
 	)
 	.unwrap();
 
@@ -6412,11 +6717,13 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 			format: MoqVideoPixelFormat::Rgba,
 			width: 320,
 			height: 240,
-			framerate: 30,
+			framerate: crate::video::MoqVideoFrameRate {
+				numerator: 30,
+				denominator: 1,
+			},
 		},
 		MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
-			track: Some("camera".into()),
 			bitrate: Some(bitrate),
 			gop: None,
 			kind: MoqVideoEncoderKind::Software,
@@ -6439,9 +6746,12 @@ async fn dropping_a_video_producer_stops_the_rate_follower() {
 	let (input, output) = software_camera(4_000_000);
 	let video = crate::video::MoqVideoProducer::new(
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		input,
-		output,
-		Some(bandwidth),
+		crate::video::MoqVideoProducerOptions {
+			input,
+			output,
+			track: Some("camera".into()),
+			bandwidth: Some(bandwidth),
+		},
 	)
 	.unwrap();
 
@@ -6465,9 +6775,12 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 	let (input, output) = software_camera(4_000_000);
 	let video = crate::video::MoqVideoProducer::new(
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		input,
-		output,
-		Some(bandwidth),
+		crate::video::MoqVideoProducerOptions {
+			input,
+			output,
+			track: Some("camera".into()),
+			bandwidth: Some(bandwidth),
+		},
 	)
 	.unwrap();
 	let reservation = video.reservation().expect("published against an allocator");
@@ -7263,15 +7576,20 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	assert_eq!(sequences, vec![0, 1, 2]);
 }
 
-/// Wait until `auth` reports `want`, following its changes.
-async fn await_grant(auth: &crate::auth::MoqAuth, want: crate::auth::MoqGrant) {
+/// Wait until `session` grants `want`, following its changes.
+async fn await_grant(session: &MoqSession, want: crate::auth::MoqGrant) {
+	// `grant_changed` waits for a grant other than the one its handle last returned, which a
+	// read through `grant` does not move. A fresh handle starts from the grant as it is now,
+	// so it is taken before the read, and the loop follows what `grant_changed` returns.
+	let auth = session.auth();
+	let mut current = auth.grant();
 	tokio::time::timeout(TIMEOUT, async {
-		while auth.grant().as_ref() != Some(&want) {
-			auth.grant_changed().await.expect("grant watch ended");
+		while current.as_ref() != Some(&want) {
+			current = auth.grant_changed().await.expect("grant watch ended");
 		}
 	})
 	.await
-	.unwrap_or_else(|_| panic!("timed out waiting for {want:?}, last {:?}", auth.grant()));
+	.unwrap_or_else(|_| panic!("timed out waiting for {want:?}, last {current:?}"));
 }
 
 fn grant(publish: &[&str], subscribe: &[&str]) -> crate::auth::MoqGrant {
@@ -7299,8 +7617,8 @@ async fn auth_reads_the_peer_grant_on(version: &str) {
 		.expect("pair");
 
 	// Each side's origins span the root, so its peer grants it everything.
-	await_grant(&client.auth(), grant(&["**"], &["**"])).await;
-	await_grant(&accepted.auth(), grant(&["**"], &["**"])).await;
+	await_grant(&client, grant(&["**"], &["**"])).await;
+	await_grant(&accepted, grant(&["**"], &["**"])).await;
 
 	let err = tokio::time::timeout(TIMEOUT, client.auth().add("extra".into()))
 		.await
@@ -7388,7 +7706,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.expect("connect timed out")
 		.unwrap();
 	let auth = session.auth();
-	await_grant(&auth, grant(&["setup/**"], &[])).await;
+	await_grant(&session, grant(&["setup/**"], &[])).await;
 	// A second handle watches on its own and starts from the grant it was made with.
 	let watcher = session.auth();
 
@@ -7398,7 +7716,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.unwrap();
 	assert_eq!(extra.grant(), Some(grant(&["extra/**"], &[])));
 	// Patterns are kept sorted.
-	await_grant(&auth, grant(&["extra/**", "setup/**"], &[])).await;
+	await_grant(&session, grant(&["extra/**", "setup/**"], &[])).await;
 	let seen = tokio::time::timeout(TIMEOUT, watcher.grant_changed())
 		.await
 		.expect("the second handle sees the change the first took")
@@ -7406,7 +7724,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 	assert_eq!(seen, Some(grant(&["extra/**", "setup/**"], &[])));
 
 	extra.cancel();
-	await_grant(&auth, grant(&["setup/**"], &[])).await;
+	await_grant(&session, grant(&["setup/**"], &[])).await;
 	assert!(matches!(extra.closed().await, Err(MoqError::Cancelled)));
 
 	let refused = tokio::time::timeout(TIMEOUT, auth.add("bogus".into()))

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep } from "@moq/clock";
+import { type Installed, Manual, Milli, Nano, sleep } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -13,12 +13,12 @@ import { Encoder } from "./encoder";
 const PROBE = Nano.fromMilli(Milli(5));
 
 let clock = new Manual();
-let restore = () => {};
+let installed: Installed | undefined;
 beforeEach(() => {
 	clock = new Manual();
-	restore = clock.install();
+	installed = clock.install();
 });
-afterEach(() => restore());
+afterEach(() => installed?.close());
 
 class FakeVideoEncoder {
 	static instances: FakeVideoEncoder[] = [];

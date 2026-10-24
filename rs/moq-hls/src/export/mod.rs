@@ -197,8 +197,8 @@ impl Broadcaster {
 		self.renditions.subscribe()
 	}
 
-	/// Resolve once at least one rendition has a playable media playlist. How long to wait is
-	/// the caller's policy: wrap this in a timeout (or select against it) as needed.
+	/// Resolve once at least one rendition has a playable media playlist or a settled failure.
+	/// How long to wait is the caller's policy: wrap this in a timeout as needed.
 	pub async fn ready(&self) {
 		self.renditions.ready().await;
 	}
@@ -2464,7 +2464,7 @@ mod tests {
 		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
 		let wall = UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
 		let config = moq_mux::catalog::Config::default()
-			.with_clock(moq_mux::Clock::at(moq_net::time::now(), wall).expect("a representable wall"));
+			.with_clock(moq_mux::Clock::at(moq_net::time::Instant::now(), wall).expect("a representable wall"));
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 
 		let reserved = catalog.reserve();
@@ -2687,12 +2687,18 @@ mod tests {
 				.with_subscriber(remote.as_ref().unwrap().clone());
 			Some(tokio::join!(
 				async {
-					let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
+					let (session, driver) = client
+						.connect(moq_net::time::Instant::now(), client_transport)
+						.await
+						.unwrap();
 					tokio::spawn(moq_net::time::run(driver));
 					session
 				},
 				async {
-					let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
+					let (session, driver) = server
+						.accept(moq_net::time::Instant::now(), server_transport)
+						.await
+						.unwrap();
 					tokio::spawn(moq_net::time::run(driver));
 					session
 				}
@@ -4710,7 +4716,7 @@ mod tests {
 					fanout.push(at, entry(at, at), &refs[0]);
 				}
 				// Aligned references share record numbers, so every handoff continues seamlessly.
-				let started = moq_net::time::now();
+				let started = moq_net::time::Instant::now();
 				for at in retained..retained + 1_024 {
 					let reference = &refs[(at % 2) as usize];
 					fanout.select(Some(reference.clone()));

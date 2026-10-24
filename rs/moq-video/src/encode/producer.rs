@@ -607,7 +607,7 @@ async fn apply_estimate(
 		return;
 	};
 
-	let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
+	let Some(bitrate) = control.update(estimate, moq_net::time::Instant::now()) else {
 		return;
 	};
 

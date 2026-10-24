@@ -68,9 +68,9 @@ impl Client {
 	/// SNI and certificate verification.
 	pub async fn connect(&self, addr: impl ToSocketAddrs, server_name: &str) -> Result<Session, Error> {
 		let stream = TcpStream::connect(&addr).await?;
-		// Read the socket's stats handle before TLS takes ownership; the kernel's
-		// view of the TCP connection is the same either side of the encryption.
-		let socket_stats = socket_stats(&stream);
+		// Adopt the socket before TLS takes ownership; the kernel's view of the TCP
+		// connection is the same either side of the encryption.
+		let socket_stats = crate::tcp::adopt(&stream)?;
 
 		let server_name = rustls::pki_types::ServerName::try_from(server_name)
 			.map_err(|_| Error::InvalidServerName)?
@@ -101,7 +101,7 @@ impl Client {
 		}
 
 		let session_config = self.session.clone().with_negotiated(version, protocol);
-		let mut transport = Stream::new(tls_stream, version, session_config.max_record_size);
+		let mut transport = Stream::new(tls_stream);
 		if let Some(stats) = socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
@@ -139,7 +139,7 @@ impl Server {
 		self
 	}
 
-	/// Accept a TLS connection over an established TCP stream.
+	/// Accept a TLS connection over an established TCP stream, disabling Nagle on it.
 	///
 	/// This awaits both the TLS handshake and the QMux handshake (the peer's
 	/// transport parameters, bounded by the session's
@@ -147,7 +147,7 @@ impl Server {
 	/// connection with `tokio::spawn` so a slow or non-cooperative peer can't
 	/// stall your `listener.accept()` loop.
 	pub async fn accept(&self, stream: TcpStream) -> Result<Session, Error> {
-		let socket_stats = socket_stats(&stream);
+		let socket_stats = crate::tcp::adopt(&stream)?;
 		let acceptor = TlsAcceptor::from(self.config.clone());
 		let tls_stream = acceptor.accept(stream).await?;
 
@@ -159,26 +159,11 @@ impl Server {
 		tracing::debug!(?version, ?protocol, "parsed ALPN");
 
 		let session_config = self.session.clone().with_negotiated(version, protocol);
-		let mut transport = Stream::new(tls_stream, version, session_config.max_record_size);
+		let mut transport = Stream::new(tls_stream);
 		if let Some(stats) = socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
 		// `accept` awaits the peer's transport parameters so `protocol()` is resolved.
 		Session::accept(transport, session_config).await
-	}
-}
-
-/// The kernel's view of `stream`, when this platform exposes one.
-fn socket_stats(stream: &TcpStream) -> Option<crate::SharedSocketStats> {
-	#[cfg(unix)]
-	{
-		crate::TcpStats::new(stream)
-			.ok()
-			.map(|s| std::sync::Arc::new(s) as crate::SharedSocketStats)
-	}
-	#[cfg(not(unix))]
-	{
-		let _ = stream;
-		None
 	}
 }

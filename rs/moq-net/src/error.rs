@@ -38,9 +38,9 @@ pub enum SessionError {
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
 
-	/// The peer went past what the session allows: a request ID at or past the
-	/// MAX_REQUEST_ID we advertised (moq-transport drafts 14 to 16), or more announcements,
-	/// subscriptions, or FETCH requests than its `crate::session::Limits`.
+	/// The peer went past what the session allows: more announcements than its
+	/// `crate::session::Limits`, or on moq-transport drafts 14 to 16, a request ID at or past
+	/// the MAX_REQUEST_ID we advertised or more live requests than the window.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -365,6 +365,10 @@ pub enum Error {
 	#[error("invalid path: {0}")]
 	InvalidPath(#[from] crate::InvalidPattern),
 
+	/// A published broadcast or route contains a literal `.` or `..` segment.
+	#[error("broadcast path contains a navigation segment")]
+	NavigationSegment,
+
 	/// A duplicate ID was used
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
@@ -447,8 +451,8 @@ pub enum Error {
 	#[error("too many parameters")]
 	TooManyParameters,
 
-	/// The peer already holds as many FETCH requests, announcements, or subscriptions as this
-	/// session allows (see `crate::session::Limits`).
+	/// The peer went past this session's `crate::session::Limits`: too many announcements, or
+	/// too many requests on moq-transport drafts 14 to 16.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -638,7 +642,8 @@ impl From<&Error> for SessionError {
 			| Error::Encode(_)
 			| Error::WrongSize
 			| Error::BoundsExceeded(_)
-			| Error::InvalidPath(_) => Self::ProtocolViolation,
+			| Error::InvalidPath(_)
+			| Error::NavigationSegment => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
 			// A code we did not recognize, so we cannot say which space it came from.
 			// Forwarding it into this one risks landing on a value that IS registered here
@@ -700,9 +705,11 @@ impl From<&Error> for StreamError {
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
 			// Our own parse failure is, from the peer's side, a malformed track.
-			Error::Decode(_) | Error::BoundsExceeded(_) | Error::InvalidPath(_) | Error::MalformedTrack => {
-				Self::MalformedTrack
-			}
+			Error::Decode(_)
+			| Error::BoundsExceeded(_)
+			| Error::InvalidPath(_)
+			| Error::NavigationSegment
+			| Error::MalformedTrack => Self::MalformedTrack,
 			Error::App(app) => Self::App(*app),
 			// See the SessionError impl: an unregistered code carries no registry, so
 			// re-sending the number could mistranslate it.

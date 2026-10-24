@@ -79,16 +79,18 @@ import 'package:moq/video.dart' as video;
 final camera = moq.createBroadcast('live/camera');
 final encoder = video.Producer(
   catalog: media.CatalogProducer(broadcast: camera),
-  input: video.EncoderInput(
-    format: video.PixelFormat.rgba,
-    width: 1280,
-    height: 720,
-    framerate: 30,
-  ),
-  output: video.EncoderOutput(
-    codec: video.Codec.h264,
+  options: video.ProducerOptions(
+    input: video.EncoderInput(
+      format: video.PixelFormat.rgba,
+      width: 1280,
+      height: 720,
+      framerate: video.FrameRate(numerator: 30000, denominator: 1001),
+    ),
+    output: video.EncoderOutput(
+      codec: video.Codec.h264,
+      kind: video.AutoEncoder(),
+    ),
     track: 'camera',
-    kind: video.AutoEncoder(),
   ),
 );
 encoder.write(frame: video.Frame(timestampUs: pts, data: rgba));
@@ -126,6 +128,8 @@ mine.close();
 
 await moq.close();
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings.
 
 ## Things to know
 

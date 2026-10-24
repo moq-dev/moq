@@ -76,8 +76,9 @@ try audio.cut() // audio has no keyframes, so this is what gives it groups
 
 let video = try Video.Producer(
     catalog: Media.CatalogProducer(broadcast: broadcast),
-    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
-    output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .auto)
+    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
+    output: VideoEncoderOutput(codec: .h264, kind: .auto),
+    track: "camera"
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
 try broadcast.announce(route: AnnounceRoute(epoch: mintEpoch())) // a fresh epoch per run
@@ -87,6 +88,8 @@ try broadcast.close()
 
 try await session.shutdown()
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings.
 
 ## Things to know
 
