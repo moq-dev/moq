@@ -45,8 +45,9 @@ pub trait MediaSink: Send {
 	/// loop has already converted the timestamp to microseconds.
 	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()>;
 
-	/// Called once when the session ends with a genuine failure, so the sink can
-	/// abort its tracks with the real cause instead of a bare `Error::Dropped`.
+	/// Called once when the session ends other than by the peer's clean end, so the sink can
+	/// abort its tracks, the catalog included, with the real cause instead of a bare
+	/// `Error::Dropped`.
 	fn abort(&mut self, err: moq_net::Error);
 
 	/// Called once when the peer ends the session cleanly after its final media: finish
@@ -148,11 +149,10 @@ impl Session {
 
 	pub async fn run(&mut self) -> Result<()> {
 		let result = self.run_loop().await;
-		// A genuine failure (not a normal peer disconnect or an unconnected offer)
-		// propagates to subscribers as the real cause; the normal ends just let the
-		// sink's tracks close as Dropped.
+		// Any end but the peer's DELETE, a disconnect or an offer that never connected
+		// included, ends the sink's tracks with its cause, so subscribers see the publisher
+		// go rather than its tracks dropped unfinished.
 		if let Err(err) = &result
-			&& !matches!(err, Error::SessionClosed | Error::IceTimeout)
 			&& let MediaRole::Ingest(sink) = &mut self.role
 		{
 			sink.abort(moq_net::Error::Transport(err.to_string()));
