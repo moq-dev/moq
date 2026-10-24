@@ -428,6 +428,14 @@ impl Track {
 
 	/// Finish the importer, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
+		// Each decode flushed its whole frame, so a splitter holds only input storage, which ends
+		// with the input. The import stays, keeping the finished track and its rendition published.
+		match &mut self.kind {
+			TrackKind::Avc3 { split, .. } => *split = Default::default(),
+			TrackKind::Hev1 { split, .. } => *split = Default::default(),
+			TrackKind::Av01 { split, .. } => *split = Default::default(),
+			_ => {}
+		}
 		import!(&mut self.kind, import => import.finish())
 	}
 
@@ -652,8 +660,10 @@ impl TrackStream {
 
 	/// Finish the importer, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
+		// The splitter is taken out to flush, so its input storage ends with the input. The import
+		// stays, keeping the finished track and its rendition published.
 		stream!(&mut self.kind, split, import => {
-			let tail = split.flush(None)?;
+			let tail = std::mem::take(split).flush(None)?;
 			import.decode(tail)?;
 			import.finish()
 		})

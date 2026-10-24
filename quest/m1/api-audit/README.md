@@ -36,7 +36,7 @@ Rules every child follows:
 - Inherited debt is fixed here only when it is cheap or sits on a surface
   this release breaks anyway. Otherwise it joins the later quest that
   reshapes it (the ordered track reader joins
-  [foreign poll](/quest/m2/ffi-poll-protocol.md); binding durations get
+  [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md); binding durations get
   [their own m2 quest](/quest/m2/ffi-durations.md)).
 - Each child lists its public API and wire impact in its PR and writes its
   own `MIGRATE.md` entries.
@@ -61,8 +61,8 @@ Rejected in planning:
   `close` collides with `AutoCloseable`, and no single verb fits every
   language's reserved names.
 - A follow policy enum folding `linger` and `stitch`: one name per meaning
-  ([CLI flags](/quest/m1/api-audit/cli-flags.md)) fixes the confusion more
-  cheaply.
+  ([TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md)
+  renames the export wait `--follow`) fixes the confusion more cheaply.
 
 ## Required
 
@@ -79,15 +79,12 @@ Rejected in planning:
 - [Ranges refuse what the wire drops](/quest/m1/api-audit/ranges-wire.md) - relative and time anchors fail loud where a wire cannot carry them, `floor()` honors the subscription, and bindings take an optional max delay
 - [Derived origins borrow](/quest/m1/api-audit/derived-origin-close.md) - closing a JS `scope()` or `withPreference()` handle releases only that handle
 - [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - Python, Go, and Dart client options use the FFI's names and nesting
-- [One decode read](/quest/m1/api-audit/decode-read.md) - audio and video decoders yield the same `Frame`, `Gap`, `End` read as moq-mux containers
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
 - [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
 - [One frame rate name](/quest/m1/api-audit/frame-rate.md) - core `moq_video::Rate` becomes `FrameRate`, as the bindings name it
 - [CLI and gst flags](/quest/m1/api-audit/cli-flags.md) - one flag name per meaning across CLI subcommands and gst elements, and `linger` means one thing
-- [qmux shape](/quest/m1/api-audit/qmux-shape.md) - qmux binds framing at connect, shares flow-control names with moq-tokio, and JS drops the legacy wire
 - [Transport config](/quest/m1/api-audit/transport-config.md) - moq-tokio and moq-quic configs have one meaning for unset, enums for modes, no order-dependent setters, and no leftover features
 - [Relay config](/quest/m1/api-audit/relay-config.md) - moq-relay and its embedders load config through one path that refuses old spellings, under names that do not collide
-- [Auth and clock names](/quest/m1/api-audit/auth-clock-names.md) - refusal and reason types have distinct names, and the Rust and JS clocks mirror each other
 - [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
 - [Only sessions accept a request](/quest/m1/api-audit/claim-request-type.md) - accepting an application claim's request fails to compile, and the peer-route hatches are crate-private
 - [One range setter](/quest/m1/api-audit/serve.md) - `with_range` replaces seven cursor setters and nothing else of the serving cursor goes public

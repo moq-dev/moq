@@ -76,8 +76,8 @@ Moq.connect("https://relay.example.com").use { moq ->
 
     val video = dev.moq.video.Producer(
         CatalogProducer(broadcast),
-        VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = 30u),
-        VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", bitrate = null, gop = null, kind = autoEncoder),
+        dev.moq.video.ProducerOptions(input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = dev.moq.video.FrameRate(30000u, 1001u)),
+        output = VideoEncoderOutput(codec = VideoCodec.H264, bitrate = null, gop = null, kind = autoEncoder), track = "camera"),
     )
     video.write(VideoFrame(timestampUs = pts, data = rgba))
     broadcast.announce(AnnounceRoute(epoch = mintEpoch())) // a fresh epoch per run
@@ -87,6 +87,8 @@ Moq.connect("https://relay.example.com").use { moq ->
     moq.shutdown()
 }
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings.
 
 ## Things to know
 
