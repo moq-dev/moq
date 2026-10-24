@@ -77,6 +77,9 @@ impl<O: Output> Media<O> {
 	/// update is the same instance, which its subscriptions already ride out.
 	async fn play(self) -> anyhow::Result<()> {
 		let mut follow = Instances::new(&self.origin, &self.broadcast, None)?;
+		// The device belongs to the player, so replacing a broadcast never waits
+		// for it to close and reopen. Each sink adapts its own rate and layout.
+		let device = tokio::sync::OnceCell::new();
 		let mut playing = None;
 
 		loop {
@@ -103,7 +106,7 @@ impl<O: Output> Media<O> {
 					self.video.lock().unwrap().clear();
 					self.drained.notify_one();
 					self.output.send(Event::Wake);
-					playing = Some(Box::pin(self.play_broadcast(broadcast)));
+					playing = Some(Box::pin(self.play_broadcast(broadcast, &device)));
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
@@ -118,7 +121,11 @@ impl<O: Output> Media<O> {
 	}
 
 	/// Play the instance handed out by the follower until its catalog and tracks end.
-	async fn play_broadcast(&self, broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
+	async fn play_broadcast(
+		&self,
+		broadcast: moq_net::broadcast::Consumer,
+		device: &tokio::sync::OnceCell<O::Speaker>,
+	) -> anyhow::Result<()> {
 		let source = moq_mux::Source::new(self.origin.clone(), broadcast.clone());
 		let mut catalogs = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
 			.await
@@ -132,8 +139,8 @@ impl<O: Output> Media<O> {
 		let mut audio_demand: Option<Demand> = None;
 		// Shared by an audio rendition and the retired tails still playing beside
 		// it, so their sinks mix on one stream: a second stream on an exclusive
-		// device would fail to open. Released once none of them is left, so an
-		// idle `play` does not hold the device.
+		// device would fail to open. Released once none of them is left to hand
+		// the presentation anchor back to video; the player keeps the device.
 		let mut speaker = None;
 		// Retired audio sinks still playing out what they hold.
 		let mut tails = tokio::task::JoinSet::new();
@@ -208,9 +215,8 @@ impl<O: Output> Media<O> {
 				}
 			}
 
-			// The speaker is only open while some audio is, so releasing it marks the
-			// last of it going quiet: nothing holds playback to the speaker's cadence
-			// any more, and video takes the anchor back.
+			// The last sink went quiet: nothing holds playback to the speaker's
+			// cadence any more, and video takes the anchor back.
 			if !playback.playing(Kind::Audio) && tails.is_empty() && speaker.take().is_some() {
 				self.presentation.lock().unwrap().stopped();
 				self.drained.notify_one();
@@ -344,7 +350,7 @@ impl<O: Output> Media<O> {
 						Ok(consumer) => {
 							tracing::info!(track = name, decoder = consumer.name(), "playing audio rendition");
 							if speaker.is_none() {
-								speaker = Some(self.output.speaker().await?);
+								speaker = Some(device.get_or_try_init(|| self.output.speaker()).await?.clone());
 							}
 							let audio = AudioPlayback {
 								speaker: speaker.clone().expect("opened above"),
@@ -1641,6 +1647,7 @@ mod tests {
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
+		assert_eq!(recorder.speakers(), 1, "the replacement reopened the speaker");
 		assert!(
 			played(&recorder, OLD).0 > Duration::ZERO,
 			"the old broadcast never played"
@@ -1692,6 +1699,7 @@ mod tests {
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
+		assert_eq!(recorder.speakers(), 1, "the replacement reopened the speaker");
 		assert!(
 			played(&recorder, OLD).0 > Duration::ZERO,
 			"the old broadcast never played"
@@ -1729,6 +1737,7 @@ mod tests {
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
+		assert_eq!(recorder.speakers(), 1, "the returning broadcast reopened the speaker");
 		assert_eq!(
 			played(&recorder, OLD).0,
 			PACKET_DURATION * 10,

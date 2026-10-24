@@ -9,14 +9,18 @@ only the configured routing, codec, and playback delays.
 
 ## Plan
 
-Today each new instance opens its own speaker (`rs/moq-cli/src/play/media.rs`
-calls `self.output.speaker()` per run). On a loaded host
-(`rs/moq-audio/src/playback/driver.rs` "opened audio output") that took 100
-to 220 ms per switch, and the PCM after the switch stayed glitchy past the
-bound in 3 of 4 native-play runs while landing
-[moq-dev/moq#6548](https://github.com/moq-dev/moq/pull/6548). Keep one output
-for the player's lifetime and hand it from run to run. Reopen it only when the
-new run's rate or channel layout differs. Then rerun the native-play lane
-several times on a loaded host, and fix any glitch that remains at its cause.
+The player now keeps one lazily opened speaker across broadcast runs. Existing
+paused-clock replacement and offline-return tests verify one speaker opening,
+and all 240 player unit tests pass. Each playback sink already resamples and
+remixes its input, so a different input rate or layout does not require reopening
+the device.
+
+Finish the native validation before landing. A real-device run passed lite-07
+replacement/fallback at 822/793 ms, but lite-06 fallback produced distorted PCM
+past the unchanged 1495 ms bound. Its log showed repeated unclassified ALSA/cpal
+backend errors and five internal device recoveries during startup. Distinguish
+the backend's device recovery from the player's speaker ownership, diagnose the
+remaining PCM glitch at its source, and rerun the lane several times on a loaded
+host. Keep its existing derived timing and tone-quality bounds.
 
 Public API: none expected. Wire: none.
