@@ -137,7 +137,7 @@ fold-or-`TooFarBehind` rule as a Rust eviction. A run sits between cached
 sequences, so there are at most about one per cached sequence (alternating
 drop and arrival), and JS run state grows no faster than the JS cache
 itself. The JS byte bound for both is
-[JS unbounded groups](/quest/m2/unbounded-groups/js.md).
+[JS unbounded groups](/quest/m1/unbounded-groups/js.md).
 
 The per-cursor record keeps resolved-demand's pool bound and floor rule,
 with "final" narrowed: only a delivered run or a budget-independent drop (a
@@ -206,6 +206,13 @@ Test on mock time through a relay:
 - A single run spanning billions of sequences is settled by each cursor in
   one step, whether dropped, skipped by a wider reader, or evicted and
   judged again.
+- Per-reader misses are bounded the same way. [Dynamic range
+  requests](/quest/m1/subscribe-ranges/dynamic.md) adds a third unbounded
+  record: each reader's given-up misses, one per gap, which a reader whose
+  floor never moves cannot forget. Fold them into the cursor's runs, billed
+  to the pool (from
+  [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171), decided
+  2026-10-23).
 
 Mirror each case in `js/net`.
 
@@ -221,4 +228,4 @@ unchanged.
 
 - [An evicted group is judged stale](/quest/m1/evicted-group-stale.md) - the sibling for groups a reader already holds after the cache evicts them
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
-- [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache
+- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache

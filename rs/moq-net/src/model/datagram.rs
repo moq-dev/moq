@@ -43,7 +43,6 @@ pub struct Datagram {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-// private: passthrough
 pub(crate) struct Wire {
 	pub object_id: Option<u64>,
 	pub priority: Option<u8>,
@@ -53,7 +52,6 @@ pub(crate) struct Wire {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-// private: passthrough
 pub(crate) struct Stored {
 	pub datagram: Datagram,
 	pub wire: Option<std::sync::Arc<Wire>>,

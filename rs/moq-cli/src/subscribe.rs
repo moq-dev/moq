@@ -197,9 +197,6 @@ pub struct SubscribeArgs {
 	/// Write the `m2ts` passthrough track back out instead of muxing the media (TS only).
 	pub passthrough: bool,
 
-	/// Render identical packets to every other synced export of the broadcast (TS only).
-	pub sync: bool,
-
 	/// Catalog format for track discovery (default: detect from the broadcast suffix).
 	pub catalog: Option<CatalogFormatArg>,
 
@@ -270,8 +267,6 @@ fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'stat
 		offset_ms = ?release.offset,
 		drift_ppm = ?release.drift,
 		out_of_tolerance = release.out_of_tolerance,
-		overruns = release.overruns,
-		late = release.late,
 		"{message}"
 	);
 }
@@ -419,9 +414,6 @@ impl Subscribe {
 		if let Some(mux_rate) = self.args.mux_rate {
 			ts = ts.with_mux_rate(mux_rate);
 		}
-		if self.args.sync {
-			ts = ts.with_sync();
-		}
 
 		// A TS byte stream carries no per-frame timing, so delivery time is the only
 		// carrier of each frame's spacing (#2984). The export lays each slice of the PCR
@@ -435,8 +427,8 @@ impl Subscribe {
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
 		let mut sampled = moq_clock::now();
-		// The export's drop, gap, out-of-tolerance and `--sync` counts, as last logged.
-		let mut reported = (0, 0, 0, 0, 0, 0);
+		// The export's drop, gap and out-of-tolerance counts, as last logged.
+		let mut reported = (0, 0, 0, 0);
 		let sections = self.sections;
 		let report = |stats: &moq_mux::container::ts::stats::Export| {
 			if let Some(sections) = &sections {
@@ -460,14 +452,7 @@ impl Subscribe {
 				let stats = ts.export().stats();
 				report(&stats);
 				let release = &stats.release;
-				let counts = (
-					release.dropped,
-					release.trimmed,
-					release.gaps,
-					release.out_of_tolerance,
-					release.overruns,
-					release.late,
-				);
+				let counts = (release.dropped, release.trimmed, release.gaps, release.out_of_tolerance);
 				if counts != reported {
 					reported = counts;
 					log_release(release, "TS export release clock");
