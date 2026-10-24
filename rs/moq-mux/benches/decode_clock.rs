@@ -7,7 +7,10 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use moq_clock::Instant;
 
 #[path = "../src/container/decode.rs"]
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 mod decode;
 
 /// A 40 ms frame in 90 kHz ticks.

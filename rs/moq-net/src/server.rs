@@ -1057,6 +1057,17 @@ mod tests {
 		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			std::task::Poll::Pending
 		}
+
+		fn poll_open_request(
+			&mut self,
+			cx: &mut std::task::Context<'_>,
+			options: crate::transport::poll::SendOptions<
+				'_,
+				<Self::SendStream as crate::transport::poll::SendStream>::Group,
+			>,
+		) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+			self.poll_open_bi(cx, options).map_ok(Some)
+		}
 		fn poll_open_uni(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,

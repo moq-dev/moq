@@ -2826,6 +2826,11 @@ pub mod d3d11 {
 
 		#[test]
 		#[ignore = "Windows GPU workload; reports submission and batch completion, not capture latency"]
+		#[expect(
+			clippy::disallowed_methods,
+			clippy::disallowed_types,
+			reason = "the workload measures itself on the host clock"
+		)]
 		fn wgc_conversion_workload() {
 			let device = create_device().expect("D3D11 hardware device");
 			for size in [Size::new(640, 480), Size::new(1280, 720), Size::new(1920, 1080)] {

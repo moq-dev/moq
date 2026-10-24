@@ -209,11 +209,11 @@ On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport
 
 ## Stats
 
-`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. While a client session reconnects, `session->failure()` returns why as a `moq::Error`, and while its first `connect` is still retrying, `client->failure()` does.
+`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its first-dial failures and reconnects; independent watchers keep their own revisions.
 
 ## Shutdown
 
-`session->shutdown().get()` drains for up to one second and reports any error.
+`session->shutdown()` requests a drain immediately; `session->closed().get()` waits up to one second and reports its result.
 Application delivery requires explicitly selecting `moq-lite-07-wip` on both
 peers; older Lite versions (including default lite-06) and IETF wait only for
 transport ACKs. Finish or abort live tracks first.

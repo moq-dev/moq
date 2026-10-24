@@ -81,6 +81,7 @@ pub struct Relay {
 	internal: internal::Internal,
 	web: web::Web,
 	/// The ACME client, issuing before [`Self::run`] serves and renewing after.
+	#[cfg(feature = "acme")]
 	acme: Option<crate::acme::Acme>,
 	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
@@ -101,7 +102,7 @@ pub struct Relay {
 	#[cfg(feature = "_quic")]
 	workers: Option<moq_tokio::worker::Workers>,
 	/// The io_uring QUIC workers, already bound and waiting for
-	/// [`serve`](crate::uring::Workers::serve). `None` unless both
+	/// [`serve`](crate::uring::Spawned::serve). `None` unless both
 	/// `runtime.workers` and `runtime.io_uring` are configured, in which case
 	/// they own the QUIC listen address instead of `workers`.
 	#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -136,7 +137,9 @@ impl Relay {
 			.clone();
 		config.connect.implementation = Some(implementation.clone());
 		// Every TLS listener serves the ACME certificate, so install it before any is built.
+		#[cfg(feature = "acme")]
 		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
+		#[cfg(feature = "acme")]
 		if let Some(acme) = &acme {
 			config.listen.tls.resolver = Some(acme.resolver());
 		}
@@ -296,10 +299,9 @@ impl Relay {
 			advertise = advertise.with_fingerprint(fingerprint);
 		}
 		let mut cluster_options = cluster::Options::new(config.cluster).with_cache(cache);
-		cluster_options.session = config.session;
-		cluster_options.peer = config.peer;
+		cluster_options.session = config.limits.client;
+		cluster_options.peer = config.limits.peer;
 		let cluster = cluster::Cluster::new(cluster_options)?
-			.with_client_tls(config.connect.tls.build()?)
 			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
 		#[cfg(feature = "iroh")]
@@ -315,14 +317,15 @@ impl Relay {
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(false);
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
-			.with_acme(acme.as_ref().map(crate::acme::Acme::resolver))
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions)
 			.with_extensions(server_extensions)
 			.with_implementation(implementation)
 			.with_timeout(handshake_timeout)
-			.with_sessions(sessions.clone())
-			.bind()?;
+			.with_sessions(sessions.clone());
+		#[cfg(feature = "acme")]
+		let web = web.with_acme(acme.as_ref().map(crate::acme::Acme::resolver));
+		let web = web.bind()?;
 		// `bind`, not `listen`: the TCP/Unix accept loops handshake as soon as
 		// they run, and `load` is not yet willing to take a session. `run`
 		// starts them on its first accept.
@@ -370,6 +373,7 @@ impl Relay {
 			stats,
 			internal,
 			web,
+			#[cfg(feature = "acme")]
 			acme,
 			stun,
 			addr,
@@ -546,6 +550,7 @@ impl Relay {
 			cluster,
 			internal,
 			web,
+			#[cfg(feature = "acme")]
 			acme,
 			stun,
 			shutdown,
@@ -575,6 +580,7 @@ impl Relay {
 
 		// Nothing else serves or reports ready until the certificate exists: a
 		// self-signed placeholder would only fail every browser that connects.
+		#[cfg(feature = "acme")]
 		if let Some(mut acme) = acme {
 			let listener = web.https_listener().context("ACME needs the HTTPS listener")?;
 			// Issuance can take minutes, and as a container's PID 1 the relay
@@ -602,13 +608,13 @@ impl Relay {
 		// identity rustls will not load fails here, and reporting ready first would
 		// release the units depending on a relay that is about to exit.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
-		let mut uring = uring;
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
-		if let Some(uring) = uring.as_mut() {
-			uring
-				.spawn(cluster.clone(), auth.clone(), shutdown.clone(), sessions.clone())
-				.context("failed to start the io_uring QUIC workers")?;
-		}
+		let mut uring = uring
+			.map(|uring| {
+				uring
+					.spawn(cluster.clone(), auth.clone(), shutdown.clone(), sessions.clone())
+					.context("failed to start the io_uring QUIC workers")
+			})
+			.transpose()?;
 
 		// Without ACME, after the last step that can fail, since a handler outlives a
 		// failed `run`, and before anything accepts a session a signal would kill
@@ -848,11 +854,7 @@ async fn serve_listening(
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	#[tokio::test]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
@@ -903,6 +905,7 @@ mod tests {
 	/// exits at once rather than starting the drain again.
 	#[cfg(unix)]
 	#[tokio::test(start_paused = true)]
+	#[expect(clippy::disallowed_types, reason = "tests read the host clock directly")]
 	async fn a_signal_after_an_early_trigger_exits_at_once() {
 		let _signals = crate::shutdown::SIGNALS.lock().await;
 		// Either arm is ready, so an unbiased wait would pass some runs.

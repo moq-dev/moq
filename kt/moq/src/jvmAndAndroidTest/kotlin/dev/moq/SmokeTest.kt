@@ -115,7 +115,7 @@ class SmokeTest {
 
     /**
      * Exercises the [Moq.connect] facade end to end without a network: a bogus
-     * URL fails fast, and the failure surfaces as a [MoqException]. Also proves
+     * dial failure reaches the returned session through [Session.closed]. Also proves
      * the native lib loads through the transitive `moq-ffi` dependency.
      * One-shot mode, since the default reconnect would retry the dial with
      * backoff instead of failing.
@@ -123,7 +123,9 @@ class SmokeTest {
     @Test
     fun `connect fails fast and surfaces a MoqException`() = runTest {
         val ex = assertFailsWith<MoqException> {
-            Moq.connect("https://localhost:0/test", ClientConfig(tls = ClientTls(insecure = true), once = true))
+            Moq.connect("https://localhost:0/test", ClientConfig(tls = ClientTls(insecure = true), once = true)).use { moq ->
+                moq.session.closed()
+            }
         }
         assertTrue(
             ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,
@@ -146,7 +148,7 @@ class SmokeTest {
                     once = true,
                     websocket = WebSocketConfig(enabled = false, delayUs = 0uL),
                 ),
-            )
+            ).use { moq -> moq.session.closed() }
         }
         assertFailsWith<MoqException.Config> {
             Moq.connect("https://localhost:0/test", ClientConfig(versions = listOf("moq-lite-99")))
@@ -207,14 +209,14 @@ class SmokeTest {
         val server: ServerConfig = ServerConfig(tls = ServerTls(generate = listOf("localhost")))
         assertEquals(4096uL, client.quic.maxStreams)
         assertEquals(listOf("localhost"), server.tls.generate)
-        val status: ConnectionStatus = ConnectionStatus.CONNECTED
+        val status: ConnectionPhase = ConnectionPhase.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(true, snapshot.deltas)
         assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
         assertEquals(500_000uL, backoff.initialUs)
-        assertEquals(ConnectionStatus.CONNECTED, status)
+        assertEquals(ConnectionPhase.CONNECTED, status)
     }
 
     @Test
@@ -716,24 +718,17 @@ class SmokeTest {
         }
     }
 
-    /**
-     * Cancelling the client aborts a connect parked on a server that never
-     * accepts, and the connect reports it as [MoqException.Cancelled].
-     */
+    /** The returned Session owns its pending dial even after Client cancellation. */
     @Test
-    fun `client cancel aborts a pending connect`() = runTest {
+    fun `session owns and cancels its first dial`() = runTest {
         Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
-            // A reconnecting client would redial instead of failing the connect.
             val client = Client(ClientConfig(bind = "127.0.0.1:0", tls = ClientTls(insecure = true), once = true))
-
-            // runCatching, because a failed `async` would cancel the test scope
-            // before `await` ever reported it.
-            val connect = async { runCatching { client.connect("https://${server.localAddr}") } }
-            yield()
+            val session = client.connect("https://${server.localAddr}")
             client.cancel()
-
-            val connected = connect.await().exceptionOrNull()
-            assertTrue(connected is MoqException.Cancelled, "expected a cancelled connect, got: $connected")
+            assertEquals(0uL, session.state().connects)
+            session.cancel(0u)
+            session.closed()
+            assertEquals(ConnectionPhase.CLOSED, session.state().phase)
         }
     }
 
