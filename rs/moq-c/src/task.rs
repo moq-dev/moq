@@ -10,14 +10,14 @@ use crate::{Error, Id, NonZeroSlab, State};
 /// `close` is an `Option` so closing can drop just the sender without removing the
 /// entry or revoking the callback. The task delivers one final terminal callback and
 /// then removes itself, so `user_data` stays valid until that callback fires.
-pub(crate) struct Task {
+pub(crate) struct Task<C = OnStatus> {
 	close: Option<oneshot::Sender<()>>,
-	pub callback: OnStatus,
+	pub callback: C,
 }
 
-impl Task {
+impl<C> Task<C> {
 	/// An entry, plus the receiver its task watches for [`Self::close`].
-	pub fn new(callback: OnStatus) -> (Self, oneshot::Receiver<()>) {
+	pub fn new(callback: C) -> (Self, oneshot::Receiver<()>) {
 		let (close, closed) = oneshot::channel();
 		let task = Self {
 			close: Some(close),

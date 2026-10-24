@@ -102,7 +102,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			log: ts::stats::Log::default(),
-			sampled: moq_net::time::now(),
+			sampled: moq_net::time::Instant::now(),
 			span: tracing::info_span!("srt", %path),
 		})
 	}
@@ -120,7 +120,7 @@ impl Publisher {
 		}
 		.map_err(moq_mux::Error::from)?;
 		if self.sampled.elapsed() >= ts::stats::Log::INTERVAL {
-			self.sampled = moq_net::time::now();
+			self.sampled = moq_net::time::Instant::now();
 			let _span = self.span.enter();
 			self.log.sample(self.stats());
 		}

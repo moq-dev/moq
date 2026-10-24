@@ -24,8 +24,8 @@ The encode and decode seams become asynchronous.
   codecs such as MediaCodec.
 - **Runtime:** browser objects are not `Send`, so these backends run on the
   browser runtime.
-- **API changes:** any change to a published entry point gets a `MIGRATE.md`
-  entry.
+- **API changes:** any change to a published entry point says how to migrate
+  in the PR's Impact bullet.
 
 ## Required
 
