@@ -701,6 +701,7 @@ mod test {
 				enabled: true,
 				preference: 0,
 				framerate: None,
+				reorder: None,
 				optimize_for_latency: None,
 				container: Container::Legacy,
 				warmup: None,
@@ -1095,7 +1096,7 @@ mod test {
 		assert_eq!(archive.timescale, 1000);
 
 		// Archive PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
-		let expected = std::time::UNIX_EPOCH
+		let expected = moq_clock::Wall::UNIX_EPOCH
 			+ std::time::Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
 		assert_eq!(
 			clock

@@ -25,6 +25,13 @@ Candidates, to be ranked by the profile:
   relying on `Vec` capacity.
 - One `handle` call takes a whole GRO batch.
 
+Received datagrams and leased stream bytes are copied out of their receive
+buffer, since a slice keeps the whole batch alive while the receive budgets
+charge only its bytes. A frame that references a ring slot must keep that
+bound. Per-packet ownership could let large frames skip the copy, which costs
+up to 70% of `wire_decode` (16 datagrams a packet) and 20% of `receive_lease`
+under the benches' plaintext crypto.
+
 Decided 2026-10-08: `SENDMSG_ZC`
 ([#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md))
 and registered TX buffers

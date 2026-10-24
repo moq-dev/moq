@@ -7,7 +7,7 @@
 //! `track_aborted_scan` isolates the other half of delivery: how much a cached
 //! prefix of aborted groups costs the scan that has to walk past it.
 //!
-//! `track_gc` is the cache's clock-driven half: the per-poll [`cache::Pool::gc`]
+//! `track_gc` is the cache's clock-driven half: the per-poll [`cache::Pool::poll`]
 //! call every origin driver makes, and the due expiry pass it runs over every track.
 //!
 //! `track_subscriber_churn` measures viewers joining and leaving beside steady ones:
@@ -340,7 +340,7 @@ impl Swept {
 			.collect();
 		// The first call starts the pool's clock and runs its first pass.
 		let now = Instant::now();
-		pool.gc(now, &kio::Waiter::noop());
+		pool.poll(now, &kio::Waiter::noop());
 		Self {
 			_broadcast: broadcast,
 			_tracks: tracks,
@@ -404,7 +404,7 @@ impl Aged {
 		let pool = broadcast.info().pool.clone();
 		// The driver's first collection, which arms wall-clock deadlines.
 		let now = Instant::now();
-		pool.gc(now, &kio::Waiter::noop());
+		pool.poll(now, &kio::Waiter::noop());
 		let mut reads = Vec::with_capacity(tracks);
 		let tracks = (0..tracks)
 			.map(|i| {
@@ -451,7 +451,7 @@ fn bench_wall(c: &mut Criterion) {
 			group.bench_function(BenchmarkId::new("idle", &id), |b| {
 				let aged = Aged::new(tracks, groups);
 				let waiter = kio::Waiter::noop();
-				b.iter(|| black_box(aged.pool.gc(aged.now, &waiter)));
+				b.iter(|| black_box(aged.pool.poll(aged.now, &waiter)));
 			});
 			// Re-polling one parked read re-arms its deadline.
 			group.bench_function(BenchmarkId::new("repoll", &id), |b| {
@@ -472,7 +472,7 @@ fn bench_wall(c: &mut Criterion) {
 					|| Aged::new(tracks, groups),
 					|aged| {
 						// Past every deadline, which setup armed after `now`.
-						black_box(aged.pool.gc(aged.now + 2 * AGED_BUDGET, &kio::Waiter::noop()));
+						black_box(aged.pool.poll(aged.now + 2 * AGED_BUDGET, &kio::Waiter::noop()));
 						aged
 					},
 					BatchSize::PerIteration,
@@ -491,7 +491,7 @@ fn bench_gc(c: &mut Criterion) {
 		group.bench_with_input(BenchmarkId::new("idle", tracks), &tracks, |b, &tracks| {
 			let swept = Swept::new(tracks);
 			let waiter = kio::Waiter::noop();
-			b.iter(|| black_box(swept.pool.gc(swept.now, &waiter)));
+			b.iter(|| black_box(swept.pool.poll(swept.now, &waiter)));
 		});
 		// Also advance supplied time, so reusing an identical instant cannot hide clock work.
 		group.bench_with_input(BenchmarkId::new("advancing", tracks), &tracks, |b, &tracks| {
@@ -500,7 +500,7 @@ fn bench_gc(c: &mut Criterion) {
 			let waiter = kio::Waiter::noop();
 			b.iter(|| {
 				now += Duration::from_nanos(1);
-				black_box(swept.pool.gc(now, &waiter))
+				black_box(swept.pool.poll(now, &waiter))
 			});
 		});
 		// A due pass, stepping one sweep interval per call.
@@ -512,7 +512,7 @@ fn bench_gc(c: &mut Criterion) {
 			let waiter = kio::Waiter::noop();
 			b.iter(|| {
 				now += interval;
-				black_box(swept.pool.gc(now, &waiter))
+				black_box(swept.pool.poll(now, &waiter))
 			});
 		});
 	}
@@ -1300,7 +1300,7 @@ impl Expiring {
 			now: Instant::now() + Duration::from_secs(3600),
 		};
 		for gap in 0..gaps {
-			fixture.pool.gc(fixture.now, &kio::Waiter::noop());
+			fixture.pool.poll(fixture.now, &kio::Waiter::noop());
 			fixture.sparse.hand_out(gap * 2);
 			fixture.now += Duration::from_millis(1);
 		}
@@ -1319,7 +1319,7 @@ impl Expiring {
 
 	fn step(&mut self) {
 		self.now += Duration::from_millis(1);
-		self.pool.gc(self.now, &kio::Waiter::noop());
+		self.pool.poll(self.now, &kio::Waiter::noop());
 		self.sparse.hand_out(self.sparse.next);
 		self.sparse.next += 2;
 	}

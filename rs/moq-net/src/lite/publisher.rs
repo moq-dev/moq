@@ -2888,7 +2888,7 @@ mod announce_test {
 		let origin = Hop::new(1).unwrap().produce();
 		let _route = origin.announce("cam", crate::origin::Route::default()).unwrap();
 		// An upstream that never answers its announce request.
-		let _silent = origin.clone().upstream().snapshot("");
+		let _silent = origin.clone().with_link(crate::origin::Link::Upstream).snapshot("");
 
 		let log = Log::default();
 		let writes = log.writes.clone();
@@ -3003,7 +3003,7 @@ mod announce_test {
 		h.announcement
 			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
 			.unwrap();
-		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
@@ -3037,7 +3037,7 @@ mod announce_test {
 			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
 			let newer = h.origin.announce("cam", route.clone()).unwrap();
 			// A restart waits out the update hold like an update.
-			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 			settle().await;
 			let restarted = |msgs: Vec<lite::AnnounceBroadcast<'static>>| match (version, msgs.as_slice()) {
 				(
@@ -3067,7 +3067,7 @@ mod announce_test {
 			restarted(h.wire.take_announces());
 
 			drop(newer);
-			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 			settle().await;
 			restarted(h.wire.take_announces());
 			h.assert_idle();
@@ -3089,7 +3089,7 @@ mod announce_test {
 					.with_cost(7),
 			)
 			.unwrap();
-		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[
@@ -3132,7 +3132,7 @@ mod announce_test {
 			};
 			let _newer = h.origin.announce("cam", route).unwrap();
 			auth.authorize(&grant(&["cam", "other"]));
-			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 			settle().await;
 			match h.wire.take_announces().as_slice() {
 				[lite::AnnounceBroadcast::Restart { id: 0, epoch: sent, .. }] => {
@@ -3151,12 +3151,12 @@ mod announce_test {
 		let mut h = harness().await;
 		let route = |cost| crate::origin::Route::default().with_hops(pub_hops()).with_cost(cost);
 		h.announcement.update(route(u64::MAX)).unwrap();
-		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		assert_eq!(h.wire.take_announces().len(), 1, "expected the clamped restart");
 
 		h.announcement.update(route(u64::MAX - 1)).unwrap();
-		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		h.assert_idle();
 	}
@@ -3230,7 +3230,7 @@ mod announce_test {
 					.with_cost(u64::MAX),
 			)
 			.unwrap();
-		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Update { cost, .. }] => {

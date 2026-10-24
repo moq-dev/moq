@@ -5,12 +5,13 @@
 //! that resolver to every TLS listener, so QUIC, HTTPS, and every worker serve
 //! the same certificate and pick up a renewal on their next handshake.
 
+use moq_clock::Wall;
 use std::{
 	io,
 	net::SocketAddr,
 	path::{Path, PathBuf},
 	sync::Arc,
-	time::{Duration, SystemTime, UNIX_EPOCH},
+	time::Duration,
 };
 
 use anyhow::Context as _;
@@ -265,17 +266,21 @@ struct Failures {
 
 impl Failures {
 	/// The failures within [`FAILURE_WINDOW`], oldest first.
-	fn recent(&self) -> anyhow::Result<Vec<SystemTime>> {
+	fn recent(&self) -> anyhow::Result<Vec<Wall>> {
 		let Some(contents) = Cache::read(&self.path)? else {
 			return Ok(Vec::new());
 		};
-		let cutoff = SystemTime::from(moq_clock::wall()) - FAILURE_WINDOW;
+		let cutoff = moq_clock::wall()
+			.checked_sub(FAILURE_WINDOW)
+			.unwrap_or(Wall::UNIX_EPOCH);
 		let mut recent = Vec::new();
 		for line in String::from_utf8_lossy(&contents).lines() {
 			let secs: u64 = line
 				.parse()
 				.with_context(|| format!("malformed ACME failure record in {}", self.path.display()))?;
-			let at = UNIX_EPOCH + Duration::from_secs(secs);
+			let at = Wall::UNIX_EPOCH
+				.checked_add(Duration::from_secs(secs))
+				.context("failure timestamp out of range")?;
 			if at > cutoff {
 				recent.push(at);
 			}
@@ -285,12 +290,12 @@ impl Failures {
 	}
 
 	/// Record a failure now, returning the recent ones including it.
-	fn record(&self) -> anyhow::Result<Vec<SystemTime>> {
+	fn record(&self) -> anyhow::Result<Vec<Wall>> {
 		let mut recent = self.recent()?;
-		recent.push(SystemTime::from(moq_clock::wall()));
+		recent.push(moq_clock::wall());
 		let lines: String = recent
 			.iter()
-			.map(|at| format!("{}\n", at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()))
+			.map(|at| format!("{}\n", at.saturating_duration_since(Wall::UNIX_EPOCH).as_secs()))
 			.collect();
 		Cache::write(&self.path, lines.as_bytes())?;
 		Ok(recent)
@@ -304,15 +309,17 @@ impl Failures {
 	}
 
 	/// The startup error once `failed` reaches [`FAILURE_LIMIT`].
-	fn refuse(&self, failed: &[SystemTime], domains: &str, addr: SocketAddr, last: Option<&str>) -> anyhow::Error {
+	fn refuse(&self, failed: &[Wall], domains: &str, addr: SocketAddr, last: Option<&str>) -> anyhow::Error {
 		let retry = failed
 			.first()
-			.map_or(SystemTime::from(moq_clock::wall()), |oldest| *oldest + FAILURE_WINDOW);
+			.map_or(Some(moq_clock::wall()), |oldest| oldest.checked_add(FAILURE_WINDOW))
+			.map(|retry| humantime::format_rfc3339_seconds(retry.into()).to_string())
+			.unwrap_or_else(|| "the supported wall-time range".to_string());
 		let last = last.map(|last| format!("; last error: {last}")).unwrap_or_default();
 		anyhow::anyhow!(
 			"ACME validation for {domains} failed {} times in the last hour; stopping before the directory's failed-validation limit locks the hostname out (Let's Encrypt allows 5 failed validations per hostname per hour). Check that each domain resolves to this relay and that TCP port 443 reaches web.https.listen ({addr}), then restart after {} or delete {}{last}",
 			failed.len(),
-			humantime::format_rfc3339_seconds(retry),
+			retry,
 			self.path.display(),
 		)
 	}

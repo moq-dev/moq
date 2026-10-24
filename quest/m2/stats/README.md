@@ -11,8 +11,7 @@ its own connection. A dashboard reads both the same way a publisher does. One
 shared model turns either report into a health verdict, and a bounded
 preflight run reports which media layer of a broadcast is broken. Stats and
 feedback cost nothing on the network unless someone subscribes. Not here: the
-relay's `moq-stats` layout, which this line does not change (the
-[broadcast epoch](/quest/m0/broadcast-epoch/README.md) line reshapes it);
+relay's `moq-stats` layout, which this line does not change;
 clock synchronization; any
 requirement that a client report; and feedback as an input to billing,
 authorization, or route selection.

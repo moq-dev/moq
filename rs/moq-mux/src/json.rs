@@ -746,35 +746,36 @@ mod test {
 
 		assert_eq!(entry(&catalog, "gps").bitrate, Some(100_000));
 		assert_eq!(entry(&catalog, "status").bitrate, Some(4_200));
-		assert_eq!(
-			entry(&catalog, "gps").jitter,
-			None,
-			"write spacing is not a flush delay"
-		);
+		assert_eq!(entry(&catalog, "gps").jitter, None, "write spacing is not jitter");
 	}
 
-	/// An unchanged snapshot value writes no frame, so its capture time must not measure a flush
+	/// An unchanged snapshot value writes no frame, so its capture time must not measure a write
 	/// that never happened.
 	#[test]
 	fn an_unchanged_snapshot_measures_nothing() {
 		let (mut broadcast, catalog) = catalog();
+		let mut gps = catalog
+			.json_stream::<Value>(timed_track(&mut broadcast, "gps"), Config::default())
+			.unwrap();
 		let mut status = catalog
 			.json_snapshot::<Value>(timed_track(&mut broadcast, "status"), Config::default())
 			.unwrap();
 		let now = catalog.clock().now();
 		let value = serde_json::json!({ "armed": true });
 		status.update(Timed::from(&value).at(now)).unwrap();
+		gps.append(Timed::from(&serde_json::json!({ "lat": 0 })).at(now))
+			.unwrap();
 		let stale = now
 			.checked_sub(moq_net::Timestamp::from_micros(1_000_000).unwrap())
 			.unwrap();
 		status.update(Timed::from(&value).at(stale)).unwrap();
-		assert_eq!(entry(&catalog, "status").jitter, None);
+		assert_eq!(entry(&catalog, "status").delay, None);
 
-		// The same stale capture on a changed value is measured.
+		// The same stale capture on a changed value is written behind gps.
 		let changed = serde_json::json!({ "armed": false });
 		status.update(Timed::from(&changed).at(stale)).unwrap();
-		let jitter = entry(&catalog, "status").jitter.expect("a late capture is jitter");
-		assert!(jitter >= std::time::Duration::from_secs(1), "{jitter:?}");
+		let delay = entry(&catalog, "status").delay.expect("a capture behind gps is delay");
+		assert!(delay >= std::time::Duration::from_secs(1), "{delay:?}");
 	}
 
 	/// The catalog is the only thing that announces a data track, so walking it is the discovery

@@ -918,19 +918,21 @@ The parameter-specific value, interpreted according to Parameter ID.
 A capability is available for the session only if the relevant endpoint advertises it; an absent parameter means the sender does not support that capability.
 The following Setup Parameters are defined:
 
-|------|-----------|-------------|
-|  ID  | Name      | Value       |
-|-----:|:----------|:------------|
-| 0x1  | Probe     | Level (i)   |
-|------|-----------|-------------|
-| 0x2  | Path      | Path (s)    |
-|------|-----------|-------------|
-| 0x3  | Role      | Role (i)    |
-|------|-----------|-------------|
-| 0x4  | Cost      | Cost (i)    |
-|------|-----------|-------------|
-| 0x5  | Hop       | Hop ID (i)  |
-|------|-----------|-------------|
+|------|----------------|-------------|
+|  ID  | Name           | Value       |
+|-----:|:---------------|:------------|
+| 0x1  | Probe          | Level (i)   |
+|------|----------------|-------------|
+| 0x2  | Path           | Path (s)    |
+|------|----------------|-------------|
+| 0x3  | Role           | Role (i)    |
+|------|----------------|-------------|
+| 0x4  | Cost           | Cost (i)    |
+|------|----------------|-------------|
+| 0x5  | Hop            | Hop ID (i)  |
+|------|----------------|-------------|
+| 0x6  | Implementation | Tokens (s)  |
+|------|----------------|-------------|
 
 ### Probe Parameter {#probe-parameter}
 The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
@@ -991,6 +993,13 @@ The Parameter Value is a variable-length integer; a value of 0 carries no identi
 Declaring it at setup gives the receiver the peer's identity before any other stream arrives, so route selection applies the same exclusion to the peer's subscriptions as to its announcements (see [Routing](#routing)), even on a session that never opens an Announce Stream.
 Either endpoint MAY send it; a subscriber-only endpoint with no identity MAY omit it, but a publisher SHOULD have a Hop ID regardless (see [ANNOUNCE_OK](#announce-ok)).
 A relay MUST NOT forward it.
+
+### Implementation Parameter {#implementation-parameter}
+The Implementation Parameter names the sender's software, so a peer can attribute a session to its build.
+The Parameter Value is a UTF-8 string of space-separated `name/version` product tokens, outermost first, such as `moq-ffi/0.4.12 moq-net-rs/0.3.10`; it is otherwise opaque to moq-lite.
+A receiver that receives an invalid UTF-8 value MUST close the session with a PROTOCOL_VIOLATION.
+
+Either endpoint MAY send it, and MAY omit it to avoid disclosing its software. A receiver MUST NOT authorize on it or change its protocol behavior because of it. A relay MUST NOT forward it.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}
@@ -1787,6 +1796,8 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-07
+
+- Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens. Earlier versions with a Setup Stream ignore it as an unknown parameter.
 
 - Allow a negotiated extension to preserve timestamps with explicitly unchecked provenance.
 

@@ -1746,15 +1746,14 @@ impl PeerIdentity {
 		Some(cert.issuer().to_string())
 	}
 
-	/// The leaf certificate's `notAfter`, if it parses. A `notAfter` before the
-	/// Unix epoch is reported as `None`.
-	pub fn expiry(&self) -> Option<std::time::SystemTime> {
-		use std::time::{Duration, UNIX_EPOCH};
-
+	/// The leaf certificate's `notAfter`, if it parses, saturated to the wall range.
+	pub fn expiry(&self) -> Option<moq_clock::Wall> {
 		let leaf = self.chain.first()?;
 		let (_, cert) = x509_parser::parse_x509_certificate(leaf).ok()?;
-		let secs = u64::try_from(cert.validity().not_after.timestamp()).ok()?;
-		Some(UNIX_EPOCH + Duration::from_secs(secs))
+		// Before 1970 reads as the epoch and past 2554 as the last wall time: no
+		// representable now compares differently against the saturated value.
+		let secs = u64::try_from(cert.validity().not_after.timestamp()).unwrap_or(0);
+		Some(moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(secs)))
 	}
 }
 
@@ -2328,9 +2327,28 @@ mod tests {
 		let parsed = PeerIdentity::from_any(Some(identity)).expect("chain parsed");
 		let expiry = parsed.expiry().expect("expiry parsed");
 		assert_eq!(
-			expiry.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+			expiry.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH).as_secs(),
 			2_000_000_000
 		);
+	}
+
+	#[cfg(feature = "quic")]
+	#[test]
+	fn peer_expiry_saturates_to_the_wall_range() {
+		let last = moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
+		// rcgen's default notAfter is in 4096.
+		for (seconds, expected) in [
+			(-1, moq_clock::Wall::UNIX_EPOCH),
+			(18_446_744_074, last),
+			(67_090_118_400, last),
+		] {
+			let key = rcgen::KeyPair::generate().unwrap();
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+			params.not_after = ::time::OffsetDateTime::from_unix_timestamp(seconds).unwrap();
+			let cert = params.self_signed(&key).unwrap().into();
+			let peer = PeerIdentity { chain: vec![cert] };
+			assert_eq!(peer.expiry(), Some(expected));
+		}
 	}
 
 	#[cfg(feature = "quic")]

@@ -326,7 +326,10 @@ impl StreamError {
 /// Local conditions are the flat variants (`Cancel`, `NotFound`, `Lagged`, and so
 /// on): this side decided what went wrong. Codes received from a peer are nested
 /// in [`Self::Session`] or [`Self::Stream`], preserving the registry and the numeric
-/// value. [`Self::Remote`] is an unrecognized request-rejection code (the IETF
+/// value. A stream also reads its session ending cleanly, whichever side closed it, as
+/// `Session(SessionError::Cancel)`: to the stream that is the session failing under it,
+/// while [`crate::Session::closed`] reports the clean close itself as [`Self::Cancel`].
+/// [`Self::Remote`] is an unrecognized request-rejection code (the IETF
 /// request registry), not a session or stream unknown.
 ///
 /// The two registries are the wire. Mapping a local condition onto a code is
@@ -374,8 +377,8 @@ pub enum Error {
 	#[error("duplicate")]
 	Duplicate,
 
-	/// Nobody is reading any more, so the producer stopped. Not a failure.
-	// Cancel is returned when there are no more readers.
+	/// Nobody is reading any more, so the producer stopped; or the session closed cleanly,
+	/// by either side, as [`crate::Session::closed`] reports it. Not a failure.
 	#[error("cancelled")]
 	Cancel,
 
