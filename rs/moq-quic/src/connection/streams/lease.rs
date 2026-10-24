@@ -21,9 +21,6 @@ pub struct Leased {
     chunks: VecDeque<Bytes>,
     /// Bytes in `chunks`.
     len: u64,
-    /// The trailing chunks that still slice the datagram buffers they arrived in, which a byte
-    /// of them keeps whole.
-    fresh: usize,
     /// Bytes whose connection credit is withheld: `len`, plus bytes taken or advanced past but
     /// not yet released.
     held: u64,
@@ -90,7 +87,6 @@ impl Leased {
             false => self.chunks.pop_front().expect("front exists"),
         };
         self.len -= chunk.len() as u64;
-        self.fresh = self.fresh.min(self.chunks.len());
         chunk
     }
 
@@ -112,7 +108,6 @@ impl Leased {
             left -= front.len();
             self.chunks.pop_front();
         }
-        self.fresh = self.fresh.min(self.chunks.len());
     }
 
     /// Return the credit of every byte taken or advanced past.
@@ -122,19 +117,19 @@ impl Leased {
         freed
     }
 
-    /// Copy the fresh chunks out of their datagram buffers, for a reader about to wait on them.
+    /// Lease `read`, copied out of the datagram buffers it arrived in.
     ///
     /// Credit counts the leased bytes, but a slice keeps its whole receive buffer alive, so a
     /// peer splitting a unit into tiny frames would otherwise hold many buffers per byte of
-    /// credit. Bytes handed out without waiting never pay for the copy. Absorbing each smaller
+    /// credit, whether the reader waits on them, parks, or takes them. Absorbing each smaller
     /// predecessor keeps a slowly arriving unit to few chunks while copying each byte only a
     /// logarithmic number of times.
-    fn compact(&mut self) {
-        if self.fresh == 0 {
+    fn extend(&mut self, read: &[Bytes]) {
+        let len: usize = read.iter().map(Bytes::len).sum();
+        if len == 0 {
             return;
         }
-        let mut start = self.chunks.len() - self.fresh;
-        let mut size: usize = self.chunks.range(start..).map(Bytes::len).sum();
+        let (mut start, mut size) = (self.chunks.len(), len);
         while start > 0 && self.chunks[start - 1].len() <= size {
             start -= 1;
             size += self.chunks[start].len();
@@ -143,8 +138,12 @@ impl Leased {
         for chunk in self.chunks.drain(start..) {
             buf.extend_from_slice(&chunk);
         }
+        for chunk in read {
+            buf.extend_from_slice(chunk);
+        }
         self.chunks.push_back(buf.freeze());
-        self.fresh = 0;
+        self.len += len as u64;
+        self.held += len as u64;
     }
 }
 
@@ -216,7 +215,6 @@ impl RecvStream<'_> {
                 Some(End::Reset(code)) => return Err(LeaseError::Reset(code)),
                 None => {
                     lease.want = Some(want);
-                    lease.compact();
                     // It may be waiting behind a gap, which holds eviction off until filled.
                     self.state.unlooked.insert(self.id);
                     // An eviction always has a reader to wake, even with no `MAX_DATA` due yet.
@@ -297,7 +295,7 @@ impl RecvStream<'_> {
             return Ok(ShouldTransmit(false));
         }
 
-        let mut read = VecDeque::new();
+        let mut read = Vec::new();
         let (end, transmit) = {
             let mut chunks = match Chunks::new(self.id, true, self.state, self.pending) {
                 Ok(chunks) => chunks,
@@ -307,7 +305,7 @@ impl RecvStream<'_> {
             };
             let end = loop {
                 match chunks.next(usize::MAX) {
-                    Ok(Some(chunk)) => read.push_back(chunk.bytes),
+                    Ok(Some(chunk)) => read.push(chunk.bytes),
                     Ok(None) => break Some(End::Fin),
                     Err(ReadError::Blocked) => break None,
                     Err(ReadError::Reset(code)) => break Some(End::Reset(code)),
@@ -318,11 +316,7 @@ impl RecvStream<'_> {
         };
 
         let lease = self.state.leases.get_mut(&self.id).expect("inserted above");
-        let len: u64 = read.iter().map(|chunk| chunk.len() as u64).sum();
-        lease.len += len;
-        lease.held += len;
-        lease.fresh += read.len();
-        lease.chunks.append(&mut read);
+        lease.extend(&read);
         lease.end = end;
         Ok(transmit)
     }
@@ -529,7 +523,6 @@ impl StreamsState {
         let held = std::mem::take(&mut lease.len);
         lease.held -= held;
         lease.chunks.clear();
-        lease.fresh = 0;
         lease.want = None;
         lease.ready = false;
         lease.evicted = true;

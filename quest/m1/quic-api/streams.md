@@ -70,10 +70,9 @@ the connection's `MutexGuard`, so while moq-net decodes a message from a
 lease, the connection's packet processing, transmits, timers, and every other
 stream wait on it. `recv::Lease` instead holds owned `Bytes` chunks, taken
 under a short lock, and returns their credit under another short lock on
-release or drop. The [receive pinning](/quest/m1/quic-receive-pinning.md)
-fix already copies or compacts chunks out of the batch, so owning them adds
-no copy. A lease stays `!Send` only if something still needs it; otherwise it
-may cross an await. Test that the driver keeps sending and receiving on
+release or drop. A lease already copies its chunks out of the receive batch
+as it fills, so owning them adds no copy. A lease stays `!Send` only if
+something still needs it; otherwise it may cross an await. Test that the driver keeps sending and receiving on
 other streams while a lease is held.
 
 **Datagrams.** `send_datagram(impl Buf, send::Options)`, so a caller

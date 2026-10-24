@@ -695,7 +695,7 @@ pub(super) struct Publisher {
 	auth: crate::auth::Handle,
 	// Dispatched finite serves, including those not yet polled.
 	pub(super) owed: Arc<AtomicUsize>,
-	// Subscriptions the peer holds, PUBLISHes for its listings capped by `session::Limits::requests`.
+	// Subscriptions the peer holds, PUBLISHes for its listings included, counted for the peak.
 	pub(super) subscriptions: crate::session::Slots,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,

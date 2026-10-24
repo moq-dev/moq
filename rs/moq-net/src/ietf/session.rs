@@ -225,8 +225,9 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 				.with_stats(stats.clone())
 		});
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
+		// Counted for the peak only: stream credit bounds them.
 		let subscriptions =
-			crate::session::Slots::new(limits.requests).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+			crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 		let announces =
 			crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 

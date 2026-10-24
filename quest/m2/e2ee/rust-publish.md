@@ -20,8 +20,8 @@ moq-video and moq-audio encoders take them, so mux, video, audio, and
 timeline publishers already publish into an encrypted
 broadcast under semantic names with no change here. This quest keeps only
 what the traits do not cover. Every track these publishers serve is declared
-in advance, so it does not wait on the
-[dynamic names](/quest/m2/e2ee/dynamic-names.md) design (maintainer,
+in advance, so it does not wait on
+[undeclared names](/quest/m2/e2ee/undeclared-names.md) (maintainer,
 2026-10-19).
 
 - Catalog naming: derive the protected catalog name from its well-known
