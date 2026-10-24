@@ -379,12 +379,12 @@ export class Reload {
 		// This run's teardown, handed to connect() so a rerun cancels the attempt in flight.
 		const signal = effect.abort;
 
-		// The session this run serves, closed with the run. A drained one leaves this slot
+		// The session this run serves, ended with the run. A drained one leaves this slot
 		// for #draining, which outlives the run.
 		let current: Established | undefined;
 		effect.cleanup(() => {
 			if (current) {
-				current.abort();
+				this.#end(current);
 				if (this.established.peek() === current) this.established.set(undefined);
 				current = undefined;
 			}
@@ -419,7 +419,8 @@ export class Reload {
 						this.#dialing = false;
 					}
 
-					// Hand the connection to the effect, which closes it now if this run is already over.
+					// Hand the connection to the effect. One that lands after this run is over never
+					// served anything, so there is nothing to drain.
 					if (signal.aborted) {
 						connection.abort();
 						return;
@@ -439,6 +440,7 @@ export class Reload {
 					if (ended === null || ended instanceof Error) {
 						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);
 						this.#redirects.reset();
+						current = undefined;
 						if (this.established.peek() === connection) this.established.set(undefined);
 						this.#retry(effect, connected, ended ?? undefined);
 						return;
@@ -510,7 +512,7 @@ export class Reload {
 			// The peer is leaving and named somewhere we won't go: redialing the old address
 			// would ignore it, so stop here.
 			console.warn("GOAWAY redirect refused:", err);
-			connection.abort();
+			this.#end(connection);
 			this.established.set(undefined);
 			this.status.set("disconnected");
 			this.#giveUp(error(err));
@@ -524,8 +526,8 @@ export class Reload {
 		}
 
 		console.info("GOAWAY received; migrating");
-		// A newer GOAWAY retires an older predecessor rather than holding two open.
-		this.#draining?.retire();
+		// A newer GOAWAY retires an older predecessor rather than serving from two.
+		this.#retire();
 		const cap = handover(this.goaway.handover ?? DEFAULT_HANDOVER, drain.timeout);
 		const draining = new Draining(connection, cap, () => {
 			if (this.#draining === draining) this.#draining = undefined;
@@ -536,6 +538,26 @@ export class Reload {
 		});
 		this.#draining = draining;
 		return true;
+	}
+
+	/**
+	 * End a session this loop is done with. Its groups in flight finish within the close
+	 * deadline, unless the page is going away: nothing would run to finish them, and an abort
+	 * closes the transport now rather than leaving the browser to sever it.
+	 */
+	#end(connection: Established): void {
+		if (this.#suspended.peek()) {
+			connection.abort();
+			return;
+		}
+		// A served live track never finishes, so the deadline aborting the rest is the usual end.
+		connection.close().catch(() => {});
+	}
+
+	/** Stop serving from a drained predecessor, ending it if still open. */
+	#retire(): void {
+		const draining = this.#draining?.retire();
+		if (draining) this.#end(draining);
 	}
 
 	#initial(): Milli {
@@ -622,7 +644,7 @@ export class Reload {
 		this.#deadline = undefined;
 		this.#sequenceHref = undefined;
 		this.#redirects.reset();
-		this.#draining?.retire();
+		this.#retire();
 	}
 
 	/**
@@ -669,10 +691,10 @@ export class Reload {
 		return this.established.peek()?.stats();
 	}
 
-	/** Stop reconnecting, close the current connection, and settle {@link Reload.closed}. Idempotent. */
+	/** Stop reconnecting, drain and close the current connection, and settle {@link Reload.closed}. Idempotent. */
 	close(abort?: Error) {
 		this.#signals.close();
-		this.#draining?.retire();
+		this.#retire();
 		if (this.#closed.peek() === undefined) this.#closed.set(abort ?? null);
 	}
 }
@@ -733,7 +755,8 @@ export function pumpAnnounced(effect: Effect, upstream: Announce.Consumer, produ
 
 /**
  * A session the peer sent GOAWAY on, left serving so its groups in flight finish. It retires
- * when it closes on its own or overstays its handover window, and `onRetire` runs once either way.
+ * when it closes on its own, overstays its handover window (aborted), or is retired by the
+ * loop, and `onRetire` runs once either way.
  */
 class Draining {
 	#connection: Established;
@@ -746,22 +769,22 @@ class Draining {
 		this.#onRetire = onRetire;
 		void sleep(Nano.fromMilli(handover), { signal: this.#timer.signal }).then(
 			() => {
-				if (this.#retired) return;
+				if (!this.retire()) return;
 				console.warn("old session did not drain in time; closing");
-				this.retire();
+				connection.abort();
 			},
 			() => {},
 		);
 		void connection.closed.then(() => this.retire());
 	}
 
-	/** Close the old session now, whatever remains of its window. Idempotent. */
-	retire(): void {
-		if (this.#retired) return;
+	/** Stop serving from the old session, returning it the first time for the caller to end. */
+	retire(): Established | undefined {
+		if (this.#retired) return undefined;
 		this.#retired = true;
 		this.#timer.abort();
-		this.#connection.abort();
 		this.#onRetire();
+		return this.#connection;
 	}
 }
 
