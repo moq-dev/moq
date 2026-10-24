@@ -439,7 +439,7 @@ pub enum Error {
 	#[error("unexpected message")]
 	UnexpectedMessage,
 
-	/// The peer asked for a feature this endpoint does not implement.
+	/// A feature was asked for that this endpoint, or the wire to the peer, does not implement.
 	#[error("unsupported")]
 	Unsupported,
 

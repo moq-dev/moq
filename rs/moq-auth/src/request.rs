@@ -1,9 +1,10 @@
+use moq_clock::Wall;
 use serde::{Deserialize, Serialize};
 use serde_with::base64::{Base64, UrlSafe};
 use serde_with::formats::Unpadded;
-use serde_with::{DurationSecondsWithFrac, TimestampSeconds, serde_as};
+use serde_with::{DurationSecondsWithFrac, serde_as};
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use crate::lease::Reason;
 
@@ -212,8 +213,8 @@ pub struct Peer {
 	/// SHA-256 of the leaf certificate, hex.
 	pub fingerprint: String,
 	/// The certificate's notAfter.
-	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
-	pub expires: Option<SystemTime>,
+	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
+	pub expires: Option<Wall>,
 	/// The issuer's distinguished name.
 	pub issuer: String,
 }
@@ -243,7 +244,7 @@ mod tests {
 		request.tls = Some(Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
-			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
+			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			issuer: "CN=cluster".into(),
 		});
 		request

@@ -105,9 +105,10 @@ pub fn moq_mint_epoch() -> String {
 #[uniffi::export]
 pub fn moq_epoch_time_ms(epoch: String) -> Result<u64, MoqError> {
 	let epoch: moq_net::Epoch = epoch.parse()?;
-	let since = epoch.time().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-	// A UUIDv7 holds 48 bits of milliseconds, so this never truncates.
-	Ok(since.as_millis() as u64)
+	// This numeric API retains UUIDv7's full 48-bit range, beyond Wall's year 2554.
+	// Parsing above guarantees these fields are canonical hexadecimal Unix milliseconds.
+	let text = epoch.as_str();
+	Ok(u64::from_str_radix(&text[..8], 16).unwrap() << 16 | u64::from_str_radix(&text[9..13], 16).unwrap())
 }
 
 /// An origin in which broadcasts can be published.

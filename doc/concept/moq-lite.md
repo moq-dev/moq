@@ -265,9 +265,12 @@ own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
 served. A relay merges its subscribers' ranges into one upstream request, which
-today's wire versions carry as the single span covering them. A time anchor is
-resolved from the groups the serving hop holds; upstream it asks for everything
-max delay allows, and an untimed track refuses it. At the live edge, a time end
+today's wire versions carry as the single span covering them. A relative or time
+anchor resolves on the hop that publishes the track, and over moq-lite-07, which
+reports the live edge and media time and asks upstream for every group the budget
+allows. Over an older lite or any moq-transport version, a subscriber gets every
+anchor but the live and default starts refused as unsupported, and an untimed
+track refuses a time anchor. At the live edge, a time end
 may let one group through before its first frame shows it starts past the end:
 the first group that has yet to start is handed out without waiting for that
 frame, and the next one waits on it. A datagram is judged by its own timestamp.

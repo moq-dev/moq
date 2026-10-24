@@ -5,17 +5,17 @@
 //! a push asks the lease to re-check now, and the server's reply is the verdict.
 //! One-shot HTTP and LAN peers are not sessions and stay out.
 
+use moq_clock::Wall;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use moq_auth::{Pattern, Peer, Request, Role, Transport};
 use serde::{Deserialize, Serialize};
-use serde_with::{TimestampSeconds, serde_as};
+use serde_with::serde_as;
 
 /// The live sessions on this node, cloned into every connection and the
 /// internal listener.
@@ -26,7 +26,7 @@ pub struct Registry {
 
 struct Entry {
 	request: Request,
-	started: SystemTime,
+	started: Wall,
 	handle: Handle,
 }
 
@@ -98,7 +98,7 @@ impl Registry {
 			id.clone(),
 			Entry {
 				request,
-				started: SystemTime::from(moq_clock::wall()),
+				started: moq_clock::wall(),
 				handle: handle.clone(),
 			},
 		);
@@ -439,12 +439,12 @@ pub struct View {
 	/// The verified client certificate, when one was presented.
 	pub tls: Option<Peer>,
 	/// When the session was admitted, as unix seconds.
-	#[serde_as(as = "TimestampSeconds<i64>")]
-	pub started: SystemTime,
+	#[serde_as(as = "moq_clock::serde::UnixSeconds")]
+	pub started: Wall,
 }
 
 impl View {
-	fn from_session(request: &Request, started: SystemTime) -> Self {
+	fn from_session(request: &Request, started: Wall) -> Self {
 		Self {
 			id: request.id.clone(),
 			node: request.node.clone(),

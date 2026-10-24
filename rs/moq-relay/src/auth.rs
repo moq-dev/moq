@@ -522,9 +522,10 @@ impl Lease {
 	pub(crate) fn preparing(
 		mut self,
 		handle: moq_net::auth::Handle,
-		role: Option<moq_net::Role>,
+		requests: moq_net::auth::Requests,
+		role: Option<moq_net::setup::Role>,
 	) -> Result<Self, moq_net::Error> {
-		let refresh = refresh::Refresh::new(&mut self, handle, role)
+		let refresh = refresh::Refresh::new(&mut self, handle, requests, role)
 			.inspect_err(|err| crate::connection::setup_failed(&self.stats, Some(err)))?;
 		self.refresh = Some(refresh);
 		Ok(self)
@@ -1096,10 +1097,10 @@ fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
 }
 
 /// The auth role for a session role, `None` for one `moq-auth` cannot name yet.
-pub(crate) fn role(role: moq_net::Role) -> Option<moq_auth::Role> {
+pub(crate) fn role(role: moq_net::setup::Role) -> Option<moq_auth::Role> {
 	match role {
-		moq_net::Role::Publisher => Some(moq_auth::Role::Publisher),
-		moq_net::Role::Subscriber => Some(moq_auth::Role::Subscriber),
+		moq_net::setup::Role::Publisher => Some(moq_auth::Role::Publisher),
+		moq_net::setup::Role::Subscriber => Some(moq_auth::Role::Subscriber),
 		_ => None,
 	}
 }
@@ -1119,7 +1120,6 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
-	use std::time::SystemTime;
 
 	fn patterns(texts: &[&str]) -> moq_auth::Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
@@ -1402,7 +1402,7 @@ mod tests {
 
 		let start = moq_clock::now();
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(SystemTime::from(moq_clock::wall()) + Duration::from_secs(10));
+		grant.expires = Some(moq_clock::wall() + Duration::from_secs(10));
 		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
 		for _ in 0..9 {
 			assert!(moq_clock::timeout(Duration::from_secs(1), lease.ended()).await.is_err());
@@ -1420,7 +1420,7 @@ mod tests {
 		use std::time::Duration;
 
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(SystemTime::from(moq_clock::wall()) - Duration::from_secs(1));
+		grant.expires = Some(moq_clock::wall() - Duration::from_secs(1));
 		assert!(matches!(grant.validate(), Err(moq_auth::Error::GrantExpired)));
 
 		let start = moq_clock::now();

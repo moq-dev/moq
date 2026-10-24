@@ -149,7 +149,10 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 async fn tokio_peer_session_widens_quic_limits() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
-	let relay = Relay::load(config(dir.path())).await.expect("load relay");
+	let relay = Relay::load(config(dir.path()))
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let port = relay.quic_addr().expect("quic listener bound").port();
 	peer_widens_and_viewer_does_not(relay, port).await;
 }
@@ -321,7 +324,7 @@ async fn tokio_worker_peer_session_widens_quic_limits() {
 	let mut config = config(dir.path());
 	config.runtime.workers = Some(1);
 	config.runtime.pin = false;
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	peer_widens_and_viewer_does_not(relay, port).await;
 }
@@ -343,7 +346,7 @@ async fn uring_peer_session_widens_quic_limits() {
 	config.runtime.workers = Some(1);
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	peer_widens_and_viewer_does_not(relay, port).await;
 }

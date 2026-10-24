@@ -7,10 +7,12 @@ use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
-	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Role, Session,
-	SessionError, Version, Versions,
+	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, SessionError,
+	Version, Versions,
 	coding::{Decode, Encode, Stream},
-	ietf, lite, setup, stats,
+	ietf, lite,
+	setup::{self, Role},
+	stats,
 };
 
 /// Tracks admitted connections until their handshake or session ends.
@@ -821,11 +823,26 @@ impl Handshake {
 	}
 
 	/// The session's auth handle, the same one [`Session::auth`] returns once accepted.
-	///
-	/// Take [`requests`](crate::auth::Handle::requests) here to answer the client's
-	/// tokens yourself; the choice is fixed once the session's driver first runs.
 	pub fn auth(&self) -> crate::auth::Handle {
 		self.auth.clone()
+	}
+
+	/// Answer every token the client presents yourself, instead of the default acceptor:
+	/// on its own AUTH stream, or riding one of its moq-transport SUBSCRIBE or
+	/// PUBLISH_NAMESPACE requests as an `AUTHORIZATION TOKEN`.
+	///
+	/// Without it the session grants the client what its own origin handles allow for the
+	/// connection's credential, and refuses any other token as unsupported, along with the
+	/// request that carried it. A later call hands the queue to the new [`auth::Requests`],
+	/// ending the earlier one.
+	///
+	/// The client's credit bounds how many tokens wait unanswered: each AUTH token holds its
+	/// stream open, and each request token holds its request's slot, until it is answered or
+	/// withdrawn. A withdrawn token leaves the queue.
+	///
+	/// [`auth::Requests`]: crate::auth::Requests
+	pub fn requests(&mut self) -> crate::auth::Requests {
+		self.auth.requests()
 	}
 
 	/// The credential the client presented in its SETUP's `AUTHORIZATION TOKEN` option.
@@ -1234,7 +1251,7 @@ mod tests {
 		params
 	}
 
-	/// An acceptor taken with `Request::auth().requests()` BEFORE `ok()` must govern the
+	/// An acceptor taken with `Handshake::requests()` BEFORE `ok()` must govern the
 	/// session the driver then runs, through the REAL accept path (`accept_request` -> `ok`).
 	/// The session's own `auth()` (the handle the driver polls) routes a request token to that
 	/// pre-ok consumer instead of falling to the `Unsupported` default, and granting admits.
@@ -1255,13 +1272,13 @@ mod tests {
 		];
 
 		for (session, version) in cases {
-			let request = Server::new()
+			let mut request = Server::new()
 				.accept_request(moq_clock::now(), session)
 				.await
 				.unwrap_or_else(|e| panic!("accept at {version:?}: {e}"));
 
 			// Install the verifier before ok(), as a QUIC server must.
-			let mut requests = request.auth().requests().expect("requests() pre-ok");
+			let mut requests = request.requests();
 			let (net_session, _driver) = request.ok().await.unwrap_or_else(|e| panic!("ok at {version:?}: {e}"));
 
 			// The session's own handle is the one the driver polls. Verifying a request token on

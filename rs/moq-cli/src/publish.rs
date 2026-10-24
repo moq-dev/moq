@@ -1421,9 +1421,9 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
-		let before = std::time::SystemTime::now();
+		let before = moq_clock::wall();
 		decoder.decode_chunk(BBB).unwrap();
-		let after = std::time::SystemTime::now();
+		let after = moq_clock::wall();
 		decoder.finish().unwrap();
 
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)

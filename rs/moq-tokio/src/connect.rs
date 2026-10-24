@@ -648,8 +648,8 @@ pub struct Config {
 
 	/// Dial once instead of redialing (with backoff) whenever the session drops.
 	///
-	/// A [`crate::Connection`] reconnects by default. With this set, the session's
-	/// close surfaces through [`crate::Connection::closed`] instead.
+	/// The connection reconnects by default. With this set, the session's
+	/// close surfaces through its closed event instead.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "connect-once",
@@ -672,12 +672,12 @@ pub struct Config {
 	#[usage(skip)]
 	pub(crate) reconnect: Option<bool>,
 
-	/// Retry pacing for [`crate::Client::connect`] (`--backoff-*`).
+	/// Retry pacing for [`crate::Client::connect`] (`--connect-backoff-*`).
 	#[usage(flatten)]
 	#[serde(default)]
 	pub backoff: Backoff,
 
-	/// How [`crate::Client::connect`] reacts to a peer's GOAWAY (`--goaway-*`).
+	/// How [`crate::Client::connect`] reacts to a peer's GOAWAY (`--connect-goaway-*`).
 	#[usage(flatten)]
 	#[serde(default)]
 	pub goaway: Goaway,
@@ -744,6 +744,8 @@ impl Config {
 	/// skipped the check can't reach a dial that quietly ignored half of it.
 	pub fn deprecated(&self) -> crate::cli::Deprecated {
 		let mut found = self.legacy.deprecated();
+		found.extend(self.backoff.deprecated());
+		found.extend(self.goaway.deprecated());
 		if self.connect.is_some() {
 			found.toml("connect", "url", None);
 		}

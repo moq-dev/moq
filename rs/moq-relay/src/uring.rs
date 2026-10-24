@@ -336,9 +336,13 @@ impl Workers {
 				start: start_rx,
 				failures: self.failures_tx.clone(),
 			};
+			// A scoped embedder subscriber belongs to these workers too; threads do
+			// not inherit their creator's tracing dispatcher.
+			let dispatch = tracing::dispatcher::get_default(Clone::clone);
+			let parent = tracing::Span::current();
 			let thread = std::thread::Builder::new()
 				.name(format!("moq-uring-{index}"))
-				.spawn(move || run_worker(spawn))
+				.spawn(move || tracing::dispatcher::with_default(&dispatch, || parent.in_scope(|| run_worker(spawn))))
 				.with_context(|| format!("failed to spawn io_uring worker {index}"))?;
 
 			// A worker that fails setup drops its sender, so a recv error and
@@ -877,7 +881,7 @@ async fn serve_request(
 	if let Some(publisher) = publisher {
 		request = request.with_subscriber(publisher);
 	}
-	let lease = lease.preparing(request.auth(), request.role())?;
+	let lease = lease.preparing(request.auth(), request.requests(), request.role())?;
 	let serving = serve.shutdown.serve();
 	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
 	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the

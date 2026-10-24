@@ -750,7 +750,7 @@ pub struct Config {
 
 	/// Connect to one or more other cluster nodes. Each entry is a full URL, e.g.
 	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`, `egress`,
-	/// `token`, and `upstream`; see [`Peer`]. A bare host or `host:port` is refused; pass the
+	/// `token`, and `upstream`. A bare host or `host:port` is refused; pass the
 	/// full URL instead. Accepts a comma-separated list on the CLI or repeat the
 	/// flag; in config files use a TOML array of URLs and/or objects.
 	///
@@ -793,7 +793,7 @@ pub struct Config {
 	pub(crate) removed_api_root: Option<serde::de::IgnoredAny>,
 
 	/// This relay's own externally-reachable URL (identity). Sent to
-	/// [`Self::api`] as a `?node=` query param so the endpoint can return
+	/// `--cluster-api-url` as a `?node=` query param so the endpoint can return
 	/// this node's peers, and advertised over mDNS when LAN discovery is on. On
 	/// its own it neither opens nor accepts a connection.
 	#[usage(
@@ -886,7 +886,7 @@ impl Config {
 pub struct LanConfig {
 	/// Enable mDNS discovery. Boolean flag: pass `--cluster-lan` (or `=true` /
 	/// `=false`). Advertises the listener fingerprint when the certificate was
-	/// generated or supplied in-memory, the [`Config::node`] URL when one
+	/// generated or supplied in-memory, the `--cluster-node` URL when one
 	/// is configured, and needs at least one of them.
 	#[usage(
 		name = "cluster-lan",
@@ -1450,8 +1450,8 @@ impl Cluster {
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
-	/// marked [`origin::Producer::peer`] when the grant names a cluster peer and
-	/// [`origin::Producer::upstream`] when that peer is upstream.
+	/// linked as [`origin::Link::Peer`] when the grant names a cluster peer and
+	/// [`origin::Link::Upstream`] when that peer is upstream.
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
 		self.mounted(token)?.scope(&token.root, &token.publish).ok()
@@ -1462,8 +1462,8 @@ impl Cluster {
 	/// (overlapping another) admits nothing.
 	fn mounted(&self, token: &auth::Token) -> Option<origin::Producer> {
 		let mut origin = match (token.upstream, token.peer) {
-			(true, _) => self.origin.clone().upstream(),
-			(false, true) => self.origin.clone().peer(),
+			(true, _) => self.origin.clone().with_link(origin::Link::Upstream),
+			(false, true) => self.origin.clone().with_link(origin::Link::Peer),
 			(false, false) => self.origin.clone(),
 		};
 		for (at, target) in &token.mounts {
@@ -2027,8 +2027,8 @@ impl Cluster {
 		// never offered another upstream's. A peer that predates the hidden opt-in
 		// still discovers our hidden routes; see `Cluster::scope`.
 		let origin = match target.upstream {
-			true => self.origin.clone().upstream(),
-			false => self.origin.clone().peer(),
+			true => self.origin.clone().with_link(origin::Link::Upstream),
+			false => self.origin.clone().with_link(origin::Link::Peer),
 		};
 		let stats = self.stats.tier(self.cluster_tier()).session("");
 		let mut client = client
@@ -2120,7 +2120,7 @@ impl Cluster {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 		let mut client = self
 			.peer_client(true, target.fingerprint.as_deref())?
-			.with_origin(self.origin.clone().peer());
+			.with_origin(self.origin.clone().with_link(origin::Link::Peer));
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
