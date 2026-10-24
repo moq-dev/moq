@@ -60,7 +60,9 @@ the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission withou
 a deadline.
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
-one; every flag is documented there. Flags renamed between releases are listed in
+one; every flag is documented there. A `MOQ_*` environment variable `moq` does
+not read, such as a misspelling or one meant for `moq-relay`, stops it at startup
+with the variable named. Flags renamed between releases are listed in
 [MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md).
 
 ```bash

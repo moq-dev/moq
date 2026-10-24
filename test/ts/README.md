@@ -375,7 +375,7 @@ packet advancing the counter. A pipe cannot go through TSDuck first without
 rebuffering the arrivals `release` stamps.
 
 Live runs write `pcr-timing.json` beside `timing.out`. Failures retain their run;
-set `MOQ_TEST_KEEP=1` to retain passing controls too. The JSON report keeps the
+set `HARNESS_KEEP=1` to retain passing controls too. The JSON report keeps the
 graded PID's raw `[packet_index, unwrapped_pcr_ticks, arrival_seconds, pid]` samples,
 the indices that begin new time bases, wrap count, and grading parameters. PCR ticks
 are at 27 MHz; arrivals use the reader's `time.monotonic()` clock and are upper
@@ -700,7 +700,7 @@ acquires at, against the continuous source decode. Each of those points must
 carry its own PAT and PMT, sent after the picture before it. Its graders' failure
 paths run beside it, and `just rs ts-recovery` runs two minutes of the same faults
 nightly, failing if the latency drifts and keeping a failing arm's export and
-ledgers under `$MOQ_TEST_RUNS/ts-recovery/`.
+ledgers under `$HARNESS_RUNS/ts-recovery/`.
 
 ### Lossy path (`--loss`)
 
@@ -920,7 +920,7 @@ These are actual test invocations, not optional tools installed on a runner.
 
 Failed runs retain source/capture files, process logs and statuses, tool versions,
 decoder commands, frame hashes, PCM, and grader reports under the harness run
-directory. CI uploads that directory for seven days. `MOQ_TEST_KEEP=1` preserves
+directory. CI uploads that directory for seven days. `HARNESS_KEEP=1` preserves
 successful local evidence too. `ts-eit` retains its sparse-schedule and pending
 version fixtures; `ts-tstd` retains its existing model controls.
 

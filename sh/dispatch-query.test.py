@@ -29,8 +29,8 @@ class QueryTests(unittest.TestCase):
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
             (self.bin / command).symlink_to(shutil.which(command))
         self.env = dict(os.environ, PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
-                        GIT_CONFIG_GLOBAL=os.devnull, MOQ_STRICT="1")
-        for key in ("MOQ_DEV_SHELL", "MOQ_ALLOW_HOST", "GITHUB_BASE_REF"):
+                        GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
+        for key in ("IN_MOQ_DEV_SHELL", "ALLOW_HOST_TOOLCHAIN", "GITHUB_BASE_REF"):
             self.env.pop(key, None)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
@@ -188,7 +188,7 @@ class QueryTests(unittest.TestCase):
         nix = self.bin / "nix"
         nix.write_text('#!/usr/bin/env bash\nprintf "nix %s\\n" "$*" >>"$CALLS"\n')
         nix.chmod(0o755)
-        self.env.update(MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
+        self.env.update(IN_MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
         self.env["PATH"] = f"{self.bin}:{os.environ['PATH']}"
         for script in ("markdown.sh", "shell.sh", "large-files.sh"):

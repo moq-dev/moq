@@ -20,7 +20,7 @@ CLI does no scoping of its own: the subtree scope tried for this in
 [moq-dev/moq#6255](https://github.com/moq-dev/moq/pull/6255) lost the
 sibling broadcasts a catalog references, such as a transcode's `.` source.
 Asking for the watched prefixes fixes the cell without that loss; verify
-it with `MOQ_BIN=target/debug/moq just relays --only moxygen` from
+it with `CLI_BIN=target/debug/moq just relays --only moxygen` from
 `test/smoke`.
 
 - First step: Rust sends UNSUBSCRIBE_NAMESPACE on d14/15. It never does

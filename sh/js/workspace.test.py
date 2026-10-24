@@ -62,7 +62,7 @@ class SelectionTest(unittest.TestCase):
         just = tools / "just"
         subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
         calls = self.root / "calls"
-        env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", MOQ_ALLOW_HOST="1",
+        env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1",
                    SELECT_CALLS=str(calls))
         for script in ("markdown.sh", "shell.sh", "large-files.sh"):
             path = sh / script

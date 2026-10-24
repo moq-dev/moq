@@ -100,6 +100,16 @@ mod mf;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 mod v4l2;
 
+/// The environment variables this build reads, for a binary that refuses `MOQ_*` names nothing reads.
+pub const ENV: &[&str] = &[
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	"MOQ_VAAPI_DEVICE",
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	"MOQ_V4L2_ENCODER",
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	"MOQ_V4L2_DECODER",
+];
+
 pub use color::Color;
 pub use error::Error;
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]

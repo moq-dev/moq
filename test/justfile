@@ -70,7 +70,7 @@ interop *args:
         --run-ignored all
     ./interop/interop.sh "$@"
 
-# The harnesses append one record per case to MOQ_TEST_RESULTS; flags link the page to its
+# The harnesses append one record per case to HARNESS_RESULTS; flags link the page to its
 # workflow run. See interop/report.py.
 
 # Render interop case records as a static HTML report.
@@ -277,5 +277,5 @@ p2p:
 # Retain complete backend assets, parity, and raw alternating browser samples.
 [positional-arguments]
 wasm-baseline *args:
-    MOQ_TEST_RUNS="${MOQ_TEST_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh "$@"
-    MOQ_TEST_RUNS="${MOQ_TEST_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh --baseline "$@"
+    HARNESS_RUNS="${HARNESS_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh "$@"
+    HARNESS_RUNS="${HARNESS_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh --baseline "$@"

@@ -168,7 +168,7 @@ cell() {
     ran=$((ran + 1))
     echo "=== $name${planned:+ (planned break $planned)} ==="
     # The nested interop.sh runs are this cell, not cases of their own.
-    if (unset MOQ_TEST_RESULTS && "$@"); then
+    if (unset HARNESS_RESULTS && "$@"); then
         echo "PASS $name"
         result=pass
     else
@@ -184,7 +184,7 @@ cell() {
 
 fetch() {
     local relay="$1" pub="$2" sub="$3" js="$4" version="$5"
-    RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+    RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
         INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 \
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
 }
@@ -201,7 +201,7 @@ while read -r source version <&3; do
             exit 1
             ;;
     esac
-    cell media-control "$version" "$source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$pub" INTEROP_VERSION="$version" \
+    cell media-control "$version" "$source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$pub" INTEROP_VERSION="$version" \
         INTEROP_COMPAT_CLIENT="$js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
 done 3<"$HARNESS_RUN/controls"
 
@@ -240,14 +240,14 @@ while read -r version <&3; do
             fi
             # One cell per reader, so a planned break in one reader's release keeps the other running.
             for reader in rust js-native-node; do
-                cell "media-$reader" "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+                cell "media-$reader" "$version" "$relay_source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
                     INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers "$reader"
             done
             [[ "$released_fetch" == true && "$current_fetch" == true ]] || continue
             # Drive JS publication from actual subscriber demand: the publisher's own JS
             # subscribes and observes the group, which the opposite Rust CLI then
             # FETCHes by ID. Reading the newest group races its live delivery.
-            cell js-publish "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+            cell js-publish "$version" "$relay_source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
                 INTEROP_COMPAT_CLIENT="$own_js" INTEROP_FETCH_DATA=1 bash "$DIR/interop.sh" --publishers js-native --subscribers rust
             # Both Rust sources fetch the same group and compare exact payloads. The
             # publisher's own JS finds the group, so a catalog break fails only the

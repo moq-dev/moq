@@ -66,7 +66,7 @@ class ReportTest(unittest.TestCase):
         run.mkdir(parents=True)
         (self.root / 'criterion-runs.txt').write_text(f'{run}\n')
         (run / 'metadata.json').write_text(json.dumps({'mode': '--criterion', 'revision': 'abc',
-            'environment': {'MOQ_BENCH_LABEL': 'net-cpu', 'SESSION_CPU': '1'}}))
+            'environment': {'BENCH_LABEL': 'net-cpu', 'SESSION_CPU': '1'}}))
         with self.assertRaises(ValueError):
             report.rust(self.root)
         case = run / 'criterion' / 'delivery' / 'new'
@@ -86,7 +86,7 @@ class ReportTest(unittest.TestCase):
             run = self.root / 'runs' / label
             run.mkdir(parents=True)
             (run / 'metadata.json').write_text(json.dumps({'mode': '--criterion', 'revision': 'c2', 'base': base,
-                                                           'environment': {'MOQ_BENCH_LABEL': label}}))
+                                                           'environment': {'BENCH_LABEL': label}}))
             if comparison is not None:
                 (run / 'paired.json').write_text(json.dumps(comparison))
             runs.append(str(run))

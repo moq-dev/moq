@@ -22,11 +22,11 @@ esac
 
 # A host toolchain fails deep in a build instead: its gcc keeps the
 # _FORTIFY_SOURCE the dev shell disables, which breaks jemalloc's -Werror
-# configure probes. This flake's dev shell sets MOQ_DEV_SHELL. Windows has no
+# configure probes. This flake's dev shell sets IN_MOQ_DEV_SHELL. Windows has no
 # Nix, so it always runs on the host.
-if [[ -z "$query" && -z "${MOQ_DEV_SHELL:-}" && -z "${MOQ_ALLOW_HOST:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
+if [[ -z "$query" && -z "${IN_MOQ_DEV_SHELL:-}" && -z "${ALLOW_HOST_TOOLCHAIN:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
     echo "error: run inside the Nix dev shell ('nix develop' or direnv) so tools match CI" >&2
-    echo "       or set MOQ_ALLOW_HOST=1 to use the host toolchain anyway" >&2
+    echo "       or set ALLOW_HOST_TOOLCHAIN=1 to use the host toolchain anyway" >&2
     exit 1
 fi
 
@@ -131,7 +131,7 @@ if [[ "$action" == ci-platform ]]; then
 fi
 
 # The tools each module needs. A module missing one is skipped locally, so an
-# incomplete toolchain checks less; under MOQ_STRICT (CI) it is an error, up
+# incomplete toolchain checks less; under CI_STRICT (CI) it is an error, up
 # front, because there a skip is indistinguishable from a pass. swift needs
 # none: it skips off macOS by design, and platform.yml is its real gate.
 declare -A tools=(
@@ -198,7 +198,7 @@ for module in "${modules[@]}"; do
     done
     if ((${#absent[@]} == 0)); then
         selected+=("$module")
-    elif [[ -n "${MOQ_STRICT:-}" ]]; then
+    elif [[ -n "${CI_STRICT:-}" ]]; then
         missing+=("${absent[@]}")
     else
         echo "$action: skipping $module; missing ${absent[*]}" >&2
@@ -220,8 +220,8 @@ if [[ -n "$query" ]]; then
 fi
 
 if ((${#missing[@]})); then
-    echo "error: MOQ_STRICT is set but these tools are missing: $(printf '%s\n' "${missing[@]}" | sort -u | tr '\n' ' ')" >&2
-    echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
+    echo "error: CI_STRICT is set but these tools are missing: $(printf '%s\n' "${missing[@]}" | sort -u | tr '\n' ' ')" >&2
+    echo "       run inside 'nix develop', or unset CI_STRICT to skip what isn't installed" >&2
     exit 1
 fi
 

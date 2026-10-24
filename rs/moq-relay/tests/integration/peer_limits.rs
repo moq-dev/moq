@@ -335,7 +335,7 @@ async fn uring_peer_session_widens_quic_limits() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => {}
-		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring relay test: {reason}");
 			return;
 		}
