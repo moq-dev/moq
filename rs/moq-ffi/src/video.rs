@@ -87,6 +87,25 @@ impl From<MoqVideoEncoderKind> for moq_video::encode::Kind {
 	}
 }
 
+/// An exact video frame rate in frames per second.
+#[derive(Clone, Copy, uniffi::Record)]
+pub struct MoqVideoFrameRate {
+	/// Frames per second numerator; must be nonzero.
+	pub numerator: u32,
+	/// Frames per second denominator; must be nonzero.
+	pub denominator: u32,
+}
+
+impl TryFrom<MoqVideoFrameRate> for moq_video::Rate {
+	type Error = MoqError;
+
+	fn try_from(rate: MoqVideoFrameRate) -> Result<Self, Self::Error> {
+		Self::new(rate.numerator, rate.denominator).map_err(|err| MoqError::Video {
+			reason: format!("invalid framerate: {err}"),
+		})
+	}
+}
+
 /// Raw frame layout the caller will pass to [`MoqVideoProducer::write`], plus
 /// the resolution and rate the encoder is opened at. Every written frame must
 /// match `width` x `height`; scale before writing if your source moves.
@@ -100,7 +119,7 @@ pub struct MoqVideoEncoderInput {
 	pub height: u32,
 	/// Nominal frames per second, used for the codec time base and the default
 	/// bitrate and keyframe interval. Must be non-zero.
-	pub framerate: u32,
+	pub framerate: MoqVideoFrameRate,
 }
 
 /// Codec-side configuration.
@@ -108,9 +127,6 @@ pub struct MoqVideoEncoderInput {
 pub struct MoqVideoEncoderOutput {
 	/// The codec used to encode this rendition.
 	pub codec: MoqVideoCodec,
-	/// Track name for a broadcast-bound producer. `None` derives one from the codec.
-	#[uniffi(default = None)]
-	pub track: Option<String>,
 	/// Target bitrate in bits per second. `None` derives one from the resolution
 	/// and framerate.
 	#[uniffi(default = None)]
@@ -121,6 +137,21 @@ pub struct MoqVideoEncoderOutput {
 	/// Encoder implementation preference. Pass
 	/// [`MoqVideoEncoderKind::Auto`] unless you need a specific backend.
 	pub kind: MoqVideoEncoderKind,
+}
+
+/// Input, codec settings, and publication ownership for a video producer.
+#[derive(uniffi::Record)]
+pub struct MoqVideoProducerOptions {
+	/// The raw pictures the caller writes.
+	pub input: MoqVideoEncoderInput,
+	/// The codec settings used to encode those pictures.
+	pub output: MoqVideoEncoderOutput,
+	/// Published track name; `None` derives one from the codec.
+	#[uniffi(default = None)]
+	pub track: Option<String>,
+	/// Session bandwidth allocator; absent keeps the configured bitrate.
+	#[uniffi(default = None)]
+	pub bandwidth: Option<Arc<MoqBandwidth>>,
 }
 
 /// How the encoded stream is divided into independently decodable groups.
@@ -180,8 +211,7 @@ fn video_encoder_config(
 	input: &MoqVideoEncoderInput,
 	output: &MoqVideoEncoderOutput,
 ) -> Result<moq_video::encode::Config, MoqError> {
-	let framerate = moq_video::Rate::new(input.framerate, 1)
-		.map_err(|_| MoqError::from(moq_video::Error::InvalidFramerate(input.framerate)))?;
+	let framerate = input.framerate.try_into()?;
 	let mut config = moq_video::encode::Config::new(input.width, input.height, framerate);
 	config.codec = output.codec.into();
 	config.kind = output.kind.clone().into();
@@ -546,34 +576,30 @@ impl MoqVideoProducer {
 	/// it.
 	///
 	/// The encoder opens here, so an unsupported codec, resolution, or backend
-	/// fails now rather than on the first frame. [`MoqVideoEncoderOutput::track`]
+	/// fails now rather than on the first frame. [`MoqVideoProducerOptions::track`]
 	/// chooses the track name; `None` derives one from the codec. The catalog
 	/// rendition is published immediately so a subscriber can discover the track
 	/// before a frame is written to it.
 	///
-	/// Pass `bandwidth` to reserve this track's configured bitrate against the
+	/// Set `options.bandwidth` to reserve this track's configured bitrate against the
 	/// session's allocator and follow the grant with the same policy the Rust
 	/// capture encoder uses. [`set_bitrate`](MoqVideoProducer::set_bitrate) is
 	/// the manual ceiling: it retunes the encoder and moves the reservation.
-	#[uniffi::constructor(default(bandwidth = None))]
+	#[uniffi::constructor]
 	pub fn new(
 		catalog: &crate::media::MoqMediaCatalogProducer,
-		input: MoqVideoEncoderInput,
-		output: MoqVideoEncoderOutput,
-		bandwidth: Option<Arc<MoqBandwidth>>,
+		options: MoqVideoProducerOptions,
 	) -> Result<Arc<MoqVideoProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let broadcast = catalog.broadcast()?;
 
-		let framerate = moq_video::Rate::new(input.framerate, 1)
-			.map_err(|_| MoqError::from(moq_video::Error::InvalidFramerate(input.framerate)))?;
-		let mut config = moq_video::encode::Config::new(input.width, input.height, framerate);
-		config.codec = output.codec.into();
-		config.kind = output.kind.into();
-		config.bitrate = output.bitrate.map(moq_net::bandwidth::Rate::from_bps);
-		if let Some(gop) = output.gop {
-			config.gop = gop.into();
-		}
+		let MoqVideoProducerOptions {
+			input,
+			output,
+			track,
+			bandwidth,
+		} = options;
+		let config = video_encoder_config(&input, &output)?;
 
 		// Both before the track exists: a config this machine can't encode should fail
 		// without leaving a track advertised that will never carry frames. The probe
@@ -583,7 +609,7 @@ impl MoqVideoProducer {
 		let gop = config.gop.duration(config.framerate);
 		let ceiling = video_ceiling(&config, &rendition);
 		let finished = broadcast.with_state(|state| Ok(state.finished.clone()))?;
-		let producer = broadcast.with_state(|state| match output.track {
+		let producer = broadcast.with_state(|state| match track {
 			Some(name) => {
 				let track = state
 					.broadcast
@@ -877,8 +903,15 @@ struct VideoConsumerInner {
 
 impl VideoConsumerInner {
 	async fn next(&mut self) -> Result<Option<Arc<MoqVideoDecodedFrame>>, MoqError> {
-		let frame = self.consumer.read().await?;
-		Ok(frame.map(|frame| Arc::new(MoqVideoDecodedFrame { frame })))
+		loop {
+			match self.consumer.read().await? {
+				Some(moq_video::decode::Read::Frame(frame)) => {
+					return Ok(Some(Arc::new(MoqVideoDecodedFrame { frame })));
+				}
+				Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => {}
+				None => return Ok(None),
+			}
+		}
 	}
 }
 
@@ -1056,6 +1089,43 @@ mod decode_tests {
 mod finish_tests {
 	use super::*;
 
+	#[test]
+	fn encoder_config_preserves_exact_rates_and_rejects_invalid_ratios() {
+		let output = MoqVideoEncoderOutput {
+			codec: MoqVideoCodec::H264,
+			bitrate: None,
+			gop: None,
+			kind: MoqVideoEncoderKind::Software,
+		};
+		for (numerator, denominator) in [(30_000, 1001), (60_000, 2002), (24_000, 1001)] {
+			let config = video_encoder_config(
+				&MoqVideoEncoderInput {
+					format: MoqVideoPixelFormat::I420,
+					width: 64,
+					height: 48,
+					framerate: MoqVideoFrameRate { numerator, denominator },
+				},
+				&output,
+			)
+			.unwrap();
+			assert_eq!(config.framerate, moq_video::Rate::new(numerator, denominator).unwrap());
+			assert_eq!(config.framerate.denominator(), 1001);
+		}
+		for (numerator, denominator) in [(0, 1), (30_000, 0), (1_000_001, 1)] {
+			let error = video_encoder_config(
+				&MoqVideoEncoderInput {
+					format: MoqVideoPixelFormat::I420,
+					width: 64,
+					height: 48,
+					framerate: MoqVideoFrameRate { numerator, denominator },
+				},
+				&output,
+			)
+			.unwrap_err();
+			assert!(matches!(error, MoqError::Video { .. }));
+		}
+	}
+
 	/// The codec-only encoder every wrapper exposes (`moq.video.Encoder` and
 	/// friends): a keyframe opens the stream, `cut` forces the next one, and
 	/// `finish` closes it. No test in any language had driven it.
@@ -1067,11 +1137,13 @@ mod finish_tests {
 				format: MoqVideoPixelFormat::I420,
 				width,
 				height,
-				framerate: 30,
+				framerate: crate::video::MoqVideoFrameRate {
+					numerator: 30_000,
+					denominator: 1001,
+				},
 			},
 			MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
-				track: None,
 				bitrate: Some(500_000),
 				gop: None,
 				kind: MoqVideoEncoderKind::Software,
@@ -1079,7 +1151,7 @@ mod finish_tests {
 		)
 		.unwrap();
 		let picture = |i: u64| MoqVideoFrame {
-			timestamp_us: i * 33_333,
+			timestamp_us: i * 1_001_000 / 30,
 			data: vec![(i * 40) as u8; (width * height * 3 / 2) as usize],
 		};
 
@@ -1095,7 +1167,7 @@ mod finish_tests {
 
 		let keyframes: Vec<u64> = packets.iter().filter(|p| p.keyframe).map(|p| p.timestamp_us).collect();
 		assert_eq!(packets.len(), 4, "one access unit per picture");
-		assert_eq!(keyframes, [0, 3 * 33_333], "keyframes at the start and the cut");
+		assert_eq!(keyframes, [0, 3 * 1_001_000 / 30], "keyframes at the start and the cut");
 		assert!(packets.iter().all(|p| !p.data.is_empty()), "an empty access unit");
 		assert!(matches!(encoder.encode(picture(4)), Err(MoqError::Closed)));
 	}
@@ -1111,20 +1183,25 @@ mod finish_tests {
 			format: MoqVideoPixelFormat::Rgba,
 			width: 320,
 			height: 240,
-			framerate: 30,
+			framerate: crate::video::MoqVideoFrameRate {
+				numerator: 30,
+				denominator: 1,
+			},
 		};
 		let output = MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
-			track: Some("camera".into()),
 			bitrate: Some(4_000_000),
 			gop: None,
 			kind: MoqVideoEncoderKind::Software,
 		};
 		let video = crate::video::MoqVideoProducer::new(
 			&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-			input,
-			output,
-			Some(bandwidth),
+			crate::video::MoqVideoProducerOptions {
+				input,
+				output,
+				track: Some("camera".into()),
+				bandwidth: Some(bandwidth),
+			},
 		)
 		.unwrap();
 		let track = broadcast

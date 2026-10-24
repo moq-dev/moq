@@ -9,7 +9,7 @@ for (const mode of ["jump", "advance"]) {
 				const samples: number[][] = [[], [], []];
 				for (let round = 0; round < 6; round++) {
 					const clock = new Manual();
-					const restore = clock.install();
+					const installed = clock.install();
 					const aborts = Array.from({ length: scope === "shared" ? 1 : armed }, () => new AbortController());
 					try {
 						const start = performance.now();
@@ -31,7 +31,7 @@ for (const mode of ["jump", "advance"]) {
 							samples[2].push((cancelledAt - advancedAt) * 1000);
 						}
 					} finally {
-						restore();
+						installed.close();
 					}
 				}
 				console.log(
