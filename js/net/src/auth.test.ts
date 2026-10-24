@@ -647,42 +647,41 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 	},
 );
 
-test.each([
-	Lite.ALPN_07_WIP,
-	Ietf.ALPN.DRAFT_17,
-	Ietf.ALPN.DRAFT_22,
-])("%s carries literal and wildcard grants exactly", async (protocol) => {
-	const { client, server } = await connect({ publish: new OriginProducer(), protocol });
-	const requests = server.auth.requests();
-	const unions: Record<string, [string[], string[]]> = {
-		"": [["a/**"], []],
-		exact: [["room/alice"], []],
-		wildcard: [["room/*/cam"], ["**/demo.hang"]],
-		mixed: [["room/**", "lobby", "cam-*.hang"], []],
-		root: [[""], ["**"]],
-	};
-	const parse = (texts: string[]) => new Path.Patterns(texts.map((text) => Path.Pattern.parse(text)));
-	const issued: Issued[] = [];
-	void (async () => {
-		for (;;) {
-			const request = await requests.next();
-			if (!request) break;
-			const [publish, subscribe] = unions[new TextDecoder().decode(request.token)] ?? [[], []];
-			issued.push(request.accept({ publish: parse(publish), subscribe: parse(subscribe) }));
-		}
-	})();
+test.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])(
+	"%s carries literal and wildcard grants exactly",
+	async (protocol) => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		const requests = server.auth.requests();
+		const unions: Record<string, [string[], string[]]> = {
+			"": [["a/**"], []],
+			exact: [["room/alice"], []],
+			wildcard: [["room/*/cam"], ["**/demo.hang"]],
+			mixed: [["room/**", "lobby", "cam-*.hang"], []],
+			root: [[""], ["**"]],
+		};
+		const parse = (texts: string[]) => new Path.Patterns(texts.map((text) => Path.Pattern.parse(text)));
+		const issued: Issued[] = [];
+		void (async () => {
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				const [publish, subscribe] = unions[new TextDecoder().decode(request.token)] ?? [[], []];
+				issued.push(request.accept({ publish: parse(publish), subscribe: parse(subscribe) }));
+			}
+		})();
 
-	await waitFor(client.auth.grant, (g) => g !== undefined);
-	for (const token of ["exact", "wildcard", "mixed", "root"]) {
-		const [publish, subscribe] = unions[token];
-		const added = await client.auth.add(token);
-		const got = added.grant.peek();
-		expect(got?.publish.equals(parse(publish))).toBe(true);
-		expect(got?.subscribe.equals(parse(subscribe))).toBe(true);
-	}
-	client.abort();
-	server.abort();
-});
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		for (const token of ["exact", "wildcard", "mixed", "root"]) {
+			const [publish, subscribe] = unions[token];
+			const added = await client.auth.add(token);
+			const got = added.grant.peek();
+			expect(got?.publish.equals(parse(publish))).toBe(true);
+			expect(got?.subscribe.equals(parse(subscribe))).toBe(true);
+		}
+		client.abort();
+		server.abort();
+	},
+);
 
 // moq-transport keeps the token for the requests that name it, with no grant of its own.
 test.each([

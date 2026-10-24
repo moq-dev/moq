@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::coding::*;
 use crate::Patterns;
+use crate::coding::*;
 
 use super::{Message, Version};
 
