@@ -402,7 +402,7 @@ impl Sync {
 /// meaningless when spliced onto bytes that didn't follow them. Keeping one implementation
 /// keeps a subtle rule (which packets advance the counter, which retransmissions to ignore)
 /// from drifting into two, and `Continuity_count_error` reads the same verdict.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Continuity {
 	/// Last continuity_counter seen on a packet with payload, to spot gaps.
 	last_cc: Option<u8>,

@@ -303,11 +303,11 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 
 	/// Carry on another reader's pass over the input: start on the packet boundary its framer
-	/// confirmed, so a packet ending the input routes without a successor to confirm it, and
-	/// keep grading where its `health` left off.
-	pub(super) fn resume(mut self, health: Health) -> Self {
+	/// confirmed, so a packet ending the input routes without a successor to confirm it.
+	pub(super) fn resume(mut self, from: Resume) -> Self {
 		self.framer = Framer { synced: true };
-		self.health = health;
+		self.health = from.health;
+		self.pmt_sections.insert(from.pmt, from.sections);
 		self
 	}
 
@@ -2484,6 +2484,16 @@ impl Liveness {
 	}
 }
 
+/// Where another reader's pass over the input left off, for [`Import::resume`].
+pub(super) struct Resume {
+	/// Its grading of the input so far.
+	pub health: Health,
+	/// The PMT PID that started the importer.
+	pub pmt: Pid,
+	/// That PID's reassembler, holding any section the starting packet began.
+	pub sections: SectionReassembler,
+}
+
 /// Locks onto the 188-byte packet grid of a TS byte stream.
 ///
 /// 0x47 is the packet sync byte but also occurs freely in payload (TS has no byte
@@ -2630,7 +2640,7 @@ pub(super) fn payload(pkt: &[u8; TsPacket::SIZE]) -> Payload<'_> {
 /// header split, where section_length is not yet known), continuity-counter
 /// gaps, and adaptation-field discontinuities. Deliberately minimal: just enough to
 /// recover whole sections verbatim.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct SectionReassembler {
 	/// Bytes of the section currently being reassembled. Its 3-byte header (and
 	/// thus section_length) may not all be present yet, so completeness is
