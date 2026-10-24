@@ -1,19 +1,14 @@
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
 
-/** Wire format that frame encode/decode operates on.
- *
- * Internal to the qmux crate. The public `Version` type (exported from
- * `index.ts`) only includes the QMux drafts; `"webtransport"` is the
- * legacy fallback wire format and isn't a valid value for any public option.
- */
-export type WireFormat = "webtransport" | "qmux-00" | "qmux-01" | "qmux-02";
+/** The supported QMux wire formats. */
+export type WireFormat = "qmux-00" | "qmux-01" | "qmux-02";
 
 /** Maximum size of a single QMux frame on the wire.
  *
  * This is draft-00's `max_frame_size`, which bounds the whole frame. The
  * record-framed drafts supersede it with the negotiated `max_record_size`, so it
- * only bounds draft-00 and the legacy WebTransport binding. */
+ * only bounds draft-00. */
 export const MAX_FRAME_SIZE = 16384;
 
 /** Send-only compatibility ceiling for STREAM payloads on the currently
@@ -51,22 +46,15 @@ function maxLengthPrefixedPayload(available: bigint): bigint {
  *
  * The budget is what the peer accepts for one frame — its `max_record_size` on
  * the record-framed drafts, {@link MAX_FRAME_SIZE} otherwise — so the frame's own
- * header comes out of it: the type, the stream ID, and (QMux only) the offset and
+ * header comes out of it: the type, the stream ID, the offset and
  * the length varint. Header widths are the ones this frame actually encodes, not
  * a worst-case reservation. The session applies any send-only compatibility
  * ceiling after calculating this exact peer budget.
  *
  * `budget` and the result are `bigint`: `max_record_size` is a varint, so a peer
  * may advertise up to 2^62-1, which `number` cannot hold exactly. */
-export function maxStreamPayload(version: WireFormat, budget: bigint, id: Stream.Id, offset: bigint): bigint {
-	// The type is 0x0e/0x0f on QMux and 0x08/0x09 on the legacy binding: one byte
-	// either way.
+export function maxStreamPayload(_version: WireFormat, budget: bigint, id: Stream.Id, offset: bigint): bigint {
 	const header = BigInt(1 + id.value.size());
-	if (version === "webtransport") {
-		// The payload runs to the end of the message, so there is no length varint
-		// to reserve.
-		return budget > header ? budget - header : 0n;
-	}
 
 	const fixed = header + BigInt(VarInt.from(offset).size());
 	return maxLengthPrefixedPayload(budget > fixed ? budget - fixed : 0n);
@@ -88,8 +76,7 @@ export interface ResetStream {
 	type: "reset_stream";
 	id: Stream.Id;
 	code: VarInt;
-	/** Final byte offset consumed by the send side. The legacy WebTransport wire
-	 * format omits this field and decodes it as zero. */
+	/** Final byte offset consumed by the send side. */
 	finalSize: bigint;
 	/** Set (to the frame's Reliable Size) when this was decoded from a
 	 * RESET_STREAM_AT frame (0x24, draft-02); absent for a plain RESET_STREAM.
@@ -265,16 +252,8 @@ export type Any =
 	| PingResponse
 	| Datagram;
 
-export function encode(frame: Any, version: WireFormat = "webtransport"): Uint8Array {
-	if (version === "webtransport") {
-		return encodeWebTransport(frame);
-	}
+export function encode(frame: Any, _version: WireFormat): Uint8Array {
 	return encodeQMux(frame);
-}
-
-/** Returns true if the version uses QMux framing (draft-00 or later). */
-export function isQmux(version: WireFormat): boolean {
-	return version === "qmux-00" || version === "qmux-01" || version === "qmux-02";
 }
 
 /** Returns true if the version uses the QMux Record framing layer and the
@@ -316,59 +295,6 @@ const RECOGNIZED_PARAM_IDS = new Set<bigint>([
 	APPLICATION_PROTOCOLS_ID,
 	RESET_STREAM_AT_PARAM_ID,
 ]);
-
-function encodeWebTransport(frame: Any): Uint8Array {
-	switch (frame.type) {
-		case "stream": {
-			let buffer = new Uint8Array(new ArrayBuffer(1 + 8 + frame.data.length), 0, 1);
-
-			buffer[0] = frame.fin ? 0x09 : 0x08;
-			buffer = frame.id.value.encode(buffer);
-
-			buffer = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength + frame.data.length);
-			buffer.set(frame.data, buffer.byteLength - frame.data.length);
-
-			return buffer;
-		}
-
-		case "reset_stream": {
-			let buffer = new Uint8Array(new ArrayBuffer(1 + 8 + 8), 0, 1);
-
-			buffer[0] = 0x04;
-			buffer = frame.id.value.encode(buffer);
-			buffer = frame.code.encode(buffer);
-			return buffer;
-		}
-
-		case "stop_sending": {
-			let buffer = new Uint8Array(new ArrayBuffer(1 + 8 + 8), 0, 1);
-
-			buffer[0] = 0x05;
-			buffer = frame.id.value.encode(buffer);
-			buffer = frame.code.encode(buffer);
-			return buffer;
-		}
-
-		// The legacy WebTransport format keeps the reason as the rest of the buffer
-		// (no Frame Type / length fields); only the type byte differs.
-		case "connection_close":
-		case "application_close": {
-			const body = new TextEncoder().encode(frame.reason);
-			let buffer = new Uint8Array(new ArrayBuffer(1 + 8 + body.length), 0, 1);
-
-			buffer[0] = frame.type === "application_close" ? 0x1d : 0x1c;
-			buffer = frame.code.encode(buffer);
-
-			buffer = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength + body.length);
-			buffer.set(body, buffer.byteLength - body.length);
-
-			return buffer;
-		}
-
-		default:
-			throw new Error("flow control frames are not supported in WebTransport version");
-	}
-}
 
 function encodeQMux(frame: Any): Uint8Array {
 	switch (frame.type) {
@@ -685,14 +611,11 @@ function decodeTransportParams(buffer: Uint8Array): TransportParams {
 	return params;
 }
 
-export function decode(buffer: Uint8Array, version: WireFormat = "webtransport"): Any | null {
+export function decode(buffer: Uint8Array, _version: WireFormat): Any | null {
 	if (buffer.length === 0) {
 		throw new Error("Invalid frame: empty buffer");
 	}
 
-	if (version === "webtransport") {
-		return decodeWebTransport(buffer);
-	}
 	return decodeQMux(buffer);
 }
 
@@ -724,59 +647,6 @@ export function decodeRecord(buffer: Uint8Array): Any[] {
 		buffer = remaining;
 	}
 	return frames;
-}
-
-function decodeWebTransport(buffer: Uint8Array): Any {
-	const frameType = buffer[0];
-	buffer = buffer.slice(1);
-
-	let v: VarInt;
-
-	if (frameType === 0x04) {
-		[v, buffer] = VarInt.decode(buffer);
-		const id = new Stream.Id(v);
-
-		[v, buffer] = VarInt.decode(buffer);
-		const code = v;
-
-		return { type: "reset_stream", id, code, finalSize: 0n };
-	}
-
-	if (frameType === 0x05) {
-		[v, buffer] = VarInt.decode(buffer);
-		const id = new Stream.Id(v);
-
-		[v, buffer] = VarInt.decode(buffer);
-		const code = v;
-
-		return { type: "stop_sending", id, code };
-	}
-
-	if (frameType === 0x1d || frameType === 0x1c) {
-		[v, buffer] = VarInt.decode(buffer);
-		const code = v;
-
-		// Legacy format: the reason is the rest of the buffer (no Frame Type field).
-		const reason = new TextDecoder().decode(buffer);
-
-		return frameType === 0x1d
-			? { type: "application_close", code, reason }
-			: { type: "connection_close", code, reason };
-	}
-
-	if (frameType === 0x08 || frameType === 0x09) {
-		[v, buffer] = VarInt.decode(buffer);
-		const id = new Stream.Id(v);
-
-		return {
-			type: "stream",
-			id,
-			data: buffer,
-			fin: frameType === 0x09,
-		};
-	}
-
-	throw new Error(`Invalid frame type: ${frameType}`);
 }
 
 function decodeQMux(buffer: Uint8Array): Any | null {

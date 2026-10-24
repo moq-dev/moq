@@ -144,6 +144,8 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 
 	track: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
+	/// The latest group's start, which the next group may not start below.
+	start: Option<Timestamp>,
 
 	// Reports this track's fragments into its timeline. Passthrough writes groups by hand (no
 	// `container::Producer`), so the recorder is fed directly rather than through `with_recorder`.
@@ -216,8 +218,6 @@ struct Run {
 	earliest: Timestamp,
 	/// The furthest presentation end any sample reaches.
 	end: Timestamp,
-	/// The track's bytes within the `mdat` payload.
-	range: std::ops::Range<usize>,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -472,6 +472,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			rendition,
 			track,
 			group: None,
+			start: None,
 			recorder: Some(recorder),
 			pending_sequence: None,
 			estimator: Estimator::new(),
@@ -917,6 +918,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::NoMoov.into());
 		}
 
+		let mut claimed = sample::Claimed::default();
+
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
 			let track_id = traf.tfhd.track_id;
@@ -927,6 +930,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						data: &payload,
 						moof_size,
 						header_size,
+						claimed: &mut claimed,
 					},
 					&mut self.timebase,
 				)?;
@@ -941,6 +945,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			};
 
 			let run = track.run(traf, moof_size, header_size, payload.len())?;
+			for sample in &run.samples {
+				claimed.take(sample.range.clone())?;
+			}
 
 			// Shift onto the catalog clock. Anchor before releasing the reservation, so the first
 			// snapshot carries the final clock; the moov declared every track, so any track's
@@ -1014,7 +1021,6 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 
 		let tfhd = &traf.tfhd;
 		let mut offset = tfhd.base_data_offset.unwrap_or_default() as usize;
-		let mut start: Option<usize> = None;
 		let mut earliest = None;
 		let mut end = None;
 		let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
@@ -1034,9 +1040,6 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 					.checked_add(relative_offset)
 					.ok_or(Error::InvalidDataOffset)?;
 			}
-
-			// Capture the actual start offset for this traf before consuming samples
-			start.get_or_insert(offset);
 
 			for entry in &trun.entries {
 				let sample = self.defaults.resolve(tfhd, entry);
@@ -1065,11 +1068,18 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 				end = Some(end.map_or(sample_end, |max: Timestamp| max.max(sample_end)));
 				earliest = Some(earliest.map_or(timestamp, |min: Timestamp| min.min(timestamp)));
 
+				// Each sample must lie inside the mdat, or the sizes and offsets disagree with the
+				// data and it cannot be addressed safely.
 				let next = offset
 					.checked_add(sample.size as usize)
 					.ok_or(Error::InvalidDataOffset)?;
 				if next > len {
-					return Err(Error::InvalidDataOffset.into());
+					return Err(Error::SampleRangeOutOfBounds {
+						start: offset,
+						end: next,
+						len,
+					}
+					.into());
 				}
 
 				samples.push(Sample {
@@ -1087,28 +1097,18 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 			}
 		}
 
-		// The track's bytes must be in bounds of the mdat. If not, the parsed sample sizes and
-		// offsets disagree with the actual data and no sample can be addressed safely.
-		let start = start.unwrap_or(0);
-		if !(start <= offset && offset <= len) {
-			return Err(Error::SampleRangeOutOfBounds {
-				start,
-				end: offset,
-				len,
-			}
-			.into());
-		}
-
 		Ok(Run {
 			samples,
 			earliest: earliest.ok_or(Error::MissingTrun)?,
 			end: end.ok_or(Error::MissingTrun)?,
-			range: start..offset,
 		})
 	}
 }
 
 /// Re-encode `traf`'s samples as a standalone moof+mdat fragment addressing only its own bytes.
+///
+/// The mdat holds `run`'s samples back to back in decode order, whatever separated them in the
+/// source (padding, another track's runs), so each rewritten `data_offset` is the sizes before it.
 fn fragment(
 	traf: &mp4_atom::Traf,
 	moof: &Moof,
@@ -1171,10 +1171,23 @@ fn fragment(
 	moof_buf.clear();
 	adjusted_moof.encode(&mut moof_buf)?;
 
-	Mdat {
-		data: payload[run.range.clone()].to_vec(),
+	// Adjacent samples are copied as one span.
+	let mut data = Vec::with_capacity(run.samples.iter().map(|sample| sample.range.len()).sum());
+	let mut span: Option<std::ops::Range<usize>> = None;
+	for sample in &run.samples {
+		match &mut span {
+			Some(span) if span.end == sample.range.start => span.end = sample.range.end,
+			_ => {
+				if let Some(span) = span.replace(sample.range.clone()) {
+					data.extend_from_slice(&payload[span]);
+				}
+			}
+		}
 	}
-	.encode(&mut moof_buf)?;
+	if let Some(span) = span {
+		data.extend_from_slice(&payload[span]);
+	}
+	Mdat { data }.encode(&mut moof_buf)?;
 
 	Ok(Bytes::from(moof_buf))
 }
@@ -1192,6 +1205,14 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		// are frames. The keyframe bit does not decide that: audio flags every sample a sync
 		// sample, so keying off it opened a group (a QUIC stream) per audio fragment.
 		let start_group = self.group.is_none() || placement.new_segment;
+		// A group may not start below the one before it. Refused before the open group closes or
+		// a new one opens, so a rewound fragment publishes nothing, as an unwrapped track does.
+		if start_group
+			&& let Some(floor) = self.start
+			&& timestamp < floor
+		{
+			return Err(crate::container::TimestampRewind { timestamp, floor }.into());
+		}
 		let mut group = if start_group {
 			if let Some(mut prev) = self.group.take() {
 				prev.finish()?;
@@ -1223,6 +1244,9 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		}
 		let fragment_len = fragment.len();
 		group.write_frame(timestamp, fragment)?;
+		if start_group {
+			self.start = Some(timestamp);
+		}
 
 		// Only once published, so a rejected fragment is never indexed. Audio is always
 		// independently decodable; video says whether this fragment really begins on an IDR,
@@ -1238,7 +1262,8 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.group = Some(group);
 
 		self.estimator.write(timestamp, fragment_len);
-		self.sent.add(run.samples.len() as u64, run.range.len(), keyframes);
+		let bytes = run.samples.iter().map(|sample| sample.range.len()).sum();
+		self.sent.add(run.samples.len() as u64, bytes, keyframes);
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.end(end);
 		}
@@ -1303,6 +1328,8 @@ fn unwrap<E: crate::catalog::hang::CatalogExt>(
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
+		// No input follows, so the buffer that waited for the rest of an atom is done.
+		self.buffer = BytesMut::new();
 		for track in self.text.values_mut() {
 			track.producer.finish()?;
 		}
@@ -1359,7 +1386,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// The source signalled a new timeline (an HLS `EXT-X-DISCONTINUITY`), so the next
 	/// fragment's decode time is not compared with the last one on each track. A timeline that
-	/// restarts below where it was still fails: a track refuses a group that rewinds.
+	/// restarts below where it was still fails with
+	/// [`TimestampRewind`](crate::container::TimestampRewind): a track refuses a group that
+	/// rewinds, before publishing any of it.
 	pub fn discontinuity(&mut self) -> Result<()> {
 		for track in self.text.values_mut() {
 			track.end_decode_time = None;

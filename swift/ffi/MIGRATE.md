@@ -4,6 +4,27 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `MoqContainerFormat.fmp4` unwraps to Legacy (#6250)
+
+A container import with `MoqContainerFormat.fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+A reader that follows the catalog's container needs no change.
+Republishing each fragment whole as CMAF is Rust-only, through `moq_mux::container::fmp4::Import::with_passthrough`.
+
+### Video rendition preference
+
+`MoqVideo` gains `preference: Int32`, defaulting to `0`. Regenerate the bindings and rebuild against the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
+### `announce` takes a `MoqAnnounceRoute`
+
+`MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
+`MoqRoute` is only what announcements report, and the `InvalidRoute` error is gone.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.resolve(reference:epoch:)` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel the task.
+Regenerate the bindings for the changed `resolve` checksum.
+
 ### A client asks only about what it watches (#6165)
 
 On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.
@@ -15,7 +36,7 @@ Regenerate the bindings for the changed `request_broadcast` checksum.
 ### Catalog references carry their epoch
 
 `MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names; the memberwise initializer defaults it to `nil`.
-`MoqBroadcastConsumer.resolve(reference:)` requires `epoch:` too; pass the rendition's `epoch` alongside, or `nil` to resolve whichever instance answers.
+`MoqBroadcastConsumer.resolve(reference:)` becomes `resolve(rendition:)`, taking the catalog `MoqRendition` and reading its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, throw `MoqError.Mux` for a rendition whose broadcast is proven to serve another epoch.
 Regenerate the Swift sources and rebuild the matching XCFramework, then rebuild callers.
 

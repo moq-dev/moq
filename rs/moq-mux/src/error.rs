@@ -327,6 +327,19 @@ pub enum Error {
 	/// Another publisher instance replaced a followed broadcast, and stitching was off.
 	#[error("another publisher instance replaced broadcast `{0}`; enable stitch to follow it as a program switch")]
 	Replaced(String),
+
+	/// A rendition moved to a track whose media goes back before what the export already read for it.
+	#[error(
+		"rendition {rendition} moved to a track that goes back in time: a group starts at {start:?}, not past {read:?}"
+	)]
+	RenditionRewound {
+		/// The rendition's ID in the catalog.
+		rendition: String,
+		/// Where the new track's group starts.
+		start: std::time::Duration,
+		/// The latest media the export read from the rendition's previous track.
+		read: std::time::Duration,
+	},
 }
 
 impl Error {
