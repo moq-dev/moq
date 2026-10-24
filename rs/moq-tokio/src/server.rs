@@ -1980,8 +1980,7 @@ mod tests {
 		tokio::select! {
 			biased;
 			_ = stalled.read_to_end(&mut remaining) => panic!("first handshake ended before second completed"),
-			result = qmux::tcp::Config::new(qmux::Version::QMux01)
-				.protocols(["moq-lite-06"]).connect(addr) => {
+			result = qmux::tcp::connect(addr, { let mut config = qmux::Config::new(qmux::Version::QMux01); config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]); config }) => {
 				result.expect("second handshake completes");
 			}
 		}
@@ -2012,10 +2011,12 @@ mod tests {
 			},
 			tx,
 		);
-		let result = qmux::tcp::Config::new(qmux::Version::QMux01)
-			.protocols(["moq-lite-06"])
-			.connect(addr)
-			.await;
+		let result = qmux::tcp::connect(addr, {
+			let mut config = qmux::Config::new(qmux::Version::QMux01);
+			config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]);
+			config
+		})
+		.await;
 		assert!(result.is_err(), "a closed server must not handshake");
 		task.abort();
 		let _ = task.await;
@@ -2054,8 +2055,7 @@ mod tests {
 		tokio::select! {
 			biased;
 			_ = stalled.read_to_end(&mut remaining) => panic!("first handshake ended before second completed"),
-			result = qmux::uds::Config::new(qmux::Version::QMux01)
-				.protocols(["moq-lite-06"]).connect(&path) => {
+			result = qmux::uds::connect(&path, { let mut config = qmux::Config::new(qmux::Version::QMux01); config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]); config }) => {
 				result.expect("second handshake completes");
 			}
 		}

@@ -11,6 +11,17 @@ A session closed cleanly by the peer now ends with `MoqError::Cancelled`, like o
 When this side aborted the session, it ends with that abort's error.
 Drop any check for the session-scoped `Cancel` kind.
 
+### Exact encoder rates and publication options
+
+Encoder configuration is breaking: `MoqVideoEncoderInput.framerate` is now a
+`MoqVideoFrameRate { numerator, denominator }` (use `{30, 1}` for 30 fps or
+`{30000, 1001}` for NTSC). Zero components and rates above 1,000,000 fps are
+refused. `track` moves out of both encoder output records into
+`MoqAudioProducerOptions` / `MoqVideoProducerOptions`, alongside `input`,
+`output`, and optional `bandwidth`. Producers now take `(catalog, options)`;
+codec-only encoders keep their input/output arguments and take no publication
+settings. Regenerate bindings and rebuild the native library together.
+
 ### Video rendition preference
 
 `MoqVideo` gains `preference: i32`. Set it to `0` in record literals to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Regenerate bindings and rebuild them with the matching native library.
@@ -162,7 +173,7 @@ let config = MoqMediaTrackConfig { rendition: MoqRendition::Video { id, config: 
 ### Native codecs have audio and video namespaces (#5694)
 
 `MoqBroadcastProducer::encode_audio` / `encode_video` are the `MoqAudioProducer::new` / `MoqVideoProducer::new` constructors, which take the broadcast's `MoqMediaCatalogProducer`.
-The audio track name moves into `MoqAudioEncoderOutput::track`, and a zero `frame_duration_us` (the new default) takes the codec's own frame.
+The audio track name belongs to `MoqAudioProducerOptions::track`, and a zero `frame_duration_us` (the new default) takes the codec's own frame.
 `MoqBroadcastConsumer::decode_audio` / `decode_video` are `MoqAudioConsumer::subscribe` / `MoqVideoConsumer::subscribe`, taking the broadcast first.
 The producers' `name()`, `used()`, and `unused()` are gone; read subscriber state through `demand()`.
 `MoqVideoEncoderOutput::gop` is `Option<MoqVideoGop>`, so `Some(30)` is `Some(MoqVideoGop::Keyframe { interval: 30 })`.
@@ -170,7 +181,7 @@ Codec-only `MoqAudioEncoder` / `MoqVideoEncoder` encode without publishing.
 
 ```rust
 let catalog = MoqMediaCatalogProducer::new(broadcast)?;
-let video = MoqVideoProducer::new(&catalog, input, output, None)?;
+let video = MoqVideoProducer::new(&catalog, MoqVideoProducerOptions { input, output, track: None, bandwidth: None })?;
 let frames = MoqVideoConsumer::subscribe(&consumer, name, rendition, decoder).await?;
 ```
 

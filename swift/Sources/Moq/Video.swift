@@ -2,9 +2,12 @@ import MoqFFI
 
 /// Native video encoding, publication, and decoding.
 public enum Video {
-    /// The pixel layout, resolution, and framerate written to a `Producer`.
+    /// An exact video frame rate in frames per second.
+    public typealias FrameRate = MoqFFI.MoqVideoFrameRate
+
+    /// The raw frame layout, resolution, and framerate the caller writes.
     public typealias EncoderInput = VideoEncoderInput
-    /// The track name, codec, bitrate, group mode, and backend preference.
+    /// The codec, bitrate, group mode, and backend preference.
     public typealias EncoderOutput = VideoEncoderOutput
     /// What a `Consumer` delivers: an optional resize, a max delay, and the decoder's surface (macOS only).
     public typealias DecoderOutput = VideoDecoderOutput
@@ -32,9 +35,13 @@ public enum Video {
             catalog: Media.CatalogProducer,
             input: EncoderInput,
             output: EncoderOutput,
+            track: String? = nil,
             bandwidth: Bandwidth? = nil
         ) throws {
-            ffi = try MoqVideoProducer(catalog: catalog.ffi, input: input, output: output, bandwidth: bandwidth?.ffi)
+            ffi = try MoqVideoProducer(
+                catalog: catalog.ffi,
+                options: MoqVideoProducerOptions(
+                    input: input, output: output, track: track, bandwidth: bandwidth?.ffi))
         }
 
         /// A watch-only handle to whether the video track has subscribers.
@@ -131,7 +138,7 @@ public enum Video {
     public final class Encoder: Sendable {
         let ffi: MoqVideoEncoder
 
-        /// Open a codec-only encoder; `output.track` is ignored.
+        /// Open a codec-only encoder.
         public init(input: EncoderInput, output: EncoderOutput) throws {
             ffi = try MoqVideoEncoder(input: input, output: output)
         }

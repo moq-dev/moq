@@ -26,7 +26,7 @@ pub struct Driver {
 /// The protocol half of a machine, one variant per negotiated wire protocol.
 pub(crate) enum Protocol {
 	/// Boxed for size only.
-	Lite(Box<crate::lite::Driver<Transport>>),
+	Lite(Box<crate::lite::Driver>),
 	Ietf(crate::ietf::Driver),
 }
 

@@ -497,7 +497,7 @@ mod tests {
 			);
 			config
 		};
-		let stream = |io| qmux::transport::Stream::new(io, qmux::Version::QMux01, config().max_record_size);
+		let stream = |io| qmux::transport::Stream::new(io);
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		tokio::try_join!(
 			qmux::Session::connect(stream(client), config()),

@@ -146,10 +146,10 @@ continuation. The difference is in each backend's calling convention.
   `RustBuffer`. BoltFFI generates a CPython C extension, so a call is a C function
   call.
 - **Kotlin**: UniFFI calls through JNA, which builds per-call structures by reflection
-  ([Kotlin calls](/quest/m2/kt-ffi-calls.md)). BoltFFI generates JNI glue and passes
+  ([Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md)). BoltFFI generates JNI glue and passes
   buffers as direct `ByteBuffer`s. BoltFFI's 6 ns no-op call is about the JNI floor.
 - **Bytes**: UniFFI copies `Vec<u8>` one byte at a time
-  ([Payload bytes](/quest/m2/ffi-bytes.md)). BoltFFI copies in bulk, which is why its
+  ([Payload bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md)). BoltFFI copies in bulk, which is why its
   advantage grows with frame size in Python.
 
 None of these needs BoltFFI's core. Each is a backend change that a UniFFI fork can
@@ -213,9 +213,9 @@ and do not translate to BoltFFI's IR.
 
 | work | from UniFFI | from BoltFFI |
 |---|---|---|
-| Bulk byte copies | M: [Payload bytes](/quest/m2/ffi-bytes.md) | done |
-| Call overhead | M: JNI or JNA direct mapping for Kotlin ([Kotlin calls](/quest/m2/kt-ffi-calls.md)); L: a C-extension Python backend, not yet planned | done |
-| Zero-copy byte returns | M: [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md) | M: bytes cross its wire buffer, with no borrowed return |
+| Bulk byte copies | M: [Payload bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md) | done |
+| Call overhead | M: JNI or JNA direct mapping for Kotlin ([Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md)); L: a C-extension Python backend, not yet planned | done |
+| Zero-copy byte returns | M: [Zero-copy byte returns](https://github.com/kixelated/rust2/blob/main/quest/m2/ffi-bytes-return.md) | M: bytes cross its wire buffer, with no borrowed return |
 | Namespaced types | M: [Namespaced external types](https://github.com/kixelated/rust2/blob/main/quest/m2/uniffi-namespaces.md) | M: same-name types collide (RFC #700, open) |
 | Poll-native async | M: [Poll-native async](/quest/m2/ffi-poll-migrate.md) | M: the same poll-plus-continuation model, with per-method poll exports |
 | Binding moq-ffi as written | none | M: drop `Arc` returns, rework wasm gating, and fix the gaps above |
