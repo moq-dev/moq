@@ -2405,7 +2405,6 @@ export class Request {
 		};
 		publishPrepared = (request, answer, announcer, epoch) => {
 			if (!request.#server.has(request)) throw new Error("request is closed");
-			if (answer.closed.peek() !== undefined) throw new Error("broadcast is closed");
 			hooks.attachAnnouncer(answer, announcer);
 			// The exact route usually settles the request on its own, resolving its waiters
 			// through the new epoch; answer it directly if it is still pending.
@@ -2500,7 +2499,8 @@ export class Prepared {
 		this.broadcast = answer;
 		this.#announcer = announcer;
 		this.#epoch = epoch;
-		this.#stop = answer.closed.subscribe(() => this.close());
+		// Synchronous, so a request made right after the broadcast closes reaches the claim again.
+		this.#stop = hooks.onClosed(answer, () => this.close());
 	}
 
 	static {
@@ -2509,11 +2509,8 @@ export class Prepared {
 
 	/** Announce the filled broadcast and resolve every waiting requester, refusing them if it cannot be announced. */
 	publish(): broadcast.Producer {
+		// Closing the broadcast closes this answer at once, so `#done` covers it too.
 		if (this.#done) throw new Error("prepared answer is closed");
-		if (this.broadcast.closed.peek() !== undefined) {
-			this.close();
-			throw new Error("broadcast is closed");
-		}
 		this.#done = true;
 		this.#stop();
 		try {

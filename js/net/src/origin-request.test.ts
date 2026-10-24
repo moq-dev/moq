@@ -373,22 +373,6 @@ test("closing a prepared answer refuses the request and closes its broadcast", a
 	origin.close();
 });
 
-test("a prepared answer that fails to publish refuses the request", async () => {
-	const origin = new Producer();
-	const claim = origin.dynamic(Path.from("room"));
-	const requests = claim.requested();
-	const request = origin.request(Path.from("room/alice"));
-	const pending = (await requests.next()).value;
-	if (!pending) throw new Error("expected a request");
-	const prepared = pending.prepare(Epoch.mint());
-	prepared.broadcast.close();
-	expect(() => prepared.publish()).toThrow("broadcast is closed");
-	await settle();
-	expect(request.closed.peek()).toBeInstanceOf(Error);
-	claim.close();
-	origin.close();
-});
-
 test("an answer prepared for an abandoned claim is never announced", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
@@ -422,6 +406,8 @@ for (const cleanup of ["close", "dispose", "broadcast"] as const) {
 		if (cleanup === "close") prepared.close();
 		else if (cleanup === "dispose") prepared[Symbol.dispose]();
 		else prepared.broadcast.close();
+		// Requested in the same turn, so the release cannot wait on a reactive notification.
+		const later = origin.request(path);
 		await settle();
 		prepared.close();
 		prepared[Symbol.dispose]();
@@ -430,8 +416,8 @@ for (const cleanup of ["close", "dispose", "broadcast"] as const) {
 			expect(request.closed.peek()).toBeInstanceOf(StreamError);
 			expect((request.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
 		}
+		expect(later.closed.peek()).toBeUndefined();
 		expect(() => prepared.publish()).toThrow("prepared answer is closed");
-		const later = origin.request(path);
 		const next = (await requests.next()).value;
 		if (!next) throw new Error("expected another request");
 		expect(next).not.toBe(pending);
