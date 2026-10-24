@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.18](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.17...moq-mux-v0.10.18) - 2026-10-24
+
+### Fixed
+
+- *(moq-mux)* send the H.265 picture aspect, not the pixel aspect (backport #5574)
+
 ## [0.10.17](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.16...moq-mux-v0.10.17) - 2026-10-22
 
 ### Other
