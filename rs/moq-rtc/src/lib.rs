@@ -25,12 +25,7 @@
 //! (resolving the broadcast name from a verified token), skip the routers and
 //! call [`whip::accept`] (ingest) / [`whep::accept`] (egress) from your own
 //! handler. Return the [`Response::answer`] in your HTTP response, then run
-//! [`Response::run`] to drive the media session for its lifetime. Clone
-//! [`Response::wire`] before running it to sample the peer's cumulative UDP
-//! payload bytes, including ICE, DTLS, RTP, RTCP, and retransmissions. Client
-//! dials return the same [`wire::Source`]; its counters remain readable after
-//! the session ends. [`wire::Source::stats`] can back an embedder's wire-source
-//! registry without retaining the session or its socket. The routers and
+//! [`Response::run`] to drive the media session for its lifetime. The routers and
 //! the `axum` re-export sit behind the default `server` feature, so such an
 //! embedder can drop them with `default-features = false`.
 //!
@@ -45,7 +40,6 @@
 
 pub mod client;
 pub mod server;
-pub mod wire;
 
 // Implementation detail modules: these carry the WebRTC/str0m plumbing (str0m
 // `Rtc`, `Mid`/`Pt`, tokio channels, raw packet buffers) and are deliberately
@@ -151,9 +145,8 @@ mod tests {
 							.unwrap();
 						let answer = response.answer.clone();
 						let id = response.resource_id.clone();
-						let wire = response.wire.clone();
 						let task = tokio::spawn(response.run());
-						sources.send((id, wire, task)).await.unwrap();
+						sources.send((id, task)).await.unwrap();
 						answer
 					}
 				}),
@@ -170,9 +163,8 @@ mod tests {
 							.unwrap();
 						let answer = response.answer.clone();
 						let id = response.resource_id.clone();
-						let wire = response.wire.clone();
 						let task = tokio::spawn(response.run());
-						sources.send((id, wire, task)).await.unwrap();
+						sources.send((id, task)).await.unwrap();
 						answer
 					}
 				}),
@@ -188,7 +180,7 @@ mod tests {
 		let whip = format!("http://user:pass@{address}/whip/ingested?jwt=secret")
 			.parse()
 			.expect("WHIP URL");
-		let whip_wire = tokio::time::timeout(TIMEOUT, client.publish(whip, source_consumer, "source"))
+		tokio::time::timeout(TIMEOUT, client.publish(whip, source_consumer, "source"))
 			.await
 			.expect("WHIP negotiation timed out")
 			.expect("WHIP negotiation failed");
@@ -201,7 +193,7 @@ mod tests {
 		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=secret")
 			.parse()
 			.expect("WHEP URL");
-		let whep_wire = tokio::time::timeout(TIMEOUT, client.subscribe(whep, output))
+		tokio::time::timeout(TIMEOUT, client.subscribe(whep, output))
 			.await
 			.expect("WHEP negotiation timed out")
 			.expect("WHEP negotiation failed");
@@ -238,21 +230,8 @@ mod tests {
 			.expect("read output Opus packet")
 			.expect("output Opus track ended");
 		assert_eq!(frame.payload.as_ref(), OPUS_PACKET);
-		let (whip_id, whip_server_wire, whip_task) = sources_rx.recv().await.unwrap();
-		let (whep_id, whep_server_wire, whep_task) = sources_rx.recv().await.unwrap();
-		for source in [&whip_wire, &whep_wire, &whip_server_wire, &whep_server_wire] {
-			let stats = source.stats();
-			assert!(
-				stats.tx > OPUS_PACKET.len() as u64,
-				"includes outgoing ICE/DTLS/RTP/RTCP: {stats:?}"
-			);
-			assert!(
-				stats.rx > OPUS_PACKET.len() as u64,
-				"includes incoming ICE/DTLS/RTP/RTCP: {stats:?}"
-			);
-			assert!(source.stats().tx >= stats.tx);
-			assert!(source.stats().rx >= stats.rx);
-		}
+		let (whip_id, whip_task) = sources_rx.recv().await.unwrap();
+		let (whep_id, whep_task) = sources_rx.recv().await.unwrap();
 		assert!(server.terminate(&whep_id));
 		assert!(server.terminate(&whip_id));
 		tokio::time::timeout(TIMEOUT, whep_task)
@@ -279,12 +258,8 @@ mod tests {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		let final_whip = whip_server_wire.stats();
-		let final_whep = whep_server_wire.stats();
 		assert!(!server.terminate(&whip_id));
 		assert!(!server.terminate(&whep_id));
-		assert_eq!(whip_server_wire.stats(), final_whip);
-		assert_eq!(whep_server_wire.stats(), final_whep);
 		http.abort();
 		http.await.unwrap_err();
 	}

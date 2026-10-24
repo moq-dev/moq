@@ -94,7 +94,7 @@ pub struct Config {
 
 pub(crate) struct Driver {
 	pub(crate) withdrawal: crate::session::Withdrawal,
-	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	pub(crate) closing: std::sync::Arc<crate::session::Closing>,
 	// Dispatched SUBSCRIBE and FETCH serves still owing the peer data.
 	owed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 	future: MaybeSendBox<'static, Result<(), Error>>,
@@ -172,8 +172,8 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 
 	let withdrawal = crate::session::Withdrawal::default();
 	let withdrawing = withdrawal.clone();
-	let local_close = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-	let closing = local_close.clone();
+	let supervised = std::sync::Arc::new(crate::session::Closing::default());
+	let closing = supervised.clone();
 	let owed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 	let serving = owed.clone();
 
@@ -412,11 +412,11 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 					Poll::Pending
 				})
 				.await;
-				close(&mut session, &res);
-				if !closing.load(std::sync::atomic::Ordering::Relaxed) {
+				close(&mut session, &closing, &res);
+				if !closing.is_local() {
 					kio::wait(|waiter| unis.poll_drain(waiter)).await;
 				}
-				if closing.load(std::sync::atomic::Ordering::Relaxed) {
+				if closing.is_local() {
 					subscriber.close();
 				} else if let Err(err) = &res {
 					// Every track this session was receiving ends with its error.
@@ -629,17 +629,17 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 					Poll::Pending
 				})
 				.await;
-				close(&mut session, &res);
+				close(&mut session, &closing, &res);
 				// Before this arm's Auth serve tasks drop, so each settles with the
 				// session's error rather than a bare cancel.
 				auth.close(match &res {
 					Ok(()) => Error::Cancel,
 					Err(err) => err.clone(),
 				});
-				if !closing.load(std::sync::atomic::Ordering::Relaxed) {
+				if !closing.is_local() {
 					kio::wait(|waiter| unis.poll_drain(waiter)).await;
 				}
-				if closing.load(std::sync::atomic::Ordering::Relaxed) {
+				if closing.is_local() {
 					subscriber.close();
 				} else if let Err(err) = &res {
 					// Every track this session was receiving ends with its error.
@@ -661,7 +661,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 	Ok((
 		Driver {
 			withdrawal,
-			local_close,
+			closing: supervised,
 			owed,
 			future: driver,
 		},
@@ -673,7 +673,8 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 ///
 /// Dropping them first would reset the control stream ahead of the close, and a strict peer
 /// closes over that reset with its own PROTOCOL_VIOLATION before it reads our code.
-fn close(session: &mut Transport, res: &Result<(), Error>) {
+fn close(session: &mut Transport, closing: &crate::session::Closing, res: &Result<(), Error>) {
+	closing.record(res.as_ref().err().unwrap_or(&Error::Cancel));
 	match res {
 		Err(err @ (Error::Transport(_) | Error::IdleTimeout)) => {
 			tracing::info!(%err, "session terminated");
