@@ -581,7 +581,7 @@ async def test_json_window_roundtrip():
     assert event == moq.json.Timed(moq.json.WindowPop(range(0, 2)), timedelta(milliseconds=3))
 
     producer.finish()
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Closed):
         producer.push({"n": 3}, timestamp=timedelta(milliseconds=4))
     assert [event async for event in consumer] == []
 
@@ -643,7 +643,7 @@ async def test_json_window_skips_records_outside_the_checkpoint():
     ]
 
     producer.finish()
-    with pytest.raises(moq.Error.JsonTrack):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.JsonTrack):
         moq.json.WindowProducer(broadcast.publish_track("bad"), checkpoint_records=0)
 
 
