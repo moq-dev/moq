@@ -250,7 +250,8 @@ impl Server {
 				max_age: None,
 				bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 				program: None,
-				linger: Duration::ZERO,
+				linger: moq_mux::Linger::DEFAULT,
+				follow: Duration::ZERO,
 				stitch: false,
 			};
 
@@ -286,9 +287,11 @@ struct Pending {
 	bandwidth: moq_net::bandwidth::Allocator,
 	/// The programs of a multiplex an ingest publishes. Override with [`Publish::with_program`].
 	program: Option<Program>,
-	/// How long an egress waits for the same instance to return. Override with
-	/// [`Subscribe::with_linger`].
+	/// How long an ended ingest stays up. Override with [`Publish::with_linger`].
 	linger: Duration,
+	/// How long an egress waits for the same instance to return. Override with
+	/// [`Subscribe::with_follow`].
+	follow: Duration,
 	/// Whether an egress follows a replacement. Override with [`Subscribe::with_stitch`].
 	stitch: bool,
 }
@@ -396,6 +399,14 @@ impl Publish {
 		self
 	}
 
+	/// Keep the broadcast up for `linger` after the stream ends, so a subscriber that arrives
+	/// after the end still gets the tail. Defaults to [`moq_mux::Linger::DEFAULT`]; zero closes
+	/// it at once.
+	pub fn with_linger(mut self, linger: Duration) -> Self {
+		self.0.linger = linger;
+		self
+	}
+
 	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
 	/// connection's MPEG-TS into it until the client disconnects.
 	///
@@ -404,10 +415,9 @@ impl Publish {
 	/// future resolves when the connection ends, so callers usually run it on its
 	/// own task.
 	///
-	/// Once the stream ends, the finished broadcast stays up until its media is stale, so
-	/// subscribers still catching up drain the tail, and the future resolves after that.
-	/// Dropping the future ends the linger early, as does a newer publish at `path`. A
-	/// socket or demux error closes the broadcast at once.
+	/// Once the stream ends, the finished broadcast stays up for the
+	/// [linger](Self::with_linger), and the future resolves after that. Dropping the future
+	/// ends the linger early. A socket or demux error closes the broadcast at once.
 	pub async fn accept(self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
 		let socket = self.0.request.accept(None).await?;
@@ -415,7 +425,12 @@ impl Publish {
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(self.0.max_age)
 			.with_bandwidth(self.0.bandwidth);
-		serve_publish(origin, path.as_str(), socket, config, self.0.program).await
+		let ingest = Ingest {
+			config,
+			program: self.0.program,
+			linger: self.0.linger,
+		};
+		serve_publish(origin, path.as_str(), socket, ingest).await
 	}
 
 	/// Reject the publish with a verdict the client can distinguish on the wire.
@@ -456,12 +471,12 @@ impl Subscribe {
 		self.0.peer
 	}
 
-	/// Wait up to `linger` for the same publisher instance to come back once the broadcast
+	/// Wait up to `follow` for the same publisher instance to come back once the broadcast
 	/// ends, carrying on with the same stream. Zero (the default) closes the SRT stream at
 	/// the broadcast's end.
 	/// A stitched replacement must also supply its first catalog within this bound.
-	pub fn with_linger(mut self, linger: Duration) -> Self {
-		self.0.linger = linger;
+	pub fn with_follow(mut self, follow: Duration) -> Self {
+		self.0.follow = follow;
 		self
 	}
 
@@ -485,7 +500,7 @@ impl Subscribe {
 		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
 		let options = crate::ts::Options {
 			latency: self.0.latency,
-			linger: self.0.linger,
+			follow: self.0.follow,
 			stitch: self.0.stitch,
 		};
 		serve_subscribe(origin, path.as_str(), socket, options).await
@@ -508,17 +523,23 @@ async fn reject_log(request: ConnectionRequest, reason: Reject, peer: SocketAddr
 	}
 }
 
+/// How an ingest publishes: its catalog, which programs, and how long a clean end stays up.
+pub(crate) struct Ingest {
+	pub config: moq_mux::catalog::Config,
+	pub program: Option<Program>,
+	pub linger: Duration,
+}
+
 /// Pump one accepted SRT socket's MPEG-TS payload into the origin (`m=publish`).
 pub(crate) async fn serve_publish(
 	origin: &origin::Producer,
 	path: &str,
 	mut socket: SrtSocket,
-	config: moq_mux::catalog::Config,
-	program: Option<Program>,
+	ingest: Ingest,
 ) -> Result<()> {
 	use futures::TryStreamExt;
 
-	let mut publisher = crate::ts::Publisher::new(origin, path, config, program)?;
+	let mut publisher = crate::ts::Publisher::new(origin, path, ingest.config, ingest.program)?;
 
 	// Run the read/feed loop so an error surfaces here instead of unwinding past
 	// the publisher, which would drop it (and its tracks) with a bare Error::Dropped.
@@ -531,17 +552,16 @@ pub(crate) async fn serve_publish(
 	.await;
 
 	match result {
-		// The stream ended: serve the finished broadcasts until their media is stale, so
-		// subscribers still catching up drain the tail. srt-tokio ends the stream the same
+		// The stream ended: serve the finished broadcasts for the linger, so a subscriber
+		// that arrives after the end still gets the tail. srt-tokio ends the stream the same
 		// way for a shutdown and a peer gone silent, so both count as clean here; the
-		// media up to that point is complete either way, and a reconnect cuts the linger.
+		// media up to that point is complete either way.
 		Ok(()) => {
 			drop(socket);
-			let finished = publisher.finish()?;
-			let linger = finished.iter().map(moq_net::broadcast::Finish::linger).max();
-			tracing::info!(%path, ?linger, "SRT ingest ended, serving the finished broadcast until its media is stale");
-			// Polled together, so each program closes at its own expiry.
-			futures::future::join_all(finished.into_iter().map(moq_net::broadcast::Finish::wait)).await;
+			let linger = ingest.linger;
+			let publisher = publisher.finish(linger)?;
+			tracing::info!(%path, ?linger, "SRT ingest ended, serving the finished broadcast");
+			publisher.wait().await;
 			Ok(())
 		}
 		// The socket or demux failed: abort with the real cause so subscribers see it.
@@ -584,7 +604,7 @@ pub(crate) async fn serve_subscribe(
 
 	let mut egress = Egress::default();
 	loop {
-		// Keep watching the socket: a linger can hold `next` for as long as it is set, and
+		// Keep watching the socket: a follow can hold `next` for as long as it is set, and
 		// nothing is sent meanwhile, so a caller who hangs up would otherwise hold the task.
 		let next = tokio::select! {
 			biased;
@@ -1057,11 +1077,11 @@ mod tests {
 		}
 	}
 
-	/// Accept one `m=request` caller for `live` with `linger` and `stitch`, returning the
+	/// Accept one `m=request` caller for `live` with `follow` and `stitch`, returning the
 	/// receiving socket and the egress task.
 	async fn egress(
 		origin: &moq_net::origin::Producer,
-		linger: Duration,
+		follow: Duration,
 		stitch: bool,
 	) -> (SrtSocket, tokio::task::JoinHandle<Result<()>>) {
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), Duration::from_millis(300))
@@ -1081,7 +1101,7 @@ mod tests {
 		let task = tokio::spawn(async move {
 			let _server = server;
 			subscribe
-				.with_linger(linger)
+				.with_follow(follow)
 				.with_stitch(stitch)
 				.accept(&consumer, "live")
 				.await
@@ -1143,15 +1163,15 @@ mod tests {
 		egress.abort();
 	}
 
-	/// An end that nothing replaces closes the SRT stream once the linger runs out, so a
+	/// An end that nothing replaces closes the SRT stream once the follow runs out, so a
 	/// finished broadcast never leaves a caller connected indefinitely.
 	#[tokio::test]
-	async fn an_unreplaced_end_closes_the_srt_stream_at_the_linger() {
-		const LINGER: Duration = Duration::from_secs(1);
+	async fn an_unreplaced_end_closes_the_srt_stream_once_the_follow_ends() {
+		const FOLLOW: Duration = Duration::from_secs(1);
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let mut live = Instance::publish(&origin, "a.aac");
-		let (mut receiver, egress) = egress(&origin, LINGER, false).await;
+		let (mut receiver, egress) = egress(&origin, FOLLOW, false).await;
 
 		live.write(5, 0);
 		tokio::time::timeout(Duration::from_secs(10), receiver.next())
@@ -1168,15 +1188,15 @@ mod tests {
 			}
 		})
 		.await
-		.expect("the SRT stream stayed open past the linger");
-		assert!(ended.elapsed() >= LINGER, "closed after only {:?}", ended.elapsed());
+		.expect("the SRT stream stayed open past the follow");
+		assert!(ended.elapsed() >= FOLLOW, "closed after only {:?}", ended.elapsed());
 		egress.await.unwrap().unwrap();
 	}
 
-	/// A caller hanging up while the egress lingers ends it then, rather than holding the
-	/// task and its socket until the linger runs out.
+	/// A caller hanging up while the egress follows ends it then, rather than holding the
+	/// task and its socket until the follow runs out.
 	#[tokio::test]
-	async fn a_caller_hanging_up_during_the_linger_ends_the_egress() {
+	async fn a_caller_hanging_up_during_the_follow_ends_the_egress() {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let mut live = Instance::publish(&origin, "a.aac");
@@ -1189,7 +1209,7 @@ mod tests {
 			.expect("the SRT egress closed early")
 			.unwrap();
 		live.finish();
-		// Take everything the broadcast sent, so the egress is lingering when the caller goes.
+		// Take everything the broadcast sent, so the egress is following when the caller goes.
 		while let Ok(Some(payload)) = tokio::time::timeout(Duration::from_secs(2), receiver.next()).await {
 			payload.unwrap();
 		}

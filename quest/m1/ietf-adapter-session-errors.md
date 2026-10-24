@@ -10,8 +10,8 @@ transient.
 
 ## Plan
 
-Decided 2026-10-22 (maintainer, from the release audit): m2. The race is
-narrow and limited to the older drafts. It is the session-scope follow-up
+From the 2026-10-22 release audit; moved to m1 on 2026-10-23 (maintainer),
+though the race is narrow and limited to the older drafts. It is the session-scope follow-up
 left by [moq-dev/moq#6251](https://github.com/moq-dev/moq/pull/6251), which
 kept stream errors through `AdapterError::Real`.
 
