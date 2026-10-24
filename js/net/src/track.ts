@@ -79,10 +79,12 @@ const HOLES: ReadonlySet<number> = new Set([
 // not a failed one. Mirrors Rust's cache-policy aborts in `group::Handle::commit_abort`.
 const EVICTED = new WeakSet<Error>();
 
-// Whether `group` failed: closed with an error other than its eviction from this cache.
+// Whether `group`'s copy failed: closed with an error other than its eviction from this cache.
+// Read from the copy, since a reader's own verdict (an eviction's gap, a stale group) says
+// nothing about whether the group arrived.
 function failed(group: GroupConsumer): boolean {
-	const closed = group.closed.peek();
-	return closed instanceof Error && !EVICTED.has(closed);
+	const abort = hooks.groupAbort(group);
+	return abort !== undefined && !EVICTED.has(abort);
 }
 
 /**

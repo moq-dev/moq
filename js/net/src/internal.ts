@@ -535,6 +535,8 @@ export const hooks: {
 	groupArrived: (group: GroupConsumer) => Instant;
 	/** Whether a group counts as content: its first frame landed, or it ended. */
 	groupStarted: (group: GroupConsumer) => boolean;
+	/** Return the error a group's copy was closed with, ignoring this reader's own verdicts. */
+	groupAbort: (group: GroupConsumer) => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
@@ -711,6 +713,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupStarted: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupAbort: () => {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {

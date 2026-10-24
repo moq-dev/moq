@@ -1230,6 +1230,48 @@ test("a parked read wakes at its wall deadline", async () => {
 	}
 });
 
+// Evicting a recorded successor nobody read leaves its mirror a reader-side gap, which is not
+// a failure: the held group is still judged by that successor's arrival, not the next one's.
+test("an evicted successor with unread frames still starts the wall clock", async () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	try {
+		const budget = 2 * CACHE_WINDOW_MS;
+		const track = producer.subscribe({ maxDelay: Milli(budget) });
+		const write = () => {
+			const group = producer.appendGroup();
+			group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
+			group.close();
+		};
+		write();
+		const group = track.tryRecvGroup();
+		if (!group) throw new Error("missing group");
+		expect(await group.readString()).toBe("x");
+
+		let stale = false;
+		const guarded = hooks
+			.guardGroup(group, () => new Promise<never>(() => {}))
+			.catch((err: unknown) => {
+				stale = true;
+				return err;
+			});
+		write(); // the successor, left unread
+		await settle();
+		// A later live edge, so the successor ages out of the cache.
+		await clock.advance(20_000);
+		write();
+
+		await clock.advance(10_000 + budget - 1);
+		expect(stale).toBe(false);
+		await clock.advance(10_000 + budget);
+		expect(stale).toBe(true);
+		expect(await guarded).toMatchObject({ code: StreamCode.Old });
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
 // A held group's recorded successor that failed hands the wall clock on to the next live
 // group, even when the write that brings that group in also evicts the failed one before the
 // guard looks again, rather than convicting by the failed one's arrival.
@@ -1269,6 +1311,7 @@ test("a failed successor hands the wall clock on after the cache evicts it", asy
 		await clock.advance(replacement + budget - 1);
 		expect(stale).toBe(false);
 		await clock.advance(replacement + budget);
+		expect(stale).toBe(true);
 		expect(await guarded).toMatchObject({ code: StreamCode.Old });
 	} finally {
 		producer.close();
