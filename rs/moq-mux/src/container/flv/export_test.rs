@@ -1344,8 +1344,9 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 
 /// The `(DTS, PTS)` of every AVC frame tag, and the audio tag timestamps, an export renders of
 /// a broadcast that declares `reorder` and carries a group of `stamps` (ms, decode order) for
-/// each entry, plus one audio frame at 20 ms.
-async fn export_declared(reorder: u8, groups: &[&[u64]]) -> anyhow::Result<(Vec<(u32, i64)>, Vec<u32>)> {
+/// each entry, plus one audio frame at 20 ms. With `open`, the last group is cut but the video
+/// track stays open.
+async fn export_declared(reorder: u8, groups: &[&[u64]], open: bool) -> anyhow::Result<(Vec<(u32, i64)>, Vec<u32>)> {
 	use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
 	use moq_net::Timestamp;
 
@@ -1397,7 +1398,10 @@ async fn export_declared(reorder: u8, groups: &[&[u64]]) -> anyhow::Result<(Vec<
 			video.write(frame(ms, payload, index == 0)).unwrap();
 		}
 	}
-	video.finish().unwrap();
+	match open {
+		true => video.cut(None).unwrap(),
+		false => video.finish().unwrap(),
+	}
 	let mut audio = crate::container::Producer::new(
 		audio_track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
@@ -1414,6 +1418,7 @@ async fn export_declared(reorder: u8, groups: &[&[u64]]) -> anyhow::Result<(Vec<
 	if let Some(Err(err)) = drain_until_idle(&mut exporter, &mut exported).await {
 		return Err(err);
 	}
+	drop(video);
 	let tags = parse_tags(&exported);
 	let video = tags
 		.iter()
@@ -1437,7 +1442,7 @@ async fn export_declared(reorder: u8, groups: &[&[u64]]) -> anyhow::Result<(Vec<
 #[tokio::test(start_paused = true)]
 async fn export_declared_reorder_decodes_each_group_from_its_frames() {
 	let groups: [&[u64]; 2] = [&[0, 160, 80, 40, 120], &[400, 560, 480, 440, 520]];
-	let (video, audio) = export_declared(2, &groups).await.unwrap();
+	let (video, audio) = export_declared(2, &groups, false).await.unwrap();
 	assert_eq!(
 		video,
 		[
@@ -1457,14 +1462,19 @@ async fn export_declared_reorder_decodes_each_group_from_its_frames() {
 
 	// A first group cut short leaves the next decoding where it would have.
 	let cut: [&[u64]; 2] = [&[0, 160, 80], &[400, 560, 480, 440, 520]];
-	let (cut, _) = export_declared(2, &cut).await.unwrap();
+	let (cut, _) = export_declared(2, &cut, false).await.unwrap();
 	assert_eq!(cut[3..], video[5..]);
 
 	// A depth of zero decodes at presentation, and refuses a frame that reorders.
-	let (video, _) = export_declared(0, &[&[0, 40, 80]]).await.unwrap();
+	let (video, _) = export_declared(0, &[&[0, 40, 80]], false).await.unwrap();
 	assert_eq!(video, [(0, 0), (40, 40), (80, 80)]);
-	let err = export_declared(0, &[&[0, 80, 40]]).await.unwrap_err();
+	let err = export_declared(0, &[&[0, 80, 40]], false).await.unwrap_err();
 	assert!(err.to_string().contains("declared depth"), "{err}");
+
+	// A group that ends goes out whole while the track stays open, though fewer frames than the
+	// depth settle nothing.
+	let (video, _) = export_declared(2, &[&[0, 80]], true).await.unwrap();
+	assert_eq!(video, [(0, 2), (1, 82)]);
 }
 
 /// Poll `exporter` into `out` until it ends or goes idle; `None` if it went idle.
