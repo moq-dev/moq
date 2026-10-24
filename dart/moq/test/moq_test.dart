@@ -559,17 +559,19 @@ void main() {
     final broadcast = BroadcastProducer();
     final video = moq_video.Producer(
       catalog: moq_media.CatalogProducer(broadcast: broadcast),
-      input: moq_video.EncoderInput(
-        format: moq_video.PixelFormat.rgba,
-        width: 320,
-        height: 240,
-        framerate: 30,
-      ),
-      // Software so the encode is deterministic everywhere.
-      output: moq_video.EncoderOutput(
-        codec: moq_video.Codec.h264,
+      options: moq_video.ProducerOptions(
+        input: moq_video.EncoderInput(
+          format: moq_video.PixelFormat.rgba,
+          width: 320,
+          height: 240,
+          framerate: moq_video.FrameRate(numerator: 30000, denominator: 1001),
+        ),
+        output: moq_video.EncoderOutput(
+          codec: moq_video.Codec.h264,
+
+          kind: moq_video.SoftwareEncoder(),
+        ),
         track: 'camera',
-        kind: moq_video.SoftwareEncoder(),
       ),
     );
 
@@ -627,13 +629,13 @@ void main() {
     final broadcast = BroadcastProducer();
     final audio = moq_audio.Producer(
       catalog: moq_media.CatalogProducer(broadcast: broadcast),
-      input: moq_audio.EncoderInput(
-        format: moq_audio.SampleFormat.f32,
-        sampleRate: 48000,
-        channels: 1,
-      ),
-      output: moq_audio.EncoderOutput(
-        codec: moq_audio.Codec.opus(),
+      options: moq_audio.ProducerOptions(
+        input: moq_audio.EncoderInput(
+          format: moq_audio.SampleFormat.f32,
+          sampleRate: 48000,
+          channels: 1,
+        ),
+        output: moq_audio.EncoderOutput(codec: moq_audio.Codec.opus()),
         track: 'mic',
       ),
     );
@@ -690,15 +692,17 @@ void main() {
     final broadcast = BroadcastProducer();
     final producer = moq_audio.Producer(
       catalog: moq_media.CatalogProducer(broadcast: broadcast),
-      input: moq_audio.EncoderInput(
-        format: moq_audio.SampleFormat.f32,
-        sampleRate: 48000,
-        channels: 1,
-      ),
-      output: moq_audio.EncoderOutput(
-        codec: moq_audio.Codec.opus(),
+      options: moq_audio.ProducerOptions(
+        input: moq_audio.EncoderInput(
+          format: moq_audio.SampleFormat.f32,
+          sampleRate: 48000,
+          channels: 1,
+        ),
+        output: moq_audio.EncoderOutput(
+          codec: moq_audio.Codec.opus(),
+          frameDurationUs: 10000,
+        ),
         track: 'mic',
-        frameDurationUs: 10000,
       ),
     );
     producer.write(
