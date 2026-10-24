@@ -22,10 +22,10 @@ and hashes only peer routes. Through a peer, a restart on a different chain
 of the same length and cost that loses the routing hash is reached only once
 the old session closes and its route is withdrawn.
 
-The epoch rides moq-lite 07 announcements and requests as metadata, so the
-path never changes and every older version and moq-transport keeps working:
-their routes carry no epoch, and see a restart as an end and start at the
-same path.
+The epoch rides moq-lite 07 announcements and requests as metadata, and the
+negotiated IETF epoch extension carries it on supported moq-transport versions.
+The path never changes. Versions without epoch support keep working: their
+routes carry no epoch, and see a restart as an end and start at the same path.
 
 Decided 2026-10-10: keep epochless clients supported on updated relays, with
 unchanged paths and End+Start on replacement. The relay retains the explicit
@@ -92,15 +92,29 @@ the IETF resume point and lite-05/06 `widen_frame_bounds` still serve any
 mid-group start: a public `Subscription::with_start` or a downstream Frame
 Start a relay forwards upstream.
 
-This README owns an end-to-end relay test: republish a name under a new
-epoch while the old publisher's session stays open. A lite-07 viewer and a lite-06 or IETF viewer
-that follow the announce `Restart` (or END then START) both reach the new
-epoch within one RTT-scale bound rather than the idle timeout, and killing the
-newest epoch falls back to a still-live older one.
-The same test drives the real players (decided 2026-10-09, from #5154):
-`moq play` and a browser `@moq/watch`, the latter through the `just test
-media` lane, both show the new run within that bound, without a manual
-republish against a live relay.
+The end-to-end gate republishes a name under a new epoch while the old
+publisher's session stays open, then closes the newest so the still-live older
+one wins again. The real relay (the CLI integration suite's `epochs` cases) and
+both real players (decided 2026-10-09, from #5154: `moq play` through `just test
+native-play` and a browser `@moq/watch` through `just test media`) run it on
+lite-07, lite-06, and IETF, holding A's catalog and media across B's takeover.
+
+Decided 2026-10-23 (maintainer, on
+[PR 6548](https://github.com/moq-dev/moq/pull/6548)): the gate's "RTT-scale
+bound" means announcement-following readers observe the replacement within the
+protocol round trips plus the configured announcement hold, independent of the
+idle timeout, and real players present it within those routing delays plus
+their configured codec cadence, decoding, and playback delays. A player cannot
+show a new run sooner than its keyframe cadence and playback delay allow, and
+the hold is a deliberate routing setting, so neither is a stall; the gate
+exists to exclude waiting on the old session's idle timeout. Each gate enforces
+the bound derived from its own configuration rather than a hang watchdog.
+That PR fixed the IETF22 viewer's group recovery and its object-stream error.
+The gates landed with two problems left open (maintainer): a fallback session
+drop and audio stall that did not reproduce, tracked in
+[IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md), and the native
+player reopening its audio output on each switch, which glitches under load,
+tracked in [Play keeps its audio output](/quest/m1/play-audio-handover.md).
 
 When the release cut carries stats epochs, drop
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed and
@@ -114,12 +128,5 @@ handover. Keep existing reads sticky; stopping new unpinned wire work is a
 separate boundary. Catalog references apply the same identity policy to
 players and exporters, distinguishing announcement followers from readers
 that retain lifetime pins. Wall-clock expiry, live DROP dispositions,
-and FETCH budgets remain m1.
-
-Extend the line's relay/media tests to hold catalog and media from A while B
-replaces it, exercise later metadata/subscription/FETCH operations, and prove
-that replacing the catalog starts fresh pins. A followed sibling replacement
-restarts that sibling while preserving the catalog's explicit epoch
-constraints; it never mixes instances through an old handle. Check
-exact and covering routes, matching/different/absent epochs, and legacy
-End+Start. The child quests own their focused regressions.
+and FETCH budgets remain m1; the IETF extension and seamless JS handover
+landed independently.

@@ -34,8 +34,10 @@ Direction carried over from 2026-09-19, not re-confirmed:
   behind a relay setting (`cluster.fair`), off by default.
 - A tenant-keyed domain (one bucket per customer, however many broadcasts they
   run) needs the tenant identity from the auth line and refines the same tier.
-- moq-quic already has the fair tier: send domains sharing bytes by deficit
-  round robin, with groups inside them, crate-private until a consumer lands.
+- moq-quic had the fair tier: send domains sharing bytes by deficit round
+  robin, with groups inside them. [quic-api trim](/quest/m1/quic-api/trim.md)
+  deletes it while nothing uses it (maintainer, 2026-10-23); restore it from
+  that PR's history with this quest's consumer.
   Exposing them gives `transport::poll::Session::send_group` a domain, a
   trait break for every implementer.
 - The draft would say a relay MAY scope priority to the broadcast on a

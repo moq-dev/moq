@@ -22,8 +22,8 @@ dropped and expired objects and slow-viewer isolation; best-effort loss must
 not make lower CPU look like a gain.
 
 Keep framing, priority, expiry and memory-accounting behavior intact. The
-[datagram memory](/quest/m1/release-audit/datagram-memory.md) quest owns the
-decoded memory-accounting defect. This quest owns the recurring audit's missing
+decoded memory-accounting defect is fixed
+([moq-dev/moq#6413](https://github.com/moq-dev/moq/pull/6413)). This quest owns the recurring audit's missing
 session-level datagram measurement and any independent measured optimization.
 
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):

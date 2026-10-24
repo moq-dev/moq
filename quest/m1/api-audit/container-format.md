@@ -20,8 +20,8 @@ passthrough, and `ts::Passthrough` is unreachable from `ContainerFormat`.
   (`MOQ_CONTAINER_FORMAT_CMAF`), and every wrapper enum; none has a caller.
   Parse `"cmaf"` as `Fmp4`. Passthrough stays Rust-only through
   `fmp4::Import::with_passthrough` and `moq_hls::import::Config::passthrough`,
-  which the CLI already uses. Rewrite the 8 binding MIGRATE entries #6250
-  wrote. Chosen over a `ContainerInit::passthrough` flag because nothing
+  which the CLI already uses. The Impact bullet supersedes the 8 binding
+  MIGRATE entries #6250 wrote, for the cut to collapse. Chosen over a `ContainerInit::passthrough` flag because nothing
   outside Rust asks for passthrough yet.
 - Make the `"m2ts"` string agree with the catalog meaning, or rename it so it
   does not collide; verify against callers first.

@@ -58,7 +58,7 @@ Measure retained bytes per session and throughput across many sessions for
 the chosen window.
 
 Public API: qmux's `RecvStream` leases natively instead of through
-`Buffered`, and its window defaults or validation change (MIGRATE.md). Wire:
+`Buffered`, and its window defaults or validation change (with a migration note). Wire:
 QMux MAX_DATA and STOP_SENDING only, no MoQ format change.
 
 
