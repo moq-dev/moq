@@ -56,8 +56,10 @@ impl Edit {
 				.map_err(|_| Error::PtsOverflow)?,
 		};
 
-		// An Opus frame timestamp already counts the OpusHead pre-skip (draft-lcurley-moq-hang), and
-		// the edit includes it, so only the part beyond it moves the timestamps.
+		// A consumer trims the OpusHead pre-skip from the first decoded frame and plays the first
+		// sample it keeps at the frame timestamp (draft-lcurley-moq-hang), while in ISO BMFF the edit
+		// alone trims. So the edit moves an Opus frame by its distance from the pre-skip: an edit
+		// starting inside the pre-skip delays the kept samples by the rest of it.
 		let skip = match trak.mdia.minf.stbl.stsd.codecs.as_slice() {
 			[mp4_atom::Codec::Opus(opus)] => {
 				u64::try_from(u128::from(opus.dops.pre_skip) * timescale / 48_000).map_err(|_| Error::PtsOverflow)?
@@ -65,9 +67,12 @@ impl Edit {
 			_ => 0,
 		};
 
-		Ok(Self {
-			start: media_time.saturating_sub(skip),
-			delay,
+		Ok(match media_time.checked_sub(skip) {
+			Some(start) => Self { start, delay },
+			None => Self {
+				start: 0,
+				delay: delay.checked_add(skip - media_time).ok_or(Error::PtsOverflow)?,
+			},
 		})
 	}
 
@@ -150,7 +155,12 @@ mod tests {
 				true,
 				[None, None, Some(0), Some(40)],
 			),
-			(Some(vec![entry(0, Some(100), 1)]), true, none),
+			// An edit inside the pre-skip shows media 312, the first sample a consumer keeps, at 212.
+			(
+				Some(vec![entry(0, Some(100), 1)]),
+				true,
+				[Some(212), Some(1171), Some(1172), Some(1212)],
+			),
 		];
 		for (entries, opus, expected) in cases {
 			let edit = Edit::new(&trak(entries.clone(), opus), 1000).unwrap();

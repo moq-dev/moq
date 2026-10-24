@@ -118,6 +118,9 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	/// The edit list, applied to every sample's presentation time.
 	edit: Edit,
 
+	/// The edit list dropped the last sync sample, so the samples decoding from it go too.
+	orphaned: bool,
+
 	// The decode time of the last fragment, which the next one has to advance past.
 	last_decode_time: Option<u64>,
 
@@ -420,6 +423,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					defaults: sample::Defaults::from_moov(&moov, track_id),
 					timescale,
 					edit,
+					orphaned: false,
 					last_decode_time: None,
 					sample_duration: None,
 					segment: None,
@@ -1098,7 +1102,11 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 					.into());
 				}
 
-				if let Some(presented) = self.edit.present(pts)? {
+				let presented = self.edit.present(pts)?;
+				if sample.is_sync() {
+					self.orphaned = presented.is_none();
+				}
+				if let Some(presented) = presented.filter(|_| !self.orphaned) {
 					let timestamp = Timestamp::new(presented, timescale)?;
 					let sample_end = match duration_ts.or(self.sample_duration) {
 						Some(duration) => timestamp.checked_add(duration)?,
@@ -1235,8 +1243,8 @@ fn fragment(
 
 /// `traf` restated as one run of `run`'s samples, for a fragment the edit list dropped some of.
 ///
-/// Each sample keeps its decode and composition time: a dropped sample's duration goes to the
-/// sample before it, or into `tfdt` when it led the fragment. The per-sample tables (`sbgp`,
+/// Each sample keeps its decode and composition time: `tfdt` starts at the first kept sample, and
+/// each kept sample lasts until the next one decodes. The per-sample tables (`sbgp`,
 /// `subs`, sample auxiliary information) would index the wrong samples, and no consumer reads
 /// them, so they go.
 fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {

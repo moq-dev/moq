@@ -896,31 +896,17 @@ async fn audio_presents_from_its_edit() {
 	}
 }
 
-/// A dropped sample between kept ones, such as an open GOP's leading picture, leaves every kept
-/// sample at its own presentation time and in decode order, passthrough or unwrapped.
-#[tokio::test]
-async fn video_drops_the_samples_before_its_edit() {
-	let (_, (video_id, video_scale), _) = bbb_init();
-	let tick = video_scale.as_u64() / 24;
-	let init = bbb_init_with_edits(video_id, vec![media_edit(2 * tick)]);
-	let non_sync = 0x0001_0000;
-
-	// I, a leading B presenting before it, P, then B, in decode order.
-	let entries = [
-		(2 * tick, 0, 0xA),
-		(0, non_sync, 0xB),
-		(2 * tick, non_sync, 0xC),
-		(0, non_sync, 0xD),
-	];
+/// One video fragment decoding from `dts`, a sample per `(cts, flags, byte)` lasting `tick`.
+fn video_fragment(track_id: u32, dts: u64, tick: u64, entries: &[(u64, u32, u8)]) -> Vec<u8> {
 	let moof = mp4_atom::Moof {
 		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 		traf: vec![mp4_atom::Traf {
 			tfhd: mp4_atom::Tfhd {
-				track_id: video_id,
+				track_id,
 				..Default::default()
 			},
 			tfdt: Some(mp4_atom::Tfdt {
-				base_media_decode_time: 0,
+				base_media_decode_time: dts,
 			}),
 			trun: vec![mp4_atom::Trun {
 				data_offset: None,
@@ -944,23 +930,73 @@ async fn video_drops_the_samples_before_its_edit() {
 	}
 	.encode(&mut fragment)
 	.unwrap();
+	fragment
+}
 
+/// The edit list drops the video samples before it and keeps every other one at its own
+/// presentation time and in decode order, passthrough or unwrapped. A dropped sync sample takes the
+/// samples decoding from it along, so the track resumes at the next one.
+#[tokio::test]
+async fn video_drops_the_samples_before_its_edit() {
+	let (_, (video_id, video_scale), _) = bbb_init();
+	let tick = video_scale.as_u64() / 24;
 	let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(video_scale.as_u64());
-	let expected = vec![
-		(0, true, bytes::Bytes::from_static(&[0xA; 2])),
-		(micros(2 * tick), false, bytes::Bytes::from_static(&[0xC; 2])),
-		(micros(tick), false, bytes::Bytes::from_static(&[0xD; 2])),
+	let sample = |ticks: u64, keyframe: bool, byte: u8| (micros(ticks), keyframe, bytes::Bytes::from(vec![byte; 2]));
+	let non_sync = 0x0001_0000;
+
+	let cases = [
+		// I, a leading B presenting before it, P, then B, in decode order.
+		(
+			2 * tick,
+			vec![video_fragment(
+				video_id,
+				0,
+				tick,
+				&[
+					(2 * tick, 0, 0xA),
+					(0, non_sync, 0xB),
+					(2 * tick, non_sync, 0xC),
+					(0, non_sync, 0xD),
+				],
+			)],
+			vec![
+				sample(0, true, 0xA),
+				sample(2 * tick, false, 0xC),
+				sample(tick, false, 0xD),
+			],
+		),
+		// An edit after the first I, as a cut at a non-sync sample writes: the P frames after the
+		// edit can't decode without it.
+		(
+			tick,
+			vec![
+				video_fragment(
+					video_id,
+					0,
+					tick,
+					&[(0, 0, 0xA), (0, non_sync, 0xB), (0, non_sync, 0xC)],
+				),
+				video_fragment(video_id, 3 * tick, tick, &[(0, 0, 0xD), (0, non_sync, 0xE)]),
+			],
+			vec![sample(2 * tick, true, 0xD), sample(3 * tick, false, 0xE)],
+		),
 	];
-	for passthrough in [false, true] {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
-		fmp4.decode(&init).unwrap();
-		fmp4.decode(&fragment).unwrap();
-		fmp4.finish().unwrap();
-		let [video, _] = published(&consumer, &catalog).await;
-		assert_eq!(video, expected, "passthrough {passthrough}");
+	for (media_time, fragments, expected) in cases {
+		let init = bbb_init_with_edits(video_id, vec![media_edit(media_time)]);
+		for passthrough in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+			let mut fmp4 =
+				crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+			fmp4.decode(&init).unwrap();
+			for fragment in &fragments {
+				fmp4.decode(fragment).unwrap();
+			}
+			fmp4.finish().unwrap();
+			let [video, _] = published(&consumer, &catalog).await;
+			assert_eq!(video, expected, "edit at {media_time}, passthrough {passthrough}");
+		}
 	}
 }
 
