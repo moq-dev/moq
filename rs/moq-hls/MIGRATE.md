@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Denied broadcast references report authorization failure
+
+A rendition whose referenced broadcast is outside the source origin's scope now
+returns `Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized))` from
+playlist (ranged too), init and segment reads, and from the segment cursor,
+instead of behaving like missing media.
+`Broadcaster::ready` and `Rendition::playable` settle on that refusal. Embedders
+should answer it with an uncacheable 403; the HTTP server does so automatically.
+Allowed renditions keep serving, and missing or disconnected media remains 404.
+
 ### A failed timeline fails the segment cursor
 
 `export::segments::Consumer::next` returns `Err(Error::TimelineFailed { .. })` once a failed timeline's covered segments drain, instead of `Ok(None)`.
@@ -26,6 +36,7 @@ Set `import::Config::passthrough` to keep publishing CMAF.
 ### An ended playlist ends the import
 
 `import::Import::run` returns `Ok(())` once every rendition's playlist carries `EXT-X-ENDLIST` and its last segment is imported, instead of polling forever.
+A playlist that has already ended (`EXT-X-ENDLIST`) when a rendition first sees it is refused with the new `Error::PlaylistEnded`, from `init` and `run` alike, instead of importing its last three segments.
 Call `Import::finish` then, and keep the returned `broadcast::Finish` (or await `Finish::wait`) so subscribers still catching up drain the tail.
 
 ```rust

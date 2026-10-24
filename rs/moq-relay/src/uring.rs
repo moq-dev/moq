@@ -414,12 +414,6 @@ impl std::fmt::Debug for Workers {
 /// One qlog sink is built for the whole group and cloned into every worker, so
 /// the traces share a single writer thread however many workers there are.
 fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::Transport> {
-	// The datagram path fixes both payload ceilings at SEGMENT and hands
-	// `conn.send` slices of exactly that, so there is no larger size to find.
-	anyhow::ensure!(
-		!quic.mtu_discovery,
-		"io_uring workers send a fixed-size UDP payload, so quic.mtu_discovery has nothing to discover"
-	);
 	// The tokio path reports this through `moq_tokio::Error::QlogUnsupported`,
 	// which nothing builds here: this listener is the io_uring stack.
 	#[cfg(not(feature = "qlog"))]
@@ -449,6 +443,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
+	transport.mtu_discovery = quic.mtu_discovery;
 	// `[quic]` resolves every window, defaults included, so both runtimes run
 	// the same ones rather than each backend's own.
 	transport.receive_window = Some(quic.receive_window);
@@ -728,7 +723,7 @@ async fn serve_connection(
 	// moq-net boxes the transport with a native `Send` bound, which only a `Local`
 	// session meets; it still never leaves this worker.
 	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, binding));
-	let now = moq_net::time::now();
+	let now = moq_net::time::Instant::now();
 	let mut accepted = Accepted {
 		handle,
 		conn,
@@ -797,13 +792,8 @@ async fn serve_request(
 	}
 	auth_request.remote = Some(remote);
 	auth_request.local = Some(serve.local);
-	// Like the tokio listener: the SNI, else the host a WebTransport client addressed.
-	auth_request.server_name = sni.or_else(|| {
-		url.as_ref()
-			.and_then(|url| url.host_str())
-			.filter(|host| !host.is_empty())
-			.map(str::to_owned)
-	});
+	// Only the SNI, like the tokio listener: the CONNECT host selected no certificate.
+	auth_request.server_name = sni;
 	auth_request.alpn = alpn.clone();
 	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 	let admission = lifecycle.clone();
@@ -814,7 +804,7 @@ async fn serve_request(
 		.await
 		.inspect_err(|err| {
 			if matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::Timeout)) {
-				serve.cluster.refusals.record(crate::refusals::Refusal::Unavailable);
+				serve.cluster.refusals.record(crate::refusals::RefusalKind::Unavailable);
 			}
 		})?;
 	let (admitted, registration) = match decided {
@@ -909,6 +899,15 @@ mod tests {
 		assert_eq!(transport.receive_window, Some(128 << 20));
 		assert_eq!(transport.stream_receive_window, Some(8 << 20));
 		assert_eq!(transport.send_window, Some(32 << 20));
+	}
+
+	/// `quic.mtu_discovery` reaches the workers as it does the tokio backends: off unless set.
+	#[test]
+	fn mtu_discovery_is_applied() {
+		let mut quic = moq_tokio::quic::Config::default();
+		assert!(!transport(&quic.resolve()).expect("default").mtu_discovery);
+		quic.mtu_discovery = Some(true);
+		assert!(transport(&quic.resolve()).expect("discovery").mtu_discovery);
 	}
 
 	/// Incomplete messages hold connection credit, so the window has to fit the largest.

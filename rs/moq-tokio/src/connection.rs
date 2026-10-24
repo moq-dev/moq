@@ -75,11 +75,7 @@ pub struct Backoff {
 	/// pacing would collapse.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub initial: Option<Duration>,
 
 	/// Initial delay before the first reconnect attempt. Defaults to 1s, floored at 50ms.
@@ -105,11 +101,7 @@ pub struct Backoff {
 	/// Maximum delay between reconnect attempts. Defaults to 5s.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub max: Option<Duration>,
 
 	/// Maximum delay between reconnect attempts. Defaults to 5s.
@@ -132,11 +124,7 @@ pub struct Backoff {
 	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
 	/// type's default, and only `None` tells "unset" apart from "retry forever".
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<Duration>,
 
 	// No parser default: the parser stores one as if it were given, and it would then beat a
@@ -368,11 +356,7 @@ pub struct Goaway {
 	/// does not extend it. Defaults to 10 seconds.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub handover: Option<Duration>,
 
 	/// How long the old session keeps serving after its replacement connects. Defaults to 10s.

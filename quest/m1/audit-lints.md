@@ -83,5 +83,4 @@ m2 successor before finishing these checks and the audit's fixes.
   suppression/deprecation markers in those wrappers or C/C++ requiring changes.
 
 Count with `git grep` over tracked files, including multi-line Rust attributes.
-Generated/vendor bindings retain generator-owned suppressions. The model-marker
-parser accepts wrapped attributes; run its tests if a reason moves near a marker.
+Generated/vendor bindings retain generator-owned suppressions.

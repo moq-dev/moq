@@ -647,6 +647,13 @@ pub(crate) struct SocketStats(std::convert::Infallible);
 #[derive(Clone, Debug)]
 pub struct MtlsPeer(pub moq_tokio::tls::PeerIdentity);
 
+/// The SNI that selected the HTTPS certificate, inserted as a request extension.
+///
+/// Plain HTTP has no handshake to name a host, so it never carries one; the `Host`
+/// header and `:authority` are client-chosen and never stand in for it.
+#[derive(Clone, Debug)]
+pub(crate) struct ServerName(pub(crate) String);
+
 /// Accepts a connection on a public web listener.
 ///
 /// Captures the socket, then hands the stream to `inner`: [`DefaultAcceptor`] for
@@ -695,6 +702,10 @@ impl WebAcceptor<RustlsAcceptor<DefaultAcceptor>> {
 trait HttpStream {
 	/// The marker for this connection's verified peer certificate.
 	fn mtls_peer(&self) -> Option<MtlsPeer>;
+	/// The SNI that selected the certificate, when the connection carried TLS.
+	fn server_name(&self) -> Option<&str> {
+		None
+	}
 	fn admission(&self) -> Option<crate::listener::Admission> {
 		None
 	}
@@ -731,6 +742,9 @@ impl<I: HttpStream> HttpStream for TlsStream<I> {
 	}
 	fn acme_challenge(&self) -> bool {
 		self.get_ref().1.alpn_protocol() == Some(rustls_acme::acme::ACME_TLS_ALPN_NAME)
+	}
+	fn server_name(&self) -> Option<&str> {
+		self.get_ref().1.server_name()
 	}
 	fn mtls_peer(&self) -> Option<MtlsPeer> {
 		self.get_ref()
@@ -782,6 +796,7 @@ where
 				return Err(std::io::Error::other("answered an ACME TLS-ALPN-01 challenge"));
 			}
 			let peer = stream.mtls_peer();
+			let server_name = stream.server_name().map(|name| ServerName(name.to_owned()));
 			let admission = stream.admission();
 			if stream.is_http2() {
 				// Extended CONNECT is not enabled, so h2 cannot become a WebSocket.
@@ -792,6 +807,7 @@ where
 				SetConnectionExtensions {
 					inner: service,
 					peer,
+					server_name,
 					socket,
 					admission,
 				},
@@ -817,12 +833,13 @@ fn socket_stats<I: AcceptStream>(_stream: &I) -> Option<SocketStats> {
 
 /// Attaches connection facts to each request, handing the first upgrade its admission.
 ///
-/// The mTLS marker and captured socket are replayed on every request. Admission
-/// is shared between service clones and consumed only once.
+/// The mTLS marker, SNI, and captured socket are replayed on every request.
+/// Admission is shared between service clones and consumed only once.
 #[derive(Clone)]
 struct SetConnectionExtensions<S> {
 	inner: S,
 	peer: Option<MtlsPeer>,
+	server_name: Option<ServerName>,
 	socket: Option<SocketStats>,
 	admission: Option<crate::listener::Admission>,
 }
@@ -858,6 +875,9 @@ where
 		// `Option<Extension<MtlsPeer>>` so absence is the no-cert case.
 		if let Some(peer) = self.peer.clone() {
 			req.extensions_mut().insert(peer);
+		}
+		if let Some(server_name) = self.server_name.clone() {
+			req.extensions_mut().insert(server_name);
 		}
 		if let Some(socket) = self.socket.clone() {
 			req.extensions_mut().insert(socket);
@@ -949,30 +969,8 @@ impl<'de> serde::Deserialize<'de> for FetchGroup {
 	}
 }
 
-/// The host this request was addressed to, reported to the auth server as the
-/// session's `server_name` so it can route by hostname. These handlers build their
-/// request from a path rather than a URL, so it has to come off the request headers.
-fn request_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
-	// HTTP/2 carries the host in `:authority`, which hyper surfaces on the URI and
-	// usually WITHOUT a `Host` header. The HTTPS listener advertises h2, so reading
-	// the header alone loses the tenant for ordinary clients.
-	uri.authority()
-		.map(|authority| authority.host().to_string())
-		.or_else(|| {
-			headers
-				.get(http::header::HOST)
-				.and_then(|host| host.to_str().ok())
-				// Parsed rather than split on the last colon, which would truncate a
-				// bracketed IPv6 literal (`[2001:db8::1]`) at its own separator.
-				.and_then(|host| host.parse::<http::uri::Authority>().ok())
-				.map(|authority| authority.host().to_string())
-		})
-		.map(|host| host.to_ascii_lowercase())
-		.filter(|host| !host.is_empty())
-}
-
 /// Admit a one-shot HTTP read: the auth server sees the path, the raw query, the
-/// host it was addressed to, the peer, and any certificate. Only a grant that may
+/// SNI on HTTPS, the peer, and any certificate. Only a grant that may
 /// subscribe counts as a request; the returned origin meters reads under its token.
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
@@ -981,7 +979,7 @@ async fn admit_http(
 	path: String,
 	query: AuthQuery,
 	uri: &http::Uri,
-	headers: &http::HeaderMap,
+	server_name: Option<Extension<ServerName>>,
 	remote: net::SocketAddr,
 	mtls: Option<Extension<MtlsPeer>>,
 ) -> axum::response::Result<(auth::Lease, moq_net::origin::Consumer)> {
@@ -994,7 +992,7 @@ async fn admit_http(
 		.query()
 		.map(str::to_owned)
 		.or_else(|| query.jwt.map(|jwt| format!("jwt={jwt}")));
-	request.server_name = request_host(uri, headers);
+	request.server_name = server_name.map(|Extension(ServerName(name))| name);
 	request.remote = Some(remote);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	// The listener's timeout bounds admission as it bounds the request headers. An
@@ -1009,7 +1007,7 @@ async fn admit_http(
 	.inspect_err(|err| state.cluster.refusals.record_auth(err))?;
 	let token = lease.token();
 	let Some(origin) = state.cluster.subscriber(token) else {
-		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
+		state.cluster.refusals.record(crate::refusals::RefusalKind::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 	let stats = state.cluster.stats.tier(token.tier.clone()).request(&token.label);
@@ -1024,9 +1022,9 @@ async fn serve_announced(
 	path: Option<Path<String>>,
 	Query(query): Query<AuthQuery>,
 	mtls: Option<Extension<MtlsPeer>>,
+	server_name: Option<Extension<ServerName>>,
 	ConnectInfo(remote): ConnectInfo<net::SocketAddr>,
 	uri: http::Uri,
-	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<String> {
 	let prefix = match path {
@@ -1034,7 +1032,7 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let (lease, origin) = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
+	let (lease, origin) = admit_http(&state, prefix, query, &uri, server_name, remote, mtls).await?;
 	let mut announced = origin.announced();
 	let mut broadcasts = Vec::new();
 
@@ -1062,9 +1060,9 @@ async fn serve_fetch(
 	Path(path): Path<String>,
 	Query(params): Query<FetchParams>,
 	mtls: Option<Extension<MtlsPeer>>,
+	server_name: Option<Extension<ServerName>>,
 	ConnectInfo(remote): ConnectInfo<net::SocketAddr>,
 	uri: http::Uri,
-	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<ServeGroup> {
 	// The path containts a broadcast/track
@@ -1076,7 +1074,7 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let (lease, origin) = admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
+	let (lease, origin) = admit_http(&state, path.join("/"), params.auth, &uri, server_name, remote, mtls).await?;
 	// The token's root is the canonical (alias-resolved) broadcast path.
 	let broadcast = lease.token().root.to_string();
 
@@ -1098,11 +1096,15 @@ async fn serve_fetch(
 		let group = match async { crate::fetch_group(&broadcast.track(&track)?, sequence).await }.await {
 			Ok(group) => group,
 			// A miss upstream arrives as the stream reset that refused the FETCH. A datagram
-			// group is never cached, so it is a miss too.
+			// group is never cached, and a group past the track's max age is gone, so both
+			// are misses too.
 			Err(
 				moq_net::Error::NotFound
 				| moq_net::Error::NotFetchable
-				| moq_net::Error::Stream(moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable),
+				| moq_net::Error::Old
+				| moq_net::Error::Stream(
+					moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable | moq_net::StreamError::Old,
+				),
 			) => {
 				return Err(StatusCode::NOT_FOUND);
 			}
@@ -1203,7 +1205,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn http_refusals_count_at_both_endpoints() {
-		use crate::refusals::Refusal;
+		use crate::refusals::RefusalKind;
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
@@ -1231,9 +1233,9 @@ mod tests {
 							group: FetchGroup::Latest,
 						}),
 						None,
+						None,
 						remote,
 						"/fetch/room/video".parse().unwrap(),
-						http::HeaderMap::new(),
 						State(state.clone()),
 					)
 					.await
@@ -1245,9 +1247,9 @@ mod tests {
 						Some(Path("room".to_owned())),
 						Query(AuthQuery { jwt: None }),
 						None,
+						None,
 						remote,
 						"/announced/room".parse().unwrap(),
-						http::HeaderMap::new(),
 						State(state.clone()),
 					)
 					.await
@@ -1257,9 +1259,9 @@ mod tests {
 				};
 				assert_eq!(status, StatusCode::UNAUTHORIZED);
 				let reason = if publish_only {
-					Refusal::Forbidden
+					RefusalKind::Forbidden
 				} else {
-					Refusal::Refused
+					RefusalKind::Refused
 				};
 				assert_eq!(
 					state.cluster.refusals.count(reason),
@@ -1297,9 +1299,9 @@ mod tests {
 				group: FetchGroup::Latest,
 			}),
 			None,
+			None,
 			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/fetch/room/video".parse().unwrap(),
-			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1308,9 +1310,9 @@ mod tests {
 			Some(Path("room".to_owned())),
 			Query(AuthQuery { jwt: None }),
 			None,
+			None,
 			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/announced/room".parse().unwrap(),
-			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1379,9 +1381,9 @@ mod tests {
 						group: selector,
 					}),
 					None,
+					None,
 					ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 					format!("/fetch/room/video?tier={tier}").parse().unwrap(),
-					http::HeaderMap::new(),
 					State(state.clone()),
 				)
 				.await
@@ -1395,9 +1397,9 @@ mod tests {
 				Some(Path("room".into())),
 				Query(AuthQuery { jwt: None }),
 				None,
+				None,
 				ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 				format!("/announced/room?tier={tier}").parse().unwrap(),
-				http::HeaderMap::new(),
 				State(state.clone()),
 			)
 			.await
@@ -1447,6 +1449,58 @@ mod tests {
 		}
 	}
 
+	/// A group the track's max age has dropped is gone, which is a 404 rather than a 500.
+	#[tokio::test(start_paused = true)]
+	async fn http_fetch_of_an_expired_group_is_not_found() {
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
+		let auth = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		}
+		.init("test", &moq_tokio::tls::Connect::default(), false)
+		.unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let broadcast = cluster.origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast
+			.create_track(
+				"video",
+				moq_net::track::Info::default()
+					.with_timescale(moq_net::Timescale::MILLI)
+					.with_max_age(std::time::Duration::from_millis(500)),
+			)
+			.unwrap();
+		// Group 0 can only present until group 1 starts at 1s, a full second behind the 2s
+		// edge: past the 500ms max age, so it is no longer served.
+		for millis in [0, 1000, 2000] {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let state = Web::new(auth, cluster, certificates, Config::default()).state;
+		let status = serve_fetch(
+			Path("room/video".into()),
+			Query(FetchParams {
+				auth: AuthQuery { jwt: None },
+				group: FetchGroup::Num(0),
+			}),
+			None,
+			None,
+			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
+			"/fetch/room/video?group=0".parse().unwrap(),
+			State(state),
+		)
+		.await
+		.map(|_| ())
+		.into_response()
+		.status();
+		assert_eq!(status, StatusCode::NOT_FOUND);
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn http_refused_subscribe_counts_no_request() {
 		let dir = TempDir::new().unwrap();
@@ -1476,9 +1530,9 @@ mod tests {
 				group: FetchGroup::Latest,
 			}),
 			None,
+			None,
 			peer(),
 			"/fetch/room/video".parse().unwrap(),
-			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1487,9 +1541,9 @@ mod tests {
 			Some(Path("room".into())),
 			Query(AuthQuery { jwt: None }),
 			None,
+			None,
 			peer(),
 			"/announced/room".parse().unwrap(),
-			http::HeaderMap::new(),
 			State(state.clone()),
 		)
 		.await;
@@ -1554,42 +1608,6 @@ mod tests {
 			vec![b"h2".to_vec(), b"http/1.1".to_vec()],
 			"ALPN must advertise h2 and http/1.1",
 		);
-	}
-
-	/// HTTP/2 puts the host in `:authority` and usually sends no `Host` header, and
-	/// the HTTPS listener advertises h2 - so a header-only read loses the tenant.
-	#[test]
-	fn request_host_prefers_the_uri_authority() {
-		let uri: http::Uri = "https://customer.example.com/announced".parse().unwrap();
-		assert_eq!(
-			request_host(&uri, &http::HeaderMap::new()),
-			Some("customer.example.com".to_string())
-		);
-	}
-
-	/// HTTP/1.1 leaves no authority on the URI, so the header is the only source. A
-	/// port is stripped either way, so both paths agree on the host.
-	#[test]
-	fn request_host_falls_back_to_the_header() {
-		let uri: http::Uri = "/announced".parse().unwrap();
-		let mut headers = http::HeaderMap::new();
-		headers.insert(http::header::HOST, "Customer.Example.com:4443".parse().unwrap());
-		assert_eq!(request_host(&uri, &headers), Some("customer.example.com".to_string()));
-		assert_eq!(request_host(&uri, &http::HeaderMap::new()), None);
-	}
-
-	/// A bracketed IPv6 literal carries its own colons, so splitting on the last
-	/// one truncates the address instead of stripping a port.
-	#[test]
-	fn request_host_keeps_ipv6_literals_intact() {
-		let uri: http::Uri = "/announced".parse().unwrap();
-		let host = |value: &str| {
-			let mut headers = http::HeaderMap::new();
-			headers.insert(http::header::HOST, value.parse().unwrap());
-			request_host(&uri, &headers)
-		};
-		assert_eq!(host("[2001:db8::1]"), Some("[2001:db8::1]".to_string()));
-		assert_eq!(host("[2001:db8::1]:4443"), Some("[2001:db8::1]".to_string()));
 	}
 
 	#[test]
@@ -1869,6 +1887,88 @@ mod tests {
 			"captured",
 			"the HTTPS listener must install the capturing acceptor"
 		);
+
+		serving.abort();
+	}
+
+	/// `server_name` is the SNI that selected the certificate, on an HTTP read and a
+	/// WebSocket alike, never the `Host` the client wrote; plain HTTP has no SNI, so it
+	/// reports none rather than the header. Real sockets, so this runs on the wall clock.
+	#[cfg(all(unix, feature = "websocket"))]
+	#[tokio::test]
+	async fn server_name_is_the_sni_never_the_host() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		trait Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+		impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Stream for T {}
+
+		let dir = TempDir::new().unwrap();
+		let (ca, cert, key) = make_certs(&dir);
+		let mut config = Config::default();
+		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		config.https.listen = Some("127.0.0.1:0".parse().unwrap());
+		config.https.cert = vec![cert.clone()];
+		config.https.key = vec![key];
+		config.ws = true;
+		let (auth, mut admissions) = crate::auth::Auth::embedded("test");
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
+		let Addrs {
+			http: Some(http),
+			https: Some(https),
+		} = web.addrs()
+		else {
+			panic!("both listeners are configured");
+		};
+		let routes = web.routes();
+		let serving = tokio::spawn(web.serve(routes));
+
+		let connect = async |tls: bool| -> Box<dyn Stream> {
+			let tcp = tokio::net::TcpStream::connect(if tls { https } else { http })
+				.await
+				.unwrap();
+			if !tls {
+				return Box::new(tcp) as Box<dyn Stream>;
+			}
+			let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+			Box::new(tls_connector(&ca).connect(name, tcp).await.expect("TLS handshake"))
+		};
+
+		for tls in [true, false] {
+			let expected = tls.then_some("localhost");
+
+			let mut stream = connect(tls).await;
+			stream
+				.write_all(b"GET /announced HTTP/1.1\r\nHost: tenant.example\r\nConnection: close\r\n\r\n")
+				.await
+				.unwrap();
+			let admission = admissions.next().await.expect("an HTTP admission");
+			assert_eq!(admission.request.transport, moq_auth::Transport::Http);
+			assert_eq!(admission.request.server_name.as_deref(), expected, "HTTP, tls={tls}");
+			// Unanswered, the read fails as unavailable; only the request mattered.
+			drop(admission);
+			let _ = stream.read_to_end(&mut Vec::new()).await;
+
+			let mut stream = connect(tls).await;
+			stream
+				.write_all(b"GET /room HTTP/1.1\r\nHost: tenant.example\r\n")
+				.await
+				.unwrap();
+			let client = tokio::spawn(drain::upgrade_while_draining(stream, true));
+			let admission = admissions.next().await.expect("a WebSocket admission");
+			assert_eq!(admission.request.transport, moq_auth::Transport::WebSocket);
+			assert_eq!(
+				admission.request.server_name.as_deref(),
+				expected,
+				"WebSocket, tls={tls}"
+			);
+			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(
+				moq_auth::Pattern::all(),
+				moq_auth::Pattern::all(),
+			)));
+			drop(client.await.expect("the WebSocket session connects"));
+		}
 
 		serving.abort();
 	}
@@ -2177,12 +2277,14 @@ mod tests {
 		let mut with_peer = SetConnectionExtensions {
 			inner: EchoExt,
 			peer: Some(MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(Vec::new()))),
+			server_name: None,
 			socket: None,
 			admission: None,
 		};
 		let mut no_peer = SetConnectionExtensions {
 			inner: EchoExt,
 			peer: None,
+			server_name: None,
 			socket: None,
 			admission: None,
 		};
@@ -2304,7 +2406,7 @@ mod tests {
 			}
 		}
 
-		async fn upgrade_while_draining<I>(mut stream: I, head_sent: bool) -> moq_net::Session
+		pub(super) async fn upgrade_while_draining<I>(mut stream: I, head_sent: bool) -> moq_net::Session
 		where
 			I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 		{
@@ -2337,7 +2439,7 @@ mod tests {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-06".parse::<moq_net::Version>().unwrap().into())
 				.with_publisher(origin.consume())
-				.connect(moq_net::time::now(), transport)
+				.connect(moq_net::time::Instant::now(), transport)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));

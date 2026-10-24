@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { Manual, Micro, Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
@@ -7,7 +7,8 @@ import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { type Delay, Sync } from "../sync";
-import { SharedRingBuffer } from "./shared-ring-buffer";
+import type { Message, State } from "./render";
+import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
 
 // Bun cannot load the blob-URL worklet import.
@@ -51,8 +52,52 @@ class FakeContext extends EventTarget {
 	};
 }
 
+// Every worklet built.
+let worklets: FakeWorklet[] = [];
+
+// The render worklet's side of the port, synchronous: each message applies to a real ring, and
+// every quantum read reports the ring's state back, the way `render-worklet.ts` does.
 class FakeWorklet {
-	readonly port = Object.assign(new EventTarget(), { postMessage() {}, start() {} });
+	ring?: AudioRingBuffer;
+	#epoch = 0;
+	readonly port = Object.assign(new EventTarget(), {
+		postMessage: (msg: Message) => {
+			if (msg.type === "init") this.ring = new AudioRingBuffer(msg);
+			else if (msg.type === "data") this.ring?.write(msg.timestamp, msg.data);
+			else if (msg.type === "latency") this.ring?.resize(msg.latency);
+			else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
+			else if (msg.type === "reset") {
+				this.ring?.reset();
+				this.#epoch = msg.epoch;
+			}
+		},
+		start() {},
+	});
+	constructor() {
+		worklets.push(this);
+	}
+	get stalled(): boolean {
+		return this.ring?.stalled ?? true;
+	}
+	get length(): number {
+		return this.ring?.length ?? 0;
+	}
+	// Render one quantum and report the ring's state back to the main thread.
+	read(output: Float32Array[]): number {
+		const ring = this.ring;
+		if (!ring) return 0;
+		const read = ring.read(output);
+		const state: State = {
+			type: "state",
+			timestamp: ring.timestamp,
+			stalled: ring.stalled,
+			anchored: ring.anchored,
+			underruns: ring.underruns,
+			epoch: this.#epoch,
+		};
+		this.port.dispatchEvent(new MessageEvent("message", { data: state }));
+		return read;
+	}
 	disconnect() {}
 }
 
@@ -96,12 +141,16 @@ const globals = [
 const originals = new Map<string, PropertyDescriptor | undefined>();
 let codecs = 0;
 let codecErrors: AudioDecoderInit["error"][] = [];
+// Thrown by the next `decode`, as WebCodecs does synchronously for a chunk it refuses.
+let decodeThrows: Error | undefined;
 
 beforeEach(() => {
 	frameTimestamp = 0;
 	codecs = 0;
 	codecErrors = [];
+	decodeThrows = undefined;
 	contexts = [];
+	worklets = [];
 	moduleLoaded = Promise.resolve();
 	for (const name of globals) originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
 
@@ -121,6 +170,7 @@ beforeEach(() => {
 			this.needsKey = true;
 		}
 		decode(chunk: { timestamp: number; type: EncodedAudioChunkType }) {
+			if (decodeThrows) throw decodeThrows;
 			if (this.needsKey && chunk.type !== "key") throw new DOMException("key chunk required", "DataError");
 			this.needsKey = false;
 			this.init.output(new FakeData(chunk.timestamp) as unknown as AudioData);
@@ -159,18 +209,22 @@ afterEach(() => {
 	mock.restore();
 });
 
-// Hands frames to whichever container consumer is reading, and ends a consumer's reads on close.
+// Hands frames to whichever container consumer is reading, and ends a consumer's reads on close. An
+// Error stands in for a malformed read.
 function feed() {
 	const closed = new WeakSet<Container.Consumer>();
-	const queue: Read[] = [];
-	let waiter: { consumer: Container.Consumer; resolve: (read: Read | undefined) => void } | undefined;
+	const queue: (Read | Error)[] = [];
+	let waiter:
+		| { consumer: Container.Consumer; resolve: (read: Read | undefined) => void; reject: (err: Error) => void }
+		| undefined;
 
 	spyOn(Container.Consumer.prototype, "next").mockImplementation(function (this: Container.Consumer) {
 		if (closed.has(this)) return Promise.resolve(undefined);
 		const read = queue.shift();
+		if (read instanceof Error) return Promise.reject(read);
 		if (read) return Promise.resolve(read);
-		return new Promise<Read | undefined>((resolve) => {
-			waiter = { consumer: this, resolve };
+		return new Promise<Read | undefined>((resolve, reject) => {
+			waiter = { consumer: this, resolve, reject };
 		});
 	});
 
@@ -184,11 +238,12 @@ function feed() {
 		close.call(this);
 	});
 
-	return (read: Read) => {
+	return (read: Read | Error) => {
 		const current = waiter;
 		waiter = undefined;
-		if (current) current.resolve(read);
-		else queue.push(read);
+		if (!current) queue.push(read);
+		else if (read instanceof Error) current.reject(read);
+		else current.resolve(read);
 	};
 }
 
@@ -196,9 +251,9 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	// These cases test timeline handover after the optional decoder has loaded.
 	if (cmaf) await import("@moq/hang/cmaf");
 	const push = feed();
-	const truncate = spyOn(SharedRingBuffer.prototype, "truncate");
-	const reset = spyOn(SharedRingBuffer.prototype, "reset");
-	const insert = spyOn(SharedRingBuffer.prototype, "insert");
+	const truncate = spyOn(AudioRingBuffer.prototype, "truncate");
+	const reset = spyOn(AudioRingBuffer.prototype, "reset");
+	const insert = spyOn(AudioRingBuffer.prototype, "write");
 
 	let producer = new Moq.Broadcast.Producer();
 	let consumer = producer.consume();
@@ -283,7 +338,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			frameTimestamp = 0;
 		},
 		// The rings written to, and the timestamps of every frame that reached one.
-		rings: () => [...new Set(insert.mock.contexts)] as SharedRingBuffer[],
+		rings: () => worklets.filter((worklet) => worklet.ring && insert.mock.contexts.includes(worklet.ring)),
 		inserted: () => insert.mock.calls.map(([timestamp]) => timestamp as number),
 		// Each subscription resolves the rendition's broadcast once.
 		subscriptions: () => relativeBroadcast.mock.calls.length,
@@ -455,7 +510,7 @@ describe("Decoder across a delay change", () => {
 });
 
 // Play a ring out the way the worklet does, one render quantum at a time, until it runs dry.
-function drain(ring: SharedRingBuffer): number {
+function drain(ring: FakeWorklet): number {
 	const output = [new Float32Array(128), new Float32Array(128)];
 	let total = 0;
 	for (;;) {
@@ -466,17 +521,14 @@ function drain(ring: SharedRingBuffer): number {
 }
 
 describe("Decoder across a rendition's absence", () => {
-	afterEach(() => jest.useRealTimers());
-
 	it("plays the tail, suspends once drained, and resumes on return", async () => {
-		// The ring's stall state is polled on an interval.
-		jest.useFakeTimers();
 		const playback = await play(Milli(100));
 		try {
 			await playback.play(12);
 			const [ring] = playback.rings();
+			// The worklet reports the ring playing once it renders a quantum.
+			expect(ring.read([new Float32Array(128), new Float32Array(128)])).toBe(128);
 			expect(ring.stalled).toBe(false);
-			jest.advanceTimersByTime(50);
 			await microtasks();
 
 			playback.remove();
@@ -490,7 +542,6 @@ describe("Decoder across a rendition's absence", () => {
 			expect(drain(ring)).toBeGreaterThan(0);
 			expect(playback.truncates()).toBe(0);
 			expect(playback.resets()).toBe(0);
-			jest.advanceTimersByTime(50);
 			await microtasks();
 			expect(context.calls.suspend).toBe(1);
 			expect(context.state).toBe("suspended");
@@ -659,6 +710,34 @@ for (const cmaf of [false, true]) {
 }
 
 describe("fatal decoder errors", () => {
+	// A failure in the read loop, not a WebCodecs callback, must still reach `error` and release the
+	// subscription, instead of leaving the player apparently live.
+	for (const cmaf of [false, true]) {
+		for (const failure of ["a malformed read", "a decode that throws"] as const) {
+			it(`reports ${failure} on ${cmaf ? "CMAF" : "legacy"} and releases its subscription`, async () => {
+				const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+				const playback = await play(Milli(100), false, cmaf);
+				try {
+					await playback.play(2);
+					const before = close.mock.calls.length;
+					const error = new Error(failure);
+					if (failure === "a malformed read") {
+						playback.push(error);
+					} else {
+						decodeThrows = error;
+						await playback.play(1);
+					}
+					await microtasks();
+					expect(playback.error.peek()).toBe(error);
+					expect(close.mock.calls.length).toBeGreaterThan(before);
+				} finally {
+					playback.close();
+					close.mockRestore();
+				}
+			});
+		}
+	}
+
 	it("releases audio subscriptions and retains the failure until the source changes", async () => {
 		const close = spyOn(Moq.Track.Subscriber.prototype, "close");
 		const playback = await play(Milli(100));
@@ -731,8 +810,7 @@ describe("fatal decoder errors", () => {
 function manualAt(ms: number) {
 	const clock = new Manual();
 	clock.jump(Nano.fromMilli(Milli(ms)));
-	const restore = clock.install();
-	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), restore };
+	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), installed: clock.install() };
 }
 
 // A legacy container frame: the media timestamp, then one payload byte.
@@ -749,7 +827,7 @@ function legacyFrame(media: Micro): Moq.Group.Frame {
 async function livePlayback(burst: number) {
 	const FRAME = 20;
 	const clock = manualAt(0);
-	const insert = spyOn(SharedRingBuffer.prototype, "insert");
+	const insert = spyOn(AudioRingBuffer.prototype, "write");
 
 	const audio = Catalog.AudioConfigSchema.parse({
 		codec: "opus",
@@ -780,7 +858,7 @@ async function livePlayback(burst: number) {
 	let sequence = 0;
 	let held: number[] = [];
 
-	const ring = () => insert.mock.contexts.at(-1) as SharedRingBuffer | undefined;
+	const ring = () => worklets.findLast((worklet) => worklet.ring && insert.mock.contexts.includes(worklet.ring));
 	return {
 		sync,
 		error: decoder.out.error,
@@ -842,7 +920,7 @@ async function livePlayback(burst: number) {
 			media.peek().close();
 			producer.close();
 			await microtasks();
-			clock.restore();
+			clock.installed.close();
 		},
 	};
 }
