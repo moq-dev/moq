@@ -148,7 +148,7 @@ impl Server {
 		runtime: Deadlines,
 		session: Transport,
 		version: lite::Version,
-		client_setup: Option<lite::AcceptedSetup<Transport>>,
+		client_setup: Option<lite::AcceptedSetup>,
 		peer_hop: Option<crate::Hop>,
 		auth: crate::auth::Link,
 	) -> Result<(Session, crate::Driver), Error> {
@@ -519,7 +519,7 @@ enum PausedHandshake {
 	LiteSetup {
 		session: Transport,
 		version: lite::Version,
-		client_setup: lite::AcceptedSetup<Transport>,
+		client_setup: lite::AcceptedSetup,
 	},
 	IetfModern(PausedIetfModern),
 	Legacy(PausedLegacy),
@@ -531,7 +531,7 @@ enum PausedHandshake {
 struct PausedIetfModern {
 	session: Transport,
 	version: ietf::Version,
-	peer_setup: ietf::PeerSetup<Transport>,
+	peer_setup: ietf::PeerSetup,
 }
 
 impl PausedIetfModern {
