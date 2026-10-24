@@ -2059,6 +2059,15 @@ test("Subscribe v20: decodes every legal parameter", async () => {
 	expect(msg.propertiesWanted).toBe(false);
 });
 
+// From draft-15 an omitted SUBSCRIBER_PRIORITY means 128, not the unset 127, so a relay
+// forwards it unchanged.
+test("Subscribe: an omitted SUBSCRIBER_PRIORITY is 128", async () => {
+	for (const version of [Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+		const msg = await decodeVersioned(framed([...TRACK_HEAD, 0x00]), Subscribe.Subscribe.decode, version);
+		expect(msg.subscriberPriority).toBe(128);
+	}
+});
+
 // INCLUDE_PROPERTIES is a uint8: one raw byte with no Length.
 test("Subscribe v20: INCLUDE_PROPERTIES is a uint8", async () => {
 	const msg = new Subscribe.Subscribe({

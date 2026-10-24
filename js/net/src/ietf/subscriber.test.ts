@@ -1226,9 +1226,9 @@ test("a compact END_OF_TRACK at object 5 with properties is subgroup 5, refused 
 	}
 });
 
-test("older peer without priority property inherits the unset priority", async () => {
+test("older peer without priority property inherits the default publisher priority", async () => {
 	const { subscriber, track } = await subscribeTrack();
-	expect((await track.info()).priority).toBe(0);
+	expect((await track.info()).priority).toBe(127 - 128);
 	const group = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: 3,
@@ -1237,7 +1237,7 @@ test("older peer without priority property inherits the unset priority", async (
 		flags: { ...groupFlags(true), hasPriority: false },
 	});
 	await subscriber.handleGroup(group, new Reader(undefined, encodeObjects([0]), VERSION));
-	expect(group.publisherPriority).toBe(127);
+	expect(group.publisherPriority).toBe(128);
 	track.close();
 });
 
@@ -1351,7 +1351,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	if (outcome === "acceptance") {
 		await peer.writer.u53(SubscribeOk.id);
 		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
-		expect(await info).toMatchObject({ priority: 0 });
+		expect(await info).toMatchObject({ priority: 127 - 128 });
 		expect(returned.closed.peek()).toBeUndefined();
 	} else {
 		jest.advanceTimersByTime(4_000);
@@ -1418,7 +1418,7 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 	const request = await Subscribe.decode(next.reader, VERSION);
 	await next.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(next.writer, VERSION);
-	expect(await info).toMatchObject({ priority: 0 });
+	expect(await info).toMatchObject({ priority: 127 - 128 });
 });
 
 test("abandonment cancels once and a late acceptance cannot capture a reused alias", async () => {

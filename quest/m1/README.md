@@ -84,7 +84,6 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 
 ## Required
 
-- [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
 - [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
 - [SUBSCRIBE_TRACKS follows credit](/quest/m1/listing-credit.md) - a listing holds state in proportion to what the peer reads, not to the catalog
@@ -100,9 +99,7 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [Stats groups as tracks](/quest/m1/stats-group-tracks.md) - one stable node broadcast per stats producer, with each group a produced track listed by TRACKS
 - [No reused track names](/quest/m1/name-reuse.md) - no first-party publisher re-creates a finished track under its old name
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
-- [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Receive pinning](/quest/m1/quic-receive-pinning.md) - tiny DATAGRAM or STREAM frames cannot pin moq-quic receive batches past the receive budgets
-- [Priority requeue](/quest/m1/quic-priority-requeue.md) - raising a queued QUIC stream's priority moves it at once instead of after it next sends
 - [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - receive leases and the connection window keep exact books, and eviction stops scanning every stream
 - [io_uring listen extensions](/quest/m1/uring-listen-extensions.md) - ring listeners offer the configured `[listen] extensions`
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
@@ -147,19 +144,15 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
-- [Subscribe update camera check](/quest/m1/subscribe-update-churn.md) - a person checks a physical-camera publish for SUBSCRIBE_UPDATE chatter; bbb and the fake camera measured quiet
-- [Unprefixed C++ free functions](/quest/m1/cpp-free-function-prefix.md) - generated free functions drop `moq_`, and `moq.hpp` deletes its five pass-through wrappers before C++ first publishes
 - [API-diff check](/quest/m1/api-diff.md) - a recipe diffs every published package's API against its last release, run on PRs into release and against main before the cut
 - [API Extractor checks](/quest/m1/api-extractor-checks.md) - API Extractor fails a PR on a forgotten export, an unresolved declaration, or an undocumented export, replacing the hand-rolled `.d.ts` checkers
 - [Generated JS API reference](/quest/m1/js-api-reference.md) - the doc site renders an API reference for every `@moq/*` package from API Extractor's doc model
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - JS moq-transport sessions never hold overlapping SUBSCRIBE_NAMESPACE requests at a peer that refuses them
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
 - [One Annex-B exporter](/quest/m1/annexb-export.md) - H.264 and H.265 Annex-B export share one private lifecycle, which also follows a rebound rendition
-- [Caption store bounds](/quest/m1/caption-store-bounds.md) - a hostile caption track cannot grow a viewer's cue and region store or its per-frame work without bound
 - [Peers advertise their implementation and version](/quest/m1/peer-version.md) - moq-net and `@moq/net` send a `name/version` SETUP parameter both ways, and the auth request and session span carry the client's
 - [Binding peer version](/quest/m1/binding-peer-version.md) - every binding names itself ahead of the Rust core in that parameter
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
-- [Interop audit](/quest/m1/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down
 - [Refuse unknown MOQ_* environment variables](/quest/m1/env-unknown.md) - every binary exits at startup naming a `MOQ_*` variable it does not read
 - [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - `export hls --output <dir>` records playlists and segments to a directory
 - [Group storage benchmark](/quest/m1/group-storage-bench.md) - numbers pick the append-only log, a ring buffer, or sorted runs for `GroupState` before either lands

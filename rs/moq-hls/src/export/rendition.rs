@@ -1,10 +1,11 @@
 //! One rendition: playlists from its view of the broadcast's segments, resolved against its own
 //! timeline, and segments fetched on demand.
 
+use moq_clock::Wall;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::Poll;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{Archive, AudioConfig, Clock, Reference, VideoConfig};
@@ -1003,7 +1004,7 @@ impl Rendition {
 	/// The wall-clock time of a media timestamp, when the catalog advertises its broadcast
 	/// clock. Converts the timeline-timescale timestamp into the clock's timescale and applies
 	/// the root mapping; an unrepresentable result maps to no time rather than a truncated one.
-	pub(crate) fn wall_clock(&self, pts: moq_net::Timestamp) -> Option<SystemTime> {
+	pub(crate) fn wall_clock(&self, pts: moq_net::Timestamp) -> Option<Wall> {
 		let clock = self.clock.as_ref()?;
 		clock.wall_clock(pts).ok()
 	}

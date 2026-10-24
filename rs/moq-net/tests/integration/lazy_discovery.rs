@@ -296,8 +296,8 @@ async fn a_relay_link_asks_for_everything() {
 		for upstream in [false, true] {
 			let relay = produce_origin(2);
 			let link = match upstream {
-				true => relay.clone().upstream(),
-				false => relay.clone().peer(),
+				true => relay.clone().with_link(moq_net::origin::Link::Upstream),
+				false => relay.clone().with_link(moq_net::origin::Link::Peer),
 			};
 			let lazy = Lazy::with(version, link).await;
 			assert_eq!(lazy.requests(), 1, "{version}");
@@ -496,7 +496,7 @@ async fn ietf_waiting_on_a_path_asks_about_it() {
 async fn ietf_a_relay_link_asks_for_everything() {
 	for version in IETF {
 		let relay = produce_origin(2);
-		let _lazy = Lazy::with(version, relay.clone().peer()).await;
+		let _lazy = Lazy::with(version, relay.clone().with_link(moq_net::origin::Link::Peer)).await;
 		for path in ["a/x", "b/y"] {
 			relay.consume().request_broadcast(path, None).await.unwrap();
 		}

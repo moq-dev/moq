@@ -41,7 +41,7 @@ pub mod renditions;
 pub mod segments;
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use rand::RngExt;
@@ -344,7 +344,7 @@ impl Broadcaster {
 		Ok(Some(mpd::render_manifest(
 			&mpd::Manifest {
 				availability_start,
-				publish: SystemTime::from(moq_clock::wall()),
+				publish: moq_clock::wall(),
 				window: self.renditions.window(),
 				finished,
 				video,
@@ -2468,15 +2468,13 @@ mod tests {
 	// timescale into the clock's.
 	#[tokio::test]
 	async fn root_clock_times_playlists_and_manifest() {
-		use std::time::{SystemTime, UNIX_EPOCH};
-
 		let origin = produce_origin();
 		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
 
 		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
-		let wall = UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
 		let config = moq_mux::catalog::Config::default()
 			.with_clock(moq_mux::Clock::at(moq_net::time::Instant::now(), wall).expect("a representable wall"));
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
@@ -2506,7 +2504,7 @@ mod tests {
 		let snapshot = rendition.snapshot();
 		assert_eq!(
 			snapshot.program_date_time,
-			Some(SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS))
+			Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS))
 		);
 		let playlist = rendition.media_playlist(None).unwrap().expect("playlist renders");
 		assert!(
@@ -2646,7 +2644,10 @@ mod tests {
 		let first = anchored
 			.wall_clock(moq_net::Timestamp::from_micros(start).unwrap())
 			.unwrap();
-		let expected = format!("#EXT-X-PROGRAM-DATE-TIME:{}\n", humantime::format_rfc3339_millis(first));
+		let expected = format!(
+			"#EXT-X-PROGRAM-DATE-TIME:{}\n",
+			humantime::format_rfc3339_millis(first.into())
+		);
 		assert!(playlist.contains(&expected), "{expected} in {playlist}");
 
 		drop((import, catalog));

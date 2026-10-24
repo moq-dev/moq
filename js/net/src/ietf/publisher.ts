@@ -29,7 +29,7 @@ import * as Path from "../path.ts";
 import { Priority } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Groups, Info, Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
+import type { Groups, Info, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
@@ -48,7 +48,7 @@ import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
-import { fromWire, toWire } from "./priority.ts";
+import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { Publish, PublishDone, PublishDoneStatus } from "./publish.ts";
 import {
@@ -1273,7 +1273,7 @@ export class Publisher {
 	/** Preserve the original terminal on a separate stream when its group already sent FIN. */
 	async #runEndOfTrack(options: {
 		requestId: bigint;
-		final: TrackLocation;
+		final: TrackPosition;
 		publisherPriority: number;
 		unsubscribed: Promise<void>;
 		streams: StreamCount;
@@ -2581,7 +2581,7 @@ export class Publisher {
 				requestId: id,
 				trackNamespace: namespace,
 				trackName: name,
-				subscriberPriority: defaults.subscriberPriority ?? 127,
+				subscriberPriority: defaults.subscriberPriority ?? DEFAULT_WIRE,
 				groupOrder: defaults.groupOrder === GroupOrder.Ascending ? "ascending" : "descending",
 				filter: defaults.subscriptionFilter,
 				propertiesWanted: defaults.includeProperties ?? true,
