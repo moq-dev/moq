@@ -94,7 +94,7 @@ Python wrapper. This run only reviews what those gates can't see.
   wrapper built without warnings under Xcode 26.6 in the 2026-10-22 nightly;
   its later changes were FFI-only. 877 TypeScript files passed
   `@typescript-eslint/no-deprecated`.
-- Python: removed 22 unnecessary type ignores and made the wrapper's pyright
+- Python: removed 23 unnecessary type ignores and made the wrapper's pyright
   reject new ones.
 
 ### Baselines (2026-10-24, after the m1 run)
@@ -107,7 +107,7 @@ Python wrapper. This run only reviews what those gates can't see.
   12. `dead_code` and `unused`: 412, owned by the dead code audit.
 - Rust `deprecated`: 1, the AVFoundation call above.
 - TypeScript: 29 `biome-ignore` and 47 `@ts-expect-error`.
-- Python: 8 `noqa` or `type: ignore`.
+- Python: 7 `noqa` or `type: ignore`.
 
 Count with `git grep` over the whole tree, not per language directory, so
 only tracked files count and none outside `rs/`, `js/`, or `py/` are missed.
