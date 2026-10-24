@@ -8,7 +8,7 @@
 //! falls so far behind that the queue fills loses events, and the observer
 //! reports that as an error rather than an undercount.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
@@ -104,9 +104,13 @@ pub(super) struct Shared {
 	finished: AtomicU64,
 	/// The generation whose end a callback has closed out, or 0.
 	acknowledged: AtomicU64,
-	/// The [`Observer::finish`] waiting on [`acknowledged`](Self::acknowledged).
-	/// Woken off the audio thread, which only posts a driver sync. Its entry dies
-	/// with the future, so a cancelled finish holds nothing here.
+	/// Ledgers still counting, one per live stream. With none, nothing is left
+	/// to close out a measurement, so it is already final.
+	ledgers: AtomicUsize,
+	/// The [`Observer::finish`] waiting on [`acknowledged`](Self::acknowledged) or
+	/// [`ledgers`](Self::ledgers). Woken off the audio thread, which only posts a
+	/// driver sync. Its entry dies with the future, so a cancelled finish holds
+	/// nothing here.
 	waiters: Mutex<kio::WaiterList>,
 	/// Posts that sync. Unset in tests that run a ledger without a driver.
 	driver: OnceLock<Commands>,
@@ -128,6 +132,7 @@ impl Default for Shared {
 			overflowed: AtomicU64::new(0),
 			finished: AtomicU64::new(0),
 			acknowledged: AtomicU64::new(0),
+			ledgers: AtomicUsize::new(0),
 			waiters: Mutex::new(kio::WaiterList::new()),
 			driver: OnceLock::new(),
 			events,
@@ -142,8 +147,9 @@ impl Shared {
 		let _ = self.driver.set(driver);
 	}
 
-	/// Wake a [`Observer::finish`] whose measurement a callback closed out. Locks,
-	/// so the driver thread calls it, never the audio thread.
+	/// Wake a [`Observer::finish`] whose measurement a callback or the last stream
+	/// going away closed out. Locks, so the driver thread calls it, never the
+	/// audio thread.
 	pub(super) fn wake(&self) {
 		self.waiters.lock().unwrap().wake();
 	}
@@ -208,26 +214,35 @@ impl Observer {
 	}
 
 	/// End the measurement now, resolving once the next callback, or the stream
-	/// going away, has closed a gap still open and stopped counting. The read
-	/// after it resolves is final; only the clock moves on.
+	/// going away, has closed a gap still open and stopped counting. With no
+	/// stream it resolves at once. The read after it resolves is final; only the
+	/// clock moves on.
 	///
 	/// Dropping the future still ends the measurement; it only stops waiting.
 	pub fn finish(&mut self) -> impl Future<Output = ()> + '_ {
-		self.shared.finished.store(self.generation, Ordering::Release);
+		// SeqCst pairs with a ledger starting: either it sees this store and counts
+		// nothing, or `poll_finished` sees it counting and waits for it.
+		self.shared.finished.store(self.generation, Ordering::SeqCst);
 		kio::wait(|waiter| self.poll_finished(waiter))
 	}
 
 	fn poll_finished(&self, waiter: &kio::Waiter) -> Poll<()> {
-		let shared = &self.shared;
-		if shared.acknowledged.load(Ordering::Acquire) == self.generation {
+		if self.settled() {
 			return Poll::Ready(());
 		}
-		waiter.register(&mut shared.waiters.lock().unwrap());
-		// Checked again after registering, so an acknowledgement that raced it is not missed.
-		match shared.acknowledged.load(Ordering::Acquire) == self.generation {
+		waiter.register(&mut self.shared.waiters.lock().unwrap());
+		// Checked again after registering, so an acknowledgement or a last stream
+		// going away that raced it is not missed.
+		match self.settled() {
 			true => Poll::Ready(()),
 			false => Poll::Pending,
 		}
+	}
+
+	/// Whether a callback closed out this measurement, or no stream is left to.
+	fn settled(&self) -> bool {
+		let shared = &self.shared;
+		shared.acknowledged.load(Ordering::Acquire) == self.generation || shared.ledgers.load(Ordering::SeqCst) == 0
 	}
 }
 
@@ -286,6 +301,7 @@ impl Ledger {
 		// A rebuilt stream continues the engine's counts: once anything has played,
 		// a quiet quantum while the new stream recovers is silence, not the first fill.
 		let started = shared.quanta.load(Ordering::Relaxed) > 0;
+		shared.ledgers.fetch_add(1, Ordering::SeqCst);
 		Self {
 			shared,
 			rate: rate as f64,
@@ -429,7 +445,7 @@ impl Ledger {
 	/// The reading observer's generation, if it has ended its measurement.
 	fn finished(&self) -> Option<u64> {
 		let observer = self.shared.observer.load(Ordering::Acquire);
-		(observer != 0 && self.shared.finished.load(Ordering::Acquire) == observer).then_some(observer)
+		(observer != 0 && self.shared.finished.load(Ordering::SeqCst) == observer).then_some(observer)
 	}
 
 	fn nanos(&self, frames: u64) -> u64 {
@@ -457,15 +473,18 @@ impl Drop for Ledger {
 	fn drop(&mut self) {
 		if let Some(observer) = self.finished() {
 			self.acknowledge(observer);
-			self.shared.wake();
-			return;
+		} else {
+			self.close();
+			if self.playing {
+				self.shared.stalled.store(true, Ordering::Relaxed);
+				let at = self.clock(self.frames);
+				self.send(Event::Stall(Stall { at, stalled: true }));
+			}
 		}
-		self.close();
-		if self.playing {
-			self.shared.stalled.store(true, Ordering::Relaxed);
-			let at = self.clock(self.frames);
-			self.send(Event::Stall(Stall { at, stalled: true }));
-		}
+		// Woken even without a finish seen above: one that raced this drop waits
+		// on the last ledger going away.
+		self.shared.ledgers.fetch_sub(1, Ordering::SeqCst);
+		self.shared.wake();
 	}
 }
 
@@ -647,6 +666,32 @@ mod tests {
 		drop(ledger);
 		assert!(flag.0.load(Ordering::Acquire), "the waiting finish was not woken");
 		assert!(finish.as_mut().poll(&mut cx).is_ready());
+	}
+
+	/// With no stream left to close it out, such as after the engine shut down,
+	/// a finish resolves at once, and a stream opened after it counts nothing.
+	#[test]
+	fn finish_without_a_stream_resolves_at_once() {
+		let shared = Arc::new(Shared::default());
+		let mut observer = Observer::new(shared.clone()).unwrap();
+		let mut ledger = Ledger::new(shared.clone(), RATE);
+		add(&mut ledger, 128, 128);
+		add(&mut ledger, 128, 0);
+		drop(ledger);
+		{
+			let mut cx = std::task::Context::from_waker(Waker::noop());
+			let mut finish = std::pin::pin!(observer.finish());
+			assert!(finish.as_mut().poll(&mut cx).is_ready());
+		}
+		let mut ledger = Ledger::new(shared, RATE);
+		add(&mut ledger, 128, 128);
+		let observation = observer.read().unwrap();
+		assert_eq!(
+			observation.gaps.len(),
+			1,
+			"the dropped stream closed its gap: {observation:?}"
+		);
+		assert_eq!(observation.quanta, 2, "nothing after the finish counts");
 	}
 
 	/// A finish dropped while it waits, such as on a timeout, leaves no waker behind.
