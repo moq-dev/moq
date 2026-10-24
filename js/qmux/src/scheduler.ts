@@ -67,6 +67,9 @@ interface Waiter {
 }
 
 export interface SchedulerOptions {
+	/** The connection's opening frame, written before anything else. A close
+	 *  never drops it, since the peer rejects any other frame first. */
+	first?: Uint8Array;
 	/** Called after each frame is actually written (to track send activity). */
 	onActivity?: () => void;
 	/** Called once if the sink fails, after which nothing more is sent. */
@@ -122,7 +125,7 @@ export class SendScheduler {
 		this.#onActivity = options?.onActivity ?? (() => {});
 		this.#onFail = options?.onFail ?? (() => {});
 		// Start the writer loop. It never rejects — failures are captured by #fail.
-		void this.#run();
+		void this.#run(options?.first);
 	}
 
 	/** Queue a pre-encoded control frame. Preempts all stream data. */
@@ -241,8 +244,14 @@ export class SendScheduler {
 		return bestId as bigint;
 	}
 
-	async #run(): Promise<void> {
+	async #run(first?: Uint8Array): Promise<void> {
 		try {
+			if (first) {
+				await this.#sink.ready();
+				await this.#sink.write(first);
+				this.#onActivity();
+			}
+
 			while (true) {
 				if (
 					this.#control.length === 0 &&

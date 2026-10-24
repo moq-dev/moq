@@ -826,7 +826,12 @@ export default class Session implements WebTransport {
 			resetStreamAt: version === "qmux-02",
 		};
 
+		// QMux01 over WebSocket uses the WS message boundary as the implicit record
+		// boundary; no extra size prefix is required.
+		const params = Frame.encode({ type: "transport_parameters", params: this.#ourParams }, this.#version);
+		this.#validateRecordSize(params);
 		this.#scheduler = new SendScheduler(sink, {
+			first: params,
 			onActivity: () => {
 				this.#lastSendAt = now();
 			},
@@ -848,7 +853,6 @@ export default class Session implements WebTransport {
 		this.#bidiStreamCredit = new Credit(0n);
 		this.#uniStreamCredit = new Credit(0n);
 		this.#recvDataMax = this.#ourParams.initialMaxData;
-		this.#sendTransportParameters();
 		// Our own deadline applies until the peer's parameters arrive, so a peer
 		// that never sends them can't hold the session open.
 		this.#startIdleTimerIfEnabled();
@@ -1562,13 +1566,6 @@ export default class Session implements WebTransport {
 
 	#sendFinalSize(streamId: bigint): bigint {
 		return this.#streamFlow.get(streamId)?.sendOffset ?? 0n;
-	}
-
-	#sendTransportParameters() {
-		// QMux01 over WebSocket uses the WS message boundary as the implicit record
-		// boundary; no extra size prefix is required. This is the first frame on the
-		// wire, so it leads the control queue ahead of any stream data.
-		this.#sendPriorityFrame({ type: "transport_parameters", params: this.#ourParams });
 	}
 
 	/** The largest STREAM frame the peer accepts, in bytes.

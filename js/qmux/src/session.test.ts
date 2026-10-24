@@ -1075,6 +1075,18 @@ describe("Session integration (scripted peer)", () => {
 		expect(await session.closed).toEqual({ closeCode: 42, reason: "bye" });
 	});
 
+	test("a close before TRANSPORT_PARAMETERS is written still sends them first", async () => {
+		const { session, peer } = connect();
+		peer.blockWrites();
+		await session.ready;
+
+		session.close({ closeCode: 42, reason: "bye" });
+		await settle();
+		peer.unblockWrites();
+		await waitFor(() => peer.has("application_close"));
+		expect(peer.received().map((f) => f.type)).toEqual(["transport_parameters", "application_close"]);
+	});
+
 	// A close never waits on the peer to read: the socket closes once the close frame
 	// is handed to it, or at the close deadline if the socket is still wedged then.
 	describe("close behind a wedged socket", () => {
