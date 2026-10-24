@@ -508,7 +508,7 @@ impl ExportSource {
 			}
 			let mut subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
 			if let Some(after) = self.after {
-				subscription = subscription.with_groups((Bound::Excluded(after), Bound::Unbounded));
+				subscription = subscription.with_range((Bound::Excluded(after), Bound::Unbounded));
 			}
 			let track = match broadcast.track(&name) {
 				Ok(track) => track,

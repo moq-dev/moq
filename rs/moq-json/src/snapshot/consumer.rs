@@ -296,7 +296,7 @@ mod timestamps {
 			.create_track("data", moq_net::track::Info::default())
 			.unwrap();
 		let mut subscriber = track.subscribe(None);
-		subscriber.set_groups(..5);
+		subscriber = subscriber.with_range(..5);
 		let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
 		let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());
 		let waiter = kio::Waiter::noop();

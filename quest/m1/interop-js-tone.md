@@ -25,7 +25,3 @@ covers a false "wrong tone" under CPU starvation.
 Decided 2026-10-23 (maintainer): its own quest, ranked above the load flakes.
 
 Public API: depends on the cause. Wire: depends on the cause.
-
-## Related
-
-- [Interop timestamp gap](/quest/m1/test-flakes-2/interop-timestamp-gap.md) - the load-only audio flake, a different symptom

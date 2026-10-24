@@ -336,7 +336,7 @@ impl Reader {
 		if options.start == Start::Latest
 			&& let Some(live_edge) = subscriber.largest().await
 		{
-			subscriber.set_groups(live_edge.group.saturating_sub(lookback)..);
+			subscriber = subscriber.with_range(live_edge.group.saturating_sub(lookback)..);
 		}
 		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy

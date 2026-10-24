@@ -789,7 +789,7 @@ async fn a_narrowed_timeline_read_skips_the_group_it_left() {
 	let ascending = |groups| {
 		moq_net::track::Subscription::default()
 			.with_max_delay(None)
-			.with_groups(groups)
+			.with_range(groups)
 			.with_order(moq_net::track::Order::Ascending)
 	};
 	let mut subscriber = broadcast
@@ -902,7 +902,7 @@ async fn benchmark_timeline_fetch_fanout() {
 					broadcast.info().pool.poll(now, &kio::Waiter::noop());
 				}
 				let subscription = moq_net::track::Subscription::default()
-					.with_groups(0..)
+					.with_range(0..)
 					.with_max_delay(Duration::from_secs(60));
 				let mut retained = broadcast
 					.consume()

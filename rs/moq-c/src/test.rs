@@ -3360,7 +3360,7 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	let ascending = |start, end| {
 		moq_net::track::Subscription::default()
 			.with_max_delay(None)
-			.with_groups(start..end)
+			.with_range(start..end)
 			.with_order(moq_net::track::Order::Ascending)
 	};
 	let mut reader = {

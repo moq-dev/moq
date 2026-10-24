@@ -375,7 +375,7 @@ mod tests {
 		assert!(producer.poll_subscription_changed(&waiter).is_pending());
 		let mut weak = producer.subscribe(
 			Subscription::default()
-				.with_groups(100..200)
+				.with_range(100..200)
 				.with_order(Order::Ascending),
 		);
 		weak.update(Subscription::default().with_priority(5)).unwrap();

@@ -455,7 +455,7 @@ class Reader implements ResumeSource {
 		const start = Math.max(cursor.start, copy.floor ?? 0);
 		const replaced = copyEnd(copy);
 		const end = replaced === undefined ? cursor.end : Math.min(cursor.end ?? replaced, replaced);
-		hooks.replaceGroups(copy.sub, {
+		copy.sub.withRange({
 			start: { included: start },
 			end: end === undefined ? undefined : { excluded: end },
 		});

@@ -14966,8 +14966,12 @@ mod stitch_tests {
 		let mut whole = h.stream().await;
 		h.subscriber.clone().recv_group(&mut whole).await.expect("the group");
 
-		let mut group = consumer.recv_group().await.unwrap().expect("the group arrived");
-		group.start_at(0);
+		let mut group = consumer
+			.recv_group()
+			.await
+			.unwrap()
+			.expect("the group arrived")
+			.with_range(0..);
 		assert_eq!(group.index(), 2, "the group starts where the subscription asked");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"2");
 		assert!(group.read_frame().await.unwrap().is_none());
@@ -14994,8 +14998,12 @@ mod stitch_tests {
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
 		h.subscriber.clone().recv_group(&mut tail).await.expect("tail");
 
-		let mut group = consumer.recv_group().await.unwrap().expect("the group arrived");
-		group.start_at(0);
+		let mut group = consumer
+			.recv_group()
+			.await
+			.unwrap()
+			.expect("the group arrived")
+			.with_range(0..);
 		assert_eq!(group.index(), 2, "the group starts where the subscription asked");
 		let mut frames = Vec::new();
 		while let Some(frame) = group.read_frame().await.unwrap() {

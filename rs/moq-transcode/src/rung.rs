@@ -970,7 +970,7 @@ mod tests {
 		let ascending = |groups| {
 			moq_net::track::Subscription::default()
 				.with_max_delay(None)
-				.with_groups(groups)
+				.with_range(groups)
 				.with_order(moq_net::track::Order::Ascending)
 		};
 		let mut reader = track.subscribe(ascending(7..));
