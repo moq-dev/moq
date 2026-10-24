@@ -95,10 +95,6 @@ pub enum Error {
 	#[error("no network interface address to offer as a host candidate")]
 	NoHost,
 
-	/// A `.local` candidate could not be resolved.
-	#[error("mDNS resolution failed: {0}")]
-	Mdns(String),
-
 	/// The data channel was already taken by a session.
 	#[error("the data channel is already in use")]
 	Taken,
@@ -299,7 +295,7 @@ impl Offerer {
 		let parsed = SdpAnswer::from_sdp_string(&sdp).map_err(|err| Error::Sdp(err.to_string()))?;
 
 		let (tx, rx) = oneshot::channel();
-		self.peer.send(Command::Answer(parsed, max_message, tx))?;
+		self.peer.send(Command::Answer(parsed, max_message, tx)).await?;
 		rx.await.map_err(|_| Error::Closed)??;
 		self.peer.resolver.add(mdns).await
 	}
@@ -314,8 +310,9 @@ impl Offerer {
 
 	/// Add a candidate the remote peer sent.
 	///
-	/// A `.local` address is resolved over mDNS first, one name at a time, so this
-	/// waits while earlier names are still resolving. One that does not resolve is
+	/// This waits while the connection is still taking earlier candidates. A `.local`
+	/// address is resolved over mDNS first, one name at a time, so this also waits
+	/// while earlier names are still resolving. One that does not resolve is
 	/// dropped. An empty candidate, which a browser sends to mark the end of its
 	/// candidates, is ignored.
 	pub async fn add_candidate(&self, candidate: &Candidate) -> Result<(), Error> {
@@ -384,8 +381,9 @@ impl Answerer {
 
 	/// Add a candidate the remote peer sent.
 	///
-	/// A `.local` address is resolved over mDNS first, one name at a time, so this
-	/// waits while earlier names are still resolving. One that does not resolve is
+	/// This waits while the connection is still taking earlier candidates. A `.local`
+	/// address is resolved over mDNS first, one name at a time, so this also waits
+	/// while earlier names are still resolving. One that does not resolve is
 	/// dropped. An empty candidate, which a browser sends to mark the end of its
 	/// candidates, is ignored.
 	pub async fn add_candidate(&self, candidate: &Candidate) -> Result<(), Error> {
@@ -413,8 +411,12 @@ fn negotiated(protocol: &str) -> Result<String, Error> {
 
 /// The signaling handle both roles share: commands to the driver task, the
 /// candidates it gathers, and the resolver for the remote peer's `.local` ones.
+///
+/// The driver takes one command at a time, so a peer that trickles candidates
+/// faster than the connection applies them holds up its own signaling instead
+/// of queueing them.
 struct Peer {
-	commands: mpsc::UnboundedSender<Command>,
+	commands: mpsc::Sender<Command>,
 	candidates: mpsc::UnboundedReceiver<Candidate>,
 	resolver: Resolver,
 }
@@ -434,7 +436,7 @@ impl Peer {
 			agent = agent.awaiting_answer();
 		}
 
-		let (commands, rx) = mpsc::unbounded_channel();
+		let (commands, rx) = mpsc::channel(1);
 		let (candidates_tx, candidates) = mpsc::unbounded_channel();
 		let driver = Driver {
 			agent,
@@ -467,20 +469,20 @@ impl Peer {
 			return self.resolver.add(vec![line.to_string()]).await;
 		}
 		let candidate = str0m::Candidate::from_sdp_string(line).map_err(|err| Error::Candidate(err.to_string()))?;
-		self.send(Command::Candidate(candidate))
+		self.send(Command::Candidate(candidate)).await
 	}
 
 	async fn channel(&self) -> Result<Opened, Error> {
 		let (tx, rx) = oneshot::channel();
-		self.send(Command::Channel(tx))?;
+		self.send(Command::Channel(tx)).await?;
 		let mut opened = rx.await.map_err(|_| Error::Closed)??;
 		// The session keeps the driver alive once this handle is gone.
 		opened.channel.writer._driver = Some(self.commands.clone());
 		Ok(opened)
 	}
 
-	fn send(&self, command: Command) -> Result<(), Error> {
-		self.commands.send(command).map_err(|_| Error::Closed)
+	async fn send(&self, command: Command) -> Result<(), Error> {
+		self.commands.send(command).await.map_err(|_| Error::Closed)
 	}
 }
 
@@ -535,7 +537,7 @@ struct Open {
 /// Owns the connection and runs it on its own task.
 struct Driver {
 	agent: moq_ice::Agent,
-	commands: mpsc::UnboundedReceiver<Command>,
+	commands: mpsc::Receiver<Command>,
 	/// Dropped once gathering finishes, ending [`Offerer::candidate`] and [`Answerer::candidate`].
 	candidates: Option<mpsc::UnboundedSender<Candidate>>,
 	role: Role,

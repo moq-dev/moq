@@ -15,9 +15,9 @@ use crate::abort::AbortOnDrop;
 /// retransmissions at one and two seconds (RFC 6762 section 5.2).
 const MDNS_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Looks up the address behind a `.local` host name.
+/// Looks up the address behind a `.local` host name, or `None` if it does not resolve.
 pub(super) trait Lookup: Send + Sync + 'static {
-	fn lookup(&self, host: &str) -> impl Future<Output = Result<IpAddr, Error>> + Send;
+	fn lookup(&self, host: &str) -> impl Future<Output = Option<IpAddr>> + Send;
 }
 
 /// A peer's resolver task, cancelled when this drops.
@@ -32,7 +32,7 @@ pub(super) struct Resolver {
 
 impl Resolver {
 	/// Start resolving into the driver's `commands`.
-	pub fn spawn(commands: mpsc::UnboundedSender<Command>, lookup: impl Lookup) -> Self {
+	pub fn spawn(commands: mpsc::Sender<Command>, lookup: impl Lookup) -> Self {
 		let (batches, rx) = mpsc::channel(1);
 		use tracing::Instrument;
 		let task = tokio::spawn(run(rx, commands, lookup).instrument(tracing::Span::current()));
@@ -51,20 +51,17 @@ impl Resolver {
 	}
 }
 
-async fn run(mut batches: mpsc::Receiver<Vec<String>>, commands: mpsc::UnboundedSender<Command>, lookup: impl Lookup) {
+async fn run(mut batches: mpsc::Receiver<Vec<String>>, commands: mpsc::Sender<Command>, lookup: impl Lookup) {
 	while let Some(lines) = batches.recv().await {
 		for (host, lines) in by_host(&lines) {
-			let ip = match lookup.lookup(host).await {
-				Ok(ip) => ip,
-				Err(err) => {
-					tracing::debug!(%err, "dropped remote candidates");
-					continue;
-				}
+			let Some(ip) = lookup.lookup(host).await else {
+				tracing::debug!(%host, "dropped remote candidates: the name did not resolve");
+				continue;
 			};
 			for line in lines {
 				match with_address(line, ip) {
 					Ok(candidate) => {
-						if commands.send(Command::Candidate(candidate)).is_err() {
+						if commands.send(Command::Candidate(candidate)).await.is_err() {
 							return;
 						}
 					}
@@ -99,13 +96,17 @@ static MDNS: Mutex<Option<mdns_sd::ServiceDaemon>> = Mutex::new(None);
 pub(super) struct Mdns;
 
 impl Lookup for Mdns {
-	async fn lookup(&self, host: &str) -> Result<IpAddr, Error> {
+	async fn lookup(&self, host: &str) -> Option<IpAddr> {
 		let daemon = {
 			let mut daemon = MDNS.lock().unwrap();
 			match daemon.as_ref() {
 				Some(daemon) => daemon.clone(),
 				None => daemon
-					.insert(mdns_sd::ServiceDaemon::new().map_err(|err| Error::Mdns(err.to_string()))?)
+					.insert(
+						mdns_sd::ServiceDaemon::new()
+							.inspect_err(|err| tracing::debug!(%err, "failed to start the mDNS daemon"))
+							.ok()?,
+					)
 					.clone(),
 			}
 		};
@@ -114,7 +115,8 @@ impl Lookup for Mdns {
 		let timeout = MDNS_TIMEOUT.as_millis() as u64;
 		let events = daemon
 			.resolve_hostname(&name, Some(timeout))
-			.map_err(|err| Error::Mdns(err.to_string()))?;
+			.inspect_err(|err| tracing::debug!(%err, "failed to query mDNS"))
+			.ok()?;
 		let found = loop {
 			match events.recv_async().await {
 				Ok(mdns_sd::HostnameResolutionEvent::AddressesFound(_, addrs)) if !addrs.is_empty() => {
@@ -126,7 +128,7 @@ impl Lookup for Mdns {
 			}
 		};
 		let _ = daemon.stop_resolve_hostname(&name);
-		found.ok_or_else(|| Error::Mdns(format!("{host} did not resolve")))
+		found
 	}
 }
 
@@ -165,7 +167,7 @@ mod tests {
 	}
 
 	impl Lookup for Fake {
-		async fn lookup(&self, host: &str) -> Result<IpAddr, Error> {
+		async fn lookup(&self, host: &str) -> Option<IpAddr> {
 			self.queries.lock().unwrap().push(host.to_string());
 			let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
 			let _in_flight = InFlight(self.in_flight.clone());
@@ -176,7 +178,7 @@ mod tests {
 				.trim_end_matches(".local")
 				.parse()
 				.unwrap();
-			Ok(IpAddr::V4(Ipv4Addr::new(192, 0, 2, index)))
+			Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, index)))
 		}
 	}
 
@@ -185,7 +187,7 @@ mod tests {
 	}
 
 	/// The next candidate the resolver handed the driver, or `None` once it stopped.
-	async fn next(commands: &mut mpsc::UnboundedReceiver<Command>) -> Option<str0m::Candidate> {
+	async fn next(commands: &mut mpsc::Receiver<Command>) -> Option<str0m::Candidate> {
 		match commands.recv().await? {
 			Command::Candidate(candidate) => Some(candidate),
 			_ => panic!("the resolver only sends candidates"),
@@ -195,7 +197,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn lines_sharing_a_name_issue_one_query() {
 		let fake = Fake::default();
-		let (tx, mut commands) = mpsc::unbounded_channel();
+		let (tx, mut commands) = mpsc::channel(1);
 		let resolver = Resolver::spawn(tx, fake.clone());
 
 		resolver.add((0..100).map(|i| line(i, 7)).collect()).await.unwrap();
@@ -209,7 +211,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn distinct_names_resolve_one_at_a_time() {
 		let fake = Fake::default();
-		let (tx, mut commands) = mpsc::unbounded_channel();
+		let (tx, mut commands) = mpsc::channel(1);
 		let resolver = Resolver::spawn(tx, fake.clone());
 
 		let start = moq_clock::now();
@@ -225,7 +227,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn trickled_names_wait_for_the_resolver() {
 		let fake = Fake::default();
-		let (tx, _commands) = mpsc::unbounded_channel();
+		let (tx, _commands) = mpsc::channel(1);
 		let resolver = Resolver::spawn(tx, fake.clone());
 
 		// The first is resolving and the second waits in the channel.
@@ -242,7 +244,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dropping_the_resolver_cancels_resolution() {
 		let fake = Fake::default();
-		let (tx, mut commands) = mpsc::unbounded_channel();
+		let (tx, mut commands) = mpsc::channel(1);
 		let resolver = Resolver::spawn(tx, fake.clone());
 
 		resolver.add(vec![line(0, 0), line(1, 1)]).await.unwrap();

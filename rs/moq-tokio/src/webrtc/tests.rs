@@ -365,3 +365,28 @@ fn construction_queues_no_output() {
 	answerer.sdp_api().accept_offer(offer).unwrap();
 	idle(&mut answerer);
 }
+
+/// A trickled IP candidate waits for the driver to take the one before it, so a
+/// peer cannot queue candidates faster than the connection applies them.
+#[tokio::test(start_paused = true)]
+async fn trickled_candidates_wait_for_the_driver() {
+	let (commands, mut driver) = mpsc::channel(1);
+	let (_candidates, candidates) = mpsc::unbounded_channel();
+	let peer = Peer {
+		resolver: Resolver::spawn(commands.clone(), resolver::Mdns),
+		commands,
+		candidates,
+	};
+	let candidate = Candidate::new("candidate:1 1 udp 2113937151 192.0.2.1 54321 typ host");
+
+	peer.add_candidate(&candidate).await.unwrap();
+	let mut second = std::pin::pin!(peer.add_candidate(&candidate));
+	assert!(
+		futures::poll!(&mut second).is_pending(),
+		"the second candidate queued while the driver held the first"
+	);
+
+	assert!(matches!(driver.recv().await, Some(Command::Candidate(_))));
+	second.await.unwrap();
+	assert!(matches!(driver.recv().await, Some(Command::Candidate(_))));
+}
