@@ -39,23 +39,26 @@ unsupported has to live in the return type rather than the error, and a
 consumer must treat `None` as unknown, never as delivered.
 
 Each QUIC driver, moq-tokio's `quic::driver` and moq-uring's, gets the hook
-first, in the shape of [the driver poll waits](/quest/m2/driver-poll.md),
+first, in the shape of [the driver poll waits](/quest/m1/quic-api/poll.md),
 with an async wrapper:
 
 ```rust
-impl SendStream {
-    pub fn poll_acked(&mut self, cx: &mut Context<'_>, offset: u64) -> Poll<Result<(), AckedError>>;
-    pub async fn acked(&mut self, offset: u64) -> Result<(), AckedError>;
+impl send::Stream {
+    pub fn poll_acked(&mut self, cx: &mut Context<'_>, offset: u64) -> Poll<Result<(), send::Error>>;
+    pub async fn acked(&mut self, offset: u64) -> Result<(), send::Error>;
 }
 ```
 
-`AckedError` says why the bytes will never be acknowledged: a reset, the
+The same pair goes on `send::Finished`, the handle `finish(self)` returns
+([quic-api streams](/quest/m1/quic-api/streams.md)); if that quest lands an
+opaque `send::Offset`, the methods take it instead of a `u64`. The
+`send::Error` says why the bytes will never be acknowledged: a reset, the
 peer's STOP_SENDING, the connection's loss, or an offset past the data
-written. Both drivers sit on `moq-quic`'s `SendStream::acked(offset)`, whose
-`false` asks for a `StreamEvent::Acked { id, offset }` once the acknowledged
+written. Both drivers sit on `moq-quic`'s `send::Stream::acked(offset)`, whose
+`false` asks for a `stream::Event::Acked { id, offset }` once the acknowledged
 prefix reaches the offset. Neither driver handles that event today
 (moq-tokio's catch-all arm, moq-uring's `sweep_stream`), so waking the
-stream's waiter on it is the core of the work. Three traps:
+stream's waiter on it is the core of the work. Four traps:
 
 - Once a stream is freed, `acked` fails with `ClosedStream`, which cannot tell
   a finished stream whose every byte was acknowledged from a reset one. The
@@ -64,7 +67,12 @@ stream's waiter on it is the core of the work. Three traps:
   that end; moq-tokio's handle tracks `finished` and, since #6196, the reset.
 - `moq-quic`'s `acked` panics on an offset past the data written to an
   unreset stream. The driver returns the error instead, since a panic under
-  the connection lock poisons it for every handle.
+  the connection lock poisons it for every handle. (Once quic-api streams
+  lands, `moq-quic` returns the error itself.)
+- `reset_at` below the acknowledged prefix, or STOP_SENDING after a reset
+  (which truncates to 0), reports `Acked` with a smaller offset than before.
+  The waiters fail anyway, but the event's doc promises a prefix; make the
+  reported offset monotonic or document the exception.
 - The offset counts bytes on the QUIC stream. The trait method takes a byte
   offset, like `moq-quic` (decided 2026-10-17 on #5817), and the starvation
   quest's writer counts the bytes it writes, so neither driver needs a public
@@ -94,7 +102,7 @@ Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
 
 ## Required
 
-- [QUIC driver poll waits](/quest/m2/driver-poll.md) - the leak-free poll
+- [QUIC driver poll waits](/quest/m1/quic-api/poll.md) - the leak-free poll
   shape and waiter lists `poll_acked` joins
 
 ## Related

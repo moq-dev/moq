@@ -4,11 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Subscriptions and fetches start at a group's first frame ([#6465](https://github.com/moq-dev/moq/pull/6465))
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
-A group is the unit of decodability, so every range names whole groups.
-`track::Anchor::Absolute` takes a group sequence instead of a `Position`: replace `Anchor::Absolute(Position::group(n))` with `Anchor::Absolute(n)`, and as an exclusive end, `Position::after_group(n)` with `n + 1`.
-`group::Fetch::frame_start` and `with_frame_start` are gone: fetch the whole group and skip frames with `group::Consumer::set_frames`.
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
 
 ### Published names refuse navigation segments
 
@@ -440,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)

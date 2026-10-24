@@ -1199,8 +1199,7 @@ impl Subscriber {
 					subscribe_options: ietf::SubscribeOptions::Namespace,
 					hidden,
 				};
-				stream.writer.varint(ietf::SubscribeNamespaceLegacy::ID).await?;
-				stream.writer.encode(&msg).await?;
+				stream.writer.encode_message(&msg).await?;
 			}
 			_ => {
 				let msg = ietf::SubscribeNamespace {
@@ -1208,8 +1207,7 @@ impl Subscriber {
 					namespace: prefix.clone(),
 					hidden,
 				};
-				stream.writer.varint(ietf::SubscribeNamespace::ID).await?;
-				stream.writer.encode(&msg).await?;
+				stream.writer.encode_message(&msg).await?;
 			}
 		}
 
@@ -2187,14 +2185,15 @@ impl Subscriber {
 	async fn write_ok(&self, stream: &mut Stream<Transport, Version>, request_id: RequestId) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => {
-				stream.writer.buffer_varint(ietf::PublishNamespaceOk::ID)?;
-				stream.writer.encode(&ietf::PublishNamespaceOk { request_id }).await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 				stream
 					.writer
-					.encode(&ietf::RequestOk {
+					.encode_message(&ietf::PublishNamespaceOk { request_id })
+					.await?;
+			}
+			Version::Draft15 | Version::Draft16 => {
+				stream
+					.writer
+					.encode_message(&ietf::RequestOk {
 						largest: None,
 						request_id: Some(request_id),
 						active: None,
@@ -2202,10 +2201,9 @@ impl Subscriber {
 					.await?;
 			}
 			_ => {
-				stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 				stream
 					.writer
-					.encode(&ietf::RequestOk {
+					.encode_message(&ietf::RequestOk {
 						largest: None,
 						request_id: None,
 						active: None,
@@ -2996,10 +2994,9 @@ impl Subscriber {
 			}
 			None => {
 				async {
-					stream.writer.varint(ietf::Subscribe::ID).await?;
 					stream
 						.writer
-						.encode(&ietf::Subscribe {
+						.encode_message(&ietf::Subscribe {
 							max_age,
 							new_group,
 							request_id,
@@ -3789,9 +3786,8 @@ impl Subscriber {
 		update: Update,
 	) -> Result<(), Error> {
 		let request_id = self.control.next_request_id(&self.runtime).await?;
-		writer.varint(ietf::SubscribeUpdate::ID).await?;
 		writer
-			.encode(&ietf::SubscribeUpdate {
+			.encode_message(&ietf::SubscribeUpdate {
 				max_age: update.max_age,
 				request_id,
 				subscription_request_id: matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
@@ -3857,8 +3853,7 @@ impl Subscriber {
 		writer: &mut crate::coding::Writer<crate::transport::boxed::SendStream, Version>,
 		request_id: RequestId,
 	) -> Result<(), Error> {
-		writer.varint(ietf::Unsubscribe::ID).await?;
-		writer.encode(&ietf::Unsubscribe { request_id }).await?;
+		writer.encode_message(&ietf::Unsubscribe { request_id }).await?;
 		Ok(())
 	}
 
@@ -3915,10 +3910,9 @@ impl Subscriber {
 					}
 				}
 				if let Err(err) = async {
-					stream.writer.varint(ietf::Fetch::ID).await?;
 					stream
 						.writer
-						.encode(&ietf::Fetch {
+						.encode_message(&ietf::Fetch {
 							request_id: fetch_id,
 							subscriber_priority: super::priority::to_wire(
 								track.subscription().map(|s| s.priority).unwrap_or(0),
@@ -4124,10 +4118,9 @@ impl Subscriber {
 		};
 
 		let written = async {
-			stream.writer.varint(ietf::TrackStatus::ID).await?;
 			stream
 				.writer
-				.encode(&ietf::TrackStatus {
+				.encode_message(&ietf::TrackStatus {
 					request_id,
 					track_namespace: broadcast_path.to_owned(),
 					track_name: track_name.into(),
@@ -5198,10 +5191,9 @@ impl Subscriber {
 			},
 		};
 		let res = async {
-			stream.writer.varint(ietf::Fetch::ID).await?;
 			stream
 				.writer
-				.encode(&ietf::Fetch {
+				.encode_message(&ietf::Fetch {
 					request_id: fetch_id,
 					subscriber_priority: super::priority::to_wire(request.priority()),
 					group_order: GroupOrder::Ascending,
@@ -5413,8 +5405,7 @@ impl Subscriber {
 				// The adapter has no transport reset, so deliver FETCH_CANCEL without a
 				// subsequent writer drop discarding unacknowledged control bytes.
 				let res = async {
-					stream.writer.varint(ietf::FetchCancel::ID).await?;
-					stream.writer.encode(&ietf::FetchCancel { request_id }).await?;
+					stream.writer.encode_message(&ietf::FetchCancel { request_id }).await?;
 					stream.writer.close().await
 				}
 				.await;

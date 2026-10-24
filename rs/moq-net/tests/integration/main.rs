@@ -22,7 +22,6 @@ mod empty_group;
 mod empty_replacement;
 mod extensions;
 mod fetch_cancel;
-mod fetch_caps;
 mod fetch_fanout;
 mod fetch_from_feed;
 mod fetch_only;

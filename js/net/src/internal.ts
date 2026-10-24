@@ -535,6 +535,8 @@ export const hooks: {
 	groupArrived: (group: GroupConsumer) => Instant;
 	/** Whether a group counts as content: its first frame landed, or it ended. */
 	groupStarted: (group: GroupConsumer) => boolean;
+	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
+	groupFate: (group: GroupConsumer) => () => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
@@ -556,6 +558,8 @@ export const hooks: {
 	withholdAnnouncer: (
 		producer: BroadcastProducer,
 	) => { announce(route: Route): void; unannounce(): void; route(): Route | undefined } | undefined;
+	/** Call `fn` synchronously when an open broadcast closes, from any handle. */
+	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
@@ -713,6 +717,9 @@ export const hooks: {
 	groupStarted: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupFate: () => {
+		throw new Error("group.ts not loaded");
+	},
 	expireGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -732,6 +739,9 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 	withholdAnnouncer: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	onClosed: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 	stampPath: () => {

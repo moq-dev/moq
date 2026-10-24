@@ -4,9 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Absolute anchors name a group ([#6465](https://github.com/moq-dev/moq/pull/6465))
+### Connection state
 
-`AbsoluteMoqAnchor` drops `frame`: a range always starts at a group's first frame. Write `AbsoluteMoqAnchor(n)`.
+`Moq.connect` returns a connecting native session. Replace status, connect-count, and failure polls with `session.state()` and `session.stateChanged(after: state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate(numerator: 30000, denominator: 1001)` and pass `options: ProducerOptions(input: input, output: output, track: track, bandwidth: bandwidth)` to the matching audio/video producer.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
 
 ### Video rendition preference
 

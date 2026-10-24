@@ -966,6 +966,17 @@ pub(crate) struct Handle {
 	alive: Arc<Alive>,
 }
 
+/// Whether a group failed, without holding it open or pinning its frames.
+pub(super) struct Fate(Arc<Alive>);
+
+impl Fate {
+	/// Whether the group was aborted other than by cache policy (`Old`, `Timeout`,
+	/// `Evicted`): it failed or was given up, rather than aged out of a cache.
+	pub(super) fn failed(&self) -> bool {
+		self.0.failed.load(Ordering::Acquire)
+	}
+}
+
 struct Alive {
 	// Monotone mirror of `GroupState::abort` for track scans that already hold the
 	// track lock. A stale false only hands out a group that is concurrently aborting;
@@ -982,6 +993,9 @@ struct Alive {
 	// policy (`Old`, `Timeout`, `Evicted`). Set before `aborted`, under the same rules, so
 	// a track scan learns why without taking the group lock.
 	cut: OnceLock<Error>,
+	// Set before `aborted` when the abort was not cache policy: the group failed or was given
+	// up rather than aged out of a cache. Read through [`Fate`] once the group is gone.
+	failed: AtomicBool,
 	// Monotone mirror of `GroupState::started` for the first frame or the finish, set after
 	// the group lock is released and before the track is told: a track scan reading a stale
 	// false judges the group frameless until that wake re-judges it.
@@ -1111,6 +1125,7 @@ impl Producer {
 			aborted: AtomicBool::new(false),
 			checked: AtomicBool::new(false),
 			cut: OnceLock::new(),
+			failed: AtomicBool::new(false),
 			started: AtomicBool::new(false),
 			access,
 		});
@@ -1872,6 +1887,9 @@ impl Handle {
 		if cut {
 			let _ = self.alive.cut.set(err.clone());
 		}
+		if !policy {
+			self.alive.failed.store(true, Ordering::Release);
+		}
 		guard.abort = Some(err);
 		self.alive.aborted.store(true, Ordering::Release);
 		guard.release(salvage);
@@ -1896,6 +1914,11 @@ impl Handle {
 	/// Reads the mirror, like [`Self::is_aborted`], so a track scan never takes the group lock.
 	pub(super) fn cut_error(&self) -> Option<&Error> {
 		self.alive.cut.get()
+	}
+
+	/// This group's [`Fate`], readable after the group and its frames are gone.
+	pub(super) fn fate(&self) -> Fate {
+		Fate(self.alive.clone())
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.

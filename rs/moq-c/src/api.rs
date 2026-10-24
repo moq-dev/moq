@@ -850,6 +850,40 @@ pub struct moq_announce_event {
 	pub kind: moq_announce_kind,
 }
 
+/// Where a session is in its lifecycle, reported by [moq_connection_state].
+#[repr(C)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum moq_connection_phase {
+	/// No connection has been established yet.
+	MOQ_CONNECTION_PHASE_CONNECTING = 0,
+	/// A connection is serving.
+	MOQ_CONNECTION_PHASE_CONNECTED = 1,
+	/// No connection is serving while the session redials.
+	MOQ_CONNECTION_PHASE_DISCONNECTED = 2,
+	/// The old connection serves while its replacement dials.
+	MOQ_CONNECTION_PHASE_MIGRATING = 3,
+	/// The session has stopped for good: the terminal snapshot.
+	MOQ_CONNECTION_PHASE_CLOSED = 4,
+}
+
+/// One coherent snapshot of a session's lifecycle, delivered to its `moq_state_callback`.
+///
+/// The struct and its `protocol` are valid only during the callback, so copy what you keep.
+#[repr(C)]
+pub struct moq_connection_state {
+	/// The lifecycle phase.
+	pub phase: moq_connection_phase,
+	/// How many connections have been established, including reconnects.
+	pub connects: u64,
+	/// Zero, or the negative code of the latest failed dial, dropped connection, or terminal
+	/// error, which [moq_error] and [moq_error_protocol] describe during the callback. A
+	/// connect clears it; a terminal zero is a clean close.
+	pub failure: i32,
+	/// The live connection's negotiated draft name, or empty while none is serving.
+	pub protocol: moq_string,
+}
+
 /// Statistics and protocol sampled from the same connection by [moq_session_snapshot].
 #[repr(C)]
 pub struct moq_connection_snapshot {
@@ -1285,7 +1319,7 @@ unsafe fn connect_session(
 	config: *const moq_client_config,
 	origin_publish: u32,
 	origin_consume: u32,
-	on_status: ffi::moq_status_callback,
+	on_state: ffi::moq_state_callback,
 	user_data: *mut c_void,
 ) -> Result<crate::Id, Error> {
 	let url = ffi::parse_url(url, url_len)?;
@@ -1303,7 +1337,7 @@ unsafe fn connect_session(
 		(publish, consume)
 	};
 
-	let callback = unsafe { ffi::OnStatus::new(user_data, on_status)? };
+	let callback = unsafe { ffi::OnState::new(user_data, on_state)? };
 	let request = Connect {
 		config,
 		url,
@@ -1338,18 +1372,15 @@ unsafe fn connect_session(
 /// Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
 /// since the origins outlive the underlying connection.
 ///
-/// `on_status` reports the session lifecycle through its status code:
-/// - `> 0` on every (re)connect, carrying the connect count (`1` = first connect,
-///   `2` = first reconnect, and so on), so a reconnect is distinguishable from the
-///   initial connect. May fire repeatedly. Transient disconnects are not reported.
-/// - `0` when the session is closed cleanly via [moq_session_close] (terminal).
-/// - a negative error code if reconnection permanently gives up, e.g. the backoff
-///   timeout is exceeded (terminal).
+/// `on_state` receives a [moq_connection_state] whenever the lifecycle changes: each
+/// connect, drop, migration, and failed dial, carrying the phase, the connect count, and
+/// why the latest attempt failed. Changes that land together arrive as one snapshot.
 ///
-/// After a terminal (`<= 0`) status, `on_status` is never called again and `user_data`
-/// is never touched again, so that final callback is the point to release `user_data`.
-/// The terminal `0` fires even after [moq_session_close], so do not free `user_data` on
-/// the close call itself.
+/// The last call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after
+/// [moq_session_close] or the negative code that made reconnecting give up. By then the
+/// session handle is already released, and `on_state` and `user_data` are never touched
+/// again, so that terminal snapshot is the point to release `user_data`. It fires even
+/// after [moq_session_close], so do not free `user_data` on the close call itself.
 ///
 /// # Safety
 /// - The caller must ensure that url is a valid pointer to url_len bytes of data.
@@ -1357,7 +1388,7 @@ unsafe fn connect_session(
 ///   non-NULL pointer inside it must be valid for its paired length, and all of
 ///   them must stay alive for the duration of this call: the config is read
 ///   here, not copied by whoever filled it in.
-/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_status` callback.
+/// - The caller must keep `user_data` valid until the terminal `on_state` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_session_connect(
 	url: *const c_char,
@@ -1365,7 +1396,7 @@ pub unsafe extern "C" fn moq_session_connect(
 	config: *const moq_client_config,
 	origin_publish: u32,
 	origin_consume: u32,
-	on_status: ffi::moq_status_callback,
+	on_state: ffi::moq_state_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || unsafe {
@@ -1375,7 +1406,7 @@ pub unsafe extern "C" fn moq_session_connect(
 			config,
 			origin_publish,
 			origin_consume,
-			on_status,
+			on_state,
 			user_data,
 		)
 	})
@@ -1384,12 +1415,11 @@ pub unsafe extern "C" fn moq_session_connect(
 /// Request that a session shut down.
 ///
 /// Returns immediately: zero on success, or a negative code if the session is
-/// unknown or already closing. Does NOT free `user_data`. The
-/// [moq_session_connect] `on_status` callback still fires once more with a
-/// terminal `0` (or a negative error) once the close has reached the peer, after
-/// at most a second of draining, and that final callback is where `user_data`
-/// should be released. Safe to call from any thread, including from
-/// within `on_status`.
+/// unknown or already closing. Does NOT free `user_data`. The session's
+/// `on_state` callback still fires once more with its terminal snapshot once the
+/// close has reached the peer, after at most a second of draining, and that final
+/// callback is where `user_data` should be released. Safe to call from any thread,
+/// including from within `on_state`.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_session_close(session: u32) -> i32 {
 	ffi::enter(move || {
@@ -1444,28 +1474,6 @@ pub unsafe extern "C" fn moq_session_snapshot(session: u32, dst: *mut moq_connec
 			},
 		};
 		Ok(())
-	})
-}
-
-/// Why a dialed session is reconnecting.
-///
-/// Returns zero while nothing has failed since the last connect, including for a
-/// server-accepted session, which never reconnects. Otherwise returns the negative code
-/// of the error that ended the last connection or failed the latest dial, recorded like
-/// any failed call so [moq_error] and [moq_error_protocol] describe it. Also negative
-/// when the handle is unknown.
-///
-/// A dial that keeps failing never fires `on_status`, so poll this while
-/// [moq_session_snapshot] reports the session offline. Giving up for good arrives
-/// through `on_status` instead.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_session_failure(session: u32) -> i32 {
-	ffi::enter(move || {
-		let session = ffi::parse_id(session)?;
-		match State::lock().session.failure(session)? {
-			Some(err) => Err(err),
-			None => Ok(()),
-		}
 	})
 }
 
@@ -1660,28 +1668,27 @@ pub unsafe extern "C" fn moq_session_request_query(request: u32, dst: *mut moq_s
 /// negative code on failure (leaving the request unanswered). The session works with every
 /// `moq_session_*` call; stats and bandwidth report offline until the handshake completes.
 ///
-/// `on_status` reports the session lifecycle:
-/// - `1` once the handshake completes. An accepted session is a single connection, so it
-///   never reconnects and never reports more.
-/// - `0` when closed via [moq_session_close] (terminal).
-/// - a negative error code if the handshake fails or the peer closes the session; read
-///   [moq_error_protocol] for the peer's close code (terminal).
+/// `on_state` reports the lifecycle like [moq_session_connect]'s: one connected snapshot
+/// once the handshake completes, since an accepted session is a single connection that
+/// never reconnects, then the terminal closed snapshot. Its `failure` is zero only after
+/// [moq_session_close], and otherwise the negative code of a failed handshake or the
+/// peer's close; read [moq_error_protocol] during the callback for the peer's close code.
 ///
 /// # Safety
-/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_status` callback.
+/// - The caller must keep `user_data` valid until the terminal `on_state` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_session_request_accept(
 	request: u32,
 	origin_publish: u32,
 	origin_consume: u32,
-	on_status: ffi::moq_status_callback,
+	on_state: ffi::moq_state_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
 		let origin_publish = ffi::parse_id_optional(origin_publish)?;
 		let origin_consume = ffi::parse_id_optional(origin_consume)?;
-		let callback = unsafe { ffi::OnStatus::new(user_data, on_status)? };
+		let callback = unsafe { ffi::OnState::new(user_data, on_state)? };
 
 		let mut state = State::lock();
 		let publish = origin_publish.map(|id| state.origin.get(id)).transpose()?.cloned();

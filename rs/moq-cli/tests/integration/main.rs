@@ -9,6 +9,7 @@
 )]
 
 mod auth_serve;
+mod epochs;
 mod export;
 mod import;
 mod listen;
