@@ -543,7 +543,13 @@ impl Consumer {
 			let Some((row, resets)) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
 				return Ok(None);
 			};
-			kio::wait(|waiter| self.rendition.poll_resolved(waiter, &row)).await;
+			kio::wait(|waiter| {
+				// The refusal settles the binding, not this rendition's timeline, so watch both.
+				self.rendition.poll_media(waiter);
+				self.rendition.authorize()?;
+				self.rendition.poll_resolved(waiter, &row).map(Ok::<_, crate::Error>)
+			})
+			.await?;
 			// This rendition's timeline failed before covering the row, so no later row resolves.
 			if let Some(err) = self.rendition.own_failure()
 				&& self.rendition.is_failed(&row)

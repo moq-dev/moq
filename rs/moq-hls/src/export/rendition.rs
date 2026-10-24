@@ -1462,11 +1462,15 @@ mod tests {
 		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
 		let rendition = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
 		let request = dynamic.requested_broadcast().await.unwrap();
-		let row = segments::Row {
+		let other = origin.dynamic_route("room/hidden", Default::default()).unwrap();
+		config.broadcast = Some(moq_net::path::Relative::new("./hidden").to_owned());
+		let resolving = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
+		let other_request = other.requested_broadcast().await.unwrap();
+		let row = |reference: &str| segments::Row {
 			index: 0,
 			segment: 0,
 			period: moq_net::Timestamp::ZERO,
-			reference: Arc::new((Kind::Video, "video".into(), "video".into())),
+			reference: Arc::new((Kind::Video, reference.into(), reference.into())),
 			frames: hang::timeline::Position::group(0)..hang::timeline::Position::group(1),
 			keyframe: true,
 			duration: Duration::from_secs(1),
@@ -1474,27 +1478,38 @@ mod tests {
 			end: Duration::from_secs(1),
 			discontinuity: 0,
 		};
-		let segment = rendition.fetch(&row);
+		let own = row("video");
+		let segment = rendition.fetch(&own);
 		tokio::pin!(segment);
 		// The cursor waits on a window with no rows, which the refusal neither fills nor ends.
 		let mut cursor = rendition.segments();
 		let next = cursor.next();
 		tokio::pin!(next);
+		// This cursor waits for its own timeline to resolve another rendition's row, which the
+		// refusal never does either.
+		resolving.live.push(row("other"), None);
+		let mut resolving_cursor = resolving.segments();
+		let resolving_next = resolving_cursor.next();
+		tokio::pin!(resolving_next);
 		tokio::select! {
 			biased;
 			_ = &mut segment => panic!("the reference request has not been answered"),
 			_ = &mut next => panic!("the reference request has not been answered"),
+			_ = &mut resolving_next => panic!("the reference request has not been answered"),
 			_ = std::future::ready(()) => {}
 		}
 		request.reject(moq_net::Error::Unauthorized);
-		assert!(matches!(
+		other_request.reject(moq_net::Error::Unauthorized);
+		for read in [
 			segment.await,
-			Err(crate::Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)))
-		));
-		assert!(matches!(
-			next.await,
-			Err(crate::Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)))
-		));
+			next.await.map(|_| None),
+			resolving_next.await.map(|_| None),
+		] {
+			assert!(matches!(
+				read,
+				Err(crate::Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)))
+			));
+		}
 	}
 
 	// End may land while capture's query installs a dynamically served track. The handle must
