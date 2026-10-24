@@ -33,26 +33,32 @@ and TS without `--stitch` stay pinned to the instance they resolved until its
 route dies and its tracks error. Never concatenate independent instances into
 one stream.
 
+Decided with the maintainer on 2026-10-24, when the play, moqsrc, and
+transcode moves landed:
+
+- The TS follower moves onto `Instances` in
+  [TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md),
+  which reworks the same wait, so its timers change once.
+- `export hls` gives each instance its own playlist URL. While the old
+  publisher stays live, `Server::broadcaster` (`rs/moq-hls/src/server/mod.rs`)
+  answers new requests from its cached broadcaster, so an overlapping
+  replacement never reaches them; swapping the cache alone would reset the
+  source-derived `EXT-X-MEDIA-SEQUENCE` at a stable URL. Rejected: one
+  continuous playlist with monotonic media and discontinuity sequences. A
+  failed timeline keeps answering its playlists with a no-store 5xx.
+- `export rtmp` and `export rtc`, both `--listen` and `--connect`, stay on the
+  old instance until its route dies, never silently resetting timestamps or
+  codec state. Rejected for now: reconnecting the output per instance, and
+  marking the break in-session.
+
 Remaining, each with a test that replaces the publisher while the reader runs:
 
-- The TS follower (`rs/moq-mux/src/container/ts/follower.rs`), used by
-  `export ts --stitch` and both SRT sides, moves onto `Instances`. Its
-  `with_linger` wait covers announcement through resolution and the first
-  catalog, while `Instances` yields `Start` only after resolution, so moving
-  the timer onto `Start` would silently extend that bound.
-  [TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md)
-  reworks the same wait (`--follow`, no catalog deadline); land this move with
-  or after it so the follower's timers change once.
-- `export hls`: while the old publisher stays live, `Server::broadcaster`
-  (`rs/moq-hls/src/server/mod.rs`) answers new requests from its cached
-  broadcaster, so an overlapping replacement never reaches them. Swapping the
-  cache alone resets the source-derived `EXT-X-MEDIA-SEQUENCE` at a stable
-  playlist URI. Open decision: one continuous playlist with monotonic media
-  and discontinuity sequences, or a playlist URI per instance. A failed
-  timeline keeps answering its playlists with a no-store 5xx.
-- `export rtmp` and `export rtc`, both `--listen` and `--connect`: open
-  decision whether a new instance reconnects the output or marks the break
-  in-session. Until decided they stay pinned, never silently resetting
-  timestamps or codec state.
+- `export hls`: a playlist URL per instance.
+- `export rtmp` and `export rtc`: confirm both sides stay pinned and fail once
+  the old route dies.
 
 Public API: none. Wire: none.
+
+## Related
+
+- [Finite drain for a replaced run's HLS recording](/quest/m2/hls-restart-drain-cutoff.md) - the recording side of an HLS restart
