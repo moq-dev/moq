@@ -789,9 +789,11 @@ mod tests {
 			broadcast
 				.announce(origin::Route::default().with_epoch(epoch.clone()))
 				.unwrap();
-			let catalog =
-				moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
-					.unwrap();
+			let catalog = moq_mux::catalog::Producer::new(
+				&mut broadcast.broadcast().clone(),
+				moq_mux::catalog::Config::default(),
+			)
+			.unwrap();
 			let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 			importer.decode(&flv::file_header()).unwrap();
 			importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();

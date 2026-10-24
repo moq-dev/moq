@@ -903,7 +903,8 @@ mod tests {
 		let live = origin.publish("live", Default::default()).unwrap();
 		let other = origin.publish("other", Default::default()).unwrap();
 		let mut catalog =
-			moq_mux::catalog::Producer::new(&mut live.broadcast().clone(), moq_mux::catalog::Config::default()).unwrap();
+			moq_mux::catalog::Producer::new(&mut live.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
 		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 			moq_mux::container::Producer::new(
