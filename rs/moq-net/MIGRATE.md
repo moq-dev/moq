@@ -4,18 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A session records how it ended
-
-`stats::Session::fail` is gone.
-A session records its own end in the `stats::Session` it was given (`Client::with_stats`, `Server::with_stats`, `server::Handshake::with_stats`), including a SETUP reply that failed and a `Handshake::close` rejection.
-Delete calls to `fail`, and abort the session with the error that should count instead: `Error::Expired` counts as `expired`, a clean close or a reached GOAWAY deadline as no failure, and anything else by its kind.
-A context shared across reconnects fails only if its last session did.
-To count a SETUP reply the peer never takes, bound it with `Handshake::with_deadline` instead of dropping the `ok` future.
-
-`Session::closed()`, and the error from `Session::close()`, is `Error::Cancel` for every clean close by either side, where a peer's was `Error::Session(SessionError::Cancel)`.
-When the transport reports only that this side closed it, the error is this side's reason, such as the `abort` error, the protocol failure, or `GoawayTimeout`, where it was always a clean close.
-Match `Error::Cancel` alone for a clean end.
-
 ### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
 Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
@@ -451,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)

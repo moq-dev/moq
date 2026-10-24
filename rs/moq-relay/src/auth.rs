@@ -24,7 +24,7 @@ const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Where every session's grant comes from. Exactly one of `url` and the public
 /// patterns is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
-#[derive(usage_rs::Args, Clone, Debug, Serialize, Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, Serialize, Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default)]
 #[non_exhaustive]
@@ -72,17 +72,9 @@ pub struct Config {
 	#[serde_as(as = "OneOrMany<_>")]
 	pub public_publish: Vec<Pattern>,
 
-	/// Maximum in-band tokens one session has the auth server verifying at once,
-	/// counting checks still running past the admission timeout. Later tokens wait
-	/// for a slot. Also the requests one HTTP/2 connection carries at once, each
-	/// admitted on its own. Defaults to 128.
-	#[usage(
-		long = "auth-verifications",
-		env = "MOQ_AUTH_VERIFICATIONS",
-		default = "128",
-		setting = "auth.verifications"
-	)]
-	pub verifications: usize,
+	#[usage(skip)]
+	#[serde(rename = "verifications", skip_serializing)]
+	pub(crate) removed_verifications: Option<serde::de::IgnoredAny>,
 
 	/// The 0.14 flags and env vars #3688 removed, kept parsing but hidden. Never
 	/// read as settings: [`deprecated`](Self::deprecated) names what replaced each.
@@ -112,26 +104,8 @@ pub struct Config {
 	pub(crate) tls: Option<serde::de::IgnoredAny>,
 }
 
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			url: None,
-			public: Vec::new(),
-			public_subscribe: Vec::new(),
-			public_publish: Vec::new(),
-			verifications: VERIFICATIONS,
-			legacy: Legacy::default(),
-			key: None,
-			key_dir: None,
-			auth_api: None,
-			domains: None,
-			mtls_tier: None,
-			tls: None,
-		}
-	}
-}
-
-/// The default for [`Config::verifications`].
+/// Maximum in-band token verifications one session, or requests one HTTP/2
+/// connection, may hold at its decider.
 const VERIFICATIONS: usize = 128;
 
 /// The `--auth-*` flags 0.14 had and #3688 removed, with their env vars: a relay
@@ -139,6 +113,9 @@ const VERIFICATIONS: usize = 128;
 #[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
+	#[usage(long = "auth-verifications", env = "MOQ_AUTH_VERIFICATIONS", hide = true)]
+	verifications: Option<usize>,
+
 	#[usage(name = "auth-key", long = "auth-key", env = "MOQ_AUTH_KEY", hide = true)]
 	key: Option<String>,
 	#[usage(name = "auth-key-dir", long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR", hide = true)]
@@ -205,6 +182,22 @@ impl Config {
 	/// ignored.
 	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.legacy.verifications.is_some() {
+			found.changed(
+				"--auth-verifications",
+				Some("MOQ_AUTH_VERIFICATIONS"),
+				"the fixed per-session verification policy",
+				"the configurable verification window is removed",
+			);
+		}
+		if self.removed_verifications.is_some() {
+			found.toml(
+				"[auth] verifications",
+				"the fixed per-session verification policy",
+				None,
+			);
+		}
+
 		let legacy = &self.legacy;
 		for (set, flag, env, toml, new) in [
 			(
@@ -286,6 +279,8 @@ impl Config {
 	/// prefix `anon/`, and a pattern reads it as exactly the broadcast `anon`, so
 	/// either silent reading would mislead someone upgrading.
 	pub fn validate(&self, client_ca: bool) -> anyhow::Result<()> {
+		let deprecated = self.deprecated();
+		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		let flags = [
 			("--auth-public", &self.public),
 			("--auth-public-publish", &self.public_publish),
@@ -311,9 +306,6 @@ impl Config {
 				"a client CA (--listen-tls-root, --web-https-root) verifies client certificates, which --auth-public ignores; remove it, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
 			),
 			_ => {}
-		}
-		if self.verifications == 0 {
-			anyhow::bail!("--auth-verifications must be at least 1, or no in-band token is ever verified");
 		}
 		Ok(())
 	}
@@ -341,8 +333,7 @@ impl Config {
 			),
 			(None, None) => unreachable!("validated above"),
 		};
-		let (auth, admissions) = Auth::embedded(node);
-		let mut auth = auth.with_verifications(self.verifications);
+		let (mut auth, admissions) = Auth::embedded(node);
 		auth.in_band = matches!(decider, Decider::Server(_));
 		decider.spawn(admissions);
 		Ok(auth)
@@ -719,7 +710,8 @@ pub(crate) fn error(reason: &lease::Reason) -> moq_net::Error {
 /// Work is dropped when the lease expires, narrows, or is revoked. A completed
 /// work future ends the lease with zero byte totals. A gateway that tracks
 /// transport totals can use [`Lease::ended`] and [`Lease::close`] directly.
-pub async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Output = T>) -> Result<T, lease::Reason> {
+#[cfg(test)]
+pub(crate) async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Output = T>) -> Result<T, lease::Reason> {
 	tokio::select! {
 		biased;
 		reason = lease.ended() => {
@@ -812,6 +804,7 @@ pub struct Auth {
 	/// Whether the decider can verify a token presented in band; public rules cannot.
 	in_band: bool,
 	/// How many in-band tokens one session may have the decider verifying at once.
+	#[cfg(test)]
 	verifications: usize,
 }
 
@@ -825,18 +818,25 @@ impl Auth {
 			admissions: sender,
 			node: Arc::from(node.into()),
 			in_band: true,
+			#[cfg(test)]
 			verifications: VERIFICATIONS,
 		};
 		(auth, Admissions(receiver))
 	}
 
-	/// Verify at most `verifications` in-band tokens per session at once, as
-	/// `--auth-verifications` does for a configured `Auth`; later ones wait for a slot.
-	/// Panics on 0, which would leave every in-band token waiting forever.
-	pub fn with_verifications(mut self, verifications: usize) -> Self {
-		assert!(verifications > 0, "an Auth must verify at least one token at a time");
+	#[cfg(test)]
+	pub(crate) fn with_verifications(mut self, verifications: usize) -> Self {
+		assert!(verifications > 0);
 		self.verifications = verifications;
 		self
+	}
+
+	/// How many credentials one session, or one HTTP/2 connection, may have the decider verifying at once.
+	pub(crate) fn verifications(&self) -> usize {
+		#[cfg(test)]
+		return self.verifications;
+		#[cfg(not(test))]
+		VERIFICATIONS
 	}
 
 	/// An `Auth` that refuses every session a server or a public grant would have
@@ -851,11 +851,6 @@ impl Auth {
 	/// The name this relay puts in every request.
 	pub fn node(&self) -> &str {
 		&self.node
-	}
-
-	/// How many credentials one session may have the decider verifying at once.
-	pub(crate) fn verifications(&self) -> usize {
-		self.verifications
 	}
 
 	/// A fresh `connect` request for this relay, before the transport's facts are filled in.
@@ -1022,6 +1017,7 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 }
 
 /// Build an auth request from the path, credential, and role carried in SETUP.
+#[cfg(any(feature = "test-support", all(target_os = "linux", feature = "_uring")))]
 pub(crate) fn request_for_setup(
 	auth: &Auth,
 	setup: &moq_net::server::Handshake,
@@ -1154,18 +1150,15 @@ mod tests {
 		assert!(grant.publish.is_empty());
 	}
 
-	/// The verification concurrency reads from `[auth]` and refuses 0,
-	/// which would leave every in-band token waiting forever.
+	/// Removed explicit window values, including zero, are refused by name.
 	#[test]
-	fn verifications_parse_and_refuse_zero() {
-		let config = config(Some("http://127.0.0.1:4440/"), &[]);
-		let parsed: Config = toml::from_str("url = \"http://127.0.0.1:4440/\"\nverifications = 4\n").unwrap();
-		assert_eq!(parsed.verifications, 4);
-		let zero = Config {
-			verifications: 0,
-			..config
-		};
-		assert!(zero.validate(false).is_err());
+	fn configurable_verifications_are_refused() {
+		for value in [0, 4] {
+			let parsed: Config =
+				toml::from_str(&format!("url = \"http://127.0.0.1:4440/\"\nverifications = {value}\n")).unwrap();
+			let error = parsed.validate(false).unwrap_err();
+			assert!(error.to_string().contains("verifications"), "{error}");
+		}
 	}
 
 	/// Public rules grant a certificate what they grant anyone, so a client CA
@@ -1475,3 +1468,7 @@ mod tests {
 		assert_eq!(token.recheck(&everything()).root, Path::new("vanity/room").to_owned());
 	}
 }
+
+#[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
+mod admission_tests;

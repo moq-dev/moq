@@ -1076,7 +1076,9 @@ export class Publisher {
 					hold.abort();
 				}
 				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
-				group = await wireOf(front).fetchGroup(msg.track, msg.group, {
+				const fetchGroup = wireOf(front).fetchGroup;
+				if (!fetchGroup) throw new Error("fetch group is not supported by the serving route's version");
+				group = await fetchGroup(msg.track, msg.group, {
 					priority: msg.priority,
 					maxDelay: msg.maxDelay,
 					signal: left.signal,
@@ -1349,7 +1351,8 @@ export class Publisher {
 						// until each group stream finished or reset. The subscriber leaving
 						// instead cancels whatever is still queued.
 						const drained = Symbol("drained");
-						const end = await Promise.race([Promise.all(groups).then(() => drained), controls.ended]);
+						// `race`, since this repeats per batch of drops against the subscription's end.
+						const end = await race([Promise.all(groups).then(() => drained), controls.ended]);
 						if (end instanceof Error) throw end;
 						if (end !== drained) return false;
 						if (pendingDrops.length > 0) continue;

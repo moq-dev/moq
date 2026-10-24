@@ -371,9 +371,10 @@ reads it as zero when absent. A request moved to another tier stays counted wher
 it was admitted; later traffic follows the new tier.
 
 `announces_peak` and `subscriptions_peak` are the most broadcasts announced to
-the relay, and subscriptions held on it, by any one session. Compare them with
-the relay's [client or peer session limits](/bin/relay/config#session-and-peer):
-a session that goes past one is closed with `TOO_MANY_REQUESTS`. On
+the relay, and subscriptions held on it, by any one session. Compare announces
+with the relay's [client or peer session limits](/bin/relay/config#session-and-peer),
+past which a session is closed with `TOO_MANY_REQUESTS`, and subscriptions with
+its QUIC `max_streams`, which bounds them. On
 `sessions.json` a peak never goes down while the label has a session; on the
 totals and presence tracks it never goes down while the track lives. Summing
 nodes or labels takes the largest.

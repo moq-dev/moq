@@ -4,10 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A clean session close is `CancelledMoqException`
+### Connection state
 
-A session closed cleanly by the peer now ends with `CancelledMoqException`, like one this side closed, instead of a protocol exception with a session-scoped cancel kind.
-Drop any check for that kind.
+`Moq.connect` returns a connecting native session. Replace status, connect-count, and failure polls with `session.state()` and `session.stateChanged(after: state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
 
 ### Exact encoder rates and publication options
 

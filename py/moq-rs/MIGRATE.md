@@ -4,10 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A clean session close is `Cancelled`
+### Connection state
 
-A session closed cleanly by the peer now ends with `Error.Cancelled`, which `is_shutdown` accepts, instead of `Error.Protocol` with a session-scoped cancel kind.
-Drop any check for that kind.
+Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
 
 ### Exact encoder rates and publication options
 

@@ -5,11 +5,9 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### A clean session close is `Cancelled`
+### Connection state
 
-A session closed cleanly by the peer now ends with `MoqError::Cancelled`, like one this side closed, instead of `MoqError::Protocol` with a session-scoped `MoqProtocolKind::Cancel`.
-When this side aborted the session, it ends with that abort's error.
-Drop any check for the session-scoped `Cancel` kind.
+`MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.
 
 ### Exact encoder rates and publication options
 

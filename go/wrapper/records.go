@@ -141,7 +141,7 @@ type ConnectionStats struct {
 	PacketsSent          *uint64
 	PacketsReceived      *uint64
 	PacketsLost          *uint64
-	// Version is the negotiated protocol version, spelled like WithVersions.
+	// Version is the negotiated protocol version, spelled like ClientConfig.Versions.
 	Version *string
 }
 

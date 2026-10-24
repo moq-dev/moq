@@ -4,10 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A clean session close is `ErrCancelled`
+### Connection state
 
-A session closed cleanly by the peer now ends with `ErrCancelled`, which `IsShutdown` accepts, instead of a `ProtocolError` with a session-scoped `ProtocolKindCancel`.
-Drop any check for that kind.
+`Dial` returns a connecting native client. Replace `Session.Status`, `Connects`, and `Failure` with `State()` and `StateChanged(ctx, state.Revision)`. `ConnectionState` carries `Phase`, `Connects`, `Failure`, and `Version`; `ConnectionPhase` replaces `ConnectionStatus`. Cancelling a state wait only cancels that wait. Cancel the session itself to stop its dial.
 
 ### Exact encoder rates and publication options
 

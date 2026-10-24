@@ -4,10 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A clean session close is `Cancelled`
+### Connection state
 
-A session closed cleanly by the peer now ends with `MoqError.Cancelled`, which `isShutdown` accepts, instead of `MoqError.Protocol` with a session-scoped cancel kind.
-Drop any check for that kind.
+`Client.connect(to:)` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `stateChanged(after: state.revision)`. Use `ConnectionState.phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
 
 ### Exact encoder rates and publication options
 

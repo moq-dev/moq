@@ -4,10 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A clean session close carries no protocol error
+### Sessions report a lifecycle snapshot
 
-A session closed cleanly by the peer no longer reports a session-scoped `MOQ_PROTOCOL_KIND_CANCEL` from `moq_error_protocol`, matching one this side closed.
-Treat `MOQ_ERROR_MOQ` without protocol details as the session's end.
+`moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
+Each change delivers a `moq_connection_state` with `phase`, `connects`, `failure`, and the live `protocol`; copy what you keep, since it is valid only during the callback.
+Read `state->connects` where you read a positive status code. A failed dial or dropped connection now fires the callback with a negative `failure`, so drop your `moq_session_failure` polling; `moq_error()` describes it during the callback.
+The terminal call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after a requested close or the error that ended the session, where the terminal status code used to be. Release `user_data` there, as before.
 
 ### Exact encoder rates and publication options
 

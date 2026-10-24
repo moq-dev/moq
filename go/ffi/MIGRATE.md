@@ -4,10 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A clean session close is `Cancelled`
+### Connection state
 
-A session closed cleanly by the peer now ends with `ErrMoqErrorCancelled`, like one this side closed, instead of a protocol error with a session-scoped `MoqProtocolKindCancel`.
-Drop any check for the session-scoped cancel kind.
+Generated connection APIs now expose `MoqConnectionState` and `MoqConnectionPhase`, with `state()` and revision-based `state_changed(after)` instead of status, connect-count, and failure polls. Connect returns before its first dial completes. Regenerate bindings from the matching Rust metadata.
 
 ### Exact encoder rates and publication options
 

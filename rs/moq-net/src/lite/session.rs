@@ -262,8 +262,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.with_stats(stats.clone())
 	});
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
-	let subscriptions =
-		crate::session::Slots::new(limits.subscriptions).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
@@ -314,7 +313,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		peer_grant,
 		client,
 		subscriptions,
-		fetches: crate::session::Slots::new(limits.fetches),
 	});
 	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
@@ -604,7 +602,7 @@ impl PresentToken {
 						return Poll::Ready(Error::GoingAway);
 					}
 					let token = token.clone();
-					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
+					let mut stream = match ready!(Stream::poll_open_request(&mut self.session, self.version, &mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
 					};
@@ -1312,6 +1310,19 @@ mod tests {
 			assert!(log.closes().is_empty(), "{version}");
 			assert!(!log.stops().is_empty(), "{version}: data stream was not refused");
 		}
+	}
+
+	// GOAWAY is not a request: refusing it without credit would leave the peer
+	// unaware that we are draining.
+	#[moq_clock::test]
+	async fn goaway_is_sent_without_request_credit() {
+		let transport = ScriptedSession::new(Vec::new()).without_credit();
+		let log = transport.log.clone();
+		let mut server = raw_session(transport, Version::Lite07, false, None);
+		server.goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		let _ = server.driver.poll(&kio::Waiter::noop());
+		assert_eq!(log.bi_opens(), 1, "GOAWAY stream was not opened");
+		assert!(log.closes().is_empty());
 	}
 
 	#[moq_clock::test]

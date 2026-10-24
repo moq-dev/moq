@@ -82,7 +82,7 @@
 //!   its final nonnegative delta. Unsupported transports contribute zero.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
 //!   announcements, or subscriptions, any one session under the label held
-//!   at once, to compare against its `crate::session::Limits`. A peak never
+//!   at once, to compare against what bounds them. A peak never
 //!   goes down; a rollup takes the largest rather than the sum.
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
@@ -673,9 +673,9 @@ impl Traffic {
 }
 
 /// Request admissions and connected-session presence for a label on a tier, or their sum.
-/// The session counters are cumulative connects and disconnects. `sessions_started
-/// - sessions_ended` is the current live session count. The peaks show how close
-/// one session came to its `crate::session::Limits`.
+/// The session counters are cumulative connects and disconnects, so
+/// `sessions_started - sessions_ended` is the current live session count. The peaks
+/// show how close one session came to the bounds on what it holds.
 ///
 /// Like [`Traffic`], this is also the wire shape of one entry on a published
 /// sessions, presence, or totals track. Serialize writes both the canonical names and the legacy
@@ -1609,7 +1609,7 @@ pub struct Session {
 	inner: Option<SendCell<Arc<SessionInner>>>,
 }
 
-/// Which of a session's `crate::session::Limits` a [`Session::hold`] counts against.
+/// Which peak a [`Session::hold`] raises.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Cap {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]

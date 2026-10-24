@@ -153,11 +153,11 @@ void main() {
 
     final client = await Moq.connect(
       'https://$address',
-      options: const ConnectOptions(
-        tlsVerify: false,
+      options: ConnectOptions(
+        tls: ClientTls(insecure: true),
         bind: '127.0.0.1:0',
         versions: version,
-        reconnect: false,
+        once: true,
       ),
     ).timeout(timeout);
     final serverSession = await accepted;
@@ -218,7 +218,10 @@ void main() {
 
     final client = await Moq.connect(
       'https://$address',
-      options: const ConnectOptions(tlsVerify: false, bind: '127.0.0.1:0'),
+      options: ConnectOptions(
+        tls: ClientTls(insecure: true),
+        bind: '127.0.0.1:0',
+      ),
     ).timeout(timeout);
     final serverSession = await accepted;
     expect(client.bandwidth(), isA<MoqBandwidth>());
@@ -283,23 +286,23 @@ void main() {
     final client = await Moq.connect(
       'https://${server.localAddr}',
       options: ConnectOptions(
-        tlsVerify: false,
-        tlsHostName: 'localhost',
+        tls: ClientTls(insecure: true, hostName: 'localhost'),
         bind: '127.0.0.1:0',
         versions: versions(),
         timeout: Duration(seconds: 5),
         race: Duration.zero,
         resolutionDelay: Duration.zero,
-        idleTimeout: Duration(seconds: 5),
-        keepAlive: Duration.zero,
-        gso: false,
-        mtuDiscovery: true,
-        congestionControl: CongestionControl.loss,
-        keylog: false,
-        reconnect: false,
+        quic: QuicConfig(
+          idleTimeout: Duration(seconds: 5),
+          keepAlive: Duration.zero,
+          gso: false,
+          mtuDiscovery: true,
+          congestionControl: CongestionControl.loss,
+          keylog: false,
+        ),
+        once: true,
         backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
-        websocketEnabled: false,
-        websocketDelay: Duration.zero,
+        websocket: WebSocketConfig(enabled: false, delay: Duration.zero),
       ),
     ).timeout(timeout);
     final serverSession = await accepted;
@@ -327,7 +330,7 @@ void main() {
       Moq.connect(
         'https://localhost',
         options: const ConnectOptions(
-          websocketDelay: Duration(microseconds: -1),
+          websocket: WebSocketConfig(delay: Duration(microseconds: -1)),
         ),
       ),
       throwsArgumentError,
@@ -552,6 +555,54 @@ void main() {
 
     consumer.cancel();
     producer.finish();
+    broadcast.close();
+  });
+
+  test('JSON window yields pushes and pops in order', () async {
+    final broadcast = MoqBroadcastProducer();
+    final producer = moq_json.WindowProducer(
+      track: broadcast.publishTrack(
+        name: 'log',
+        info: MoqTrackInfo(timescale: 1000000),
+      ),
+      config: moq_json.WindowConfig(compression: true),
+    );
+    final track = await broadcast
+        .consume()
+        .subscribeTrack(name: 'log', subscription: null)
+        .timeout(timeout);
+    final consumer = moq_json.WindowConsumer(
+      track: track,
+      config: moq_json.WindowConfig(compression: true),
+    );
+
+    for (var n = 0; n < 3; n++) {
+      producer.push(value: jsonEncode({'n': n}), timestampUs: n * 1000);
+    }
+    producer.pop(count: 2, timestampUs: 3000);
+
+    for (var n = 0; n < 3; n++) {
+      final timed = await consumer.next().timeout(timeout);
+      final push = timed!.event as moq_json.WindowEventPush;
+      expect(push.index, n);
+      expect(jsonDecode(push.value), {'n': n});
+      expect(timed.timestampUs, n * 1000);
+    }
+    final timed = await consumer.next().timeout(timeout);
+    final pop = timed!.event as moq_json.WindowEventPop;
+    expect([pop.start, pop.end], [0, 2]);
+    expect(timed.timestampUs, 3000);
+
+    // The cut's new group restates record 2, which this reader already has.
+    producer.cut();
+    producer.push(value: jsonEncode({'n': 3}), timestampUs: 4000);
+    final pushed = await consumer.next().timeout(timeout);
+    final push = pushed!.event as moq_json.WindowEventPush;
+    expect(push.index, 3);
+    expect(pushed.timestampUs, 4000);
+
+    producer.finish();
+    expect(await consumer.next().timeout(timeout), isNull);
     broadcast.close();
   });
 

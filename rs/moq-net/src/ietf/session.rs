@@ -215,8 +215,8 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 				.with_stats(stats.clone())
 		});
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
-		let subscriptions = crate::session::Slots::new(limits.subscriptions)
-			.with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+		let subscriptions =
+			crate::session::Slots::new(limits.requests).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 		let announces =
 			crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
@@ -230,7 +230,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 					);
 					return Err(err);
 				};
-				let control = Control::new(request_id_max, client).with_window(limits.requests(), client, version);
+				let control = Control::new(request_id_max, client).with_window(limits.window(), client, version);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version).with_stats(&stats);
 				// Boxed like a draft-17+ transport, so the publisher and subscriber below
 				// are the same instantiation as theirs.
@@ -251,7 +251,6 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
-				publisher.fetches = crate::session::Slots::new(limits.fetches);
 
 				let mut subscriber = Subscriber::new(
 					runtime.clone(),
@@ -333,27 +332,41 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_adapter = sub_ns_adapter.clone();
 						prefixes.push(async move {
-							let stream = match version {
-								Version::Draft16 => {
-									let mut sub_ns_adapter = sub_ns_adapter;
-									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
-									let mut reader = crate::coding::Reader::new(
-										crate::transport::boxed::RecvStream::new(recv),
-										version,
-									);
-									reader.set_priority(crate::priority::RECV_CONTROL);
-									Stream {
-										writer: crate::coding::Writer::new(
-											crate::transport::boxed::SendStream::new(send),
+							let opened = async {
+								match version {
+									Version::Draft16 => {
+										let mut sub_ns_adapter = sub_ns_adapter;
+										let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+										let mut reader = crate::coding::Reader::new(
+											crate::transport::boxed::RecvStream::new(recv),
 											version,
-										),
-										reader,
+										);
+										reader.set_priority(crate::priority::RECV_CONTROL);
+										Ok(Stream {
+											writer: crate::coding::Writer::new(
+												crate::transport::boxed::SendStream::new(send),
+												version,
+											),
+											reader,
+										})
+									}
+									_ => {
+										Stream::open_request(
+											&mut crate::driver::Transport::new(sub_ns_adapter),
+											version,
+										)
+										.await
 									}
 								}
-								_ => {
-									Stream::open(&mut crate::driver::Transport::new(sub_ns_adapter.clone()), version)
-										.await?
+							}
+							.await;
+							let stream = match opened {
+								Ok(stream) => stream,
+								Err(Error::NoStreamCredit) => {
+									tracing::warn!(%prefix, "subscribe_namespace refused without stream credit");
+									return Ok(());
 								}
+								Err(err) => return Err(err),
 							};
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
@@ -411,7 +424,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 				res
 			}
 			_ => {
-				let control = Control::new(None, client).with_history(limits.requests());
+				let control = Control::new(None, client).with_history(limits.window());
 				// Send SETUP and retain its writer for the session's lifetime. Only a failure
 				// ends the session; the other branches report how it closed.
 				let setup = err_only(run_setup(
@@ -444,7 +457,6 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
-				publisher.fetches = crate::session::Slots::new(limits.fetches);
 
 				// Only the dialing side fails loud on a publication outside its grant: a
 				// server's publish origin is everything the peer may read, not what it
@@ -555,7 +567,14 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 						let sub_ns_session = sub_ns_session.clone();
 						prefixes.push(async move {
 							let mut sub_ns_session = sub_ns_session;
-							let stream = Stream::open(&mut sub_ns_session, version).await?;
+							let stream = match Stream::open_request(&mut sub_ns_session, version).await {
+								Ok(stream) => stream,
+								Err(Error::NoStreamCredit) => {
+									tracing::warn!(%prefix, "subscribe_namespace refused without stream credit");
+									return Ok(());
+								}
+								Err(err) => return Err(err),
+							};
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
@@ -1552,6 +1571,71 @@ async fn enforce_grant(auth: crate::auth::Handle, publisher: Publisher, mut sess
 mod tests {
 	use super::*;
 	use crate::model::ProduceTest;
+
+	#[moq_clock::test]
+	async fn announce_interest_without_credit_keeps_the_session_alive() {
+		use std::sync::atomic::Ordering;
+		for version in [Version::Draft16, Version::Draft17, Version::Draft19] {
+			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let interest = origin.consume().announced();
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
+			let log = session.log.clone();
+			let mut session = crate::driver::Transport::new(session);
+			let setup = if version == Version::Draft16 {
+				Some(
+					Stream::open(&mut session, version)
+						.await
+						.expect("setup waits for credit"),
+				)
+			} else {
+				None
+			};
+			let (driver, _goaway) = start(Config {
+				runtime: crate::time::sim(),
+				stats: Default::default(),
+				session,
+				setup,
+				request_id_max: None,
+				limits: Default::default(),
+				client: true,
+				publish: None,
+				subscribe: Some(origin),
+				peer_hop: None,
+				cost: None,
+				version,
+				path: None,
+				authority: None,
+				peer_setup_stream: None,
+				peer_declared: Some(peer::Peer {
+					solicit: Some(true),
+					..Default::default()
+				}),
+				auth: crate::auth::Handle::new(false),
+				early_unis: Vec::new(),
+				extensions: Default::default(),
+			})
+			.unwrap();
+			let mut driver = std::pin::pin!(driver);
+			assert!(futures::poll!(driver.as_mut()).is_pending(), "{version}");
+			assert_eq!(
+				log.request_attempts.load(Ordering::Relaxed),
+				1,
+				"{version}: interest was attempted"
+			);
+			moq_clock::sleep(std::time::Duration::from_secs(20)).await;
+			assert!(
+				futures::poll!(driver.as_mut()).is_pending(),
+				"{version}: local refusal ended the session"
+			);
+			assert_eq!(
+				log.request_attempts.load(Ordering::Relaxed),
+				1,
+				"{version}: interest was not retried"
+			);
+			assert!(log.closes().is_empty());
+			assert!(interest.is_synced(), "a refused interest releases its snapshot");
+		}
+	}
 
 	#[moq_clock::test]
 	async fn auth_ids_share_the_modern_request_history() {

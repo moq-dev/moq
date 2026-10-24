@@ -15,8 +15,8 @@ created on the first announce (`js/publish/src/broadcast.ts`), so "never"
 serves nothing.
 
 Decided 2026-10-19 by the maintainer: delete `announce="never"`, keeping
-`source` and `always`. It is a breaking change with a `MIGRATE.md` entry in
-`js/publish`. A broadcast that should stay unlisted uses a `.`-prefixed
+`source` and `always`. It is a breaking change in
+`js/publish`, and the Impact bullet says how to migrate. A broadcast that should stay unlisted uses a `.`-prefixed
 hidden path, which is left out of discovery but still subscribable by name;
 document that on the `announce` attribute.
 
