@@ -266,7 +266,7 @@ impl<O: Output> Media<O> {
 						// once the feed is live, so wait for it rather than read the backlog of
 						// a warm copy still waiting on its source; the wait ends with the track.
 						if let Some(largest) = subscriber.largest().await {
-							subscriber.set_groups(largest.group..);
+							subscriber = subscriber.with_range(largest.group..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
 						Ok::<_, anyhow::Error>((moq_mux::container::Consumer::new(subscriber, format), decoder))

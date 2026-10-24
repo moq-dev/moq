@@ -105,7 +105,6 @@ Binding durations wait on Duration support in the generated C.
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - receive leases and the connection window keep exact books, and eviction stops scanning every stream
 - [One stuck check per packet](/quest/m1/quic-stuck-scan.md) - a RESET_STREAM storm into a shrunk window costs one stream scan per packet
-- [io_uring listen extensions](/quest/m1/uring-listen-extensions.md) - ring listeners offer the configured `[listen] extensions`
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [Binding durations](/quest/m1/ffi-durations.md) - moq-ffi takes and returns durations as a typed duration instead of `_us` integers, so wrappers stop converting by hand
@@ -145,6 +144,8 @@ Binding durations wait on Duration support in the generated C.
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Encoders declare no reordering](/quest/m1/encoder-reorder.md) - moq-video encoders publish `reorder: 0`
 - [Rust resume checks compression](/quest/m1/resume-compress.md) - a same-epoch route copy with a different `compress` is refused instead of corrupting framing
+- [JS resume reports drops](/quest/m1/resume-drops.md) - a routed JS subscriber reports its copies' dropped groups, so publishers forward SUBSCRIBE_DROP
+- [Lowered resume floor](/quest/m1/resume-floor.md) - lowering a resumed reader's floor re-offers groups only a released copy cached
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
@@ -157,7 +158,6 @@ Binding durations wait on Duration support in the generated C.
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - moq-transport sessions ask for announcements only under watched prefixes, starting with UNSUBSCRIBE_NAMESPACE on d14/15
 - [Draft 14-16 session errors](/quest/m1/ietf-adapter-session-errors.md) - the moq-transport adapter keeps session-level error causes, so a terminal rejection is not redialed
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
-- [One Annex-B exporter](/quest/m1/annexb-export.md) - H.264 and H.265 Annex-B export share one private lifecycle, which also follows a rebound rendition
 - [AMF0 exact reads](/quest/m1/rtmp-amf0-exact-reads.md) - a truncated RTMP string fails with `UnexpectedEof` instead of parsing NUL padding
 - [HLS variant area](/quest/m1/hls-variant-area.md) - a hostile `RESOLUTION` cannot panic or misorder variant ranking
 - [MSF duplicate init](/quest/m1/msf-duplicate-init.md) - an MSF catalog refuses a repeated `initDataList` id instead of resolving it last-wins
@@ -170,7 +170,6 @@ Binding durations wait on Duration support in the generated C.
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
 - [Clean close reason](/quest/m1/clean-close-reason.md) - a session that closes on its own is never recorded as `Unauthorized` because its in-band credentials closed with it
 - [Metric-safe tiers](/quest/m1/metric-tier.md) - tiers are `[A-Za-z0-9._-]` paths refused where they are set, and every metric label value is escaped
-- [ACME renewal budget](/quest/m1/acme-renewal-budget.md) - renewal counts failed validations against the startup budget and pauses instead of locking the hostname out
 - [WebRTC mDNS resolver](/quest/m1/webrtc-mdns-resolver.md) - each peer resolves its `.local` candidates in one owned task, one distinct name at a time
 - [Stats group linger](/quest/m1/stats-group-linger.md) - at depth >= 1 a lingered group ends its held tracks, documented and tested
 
