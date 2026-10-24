@@ -63,6 +63,6 @@ Public API: none; moq-ffi's dependency names change. Wire: none.
 
 ## Related
 
-- [Payload bytes](/quest/m2/ffi-bytes.md) - the first patch the fork carries
-- [Kotlin calls](/quest/m2/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
-- [Foreign poll for hot reads](/quest/m2/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it
+- [Payload bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md) - the first patch the fork carries
+- [Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
+- [Foreign poll for hot reads](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it

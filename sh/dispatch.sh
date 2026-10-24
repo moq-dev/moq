@@ -98,6 +98,7 @@ declare -A scope=(
     [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
     [markdown]=''
     [shell]=''
+    [large_files]=''
     [toml]=''
     [nix]=''
     [justfile]=''
@@ -155,6 +156,7 @@ declare -A tools=(
     [ts_paths]='cargo python3'
     [markdown]='bun'
     [shell]='shellcheck shfmt'
+    [large_files]=''
     [toml]='taplo'
     [nix]='nixfmt'
     [justfile]=''
@@ -174,7 +176,7 @@ declare -A compiles=(
 )
 
 case "$action" in
-    check | ci) modules=(js workers moq_sh drafts rs bench carla quest drill py kt swift go dart cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
+    check | ci) modules=(js workers moq_sh drafts rs bench carla quest drill py kt swift go dart cpp obs_compile obs flake ts_paths markdown shell large_files toml nix justfile gh) ;;
     fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
 
@@ -226,6 +228,10 @@ fi
 # rs selects crates from the same list, or the whole workspace.
 rs_list=$changed
 [[ -z "$all" ]] || rs_list=--all
+
+# large_files diffs against the same base, or checks every file.
+large_base=$base
+[[ -z "$all" ]] || large_base=--all
 
 # Pass only JS-impacting paths, so an unrelated quest or Rust file does not
 # turn a narrow package selection into the shared-input fallback.
@@ -296,6 +302,7 @@ for module in "${selected[@]}"; do
             bun install --frozen-lockfile
             sh/markdown.sh check
             ;;
+        check:large_files) sh/large-files.sh "$large_base" ;;
         check:toml) RUST_LOG=error taplo format --check ;;
         check:nix) files '*.nix' | xargs -0 nixfmt --check ;;
         check:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --check --justfile ;;

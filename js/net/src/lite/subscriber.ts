@@ -1592,6 +1592,12 @@ export class Subscriber {
 		const read = tail.open(group.sequence);
 
 		try {
+			// This side never asks for a group from a later frame, so a stream that skips the
+			// first ones is a peer bug. Read as a whole group, its frames would be misnumbered,
+			// and resumption and deduplication rely on those positions.
+			if (group.frameStart !== 0) {
+				throw new ProtocolViolation(`group ${group.sequence} starts at frame ${group.frameStart}`);
+			}
 			// The publisher contradicted its own end, which no later group can repair. lite-05
 			// specified an inclusive end, so its last group lands on it: the write below drops
 			// only that group there.
@@ -1618,14 +1624,17 @@ export class Subscriber {
 				scale = timescale.peek();
 			}
 
-			const compress = entry.compress;
-			if (compress && group.frameStart !== 0)
-				throw new StreamError(StreamCode.TooFarBehind, { message: "compressed group lacks its prefix" });
-			await readFrames(stream, producer, { scale, timed: hasMediaTime(this.version), compress });
+			await readFrames(stream, producer, { scale, timed: hasMediaTime(this.version), compress: entry.compress });
 
 			producer.close();
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
+			// A violation ends the session, which the connection does once it escapes; anything
+			// else ends only this group.
+			if (err instanceof ProtocolViolation) {
+				producer.close(err);
+				throw err;
+			}
 			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
 			stream.stop(e);
