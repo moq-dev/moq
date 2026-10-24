@@ -89,7 +89,8 @@ pub struct Config {
 	#[serde(default)]
 	pub acme: crate::acme::Config,
 
-	/// Optional public STUN Binding listener for application-selected ICE servers.
+	/// Optional public STUN Binding listener, available with the `stun` feature.
+	#[cfg(feature = "stun")]
 	#[usage(flatten)]
 	#[serde(default)]
 	pub stun: crate::stun::Config,
@@ -164,6 +165,7 @@ impl Default for Config {
 			auth: Default::default(),
 			web: Default::default(),
 			acme: Default::default(),
+			#[cfg(feature = "stun")]
 			stun: Default::default(),
 			stats: Default::default(),
 			cache: Default::default(),
@@ -310,6 +312,12 @@ impl Config {
 		env: &usage_rs::config::EnvLayer,
 		file: Option<moq_tokio::cli::FileSource<'_>>,
 	) -> anyhow::Result<()> {
+		#[cfg(not(feature = "stun"))]
+		anyhow::ensure!(
+			env.get("MOQ_STUN_BIND").is_none(),
+			"MOQ_STUN_BIND requires a moq-relay build with the stun feature"
+		);
+
 		#[cfg(not(feature = "iroh"))]
 		for name in [
 			"MOQ_IROH_ENABLED",
@@ -513,6 +521,7 @@ mod tests {
 		assert!(config.connect.extensions.auth);
 	}
 
+	#[cfg(feature = "stun")]
 	#[test]
 	fn stun_binding_merges_file_and_cli() {
 		if !test_env::Env::without(&["MOQ_STUN_BIND"]).isolate() {
@@ -533,6 +542,18 @@ mod tests {
 		assert!(toml::from_str::<Config>("[stun]\nrate = 10").is_err());
 	}
 
+	#[cfg(not(feature = "stun"))]
+	#[test]
+	fn a_stun_listener_requires_the_feature() {
+		assert!(toml::from_str::<Config>("[stun]\nbind = \"127.0.0.1:3478\"").is_err());
+		assert!(Config::parse_and_merge(["moq-relay", "--stun-bind=127.0.0.1:3478"]).is_err());
+		let cli = usage_rs::config::CliLayer::new(std::iter::empty::<(String, String)>());
+		let env = usage_rs::config::EnvLayer::new([("MOQ_STUN_BIND".to_string(), "127.0.0.1:3478".to_string())]);
+		let error = Config::default().merge_into(&cli, &env, None).unwrap_err();
+		assert!(error.to_string().contains("MOQ_STUN_BIND requires"), "{error}");
+	}
+
+	#[cfg(feature = "stun")]
 	#[test]
 	fn stun_binding_merges_the_environment() {
 		if !test_env::Env::default().set("MOQ_STUN_BIND", "[::1]:3478").isolate() {
@@ -912,6 +933,24 @@ root = ["ca.pem"]
 		}
 	}
 
+	/// Stats enabled from the CLI alone build at the producer's default interval:
+	/// the parser fills a field it skips with its type's zero, not `Default`.
+	#[tokio::test]
+	async fn cli_stats_build_without_an_interval() {
+		if !test_env::Env::without(&["MOQ_STATS_ENABLED", "MOQ_STATS_INTERVAL"]).isolate() {
+			return;
+		}
+
+		let args = [
+			std::ffi::OsString::from("moq-relay"),
+			std::ffi::OsString::from("--stats-enabled"),
+		];
+		let config = Config::parse_and_merge(args).expect("config load");
+		assert!(config.stats.enabled);
+		let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster");
+		config.stats.build(cluster.origin.clone()).expect("stats build");
+	}
+
 	/// Bare defaults loaded from TOML survive when the CLI does not mention them.
 	#[test]
 	fn cli_does_not_clobber_toml_stats_enabled() {
@@ -939,7 +978,7 @@ linger = "2m"
 			config.stats.enabled,
 			"TOML's stats.enabled=true must not be clobbered by CLI defaults"
 		);
-		assert_eq!(config.stats.interval(), std::time::Duration::from_secs(5));
+		assert_eq!(config.stats.interval(), Some(std::time::Duration::from_secs(5)));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 		assert_eq!(config.stats.depth, 2);
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(120)));
@@ -952,7 +991,7 @@ linger = "2m"
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(30)));
-		assert_eq!(config.stats.interval(), std::time::Duration::from_millis(250));
+		assert_eq!(config.stats.interval(), Some(std::time::Duration::from_millis(250)));
 	}
 
 	/// Bare runtime defaults loaded from TOML survive when the CLI omits them.

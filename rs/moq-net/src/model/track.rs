@@ -14,7 +14,7 @@
 //! The track is closed with [Error] when all writers or readers are dropped.
 
 use crate::sync::Mutex;
-use crate::{Error, Result, StreamError, Timescale, Timestamp, coding};
+use crate::{Error, Result, SessionError, StreamError, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
 
 use super::Datagram;
@@ -476,8 +476,12 @@ pub(crate) struct TrackState {
 	start_pending: bool,
 
 	// A copy received from a remote publisher, whose declared end waits for groups still
-	// in flight below it (see `tail`).
+	// in flight below it (see `tail`), and whose readers' relative and time anchors are
+	// refused unless `anchored` (see `Holdings::drops_anchors`).
 	received: bool,
+	// Whether a received copy's wire tells it what relative and time anchors resolve
+	// against, so they resolve here as at the publisher.
+	anchored: bool,
 	// Sequences the upstream publisher gave up, with the error each was given up with: an
 	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaiming a
 	// slot cannot erase a disposition a relay must forward, and as ranges so a wide DROP
@@ -730,6 +734,10 @@ pub(super) const CACHE_OVERHEAD: u64 =
 impl Holdings for TrackState {
 	fn timed(&self) -> bool {
 		self.info.as_ref().is_none_or(|info| info.timescale.is_some())
+	}
+
+	fn drops_anchors(&self) -> bool {
+		self.received && !self.anchored
 	}
 
 	fn containing(&self, pts: Timestamp) -> Containing {
@@ -3028,14 +3036,14 @@ impl Producer {
 	/// End the track without declaring where it ends, as a closed session does.
 	///
 	/// Consumers drain the groups that finished and then end cleanly. The open groups are
-	/// aborted with [`Error::SessionClosed`], so a consumer that already pulled one ends
+	/// aborted with [`StreamError::Session`], so a consumer that already pulled one ends
 	/// with it and their writers fail. A reader following the track's routes resumes from
 	/// another one where this copy stopped. Use [`Self::finish`] or [`Self::finish_at`]
 	/// when the end is known.
 	pub fn close(self) -> Result<()> {
 		let mut state = self.modify()?;
 		state.sealed = true;
-		let open = state.tear_down(Error::SessionClosed);
+		let open = state.tear_down(Error::Stream(StreamError::Session(SessionError::Cancel)));
 		state.close();
 		open.abort();
 		Ok(())
@@ -3129,9 +3137,21 @@ impl Producer {
 	/// Mark this track as a copy received from a remote publisher, before writing to it.
 	///
 	/// Its declared end waits for groups still in flight below it; see [`Self::finish_at`].
+	/// Its readers' relative and time anchors, other than [`Range::live`](crate::track::Range::live)
+	/// and [`Range::oldest`](crate::track::Range::oldest), fail with [`Error::Unsupported`]
+	/// unless its session's wire lets it resolve them, since it holds only part of the track.
 	pub fn received(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.received = true;
+		}
+	}
+
+	/// Let this received copy's readers resolve relative and time anchors, for a wire that
+	/// reports the live edge and media time and asks for every group the budget allows.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn anchored(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.anchored = true;
 		}
 	}
 
@@ -6929,24 +6949,28 @@ impl Subscriber {
 		})
 	}
 
-	/// The lowest group this subscriber's ranges name, as resolved here when it last read:
-	/// `None` while one reaches back to the oldest group still around, or a relative
-	/// start still waits on the first group from the live feed.
+	/// The lowest group this subscriber's ranges name, as resolved here when it last read,
+	/// raised to the start of [`Self::set_groups`]: `None` while one reaches back to the
+	/// oldest group still around, or a relative start still waits on the first group from
+	/// the live feed.
 	///
 	/// Where a reader that waits on each group in sequence starts, rather than at whatever
 	/// arrives first, which newest-first delivery makes the latest.
 	pub fn floor(&self) -> Option<u64> {
-		match &self.inner {
+		let start = match &self.inner {
 			Inner::Plain(cursor) => cursor.filter.window.start(),
 			Inner::Resume(resume, _) => resume.floor(),
-		}
+		};
+		Some(start?.max(self.bounds().start))
 	}
 
-	/// The lowest group at or above `from` this subscriber's ranges cover, `None` when
-	/// none does: the groups between are never read, so a reader waiting on each group in
-	/// sequence need not wait for them. `Some(from)` while a relative anchor waits on the
-	/// first group, which can't say yet.
+	/// The lowest group at or above `from` this subscriber's ranges and
+	/// [`Self::set_groups`] floor cover, `None` when none does: the groups between are
+	/// never read, so a reader waiting on each group in sequence need not wait for them.
+	/// `Some` from there while a relative anchor waits on the first group, which can't
+	/// say yet.
 	pub fn next_in_range(&self, from: u64) -> Option<u64> {
+		let from = from.max(self.bounds().start);
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.filter.window.runs(from).next().map(|run| *run.start()),
 			Inner::Resume(resume, _) => resume.next_in_range(from),
@@ -6962,6 +6986,18 @@ impl Subscriber {
 				cursor.filter.window.resolved()
 			}
 			Inner::Resume(..) => Vec::new(),
+		}
+	}
+
+	/// Why this subscriber's ranges can't be served from its track, the error its reads
+	/// fail with; `None` for a front's reader, whose copies answer for it.
+	pub(super) fn refused(&mut self) -> Option<Error> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.refused.clone()
+			}
+			Inner::Resume(..) => None,
 		}
 	}
 
@@ -8180,6 +8216,30 @@ mod test {
 			};
 			assert_eq!((group.sequence, group.index()), (4, 5), "ordered={ordered}");
 		}
+	}
+
+	/// The floor a reader waiting on each group starts at is the higher of its ranges' and
+	/// its local one, so it never waits on a group the local floor withholds.
+	#[test]
+	fn floor_honors_set_groups() {
+		let producer = track_producer("test", Info::default());
+		let _groups: Vec<_> = (0..6).map(|sequence| framed(&producer, sequence, 2)).collect();
+
+		let mut reader = producer.subscribe(replay().with_groups(2..));
+		assert_eq!((reader.floor(), reader.next_in_range(0)), (Some(2), Some(2)));
+		reader.set_groups(4..);
+		assert_eq!((reader.floor(), reader.next_in_range(0)), (Some(4), Some(4)));
+		assert_eq!(reader.next_in_range(5), Some(5));
+
+		// Below the ranges' floor, the ranges still decide.
+		let mut reader = producer.subscribe(replay().with_groups(3..));
+		reader.set_groups(1..);
+		assert_eq!((reader.floor(), reader.next_in_range(0)), (Some(3), Some(3)));
+
+		// A floor reaching back to the oldest group stays unknown.
+		let mut reader = producer.subscribe(replay());
+		reader.set_groups(4..);
+		assert_eq!(reader.floor(), None);
 	}
 
 	/// The largest reports only while it is within the bounds: a cap below it or a floor
@@ -9493,7 +9553,7 @@ mod test {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
 		let now = crate::model::clock::now();
 		assert_eq!(
-			pool.gc(now, &kio::Waiter::noop()),
+			pool.poll(now, &kio::Waiter::noop()),
 			Some(now + Duration::from_millis(500))
 		);
 		let producer = track_producer_pooled("test", pool.clone());
@@ -9502,9 +9562,9 @@ mod test {
 		let _open = producer.append_group().unwrap();
 		// Activity written while cleanup was idle gets the new supplied time.
 		let later = now + Duration::from_secs(60);
-		pool.gc(later, &kio::Waiter::noop());
+		pool.poll(later, &kio::Waiter::noop());
 		assert!(producer.state.read().lookup.contains_key(&0));
-		pool.gc(later + Duration::from_secs(2), &kio::Waiter::noop());
+		pool.poll(later + Duration::from_secs(2), &kio::Waiter::noop());
 		assert!(!producer.state.read().lookup.contains_key(&0));
 	}
 
@@ -9516,12 +9576,12 @@ mod test {
 		let now = crate::model::clock::now();
 		let groups: Vec<_> = (0..EVICT_SCAN * 3).map(|_| producer.append_group().unwrap()).collect();
 		let _open = producer.append_group().unwrap();
-		pool.gc(now, &kio::Waiter::noop());
+		pool.poll(now, &kio::Waiter::noop());
 		// Keep more than a write scan's worth of leading entries fresh.
 		for group in &groups[..EVICT_SCAN * 2] {
 			group.handle().cache_refresh();
 		}
-		pool.gc(now + expiry * 2, &kio::Waiter::noop());
+		pool.poll(now + expiry * 2, &kio::Waiter::noop());
 		let state = producer.state.read();
 		for sequence in 0..EVICT_SCAN * 2 {
 			assert!(state.lookup.contains_key(&(sequence as u64)), "fresh front survives");
@@ -12357,7 +12417,7 @@ mod test {
 	}
 
 	/// Closing a track aborts its open groups like [`Producer::abort`], with
-	/// [`Error::SessionClosed`].
+	/// [`StreamError::Session`].
 	#[test]
 	#[cfg(feature = "async")]
 	fn close_ends_a_pulled_open_group() {
@@ -12372,9 +12432,15 @@ mod test {
 
 		producer.close().unwrap();
 		let read = group.read_frame().now_or_never().expect("should not block");
-		assert!(matches!(read, Err(Error::SessionClosed)), "{read:?}");
+		assert!(
+			matches!(read, Err(Error::Stream(StreamError::Session(SessionError::Cancel)))),
+			"{read:?}"
+		);
 		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
-		assert!(matches!(write, Err(Error::SessionClosed)), "{write:?}");
+		assert!(
+			matches!(write, Err(Error::Stream(StreamError::Session(SessionError::Cancel)))),
+			"{write:?}"
+		);
 	}
 
 	/// Aborting an unused track aborts an open group whose reader outlived the track's

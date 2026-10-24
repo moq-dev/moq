@@ -4,14 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Dynamic tracks serve fills
-
-`TrackDynamic.requestedGroup()` is now `requestedFill()`, returning a `Fill` (`startGroup()`, `startFrame()`, `endGroup()`, `priority()`, `maxDelayUs()`, `order()`, `next()`, `accept(sequence)`, `dropGroups(start, end)`, `isUsed()`, `unused()`), and `requestedGroups()` is now `requestedFills()`.
-`GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `isUsed()` or `unused()` on the fill.
-A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `isWanted(sequence)` and `unwanted(sequence)` say when to stop serving one.
-A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
-`Subscription.maxDelayUs` is a `ULong?` and `maxDelay` a `Duration?`, where null leaves the publisher's max age alone to bound delivery.
-
 ### Connection state
 
 `Moq.connect` returns a connecting native session. Replace `status()`, `connects()`, and failure polls with `session.state()` and `session.stateChanged(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
@@ -36,6 +28,22 @@ the matching generated bindings and native library.
 
 Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel the coroutine or wrap it in `withTimeout`.
+
+### Shutdown drains
+
+`session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling.
+Await the suspending `session.closed()` to wait for the drain and catch delivery failures.
+`Moq.close()` now cancels at once; to drain a `Moq`, call `moq.shutdown()`, await `moq.session.closed()`, then close it.
+If you adopted the release line's async `drain()`, call `shutdown()` and then await `closed()` instead.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast `finish` no longer closes
+
+`BroadcastProducer.finish()` was a deprecated alias for `end()`; it no longer ends the broadcast at once.
+Call `BroadcastProducer.end()` where you called `finish()`.
 
 ### JSON snapshot `deltaRatio` is `deltas`
 
@@ -234,6 +242,8 @@ val stream = ContainerProducer(broadcast, ContainerInit(ContainerFormat.FMP4, by
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 `Frame.timestamp` and `Datagram.timestamp` are `Duration?`, null on a frame read from an untimed track.
 A raw write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `CatalogProducer.now()` samples the broadcast clock for local-event stamps.
@@ -268,10 +278,6 @@ Replace `!video.stalled` with `video.enabled`.
 `VideoDecodedFrame` is a closeable handle with `width()`, `height()`, `pixels(format)`, and `surface()`.
 `VideoDecoderOutput.format` is gone; set `surface = true` to keep the decoder's native surface.
 Replace `frame.data` with `frame.use { it.pixels(VideoPixelFormat.RGBA) }`.
-
-### `BroadcastProducer.finish()` is removed (#4152)
-
-Call `end()` to finish the broadcast and keep the handle, or `close()` to release it.
 
 ## 0.4 -> 0.5
 

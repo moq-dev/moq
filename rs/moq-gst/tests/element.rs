@@ -37,10 +37,12 @@ fn track_error_of(sink: &gst::Element, pad: &str) -> Option<String> {
 
 /// A publisher pointed at a relay that cannot answer. Connect runs in the background, so the element
 /// still reaches PAUSED and creates its producers, which is all these tests need.
+/// A sink that closes its broadcast at the end of stream, for tests not about the linger.
 fn publisher() -> gst::Element {
 	gst::ElementFactory::make("moqsink")
 		.property("url", "https://127.0.0.1:1")
 		.property("broadcast", "test")
+		.property("linger", 0u64)
 		.build()
 		.expect("create moqsink")
 }
@@ -226,13 +228,12 @@ fn play_one_frame(sink: &gst::Element) -> gst::Pad {
 	pad
 }
 
-// Lingering is opt-in: by default the end of stream closes the broadcast and posts EOS at once, even
-// with media a late subscriber could still have drained.
+// With no linger, the end of stream closes the broadcast and posts EOS at once, even with media a
+// late subscriber could still have drained.
 #[test]
-fn published_media_posts_the_eos_at_once_by_default() {
+fn published_media_posts_the_eos_at_once_without_a_linger() {
 	init();
 	let sink = publisher();
-	assert!(!sink.property::<bool>("linger"));
 	let seen = recording_bus(&sink);
 	let pad = play_one_frame(&sink);
 
@@ -241,14 +242,14 @@ fn published_media_posts_the_eos_at_once_by_default() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
-// With `linger`, published media is served until it is stale, so the EOS that ends `gst-launch` waits
-// for it. Stopping the pipeline is the interrupt: it closes the broadcast at once, and the run it ended
+// By default, published media is served for the linger, so the EOS that ends `gst-launch` waits for
+// it. Stopping the pipeline is the interrupt: it closes the broadcast at once, and the run it ended
 // owes no EOS.
 #[test]
 fn a_lingering_sink_holds_the_eos_until_the_pipeline_stops() {
 	init();
 	let sink = publisher();
-	sink.set_property("linger", true);
+	sink.set_property("linger", 30_000u64);
 	let seen = recording_bus(&sink);
 	let pad = play_one_frame(&sink);
 
@@ -619,20 +620,6 @@ fn a_pipeline_description_selects_loc() {
 	assert_eq!(
 		child_of(&sink, "sink_0").property::<gstmoq::MediaContainer>("container"),
 		gstmoq::MediaContainer::Loc
-	);
-}
-
-#[test]
-fn a_pipeline_description_marks_an_encoder_pad() {
-	init();
-	let sink = gst::parse::launch("moqsink name=publisher url=https://127.0.0.1:1 broadcast=test sink_0::encoder=true")
-		.expect("parse the description");
-	let _pad = sink.request_pad_simple("sink_0").expect("request sink_0");
-	assert!(child_of(&sink, "sink_0").property::<bool>("encoder"));
-	let _other = sink.request_pad_simple("sink_1").expect("request sink_1");
-	assert!(
-		!child_of(&sink, "sink_1").property::<bool>("encoder"),
-		"a pad is an import unless it says otherwise"
 	);
 }
 
@@ -1567,4 +1554,19 @@ fn connect_failure_retries_without_erroring() {
 	assert_eq!(status, gstmoq::ConnectionStatus::Disconnected);
 	assert_eq!(send_bitrate, 0);
 	assert_eq!(recv_bitrate, 0);
+}
+
+// Both element factories expose the same connection syntax, and refuse unknown versions
+// before opening a transport rather than silently offering the defaults.
+#[test]
+fn parsed_connection_properties_are_shared_and_validated() {
+	init();
+	for factory in ["moqsink", "moqsrc"] {
+		let element = gst::parse::launch(&format!("{factory} url=https://127.0.0.1:1 broadcast=test connect-version=moq-lite-99 quic-idle-timeout=15000 quic-keep-alive=0"))
+			.expect("parse the shared property syntax");
+		assert_eq!(element.property::<u64>("quic-idle-timeout"), 15_000);
+		assert_eq!(element.property::<u64>("quic-keep-alive"), 0);
+		assert_eq!(element.set_state(gst::State::Paused), Err(gst::StateChangeError));
+		element.set_state(gst::State::Null).unwrap();
+	}
 }

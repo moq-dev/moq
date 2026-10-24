@@ -4,14 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Dynamic tracks serve fills
-
-`TrackDynamic.requestedGroup()` is now `requestedFill()`, returning a `Fill` (`startGroup()`, `startFrame()`, `endGroup()`, `priority()`, `maxDelayUs()`, `order()`, `next()`, `accept(sequence)`, `dropGroups(start, end)`, `isUsed()`, `unused()`).
-`GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `isUsed()` or `unused()` on the fill.
-A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `isWanted(sequence)` and `unwanted(sequence)` say when to stop serving one.
-A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
-`Subscription.maxDelayUs` and `maxDelay` are nullable, where null leaves the publisher's max age alone to bound delivery.
-
 ### Connection state
 
 `Moq.connect` returns a connecting native session. Replace status, connect-count, and failure polls with `session.state()` and `session.stateChanged(after: state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
@@ -43,6 +35,21 @@ Custom implementations of generated interfaces must return `UniffiRustFuture<T>`
 
 Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: add a `.timeout` to the future.
+
+### Shutdown drains and `Moq.close()` is async
+
+`session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling.
+`await session.closed()` waits for the drain and reports delivery failures; call `session.cancel(code: 0)` to close at once, as `shutdown()` did.
+`Moq.close()` returns `Future<void>` and drains before stopping the client, so await it.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast `finish` no longer closes
+
+`BroadcastProducer.finish()` was a deprecated alias for `close()`; it no longer ends the broadcast at once.
+Call `BroadcastProducer.close()` where you called `finish()`.
 
 ### JSON snapshot `deltaRatio` is `deltas`
 
@@ -229,6 +236,8 @@ final stream = media.ContainerProducer(broadcast: broadcast, init: media.Contain
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 `Frame.timestampUs` and `Datagram.timestampUs` are nullable, null on a frame read from an untimed track, and so are their `timestamp` getters.
 A raw write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `media.CatalogProducer.now()` samples the broadcast clock for local-event stamps.
@@ -257,7 +266,3 @@ Replace `!video.stalled` with `video.enabled`.
 ### Routes have one cost (#4661)
 
 `MoqRoute.cold` is removed; drop the `cold` argument.
-
-### `BroadcastProducer.finish()` is removed (#4152)
-
-Call `close()` instead.

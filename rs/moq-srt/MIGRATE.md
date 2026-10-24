@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `with_linger` keeps an ingest up; `with_follow` follows an egress
+
+| Before | After |
+| --- | --- |
+| `Subscribe::with_linger` | `Subscribe::with_follow` |
+| `Client::with_linger` (export) | `Client::with_follow` |
+
+`Publish::with_linger` and `Client::with_linger` now set how long a cleanly ended ingest stays up, counted from its end (default 30 s, zero closes it at once), instead of its tracks' max age.
+
 ### `run` and `Config` are removed
 
 `run`, `Config`, and `Error::ListenerClosed` are gone.
@@ -21,7 +30,7 @@ To keep the first publisher on a path, track the paths you accepted and reject a
 
 ### A finished ingest lingers
 
-`Publish::accept` and `Client::pull` now resolve only after the ended stream's finished broadcast goes stale.
+`Publish::accept` and `Client::pull` now resolve only after the ended stream's finished broadcast has stayed up for `with_linger`.
 Drop the future to close the broadcast early. A socket or demux error still closes it at once.
 
 ### Egress runs at least one second behind (#5553)

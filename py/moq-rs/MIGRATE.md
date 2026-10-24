@@ -4,14 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Dynamic tracks serve fills
-
-`TrackDynamic.requested_group()` is now `requested_fill()`, returning a `Fill` (`start_group`, `start_frame`, `end_group`, `priority`, `max_delay`, `order`, `next()`, `accept(sequence)`, `drop_groups(start, end)`, `is_used()`, `unused()`), and iterating a `TrackDynamic` yields fills.
-`GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `is_used()` or `unused()` on the fill.
-A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `is_wanted(sequence)` and `unwanted(sequence)` say when to stop serving one.
-A refusal carries no application code: `drop_groups` fails the waiting fetches with `moq.Error.NotFound`.
-`Subscription.max_delay` also accepts `None`, leaving the publisher's max age alone to bound delivery.
-
 ### Connection state
 
 Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
@@ -36,6 +28,22 @@ the matching generated bindings and native library.
 
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve()` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel the task or wrap it in `asyncio.wait_for`.
+
+### Session shutdown drains
+
+`Session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling.
+`await session.closed()` waits for the drain and raises delivery failures, and a clean `async with` exit now waits for it too.
+Call `session.cancel(0)` to close at once, as `shutdown()` did.
+If you adopted the release line's async `drain()`, call `session.shutdown()` and then `await session.closed()` instead.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast `finish` no longer closes
+
+`BroadcastProducer.finish()` was a deprecated alias for `close()`; it no longer ends the broadcast at once.
+Call `BroadcastProducer.close()` where you called `finish()`.
 
 ### JSON snapshot `delta_ratio` is `deltas`
 
@@ -231,6 +239,8 @@ A string passed where a list of strings belongs (`tls_roots="ca.pem"`) raises `T
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 A frame read from an untimed track has `timestamp` set to `None`.
 Raw writes no longer default to zero, so a write to a timed track without a timestamp raises `TimestampMismatch`; whole-frame media writes require one.
 Pass `timestamp=` on every write to a timed track.
@@ -263,10 +273,6 @@ Check for both where you meant any QUIC session.
 A `VideoDecodedFrame`'s fields are methods: `timestamp_us()`, `width()`, `height()`, and `pixels(format)` replacing `data` and `format`.
 `VideoDecoderOutput.format` is gone; set `surface=True` to keep the decoder's native surface.
 Read `frame.pixels(moq.VideoPixelFormat.RGBA)` instead of `frame.data`.
-
-### `BroadcastProducer.finish()` is removed (#4152)
-
-Call `broadcast.close()` instead.
 
 ## 0.4 -> 0.5
 

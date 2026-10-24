@@ -747,12 +747,12 @@ async fn evicted_timeline_groups_remain_fetchable() {
 	let serve = tokio::spawn(reader.serve());
 	let expected = fetch(&broadcast, &timeline("video"), 0, 0).await.unwrap();
 	let now = moq_net::time::Instant::now();
-	pool.gc(now, &kio::Waiter::noop());
-	pool.gc(now + Duration::from_secs(1), &kio::Waiter::noop());
+	pool.poll(now, &kio::Waiter::noop());
+	pool.poll(now + Duration::from_secs(1), &kio::Waiter::noop());
 	assert_eq!(fetch(&broadcast, &timeline("video"), 0, 0).await.unwrap(), expected);
 	// Past the end of an evicted complete group is EOF, as it is for a cached one.
-	pool.gc(now + Duration::from_secs(2), &kio::Waiter::noop());
-	pool.gc(now + Duration::from_secs(3), &kio::Waiter::noop());
+	pool.poll(now + Duration::from_secs(2), &kio::Waiter::noop());
+	pool.poll(now + Duration::from_secs(3), &kio::Waiter::noop());
 	assert!(
 		fetch(&broadcast, &timeline("video"), 0, expected.len() as u64 + 1)
 			.await
@@ -780,8 +780,8 @@ async fn a_narrowed_timeline_read_skips_the_group_it_left() {
 		.unwrap();
 	let serve = tokio::spawn(reader.serve());
 	let now = moq_net::time::Instant::now();
-	pool.gc(now, &kio::Waiter::noop());
-	pool.gc(now + Duration::from_secs(1), &kio::Waiter::noop());
+	pool.poll(now, &kio::Waiter::noop());
+	pool.poll(now + Duration::from_secs(1), &kio::Waiter::noop());
 
 	let mock = archive.store.inner().clone();
 	mock.take();
@@ -850,11 +850,11 @@ async fn enrolled_timeline_fetch_survives_finish() {
 	let expected = fetch(&broadcast, &timeline("audio"), 0, 0).await.unwrap();
 	reader.finish().unwrap();
 	let now = moq_net::time::Instant::now();
-	broadcast.info().pool.gc(now, &kio::Waiter::noop());
+	broadcast.info().pool.poll(now, &kio::Waiter::noop());
 	broadcast
 		.info()
 		.pool
-		.gc(now + Duration::from_secs(31), &kio::Waiter::noop());
+		.poll(now + Duration::from_secs(31), &kio::Waiter::noop());
 	assert_eq!(fetch(&broadcast, &timeline("audio"), 0, 0).await.unwrap(), expected);
 	let missing = fetch(&broadcast, &timeline("audio"), 2, 0).await;
 	assert!(
@@ -893,13 +893,13 @@ async fn benchmark_timeline_fetch_fanout() {
 			let serving = tokio::spawn(reader.serve());
 			let name = timeline("video-0");
 			let mut now = moq_net::time::Instant::now();
-			broadcast.info().pool.gc(now, &kio::Waiter::noop());
+			broadcast.info().pool.poll(now, &kio::Waiter::noop());
 			let mut elapsed = Duration::ZERO;
 			for _ in 0..20 {
 				// One sweep dates recent reads; the next expires them.
 				for _ in 0..2 {
 					now += Duration::from_secs(31);
-					broadcast.info().pool.gc(now, &kio::Waiter::noop());
+					broadcast.info().pool.poll(now, &kio::Waiter::noop());
 				}
 				let subscription = moq_net::track::Subscription::default()
 					.with_groups(0..)

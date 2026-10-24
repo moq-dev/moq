@@ -90,11 +90,19 @@ pub struct Config {
 	/// The extensions our SETUP offers. Drafts 14-16 already sent it, so there this only
 	/// records what it said. MoQ Auth is offered only while [`Self::auth`] supports it too.
 	pub extensions: crate::setup::Extensions,
+
+	/// The Implementation our SETUP advertises (draft-17+), or `None` to omit it. Drafts
+	/// 14-16 already sent theirs on the bidi SETUP.
+	pub implementation: Option<String>,
+
+	/// Where the implementation the peer's SETUP advertises is published, once the uni loop
+	/// reads it. A caller that pre-read the SETUP has already filled it.
+	pub peer_implementation: crate::setup::PeerImplementation,
 }
 
 pub(crate) struct Driver {
 	pub(crate) withdrawal: crate::session::Withdrawal,
-	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	pub(crate) closing: std::sync::Arc<crate::session::Closing>,
 	// Dispatched SUBSCRIBE and FETCH serves still owing the peer data.
 	owed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 	future: MaybeSendBox<'static, Result<(), Error>>,
@@ -135,6 +143,8 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 		auth,
 		early_unis,
 		extensions,
+		implementation,
+		peer_implementation,
 	} = config;
 
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
@@ -172,15 +182,15 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 
 	let withdrawal = crate::session::Withdrawal::default();
 	let withdrawing = withdrawal.clone();
-	let local_close = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-	let closing = local_close.clone();
+	let supervised = std::sync::Arc::new(crate::session::Closing::default());
+	let closing = supervised.clone();
 	let owed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 	let serving = owed.clone();
 
 	// What the peer declared in its SETUP. Seeded now when that stream was already
 	// read (the legacy handshake, or a gated server accept), and filled by the uni
 	// loop otherwise.
-	let peer_setup = peer::PeerSetup::new(extensions);
+	let peer_setup = peer::PeerSetup::new(extensions).with_implementation(peer_implementation);
 	let setup_read = peer_declared.is_some();
 	match peer_declared {
 		Some(declared) => peer_setup.set(declared),
@@ -215,8 +225,9 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 				.with_stats(stats.clone())
 		});
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
+		// Counted for the peak only: stream credit bounds them.
 		let subscriptions =
-			crate::session::Slots::new(limits.requests).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+			crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 		let announces =
 			crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
@@ -332,27 +343,41 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_adapter = sub_ns_adapter.clone();
 						prefixes.push(async move {
-							let stream = match version {
-								Version::Draft16 => {
-									let mut sub_ns_adapter = sub_ns_adapter;
-									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
-									let mut reader = crate::coding::Reader::new(
-										crate::transport::boxed::RecvStream::new(recv),
-										version,
-									);
-									reader.set_priority(crate::priority::RECV_CONTROL);
-									Stream {
-										writer: crate::coding::Writer::new(
-											crate::transport::boxed::SendStream::new(send),
+							let opened = async {
+								match version {
+									Version::Draft16 => {
+										let mut sub_ns_adapter = sub_ns_adapter;
+										let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+										let mut reader = crate::coding::Reader::new(
+											crate::transport::boxed::RecvStream::new(recv),
 											version,
-										),
-										reader,
+										);
+										reader.set_priority(crate::priority::RECV_CONTROL);
+										Ok(Stream {
+											writer: crate::coding::Writer::new(
+												crate::transport::boxed::SendStream::new(send),
+												version,
+											),
+											reader,
+										})
+									}
+									_ => {
+										Stream::open_request(
+											&mut crate::driver::Transport::new(sub_ns_adapter),
+											version,
+										)
+										.await
 									}
 								}
-								_ => {
-									Stream::open(&mut crate::driver::Transport::new(sub_ns_adapter.clone()), version)
-										.await?
+							}
+							.await;
+							let stream = match opened {
+								Ok(stream) => stream,
+								Err(Error::NoStreamCredit) => {
+									tracing::warn!(%prefix, "subscribe_namespace refused without stream credit");
+									return Ok(());
 								}
+								Err(err) => return Err(err),
 							};
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
@@ -397,11 +422,11 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 					Poll::Pending
 				})
 				.await;
-				close(&mut session, &res);
-				if !closing.load(std::sync::atomic::Ordering::Relaxed) {
+				close(&mut session, &closing, &res);
+				if !closing.is_local() {
 					kio::wait(|waiter| unis.poll_drain(waiter)).await;
 				}
-				if closing.load(std::sync::atomic::Ordering::Relaxed) {
+				if closing.is_local() {
 					subscriber.close();
 				} else if let Err(err) = &res {
 					// Every track this session was receiving ends with its error.
@@ -418,6 +443,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 					version,
 					path,
 					authority,
+					implementation,
 					self_origin,
 					cost,
 					crate::setup::Extensions {
@@ -553,7 +579,14 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 						let sub_ns_session = sub_ns_session.clone();
 						prefixes.push(async move {
 							let mut sub_ns_session = sub_ns_session;
-							let stream = Stream::open(&mut sub_ns_session, version).await?;
+							let stream = match Stream::open_request(&mut sub_ns_session, version).await {
+								Ok(stream) => stream,
+								Err(Error::NoStreamCredit) => {
+									tracing::warn!(%prefix, "subscribe_namespace refused without stream credit");
+									return Ok(());
+								}
+								Err(err) => return Err(err),
+							};
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
@@ -607,17 +640,17 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 					Poll::Pending
 				})
 				.await;
-				close(&mut session, &res);
+				close(&mut session, &closing, &res);
 				// Before this arm's Auth serve tasks drop, so each settles with the
 				// session's error rather than a bare cancel.
 				auth.close(match &res {
 					Ok(()) => Error::Cancel,
 					Err(err) => err.clone(),
 				});
-				if !closing.load(std::sync::atomic::Ordering::Relaxed) {
+				if !closing.is_local() {
 					kio::wait(|waiter| unis.poll_drain(waiter)).await;
 				}
-				if closing.load(std::sync::atomic::Ordering::Relaxed) {
+				if closing.is_local() {
 					subscriber.close();
 				} else if let Err(err) = &res {
 					// Every track this session was receiving ends with its error.
@@ -639,7 +672,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 	Ok((
 		Driver {
 			withdrawal,
-			local_close,
+			closing: supervised,
 			owed,
 			future: driver,
 		},
@@ -651,7 +684,8 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 ///
 /// Dropping them first would reset the control stream ahead of the close, and a strict peer
 /// closes over that reset with its own PROTOCOL_VIOLATION before it reads our code.
-fn close(session: &mut Transport, res: &Result<(), Error>) {
+fn close(session: &mut Transport, closing: &crate::session::Closing, res: &Result<(), Error>) {
+	closing.record(res.as_ref().err().unwrap_or(&Error::Cancel));
 	match res {
 		Err(err @ (Error::Transport(_) | Error::IdleTimeout)) => {
 			tracing::info!(%err, "session terminated");
@@ -684,6 +718,9 @@ pub struct PeerSetup {
 
 	/// The credential the peer presented in its `AUTHORIZATION TOKEN` option.
 	pub token: Option<crate::setup::Token>,
+
+	/// The implementation the peer advertised in its `IMPLEMENTATION` option.
+	pub implementation: Option<String>,
 
 	/// The Setup Options it declared (see [`cluster`] and [`solicit`]).
 	pub declared: peer::Peer,
@@ -747,6 +784,8 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 			None => None,
 		};
 		let token = super::token::from_setup(&params, version)?;
+		let implementation =
+			crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
 		let declared = peer_from_params(&params, version)?;
 
 		return Ok(PeerSetup {
@@ -754,6 +793,7 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 			size,
 			path,
 			token,
+			implementation,
 			declared,
 			early,
 		});
@@ -762,7 +802,11 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 
 /// Parse the Setup Options we act on out of a raw SETUP parameter block, refusing any the
 /// peer's role may not send.
-fn decode_peer_setup(parameters: bytes::Bytes, version: Version, client: bool) -> Result<peer::Peer, Error> {
+fn decode_peer_setup(
+	parameters: bytes::Bytes,
+	version: Version,
+	client: bool,
+) -> Result<(peer::Peer, Option<String>), Error> {
 	let (params, _) = ietf::Parameters::decode_slice(&parameters, version)?;
 	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
 	if client && params.get_bytes(ietf::ParameterBytes::Path).is_some() {
@@ -774,7 +818,8 @@ fn decode_peer_setup(parameters: bytes::Bytes, version: Version, client: bool) -
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
 	// session (draft-21 section 8.9).
 	super::token::from_setup(&params, version)?;
-	Ok(peer_from_params(&params, version)?)
+	let implementation = crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
+	Ok((peer_from_params(&params, version)?, implementation))
 }
 
 /// The Setup Options we act on, out of an already-decoded parameter block. One place, so
@@ -808,6 +853,7 @@ async fn run_setup(
 	version: Version,
 	path: Option<String>,
 	authority: Option<String>,
+	implementation: Option<String>,
 	self_origin: Hop,
 	cost: Option<u64>,
 	extensions: crate::setup::Extensions,
@@ -825,7 +871,9 @@ async fn run_setup(
 		Writer::new(send, outer_version).with_stats(&stats);
 
 	let mut parameters = ietf::Parameters::default();
-	parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+	if let Some(implementation) = implementation {
+		parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
+	}
 	if let Some(path) = path {
 		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
 	}
@@ -1126,7 +1174,9 @@ impl Uni {
 				reader.set_priority(crate::priority::RECV_CONTROL);
 				let msg = reader.decode::<setup::Setup>().await?;
 				if let Some(peer_setup) = peer_setup {
-					peer_setup.set(decode_peer_setup(msg.parameters, version, client)?);
+					let (declared, implementation) = decode_peer_setup(msg.parameters, version, client)?;
+					peer_setup.set(declared);
+					peer_setup.set_implementation(implementation);
 				}
 
 				// Monitor for GOAWAY after setup completes.
@@ -1550,6 +1600,93 @@ mod tests {
 	use super::*;
 	use crate::model::ProduceTest;
 
+	/// The peer's IMPLEMENTATION option is read alongside what it declared, and one that
+	/// is not UTF-8 refuses the SETUP.
+	#[test]
+	fn peer_setup_reads_the_implementation() {
+		for version in [Version::Draft17, Version::Draft22] {
+			let encode = |value: Option<&[u8]>| {
+				let mut params = ietf::Parameters::default();
+				if let Some(value) = value {
+					params.set_bytes(ietf::ParameterBytes::Implementation, value.to_vec());
+				}
+				params.encode_bytes(version).unwrap()
+			};
+			let (_, implementation) = decode_peer_setup(encode(Some(b"moq-net-rs/1")), version, true).unwrap();
+			assert_eq!(implementation.as_deref(), Some("moq-net-rs/1"));
+			let (_, implementation) = decode_peer_setup(encode(None), version, true).unwrap();
+			assert_eq!(implementation, None);
+			assert!(decode_peer_setup(encode(Some(&[0xff])), version, true).is_err());
+		}
+	}
+
+	#[moq_clock::test]
+	async fn announce_interest_without_credit_keeps_the_session_alive() {
+		use std::sync::atomic::Ordering;
+		for version in [Version::Draft16, Version::Draft17, Version::Draft19] {
+			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let interest = origin.consume().announced();
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
+			let log = session.log.clone();
+			let mut session = crate::driver::Transport::new(session);
+			let setup = if version == Version::Draft16 {
+				Some(
+					Stream::open(&mut session, version)
+						.await
+						.expect("setup waits for credit"),
+				)
+			} else {
+				None
+			};
+			let (driver, _goaway) = start(Config {
+				runtime: crate::time::sim(),
+				stats: Default::default(),
+				session,
+				setup,
+				request_id_max: None,
+				limits: Default::default(),
+				client: true,
+				publish: None,
+				subscribe: Some(origin),
+				peer_hop: None,
+				cost: None,
+				version,
+				path: None,
+				authority: None,
+				peer_setup_stream: None,
+				peer_declared: Some(peer::Peer {
+					solicit: Some(true),
+					..Default::default()
+				}),
+				auth: crate::auth::Handle::new(false),
+				early_unis: Vec::new(),
+				implementation: None,
+				peer_implementation: Default::default(),
+				extensions: Default::default(),
+			})
+			.unwrap();
+			let mut driver = std::pin::pin!(driver);
+			assert!(futures::poll!(driver.as_mut()).is_pending(), "{version}");
+			assert_eq!(
+				log.request_attempts.load(Ordering::Relaxed),
+				1,
+				"{version}: interest was attempted"
+			);
+			moq_clock::sleep(std::time::Duration::from_secs(20)).await;
+			assert!(
+				futures::poll!(driver.as_mut()).is_pending(),
+				"{version}: local refusal ended the session"
+			);
+			assert_eq!(
+				log.request_attempts.load(Ordering::Relaxed),
+				1,
+				"{version}: interest was not retried"
+			);
+			assert!(log.closes().is_empty());
+			assert!(interest.is_synced(), "a refused interest releases its snapshot");
+		}
+	}
+
 	#[moq_clock::test]
 	async fn auth_ids_share_the_modern_request_history() {
 		for version in [
@@ -1626,6 +1763,8 @@ mod tests {
 						}),
 						auth: crate::auth::Handle::new(true),
 						early_unis: Vec::new(),
+						implementation: None,
+						peer_implementation: Default::default(),
 						extensions: Default::default(),
 					})
 					.unwrap();
@@ -1682,6 +1821,8 @@ mod tests {
 					}),
 					auth: crate::auth::Handle::new(true),
 					early_unis: Vec::new(),
+					implementation: None,
+					peer_implementation: Default::default(),
 					extensions: Default::default(),
 				})
 				.unwrap();
@@ -1729,6 +1870,8 @@ mod tests {
 					}),
 					auth: crate::auth::Handle::new(true),
 					early_unis: Vec::new(),
+					implementation: None,
+					peer_implementation: Default::default(),
 					extensions: Default::default(),
 				})
 				.unwrap();
@@ -1836,6 +1979,8 @@ mod tests {
 			}),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -1893,6 +2038,8 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -1973,6 +2120,8 @@ mod tests {
 			}),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -2059,6 +2208,8 @@ mod tests {
 			peer_declared,
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -2166,6 +2317,8 @@ mod tests {
 			}),
 			auth: handle.clone(),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -2248,6 +2401,8 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth,
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions,
 		})
 		.expect("start the session");
@@ -2352,6 +2507,8 @@ mod tests {
 			// As `Server` builds it: offered by the client, so supported iff we offer it.
 			auth: crate::auth::Handle::new(offered),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: crate::setup::Extensions::default(),
 		})
 		.expect("start the session");
@@ -2440,6 +2597,8 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -2482,6 +2641,8 @@ mod tests {
 				peer_declared: Some(peer::Peer::default()),
 				auth: crate::auth::Handle::new(false),
 				early_unis: Vec::new(),
+				implementation: None,
+				peer_implementation: Default::default(),
 				extensions: Default::default(),
 			})
 			.expect("start the session");
@@ -2752,6 +2913,8 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.unwrap()
@@ -2898,6 +3061,8 @@ mod tests {
 					peer_declared: Some(peer::Peer::default()),
 					auth: crate::auth::Handle::new(false),
 					early_unis: Vec::new(),
+					implementation: None,
+					peer_implementation: Default::default(),
 					extensions: Default::default(),
 				})
 				.unwrap();
@@ -2966,6 +3131,8 @@ mod tests {
 					peer_declared: Some(peer::Peer::default()),
 					auth: crate::auth::Handle::new(false),
 					early_unis: Vec::new(),
+					implementation: None,
+					peer_implementation: Default::default(),
 					extensions: Default::default(),
 					limits: Default::default(),
 				})
@@ -3074,6 +3241,8 @@ mod tests {
 			peer_declared: None,
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -3202,6 +3371,8 @@ mod tests {
 					peer_declared: Some(peer::Peer::default()),
 					auth: crate::auth::Handle::new(false),
 					early_unis: Vec::new(),
+					implementation: None,
+					peer_implementation: Default::default(),
 					extensions: Default::default(),
 				})
 				.unwrap();
@@ -3441,6 +3612,8 @@ mod tests {
 			peer_declared: None,
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.unwrap();
@@ -3499,6 +3672,7 @@ mod tests {
 				VERSION,
 				None,
 				None,
+				None,
 				Hop::new(1).unwrap(),
 				None,
 				Default::default(),
@@ -3544,6 +3718,8 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.unwrap();

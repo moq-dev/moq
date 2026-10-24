@@ -50,17 +50,19 @@ impl<'de> DeserializeAs<'de, moq_net::Timestamp> for Millis {
 }
 
 pub(crate) struct Wall;
-fn epoch() -> std::time::SystemTime {
-	std::time::UNIX_EPOCH + Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS)
+fn epoch() -> moq_clock::Wall {
+	moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS)
 }
-impl SerializeAs<std::time::SystemTime> for Wall {
-	fn serialize_as<S: serde::Serializer>(value: &std::time::SystemTime, serializer: S) -> Result<S::Ok, S::Error> {
-		let duration = value.duration_since(epoch()).map_err(serde::ser::Error::custom)?;
+impl SerializeAs<moq_clock::Wall> for Wall {
+	fn serialize_as<S: serde::Serializer>(value: &moq_clock::Wall, serializer: S) -> Result<S::Ok, S::Error> {
+		let duration = value
+			.checked_duration_since(epoch())
+			.ok_or_else(|| serde::ser::Error::custom("snapshot wall is before the MoQ epoch"))?;
 		Millis::serialize_as(&duration, serializer)
 	}
 }
-impl<'de> DeserializeAs<'de, std::time::SystemTime> for Wall {
-	fn deserialize_as<D: serde::Deserializer<'de>>(deserializer: D) -> Result<std::time::SystemTime, D::Error> {
+impl<'de> DeserializeAs<'de, moq_clock::Wall> for Wall {
+	fn deserialize_as<D: serde::Deserializer<'de>>(deserializer: D) -> Result<moq_clock::Wall, D::Error> {
 		epoch()
 			.checked_add(Millis::deserialize_as(deserializer)?)
 			.ok_or_else(|| serde::de::Error::custom("snapshot wall clock overflow"))
@@ -80,6 +82,27 @@ mod tests {
 		let value: serde_json::Value = serde_json::from_str(input).unwrap();
 		let decoded: T = serde_json::from_value(value.clone()).unwrap();
 		assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+	}
+
+	#[test]
+	fn wall_range_and_epoch_are_checked() {
+		#[serde_with::serde_as]
+		#[derive(Debug, Serialize, Deserialize)]
+		struct Value {
+			#[serde_as(as = "Wall")]
+			wall: moq_clock::Wall,
+		}
+		let last_millis = (u64::MAX / 1_000_000) - crate::catalog::MOQ_EPOCH_UNIX_MILLIS;
+		let last = format!(r#"{{"wall":{last_millis}}}"#);
+		let value: Value = serde_json::from_str(&last).unwrap();
+		assert_eq!(serde_json::to_string(&value).unwrap(), last);
+		assert!(serde_json::from_str::<Value>(&format!(r#"{{"wall":{}}}"#, last_millis + 1)).is_err());
+		assert!(
+			serde_json::to_string(&Value {
+				wall: epoch() - Duration::from_nanos(1)
+			})
+			.is_err()
+		);
 	}
 
 	#[test]
@@ -188,7 +211,7 @@ mod tests {
 		let arrival = report.renditions["hd"].arrival.as_ref().unwrap();
 		assert_eq!(arrival.timestamp, moq_net::Timestamp::from_millis(30_000).unwrap());
 		assert_eq!(
-			arrival.wall.duration_since(epoch()).unwrap(),
+			arrival.wall.checked_duration_since(epoch()).unwrap(),
 			Duration::from_millis(175_184_640_000)
 		);
 		assert_eq!(report.renditions["hd"].stalled, Duration::from_millis(120));

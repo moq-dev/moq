@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -142,7 +142,7 @@ fn all() -> Patterns {
 /// Everything under the dialed path, re-checked every second, good for `expires_in`.
 fn grant(expires_in: Duration) -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(SystemTime::now() + expires_in);
+	grant.expires = Some(moq_clock::wall() + expires_in);
 	grant.revalidate = Some(Duration::from_secs(1));
 	grant
 }
@@ -1416,7 +1416,7 @@ fn manual() -> moq_clock::Installed {
 /// Everything under the dialed path, until [`EXPIRES`] from now on the ambient clock.
 fn expiring() -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(SystemTime::from(moq_clock::wall()) + EXPIRES);
+	grant.expires = Some(moq_clock::wall() + EXPIRES);
 	grant
 }
 
@@ -1468,11 +1468,11 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 		config
 	};
 
-	let untaken = Relay::load(config()).await.expect("load relay");
+	let untaken = Relay::load(config()).await.expect("load relay").with_signals(false);
 	let err = untaken.run().await.expect_err("nobody can authenticate");
 	assert!(err.to_string().contains("nobody can authenticate"), "{err}");
 
-	let mut relay = Relay::load(config()).await.expect("load relay");
+	let mut relay = Relay::load(config()).await.expect("load relay").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
 	assert!(relay.admissions().is_none(), "taken once");
@@ -1507,7 +1507,7 @@ async fn connect_through_embedded_admission(
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	config.listen.timeout = Some(timeout);
 	config.drain_timeout = Duration::from_millis(100);
-	let mut relay = Relay::load(config).await.expect("load relay");
+	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
 	let url = room_url("tcp", port);
@@ -1632,7 +1632,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
 		let mut initial = Grant::new(all(), "a/**".parse::<moq_auth::Pattern>().unwrap());
-		initial.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		initial.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 		let script = Script::new(initial);
 		let auth = build_auth(script.spawn().await);
 		let (port, relay) = if scheme == "tcp" {
@@ -1682,7 +1682,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
-		replacement.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		replacement.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
 		let token = tokio::time::timeout(TIMEOUT, subscriber.auth().add("replacement"))
 			.await

@@ -4,18 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Dynamic tracks serve fills
-
-`TrackDynamic.RequestedGroup` is now `RequestedFill`, returning a `*Fill` (`StartGroup`, `StartFrame`, `EndGroup`, `Priority`, `MaxDelay`, `Order`, `Next`, `Accept(sequence)`, `DropGroups(start, end)`, `IsUsed`, `Unused`), and `All` ranges over fills.
-`GroupRequest` and `GroupDemand` are removed: serve each group `Next` names, and watch `IsUsed` or `Unused` on the fill.
-A reader narrowing its ranges can leave a single group while the fill stays used: `Next` skips it, and `IsWanted(sequence)` and `Unwanted(ctx, sequence)` say when to stop serving one.
-A refusal carries no application code: `DropGroups` fails the waiting fetches with `ErrNotFound`.
-
-### `Subscription.MaxDelay` is a pointer
-
-`Subscription.MaxDelay` is a `*time.Duration`, where nil leaves the publisher's max age alone to bound delivery.
-A zero-value `Subscription` now means that rather than live edge only: point `MaxDelay` at a zero duration to keep skipping at once.
-
 ### Connection state
 
 `Dial` returns a connecting native client. Replace `Session.Status`, `Connects`, and `Failure` with `State()` and `StateChanged(ctx, state.Revision)`. `ConnectionState` carries `Phase`, `Connects`, `Failure`, and `Version`; `ConnectionPhase` replaces `ConnectionStatus`. Cancelling a state wait only cancels that wait. Cancel the session itself to stop its dial.
@@ -41,6 +29,21 @@ the matching generated bindings and native library.
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.Resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: pass a `ctx` with a deadline.
 
+### Shutdown drains
+
+`Session.Shutdown()` keeps its signature, but it now requests a draining close instead of cancelling.
+Call `Session.Closed(ctx)` to wait for the drain and receive delivery failures, or `Session.Cancel(0)` to close at once, as `Shutdown()` did.
+`Client.Close()` now waits for the drain and returns its error instead of always `nil`; allow for that wait in cleanup.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast `Finish` no longer closes
+
+`BroadcastProducer.Finish()` was a deprecated alias for `Close()`; it no longer ends the broadcast at once.
+Call `BroadcastProducer.Close()` where you called `Finish()`.
+
 ### JSON snapshot `DeltaRatio` is `Deltas`
 
 `json.SnapshotOptions.DeltaRatio *uint32` and `json.DefaultDeltaRatio` are replaced by `Deltas *bool` (nil enables deltas).
@@ -49,7 +52,7 @@ Publish the track with a `Refresh` ratio so a joiner gets the value restated in 
 
 ### Priorities are signed (#6142)
 
-`TrackInfo.Priority`, `Subscription.Priority`, and `FetchGroupOptions.Priority` are `int8`, and `Fill.Priority()` returns one.
+`TrackInfo.Priority`, `Subscription.Priority`, and `FetchGroupOptions.Priority` are `int8`, and `GroupRequest.Priority()` returns one.
 Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
@@ -239,6 +242,8 @@ A frame timestamp is a `*time.Duration`, `nil` on a frame read from an untimed t
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 A raw write to a timed track without a timestamp fails with `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `media.CatalogProducer.Now()` samples the broadcast clock for local-event stamps.
 Set `Timestamp` on every write to a timed track.
@@ -271,10 +276,6 @@ Read `Enabled` where you read `!Stalled`.
 `VideoDecodedFrame` is a handle with `TimestampUs()`, `Width()`, `Height()`, `Pixels(format)`, `Surface()`, and `Close()`.
 `VideoDecoderOutput.Format` is gone; set `Surface: true` to keep the decoder's native surface.
 Call `frame.Pixels(moq.VideoPixelFormatRgba)` instead of reading `frame.Data`, and `Close()` the frame when done.
-
-### `BroadcastProducer.Finish()` is removed (#4152)
-
-Call `Close()` instead.
 
 ## 0.5 -> 0.7
 

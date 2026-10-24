@@ -4,21 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `Dynamic` serves fills, not group requests
-
-`track::Dynamic::requested_group` and `poll_requested_group` are replaced by `requested_fill` and `poll_requested_fill`, which yield a `track::Fill`: a run from `start()` (group and frame) to the exclusive `end()`, where `frame_start(sequence)` is the frame each group starts from, with `priority()`, `max_delay()`, and `order()`.
-Call `accept(sequence, info)` for each group you have (the first starts at `start().frame`) and `drop_groups(range)` for the rest; `next()` names the next group still owed, in the fill's order.
-`group::Request` is removed, and its `demand()` with it: watch the fill's `is_used()` and `unused()` instead.
-A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `is_wanted(sequence)`, `unwanted(sequence)`, and `poll_unwanted(sequence, waiter)` say when to stop serving one.
-A fill also arrives for history a subscriber's ranges cover below the live feed that the cache lacks, not only for `fetch_group`.
-Dropping a fill with groups unanswered names them dropped, where the live feed won't deliver them, while a reader still waits; a fill nobody waits on is withdrawn and records nothing.
-
-### `Subscription::max_delay` is optional
-
-`Subscription::max_delay` is an `Option<Duration>`, where `None` leaves the publisher's max age alone to bound delivery.
-The default stays `Some(Duration::ZERO)`, and `with_max_delay` takes `impl Into<Option<Duration>>`, so `with_max_delay(delay)` still compiles; reads and assignments of the field need the `Option`.
-A lite SUBSCRIBE carries `None` as the largest delay the wire allows.
-
 ### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
 Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
@@ -53,6 +38,17 @@ A `!Send` transport wraps itself in a type that checks the thread on use, such a
 `track::Producer::largest(&self)` returns the track's largest location now, `None` before any, instead of streaming each newer one; `track::Producer::poll_largest` is gone.
 Replace `poll_largest(&kio::Waiter::noop())` and `largest().await` on a producer with `largest()`.
 To wait for each newer one, keep a reader and follow its stream: `let mut reader = producer.consume();`, then `reader.largest().await`.
+
+### Transport failures keep their meaning
+
+Handle `Error::IdleTimeout` separately from `Error::Transport`. A local transport close is session cancellation, not clean end-of-content.
+Converting a transport failure to `StreamError` now gives `Unroutable` rather than `Internal`, so retry or re-resolve that route where you classified stream errors.
+
+### Track ends use positions
+
+`track::Producer::finish_at` takes a `track::Position` instead of an exclusive group sequence.
+Pass `Position::group(n)` where you passed `n`, or a position within the last group to end after a frame.
+`Producer::final_sequence()` is `end()` and returns `Option<Position>`; `Subscriber::finished()` and the ordered reader return `Position` instead of `u64`.
 
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
@@ -130,12 +126,12 @@ A group followed by a frameless one is judged against the next group that has a 
 ### Ending a track aborts its open groups (#6111)
 
 Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
-Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::SessionClosed`.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::Stream(StreamError::Session(SessionError::Cancel))`.
 `track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
 
 ### Priorities are signed, with 0 unset (#6142)
 
-`track::Info::priority`, `track::Subscription::priority`, `group::Fetch::priority`, and `track::Fill::priority()` are `i8`, higher first, and 0 is the unset midpoint.
+`track::Info::priority`, `track::Subscription::priority`, `group::Fetch::priority`, and `group::Request::priority()` are `i8`, higher first, and 0 is the unset midpoint.
 The track's default was 127, the midpoint, and the subscription's was 0, the least urgent; both are 0 now.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 The publisher's `Info::priority` now breaks ties between subscriptions at one subscriber priority.
@@ -285,7 +281,7 @@ A track received over moq-lite-05/06 arrives untimed, since its timestamps may b
 One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
 
-### `broadcast::Producer::finish` is back, and lingers (#5795)
+### Broadcast `finish` returns a linger handle (#5795)
 
 `finish()` ends the broadcast cleanly and returns a `Finish` that keeps its finished tracks servable until their media is stale.
 Dropping the `Finish` closes the broadcast, so `close()` still ends it now.
@@ -399,7 +395,8 @@ A dynamic route updated to another epoch refuses the requests its handler still 
 ### Demand is read through `demand()`
 
 `track::Producer`'s `is_used`, `used`, `unused`, and `poll_unused`, and `group::Producer`'s `used` and `unused`, moved to `demand()`: `track.unused().await` is `track.demand().unused().await?`.
-`track::Request` and `track::Dynamic` poll it through `demand().poll_unused`, which returns `Poll<Result<()>>`: treat `Err` (the request closed) as unused too.
+`track::Request`, `track::Dynamic`, and `group::Request` poll it through `demand().poll_unused`, which returns `Poll<Result<()>>`: treat `Err` (the request closed) as unused too.
+A `group::Request` is withdrawn once its last `fetch_group` caller leaves, so a handler that sees it unused just drops it; a later fetch queues a fresh request, and serving the abandoned one returns `Error::Duplicate`.
 
 ### moq-net owns its transport traits
 
@@ -468,10 +465,10 @@ let client = Client::new().with_limits(limits);
 Broadcast identity is the path, whatever the publisher or first hop.
 A publisher that restarts its group numbering must publish under a new broadcast name.
 
-### Broadcast `finish` and `abort` are removed (#4152)
+### Broadcast `abort` is removed (#4152)
 
-Close a broadcast with `close()`; its end carries no cause.
-`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`.
+`broadcast::Producer::abort` is removed; use `close()` for an immediate end without a cause.
+`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`; the broadcast end carries no cause.
 
 ### No `VarInt`
 

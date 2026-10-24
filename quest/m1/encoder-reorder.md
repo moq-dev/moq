@@ -8,13 +8,11 @@ guessing.
 
 ## Plan
 
-[Decode order](/quest/m1/ts-reliability/decode-order.md) adds
-`VideoHint.reorder` and lists the moq-video encoders as a producer that
-declares it, but leaves them out. Set it in `rendition_hint`
-(`rs/moq-video/src/encode/producer.rs`) and assert it in an encoder test.
+[moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453) adds
+`VideoHint.reorder`, which `rendition_hint`
+(`rs/moq-video/src/encode/producer.rs`) copies from the probed rendition, but
+the encoders leave it unset, so their renditions stay on the inferred clock.
+Declare `0` there, even when the SPS omits its bitstream restriction, and
+assert it in an encoder test.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Decode order](/quest/m1/ts-reliability/decode-order.md) - adds the `reorder` field

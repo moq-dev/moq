@@ -707,12 +707,14 @@ fn spawn_import(
 	}
 
 	let max_age = import.max_age.map(Into::into);
+	let linger = import.linger.map_or(moq_mux::Linger::DEFAULT, Into::into);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
 	let target = |name: String| crate::moq::ImportTarget {
 		origin: origin.clone(),
 		name,
 		max_age,
+		linger,
 		bandwidth: bandwidth.clone(),
 	};
 
@@ -733,7 +735,8 @@ fn spawn_import(
 		} else {
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config)?
-		};
+		}
+		.with_linger(linger);
 		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
@@ -840,7 +843,7 @@ fn spawn_export(
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
-				let max_delay = rtmp.max_delay.into();
+				let max_delay = rtmp.delay.into();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
 					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_delay));

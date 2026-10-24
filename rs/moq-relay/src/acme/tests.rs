@@ -125,6 +125,7 @@ impl Directory {
 		self.state.issued.borrow().clone()
 	}
 
+	#[cfg(all(target_os = "linux", feature = "_quic"))]
 	async fn wait_issued(&self, count: usize) -> Vec<CertificateDer<'static>> {
 		let mut issued = self.state.issued.subscribe();
 		tokio::time::timeout(TIMEOUT, issued.wait_for(|issued| issued.len() >= count))
@@ -425,6 +426,7 @@ impl Running {
 	}
 
 	/// Wait for HTTPS to serve `leaf`, which deploys just after the directory hands it out.
+	#[cfg(all(target_os = "linux", feature = "_quic"))]
 	async fn wait_served(&self, directory: &Directory, leaf: &CertificateDer<'static>) {
 		tokio::time::timeout(TIMEOUT, async {
 			while self.served(directory, DOMAIN).await != *leaf {
