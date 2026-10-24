@@ -31,6 +31,7 @@ check:
 
 # Tests of repository tooling; every `just check` and `just ci` runs them.
 test:
+    python3 test/smoke/runner.test.py
     python3 sh/coverage.test.py
     python3 sh/size/report.test.py
     python3 sh/size/release.test.py
