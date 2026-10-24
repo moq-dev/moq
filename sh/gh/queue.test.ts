@@ -70,6 +70,7 @@ for (const [id, job] of calls) {
 assert.deepEqual(calls.map(([id]) => id).sort(), [
 	"android",
 	"audio-quality",
+	"c",
 	"cpp",
 	"features",
 	"interop",
