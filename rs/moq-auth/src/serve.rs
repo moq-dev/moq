@@ -519,7 +519,6 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::{Algorithm, Bytes, Claims, Client, Error, Peer, Transport, lease::Reason};

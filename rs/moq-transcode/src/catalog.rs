@@ -410,11 +410,6 @@ pub(crate) fn populate(
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use hang::catalog::H264;
 
