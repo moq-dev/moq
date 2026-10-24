@@ -1149,7 +1149,7 @@ impl Publisher {
 			let track_name = msg.track_name.clone();
 			let absolute = self.origin.absolute(&msg.track_namespace).to_owned();
 
-			tracing::info!(id = %request_id, broadcast = %absolute, track = %track_name, "subscribe started");
+			tracing::debug!(id = %request_id, broadcast = %absolute, track = %track_name, "subscribe started");
 
 			// Serve only what our grant lets us publish (MoQ Auth), and stop once it no
 			// longer does. Checked before resolving, so a denied request never reaches the
