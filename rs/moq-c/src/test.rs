@@ -1486,6 +1486,7 @@ fn publish_track_invalid_broadcast() {
 	let subscription = moq_subscription {
 		priority: 1,
 		max_delay_us: 0,
+		max_delay_present: false,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -1595,6 +1596,7 @@ fn raw_track_publish_consume() {
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -1817,6 +1819,7 @@ fn raw_track_subscription_options_and_update() {
 	let subscription = moq_subscription {
 		priority: 5,
 		max_delay_us: 25_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -1931,6 +1934,7 @@ fn raw_track_time_anchor() {
 	let subscription = moq_subscription {
 		priority: 5,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2031,6 +2035,7 @@ fn raw_track_update_refuses_time_on_untimed() {
 	let update = moq_subscription {
 		priority: 3,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2089,6 +2094,7 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 	let subscribe = |ranges: &[moq_range]| moq_subscription {
 		priority: 0,
 		max_delay_us: 60_000_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2359,6 +2365,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 0,
+		max_delay_present: false,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -2510,7 +2517,6 @@ fn media_cut_bounds_audio_groups() {
 			unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), i * 20_000) },
 			0
 		);
-		assert_eq!(moq_publish_media_flush(media, i * 20_000), 0);
 		assert_eq!(moq_publish_media_cut(media), 0, "each packet is its own group");
 	}
 
@@ -2523,8 +2529,6 @@ fn media_cut_bounds_audio_groups() {
 	assert_eq!(moq_publish_media_discontinuity(media), 0);
 
 	// Both report a missing importer rather than panicking on an unknown id.
-	assert!(moq_publish_media_flush(9999, 0) < 0);
-	assert!(moq_publish_media_flush(media, u64::MAX) < 0);
 	assert!(moq_publish_media_discontinuity(9999) < 0);
 	assert!(moq_publish_media_discontinuity(0) < 0);
 	assert!(moq_publish_media_cut(9999) < 0);
@@ -5765,12 +5769,36 @@ fn server_accepts_a_session() {
 	let consumed = id(announced_cb.recv());
 	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
 	assert_eq!(announced_cb.recv_terminal(), 0);
-	assert_eq!(moq_consume_close(consumed), 0);
-
-	// Closing the accepted session is a clean terminal close.
+	// Prime the subscription, then queue a finished tail before closing the accepted
+	// session. Its terminal callback must not report success after aborting the tail.
+	let track = publish_named_track(broadcast, b"tail");
+	let (consumer, frames) = subscribe_named_track(consumed, b"tail");
+	let first = b"ready";
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, first.as_ptr(), first.len(), 0) },
+		0
+	);
+	assert_eq!(moq_consume_track_frame_free(id(frames.recv())), 0);
+	let tail = vec![42; 64 * 1024];
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, tail.as_ptr(), tail.len(), 1) },
+		0
+	);
+	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_session_close(session), 0);
+	let frame_id = id(frames.recv());
+	let mut frame: moq_frame = unsafe { std::mem::zeroed() };
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
+		tail
+	);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(frames.recv_terminal(), 0, "the tail ends cleanly");
 	let terminal = session_cb.recv_terminal();
 	assert_eq!((terminal.failure, terminal.connects), (0, 1));
+	assert!(moq_consume_track_cancel(consumer) < 0, "the consumer ended");
+	assert_eq!(moq_consume_close(consumed), 0);
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
 
@@ -5875,6 +5903,7 @@ fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,

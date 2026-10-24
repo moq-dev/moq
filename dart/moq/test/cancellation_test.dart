@@ -242,11 +242,10 @@ void main() {
       );
       final client = await Moq.connect(
         'https://${server.localAddr}',
-        options: const ConnectOptions(
-          tlsVerify: false,
-          tlsHostName: 'localhost',
-          reconnect: false,
-          websocketEnabled: false,
+        options: ConnectOptions(
+          tls: ClientTls(insecure: true, hostName: 'localhost'),
+          once: true,
+          websocket: const WebSocketConfig(enabled: false),
         ),
       );
       final session = await accept;
