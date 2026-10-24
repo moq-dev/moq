@@ -100,7 +100,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Rust releases publish through OIDC](/quest/m2/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [Go module proxy](/quest/m2/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
 - [Go per-platform lib modules](/quest/m2/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
-- [Go first dial failure](/quest/m2/go-first-dial-failure.md) - Go reports why a first dial fails, and the Kotlin and Dart docs name `client.failure()` correctly
 - [Dart on iOS](/quest/m2/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture
 - [Browser publishing paths under test](/quest/m2/publish-firefox.md) - the media harness publishes from Firefox too, covering the worker capture and video-element fallback Chromium never takes
@@ -109,6 +108,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [MSF duplicate init](/quest/m2/msf-duplicate-init.md) - an MSF catalog refuses a repeated `initDataList` id instead of resolving it last-wins
 - [AMF0 exact reads](/quest/m2/rtmp-amf0-exact-reads.md) - a truncated RTMP string fails with `UnexpectedEof` instead of parsing NUL padding
 - [HLS variant area](/quest/m2/hls-variant-area.md) - a hostile `RESOLUTION` cannot panic or misorder variant ranking
+- [HLS restart drain cutoff](/quest/m2/hls-restart-drain-cutoff.md) - a moq-hls recording of a replaced run finishes at a finite boundary while the successor starts at once
 - [Image hardening](/quest/m2/image-hardening.md) - the relay image runs unprivileged and its builder stage is pinned
 - [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the audited moq-net decoders have targets that assert an invariant, and the unsafe peer input reaches runs under Miri
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
@@ -137,8 +137,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [JS-only @moq/net](/quest/m2/rs2ts-js.md) - adopt the selected Rust-to-JS route after browser parity and measured tradeoffs are accepted
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
-- [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) - every backend implements moq-net's `transport::poll` traits, and the generic `web_transport_trait` adapters are deleted
-- [QUIC driver poll waits](/quest/m2/driver-poll.md) - the `moq_tokio::quic::driver` stream, datagram, close, and accept waits get leak-free `poll_*` forms, named like moq-uring's driver; `handshake_confirmed` and `Endpoint::wait_idle` stay async
+- [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) - qmux, iroh, wasm, and ffi implement moq-net's `transport::poll` traits, and the generic `web_transport_trait` adapters are deleted
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
@@ -223,3 +222,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [Performance audit](/quest/m2/audit-perf.md) - benchmarks that regressed since the m1 run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Upstream unknown-env option in usage-rs](/quest/m2/usage-unknown-env.md) - jdx/usage refuses unknown prefixed env vars, replacing the moq-tokio helper
 - [Artifact size audit](/quest/m2/audit-size.md) - repeat the shipping, native, WASM and browser attribution after the release ships
+- [Compile time audit](/quest/m2/audit-compile-time.md) - build-time hotspots are measured against the m1 baselines, starting with the transport share now that moq-net compiles once, and the worst are fixed or planned

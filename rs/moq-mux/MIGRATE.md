@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### TS service information expires on the program clock
+
+TS import retracts SI sub-tables and incomplete generations that stop repeating within their table's maximum interval (30 seconds for unknown tables).
+Repeat current tables within that interval; stale tables no longer remain advertised indefinitely.
+Host time and stalled PCR do not age SI, and existing readers can finish snapshots they already hold.
+
 ### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
 
 A passthrough `container::fmp4::Import` refuses a group that starts below the previous one with `Error::TimestampRewind` before opening it, as an unwrapped track does, instead of `Error::Moq(moq_net::Error::TimestampMismatch)` from a group it already opened.

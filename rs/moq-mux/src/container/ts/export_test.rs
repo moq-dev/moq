@@ -10024,6 +10024,39 @@ async fn a_backlog_stays_in_the_source_until_due() {
 	}
 }
 
+/// Video whose PTS stops advancing past the reorder lookahead in an open group: the export
+/// holds no more than what arrives within the lookahead and the delay. Flat PTS waits the
+/// catalog `jitter`; PTS running backward reads as reordering up to the deepest supported.
+#[tokio::test(start_paused = true)]
+async fn stalled_presentation_time_keeps_the_export_bounded() {
+	use crate::container::test_util::{Live, video_frame};
+
+	let step = Duration::from_millis(20);
+	let delay = Duration::from_millis(100);
+	let jitter = Duration::from_millis(120);
+	let deepest = Duration::from_secs(2);
+	let flat: fn(u64) -> u64 = |_| 10_000_000;
+	let backward: fn(u64) -> u64 = |index| 10_000_000 - index * 10_000;
+	for (name, pts, lookahead) in [("flat", flat, jitter), ("backward", backward, deepest)] {
+		let mut live = Live::avc3();
+		for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+			config.jitter = Some(jitter);
+		}
+		let mut export = open_export(live.source().await).await.unwrap().with_delay(delay);
+		live.track.write(video_frame(pts(0), true)).unwrap();
+		let mut most = 0;
+		for index in 1..500 {
+			tokio::time::advance(step).await;
+			live.track.write(video_frame(pts(index), false)).unwrap();
+			poll_frames(&mut export);
+			most = most.max(export.buffered());
+		}
+		// What arrived within the wait, the frame just read, and one due to go out.
+		let bound = ((lookahead + delay).as_millis() / step.as_millis()) as usize + 2;
+		assert!(most <= bound, "{name}: {most} frames buffered, over {bound}");
+	}
+}
+
 /// The PID of the whole-PES private data track in the tests below.
 const PLACED_PID: u16 = 0x104;
 
