@@ -88,13 +88,6 @@ impl Driver {
 }
 
 impl Protocol {
-	pub(crate) fn closing(&self) -> std::sync::Arc<crate::session::Closing> {
-		match self {
-			Self::Lite(driver) => driver.closing.clone(),
-			Self::Ietf(driver) => driver.closing.clone(),
-		}
-	}
-
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		match self {
 			Self::Lite(driver) => driver.poll(waiter),

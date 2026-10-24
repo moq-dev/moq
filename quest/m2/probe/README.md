@@ -15,7 +15,7 @@ by default; an application can override or disable them.
 The estimators stop learning once a connection is app-limited. moq-quic's
 BBR3 only raises `max_bw` from an app-limited sample above its current value,
 and only ages its window on a cycle that isn't app-limited (`update_max_bw`
-and `adapt_long_term_model` in `rs/moq-quic/src/congestion/bbr3/mod.rs`).
+and `adapt_long_term_model` in `rs/moq-congestion/src/bbr3/mod.rs`).
 Chromium's QUICHE gates its BBR2 filter the same way, and its Cubic estimate
 stops growing while the sender isn't cwnd-limited. So after a rendition
 stops, the estimate freezes at the value that stopped it, and today nothing

@@ -235,10 +235,13 @@ With no usable certificate in `cache` (missing, expired, missing a domain, or
 from another directory), startup answers only the challenge until one is
 issued; QUIC, the other routes, and readiness wait for it, and startup fails
 with the ACME error once `timeout` runs out. It also fails after 3 failed
-validations within an hour, counting earlier starts recorded in `cache`, so a
-restart loop stops short of Let's Encrypt's limit of 5 per hostname per hour. Renewal runs in the background
-well before expiry and reaches every listener on its next handshake. A failed
-renewal keeps the current certificate serving and retries.
+validations within an hour, counting earlier starts and renewals recorded in
+`cache`, so a restart loop stops short of Let's Encrypt's limit of 5 per
+hostname per hour. Renewal runs in the background well before expiry and
+reaches every listener on its next handshake. A failed renewal keeps the
+current certificate serving and retries, pausing once the same budget is spent
+until the oldest failure is an hour old; a restart in the meantime still serves
+the cached certificate.
 
 ## \[stun]
 

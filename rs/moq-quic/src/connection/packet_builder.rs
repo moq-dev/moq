@@ -252,7 +252,7 @@ impl PacketBuilder {
                 conn.permit_idle_reset = false;
                 conn.path
                     .congestion
-                    .on_packet_sent(now, size, exact_number, space_id);
+                    .on_packet_sent(now, size, exact_number, space_id.into());
             }
             conn.set_loss_detection_timer(now);
             conn.path.pacing.on_transmit(size);

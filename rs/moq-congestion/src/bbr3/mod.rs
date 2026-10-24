@@ -15,10 +15,8 @@ use rand::{RngExt, SeedableRng};
 use rand_pcg::Pcg32;
 
 use crate::RttEstimator;
-use crate::congestion::bbr3::max_filter::MaxFilter;
-use crate::congestion::{
-    BASE_DATAGRAM_SIZE, Controller, ControllerFactory, ControllerMetrics, SpaceId,
-};
+use crate::bbr3::max_filter::MaxFilter;
+use crate::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory, ControllerMetrics, SpaceId};
 use crate::{Duration, Instant};
 
 /// equivalent to BBR.MaxBwFilterLen <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.11>
@@ -616,7 +614,7 @@ impl Bbr3 {
         if let Some(probe_seed) = config.probe_rng_seed {
             probe_rng = Pcg32::from_seed(probe_seed);
         } else {
-            probe_rng = Pcg32::from_rng(&mut crate::entropy::rng());
+            probe_rng = Pcg32::from_rng(&mut rand::rng());
         }
         let smss = Ord::min(
             Ord::max(MIN_MAX_DATAGRAM_SIZE, current_mtu) as u64,
@@ -2065,8 +2063,9 @@ impl Bbr3Config {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn probe_rng_seed(&mut self, seed: [u8; 16]) -> &mut Self {
+    /// Seed the probe phases for deterministic transport tests.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn probe_rng_seed(&mut self, seed: [u8; 16]) -> &mut Self {
         self.probe_rng_seed = Some(seed);
         self
     }
@@ -2336,10 +2335,6 @@ mod test {
                     self.inflight -= self.mss;
                     let now_at = self.base + Duration::from_nanos(self.now_ns);
                     let send_at = self.base + Duration::from_nanos(p.send_ns);
-                    self.rtt_est.update(
-                        Duration::ZERO,
-                        Duration::from_nanos(self.now_ns - p.send_ns),
-                    );
                     self.bbr.on_ack(
                         now_at,
                         send_at,
@@ -2512,7 +2507,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -2579,7 +2574,6 @@ mod test {
                 if p.lost {
                     bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
                 } else {
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -2781,7 +2775,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -2840,7 +2834,6 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                 bbr.on_ack(
                     at(now_ns),
                     at(p.send_ns),
@@ -3112,7 +3105,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -3204,7 +3197,6 @@ mod test {
                         break;
                     }
                 } else {
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -3326,7 +3318,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -3404,7 +3396,6 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                 bbr.on_ack(
                     at(now_ns),
                     at(p.send_ns),
@@ -4031,7 +4022,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -4078,7 +4069,6 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                 bbr.on_ack(
                     at(now_ns),
                     at(p.send_ns),
@@ -4108,7 +4098,6 @@ mod test {
         while let Some(p) = flight.pop_front() {
             now_ns = now_ns.max(p.ack_ns);
             inflight -= MSS;
-            rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
             bbr.on_ack(
                 at(now_ns),
                 at(p.send_ns),
@@ -4208,7 +4197,6 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                 bbr.on_ack(
                     at(now_ns),
                     at(p.send_ns),
@@ -4316,7 +4304,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -4393,7 +4381,6 @@ mod test {
                 let largest_pn = burst.last().map(|p| p.pn).unwrap();
                 for p in &burst {
                     inflight -= MSS;
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -4529,7 +4516,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -4625,7 +4612,6 @@ mod test {
                 let largest_pn = burst.last().map(|p| p.pn).unwrap();
                 for p in &burst {
                     inflight -= MSS;
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -4847,7 +4833,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(PROP_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(PROP_NS));
 
         struct InFlight {
             pn: u64,
@@ -4951,7 +4937,6 @@ mod test {
                 let largest_pn = burst.iter().map(|p| p.pn).max().unwrap();
                 for p in &burst {
                     inflight -= MSS;
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -5140,7 +5125,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -5225,7 +5210,6 @@ mod test {
                 if p.lost {
                     bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
                 } else {
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -5400,7 +5384,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -5483,7 +5467,6 @@ mod test {
                 if p.lost {
                     bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
                 } else {
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -5631,7 +5614,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -5715,7 +5698,6 @@ mod test {
                 if p.lost {
                     bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
                 } else {
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -5863,7 +5845,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -5967,7 +5949,6 @@ mod test {
                         ));
                     }
                 } else {
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -6140,7 +6121,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -6246,7 +6227,6 @@ mod test {
                         ));
                     }
                 } else {
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -6422,7 +6402,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -6493,7 +6473,6 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                 bbr.on_ack(
                     at(now_ns),
                     at(p.send_ns),
@@ -6695,7 +6674,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -6803,7 +6782,6 @@ mod test {
                         }
                     }
                 } else {
-                    rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
                     bbr.on_ack(
                         at(now_ns),
                         at(p.send_ns),
@@ -6947,7 +6925,7 @@ mod test {
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let mut rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
+        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -7042,7 +7020,6 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
 
                 // update_max_bw runs inside on_end_acks, on the sample this ACK completed.
                 // Snapshot max_bw and state around the ACK and read that sample (bbr.rs)

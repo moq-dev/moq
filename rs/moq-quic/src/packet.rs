@@ -899,6 +899,27 @@ impl SpaceId {
     }
 }
 
+impl From<SpaceId> for moq_congestion::SpaceId {
+    fn from(space: SpaceId) -> Self {
+        match space {
+            SpaceId::Initial => Self::Initial,
+            SpaceId::Handshake => Self::Handshake,
+            SpaceId::Data => Self::Data,
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<moq_congestion::SpaceId> for SpaceId {
+    fn from(space: moq_congestion::SpaceId) -> Self {
+        match space {
+            moq_congestion::SpaceId::Initial => Self::Initial,
+            moq_congestion::SpaceId::Handshake => Self::Handshake,
+            moq_congestion::SpaceId::Data => Self::Data,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -22,13 +22,11 @@ use criterion::{
     measurement::{Measurement, ValueFormatter, WallTime},
 };
 use moq_clock::Instant;
+use moq_congestion::{Controller, ControllerFactory};
 use moq_quic::{
     ClientConfig, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator, DatagramEvent,
     Endpoint, EndpointConfig, Event, LeaseError, RandomConnectionIdGenerator, ReadError,
-    ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt,
-    coding::Codec,
-    congestion::{Controller, ControllerFactory},
-    fuzz::Plaintext,
+    ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt, coding::Codec, fuzz::Plaintext,
 };
 
 /// The most datagrams one `poll_transmit` may batch, as a GSO-capable socket would take.
@@ -673,7 +671,7 @@ impl Controller for Unlimited {
         _is_ecn: bool,
         _lost_bytes: u64,
         _largest_lost: u64,
-        _space: moq_quic::SpaceId,
+        _space: moq_congestion::SpaceId,
     ) {
     }
 

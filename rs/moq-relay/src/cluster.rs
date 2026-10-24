@@ -727,10 +727,11 @@ pub struct Config {
 	/// carried on each broadcast for loop detection and shortest-path routing.
 	///
 	/// Unset (the default) picks a fresh random id on every start. Set it to give
-	/// a node a stable identity across restarts. Must be non-zero and below 2^62
-	/// (the wire varint limit); an out-of-range value errors at startup. Keep it
-	/// below 2^53 for compatibility with older `@moq/lite` JS clients, which
-	/// decode hop ids as a `u53` and reject anything larger.
+	/// a node a stable identity across restarts. Must be non-zero; 0 errors at
+	/// startup. Keep it below 2^53 for compatibility with older `@moq/lite` JS
+	/// clients, which decode hop ids as a `u53` and reject anything larger. A
+	/// moq-lite-06 or older link carries an id at or above 2^62 as 0, losing loop
+	/// detection through this relay on that link.
 	#[usage(
 		name = "cluster-id",
 		long = "cluster-id",
@@ -1209,8 +1210,7 @@ impl Cluster {
 	/// spawned here, so the origin serves sessions whether or not
 	/// [`start`](Self::start) (the mesh half) is ever called.
 	///
-	/// Errors if `config.id` is set but invalid: it must be non-zero and below
-	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
+	/// Errors if `config.id` is set to 0. An unset id picks a fresh random origin.
 	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint.
 	pub fn new(options: Options) -> anyhow::Result<Self> {
 		let Options {
@@ -1220,11 +1220,7 @@ impl Cluster {
 			peer,
 		} = options;
 		let id = match config.id {
-			Some(0) => anyhow::bail!("--cluster-id must be non-zero"),
-			Some(id) if id >= 1 << 62 => {
-				anyhow::bail!("--cluster-id must be below 2^62 (wire varint limit), got {id}")
-			}
-			Some(id) => Hop::new(id).expect("cluster id already validated"),
+			Some(id) => Hop::new(id).context("--cluster-id must be non-zero")?,
 			None => Hop::random(),
 		};
 		let deprecated = config.deprecated();
@@ -3017,16 +3013,18 @@ mod tests {
 		task.abort();
 	}
 
-	/// A valid `cluster.id` is used verbatim as the relay's Hop ID, giving the
-	/// node a stable identity across restarts.
+	/// A valid `cluster.id`, anywhere in the 64-bit range, is used verbatim as the
+	/// relay's Hop ID, giving the node a stable identity across restarts.
 	#[tokio::test]
 	async fn cluster_id_sets_origin() {
-		let cluster = new_cluster(Config {
-			id: Some(42),
-			..Default::default()
-		})
-		.expect("valid id");
-		assert_eq!(cluster.origin.hop().id(), 42);
+		for id in [42, u64::MAX] {
+			let cluster = new_cluster(Config {
+				id: Some(id),
+				..Default::default()
+			})
+			.expect("valid id");
+			assert_eq!(cluster.origin.hop().id(), id);
+		}
 	}
 
 	/// Cache settings land on the one origin serving and stats share. A handle
@@ -3087,19 +3085,17 @@ mod tests {
 			.expect("stats present");
 	}
 
-	/// A reserved (0) or out-of-range (>= 2^62) `cluster.id` is rejected rather
-	/// than producing an unencodable hop id.
+	/// The reserved `cluster.id` 0 is rejected, since it cannot be excluded for loop
+	/// detection.
 	#[test]
-	fn cluster_id_out_of_range_errors() {
-		for bad in [0, 1u64 << 62] {
-			let err = new_cluster(Config {
-				id: Some(bad),
-				..Default::default()
-			})
-			.err()
-			.expect("should error");
-			assert!(format!("{err}").contains("--cluster-id"), "got: {err}");
-		}
+	fn cluster_id_zero_errors() {
+		let err = new_cluster(Config {
+			id: Some(0),
+			..Default::default()
+		})
+		.err()
+		.expect("should error");
+		assert!(format!("{err}").contains("--cluster-id"), "got: {err}");
 	}
 
 	#[tokio::test]

@@ -84,11 +84,11 @@ fn apply_windows(transport: &mut driver::TransportConfig, quic: &Resolved) {
 }
 
 /// The controller factory for a congestion control family. moq-quic's BBR is v3.
-fn congestion_factory(family: CongestionControl) -> Arc<dyn driver::congestion::ControllerFactory + Send + Sync> {
+fn congestion_factory(family: CongestionControl) -> Arc<dyn moq_congestion::ControllerFactory + Send + Sync> {
 	match family {
-		CongestionControl::Loss => Arc::new(driver::congestion::CubicConfig::default()),
-		CongestionControl::Delay => Arc::new(driver::congestion::Bbr3Config::default()),
-		CongestionControl::None => Arc::new(driver::congestion::Unlimited),
+		CongestionControl::Loss => Arc::new(moq_congestion::CubicConfig::default()),
+		CongestionControl::Delay => Arc::new(moq_congestion::Bbr3Config::default()),
+		CongestionControl::None => Arc::new(moq_congestion::Unlimited),
 	}
 }
 
@@ -1241,13 +1241,13 @@ mod tests {
 		let mtu = 1200;
 
 		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
-		assert!(loss.into_any().downcast::<driver::congestion::Cubic>().is_ok());
+		assert!(loss.into_any().downcast::<moq_congestion::Cubic>().is_ok());
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
-		assert!(delay.into_any().downcast::<driver::congestion::Bbr3>().is_ok());
+		assert!(delay.into_any().downcast::<moq_congestion::Bbr3>().is_ok());
 
 		let none = congestion_factory(CongestionControl::None).build(now, mtu);
-		assert!(none.into_any().downcast::<driver::congestion::Unlimited>().is_ok());
+		assert!(none.into_any().downcast::<moq_congestion::Unlimited>().is_ok());
 	}
 
 	/// Loopback regression test: with the knob unset, live QUIC connections must run
@@ -1320,7 +1320,7 @@ mod tests {
 	fn is_bbr3(conn: &driver::Connection) -> bool {
 		conn.congestion_state()
 			.into_any()
-			.downcast::<driver::congestion::Bbr3>()
+			.downcast::<moq_congestion::Bbr3>()
 			.is_ok()
 	}
 }

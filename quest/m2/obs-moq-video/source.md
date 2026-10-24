@@ -23,11 +23,11 @@ reordering returns an older picture. The clean media EOF callback also
 returns without draining delayed pictures. An algorithm-level reproduction
 using real libavcodec and 12 H.264 B-frames produced 10 pictures, all with
 incorrect assigned timestamps; explicit EOF draining recovered two omitted
-pictures. This was not a running OBS integration test. Preserve decoded
-output timestamps and drain clean EOF in the replacement, and cover both
-with reordered video. Track these release concerns here rather than creating
-a competing decoder rewrite; this evidence does not make the entire GPU
-replacement a prerequisite for the release.
+pictures. This was not a running OBS integration test.
+[OBS decode timing](/quest/m1/release-audit/obs-decode-timing.md) fixes both
+on the current FFmpeg path in m1 (2026-10-22, maintainer); the replacement
+keeps decoded output timestamps and clean EOF draining, covered with
+reordered video.
 
 ## Related
 

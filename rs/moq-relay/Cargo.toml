@@ -112,6 +112,7 @@ h2 = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 # Clocks only the test moves, wall time included, so a grant's life is exact.
 moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
+moq-congestion = { path = "../moq-congestion" }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
