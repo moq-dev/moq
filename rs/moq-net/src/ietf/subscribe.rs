@@ -31,8 +31,7 @@ pub struct Subscribe<'a> {
 	pub fill: Option<Fill>,
 	/// Whether the subscriber wants Track Properties on the response (draft-20).
 	pub properties_wanted: bool,
-	/// Whether Objects are forwarded (FORWARD). We only serve forwarding subscriptions,
-	/// so a subscriber that asks for none is refused.
+	/// Whether Objects are forwarded (FORWARD); a paused subscription forwards none until resumed.
 	pub forward: bool,
 	/// Whether RENDEZVOUS_TIMEOUT asks to wait for a missing publisher; never sent.
 	pub rendezvous: bool,
@@ -1689,8 +1688,7 @@ mod tests {
 		assert_eq!(encode_message(&msg, Version::Draft22), body);
 	}
 
-	/// FORWARD=0 is legal on every draft. It decodes so the request can be refused,
-	/// rather than closing the session.
+	/// FORWARD=0 is legal on every draft, a paused request rather than a session error.
 	#[test]
 	fn subscribe_decodes_forward_zero() {
 		for version in [

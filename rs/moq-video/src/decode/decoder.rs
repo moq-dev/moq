@@ -372,7 +372,10 @@ fn is_supported_vp9(vp9: &VP9) -> bool {
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
 
 	use moq_net::Timestamp;
 

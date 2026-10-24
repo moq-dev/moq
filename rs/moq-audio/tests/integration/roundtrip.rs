@@ -1,6 +1,5 @@
 //! End-to-end round-trip: configure an [`encode::Producer`], publish a few
-//! frames, subscribe via [`decode::Consumer`], assert the decoded signal is
-//! non-trivial. Covers moq-net wiring, the resampler path, and a non-default
+//! frames, subscribe via [`decode::Consumer`], and check the signal and timeline. Covers moq-net wiring, the resampler path, and a non-default
 //! [`Format`].
 
 use std::time::Duration;
@@ -13,9 +12,9 @@ fn sine_f32_interleaved(freq: f32, sample_rate: u32, channels: u32, frames: usiz
 	let mut out = Vec::with_capacity(frames * channels as usize);
 	for i in 0..frames {
 		let t = i as f32 / sample_rate as f32;
-		let v = (2.0 * std::f32::consts::PI * freq * t).sin() * 0.5;
-		for _ in 0..channels {
-			out.push(v);
+		for channel in 0..channels {
+			let frequency = freq * (channel + 1) as f32 * if i >= frames / 2 { 2.0 } else { 1.0 };
+			out.push((std::f32::consts::TAU * frequency * t).sin() * 0.5);
 		}
 	}
 	out
@@ -29,135 +28,117 @@ fn f32_bytes(samples: &[f32]) -> Bytes {
 	Bytes::from(out)
 }
 
-#[tokio::test]
-async fn opus_round_trip_48k_stereo() {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-	let mut catalog_consumer = catalog.consume().unwrap();
-	let broadcast_consumer = broadcast.consume();
-
-	let input = encode::Input::new(48_000, Layout::Stereo);
-	// `Options` is `#[non_exhaustive]`, so build it the way external callers must:
-	// `default()` plus field assignment, never a struct literal.
-	let mut options = encode::Options::default();
-	options.track = Some("audio".to_string());
-	options.settings.codec = encode::Codec::Opus;
-	options.settings.bitrate = Some(moq_net::bandwidth::Rate::from_bps(96_000));
-
-	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
-
-	let frames_per_chunk = 48_000 / 50; // 960 frames = 20ms @ 48k
-	for _ in 0..10 {
-		let pcm = sine_f32_interleaved(440.0, 48_000, 2, frames_per_chunk);
-		producer
-			.write(&Frame::new(f32_bytes(&pcm), Timestamp::from_micros(0).unwrap()))
-			.unwrap();
-	}
-
-	let snapshot = catalog_consumer.next().await.unwrap().expect("catalog should publish");
-	let cfg = snapshot.audio.renditions.get("audio").expect("audio rendition");
-	let mut options = decode::Options::default();
-	options.output.format = Format::F32;
-	// The whole clip is encoded before anything decodes it. The default REAL_TIME
-	// budget is enforced on the subscription, so without a tolerance the decoder would
-	// take the live edge and drop the rest of the batch.
-	options.max_delay = Duration::from_secs(30);
-	let mut consumer = decode::Consumer::new(&broadcast_consumer, cfg, "audio", options)
-		.await
-		.unwrap();
-
-	producer.finish().unwrap();
-
-	let mut total_frames = 0u64;
-	let mut total_energy = 0.0f64;
-	while let Some(frame) = tokio::time::timeout(Duration::from_secs(5), next_frame(&mut consumer))
-		.await
-		.expect("decoded frame timed out")
-		.unwrap()
-	{
-		let pcm: Vec<f32> = frame
-			.data
-			.as_chunks::<4>()
-			.0
-			.iter()
-			.map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-			.collect();
-		total_frames += pcm.len() as u64 / 2;
-		for s in &pcm {
-			total_energy += (*s as f64) * (*s as f64);
-		}
-	}
-
-	assert!(
-		(5_000..=12_000).contains(&total_frames),
-		"expected ~9600 frames, got {total_frames}"
-	);
-	let energy_per_frame = total_energy / total_frames.max(1) as f64;
-	assert!(
-		energy_per_frame > 0.01,
-		"signal should not be silent (got {energy_per_frame:.4})"
-	);
+struct Case {
+	rate: u32,
+	layout: Layout,
+	format: Format,
+	chunks: usize,
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
+async fn opus_round_trip_48k_stereo() {
+	opus_roundtrip(Case {
+		rate: 48_000,
+		layout: Layout::Stereo,
+		format: Format::F32,
+		chunks: 10,
+	})
+	.await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn opus_round_trip_44100_s16_resampled() {
+	opus_roundtrip(Case {
+		rate: 44_100,
+		layout: Layout::Mono,
+		format: Format::S16,
+		chunks: 25,
+	})
+	.await;
+}
+
+async fn opus_roundtrip(case: Case) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-	let mut catalog_consumer = catalog.consume().unwrap();
-	let broadcast_consumer = broadcast.consume();
-
-	let mut input = encode::Input::new(44_100, Layout::Mono);
-	input.format = Format::S16;
+	let mut snapshots = catalog.consume().unwrap();
+	let source = broadcast.consume();
+	let mut input = encode::Input::new(case.rate, case.layout);
+	input.format = case.format;
 	let mut options = encode::Options::default();
-	options.track = Some("audio".to_string());
-	options.settings = encode::Settings::new(48_000, Layout::Mono);
+	options.track = Some("audio".into());
+	options.settings = encode::Settings::new(48_000, case.layout);
 	options.settings.codec = encode::Codec::Opus;
-	options.settings.bitrate = Some(moq_net::bandwidth::Rate::from_bps(64_000));
-
 	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
-
-	let frames_per_chunk = 44_100 / 50; // 882 = 20ms @ 44.1k
-	for _ in 0..25 {
-		let pcm = sine_f32_interleaved(440.0, 44_100, 1, frames_per_chunk);
-		let s16 = Format::S16.from_interleaved_f32(&pcm, 1).unwrap();
+	let channels = case.layout.channels();
+	let chunk_frames = case.rate as usize / 50;
+	let expected_frames = chunk_frames * case.chunks;
+	let samples = sine_f32_interleaved(440.0, case.rate, channels, expected_frames);
+	for (index, pcm) in samples.chunks_exact(chunk_frames * channels as usize).enumerate() {
 		producer
-			.write(&Frame::new(Bytes::from(s16), Timestamp::from_micros(0).unwrap()))
+			.write(&Frame::new(
+				Bytes::from(case.format.from_interleaved_f32(pcm, channels).unwrap()),
+				Timestamp::from_micros(123_000 + index as u64 * 20_000).unwrap(),
+			))
 			.unwrap();
 	}
-
-	let snapshot = catalog_consumer.next().await.unwrap().unwrap();
-	let cfg = snapshot.audio.renditions.get("audio").unwrap();
-	// Catalog reports the codec's actual rate (snapped to 48 kHz).
-	assert_eq!(cfg.sample_rate, 48_000);
-	assert_eq!(cfg.channel_count, 1);
-
-	let mut config = decode::Options::default();
-	config.output.format = Format::S16;
-	config.output.sample_rate = Some(44_100);
-	config.output.layout = Some(Layout::Mono);
-	config.max_delay = Duration::from_millis(500);
-
-	let mut consumer = decode::Consumer::new(&broadcast_consumer, cfg, "audio", config)
+	let snapshot = snapshots.next().await.unwrap().unwrap();
+	let rendition = &snapshot.audio.renditions["audio"];
+	assert_eq!(rendition.sample_rate, 48_000);
+	assert_eq!(rendition.channel_count, channels);
+	let mut options = decode::Options::default();
+	options.output.format = case.format;
+	options.output.sample_rate = Some(case.rate);
+	options.output.layout = Some(case.layout);
+	// The whole clip is queued before subscription; retain every group.
+	options.max_delay = Duration::from_secs(30);
+	let mut consumer = decode::Consumer::new(&source, rendition, "audio", options)
 		.await
 		.unwrap();
-	assert_eq!(consumer.sample_rate(), 44_100);
-	assert_eq!(consumer.layout(), Layout::Mono);
-
 	producer.finish().unwrap();
-
-	let mut total_bytes = 0u64;
-	while let Some(frame) = tokio::time::timeout(Duration::from_secs(5), next_frame(&mut consumer))
-		.await
-		.expect("decoded frame timed out")
-		.unwrap()
-	{
-		total_bytes += frame.data.len() as u64;
+	let warmup = rendition.warmup.unwrap_or_default();
+	let skipped = (warmup.as_nanos() * case.rate as u128 / 1_000_000_000) as usize;
+	let mut pcm = Vec::new();
+	while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
+		let expected =
+			123_000 + warmup.as_micros() + pcm.len() as u128 / channels as u128 * 1_000_000 / case.rate as u128;
+		// Microsecond stamping rounds each chunk independently.
+		assert!(
+			frame.timestamp.as_micros().abs_diff(expected) <= 1,
+			"{:?} versus {expected}us",
+			frame.timestamp
+		);
+		pcm.extend_from_slice(&case.format.as_interleaved_f32(&frame.data, channels).unwrap());
 	}
-	assert!(
-		total_bytes > 10_000,
-		"expected several thousand samples, got {} bytes",
-		total_bytes
+	assert_eq!(
+		pcm.len(),
+		(expected_frames - skipped) * channels as usize,
+		"pre-skip, resampling and final padding preserve duration"
 	);
+	for step in 0..2 {
+		let start = (step * expected_frames / 2).max(skipped) - skipped;
+		let end = (step + 1) * expected_frames / 2 - skipped;
+		let half = &pcm[start * channels as usize..end * channels as usize];
+		for channel in 0..channels as usize {
+			let samples: Vec<f32> = half.iter().skip(channel).step_by(channels as usize).copied().collect();
+			let wanted = 440.0 * (channel + 1) as f64 * (step + 1) as f64;
+			let loudest = [440.0, 880.0, 1760.0]
+				.into_iter()
+				.max_by(|&a, &b| power(&samples, a, case.rate).total_cmp(&power(&samples, b, case.rate)))
+				.unwrap();
+			assert_eq!(loudest, wanted, "step {step}, channel {channel}");
+		}
+	}
+}
+
+fn power(samples: &[f32], frequency: f64, rate: u32) -> f64 {
+	let coefficient = 2.0 * (std::f64::consts::TAU * frequency / rate as f64).cos();
+	let (mut previous, mut older) = (0.0, 0.0);
+	for &sample in samples {
+		let value = sample as f64 + coefficient * previous - older;
+		older = previous;
+		previous = value;
+	}
+	previous * previous + older * older - coefficient * previous * older
 }
 
 #[tokio::test]
@@ -275,8 +256,8 @@ async fn pcm_five_one_reads_back_at_any_layout() {
 async fn next_frame(consumer: &mut decode::Consumer) -> Result<Option<moq_audio::Frame>, moq_audio::Error> {
 	loop {
 		match consumer.read().await? {
-			Some(decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
-			Some(decode::Read::End { .. }) => {}
+			Some(decode::Read::Frame(frame)) => return Ok(Some(frame)),
+			Some(decode::Read::Gap { .. } | decode::Read::End { .. }) => {}
 			None => return Ok(None),
 		}
 	}

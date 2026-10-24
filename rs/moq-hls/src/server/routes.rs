@@ -432,7 +432,11 @@ fn server_error(err: crate::Error) -> Response {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 
@@ -1166,6 +1170,7 @@ mod tests {
 		for uri in [
 			denied_uri,
 			"/room/live/video/video1/media.m3u8",
+			"/room/live/video/video1/media.m3u8?start=0&end=2",
 			"/room/live/video/video1/init.unknown.mp4",
 		] {
 			let response = oneshot(app.clone(), uri).await;
@@ -1245,7 +1250,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut catalog_broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::path::Relative::new("../source").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
 		let track = media_broadcast.create_track("video0", timed()).unwrap();
 		let mut media = reserved
 			.video(

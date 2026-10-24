@@ -38,9 +38,10 @@
 //! [`DEFAULT_EXPIRY`], while a relay creates one configured pool and shares it across
 //! every origin so the whole process caches into a single policy.
 
+use crate::sync::Mutex;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
+use std::sync::{Arc, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};
 use std::time::Duration;
 
@@ -744,6 +745,11 @@ impl Track {
 		if largest.position.is_some_and(|position| position.group == sequence) {
 			largest.open = false;
 		}
+	}
+
+	/// The greatest location written or reported, without waiting.
+	pub(super) fn largest(&self) -> Option<Position> {
+		self.largest.read().position
 	}
 
 	/// Whether the largest group's content may still grow; see [`Self::finish_largest`].

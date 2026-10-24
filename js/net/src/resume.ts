@@ -316,6 +316,7 @@ class Reader implements ResumeSource {
 			}),
 			shell.cursor.subscribe(() => {
 				for (const copy of this.#copies) this.#bound(copy);
+				if (this.#ended) this.#letGo(this.#delivered);
 			}),
 		);
 		// A fork starts on its parent's newest copy, at that copy's generation: the copy keeps its
@@ -1149,7 +1150,11 @@ class Recover implements GroupRecover {
 	 * reading `closed` before then would settle it on a failure recovery could still continue.
 	 */
 	watch(group: GroupConsumer): void {
-		void group.closed.then(() => this.#release(this.#reader.out.delete(this)));
+		void group.closed.then(() => this.close());
+	}
+
+	close(): void {
+		this.#release(this.#reader.out.delete(this));
 	}
 
 	// Release the copy being read. `wake` says a parked read may let go of a copy anyway.
@@ -1351,7 +1356,7 @@ export class Front {
 				if (this.#concluded) {
 					// No route will serve it again, so nothing more will be listed.
 					stop();
-					lister.finish();
+					lister.end();
 					continue;
 				}
 				listing ??= { listed: new Set(), stale: new Set() };
@@ -1401,16 +1406,19 @@ export class Front {
 						listing.reader = undefined;
 					} else {
 						stop();
-						lister.finish();
+						lister.end();
 					}
 				} else if (event.kind === "added") {
 					if (!listing.stale.delete(event.name) && !listing.listed.has(event.name)) {
 						listing.listed.add(event.name);
 						lister.add(event.name, event.info);
 					}
-				} else if (event.kind === "removed") {
+				} else if (event.kind === "removed" || event.kind === "finished") {
+					// Forwarded as the source reported it, finished or not.
 					listing.stale.delete(event.name);
-					if (listing.listed.delete(event.name)) lister.remove(event.name);
+					if (!listing.listed.delete(event.name)) continue;
+					if (event.kind === "finished") lister.finish(event.name);
+					else lister.remove(event.name);
 				} else {
 					// What the new source still lacks at its SYNCED is gone.
 					for (const name of listing.stale) {
