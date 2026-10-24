@@ -172,19 +172,10 @@ impl Session {
 				// Egress writes get drained promptly; `Agent::next` is cancel safe.
 				biased;
 
-				Some(req) = async {
-					match self.writes_rx.as_mut() {
-						Some(rx) => rx.recv().await,
-						None => std::future::pending::<Option<WriteRequest>>().await,
-					}
-				} => {
-					let wallclock = self.egress_clock.wallclock(req.time, Instant::now());
-					crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
-				}
-
 				// A failed catalog, as every subscription fails once the source's route dies,
 				// means nothing more will flow, so fail rather than idle. A clean end keeps
-				// serving what the pumps still hold.
+				// serving what the pumps still hold. Polled before the writes, which could
+				// otherwise stay ready and starve it; it completes once.
 				ended = async {
 					match self.catalog_end.as_mut() {
 						Some(end) => end.await,
@@ -195,6 +186,16 @@ impl Session {
 					if let Ok(Err(err)) = ended {
 						return Err(err);
 					}
+				}
+
+				Some(req) = async {
+					match self.writes_rx.as_mut() {
+						Some(rx) => rx.recv().await,
+						None => std::future::pending::<Option<WriteRequest>>().await,
+					}
+				} => {
+					let wallclock = self.egress_clock.wallclock(req.time, Instant::now());
+					crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
 				}
 
 				event = self.agent.next() => match event {
