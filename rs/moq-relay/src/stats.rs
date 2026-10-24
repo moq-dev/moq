@@ -115,9 +115,7 @@ impl Default for Config {
 impl Config {
 	/// The interval after command-line overrides.
 	pub(crate) fn interval(&self) -> Duration {
-		self.interval_arg
-			.map(Into::into)
-			.unwrap_or(self.interval)
+		self.interval_arg.map(Into::into).unwrap_or(self.interval)
 	}
 
 	/// The linger after command-line overrides; `None` keeps the producer's default.

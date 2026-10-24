@@ -1785,7 +1785,10 @@ mod tests {
 		.unwrap();
 		cli.validate().unwrap();
 		cli.unserved().unwrap();
-		assert_eq!(Duration::from(cli.moq.drain_timeout.unwrap()), Duration::from_millis(500));
+		assert_eq!(
+			Duration::from(cli.moq.drain_timeout.unwrap()),
+			Duration::from_millis(500)
+		);
 		let cli = Invocation::try_parse_from([
 			"moq",
 			"--connect",
