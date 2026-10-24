@@ -42,7 +42,7 @@ walls (catalogs, timelines, HLS) still refuse, since their value is shown or
 used for arithmetic, not only compared.
 
 Public API: breaking in hang, moq-mux, moq-hls, moq-quic, moq-relay, moq-auth, and
-moq-tokio, each with a `MIGRATE.md` entry. Wire: none.
+moq-tokio; the Impact bullet says how to migrate each. Wire: none.
 
 ## Related
 

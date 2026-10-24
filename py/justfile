@@ -93,6 +93,6 @@ package:
 # native moq_ffi is mocked (autodoc_mock_imports in docs/conf.py), so this needs
 # no Rust build.
 docs:
-    rm -rf dist/docs
+    rm -rf dist/docs moq-rs/docs/api
     uv run --isolated --locked --only-group docs \
         sphinx-build -b html -W --keep-going moq-rs/docs dist/docs

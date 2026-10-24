@@ -71,7 +71,7 @@ async def _publish_tone(audio: moq.audio.Producer, tones: list[int]) -> None:
 
 
 def _client(url: str, version: str | None) -> moq.Client:
-    return moq.Client(url, tls_verify=False, versions=[] if version is None else [version])
+    return moq.Client(url, tls=moq.ClientTls(insecure=True), versions=[] if version is None else [version])
 
 
 async def _print_grant(client: moq.Client, timeout: float) -> None:
@@ -165,7 +165,7 @@ async def publish(
                         raise RuntimeError("expected finish completion acknowledgement")
 
             await loop.run_in_executor(None, acknowledge)
-            if client.session is None or client.session.connects() != 1:
+            if client.session is None or client.session.state().connects != 1:
                 raise RuntimeError("publisher reconnected during finish")
             print("finish acknowledged", flush=True)
 
@@ -235,7 +235,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                         seen = True
             if not seen:
                 raise RuntimeError("missing session health payload")
-    if client.session is None or client.session.connects() != 1:
+    if client.session is None or client.session.state().connects != 1:
         raise RuntimeError("subscriber reconnected during finish")
     print(f"finish clean frames={frames} catalog=eof announce=end health=ok", flush=True)
 

@@ -6,10 +6,6 @@
 //! machine and container framing on top of the same wire path.
 //!
 //! Run it with `just rs bench-session` on a Linux 6.12+ kernel.
-#![expect(
-	clippy::disallowed_methods,
-	reason = "benchmarks measure themselves on the host clock"
-)]
 
 use criterion::{criterion_group, criterion_main};
 
@@ -18,6 +14,10 @@ use criterion::{criterion_group, criterion_main};
 mod support;
 
 #[cfg(all(target_os = "linux", feature = "quic"))]
+#[expect(
+	clippy::disallowed_methods,
+	reason = "benchmarks measure themselves on the host clock"
+)]
 mod linux {
 	use std::net::UdpSocket;
 	use std::time::Instant;

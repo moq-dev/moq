@@ -127,20 +127,21 @@ client = moq.Client(
 
 ### Connection
 
-- **`connect(url, *, tls_verify=True, tls_roots=(), tls_system_roots=None, tls_fingerprints=(), tls_cert=None, tls_key=None, tls_host_name=None, bind=None, versions=(), timeout=None, race=None, resolution_delay=None, max_streams=None, idle_timeout=None, keep_alive=None, gso=None, mtu_discovery=None, congestion_control=None, qlog=None, keylog=False, websocket_enabled=None, websocket_delay=None, reconnect=True, backoff=None, publish=None, consume=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
+- **`connect(url, *, bind=None, versions=(), timeout=None, race=None, resolution_delay=None, tls=None, quic=None, websocket=None, once=False, backoff=None, publish=None, consume=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`. The names and nesting mirror moq-ffi's `MoqClientConfig`.
 - **`Client(url, *, ...)`**, taking the same arguments. Async context manager for connecting to a relay.
-  - `tls_roots`. PEM root certificate file path(s) to trust instead of the system roots.
-  - `tls_system_roots`. Whether to trust platform roots in addition to custom roots.
-  - `tls_fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `tls_verify=False`.
-  - `tls_cert`, `tls_key`. Paired PEM certificate chain and private key paths for mTLS.
-  - `tls_host_name`. Verify the certificate against this name (SNI) instead of the URL's host.
-  - `max_streams`. Raise the peer's inbound stream cap.
-  - `idle_timeout`, `keep_alive`, `gso`, `mtu_discovery`, `congestion_control`, `qlog`. QUIC tuning; `keep_alive=timedelta(0)` disables pings, `congestion_control` takes a `CongestionControl`, and `qlog` is a trace directory when `qlog_supported()`.
-  - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
   - `versions`. Protocol versions to offer, most preferred first (e.g. `"moq-lite-03"`); empty offers all, which `versions()` lists.
   - `timeout`, `race`, `resolution_delay`. Bound one connect attempt and pace Happy Eyeballs.
-  - `reconnect`, `backoff`. Redial with a `Backoff` when the transport drops; `reconnect=False` dials once.
-  - `.session`. The established `Session` (or `None` before connecting / after exit).
+  - `tls=ClientTls(...)`. Certificate trust and the mTLS identity:
+    - `insecure`. Skip certificate verification (local development only).
+    - `roots`. PEM root certificate file path(s) to trust instead of the system roots.
+    - `system_roots`. Whether to trust platform roots in addition to custom roots.
+    - `fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `insecure=True`.
+    - `cert`, `key`. Paired PEM certificate chain and private key paths for mTLS.
+    - `host_name`. Verify the certificate against this name (SNI) instead of the URL's host.
+  - `quic=QuicConfig(...)`. QUIC tuning: `max_streams` raises the peer's inbound stream cap; `idle_timeout`, `keep_alive` (`timedelta(0)` disables pings), `gso`, `mtu_discovery`, `congestion_control` (a `CongestionControl`), and `qlog` (a trace directory when `qlog_supported()`). `keylog=True` writes TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
+  - `websocket=WebSocketConfig(...)`. The fallback raced against QUIC: `enabled=False` turns it off, and `delay` is QUIC's head start.
+  - `once`, `backoff`. Redial with a `Backoff` when the transport drops; `once=True` dials once.
+  - `.session`. The connecting or connected `Session` (or `None` before entering / after exit).
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), versions=(), max_streams=None, keylog=False, publish=None, consume=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` entering the server fails.
   - `.local_addr`. The bound address (useful when binding to port `0`).
@@ -151,12 +152,12 @@ client = moq.Client(
   - `await .accept(*, publish=None, consume=None) → Session`. Origins are captured when accept starts; None inherits the server default and a supplied origin replaces it. Pass fresh origins for isolation, or the same origin on both sides to share it. A second response raises `AlreadyResponded`; calls after cancel raise `Cancelled`. Complete the handshake (hold the result to keep the connection alive).
   - `await .reject(code)`. Reject with an application error code; 401 and 403 map to unauthorized.
   - `.cancel()`. Cancel an in-flight `accept()`/`reject()` call.
-- **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that drains on a clean exit and cancels on an error.
+- **`Session`**. A connection, connecting or connected. Holding it keeps the connection alive; it is also an `async with` context manager that drains on a clean exit and cancels on an error.
   - `await .closed()`. Wait until the session closes.
-  - `.cancel(code)`, `await session.shutdown()`. Cancel immediately, or drain within one second, raising on failure. Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older Lite versions, including default lite-06, wait only for transport ACKs. IETF also waits for transport ACKs.
+  - `.cancel(code)`, `session.shutdown()`. Cancel immediately, or request a drain now and await `session.closed()` for its result, including a delivery timeout after one second. Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older Lite versions, including default lite-06, wait only for transport ACKs. IETF also waits for transport ACKs.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
-  - `await .status() → ConnectionStatus`, `.connects()`, `.failure()`. Watch reconnects; `connects()` counts connections, 1 on the first, and `failure()` says why a reconnect is under way. Before the first connect, `Client.failure()` says why the dial is retrying.
+  - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; first-dial failures and reconnects share the same session.
   - `.bandwidth() → Bandwidth`. Divide the send estimate between encoders and app-owned tracks.
   - `.auth() → Auth`. On `moq-lite-07-wip` and on moq-transport draft-17+ with the MoQ Auth extension, `.grant()` reads the peer's `Grant` and `await .add(token) → AuthToken` presents a fresh token without reconnecting.
 

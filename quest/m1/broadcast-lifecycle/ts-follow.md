@@ -29,8 +29,8 @@ Decided with the maintainer on 2026-10-23:
   only where following applies.
 - Coordinate the name with [readers follow restarts](/quest/m1/sink-restart-follow.md),
   which owns `moq_mux::follow::Instances`.
-- Docs: `doc/bin/cli.md`, `rs/moq-cli/MIGRATE.md`, `rs/moq-mux` and
-  `rs/moq-srt` MIGRATE entries.
+- Docs: `doc/bin/cli.md`, plus a migration note for moq-cli, moq-mux, and
+  moq-srt in the Impact bullet.
 
 Public API: moq-mux and moq-srt renames (breaking); moq-cli flag rename.
 Wire: none unless the failure cause needs a new code.
