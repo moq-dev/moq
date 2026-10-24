@@ -8,11 +8,12 @@ The generated C header gives every moq-ffi item its own name. Today the method
 
 ## Plan
 
-Either rename one of the two in moq-ffi, or fix the C backend in
-[kixelated/rust2](https://github.com/kixelated/rust2)'s UniFFI fork so a method
-and a type can never map to the same C name. Ask the maintainer which before
-starting.
+Decided with the maintainer on 2026-10-24: fix the C generator, not moq-ffi. The
+generator derives collision-free names, for example by qualifying a method with
+its type, so no moq-ffi item is renamed.
 
-Public API: a rename in moq-ffi changes that item's name in every binding (Python,
-Swift, Kotlin, Dart, Go, C++, and C); a generator fix changes only the C names of
-the pairs it renames. Wire: none.
+The generator lives in [kixelated/rust2](https://github.com/kixelated/rust2)'s
+UniFFI fork (`uniffi/`), so the work lands there. This quest stands in for it
+until moq builds from a fork that ships the fix.
+
+Public API: the C names of the pairs the generator renames. Wire: none.
