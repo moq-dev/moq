@@ -58,6 +58,7 @@ backpressure. Consumer reads wait for the network outside the pump, so a stalled
 never holds up another group's opens.
 
 A grouped authentication failure ends the track with `Failure` code `authentication`; a
-bad datagram is an `authentication` event and the track continues. Every subscription through
+datagram that fails to open is dropped as an `identity`, `oversize`, or `authentication`
+event and the track continues. Every subscription through
 one consuming generation shares each key's AEAD budget, so resubscribing cannot reset it. A consumer keeps a
 1024-bit datagram duplicate window below the greatest sequence it opened.
