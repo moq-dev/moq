@@ -6940,7 +6940,7 @@ impl Subscriber {
 	}
 
 	/// The lowest group this subscriber's ranges name, as resolved here when it last read,
-	/// raised to the start of [`Self::set_groups`]: `None` while one reaches back to the
+	/// raised to the start of [`Self::with_range`]: `None` while one reaches back to the
 	/// oldest group still around, or a relative start still waits on the first group from
 	/// the live feed.
 	///
@@ -6955,7 +6955,7 @@ impl Subscriber {
 	}
 
 	/// The lowest group at or above `from` this subscriber's ranges and
-	/// [`Self::set_groups`] floor cover, `None` when none does: the groups between are
+	/// [`Self::with_range`] floor cover, `None` when none does: the groups between are
 	/// never read, so a reader waiting on each group in sequence need not wait for them.
 	/// `Some` from there while a relative anchor waits on the first group, which can't
 	/// say yet.
@@ -8180,24 +8180,22 @@ mod test {
 	/// The floor a reader waiting on each group starts at is the higher of its ranges' and
 	/// its local one, so it never waits on a group the local floor withholds.
 	#[test]
-	fn floor_honors_set_groups() {
+	fn floor_honors_with_range() {
 		let producer = track_producer("test", Info::default());
 		let _groups: Vec<_> = (0..6).map(|sequence| framed(&producer, sequence, 2)).collect();
 
-		let mut reader = producer.subscribe(replay().with_groups(2..));
+		let reader = producer.subscribe(replay().with_range(2..));
 		assert_eq!((reader.floor(), reader.next_in_range(0)), (Some(2), Some(2)));
-		reader.set_groups(4..);
+		let reader = reader.with_range(4..);
 		assert_eq!((reader.floor(), reader.next_in_range(0)), (Some(4), Some(4)));
 		assert_eq!(reader.next_in_range(5), Some(5));
 
 		// Below the ranges' floor, the ranges still decide.
-		let mut reader = producer.subscribe(replay().with_groups(3..));
-		reader.set_groups(1..);
+		let reader = producer.subscribe(replay().with_range(3..)).with_range(1..);
 		assert_eq!((reader.floor(), reader.next_in_range(0)), (Some(3), Some(3)));
 
 		// A floor reaching back to the oldest group stays unknown.
-		let mut reader = producer.subscribe(replay());
-		reader.set_groups(4..);
+		let reader = producer.subscribe(replay()).with_range(4..);
 		assert_eq!(reader.floor(), None);
 	}
 
