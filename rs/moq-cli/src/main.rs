@@ -821,7 +821,7 @@ fn spawn_export(
 		let args = SubscribeArgs {
 			format: stdout.format,
 			max_delay: stdout.max_delay,
-			linger: stdout.linger,
+			follow: stdout.follow,
 			stitch: stdout.stitch,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,

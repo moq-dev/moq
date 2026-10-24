@@ -73,8 +73,9 @@ enum State<E: catalog::Catalog> {
 ///
 /// A track failure is followed only when its cause says the publisher left: the route serving
 /// it was lost (`Unroutable`, which a moq-lite relay resets a copy with once its upstream
-/// session ends), or the session carrying it ended. Any other failure is the export's own and
-/// fails here at once.
+/// session ends), the session carrying it ended, or a moq-transport peer ended it with a code
+/// it does not register, since PUBLISH_DONE has none for a lost route. Any other failure is
+/// the export's own and fails here at once.
 ///
 /// An instance that comes back is awaited until its catalog serves a first snapshot, with no
 /// deadline but its own end. A return that refuses its catalog waits for the next change, and
@@ -419,7 +420,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 }
 
 /// Whether a failure says the publisher left rather than the export failing: the route serving
-/// the broadcast was lost, or the session carrying it ended.
+/// the broadcast was lost, the session carrying it ended, or a moq-transport peer named no cause.
 fn left(err: &crate::Error) -> bool {
 	let (crate::Error::Moq(err) | crate::Error::Hang(hang::Error::Moq(err))) = err else {
 		return false;
@@ -432,5 +433,6 @@ fn left(err: &crate::Error) -> bool {
 			| Error::Session(_)
 			| Error::Transport(_)
 			| Error::IdleTimeout
+			| Error::Remote(_)
 	)
 }

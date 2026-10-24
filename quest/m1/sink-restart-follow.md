@@ -36,9 +36,8 @@ one stream.
 Decided with the maintainer on 2026-10-24, when the play, moqsrc, and
 transcode moves landed:
 
-- The TS follower moves onto `Instances` in
-  [TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md),
-  which reworks the same wait, so its timers change once.
+- The TS follower follows `Instances`, with `--follow` bounding only the wait
+  for a publisher after an end.
 - `export hls` gives each instance its own playlist URL. While the old
   publisher stays live, `Server::broadcaster` (`rs/moq-hls/src/server/mod.rs`)
   answers new requests from its cached broadcaster, so an overlapping

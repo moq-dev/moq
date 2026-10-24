@@ -9084,11 +9084,15 @@ fn finish((broadcast, mut catalog): (moq_net::broadcast::Producer, crate::catalo
 }
 
 /// A failure whose cause is not the publisher leaving is the export's own: it fails at once,
-/// however long the follow. moq-transport's PUBLISH_DONE has no code for a lost route, so a
-/// relay's copy reads there as an unrecognized one.
+/// however long the follow.
 #[tokio::test(start_paused = true)]
 async fn a_follower_fails_at_once_on_its_own_failure() {
-	for cause in [moq_net::Error::Cancel, moq_net::Error::Remote(0)] {
+	let causes = [
+		moq_net::Error::Cancel,
+		moq_net::Error::Stream(moq_net::StreamError::Internal),
+		moq_net::Error::MalformedTrack,
+	];
+	for cause in causes {
 		let origin = crate::source::produce_origin();
 		let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
 		let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
@@ -9113,13 +9117,15 @@ async fn a_follower_fails_at_once_on_its_own_failure() {
 
 /// A track that lost its route, or whose session ended, says the publisher left even with the
 /// broadcast still announced: the follower waits out the follow for a return, then fails with
-/// that cause.
+/// that cause. moq-transport's PUBLISH_DONE has no code for a lost route, so a relay's copy
+/// reads there as an unregistered one.
 #[tokio::test(start_paused = true)]
 async fn a_follower_waits_out_the_follow_on_a_lost_route() {
 	let causes = [
 		moq_net::Error::Unroutable,
 		moq_net::Error::Stream(moq_net::StreamError::Unroutable),
 		moq_net::Error::Session(moq_net::SessionError::Cancel),
+		moq_net::Error::Remote(0),
 	];
 	for cause in causes {
 		let origin = crate::source::produce_origin();
