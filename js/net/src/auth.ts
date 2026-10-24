@@ -14,7 +14,7 @@
  * @module
  */
 
-import { type Getter, Signal } from "@moq/signals";
+import type { Getter } from "@moq/signals";
 import { SessionCode } from "./error.ts";
 import type * as Path from "./path.ts";
 
@@ -30,12 +30,6 @@ export interface Grant {
 	subscribe: Path.Patterns;
 	/** When the grant lapses, as `@moq/clock` wall time in Unix milliseconds, or undefined for never. */
 	expires?: number;
-}
-
-/** Whether two grants allow the same paths and lapse together. */
-export function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
-	if (a === undefined || b === undefined) return a === b;
-	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && a.expires === b.expires;
 }
 
 /** The session or peer carries no AUTH exchange, or takes no tokens in band. */
@@ -58,7 +52,11 @@ export interface Auth {
 	close(): void;
 }
 
-/** A token the peer presented, waiting for an answer. Answer every one. */
+/**
+ * A token the peer presented, waiting for an answer. Answer every one.
+ *
+ * @internal Answering tokens is for direct peer sessions, which have no consumer yet.
+ */
 export interface Request {
 	/** The token the peer presented. Empty means the credential its connection carried. */
 	readonly token: Uint8Array;
@@ -75,7 +73,11 @@ export interface Request {
 	reject(code: SessionCode, reason: string): void;
 }
 
-/** A grant issued to one of the peer's tokens. */
+/**
+ * A grant issued to one of the peer's tokens.
+ *
+ * @internal See {@link Request}.
+ */
 export interface Issued {
 	/** Replace the grant, such as with a lowered expiry. */
 	update(grant: Grant): void;
@@ -87,7 +89,11 @@ export interface Issued {
 	readonly closed: PromiseLike<Error | null>;
 }
 
-/** The tokens the peer presents, for an application that answers them itself. */
+/**
+ * The tokens the peer presents, for an application that answers them itself.
+ *
+ * @internal See {@link Request}.
+ */
 export interface Requests {
 	/** The next token the peer presents, or undefined once the session ends. */
 	next(): Promise<Request | undefined>;
@@ -117,22 +123,8 @@ export interface Handle {
 	 *
 	 * The peer's stream credit bounds how many tokens wait unanswered, since each holds its
 	 * stream open until answered or withdrawn. A withdrawn token leaves the queue.
+	 *
+	 * @internal See {@link Request}.
 	 */
 	requests(): Requests;
-}
-
-/** The {@link Handle} of a session without AUTH: no grant, and no tokens. */
-export class None implements Handle {
-	/** Always undefined: no token is ever granted. */
-	readonly grant: Getter<Grant | undefined> = new Signal<Grant | undefined>(undefined);
-
-	/** Always rejects with {@link Unsupported}. */
-	add(_token: string | Uint8Array): Promise<Auth> {
-		return Promise.reject(new Unsupported());
-	}
-
-	/** A stream that never yields a request. */
-	requests(): Requests {
-		return { next: async () => undefined, close: () => {} };
-	}
 }

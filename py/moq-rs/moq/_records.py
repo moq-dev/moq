@@ -100,21 +100,22 @@ class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
-    ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
-    zero skips at once, and it caps every range. ``ranges`` are the spans of the track to
-    deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which pending
-    group the publisher sends first, ``None`` for newest first.
+    ``max_delay`` is how far a non-latest group may fall behind before it is skipped,
+    ``None`` for moq-net's default of zero, which skips at once; it caps every range.
+    ``ranges`` are the spans of the track to deliver, ``None`` for everything ``max_delay``
+    still allows. ``order`` is which pending group the publisher sends first, ``None`` for
+    newest first.
     """
 
     priority: int = 0
-    max_delay: timedelta = timedelta(0)
+    max_delay: timedelta | None = None
     ranges: Sequence[MoqRange] | None = None
     order: MoqOrder | None = None
 
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
             priority=self.priority,
-            max_delay_us=_to_us(self.max_delay, "max_delay"),
+            max_delay_us=_opt_us(self.max_delay, "max_delay"),
             ranges=None if self.ranges is None else list(self.ranges),
             order=self.order,
         )

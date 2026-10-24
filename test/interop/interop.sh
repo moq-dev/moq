@@ -12,9 +12,10 @@
 # It stands up a moq-relay, then for each publisher language publishes an H.264
 # broadcast with an Opus tone per audio channel (the Rust CLI an AAC one too), and
 # confirms every subscriber sees video and decodes that tone in every rendition,
-# contiguous, before the timeout (tone.py judges the decode; the browser judges its
-# own playback). A publisher with its channels' tones swapped must then fail every
-# subscriber's check. The browser subscriber
+# contiguous and in phase with its timestamps (see phase_checked), before the
+# timeout (tone.py judges the decode; the browser judges its own playback). A
+# publisher with its channels' tones swapped must then fail every subscriber's
+# check. The browser subscriber
 # also verifies rendered WebCodecs output and player pause/resume, then that a
 # session the relay refuses hands Chromium the close code and reason.
 #
@@ -362,6 +363,17 @@ publisher_codecs() {
         rust) if [[ -n "${INTEROP_COMPAT_CLIENT:-}" ]]; then echo opus; else echo "opus,mp4a"; fi ;;
         *) echo opus ;;
     esac
+}
+# phase_checked <round> <subscriber> <codec>: whether tone.py also holds the tone's phase to the
+# decode's timestamps, which fails a misapplied pre-skip. Every publisher's tone starts at
+# timestamp zero except the browser's, whose capture clock is not tied to its WAV. The native-JS
+# subscriber hands WebCodecs raw Opus without the OpusHead, as the player does, which keeps the
+# pre-skip for the player to trim, and its libav fallback stamps milliseconds. AAC waits on the
+# fMP4 importer applying the edit list that carries ffmpeg's 1024 priming samples
+# (quest/m1/fmp4-edit-lists.md).
+# shellcheck disable=SC2329  # reached from run_cell, which 'harness_spawn' invokes
+phase_checked() {
+    [[ "$1" != js* && "$2" != js-native-* && "$3" == opus ]]
 }
 
 # Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
@@ -1121,7 +1133,7 @@ run_gst_audio() {
     done
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
         GST_TRACERS=log GST_DEBUG=GST_BUFFER:7,GST_EVENT:7 GST_DEBUG_NO_COLOR=1 GST_DEBUG_FILE="$out.trace" \
-        gst-launch-1.0 moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
+        gst-launch-1.0 moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
         s.video_0 ! filesink location="$out.video" buffer-mode=2 "${pads[@]}" >"$out.gst" 2>&1 &
     pid=$!
     while :; do
@@ -1334,7 +1346,7 @@ PYCODE
                 trap '' PIPE
                 GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
                     timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
-                    moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
+                    moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
                     s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
                     2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true
             )
@@ -1387,8 +1399,10 @@ run_cell() {
     # wrong-tone control can require every rendition to fail.
     if [[ "$status" -eq 0 && "$AUDIO" -eq 1 && "$sub" != js ]]; then
         for codec in ${codecs//,/ }; do
+            local phase=()
+            if phase_checked "$pub" "$sub" "$codec"; then phase=(--phase); fi
             echo "the $codec rendition:"
-            python3 "$INTEROP_DIR/tone.py" --tone "$tone" "$decoded.$codec" || status=$?
+            python3 "$INTEROP_DIR/tone.py" --tone "$tone" ${phase[@]+"${phase[@]}"} "$decoded.$codec" || status=$?
         done
     fi
     echo "$((SECONDS - started))" >"$LOGS/$pub-$sub.secs"
@@ -1556,7 +1570,7 @@ run_finish_gst() {
     deadline=$((SECONDS + ${TIMEOUT%.*} * 2))
     [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 2))
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
+        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
         s.video_0 ! identity name=frames silent=false ! fakesink >"$out" 2>&1 &
     pid=$!
     count=0

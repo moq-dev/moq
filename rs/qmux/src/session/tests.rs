@@ -193,7 +193,7 @@ async fn resets_and_stops_carry_their_codes() {
 	write_all(&mut send, Bytes::from_static(b"refused")).await;
 	let mut recv = server.accept_uni().await.unwrap();
 	recv.stop(11);
-	tokio::time::sleep(Duration::from_millis(1)).await;
+	moq_clock::sleep(Duration::from_millis(1)).await;
 	assert!(matches!(send.finish(), Err(Error::StreamStop(11))));
 	assert!(matches!(send.closed().await, Err(Error::StreamStop(11))));
 }
@@ -218,9 +218,42 @@ async fn the_peer_limits_concurrent_streams() {
 	opening.await.expect("credit returned once the first stream is done");
 }
 
+#[tokio::test(start_paused = true)]
+async fn request_credit_is_refused_without_parking_an_open() {
+	let mut server_config = config(Version::QMux02);
+	server_config.max_streams_bidi = 1;
+	let (mut client, mut server) = pair(config(Version::QMux02), server_config).await;
+	let mut cx = Context::from_waker(std::task::Waker::noop());
+	let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(&mut cx, Default::default()) else {
+		panic!("initial request has credit");
+	};
+	assert!(matches!(
+		client.poll_open_request(&mut cx, Default::default()),
+		Poll::Ready(Ok(None))
+	));
+	assert!(matches!(
+		client.poll_open_request(&mut cx, Default::default()),
+		Poll::Ready(Ok(None))
+	));
+	send.finish().unwrap();
+	let (mut peer_send, mut peer_recv) = server.accept_bi().await.unwrap();
+	peer_send.finish().unwrap();
+	read_all(&mut peer_recv).await.unwrap();
+	read_all(&mut recv).await.unwrap();
+	drop((send, recv, peer_send, peer_recv));
+	client
+		.open_bi(Default::default())
+		.await
+		.expect("only one fresh open consumes returned credit");
+	assert!(matches!(
+		client.poll_open_request(&mut cx, Default::default()),
+		Poll::Ready(Ok(None))
+	));
+}
+
 /// Poll `future` once, after letting every other task run.
 async fn futures_poll_once<F: std::future::Future + Unpin>(future: &mut F) -> Option<F::Output> {
-	tokio::time::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 	std::future::poll_fn(|cx| {
 		Poll::Ready(match Pin::new(&mut *future).poll(cx) {
 			Poll::Ready(output) => Some(output),
@@ -289,7 +322,7 @@ async fn websocket_keep_alive_runs_during_continuous_output() {
 			if b_write.write_all(&buf[..n]).await.is_err() {
 				return;
 			}
-			tokio::time::sleep(Duration::from_millis(1)).await;
+			moq_clock::sleep(Duration::from_millis(1)).await;
 		}
 	});
 	tokio::spawn(async move { tokio::io::copy(&mut b_read, &mut a_write).await });
@@ -307,7 +340,7 @@ async fn websocket_keep_alive_runs_during_continuous_output() {
 	let mut sender = Session::new(a, Side::Client, config.clone()).unwrap();
 	let _receiver = Session::new(b, Side::Server, config).unwrap();
 	while sender.max_datagram_size() == 0 {
-		tokio::time::sleep(Duration::from_millis(1)).await;
+		moq_clock::sleep(Duration::from_millis(1)).await;
 	}
 
 	// Far past the 500ms deadline, queueing more each tick than one batch carries
@@ -387,10 +420,10 @@ async fn a_close_behind_a_stalled_peer_is_bounded() {
 	up.send(Flow::Stall).unwrap();
 	// Fill the pipe so the writer is mid-write when the close comes.
 	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
-	let _ = tokio::time::timeout(Duration::from_millis(100), send.write(&payload(1 << 20, 0))).await;
-	tokio::time::sleep(Duration::from_millis(100)).await;
+	let _ = moq_clock::timeout(Duration::from_millis(100), send.write(&payload(1 << 20, 0))).await;
+	moq_clock::sleep(Duration::from_millis(100)).await;
 
-	let start = tokio::time::Instant::now();
+	let start = moq_clock::now();
 	client.close(5, "stalled");
 	let err = client.closed().await;
 	assert!(matches!(err, Error::ConnectionClosed { code: 5, .. }), "got {err:?}");
@@ -408,7 +441,7 @@ async fn a_silent_peer_times_out() {
 
 	up.send(Flow::Drop).unwrap();
 	down.send(Flow::Drop).unwrap();
-	let start = tokio::time::Instant::now();
+	let start = moq_clock::now();
 	assert!(matches!(client.closed().await, Error::IdleTimeout));
 	assert!(matches!(server.closed().await, Error::IdleTimeout));
 	assert!(start.elapsed() >= Duration::from_secs(30) - Duration::from_secs(1));
@@ -418,7 +451,7 @@ async fn a_silent_peer_times_out() {
 #[tokio::test(start_paused = true)]
 async fn an_idle_session_stays_up() {
 	let (mut client, _server) = pair(config(Version::QMux01), config(Version::QMux01)).await;
-	let closed = tokio::time::timeout(Duration::from_secs(120), client.closed()).await;
+	let closed = moq_clock::timeout(Duration::from_secs(120), client.closed()).await;
 	assert!(closed.is_err(), "closed with {closed:?}");
 }
 
@@ -426,7 +459,7 @@ async fn an_idle_session_stays_up() {
 async fn a_peer_that_never_sends_parameters_times_out_the_handshake() {
 	let (client, _silent) = tokio::io::duplex(PIPE);
 	let config = config(Version::QMux02);
-	let start = tokio::time::Instant::now();
+	let start = moq_clock::now();
 	let err = Session::connect(Stream::new(client), config).await.unwrap_err();
 	assert!(matches!(err, Error::HandshakeTimeout), "got {err:?}");
 	assert!(start.elapsed() >= Duration::from_secs(10));
