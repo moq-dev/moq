@@ -109,6 +109,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [MSF duplicate init](/quest/m2/msf-duplicate-init.md) - an MSF catalog refuses a repeated `initDataList` id instead of resolving it last-wins
 - [AMF0 exact reads](/quest/m2/rtmp-amf0-exact-reads.md) - a truncated RTMP string fails with `UnexpectedEof` instead of parsing NUL padding
 - [HLS variant area](/quest/m2/hls-variant-area.md) - a hostile `RESOLUTION` cannot panic or misorder variant ranking
+- [HLS restart drain cutoff](/quest/m2/hls-restart-drain-cutoff.md) - a moq-hls recording of a replaced run finishes at a finite boundary while the successor starts at once
 - [Image hardening](/quest/m2/image-hardening.md) - the relay image runs unprivileged and its builder stage is pinned
 - [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the audited moq-net decoders have targets that assert an invariant, and the unsafe peer input reaches runs under Miri
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS

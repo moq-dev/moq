@@ -1008,7 +1008,7 @@ async fn admit_http(
 	.inspect_err(|err| state.cluster.refusals.record_auth(err))?;
 	let token = lease.token();
 	let Some(origin) = state.cluster.subscriber(token) else {
-		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
+		state.cluster.refusals.record(crate::refusals::RefusalKind::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 	let stats = state.cluster.stats.tier(token.tier.clone()).request(&token.label);
@@ -1202,7 +1202,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn http_refusals_count_at_both_endpoints() {
-		use crate::refusals::Refusal;
+		use crate::refusals::RefusalKind;
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
@@ -1256,9 +1256,9 @@ mod tests {
 				};
 				assert_eq!(status, StatusCode::UNAUTHORIZED);
 				let reason = if publish_only {
-					Refusal::Forbidden
+					RefusalKind::Forbidden
 				} else {
-					Refusal::Refused
+					RefusalKind::Refused
 				};
 				assert_eq!(
 					state.cluster.refusals.count(reason),
@@ -2384,7 +2384,7 @@ mod tests {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-06".parse::<moq_net::Version>().unwrap().into())
 				.with_publisher(origin.consume())
-				.connect(moq_net::time::now(), transport)
+				.connect(moq_net::time::Instant::now(), transport)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));

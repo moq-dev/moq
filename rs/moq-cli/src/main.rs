@@ -1076,14 +1076,14 @@ mod tests {
 		let (client, server) = moq_net::transport::memory::pair(config);
 		let accepting = tokio::spawn(async move {
 			let (session, driver) = moq_net::Server::new()
-				.accept(moq_net::time::now(), server)
+				.accept(moq_net::time::Instant::now(), server)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
 			session
 		});
 		let (_client, client_driver) = moq_net::Client::new()
-			.connect(moq_net::time::now(), client)
+			.connect(moq_net::time::Instant::now(), client)
 			.await
 			.unwrap();
 		// Never dropped, which would close the transport: polled only until the session is served.

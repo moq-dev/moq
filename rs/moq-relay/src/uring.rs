@@ -722,7 +722,7 @@ async fn serve_connection(
 	// moq-net boxes the transport with a native `Send` bound, which only a `Local`
 	// session meets; it still never leaves this worker.
 	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, binding));
-	let now = moq_net::time::now();
+	let now = moq_net::time::Instant::now();
 	let mut accepted = Accepted {
 		handle,
 		conn,
@@ -803,7 +803,7 @@ async fn serve_request(
 		.await
 		.inspect_err(|err| {
 			if matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::Timeout)) {
-				serve.cluster.refusals.record(crate::refusals::Refusal::Unavailable);
+				serve.cluster.refusals.record(crate::refusals::RefusalKind::Unavailable);
 			}
 		})?;
 	let (admitted, registration) = match decided {

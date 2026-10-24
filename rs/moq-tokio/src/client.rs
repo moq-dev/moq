@@ -797,7 +797,7 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 	client: &moq_net::Client,
 	transport: S,
 ) -> Result<moq_net::Session, moq_net::Error> {
-	let (session, driver) = client.connect(moq_net::time::now(), transport).await?;
+	let (session, driver) = client.connect(moq_net::time::Instant::now(), transport).await?;
 	use tracing::Instrument;
 	tokio::spawn(crate::panic::isolate(moq_net::time::run(driver)).instrument(tracing::Span::current()));
 	Ok(session)
