@@ -393,7 +393,10 @@ impl<'a> Chunks<'a> {
                     ChunksState::Readable(recv) => StreamRecv::Open(recv),
                     _ => unreachable!("state must be ChunkState::Readable"),
                 };
-                self.streams.stream_recv_freed(self.id, recv);
+                self.pending.max_data |= self
+                    .streams
+                    .stream_recv_freed(self.id, recv)
+                    .should_transmit();
                 Err(ReadError::Reset(error_code))
             }
             RecvState::Recv { size } => {
@@ -404,7 +407,10 @@ impl<'a> Chunks<'a> {
                         ChunksState::Readable(recv) => StreamRecv::Open(recv),
                         _ => unreachable!("state must be ChunkState::Readable"),
                     };
-                    self.streams.stream_recv_freed(self.id, recv);
+                    self.pending.max_data |= self
+                        .streams
+                        .stream_recv_freed(self.id, recv)
+                        .should_transmit();
                     Ok(None)
                 } else {
                     // We don't need a distinct `ChunksState` variant for a blocked stream because

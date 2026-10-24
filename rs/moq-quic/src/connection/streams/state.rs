@@ -378,7 +378,8 @@ impl StreamsState {
             // An evicted one waits for the application's stop, which still holds its lease.
             if closed && !evicted {
                 let rs = self.recv.remove(&id).flatten().unwrap();
-                self.stream_recv_freed(id, rs);
+                // Its stop already discarded the lease, so this returns no credit.
+                let _ = self.stream_recv_freed(id, rs);
             }
 
             // We don't buffer data on stopped streams, so issue flow control credit immediately
@@ -468,7 +469,8 @@ impl StreamsState {
             // read credits up to their highest offset. An evicted one waits for its stop.
             if !evicted {
                 let rs = self.recv.remove(&id).flatten().unwrap();
-                self.stream_recv_freed(id, rs);
+                // Its stop already discarded the lease, so this returns no credit.
+                let _ = self.stream_recv_freed(id, rs);
             }
             new_bytes
         } else {
@@ -1246,11 +1248,18 @@ impl StreamsState {
 
     /// Recycle a receive stream's state, returning any credit its lease still holds, as when a
     /// plain read ends a stream a lease read from.
-    pub(super) fn stream_recv_freed(&mut self, id: StreamId, mut recv: StreamRecv) {
-        let _ = self.discard_lease(id, &mut recv.inner_mut().lease);
+    ///
+    /// Returns whether a `MAX_DATA` frame should be enqueued for that credit.
+    pub(super) fn stream_recv_freed(
+        &mut self,
+        id: StreamId,
+        mut recv: StreamRecv,
+    ) -> ShouldTransmit {
+        let transmit = self.discard_lease(id, &mut recv.inner_mut().lease);
         self.unlooked.remove(&id);
         self.free_recv.push(recv.free(self.stream_receive_window));
         self.stream_freed(id, StreamHalf::Recv);
+        transmit
     }
 
     pub(super) fn max_send_data(&self, id: StreamId) -> VarInt {
@@ -4524,6 +4533,29 @@ mod tests {
             "the stop frees it"
         );
         assert!(pending.stop_sending.is_empty(), "the peer already reset it");
+    }
+
+    /// Observing a reset frees the stream, so the credit its lease still held is announced then:
+    /// nothing is left to release or stop that could announce it later.
+    #[test]
+    fn observed_reset_announces_leased_credit() {
+        let mut client = make(Side::Client);
+        let initial = client.local_max_data;
+        let len = (client.receive_window / 8) as usize;
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, len, false);
+        assert_eq!(lease(&mut client, id), len);
+        reset(&mut client, id, len as u32);
+        assert_eq!(client.credit_stats().leased, len as u64);
+
+        let mut pending = Retransmits::default();
+        assert_eq!(
+            recv(&mut client, &mut pending, id).received_reset(),
+            Ok(Some(0u32.into()))
+        );
+        client.check_leases();
+        assert_eq!(client.local_max_data, initial + len as u64);
+        assert!(pending.max_data);
     }
 
     /// An evicted stream tells the peer once, when its reader stops it, and frees its stream ID

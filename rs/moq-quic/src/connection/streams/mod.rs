@@ -180,7 +180,8 @@ impl RecvStream<'_> {
         // state immediately.
         if !stream.final_offset_unknown() {
             let recv = entry.remove().expect("must have recv when stopping");
-            self.state.stream_recv_freed(self.id, recv);
+            // The lease was taken out above, so this returns no credit.
+            let _ = self.state.stream_recv_freed(self.id, recv);
             self.state.queue_max_stream_id(self.pending);
         }
 
@@ -212,11 +213,16 @@ impl RecvStream<'_> {
         };
 
         // Clean up state after application observes the reset, since there's no reason for the
-        // application to attempt to read or stop the stream once it knows it's reset
+        // application to attempt to read or stop the stream once it knows it's reset. A lease still
+        // holding credit returns it here, since nothing is left to release or stop it.
         let (_, recv) = entry.remove_entry();
-        self.state
+        let transmit = self
+            .state
             .stream_recv_freed(self.id, recv.expect("must have recv on reset"));
+        self.pending.max_data |= transmit.should_transmit();
         self.state.queue_max_stream_id(self.pending);
+        // The credit returned may only have paid a shrunk window's debt.
+        self.unstick();
 
         Ok(Some(code))
     }
