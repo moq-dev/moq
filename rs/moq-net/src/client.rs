@@ -135,8 +135,8 @@ impl Client {
 	/// A price the peer declares applies only where we set none. An unpriced link costs
 	/// `1`, which makes the cost track the hop count and so reproduces plain
 	/// shortest-path routing.
-	pub fn with_cost(mut self, cost: u64) -> Self {
-		self.cost = Some(cost);
+	pub fn with_cost(mut self, cost: impl Into<crate::origin::Cost>) -> Self {
+		self.cost = Some(cost.into().value());
 		self
 	}
 
@@ -645,6 +645,17 @@ mod tests {
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			Poll::Ready(self.state.control_stream.lock().unwrap().take().ok_or(FakeError))
+		}
+
+		fn poll_open_request(
+			&mut self,
+			cx: &mut std::task::Context<'_>,
+			options: crate::transport::poll::SendOptions<
+				'_,
+				<Self::SendStream as crate::transport::poll::SendStream>::Group,
+			>,
+		) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+			self.poll_open_bi(cx, options).map_ok(Some)
 		}
 
 		fn poll_open_uni(

@@ -918,7 +918,7 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 	const ring = new AudioRingBuffer({ rate: RATE, channels: 1, latency: Milli(STEP) });
 	const follow = new Effect();
 	follow.subscribe(playback.sync.out.delay, (delay) => {
-		ring.resize(Milli.fromSecond((ringSamples(RATE, delay) / RATE) as Second));
+		ring.setLatency(Milli.fromSecond((ringSamples(RATE, delay) / RATE) as Second));
 	});
 
 	// Flushed in runs of 12, so each run's first frame lands ~360ms late.

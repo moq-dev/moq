@@ -99,7 +99,8 @@ public final class Session: Sendable {
     }
 
     /// Suspend until the session is over: an error when the connection gave up for
-    /// good, a normal return after a local `shutdown()`/`cancel()`. Transient drops
+    /// good, a normal return after a local `cancel()`. After `shutdown()`, wait for
+    /// the drain and throw on delivery failure. Transient drops
     /// the reconnect loop rides out don't resolve this; watch `stateChanged(after:)` for those.
     public func closed() async throws {
         try await ffi.closed()
@@ -121,12 +122,12 @@ public final class Session: Sendable {
         ffi.cancel(code: code)
     }
 
-    /// Drain finished tracks within one second, throwing on failure.
+    /// Request a draining close now; await `closed()` for its result.
     /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
     /// Lite versions, including the default lite-06, wait only for transport ACKs.
     /// IETF also waits for transport ACKs.
-    public func shutdown() async throws {
-        try await ffi.shutdown()
+    public func shutdown() {
+        ffi.shutdown()
     }
 
     /// Snapshot the current connection statistics (RTT, bandwidth estimates,

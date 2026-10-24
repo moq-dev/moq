@@ -140,8 +140,8 @@ pub struct Config {
 	/// relay that loses its best route but still holds routes derived from the
 	/// withdrawn one sends nothing while the withdrawal wave removes them, then one
 	/// retraction, instead of advertising each stale path in turn. It must outlast
-	/// the wave's spread across the mesh. Defaults to [`DEFAULT_UPDATE_HOLD`];
-	/// zero delivers updates at once.
+	/// the wave's spread across the mesh. Defaults to 300 ms, longer than a withdrawal
+	/// takes to cross a global mesh, with margin; zero delivers updates at once.
 	///
 	/// A broadcast resolved through a peer's route keeps serving new requests while
 	/// the peer's replacement of it is held, and refuses them with
@@ -156,9 +156,8 @@ pub struct Config {
 	pub update_hold: Duration,
 }
 
-/// The default [`Config::update_hold`]: longer than a withdrawal takes to cross a
-/// global mesh, with margin.
-pub const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
+/// The default [`Config::update_hold`].
+pub(super) const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
 
 /// How long a cursor holds back a stale path to a prefix it retracted; see
 /// [`Config::update_hold`]. Path hunting after a withdrawal settles within it on
@@ -544,7 +543,7 @@ impl Default for Route {
 ///
 /// Origin bookkeeping, not a chain fact: the hop chain cannot say it, since a
 /// client and a peer relay each append one hop. The origin records it from the
-/// handle that announced the route; see [`Producer::peer`].
+/// handle that announced the route; see [`Producer::with_link`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Source {
 	/// Announced on this origin: by an in-process producer or a client session.
@@ -1414,7 +1413,7 @@ struct Horizon {
 	/// Hide the routes that entered from a cluster peer ([`Consumer::local`]).
 	local: bool,
 	/// Hide the routes learned on an upstream link, because this reader is one
-	/// ([`Producer::upstream`]): a relay never transits between two upstreams.
+	/// ([`Link::Upstream`]): a relay never transits between two upstreams.
 	upstream: bool,
 	/// Hide the routes with no room for our hop under this cap, because this reader
 	/// forwards them ([`Consumer::forwardable`]). Selection then falls back to a
@@ -1459,16 +1458,19 @@ impl Horizon {
 	}
 }
 
-/// The link a handle's routes arrive on; see [`Producer::peer`] and
-/// [`Producer::upstream`].
+/// The link a handle's routes arrive on; see [`Producer::with_link`].
+///
+/// The hop chain cannot say it, since a client and a peer relay each append one hop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-enum Link {
+pub enum Link {
 	/// Here: an in-process producer or a client session.
 	#[default]
 	Local,
-	/// A cluster peer.
+	/// A cluster peer: every route it announces reports [`Source::Peer`], and
+	/// [`Consumer::local`] hides it.
 	Peer,
-	/// A cluster peer marked upstream.
+	/// An upstream peer: a [`Self::Peer`] whose routes are never offered to another
+	/// upstream, so this origin never carries traffic between two upstreams.
 	Upstream,
 }
 
@@ -1968,7 +1970,7 @@ pub struct Producer {
 	stats: stats::Session,
 
 	// The link routes announced through this handle arrive on (see
-	// [`Self::peer`] and [`Self::upstream`]).
+	// [`Self::with_link`]).
 	link: Link,
 
 	// The rank of that link; see [`Self::with_preference`].
@@ -2049,30 +2051,16 @@ impl Producer {
 		self
 	}
 
-	/// Mark this handle (and any handle derived from it) as a cluster peer's:
-	/// every route it announces reports [`Source::Peer`], and
-	/// [`Consumer::local`] hides it.
+	/// Set the link this handle (and any handle derived from it) is given to.
 	///
-	/// Hand it to a session with another relay, so this origin can tell what
-	/// entered here from what a peer forwarded. The hop chain cannot: a client
-	/// and a peer each append one hop.
-	pub fn peer(mut self) -> Self {
-		if self.link == Link::Local {
-			self.link = Link::Peer;
-		}
-		self
-	}
-
-	/// Mark this handle (and any handle derived from it) as an upstream peer's:
-	/// a [`Self::peer`] whose routes are never offered to another upstream.
-	/// A [`Consumer`] taken from it hides every route an upstream handle
-	/// announced, so this origin never carries traffic between two upstreams.
-	///
-	/// Hand it to a session with a peer that should reach everything here
-	/// without this relay carrying its traffic to other upstreams, such as an
-	/// edge's link to a core or a drone's link to its CDN.
-	pub fn upstream(mut self) -> Self {
-		self.link = Link::Upstream;
+	/// Hand a session with another relay a [`Link::Peer`] handle, so this origin can
+	/// tell what entered here from what a peer forwarded. Hand a [`Link::Upstream`]
+	/// handle to a session with a peer that should reach everything here without this
+	/// relay carrying its traffic to other upstreams, such as an edge's link to a core
+	/// or a drone's link to its CDN: a [`Consumer`] taken from it hides every route an
+	/// upstream handle announced.
+	pub fn with_link(mut self, link: Link) -> Self {
+		self.link = link;
 		self
 	}
 
@@ -2334,8 +2322,8 @@ impl Producer {
 		}
 	}
 
-	/// Whether routes arrive here on a link between relays ([`Self::peer`] or
-	/// [`Self::upstream`]), whose sessions discover everything they may.
+	/// Whether routes arrive here on a link between relays ([`Link::Peer`] or
+	/// [`Link::Upstream`]), whose sessions discover everything they may.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn relays(&self) -> bool {
 		self.link != Link::Local
@@ -2914,7 +2902,7 @@ impl Driver {
 		waiter.batch(|| {
 			self.timers.advance(now);
 			let result = self.state.poll(waiter);
-			let gc = self.pool.gc(now, waiter);
+			let gc = self.pool.poll(now, waiter);
 			if result.is_ready() {
 				return Err(Error::Closed);
 			}
@@ -6070,7 +6058,7 @@ impl Consumer {
 	}
 
 	/// A view of the routes that entered here: every route a handle marked
-	/// [`Producer::peer`] or [`Producer::upstream`] announced is hidden from [`Self::announced`] and never
+	/// [`Link::Peer`] or [`Link::Upstream`] handle announced is hidden from [`Self::announced`] and never
 	/// resolved by [`Self::request_broadcast`].
 	///
 	/// On a relay, this is what the relay ingests itself, from clients and
@@ -7457,7 +7445,7 @@ mod tests {
 		drop(other);
 
 		// A local view never waits on a peer's routes.
-		let _peer = producer.clone().peer().snapshot("room");
+		let _peer = producer.clone().with_link(Link::Peer).snapshot("room");
 		assert!(producer.consume().local().announced().is_synced());
 		assert!(!producer.consume().announced().is_synced());
 	}
@@ -8204,7 +8192,7 @@ mod tests {
 		.produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.announced();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let old = peer
 			.dynamic_route("pool/job-0", Route::default().with_hops(hops(&[11])))
 			.unwrap();
@@ -10058,7 +10046,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn routes_report_where_they_entered() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 
 		let _ingest = producer
@@ -10104,7 +10092,7 @@ mod tests {
 		}
 
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 		step(Duration::from_millis(1)).await;
 
@@ -10142,7 +10130,7 @@ mod tests {
 			driver
 				.poll(Instant::ZERO + Duration::from_secs(1), &kio::Waiter::noop())
 				.unwrap();
-			let peer = producer.clone().peer();
+			let peer = producer.clone().with_link(Link::Peer);
 			// One epoch, so the winner moving between routes is an update, not a restart.
 			let route = |chain: &[u64], via| {
 				Route::default()
@@ -10187,7 +10175,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	async fn a_changed_route_waits_out_the_hold() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 		// Holds count on the driver's clock, which starts at its first poll.
 		moq_clock::sleep(Duration::from_millis(1)).await;
@@ -10226,7 +10214,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	async fn a_retraction_quarantines_a_named_publisher() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 		moq_clock::sleep(Duration::from_millis(1)).await;
 
@@ -10283,7 +10271,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn withdrawn_peer_hides_routes_through_it() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 
 		// Publisher 9 ingests at relay 2; relay 3 relays 2's route.
@@ -10318,7 +10306,7 @@ mod tests {
 	async fn old_session_withdrawal_keeps_newer_route() {
 		for restart in [false, true] {
 			let producer = origin(1).produce();
-			let peer = producer.clone().peer();
+			let peer = producer.clone().with_link(Link::Peer);
 			let mut announced = producer.consume().announced();
 			let route = Route::default().with_hops(hops(&[9, 2]));
 			let first = peer.dynamic_route("room", route.clone()).unwrap();
@@ -10346,7 +10334,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn withdrawn_route_no_longer_covers_requests() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let direct = peer
 			.dynamic_route("room", Route::default().with_hops(hops(&[9, 2])))
 			.unwrap();
@@ -10374,7 +10362,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	async fn source_change_is_an_update() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 
 		let route = Route::default()
@@ -10404,7 +10392,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn local_view_hides_peer_routes() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut local = producer.consume().local().announced();
 
 		let _forwarded = peer
@@ -10454,8 +10442,8 @@ mod tests {
 	#[moq_clock::test]
 	async fn upstream_view_hides_upstream_routes() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
-		let core = producer.clone().upstream();
+		let peer = producer.clone().with_link(Link::Peer);
+		let core = producer.clone().with_link(Link::Upstream);
 		let mut toward_core = core.consume().announced();
 		let mut everyone = producer.consume().announced();
 
@@ -10493,14 +10481,6 @@ mod tests {
 		);
 		drop(mesh);
 		toward_core.expect_next_ended("both").await;
-
-		// `peer` never demotes an upstream handle.
-		let _still = core
-			.clone()
-			.peer()
-			.dynamic_route("again", Route::default().with_hops(hops(&[7])).with_via(origin(7)))
-			.unwrap();
-		toward_core.assert_next_wait();
 
 		// Resolution agrees with the cursor: an upstream-only path is unroutable
 		// toward an upstream, while the full view queues it on the core's route.

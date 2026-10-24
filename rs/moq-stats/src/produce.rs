@@ -1714,7 +1714,7 @@ mod tests {
 			let (client_transport, server_transport) = moq_net::transport::memory::pair(config);
 			let client = moq_net::Client::new()
 				.with_versions(version.into())
-				.with_subscriber(downstream.clone().peer());
+				.with_subscriber(downstream.clone().with_link(origin::Link::Peer));
 			let server = moq_net::Server::new()
 				.with_versions(version.into())
 				.with_publisher(upstream.consume().with_hidden(true));
