@@ -333,6 +333,17 @@ describe("Backpressure", () => {
 		expect(gate.queued(ms(3000))).toBe(false);
 	});
 
+	// The ring starts playing a report interval before the gate learns its playhead, so a rise in that
+	// window parks from the frame the ring anchors on.
+	it("parks a ring that started before reporting its playhead", () => {
+		const gate = new Backpressure(1000, false, Milli(1000));
+		gate.queued(ms(1000));
+		const signal = new AbortController().signal;
+		for (let t = 0; t <= 500; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		expect(gate.setLatency(Milli(2000))).toBe(true);
+		expect(gate.queued(ms(2000))).toBe(true);
+	});
+
 	// An utterance that arrived whole before the reset changes nothing queued, so nothing would
 	// report it again: forgetting it would hold its first frame until the next utterance.
 	it("keeps what is queued across a reset", () => {

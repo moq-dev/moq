@@ -41,6 +41,9 @@ export class Backpressure {
 	// The ring as last observed. The playhead is undefined until one is known on the current timeline.
 	#playhead?: Micro;
 	#stalled = true;
+	// The first frame released on the current timeline, where the ring anchors. It stands in for the
+	// playhead until a report carries one, since the ring may already be playing from it.
+	#anchor?: Micro;
 	// Whether the ring is parked for a hold the queued media does not cover yet. The worklet keeps a
 	// park until the next floor update, so only this decides when it ends: a write of output decoded
 	// before the park cannot.
@@ -81,7 +84,7 @@ export class Backpressure {
 
 		// Parks whatever the ring was last reported doing: a report of a stall may be stale, and
 		// parking a ring that is still stalled changes nothing.
-		const playhead = this.#playhead;
+		const playhead = this.#playhead ?? this.#anchor;
 		this.#parked = (rise || this.#parked) && playhead !== undefined && !this.#covered(playhead + this.#headroom);
 		if (this.#parked) this.#stalled = true;
 		this.#release();
@@ -105,7 +108,7 @@ export class Backpressure {
 	 */
 	queued(newest: Micro | undefined): boolean {
 		this.#queued = newest;
-		const playhead = this.#playhead;
+		const playhead = this.#playhead ?? this.#anchor;
 		const resume = this.#parked && playhead !== undefined && this.#covered(playhead + this.#headroom);
 		if (resume) this.#parked = false;
 		this.#release();
@@ -135,6 +138,7 @@ export class Backpressure {
 	/** The ring was flushed for a new timeline: its playhead is unknown until the next frame anchors it. */
 	reset(): void {
 		this.#playhead = undefined;
+		this.#anchor = undefined;
 		this.#stalled = true;
 		this.#parked = false;
 		this.#first = undefined;
@@ -166,6 +170,12 @@ export class Backpressure {
 	}
 
 	#admit(timestamp: Micro): boolean {
+		const due = this.#due(timestamp);
+		if (due) this.#anchor ??= timestamp;
+		return due;
+	}
+
+	#due(timestamp: Micro): boolean {
 		const playhead = this.#playhead;
 		if (!this.#stalled && playhead !== undefined) {
 			if (timestamp - this.#headroom <= playhead) return true;
