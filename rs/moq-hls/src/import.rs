@@ -804,19 +804,18 @@ impl Import {
 		}
 	}
 
-	/// Finish every rendition's tracks and the catalog once [`run`](Self::run) returned `Ok`,
-	/// returning the finished broadcast, which stays announced until it is dropped. Keep it
-	/// until its media is stale, with [`Finish::wait`](moq_net::broadcast::Finish::wait), so
-	/// subscribers still catching up drain the tail.
-	pub fn finish(mut self) -> Result<moq_net::broadcast::Finish> {
+	/// Finish every rendition's tracks and the catalog once [`run`](Self::run) returned `Ok`.
+	///
+	/// The finished tracks stay servable while the import is held, so hand it and the
+	/// broadcast to a [`moq_mux::Linger`] to keep them up for late subscribers.
+	pub fn finish(&mut self) -> Result<()> {
 		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
 			if let Some(importer) = &mut track.importer {
 				importer.finish()?;
 			}
 		}
 		self.sink.catalog.finish()?;
-		// Taken while the importers are alive, so it holds the tracks just finished.
-		Ok(self.sink.broadcast.clone().finish())
+		Ok(())
 	}
 
 	/// Abort every rendition's importer and the catalog with `err` so subscribers see the real
@@ -1791,8 +1790,8 @@ mod tests {
 	}
 
 	/// A followed playlist that gains `EXT-X-ENDLIST` ends the import once its last segment is in,
-	/// including one published alongside the end, and the finished broadcast keeps serving it,
-	/// catalog included, for the retention.
+	/// including one published alongside the end, and the finished import keeps serving it,
+	/// catalog included, while it is held.
 	#[tokio::test]
 	async fn a_playlist_that_ends_later_finishes_the_import() {
 		tokio::time::pause();
@@ -1801,11 +1800,9 @@ mod tests {
 		std::fs::write(dir.join("media.mp4"), &resource).unwrap();
 		std::fs::write(dir.join("media.m3u8"), playlist).unwrap();
 
-		let max_age = Duration::from_secs(3);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
-		let catalog = CatalogProducer::new(&mut broadcast, config).unwrap();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let playlist = Url::from_file_path(dir.join("media.m3u8")).unwrap();
 		let mut import = Import::new(broadcast, catalog, Config::new(playlist)).unwrap();
 
@@ -1824,8 +1821,7 @@ mod tests {
 			.expect("an ended playlist ends the import")
 			.unwrap();
 		assert_eq!(import.video[0].next_sequence, Some(4), "the final segment was imported");
-		let finish = import.finish().unwrap();
-		assert_eq!(finish.linger(), max_age);
+		import.finish().unwrap();
 		let mut listed = consumer.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			listed.recv_group().await.unwrap().is_some(),
