@@ -173,7 +173,7 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
 
-    def run_ci(self, base="origin/main"):
+    def stub_ci(self, just=""):
         for tool in ("bun", "python3", "cargo", "wasm-bindgen", "jq", "shellcheck",
                      "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix",
                      "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
@@ -182,9 +182,9 @@ class QueryTests(unittest.TestCase):
             path = self.bin / tool
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
-        just = self.bin / "just"
-        just.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$CALLS"\n')
-        just.chmod(0o755)
+        path = self.bin / "just"
+        path.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$CALLS"\n' + just)
+        path.chmod(0o755)
         nix = self.bin / "nix"
         nix.write_text('#!/usr/bin/env bash\nprintf "nix %s\\n" "$*" >>"$CALLS"\n')
         nix.chmod(0o755)
@@ -195,10 +195,40 @@ class QueryTests(unittest.TestCase):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
+
+    def run_ci(self, base="origin/main"):
+        self.stub_ci()
         result = subprocess.run(["bash", "sh/dispatch.sh", "ci", base],
                                 cwd=self.repo, env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
+
+    def test_failure_cancels_running_lanes_and_names_its_phase(self):
+        # rs's tests run until killed, and kt fails only once they are running,
+        # so the run ends only if the failure cancels the other lane.
+        started = self.root / "started"
+        os.mkfifo(started)
+        pid = self.root / "pid"
+        self.stub_ci(f'''case "$*" in
+    "rs test-changed "*) echo $$ >"{pid}"; echo >"{started}"; exec sleep 600 ;;
+    "kt check") read -r <"{started}"; exit 3 ;;
+esac
+''')
+        self.change("rs/moq-ffi/src/lib.rs")
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
+                                env=dict(self.env, MOQ_CHECK_JOBS="2"), text=True,
+                                capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("ci: check kt failed", result.stderr)
+        self.assertRegex(result.stderr, r"\d+  check kt \(failed\)")
+        self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(pid.read_text()), 0)
+        # kt's lane stops at the failure, and no other lane starts after it.
+        calls = (self.root / "calls").read_text().splitlines()
+        self.assertIn("py test", calls)
+        self.assertNotIn("go check", calls)
+        self.assertNotIn("dart check", calls)
 
     def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
         self.change("rs/moq-clock/src/lib.rs")
