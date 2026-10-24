@@ -4,6 +4,12 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### `import --linger` sets how long a finished broadcast stays up
+
+A cleanly ended import used to stay up for its `--max-age`; it now stays up for `--linger` (default 30 s), counted from the end, and `--max-age` only sets retention.
+Replace `import --max-age 5s` used to shorten that wait with `import --linger 5s`, or `--linger 0s` to close at once.
+A reconnect at the same path no longer ends the wait. `import rtsp`, `import archive`, `import capture`, and `import rtc --connect` refuse `--linger`.
+
 ### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
 Enable `nvidia` instead; the old names were aliases for it.

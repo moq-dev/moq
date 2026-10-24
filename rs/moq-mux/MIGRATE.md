@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Programs::finish` returns the program broadcasts
+
+`Programs::finish` now returns each program's `broadcast::Producer` instead of a `broadcast::Finish`.
+Hand them, with the `Programs` that owns their tracks, to the new `moq_mux::Linger` to keep the finished programs up for a fixed time from the end:
+
+```rust
+let broadcasts = programs.finish()?;
+moq_mux::Linger::new(broadcasts, programs, moq_mux::Linger::DEFAULT).wait().await;
+```
+
 ### TS service information expires on the program clock
 
 TS import retracts SI sub-tables and incomplete generations that stop repeating within their table's maximum interval (30 seconds for unknown tables).
