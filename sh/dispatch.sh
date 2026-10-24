@@ -81,6 +81,8 @@ declare -A scope=(
     [swift]='^(swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
     [go]='^(go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
     [dart]='^(dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
+    # The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
+    [c]='^(c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
     # The package links moq-c's native-libs lists, and compiles its doc samples.
     [cpp]='^(cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
     # The plugin and its tests call through the bindings generated from cpp/moq
@@ -113,11 +115,11 @@ if [[ "$action" == ci-platform ]]; then
     if grep -qE '^(\.cargo/|\.github/|[^/]+/justfile$|justfile$)' "$changed"; then
         shared=1
     fi
-    for module in rs swift cpp obs_compile moq_sh; do
+    for module in rs swift c cpp obs_compile moq_sh; do
         enabled=false
         pattern=${scope[$module]}
         case "$module" in
-            swift | cpp | obs_compile) pattern+="|${scope[rs]}" ;;
+            swift | c | cpp | obs_compile) pattern+="|${scope[rs]}" ;;
         esac
         if [[ -n "$shared" ]] || grep -qE "$pattern" "$changed"; then
             enabled=true
@@ -148,6 +150,7 @@ declare -A tools=(
     [swift]=''
     [go]='cargo go uniffi-bindgen-go'
     [dart]='cargo dart uniffi_bindgen_dart'
+    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp'
     [cpp]='cargo cmake c++ uniffi-bindgen-cpp'
     [obs_compile]='cargo cmake pkg-config uniffi-bindgen-cpp'
     [obs]='clang-format cmake gersemi jq'
@@ -169,12 +172,12 @@ verb=$action
 # build cache only when one is selected. JS checks build @moq/wasm for its
 # consumers, and the bindings build moq-ffi.
 declare -A compiles=(
-    [check]='rs bench js py kt go dart cpp obs_compile'
+    [check]='rs bench js py kt go dart c cpp obs_compile'
     [fix]='rs'
 )
 
 case "$action" in
-    check | ci) modules=(js workers moq_sh drafts rs bench carla quest drill py kt swift go dart cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
+    check | ci) modules=(js workers moq_sh drafts rs bench carla quest drill py kt swift go dart c cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
     fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
 

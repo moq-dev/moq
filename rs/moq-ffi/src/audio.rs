@@ -226,7 +226,7 @@ pub struct MoqAudioPacket {
 
 /// The terminal packets and decoded padding emitted when an audio encoder finishes.
 #[derive(uniffi::Record)]
-pub struct MoqAudioEncoderFinish {
+pub struct MoqAudioEncoderFinished {
 	/// Packets emitted while draining the encoder.
 	pub packets: Vec<MoqAudioPacket>,
 	/// Padded samples to discard from the decoded tail.
@@ -318,10 +318,10 @@ impl MoqAudioEncoder {
 	}
 
 	/// Drain the encoder, optionally padding one final partial frame.
-	pub fn finish(&self, pcm: Vec<f32>) -> Result<MoqAudioEncoderFinish, MoqError> {
+	pub fn finish(&self, pcm: Vec<f32>) -> Result<MoqAudioEncoderFinished, MoqError> {
 		let encoder = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		let finish = encoder.finish(&pcm)?;
-		Ok(MoqAudioEncoderFinish {
+		Ok(MoqAudioEncoderFinished {
 			discard_padding: finish.discard_padding() as u64,
 			packets: audio_packets(finish.into_packets()),
 		})

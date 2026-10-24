@@ -36,6 +36,9 @@ target, and `nix build .#moq-c` produces the release layout. A bare
 pkg-config file, and omits the OpenH264 software fallback unless given
 `--features openh264`.
 
+`moq-c` and the C++ package each link in their own copy of the Rust core, so a
+program links one of the two, never both.
+
 ## Connect
 
 ```c

@@ -14,7 +14,8 @@ mod kt
 mod swift
 mod go
 mod dart
-# The C++ package over moq-ffi.
+# The C and C++ packages over moq-ffi.
+mod c
 mod cpp
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'

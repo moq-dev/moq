@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### `MoqAudioEncoderFinish` is `MoqAudioEncoderFinished` (#6052)
+
+The record `MoqAudioEncoder::finish` returns is renamed, so its C name no longer collides with the method's.
+The wrappers' `EncoderFinish` aliases are unchanged.
+
 ### Video rendition preference
 
 `MoqVideo` gains `preference: i32`. Set it to `0` in record literals to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Regenerate bindings and rebuild them with the matching native library.

@@ -27,7 +27,7 @@ type EncoderInput = ffi.MoqAudioEncoderInput
 type Packet = ffi.MoqAudioPacket
 
 // EncoderFinish holds the packets Encoder.Finish drains and the padded samples to discard.
-type EncoderFinish = ffi.MoqAudioEncoderFinish
+type EncoderFinish = ffi.MoqAudioEncoderFinished
 
 // Preset is how the encoder trades latency for compression; a nil EncoderOutput.Preset is PresetBalanced.
 type Preset = ffi.MoqAudioPreset

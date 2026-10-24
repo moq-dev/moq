@@ -14,7 +14,3 @@ build. Nothing in the repository calls the hand-written ABI any more.
   hand-written ABI has only `moq_consume_video_enabled` (decided 2026-10-23).
 - Rewrite `doc/lib/c` around the generated API, including a sample that runs
   callbacks on the host's own loop through `moq_set_dispatcher`.
-
-## Required
-
-- [moq-c package](/quest/m1/c/package.md) - the package these consumers link

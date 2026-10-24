@@ -146,7 +146,7 @@ class QueryTests(unittest.TestCase):
     def test_platform_rust_change_rebuilds_external_consumers(self):
         self.change("rs/moq-net/src/lib.rs")
         result = self.platform()
-        for suite in ("rs", "swift", "cpp", "obs_compile", "needed"):
+        for suite in ("rs", "swift", "c", "cpp", "obs_compile", "needed"):
             self.assertEqual(result[suite], "true", suite)
         self.assertEqual(result["moq_sh"], "false")
 

@@ -9,7 +9,7 @@ from moq_ffi import (
     MoqAudioConsumer,
     MoqAudioDecoderOutput,
     MoqAudioEncoder,
-    MoqAudioEncoderFinish,
+    MoqAudioEncoderFinished,
     MoqAudioEncoderOutput,
     MoqAudioFrame,
     MoqAudioPacket,
@@ -30,7 +30,7 @@ from .types import AudioSampleFormat as SampleFormat
 Packet = MoqAudioPacket
 """One encoded payload from an :class:`Encoder`."""
 
-EncoderFinish = MoqAudioEncoderFinish
+EncoderFinish = MoqAudioEncoderFinished
 """The packets :meth:`Encoder.finish` drains and the padded samples to discard."""
 
 

@@ -20,7 +20,3 @@ From the 2026-10-22 security audit:
 Tests: a call refused before it starts fires no callback; a call whose work panics still delivers one terminal callback; freeing a pending task, including from inside another callback, delivers one cancelled callback.
 
 Public API: header documentation and a guaranteed terminal callback. Wire: none.
-
-## Required
-
-- [moq-c package](/quest/m1/c/package.md) - the generated C API this contract applies to

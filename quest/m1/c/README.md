@@ -64,6 +64,5 @@ requests internally and keeps its ABI, so that quest does not wait here.
 
 ## Required
 
-- [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
 - [Async failure contract](/quest/m1/c/async-failure-contract.md) - a generated async call that fails early fires no callback, and one that started always delivers its terminal callback

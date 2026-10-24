@@ -105,7 +105,7 @@ The `quest` binary comes from the kixelated/quest flake input and serves the que
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
+| `rs/moq-ffi` | `c/moq`, `{py,swift,kt,dart}/`, `go/wrapper/` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-auth` | `js/auth`, `doc/bin/relay/auth.md` |
@@ -113,7 +113,7 @@ The `quest` binary comes from the kixelated/quest flake input and serves the que
 | `rs/moq-relay` config/behavior | `doc/bin/relay/` |
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
-| `rs/moq-c` C ABI (`moq.h`) | `doc/lib/c` |
+| `c/moq` C API (`moq/moq.h`) | `doc/lib/c` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 
 Any wire-format change updates its matching IETF draft in the same PR, including framing, message fields, enum values, and version negotiation. Use the feature-specific draft for extensions and validate with `just drafts check`. See `drafts/AGENTS.md`.
