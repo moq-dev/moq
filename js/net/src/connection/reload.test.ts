@@ -7,11 +7,15 @@ import { SessionCode, SessionError, StreamCode, toTransport } from "../error.ts"
 import { Route } from "../hop.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { Stream } from "../stream.ts";
+import { Timescale } from "../time.ts";
 import { wireOf } from "../wire.ts";
+import type { Established } from "./established.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
+import { Connection, resetShared } from "./pool.ts";
 import { pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
@@ -544,6 +548,134 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		globalThis.WebTransport = original;
 	}
 });
+
+// Once enabled, hold the FIN acknowledgement of every group stream `transport` opens, after the
+// bytes and FIN reached the peer: a final group whose tail is still in flight.
+function holdFins(transport: MockTransport) {
+	const reached = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let enabled = false;
+	const create = transport.createUnidirectionalStream.bind(transport);
+	transport.createUnidirectionalStream = async (options) => {
+		const writer = (await create(options)).getWriter();
+		return new WritableStream<Uint8Array>({
+			write: (bytes) => writer.write(bytes),
+			abort: (reason) => writer.abort(reason),
+			async close() {
+				await writer.close();
+				if (!enabled) return;
+				reached.resolve();
+				await release.promise;
+			},
+		});
+	};
+	return {
+		reached: reached.promise,
+		enable: () => {
+			enabled = true;
+		},
+		release: release.resolve,
+	};
+}
+
+// Releasing the last handle is ordinary teardown, so a track that finished just before keeps its
+// final group, whether the session is serving or a predecessor still draining after a GOAWAY.
+// A page going away aborts: nothing would run to finish the drain.
+const teardowns = {
+	"release of the last handle": { drains: true, goaway: false, end: (handle: Connection) => handle.close() },
+	disable: { drains: true, goaway: false, end: (handle: Connection) => handle.enabled.set(false) },
+	"release after a GOAWAY": { drains: true, goaway: true, end: (handle: Connection) => handle.close() },
+	pagehide: {
+		drains: false,
+		goaway: false,
+		end: (_: Connection, win: EventTarget) => win.dispatchEvent(new Event("pagehide")),
+	},
+};
+
+for (const [name, teardown] of Object.entries(teardowns)) {
+	test(`teardown by ${name} ${teardown.drains ? "drains" : "aborts"} the session`, async () => {
+		const original = globalThis.WebTransport;
+		const previousWindow = globalThis.window;
+		const previousDocument = globalThis.document;
+		const win = new EventTarget();
+		const doc = Object.assign(new EventTarget(), { hidden: false });
+		Object.assign(globalThis, { window: win, document: doc });
+
+		// Only the first session matters: the subscription lives on it.
+		const url = new URL("https://example.com/");
+		const dials: { server: Promise<Established>; quic: WebTransport }[] = [];
+		const fin = { hold: undefined as ReturnType<typeof holdFins> | undefined, closed: false };
+		const stub = function StubWebTransport() {
+			const pair = createMockTransportPair(Lite.ALPN_06);
+			if (dials.length === 0) {
+				fin.hold = holdFins(pair.client);
+				void pair.client.closed.then(() => {
+					fin.closed = true;
+				});
+			}
+			dials.push({ server: accept(pair.server, url), quic: pair.server });
+			return pair.client;
+		};
+		globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+		// GOAWAY tuning takes a private loop; the rest share the pool, closing when the linger ends.
+		const handle = new Connection(
+			teardown.goaway
+				? { url, delay: { initial: Milli(0) }, goaway: { handover: Milli(60_000) } }
+				: { url, linger: Milli(0) },
+		);
+		await waitUntil(() => handle.origin.peek() !== undefined);
+		const origin = handle.origin.peek();
+		if (!origin) throw new Error("no origin");
+		const broadcast = origin.createBroadcast(Path.from("room"));
+		broadcast.announce();
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		await waitUntil(() => dials.length > 0);
+		const first = dials[0];
+		if (!first) throw new Error("no first dial");
+		const server = await first.server;
+		const remote = wireOf(server).consume(Path.from("room"));
+		const track = remote.track("video").subscribe().ordered();
+
+		try {
+			producer.appendGroup().writeFrame(textFrame("first"));
+			expect(await (await track.nextGroup())?.readString()).toBe("first");
+
+			if (teardown.goaway) {
+				const stream = await Stream.open(first.quic, { version: Lite.Version.DRAFT_06 });
+				await stream.writer.u53(Lite.StreamId.Goaway);
+				await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_06);
+				await waitUntil(() => dials.length === 2 && handle.status.peek() === "connected");
+			}
+
+			fin.hold?.enable();
+			const last = producer.appendGroup();
+			last.writeFrame(textFrame("last"));
+			last.close();
+			producer.close();
+			teardown.end(handle, win);
+
+			if (teardown.drains) {
+				expect(await (await track.nextGroup())?.readString()).toBe("last");
+				await fin.hold?.reached;
+				await settle();
+				expect(fin.closed).toBe(false);
+				fin.hold?.release();
+			}
+			await waitUntil(() => fin.closed);
+		} finally {
+			fin.hold?.release();
+			track.close();
+			remote.close();
+			handle.close();
+			resetShared();
+			for (const dial of dials) (await dial.server).abort();
+			broadcast.close();
+			globalThis.WebTransport = original;
+			Object.assign(globalThis, { window: previousWindow, document: previousDocument });
+		}
+	});
+}
 
 test("closing an announce consumer during upstream teardown does not append retractions", async () => {
 	const { Producer } = await import("../announced.ts");
