@@ -4,6 +4,7 @@
 use gst::glib;
 
 mod block;
+mod connection;
 mod sink;
 mod source;
 
