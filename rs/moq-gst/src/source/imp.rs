@@ -2021,7 +2021,7 @@ mod session_tests {
 		}
 		for err in [
 			moq_net::Error::Closed,
-			moq_net::Error::SessionClosed,
+			moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel)),
 			moq_net::Error::Cancel,
 		] {
 			assert!(super::source_lost(&err), "{err:?}");

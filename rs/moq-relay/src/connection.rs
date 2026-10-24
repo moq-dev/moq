@@ -30,7 +30,7 @@ impl From<auth::Error> for StatusError {
 /// publish/subscribe origins, and serve the session until it closes.
 ///
 /// The request is a moq-tokio [`Request`](moq_tokio::server::Request), or an
-/// [`Accepted`](crate::Accepted) session from any moq-net transport.
+/// in-memory accepted session when the `test-support` feature is enabled.
 pub struct Connection<R: Incoming = moq_tokio::server::Request> {
 	request: R,
 	lifecycle: Lifecycle,
@@ -427,11 +427,7 @@ pub(crate) fn failure(error: &moq_net::Error) -> Option<moq_net::stats::Failure>
 	use moq_net::stats::Failure;
 	use moq_net::{Error, SessionError};
 	match error {
-		Error::Cancel
-		| Error::Closed
-		| Error::GoingAway
-		| Error::SessionClosed
-		| Error::Session(SessionError::Cancel) => None,
+		Error::Cancel | Error::Closed | Error::GoingAway | Error::Session(SessionError::Cancel) => None,
 		Error::IdleTimeout => Some(Failure::IdleTimeout),
 		Error::Transport(_) => Some(Failure::Transport),
 		_ => Some(Failure::Application),
@@ -468,7 +464,6 @@ mod tests {
 			Error::Cancel,
 			Error::Closed,
 			Error::GoingAway,
-			Error::SessionClosed,
 			Error::Session(SessionError::Cancel),
 		] {
 			assert_eq!(failure(&error), None);
