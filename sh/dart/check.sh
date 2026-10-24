@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 DART_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../dart" && pwd)
 ACTION=check
 

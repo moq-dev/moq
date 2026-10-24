@@ -25,8 +25,9 @@ entry.
 - Finish `sh/obs/includes.sh` and its generated C++ package preparation before
   starting concurrent syntax checks. Preserve all source/test coverage,
   compiler flags, per-source diagnostics, and the aggregate failure result.
-- Take concurrency from the bound parallel modules and local admission share;
-  do not create a second scheduling policy or unbounded fanout.
+- Take concurrency from the bound parallel modules and the local admission in
+  `sh/local.sh` (`quest gate`); do not create a second scheduling policy or
+  unbounded fanout.
 - Verify a failing source makes the command fail, all sources are checked, and
   interruption reaps children. Compare serial and parallel runs on the same
   inputs, reporting header preparation separately from compilation.
@@ -34,7 +35,3 @@ entry.
 ## Required
 
 - [Run the queue's modules in parallel](/quest/m0/ci/parallel-modules.md) - decides whether OBS stays on the critical path, and owns the fanout bound
-
-## Related
-
-- [Share local check capacity](/quest/m0/ci/local-gate.md) - coordinate internal fanout with the shared local command budget

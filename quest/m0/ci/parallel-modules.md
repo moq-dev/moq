@@ -23,9 +23,7 @@ overlap the Rust build, an estimated 45% off those entries.
   before the Rust build finishes, and that cancellation leaves no module
   running. Decided 2026-10-23: this replaces a separate quest to move cheap
   checks ahead of builds in the serial loop.
+- Locally, `sh/local.sh` admits each expensive phase through `quest gate`
+  and defaults nextest to four workers; overlapping modules keep that bound.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Share local check capacity](/quest/m0/ci/local-gate.md) - the same fanout bound applies locally

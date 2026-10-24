@@ -18,6 +18,10 @@
 # only where obs.yml's path filter reaches; `just obs test` runs nightly.
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here/../../cpp/obs"
 

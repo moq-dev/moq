@@ -138,7 +138,8 @@ def run(action, plan):
         filters = [f"--filter={name}" for name, package in packages.items()
                    if verb in package["manifest"].get("scripts", {})]
         if filters:
-            command("bun", "run", *filters, "--elide-lines=0", verb)
+            concurrency = [] if os.environ.get("GITHUB_ACTIONS") == "true" else ["--sequential"]
+            command("bun", "run", *concurrency, *filters, "--elide-lines=0", verb)
 
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
@@ -205,6 +206,9 @@ def main():
     if action == "plan":
         print(json.dumps(plan, default=sorted))
     else:
+        if plan["packages"] and os.environ.get("GITHUB_ACTIONS") != "true" and os.environ.get("MOQ_LOCAL_SUPERVISED") != "1":
+            os.execvp("bash", ["bash", str(ROOT / "sh/local.sh"),
+                               sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
         started = time.monotonic()
         run(action, plan)
         print(f"js: {action} finished in {time.monotonic() - started:.2f}s", flush=True)

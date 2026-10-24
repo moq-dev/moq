@@ -21,7 +21,7 @@ class SelectTest(unittest.TestCase):
             just.chmod(0o755)
             changed = scratch / "changed"
             changed.write_text("\n".join(paths) + "\n")
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
+            env = dict(os.environ, MOQ_LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
                        SELECT_CALLS=str(calls), BASH_ENV=os.devnull,
                        GITHUB_ACTIONS=str(github_actions).lower())
             subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
@@ -108,7 +108,7 @@ class FeatureTest(unittest.TestCase):
             cargo = scratch / "cargo"
             cargo.write_text(CARGO_STUB)
             cargo.chmod(0o755)
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
+            env = dict(os.environ, MOQ_LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
                        FEATURE_CALLS=str(calls), BASH_ENV=os.devnull)
             result = subprocess.run(["bash", f"sh/rs/{owner}-features.sh", *args],
                                     cwd=ROOT, env=env, capture_output=True, text=True)
