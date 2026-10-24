@@ -5,8 +5,8 @@
 When `main` is cut into `release`, its public API is net smaller and harder
 to misuse than `release`'s. Every surface added since release has a consumer
 or is removed or made private. Overlapping operations are collapsed into one.
-Names mirror across Rust, JS, and the bindings. Every break has its
-`MIGRATE.md` entry.
+Names mirror across Rust, JS, and the bindings. Every break says how
+to migrate.
 
 Non-goals: redesigning surfaces that already have their own quest
 ([subscribe ranges](/quest/m1/subscribe-ranges/README.md),
@@ -38,8 +38,8 @@ Rules every child follows:
   reshapes it (the ordered track reader joins
   [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md); binding durations get
   [their own m2 quest](/quest/m2/ffi-durations.md)).
-- Each child lists its public API and wire impact in its PR and writes its
-  own `MIGRATE.md` entries.
+- Each child lists its public API and wire impact in its PR, and its Impact
+  bullet says how to migrate.
 
 Already gated elsewhere, so not children: the archive `Producer` and `Reader`
 disagree on layout while both claim version 2
@@ -71,7 +71,6 @@ Rejected in planning:
 - [The origin announces](/quest/m1/api-audit/announce-owner.md) - a broadcast producer cannot announce; the origin hands out the announcement, so `Prepared` and standalone broadcasts lose methods that always fail
 - [Unpublish what nothing uses](/quest/m1/api-audit/unpublish.md) - packages, features, and listeners with no consumer stop shipping or stop being on by default
 - [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone
-- [Binding connection state](/quest/m1/api-audit/binding-state.md) - one `state()` snapshot and `state_changed()` replace `status`, `connects`, and both `failure` polls
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - Rust and JS model exports without a consumer go private, wrong ones are deleted, and JS names mirror Rust
 - [One clean close](/quest/m1/api-audit/clean-close.md) - a clean session close has one spelling and failures are recorded inside moq-net
 - [Ranges refuse what the wire drops](/quest/m1/api-audit/ranges-wire.md) - relative and time anchors fail loud where a wire cannot carry them, `floor()` honors the subscription, and bindings take an optional max delay

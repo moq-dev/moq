@@ -4,12 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `flush` is gone; `jitter` and `delay` come from timestamps
-
-`catalog::Estimator::flush`, `container::Producer::flush`, `import::Track::flush`, and every codec importer's `flush` are removed: nothing reads the wall clock to measure jitter any more.
-Delete the calls.
-`jitter` now covers only reorder delay and batch spans, and `delay` is how far a frame's timestamp trails those another track of the same catalog already wrote, so importers advertise it too.
-
 ### TS service information expires on the program clock
 
 TS import retracts SI sub-tables and incomplete generations that stop repeating within their table's maximum interval (30 seconds for unknown tables).

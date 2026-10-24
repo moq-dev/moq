@@ -4,10 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `media.TrackProducer.Flush` is gone
+### Connection state
 
-The catalog no longer measures jitter from when a frame was written, so there is nothing to report after writing one.
-Delete the call; `delay` is measured from the order of the timestamps you write.
+`Dial` returns a connecting native client. Replace `Session.Status`, `Connects`, and `Failure` with `State()` and `StateChanged(ctx, state.Revision)`. `ConnectionState` carries `Phase`, `Connects`, `Failure`, and `Version`; `ConnectionPhase` replaces `ConnectionStatus`. Cancelling a state wait only cancels that wait. Cancel the session itself to stop its dial.
 
 ### Exact encoder rates and publication options
 

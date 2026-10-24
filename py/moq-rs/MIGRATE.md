@@ -4,10 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `media.TrackProducer.flush` is gone
+### Connection state
 
-The catalog no longer measures jitter from when a frame was written, so there is nothing to report after writing one.
-Delete the call; `delay` is measured from the order of the timestamps you write.
+Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
 
 ### Exact encoder rates and publication options
 

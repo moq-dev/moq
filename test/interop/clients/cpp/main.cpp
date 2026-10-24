@@ -258,7 +258,7 @@ int publish(
         // Only teardown waits on the FIFO; linger has already completed on its own clock.
         std::ifstream ack(finish_ack);
         std::string line;
-        if (!std::getline(ack, line) || line != "complete" || session->connects() != 1) {
+        if (!std::getline(ack, line) || line != "complete" || session->state().connects != 1) {
             fail("finish acknowledgement or session continuity failed");
         }
         ok(health->close(), "health close");
@@ -391,7 +391,7 @@ int subscribe(
             fail("health payload or timestamp");
         }
         if (until(group->read_frame(), read_deadline, "health group EOF") ||
-            until(track->next_group(), read_deadline, "health track EOF") || session->connects() != 1) {
+            until(track->next_group(), read_deadline, "health track EOF") || session->state().connects != 1) {
             fail("health EOF or session continuity");
         }
         std::printf("finish clean frames=%zu catalog=eof announce=end health=ok\n", frames);

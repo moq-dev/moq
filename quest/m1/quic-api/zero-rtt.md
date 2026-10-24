@@ -24,7 +24,7 @@ resumption itself if rustls tickets still shorten the 1-RTT handshake; only
 early data goes. Add a test that a peer's 0-RTT packets are dropped without
 closing the connection.
 
-MIGRATE entries in moq-quic, moq-tokio, and moq-uring.
+The Impact bullet says how to migrate in moq-quic, moq-tokio, and moq-uring.
 
 ## Required
 
