@@ -575,6 +575,11 @@ impl<S: Stream> Export<S> {
 		// its config record changes.
 		for track in &mut self.video {
 			if let Some(config) = catalog.video.renditions.get(&track.name) {
+				// A depth declared after the header deepens the shift, so its group's first DTS stays
+				// at or past zero. The shift never shrinks, so tag times keep increasing.
+				if self.header_emitted && track.flavor.has_composition_time() {
+					self.shift = self.shift.max(config.reorder.map_or(0, u32::from));
+				}
 				track.config = Some(config.clone());
 			}
 		}

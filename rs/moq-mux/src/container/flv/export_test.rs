@@ -1477,6 +1477,75 @@ async fn export_declared_reorder_decodes_each_group_from_its_frames() {
 	assert_eq!(video, [(0, 2), (1, 82)]);
 }
 
+/// A depth the catalog declares only after the header raises the shift for the groups it clocks,
+/// rather than put their first DTS before zero.
+#[tokio::test(start_paused = true)]
+async fn a_reorder_declared_after_the_header_raises_the_shift() {
+	use hang::catalog::{Container, H264, VideoConfig};
+	use moq_net::Timestamp;
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let video_track = producer.create_track(producer.unique_name(".avc1"), timed()).unwrap();
+	let name = video_track.name().to_string();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: false,
+	});
+	config.container = Container::Legacy;
+	config.description = Some(Bytes::from(avcc()));
+	catalog.modify().unwrap().video.renditions.insert(name.clone(), config);
+	let frame = |ms: u64, keyframe| crate::container::Frame {
+		timestamp: Timestamp::from_millis(ms).unwrap(),
+		duration: None,
+		payload: Bytes::from_static(if keyframe {
+			&[0, 0, 0, 1, 0x65]
+		} else {
+			&[0, 0, 0, 1, 0x41]
+		}),
+		keyframe,
+	};
+	let mut video = crate::container::Producer::new(
+		video_track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	video.write(frame(0, true)).unwrap();
+
+	let mut exporter = open_export(crate::source::announced(&consumer).await)
+		.await
+		.with_delay(RECORDING_MAX_DELAY)
+		.with_replay();
+	let mut exported = exporter.next().await.unwrap().expect("the header").to_vec();
+
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.get_mut(&name)
+		.unwrap()
+		.reorder = Some(2);
+	for (ms, keyframe) in [(1, true), (5, false), (3, false)] {
+		video.write(frame(ms, keyframe)).unwrap();
+	}
+	video.finish().unwrap();
+	catalog.finish().unwrap();
+	drain_until_idle(&mut exporter, &mut exported).await.unwrap().unwrap();
+
+	let video: Vec<_> = parse_tags(&exported)
+		.iter()
+		.filter(|tag| tag.tag_type == super::TAG_VIDEO && tag.body[1] == super::AVC_NALU)
+		.map(|tag| {
+			let pts = i64::from(tag.timestamp) + i64::from(super::read_i24(&tag.body[2..5]));
+			(tag.timestamp, pts)
+		})
+		.collect();
+	assert_eq!(video, [(0, 2), (1, 3), (2, 7), (3, 5)]);
+}
+
 /// Poll `exporter` into `out` until it ends or goes idle; `None` if it went idle.
 async fn drain_until_idle<S: crate::catalog::Stream>(
 	exporter: &mut Export<S>,
