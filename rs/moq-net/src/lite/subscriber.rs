@@ -7221,8 +7221,13 @@ impl ServeLoop {
 			true => request.request_start(None),
 			false => request,
 		};
-		let serving = request.accept(info);
+		// Marked received before any reader sees it, so none resolves an anchor this wire dropped.
+		let serving = request.stage(info);
 		serving.received();
+		if serve.subscriber.version.resolves_anchors() {
+			serving.anchored();
+		}
+		let serving = serving.commit();
 		Self {
 			edge: serving.consume(),
 			largest: None,
