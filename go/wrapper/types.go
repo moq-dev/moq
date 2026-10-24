@@ -23,8 +23,8 @@ type (
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
 	// AudioFrame is one audio frame: PCM payload plus a presentation timestamp in microseconds.
 	AudioFrame = ffi.MoqAudioFrame
-	// ConnectionStatus is a connection lifecycle transition reported by Session.Status.
-	ConnectionStatus = ffi.MoqConnectionStatus
+	// ConnectionPhase is a connection lifecycle transition reported by Session.State.
+	ConnectionPhase = ffi.MoqConnectionPhase
 	// CongestionControl is the congestion control family for a QUIC connection.
 	CongestionControl = ffi.MoqCongestionControl
 	// ErrorScope is whether a protocol code is from the session or stream registry.
@@ -35,7 +35,9 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// Route is the publisher Epoch a broadcast is announced under (nil when unknown), the hop chain it takes to reach an origin, and its static production and link cost (lower wins).
+	// AnnounceRoute is how a broadcast advertises its exact path: its static production Cost (lower wins) and the publisher Epoch it serves (nil when unknown).
+	AnnounceRoute = ffi.MoqAnnounceRoute
+	// Route is an observed route: the publisher Epoch it serves (nil when unknown), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
@@ -80,7 +82,7 @@ type (
 	VideoPixelFormat = ffi.MoqVideoPixelFormat
 	// VideoEncoderInput declares the pixel layout, resolution, and framerate of frames written to a video producer.
 	VideoEncoderInput = ffi.MoqVideoEncoderInput
-	// VideoEncoderOutput configures the video track name, codec, bitrate, keyframe interval, and backend preference.
+	// VideoEncoderOutput configures the video codec, bitrate, keyframe interval, and backend preference.
 	VideoEncoderOutput = ffi.MoqVideoEncoderOutput
 	// VideoFrame is one raw video frame: pixels in the configured layout plus a presentation timestamp in microseconds.
 	VideoFrame = ffi.MoqVideoFrame
@@ -157,14 +159,18 @@ const (
 	OrderDescending = ffi.MoqOrderDescending
 )
 
-// ConnectionStatus values: the lifecycle of a client session's connection.
+// ConnectionPhase values: the lifecycle of a client session's connection.
 const (
-	// ConnectionStatusConnected means a session connected (the first connect, or a reconnect after a drop).
-	ConnectionStatusConnected = ffi.MoqConnectionStatusConnected
-	// ConnectionStatusDisconnected means the session dropped; a reconnect attempt follows.
-	ConnectionStatusDisconnected = ffi.MoqConnectionStatusDisconnected
-	// ConnectionStatusMigrating means the peer sent a GOAWAY; the replacement is being dialed while the old session keeps serving.
-	ConnectionStatusMigrating = ffi.MoqConnectionStatusMigrating
+	// ConnectionPhaseConnecting means no session has connected yet.
+	ConnectionPhaseConnecting = ffi.MoqConnectionPhaseConnecting
+	// ConnectionPhaseClosed means the connection has stopped for good.
+	ConnectionPhaseClosed = ffi.MoqConnectionPhaseClosed
+	// ConnectionPhaseConnected means a session connected (the first connect, or a reconnect after a drop).
+	ConnectionPhaseConnected = ffi.MoqConnectionPhaseConnected
+	// ConnectionPhaseDisconnected means the session dropped; a reconnect attempt follows.
+	ConnectionPhaseDisconnected = ffi.MoqConnectionPhaseDisconnected
+	// ConnectionPhaseMigrating means the peer sent a GOAWAY; the replacement is being dialed while the old session keeps serving.
+	ConnectionPhaseMigrating = ffi.MoqConnectionPhaseMigrating
 )
 
 // CongestionControl values.
@@ -194,7 +200,7 @@ func LogLevel(level string) error {
 }
 
 // MintEpoch mints a fresh publisher epoch from the wall clock and secure randomness,
-// ordered newest last. Mint one per publisher run and announce it in Route.Epoch, so
+// ordered newest last. Mint one per publisher run and announce it in AnnounceRoute.Epoch, so
 // viewers see a restart as a new broadcast instead of a stalled one.
 func MintEpoch() string {
 	return ffi.MoqMintEpoch()

@@ -75,8 +75,8 @@ Decided with the maintainer on 2026-10-22:
 
 Public API: additive. It adds `moq_mux::rate::Control::deadline`, a way to
 report a failed apply, and an async-gated `sleep_until` re-export in
-`moq_net::time`. Add a `MIGRATE.md` entry only if an existing signature
-changes. Wire: none. Cover the
+`moq_net::time`. Mark it breaking, saying how to migrate, only if an existing
+signature changes. Wire: none. Cover the
 attack-then-recovery case with paused time in the moq-mux unit tests. Cover
 it again on one caller's loop to prove the timer arm wakes without a grant
 change.

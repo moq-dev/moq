@@ -5,7 +5,8 @@
  * that comes from npm rather than this checkout). Runs under both node and bun.
  * Connect, wait for a .hang catalog with video and audio, read video through the
  * same container consumer the browser player uses until a non-empty frame arrives,
- * and decode the first --audio-ms of audio to --audio-out for tone.py to judge.
+ * and decode the first --audio-ms of every audio rendition to --audio-out.<codec> for
+ * tone.py to judge.
  * Neither runtime has WebCodecs, so audio decodes through `@moq/hang`'s libav
  * fallback, as a player under them would. Exits 0 once both are done (1 on
  * timeout). Subscribe-only: publishing media needs a WebCodecs encoder a native
@@ -19,7 +20,9 @@
  *
  * @module
  */
+
 import { writeFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
@@ -29,6 +32,7 @@ import { Hex, Libav } from "@moq/hang/util";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
+import { readFinish } from "./finish";
 
 // globalThis.WebTransport = the polyfill (no-op if a native one already exists).
 // @moq/net's connect() reads globalThis.WebTransport at call time, so this just
@@ -53,6 +57,8 @@ const { positionals, values } = parseArgs({
 		broadcast: { type: "string" },
 		timeout: { type: "string", default: "20" },
 		version: { type: "string" },
+		finish: { type: "boolean", default: false },
+		frames: { type: "string", default: "10" },
 		"audio-out": { type: "string" },
 		"audio-ms": { type: "string" },
 	},
@@ -61,6 +67,8 @@ const { positionals, values } = parseArgs({
 const role = positionals[0];
 const url = values.url;
 const broadcast = values.broadcast;
+const frames = Number(values.frames);
+if (!Number.isSafeInteger(frames) || frames <= 0) throw new Error("frames must be a positive integer");
 const audioOut = values["audio-out"];
 const audioMs = Number.parseInt(values["audio-ms"] ?? "", 10);
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
@@ -68,13 +76,12 @@ if (
 	role !== "subscribe" ||
 	!url ||
 	!broadcast ||
-	!audioOut ||
-	!(audioMs > 0) ||
+	(!values.finish && (!audioOut || !(audioMs > 0))) ||
 	!Number.isFinite(timeoutMs) ||
 	timeoutMs <= 0
 ) {
 	console.error(
-		"usage: subscribe.ts subscribe --url U --broadcast B --audio-out PREFIX --audio-ms MS [--timeout S>0] [--version V]",
+		"usage: subscribe.ts subscribe --url U --broadcast B (--audio-out PREFIX --audio-ms MS | --finish [--frames N]) [--timeout S>0] [--version V]",
 	);
 	process.exit(2);
 }
@@ -84,15 +91,15 @@ if (
 // rendition in a later update, so keep reading until one has both video and audio.
 async function catalog(
 	bc: Moq.Broadcast.Consumer,
-): Promise<{ video: [string, Catalog.VideoConfig]; audio: [string, Catalog.AudioConfig] }> {
+): Promise<{ video: [string, Catalog.VideoConfig]; audio: [string, Catalog.AudioConfig][] }> {
 	const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
 	for (;;) {
 		const root = (await catalog.latest())?.value;
 		if (!root) throw new Error("catalog ended without a video and an audio track");
 		const video = Object.entries(root.video?.renditions ?? {})[0];
-		const audio = Object.entries(root.audio?.renditions ?? {})[0];
-		if (video && audio) return { video, audio };
+		const audio = Object.entries(root.audio?.renditions ?? {});
+		if (video && audio.length) return { video, audio };
 	}
 }
 
@@ -125,7 +132,11 @@ async function video(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.V
 	throw new Error("no frame data received");
 }
 
-/** Decode the first {@link audioMs} of the rendition to `{audioOut}.{txt,pcm}`, the layout tone.py reads. */
+/**
+ * Decode the first {@link audioMs} of the rendition to `{audioOut}.{codec}.{txt,pcm}`, the layout tone.py
+ * reads. The codec is the catalog's up to its first `.` (`opus`, `mp4a`). The files are created exclusively,
+ * so two renditions of one codec fail rather than overwrite each other.
+ */
 async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.AudioConfig): Promise<void> {
 	const channels = config.numberOfChannels;
 	const want = (audioMs * config.sampleRate) / 1000;
@@ -199,10 +210,12 @@ async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.A
 	}
 	if (failed) throw failed;
 
-	writeFileSync(`${audioOut}.txt`, `${log.join("\n")}\n`);
+	const out = `${audioOut}.${config.codec.split(".")[0]}`;
+	writeFileSync(`${out}.txt`, `${log.join("\n")}\n`, { flag: "wx" });
 	writeFileSync(
-		`${audioOut}.pcm`,
+		`${out}.pcm`,
 		Buffer.concat(pcm.map((samples) => Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength))),
+		{ flag: "wx" },
 	);
 }
 
@@ -230,6 +243,17 @@ async function run(): Promise<void> {
 	const unwatch = connection.auth.grant.subscribe(printGrant);
 	let requested: Moq.Origin.Requesting | undefined;
 	try {
+		if (values.finish) {
+			console.error("finish reader ready");
+			const input = createInterface({ input: process.stdin });
+			try {
+				if ((await input.question("")) !== "read") throw new Error("expected finish read release");
+			} finally {
+				input.close();
+			}
+			console.error(await readFinish(origin, broadcast as string, frames, Milli(timeoutMs)));
+			return;
+		}
 		const path = Moq.Path.from(broadcast as string);
 		requested = origin.request(path, { announced: true });
 		let bc = requested.active.peek();
@@ -239,12 +263,17 @@ async function run(): Promise<void> {
 		}
 
 		const renditions = await catalog(bc);
-		const [bytes] = await Promise.all([video(bc, ...renditions.video), audio(bc, ...renditions.audio)]);
+		const [bytes] = await Promise.all([
+			video(bc, ...renditions.video),
+			...renditions.audio.map((rendition) => audio(bc, ...rendition)),
+		]);
 		// The harness judges success by this marker, not the exit code: the
 		// @moq/web-transport NAPI addon can segfault during the runtime's exit
 		// teardown after a frame has arrived (an upstream bug, seen under bun),
 		// which would turn a real success into a signal exit.
-		console.error(`received ${bytes} bytes and ${audioMs}ms of audio from ${broadcast}`);
+		console.error(
+			`received ${bytes} bytes and ${audioMs}ms of ${renditions.audio.length} audio renditions from ${broadcast}`,
+		);
 	} finally {
 		unwatch();
 		requested?.close();
@@ -257,7 +286,7 @@ async function run(): Promise<void> {
 }
 
 const timeout = new Promise<never>((_, reject) =>
-	setTimeout(() => reject(new Error("timed out waiting for data")), timeoutMs),
+	setTimeout(() => reject(new Error("timed out waiting for data")), timeoutMs * (values.finish ? 2 : 1)),
 );
 
 try {

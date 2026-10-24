@@ -1,7 +1,9 @@
-//! A shared byte budget for cached groups, repaid by write-time eviction.
+//! A shared byte budget for cached groups and buffered datagrams, repaid by write-time eviction.
 //!
 //! Every group charges its cached bytes into a [`Pool`] through a crate-internal
-//! `Charge`, billed to its track's `Track` account. The pool itself never evicts: it is
+//! `Charge`, billed to its track's `Track` account. A track's datagram send buffer bills
+//! each datagram it holds the same way, both payload forms of a compressed one included,
+//! and pays debt by dropping its oldest once the groups' payment falls short. The pool itself never evicts: it is
 //! a handful of atomic counters. While the pool is over capacity, each track accrues
 //! eviction debt as it writes (`accrue`),
 //! sized proportionally to what it wrote, and pays that debt by aborting its own oldest
@@ -38,9 +40,10 @@
 //! [`DEFAULT_EXPIRY`], while a relay creates one configured pool and shares it across
 //! every origin so the whole process caches into a single policy.
 
+use crate::sync::Mutex;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
+use std::sync::{Arc, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};
 use std::time::Duration;
 
@@ -120,10 +123,10 @@ impl Config {
 
 /// A shared cache policy and byte budget; cloning shares both.
 ///
-/// The pool tracks how many payload bytes are cached across every registered group,
-/// plus the mean last-access time of the evictable ones. It never evicts on its own:
-/// tracks accrue eviction debt as they write and evict their own oldest groups to
-/// pay it. Idle expiration runs during [`Self::gc`]. The capacity is
+/// The pool tracks how many payload bytes are cached across every registered group and
+/// datagram buffer, plus the mean last-access time of the evictable groups. It never
+/// evicts on its own: tracks accrue eviction debt as they write and evict their own
+/// oldest groups and datagrams to pay it. Idle expiration runs during [`Self::gc`]. The capacity is
 /// therefore a target usage converges toward, not a hard limit: carried debt, capped
 /// payments, and the always-protected live edge all let usage transiently exceed it.
 #[derive(Clone)]
@@ -240,7 +243,7 @@ impl Pool {
 		}
 	}
 
-	/// Bytes currently cached across every registered group.
+	/// Bytes currently cached across every registered group and datagram buffer.
 	pub fn used(&self) -> u64 {
 		self.inner.used.load(Ordering::Relaxed)
 	}
@@ -391,7 +394,8 @@ impl Pool {
 			first = self.inner.wall_epoch.get().is_none();
 			let epoch = *self.inner.wall_epoch.get_or_init(|| now);
 			let micros = u64::try_from(now.duration_since(epoch).as_micros()).unwrap_or(u64::MAX);
-			self.inner.wall_micros.fetch_max(micros, Ordering::Relaxed);
+			// The clock lock already orders drivers and clamps their supplied time.
+			self.inner.wall_micros.store(micros, Ordering::Relaxed);
 			if self.sweep_interval().is_none() {
 				clock.sweep = None;
 			} else if sweep && clock.sweep.is_none_or(|at| at <= now) {
@@ -404,36 +408,45 @@ impl Pool {
 			let mut undriven = self.inner.wall.lock().undriven.take();
 			undriven.wake();
 		}
-		let wall = self.release_due(self.now_wall(), driver);
+		let wall = self.release_due(driver);
 		next.into_iter().chain(wall).min()
 	}
 
-	/// Wake every read parked on a wall-clock deadline at or before `now`, returning the
+	/// Wake every read whose wall-clock deadline has passed, returning the
 	/// earliest left and registering `driver` to hear of an earlier one.
-	fn release_due(&self, now: crate::time::Instant, driver: Option<&kio::Waiter>) -> Option<crate::time::Instant> {
+	fn release_due(&self, driver: Option<&kio::Waiter>) -> Option<crate::time::Instant> {
+		let mut wall = self.inner.wall.lock();
+		if wall.due.is_empty() {
+			if let Some(driver) = driver {
+				driver.register(&mut wall.drivers);
+			}
+			return None;
+		}
+		// With no parked read there is nothing to age. Otherwise the ambient clock
+		// still matters, even when a caller supplies an instant behind its deadline.
+		// Keep one sample across tracks that rearm while this pass releases them.
+		let now = self.now_wall();
 		loop {
-			let due: Vec<_> = {
-				let mut wall = self.inner.wall.lock();
-				let mut due = Vec::new();
-				while let Some(entry) = wall.due.first_entry()
-					&& entry.key().0 <= now
-				{
-					due.push(entry.remove());
+			let mut due = Vec::new();
+			while let Some(entry) = wall.due.first_entry()
+				&& entry.key().0 <= now
+			{
+				due.push(entry.remove());
+			}
+			if due.is_empty() {
+				if let Some(driver) = driver {
+					driver.register(&mut wall.drivers);
 				}
-				if due.is_empty() {
-					if let Some(driver) = driver {
-						driver.register(&mut wall.drivers);
-					}
-					return wall.due.first_key_value().map(|((at, _), _)| *at);
-				}
-				due
-			};
+				return wall.due.first_key_value().map(|((at, _), _)| *at);
+			}
+			drop(wall);
 			// Outside the lock: a track re-arms its next deadline here.
 			for track in due.iter().filter_map(Weak::upgrade) {
 				if let Some(next) = track.wakes.release_wall(now) {
 					self.schedule(next, None, &track);
 				}
 			}
+			wall = self.inner.wall.lock();
 		}
 	}
 
@@ -736,6 +749,11 @@ impl Track {
 		}
 	}
 
+	/// The greatest location written or reported, without waiting.
+	pub(super) fn largest(&self) -> Option<Position> {
+		self.largest.read().position
+	}
+
 	/// Whether the largest group's content may still grow; see [`Self::finish_largest`].
 	pub(super) fn largest_open(&self) -> bool {
 		self.largest.read().open
@@ -887,6 +905,17 @@ impl Track {
 		})
 	}
 
+	/// Bill `bytes` of a buffered datagram, which accrue eviction debt like a group's frames.
+	pub(super) fn bill(self: &Arc<Self>, bytes: u64) -> Bill {
+		self.pool.add(bytes);
+		self.written.fetch_add(bytes, Ordering::Relaxed);
+		Bill {
+			track: self.clone(),
+			bytes,
+			at: self.pool.now(),
+		}
+	}
+
 	/// Take everything written since the last call, to be turned into eviction debt.
 	pub(super) fn take_written(&self) -> u64 {
 		self.written.swap(0, Ordering::Relaxed)
@@ -926,7 +955,7 @@ impl Track {
 		// its teardown on its own clone count rather than the state's.
 		let Some(state) = self.state.upgrade() else {
 			// An ended track's channel is closed, but a stale consumer can still hold its
-			// groups: the sweep expires them in place, or they would never go.
+			// groups and datagrams: the sweep expires them in place, or they would never go.
 			if full && scan_expiry {
 				self.state.read(|state| state.expire_closed(state.expiry_scan_drain()));
 			}
@@ -997,7 +1026,8 @@ impl Drop for Track {
 	}
 }
 
-/// The bytes a held head of a failed group bills to its track's pool, released on drop.
+/// The bytes a held head of a failed group or a buffered datagram bills to its track's
+/// pool, released on drop.
 pub(super) struct Bill {
 	track: Arc<Track>,
 	bytes: u64,
@@ -1006,6 +1036,11 @@ pub(super) struct Bill {
 }
 
 impl Bill {
+	/// What it bills the pool.
+	pub(super) fn bytes(&self) -> u64 {
+		self.bytes
+	}
+
 	/// Whether the pool's idle window passed since it was billed.
 	pub(super) fn expired(&self) -> bool {
 		let pool = &self.track.pool;
@@ -1337,6 +1372,52 @@ mod test {
 		assert!(!read.0.load(Ordering::SeqCst), "released early");
 		assert_eq!(pool.gc(at, &driving), None);
 		assert!(read.0.load(Ordering::SeqCst), "the read was never released");
+	}
+
+	/// A fresh driver must hear deadlines armed after an empty collection, including
+	/// after the previous driver was dropped or a prior deadline drained its wake list.
+	#[test]
+	fn replacement_drivers_hear_new_deadlines() {
+		let pool = Pool::unbounded();
+		let now = super::super::clock::wall();
+		pool.gc(now, &kio::Waiter::noop());
+		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let (read, reading) = flag();
+		let (driver, driving) = flag();
+		assert_eq!(pool.gc(now, &driving), None);
+		let at = now + Duration::from_secs(1);
+		track.watch_wall(at, &reading);
+		assert!(driver.0.swap(false, Ordering::SeqCst));
+		assert_eq!(pool.gc(at, &driving), None);
+		assert!(read.0.swap(false, Ordering::SeqCst));
+		track.watch_wall(at + Duration::from_secs(1), &reading);
+		assert!(driver.0.load(Ordering::SeqCst), "the drained list was never rearmed");
+	}
+
+	/// Wall time can lead a lagging driver's sample, while another driver can supply
+	/// future time. Neither a new driver nor a backward sample may rewind expiration.
+	#[moq_clock::test]
+	async fn wall_deadlines_use_the_later_of_ambient_and_driven_time() {
+		let pool = Pool::unbounded();
+		let now = moq_clock::now();
+		let waiter = kio::Waiter::noop();
+		pool.gc(now, &waiter);
+		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let (read, reading) = flag();
+		let at = now + Duration::from_secs(1);
+		track.watch_wall(at, &reading);
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(pool.gc(now, &waiter), None);
+		assert!(read.0.swap(false, Ordering::SeqCst), "ambient time was ignored");
+
+		let future = at + Duration::from_secs(1);
+		track.watch_wall(future, &reading);
+		assert_eq!(pool.gc(future, &waiter), None);
+		assert!(read.0.swap(false, Ordering::SeqCst), "driven time was ignored");
+		let tick = pool.now();
+		pool.gc(now, &waiter);
+		assert_eq!(pool.now_wall(), future);
+		assert_eq!(pool.now(), tick);
 	}
 
 	/// A track indexes one wall-clock deadline, its earliest, and takes it along when dropped.

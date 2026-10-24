@@ -404,7 +404,7 @@ impl Publish {
 	/// unless their caller explicitly identifies the frame as encoder output.
 	pub fn media_flush(&mut self, media: Id, timestamp: hang::container::Timestamp) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-		track.flush(timestamp, moq_net::time::now())?;
+		track.flush(timestamp, moq_net::time::Instant::now())?;
 		Ok(())
 	}
 
@@ -956,9 +956,9 @@ impl Publish {
 	/// state; a late joiner only sees the newest value. The catalog entry (`json.tracks.<name>`,
 	/// `mode: snapshot`) is written now and retired when the track finishes or fails.
 	///
-	/// With deltas on, the track carries a refresh ratio of 8: a joiner that would download more
-	/// than eight snapshots' worth of deltas gets the value restated in a fresh group, by a task
-	/// that runs until the track is finished.
+	/// With deltas on, the track carries a refresh ratio of 8: a join after more than eight
+	/// snapshots' worth of deltas asks for the value restated in a fresh group, which a task
+	/// answers until the track is finished.
 	pub fn json_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::json::Config) -> Result<Id, Error> {
 		let refresh = config.deltas.then_some(8);
 		let data = self.data_track(broadcast, name, refresh, |catalog, track| {

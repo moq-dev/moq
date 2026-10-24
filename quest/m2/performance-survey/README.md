@@ -152,15 +152,15 @@ No duplicate quest or workflow edit belongs here.
   copying/resource growth, CMAF allocation abuse, media reorder queues,
   watch teardown, and HLS contract investigations. MKV fragmentation below
   concerns parser replay before those queues; recheck that PR before coding.
-- [Binding bytes](/quest/m2/ffi-bytes.md),
-  [foreign polling](/quest/m2/ffi-poll-protocol.md),
-  [Kotlin calls](/quest/m2/kt-ffi-calls.md),
+- [Binding bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md),
+  [foreign polling](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
+  [Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md),
   [NVENC pooling](/quest/m2/nvenc-pool.md), and
   [watch worker planning](/quest/m2/plan-watch-worker.md) retain their scopes.
 - [Route wakes](/quest/m2/route-wakes.md),
   [keyed prefix polling](/quest/m2/keyed-prefix-polling.md), and
   [front parking](/quest/m2/origin-front-parks.md) own discovery scans/wakes.
-- The [recurring audit](/quest/m1/audit-perf.md) retains real congestion-
+- The [recurring audit](/quest/m2/audit-perf.md) retains real congestion-
   controller/loss-recovery coverage, broader importer/container coverage,
   and publish Fanout/audio-ring profiling. QUIC protocol microbenchmarks use
   `Unlimited`; their numbers cannot establish controller performance. Expand
@@ -196,6 +196,6 @@ No duplicate quest or workflow edit belongs here.
 
 ## Related
 
-- [Performance audit](/quest/m1/audit-perf.md) - nightly regression attribution and remaining coverage
+- [Performance audit](/quest/m2/audit-perf.md) - nightly regression attribution and remaining coverage
 - [Benchmark sources](/quest/m2/bench-sources.md) - publishing existing measurements to the trend table
-- [Nightly comparisons](/quest/m1/bench-ci.md) - paired nightly regression reporting
+- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - noise floor of the paired nightly regression report

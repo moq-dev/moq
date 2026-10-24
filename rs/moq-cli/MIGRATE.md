@@ -4,14 +4,13 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
+
+Enable `nvidia` instead; the old names were aliases for it.
+
 ### Iroh is opt-in
 
 The default source-build features no longer include `iroh`. Add `--features iroh` when building a binary that must use Iroh endpoints.
-
-### Non-restartable exports refuse linger
-
-`export fmp4`, `mkv`, `flv`, `h264`, and `h265` refuse a nonzero `--linger` that release accepted.
-Drop the option or pass `--linger 0s`; use `export ts` or `export srt` when a restart must be marked in the output.
 
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 

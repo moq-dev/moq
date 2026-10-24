@@ -70,6 +70,13 @@ pinning a generated self-signed certificate.
 `Client.Session().Stats()` returns a connection stats snapshot. Fields are nil
 when the transport backend does not report that metric yet.
 
+An encoder you manage can claim a share of `Client.Session().Bandwidth()` with
+`Reserve(demand, maxBps)`, using the track's `Demand()`. Keep one reservation and change its ceiling
+with `Update(maxBps)`. Call `Update(0)` before abandoning or replacing it to
+return its share and automatic probe ceiling immediately, even while the track
+stays subscribed. A later update can resume the same claim. While the track
+stays open, dropping the Go reference alone leaves release to garbage collection.
+
 Incoming server requests expose the query-free `Path()` before `Accept()`. It
 is consistent across transports and returns an empty string for the root or
 missing path. `Query()` returns the encoded query and may contain credentials.
@@ -100,9 +107,11 @@ Import it under an alias next to `encoding/json`. Each type wraps a track:
 `NewSnapshotProducer` / `NewStreamProducer` take over a `TrackProducer` and advertise it
 in the broadcast's catalog, and `NewSnapshotConsumer` / `NewStreamConsumer` take over a
 `TrackConsumer` that has not read a group yet. Snapshots carry lossy latest state; streams
-carry every record in order. Producers accept any `encoding/json` value; consumers return
+carry every record in order. `NewWindowProducer` / `NewWindowConsumer` carry a sliding window
+of records a reader can join at any point; the catalog has no window mode, so the producer
+takes only the track. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
-`Update` / `Append` take a final `*time.Duration` on the broadcast clock; nil publishes untimed.
+`Update` / `Append` / `Push` / `Pop` take a final `*time.Duration` on the broadcast clock; nil publishes untimed.
 Raw tracks with a nil timescale are untimed; timed tracks require matching timestamps.
 `media.CatalogProducer.Now()` samples and fixes the catalog clock for explicit local-event stamps.
 `moq.dev/moq/flate` provides the matching snapshot and stream producers for opaque bytes.

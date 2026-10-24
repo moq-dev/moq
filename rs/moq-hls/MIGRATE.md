@@ -4,10 +4,34 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Denied broadcast references report authorization failure
+
+A rendition whose referenced broadcast is outside the source origin's scope now
+returns `Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized))` from
+playlist (ranged too), init and segment reads, and from the segment cursor,
+instead of behaving like missing media.
+`Broadcaster::ready` and `Rendition::playable` settle on that refusal. Embedders
+should answer it with an uncacheable 403; the HTTP server does so automatically.
+Allowed renditions keep serving, and missing or disconnected media remains 404.
+
+### A failed timeline fails the segment cursor
+
+`export::segments::Consumer::next` returns `Err(Error::TimelineFailed { .. })` once a failed timeline's covered segments drain, instead of `Ok(None)`.
+`Ok(None)` now means only a clean end, so finalize a recording there, and mark it truncated on the error.
+
+```rust
+match cursor.next().await {
+	Ok(Some(segment)) => { /* store it */ }
+	Ok(None) => { /* complete: finalize the recording */ }
+	Err(Error::TimelineFailed { .. }) => { /* truncated: every later call fails the same */ }
+	Err(err) => { /* a fetch failed: call next() again to retry it */ }
+}
+```
+
 ### Segment requests carry a timeline reference
 
 `export::Rendition::segment(n)` is `segment(tag, n)`. Use the tag in the playlist segment URI instead of choosing one locally.
-Segment URLs change from `seg/{n}.m4s` to `seg/{tag}.{n}.m4s`, so route the tag and sequence separately to `segment`.
+Media playlist segment URIs gain the tag before the number, after any generation prefix: `seg/{n}.m4s` becomes `seg/{tag}.{n}.m4s`. Route the tag and number separately to `segment`.
 
 ### HLS import unwraps fMP4 to Legacy (#6250)
 
@@ -17,12 +41,19 @@ Set `import::Config::passthrough` to keep publishing CMAF.
 ### An ended playlist ends the import
 
 `import::Import::run` returns `Ok(())` once every rendition's playlist carries `EXT-X-ENDLIST` and its last segment is imported, instead of polling forever.
+A playlist that has already ended (`EXT-X-ENDLIST`) when a rendition first sees it is refused with the new `Error::PlaylistEnded`, from `init` and `run` alike, instead of importing its last three segments.
 Call `Import::finish` then, and keep the returned `broadcast::Finish` (or await `Finish::wait`) so subscribers still catching up drain the tail.
 
 ```rust
 import.run().await?;
 import.finish()?.wait().await;
 ```
+
+### A timestamp rewind ends the import (#6426)
+
+`import::Import::init` and `run` fail with the new `Error::Rewind` when a rendition's timestamps go backwards, such as a reset at an `EXT-X-DISCONTINUITY` under the same `EXT-X-MAP`.
+`run` used to retry it, then evict the rendition and rejoin it as fresh tracks.
+Treat the error as final and import the restarted source as a new broadcast.
 
 ### A failed timeline fails its listings
 

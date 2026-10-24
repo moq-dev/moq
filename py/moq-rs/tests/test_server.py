@@ -32,6 +32,13 @@ def opus_head() -> bytes:
     )
 
 
+async def wait_phase(session: moq.Session, phase: moq.ConnectionPhase) -> moq.ConnectionState:
+    state = session.state()
+    while state.phase != phase:
+        state = await asyncio.wait_for(session.state_changed(state.revision), timeout=10)
+    return state
+
+
 async def test_server_client_roundtrip():
     """Server publishes a broadcast; a client connects and receives a frame."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
@@ -125,8 +132,9 @@ async def test_client_reconnects_and_resumes_announcements():
             ) as client:
                 session = client.session
                 assert session is not None
-                assert await session.status() == moq.ConnectionStatus.CONNECTED
-                assert session.failure() is None
+                state = await wait_phase(session, moq.ConnectionPhase.CONNECTED)
+                assert state.connects == 1
+                assert session.state().failure is None
                 assert session.stats().version is not None
 
                 # Kill the transport under the client, like a relay restart.
@@ -135,16 +143,16 @@ async def test_client_reconnects_and_resumes_announcements():
 
                 # Nothing accepts the redial until the gate opens, so DISCONNECTED
                 # is still the current status when we ask for it.
-                assert await asyncio.wait_for(session.status(), timeout=10) == moq.ConnectionStatus.DISCONNECTED
+                state = await wait_phase(session, moq.ConnectionPhase.DISCONNECTED)
                 # The drop's reason is recorded before the status moves.
-                assert session.failure() is not None
+                assert session.state().failure is not None
                 assert session.stats().version is None
 
                 # The client redials on its own; the accept loop serves it.
                 regate.set()
-                while await asyncio.wait_for(session.status(), timeout=10) != moq.ConnectionStatus.CONNECTED:
-                    pass
-                assert session.failure() is None
+                state = await wait_phase(session, moq.ConnectionPhase.CONNECTED)
+                assert state.connects == 2
+                assert session.state().failure is None
 
                 # A broadcast published only after the reconnect still arrives.
                 broadcast = server.create_broadcast("after-reconnect")
@@ -161,9 +169,8 @@ async def test_client_reconnects_and_resumes_announcements():
                 pass
 
 
-async def test_client_failure_names_a_failing_first_dial():
-    """A first dial that keeps failing never finishes ``async with``, so
-    ``Client.failure`` is the only place its reason shows while it retries."""
+async def test_session_state_names_a_failing_first_dial():
+    """A first dial returns a session whose state reports each failed attempt."""
     import socket
 
     # A socket that never answers holds the port, so each dial times out.
@@ -183,24 +190,17 @@ async def test_client_failure_names_a_failing_first_dial():
                 timeout=timedelta(0),
             ),
         )
-        assert client.failure() is None
-
-        enter = asyncio.create_task(client.__aenter__())
-        try:
-
-            async def failure() -> moq.Error:
-                while (err := client.failure()) is None:
-                    await asyncio.sleep(0.01)
-                return err
-
-            err = await asyncio.wait_for(failure(), timeout=10)
-            assert isinstance(err, moq.Error.Connect)  # type: ignore[attr-defined]
-            assert not enter.done()
-        finally:
-            enter.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await enter
-        assert client.failure() is None
+        async with client:
+            session = client.session
+            assert session is not None
+            state = session.state()
+            assert state.phase == moq.ConnectionPhase.CONNECTING
+            assert state.connects == 0
+            for _ in range(2):
+                state = await asyncio.wait_for(session.state_changed(state.revision), timeout=10)
+                assert isinstance(state.failure, moq.Error.Connect)  # type: ignore[attr-defined]
+                assert state.connects == 0
+            session.cancel(0)
 
 
 async def test_server_close_releases_port():
@@ -233,17 +233,13 @@ async def test_server_request_close():
                     once=True,
                 )
             )
-            # The rejection races the optimistic connect: it surfaces either as a
-            # connect error or as the session's terminal close. MoqError is an
-            # Exception subclass at runtime; UniFFI's generated code rebinds the
-            # name so the static checker doesn't see it.
-            try:
-                session = await asyncio.wait_for(client.connect(f"https://{server.local_addr}"), timeout=5.0)
-            except moq_ffi.MoqError:  # type: ignore[misc]
-                pass
-            else:
-                with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
-                    await asyncio.wait_for(session.closed(), timeout=5.0)
+            # Network rejection belongs to the immediately returned session.
+            session = await asyncio.wait_for(client.connect(f"https://{server.local_addr}"), timeout=5.0)
+            with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
+                await asyncio.wait_for(session.closed(), timeout=5.0)
+            state = session.state()
+            assert state.phase == moq_ffi.MoqConnectionPhase.CLOSED
+            assert state.failure is not None
         finally:
             reject_task.cancel()
             try:
@@ -443,12 +439,12 @@ async def test_route_update_observes_restart():
     """A route metadata update arrives as an AnnounceEventUpdate.
 
     The publisher re-prices its announced route; the subscriber observes the new
-    hop chain in place (no retraction), and unannouncing retracts it.
+    cost in place (no retraction), and unannouncing retracts it.
     """
     origin = moq.OriginProducer()
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], publish=origin) as server:
         announce = origin.create_broadcast("routed")
-        announce.announce(moq.Route(hops=[42]))
+        announce.announce(moq.AnnounceRoute(cost=1))
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -461,15 +457,14 @@ async def test_route_update_observes_restart():
                 first = await next_route(announced)
                 assert isinstance(first, moq.AnnounceEventStart)
                 assert first.announce.prefix == "routed"
-                assert 42 in first.announce.route.hops
-                assert 77 not in first.announce.route.hops
+                first_cost = first.announce.route.cost
 
-                # The publisher advertises a longer chain: an in-place update.
-                announce.announce(moq.Route(hops=[42, 77]))
+                # The publisher raises its cost: an in-place update.
+                announce.announce(moq.AnnounceRoute(cost=5))
                 updated = await next_route(announced)
                 assert isinstance(updated, moq.AnnounceEventUpdate)
                 assert updated.announce.prefix == "routed"
-                assert 77 in updated.announce.route.hops
+                assert updated.announce.route.cost == first_cost + 4
 
                 # Unannouncing retracts the route.
                 announce.unannounce()

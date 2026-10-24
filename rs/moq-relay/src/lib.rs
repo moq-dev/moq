@@ -20,7 +20,6 @@ pub mod cluster;
 mod config;
 mod connection;
 mod critical;
-mod duration;
 mod fetch;
 mod http_client;
 mod incoming;
@@ -36,8 +35,6 @@ mod settings;
 pub mod shutdown;
 pub mod stats;
 pub mod stun;
-#[cfg(test)]
-mod test_env;
 #[cfg(feature = "test-support")]
 mod test_support;
 #[cfg(all(target_os = "linux", feature = "_uring"))]

@@ -411,11 +411,11 @@ pub struct Serve {
 
 	/// How often the relay re-checks each grant. Off by default; needs `--expires`.
 	#[usage(long)]
-	revalidate: Option<crate::duration::Duration>,
+	revalidate: Option<moq_tokio::cli::Duration>,
 
 	/// How long a grant with no bound of its own lasts: anonymous sessions, tokens without `exp`, certificates without one. Off by default.
 	#[usage(long)]
-	expires: Option<crate::duration::Duration>,
+	expires: Option<moq_tokio::cli::Duration>,
 
 	/// The most live sessions presenting one token. Needs `--revalidate`.
 	#[usage(long)]
@@ -429,8 +429,8 @@ pub struct Serve {
 impl Serve {
 	/// The policy these flags describe, refusing a cadence the relay would spin on.
 	fn policy(&self) -> anyhow::Result<Policy> {
-		let revalidate = self.revalidate.map(|cadence| cadence.into_std());
-		let expires = self.expires.map(|bound| bound.into_std());
+		let revalidate = self.revalidate.map(std::time::Duration::from);
+		let expires = self.expires.map(Into::into);
 		if revalidate.is_some_and(|cadence| cadence.is_zero()) {
 			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
 		}
@@ -469,7 +469,12 @@ impl Serve {
 				}
 			}
 		}
-		let rules = |publish: &[Pattern], subscribe: &[Pattern]| Permissions::new(publish.to_vec(), subscribe.to_vec());
+		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
+			Permissions::new(
+				publish.iter().cloned().collect::<moq_auth::Patterns>(),
+				subscribe.iter().cloned().collect::<moq_auth::Patterns>(),
+			)
+		};
 		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
 			anyhow::bail!("--key-set conflicts with --key and --key-dir");
 		}
@@ -573,7 +578,7 @@ fn write_key(key: &moq_auth::Key, path: &std::path::Path) -> anyhow::Result<()> 
 fn read_key(path: &std::path::Path) -> anyhow::Result<moq_auth::Key> {
 	if is_dash(path) {
 		let contents = io::read_to_string(io::stdin())?;
-		moq_auth::Key::from_str(contents.trim()).context("failed to parse key from stdin")
+		contents.parse().context("failed to parse key from stdin")
 	} else {
 		moq_auth::Key::from_file(path).with_context(|| format!("failed to read key from {}", path.display()))
 	}

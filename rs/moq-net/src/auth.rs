@@ -40,7 +40,7 @@ use bytes::Bytes;
 use crate::{Error, Patterns, Result, SessionError, time::Instant};
 
 /// Classify malformed AUTH messages separately from transport and local failures.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) fn protocol_error(err: Error) -> Error {
 	match err {
 		Error::Decode(_)
@@ -87,18 +87,28 @@ impl Grant {
 		}
 	}
 
-	/// Fold `other` into this grant: the paths either allows, lapsing at the
-	/// earlier expiry, which is when the union next shrinks.
-	fn union(&mut self, other: &Self) {
-		self.publish.extend(other.publish.iter().cloned());
-		self.subscribe.extend(other.subscribe.iter().cloned());
-		self.expires = earliest(self.expires, other.expires);
+	/// The paths any of `grants` allows, lapsing at the earliest expiry, which is when
+	/// the union next shrinks. Reduced once, so it costs about the grants' total size.
+	fn union<'a>(grants: impl IntoIterator<Item = &'a Self>) -> Self {
+		let mut publish = Vec::new();
+		let mut subscribe = Vec::new();
+		let mut expires = None;
+		for grant in grants {
+			publish.extend(grant.publish.iter().cloned());
+			subscribe.extend(grant.subscribe.iter().cloned());
+			expires = earliest(expires, grant.expires);
+		}
+		Self {
+			publish: publish.into_iter().collect(),
+			subscribe: subscribe.into_iter().collect(),
+			expires,
+		}
 	}
 
 	/// The paths both grants allow, lapsing at the earlier expiry.
 	///
 	/// Fails closed: an intersection too large to hold grants nothing, never more.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn intersect(&self, other: &Self) -> Self {
 		let both = |a: &Patterns, b: &Patterns| {
 			a.intersect(b).unwrap_or_else(|err| {
@@ -132,7 +142,7 @@ pub(crate) struct State {
 	requests: bool,
 	/// Set once the session ends; every waiter resolves with it.
 	closed: Option<Error>,
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	next_id: u64,
 	/// Every token this side presented that has not ended.
 	tokens: BTreeMap<u64, Slot>,
@@ -149,7 +159,7 @@ pub(crate) struct State {
 	/// The grants the application issued to the peer's AUTH tokens, by stream, in the
 	/// peer's terms. A token on a single request never joins them.
 	issued: BTreeMap<u64, Grant>,
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	next_issue: u64,
 	/// The session's scope for the peer: the limit and every issued grant, `None` while the
 	/// limit is.
@@ -162,17 +172,17 @@ pub(crate) struct State {
 
 /// One presented token.
 pub(crate) struct Slot {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	token: Bytes,
 	/// Presented by the session itself at setup, so enforcement waits on it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	setup: bool,
 	/// The latest AUTH_OK, `None` before the first and after the token ends.
 	grant: Option<Grant>,
 	/// Handed to the driver to open its AUTH stream, which then owns ending it.
 	streamed: bool,
 	/// The first reply: `Ok` for an AUTH_OK, the refusal otherwise.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	answered: Option<Result<()>>,
 	/// Why the token ended, once it has.
 	ended: Option<Error>,
@@ -187,10 +197,10 @@ enum Acceptor {
 	#[default]
 	Undecided,
 	/// The app answers every token.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	App(Pending),
 	/// The session answers from its own origin handles.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Default,
 }
 
@@ -200,10 +210,7 @@ impl State {
 		if granted.peek().is_none() && !self.replied {
 			return;
 		}
-		let mut union = Grant::default();
-		for grant in granted {
-			union.union(grant);
-		}
+		let union = Grant::union(granted);
 		if self.union.as_ref() != Some(&union) {
 			self.union = Some(union);
 			self.epoch += 1;
@@ -212,13 +219,10 @@ impl State {
 
 	/// Re-derive the scope from the limit and the issued grants.
 	fn rescope(&mut self) {
-		let scope = self.limit.as_ref().map(|limit| {
-			let mut scope = limit.clone();
-			for grant in self.issued.values() {
-				scope.union(grant);
-			}
-			scope
-		});
+		let scope = self
+			.limit
+			.as_ref()
+			.map(|limit| Grant::union(std::iter::once(limit).chain(self.issued.values())));
 		if self.scope != scope {
 			self.scope = scope;
 			self.epoch += 1;
@@ -232,7 +236,7 @@ impl State {
 
 	/// The union's and the scope's patterns for `direction`, each `None` while
 	/// unrestricted.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn parts(&self, direction: Direction) -> (Option<&Patterns>, Option<&Patterns>) {
 		// The peer's grant names what we may do; the scope names what the peer may,
 		// so what we send is what the peer may subscribe to, and the other way around.
@@ -249,7 +253,7 @@ impl State {
 	}
 
 	/// What `direction` allows right now.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn permit(&self, direction: Direction) -> Permit {
 		let (granted, limit) = self.parts(direction);
 		Permit {
@@ -259,7 +263,7 @@ impl State {
 	}
 
 	/// Whether `direction` allows `path` right now, without copying the patterns.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn allows(&self, direction: Direction, path: &str) -> bool {
 		let (granted, limit) = self.parts(direction);
 		granted.is_none_or(|granted| granted.matches(path)) && limit.is_none_or(|limit| limit.matches(path))
@@ -270,7 +274,7 @@ impl State {
 /// union of its tokens) and the limit this side set on the peer, each `None`
 /// while unrestricted.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Permit {
 	granted: Option<Patterns>,
 	limit: Option<Patterns>,
@@ -278,7 +282,7 @@ pub(crate) struct Permit {
 
 impl Permit {
 	/// Whether both allow `path`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn matches(&self, path: &str) -> bool {
 		self.granted(path) && self.within_limit(path)
 	}
@@ -290,14 +294,14 @@ impl Permit {
 
 	/// Whether the limit alone allows `path`: for what the peer offers us, which our
 	/// own grant does not decide.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn within_limit(&self, path: &str) -> bool {
 		self.limit.as_ref().is_none_or(|limit| limit.matches(path))
 	}
 
 	/// Whether this allows everything `other` does, judged part by part, so a `false`
 	/// may be spurious but a `true` never is.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn covers(&self, other: &Self) -> bool {
 		let covers = |this: &Option<Patterns>, other: &Option<Patterns>| match (this, other) {
 			(None, _) => true,
@@ -318,7 +322,7 @@ pub struct Handle {
 
 impl Handle {
 	/// A handle for a session that speaks AUTH (`supported`) or never will.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn new(supported: bool) -> Self {
 		Self {
 			state: kio::Shared::new(State {
@@ -330,7 +334,7 @@ impl Handle {
 
 	/// A moq-transport handle: like [`new`](Self::new), but a request can carry a token
 	/// itself, so [`add`](Self::add) succeeds without AUTH.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn ietf(supported: bool) -> Self {
 		Self {
 			state: kio::Shared::new(State {
@@ -343,7 +347,7 @@ impl Handle {
 
 	/// Whether this side speaks AUTH: false on a version without it, on a side that does
 	/// not offer it, and once the peer turns out not to.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn supported(&self) -> bool {
 		self.state.lock().supported
 	}
@@ -374,7 +378,7 @@ impl Handle {
 	}
 
 	/// Queue a token for the driver to present.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn present(&self, token: Bytes, setup: bool) -> Result<Auth> {
 		let mut state = self.state.lock();
 		if !state.supported && !state.requests {
@@ -413,7 +417,7 @@ impl Handle {
 	/// The token a request carries for `auth`, or `None` when the request goes out unnamed
 	/// under the session's scope: `auth` came from another handle, it ended, or requests
 	/// carry no token on this version.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn token(&self, auth: &Auth) -> Option<Bytes> {
 		if !auth.presented.state.same_channel(&self.state) {
 			return None;
@@ -467,7 +471,7 @@ impl Handle {
 	/// and for an empty token, which on AUTH means the connection's own credential and so would
 	/// reach the acceptor as that credential. `hold` is the request's slot, kept while the
 	/// application verifies the token.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn verify_request(&self, token: crate::setup::Token, hold: Option<Hold>) -> RequestVerdict {
 		let Some(queue) = self.acceptor() else {
 			return RequestVerdict { issue: None };
@@ -486,7 +490,7 @@ impl Handle {
 
 	/// Decide who answers the peer's tokens: the app if it took the requests,
 	/// otherwise the session itself (`None`). Idempotent.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn acceptor(&self) -> Option<Pending> {
 		let mut state = self.state.lock();
 		match &state.acceptor {
@@ -500,7 +504,7 @@ impl Handle {
 	}
 
 	/// The next token to open a stream for, or `Ready(None)` once the session ends.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_opening(&self, waiter: &kio::Waiter) -> Poll<Option<(u64, Bytes)>> {
 		let mut state = ready_or!(self.state.poll(waiter, |state| {
 			match state.opening.is_empty() && state.closed.is_none() {
@@ -527,7 +531,7 @@ impl Handle {
 	}
 
 	/// Whether the token's handle dropped, so its stream should close.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_withdrawn(&self, id: u64, waiter: &kio::Waiter) -> Poll<()> {
 		let _ = ready_or!(self.state.poll(waiter, |state| match state.tokens.get(&id) {
 			Some(slot) if !slot.withdrawn => Poll::Pending,
@@ -537,7 +541,7 @@ impl Handle {
 	}
 
 	/// Record an AUTH_OK for the token.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn granted(&self, id: u64, grant: Grant) {
 		// One parseable line per AUTH_OK, so the grant the peer actually sent is observable
 		// without an API; the interop harness checks it against the token it minted.
@@ -560,7 +564,7 @@ impl Handle {
 	/// Record an AUTH_ERROR for the token: a reply that grants nothing, so a refused
 	/// setup token leaves an empty union rather than an unknown (unrestricted) one.
 	/// The driver still ends the token with [`ended`](Self::ended).
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn refused(&self, id: u64) {
 		let mut state = self.state.lock();
 		if state.tokens.contains_key(&id) {
@@ -570,7 +574,7 @@ impl Handle {
 
 	/// End the token: refused or revoked by the peer, withdrawn by us, or its
 	/// stream lost. A token that was never answered records `err` as its answer.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn ended(&self, id: u64, err: Error) {
 		let mut state = self.state.lock();
 		let Some(slot) = state.tokens.get_mut(&id) else {
@@ -590,7 +594,7 @@ impl Handle {
 
 	/// Resolve once every token the session presented at setup has its first
 	/// reply, so enforcement never waits on a token the app added later.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_setup_answered(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let _ = ready_or!(self.state.poll(waiter, |state| {
 			match state.tokens.values().any(|slot| slot.setup && slot.answered.is_none()) {
@@ -602,7 +606,7 @@ impl Handle {
 	}
 
 	/// Wait only when a token already presented might widen the grant for this path.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_presented(&self, direction: Direction, path: &str, waiter: &kio::Waiter) -> Poll<()> {
 		let _ = ready_or!(self.state.poll(waiter, |state| {
 			let (granted, _) = state.parts(direction);
@@ -664,7 +668,7 @@ impl Handle {
 
 	/// The union once it changed since `epoch` last saw it, advancing `epoch`. It
 	/// only ever changes into `Some`: no answer yet is the initial state.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_union(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
 		let state = ready_or!(self.poll_epoch(*epoch, waiter));
 		*epoch = state.epoch;
@@ -673,7 +677,7 @@ impl Handle {
 
 	/// What `direction` allows once it may have changed since `epoch` last saw it,
 	/// advancing `epoch`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_permit(&self, direction: Direction, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Permit> {
 		let state = ready_or!(self.poll_epoch(*epoch, waiter));
 		*epoch = state.epoch;
@@ -681,14 +685,14 @@ impl Handle {
 	}
 
 	/// The limit once it may have changed since `epoch` last saw it, advancing `epoch`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_limit(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
 		let state = ready_or!(self.poll_epoch(*epoch, waiter));
 		*epoch = state.epoch;
 		Poll::Ready(state.limit.clone())
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_epoch(&self, seen: u64, waiter: &kio::Waiter) -> Poll<kio::Mut<'_, State>> {
 		self.state.poll(waiter, |state| match state.epoch != seen {
 			true => Poll::Ready(()),
@@ -699,7 +703,7 @@ impl Handle {
 	/// Whether `direction` allows `path` right now: the union (allowing everything
 	/// while it is `None`, before an answer or on a version without AUTH) and the
 	/// limit both.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn allows(&self, direction: Direction, path: &str) -> bool {
 		self.state.read().allows(direction, path)
 	}
@@ -710,7 +714,7 @@ impl Handle {
 	/// would leave the peer believing it backs a request this side holds to its scope. A side
 	/// that neither scopes the peer nor answers tokens has nothing to check one against, and
 	/// admits as it would without it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn token_decides(&self, direction: Direction) -> bool {
 		let state = self.state.read();
 		let (_, scope) = state.parts(direction);
@@ -719,7 +723,7 @@ impl Handle {
 
 	/// Whether the peer's grant alone allows `direction` at `path`, allowing everything
 	/// while it is `None`: what bounds this side whatever authorized the request.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn within_grant(&self, direction: Direction, path: &str) -> bool {
 		let state = self.state.read();
 		let (granted, _) = state.parts(direction);
@@ -728,7 +732,7 @@ impl Handle {
 
 	/// Whether the scope alone allows `direction` at `path`: for a route the peer
 	/// offers us, which our own grant does not decide.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn within_limit(&self, direction: Direction, path: &str) -> bool {
 		let state = self.state.read();
 		let (_, scope) = state.parts(direction);
@@ -739,7 +743,7 @@ impl Handle {
 	/// moq-transport every token we presented stays, with an unknown grant, for the
 	/// requests that name it; elsewhere each fails as unsupported. The peer's tokens can
 	/// still ride its requests, so their queue stays open.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn unsupported(&self) {
 		let mut state = self.state.lock();
 		state.supported = false;
@@ -759,7 +763,7 @@ impl Handle {
 
 	/// End the session: fail every pending token, end every watch, and close the
 	/// requests.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn close(&self, err: Error) {
 		let mut state = self.state.lock();
 		if state.closed.is_some() {
@@ -834,7 +838,7 @@ impl Auth {
 		.await
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		let Presented { state, id } = &*self.presented;
 		let state = ready_or!(state.poll(waiter, |state| match state.tokens.get(id) {
@@ -1019,7 +1023,7 @@ impl Pending {
 	}
 
 	/// Queue the token for the application, or refuse it when closed.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn push(&self, request: Request) {
 		let mut state = self.state.lock();
 		// Dropping the request refuses it as unanswered.
@@ -1063,9 +1067,9 @@ impl Pending {
 
 /// What the acceptor writes on one peer token's stream.
 pub(crate) enum Reply {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Grant(Grant),
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Refuse { code: SessionError, reason: String },
 }
 
@@ -1109,16 +1113,16 @@ impl Issue {
 	}
 }
 
-/// A request's slot against the session's cap, shared with the application's verification
-/// of its token so work still in flight stays counted after the request ends. Opaque here:
-/// auth only keeps it alive.
+/// A request's slot in the session's count, shared with the application's verification of its
+/// token so work still in flight stays counted after the request ends. Opaque here: auth only
+/// keeps it alive.
 pub(crate) type Hold = std::sync::Arc<dyn std::any::Any + Send + Sync>;
 
 /// The serving task's hold on one peer token's [`Issue`].
 ///
 /// Dropping it settles [`Issued::closed`] with the session's error, unless the task
 /// already recorded why the stream ended, so no exit path leaves the acceptor waiting.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Serving {
 	pub issue: kio::Shared<Issue>,
 	handle: Handle,
@@ -1126,7 +1130,7 @@ pub(crate) struct Serving {
 
 impl Serving {
 	/// A fresh stream's shared state, settled by the session `handle` if the task drops.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn new(handle: Handle) -> Self {
 		let id = {
 			let mut state = handle.state.lock();
@@ -1144,7 +1148,7 @@ impl Serving {
 
 	/// Record why the stream ended on the peer's side; the first reason wins. Whatever it
 	/// granted leaves the scope.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn end(&self, err: Error) {
 		let mut issue = self.issue.lock();
 		issue.peer.get_or_insert(err);
@@ -1174,7 +1178,7 @@ pub struct Request {
 }
 
 impl Request {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn new(token: Bytes, issue: kio::Shared<Issue>) -> Self {
 		Self {
 			token,
@@ -1240,7 +1244,7 @@ fn refuse(issue: &kio::Shared<Issue>, code: SessionError, reason: String) {
 
 /// Which request a token rode on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) enum RequestKind {
 	/// A SUBSCRIBE: the peer reads the named track.
 	Subscribe,
@@ -1253,7 +1257,7 @@ impl RequestKind {
 	/// `path`. A grant names what its holder may do, so a request to read is covered by its
 	/// `subscribe` patterns and a request to announce by its `publish` patterns. An announce
 	/// routes everything beneath its namespace, so the grant must cover that whole subtree.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn covers(self, grant: &Grant, path: &str) -> bool {
 		match self {
 			Self::Subscribe => grant.subscribe.matches(path),
@@ -1275,7 +1279,7 @@ pub(crate) struct RequestVerdict {
 /// Why a request token did not authorize its request: the error whose code the peer is
 /// sent, and the reason phrase with it, which the acceptor chose when it refused.
 #[derive(Debug)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Refusal {
 	pub error: Error,
 	pub reason: String,
@@ -1297,7 +1301,7 @@ impl From<Error> for Refusal {
 	}
 }
 
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl RequestVerdict {
 	/// Wait for the acceptor's first answer. See [`poll_grant`](Self::poll_grant).
 	#[cfg(test)]
@@ -1382,10 +1386,10 @@ impl Drop for RequestVerdict {
 /// Clones share the grant: the request's [`until`] watches it end while the request renews it.
 /// Ending a request grant never touches the session: only that one request ends.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-pub(crate) struct RequestGrant(std::sync::Arc<std::sync::Mutex<Held>>);
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+pub(crate) struct RequestGrant(std::sync::Arc<crate::sync::Mutex<Held>>);
 
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 struct Held {
 	verdict: RequestVerdict,
 	grant: Grant,
@@ -1400,7 +1404,7 @@ struct Held {
 	clock: crate::time::Deadlines,
 }
 
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl RequestGrant {
 	/// Hold the acceptor's first answer `res` for the request's life, armed to lapse at its
 	/// expiry, or the refusal to answer the request with: the acceptor's own, or
@@ -1419,7 +1423,7 @@ impl RequestGrant {
 		}
 		let mut deadline = crate::time::Deadline::new(clock);
 		deadline.set(grant.expires);
-		Ok(Self(std::sync::Arc::new(std::sync::Mutex::new(Held {
+		Ok(Self(std::sync::Arc::new(crate::sync::Mutex::new(Held {
 			verdict,
 			grant,
 			deadline,
@@ -1431,7 +1435,7 @@ impl RequestGrant {
 		}))))
 	}
 
-	fn held(&self) -> std::sync::MutexGuard<'_, Held> {
+	fn held(&self) -> crate::sync::MutexGuard<'_, Held> {
 		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 	}
 
@@ -1542,7 +1546,7 @@ impl RequestGrant {
 /// A dropped `body` releases what it holds; anything it was writing stays buffered whole in
 /// the stream's [`Writer`](crate::coding::Writer) as long as each message is buffered before
 /// its first await, so the caller can still end the request on the wire.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) async fn until<F: std::future::Future>(
 	body: F,
 	mut ended: impl FnMut(&kio::Waiter) -> Poll<Refusal>,
@@ -1559,13 +1563,13 @@ pub(crate) async fn until<F: std::future::Future>(
 
 /// Whether `grant` covers a `kind` request at `path` and has not already expired: admitting
 /// an expired one until its deadline fires would let others act on it meanwhile.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 fn live(clock: &crate::time::Deadlines, kind: RequestKind, path: &str, grant: &Grant) -> bool {
 	kind.covers(grant, path) && grant.expires.is_none_or(|expires| expires > clock.now())
 }
 
 /// Whether the acceptor granted the token behind `issue` and still holds the grant.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 fn granted(issue: &kio::Shared<Issue>) -> bool {
 	let issue = issue.read();
 	!issue.done && issue.outbox.iter().any(|reply| matches!(reply, Reply::Grant(_)))
@@ -1623,7 +1627,7 @@ async fn closed(issue: &kio::Shared<Issue>) -> Error {
 
 /// Which way media flows, from this side's view.
 #[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) enum Direction {
 	/// This side sends to the peer: our grant's `publish`, and the limit's `subscribe`.
 	Publish,
@@ -1637,7 +1641,7 @@ pub(crate) enum Direction {
 /// Create it at the request's first check and hold it to the end, so a change
 /// landing in between is never missed. Cheap to poll on every wakeup: the path is
 /// only re-matched when the union or the limit changes.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Gate {
 	handle: Handle,
 	path: crate::PathOwned,
@@ -1663,7 +1667,7 @@ impl Drop for Waiting {
 }
 
 /// Which part of a [`Permit`] a [`Gate`] watches.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 enum Part {
 	/// The peer's grant and the scope both.
 	Both,
@@ -1674,7 +1678,7 @@ enum Part {
 }
 
 impl Gate {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn new(handle: Handle, path: crate::PathOwned, direction: Direction) -> Self {
 		let within_limit = handle.within_limit(direction, path.as_str());
 		Self {
@@ -1690,7 +1694,7 @@ impl Gate {
 	}
 
 	/// Hold the request to the peer's grant alone, once its own token authorized it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn named(mut self) -> Self {
 		self.part = Part::Granted;
 		self
@@ -1698,7 +1702,7 @@ impl Gate {
 
 	/// A gate for a request under a namespace the peer announced, while `live` stays open:
 	/// the announce stands in for the scope, as its own token may have authorized it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn announced(
 		handle: Handle,
 		path: crate::PathOwned,
@@ -1712,7 +1716,7 @@ impl Gate {
 	}
 
 	/// Whether the session allows the path right now.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn allows(&self) -> bool {
 		let path = self.path.as_str();
 		self.handle.within_grant(self.direction, path)
@@ -1724,31 +1728,31 @@ impl Gate {
 	}
 
 	/// Whether the peer's request token must be verified separately from session scope.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn token_decides(&self) -> bool {
 		self.handle.token_decides(self.direction)
 	}
 
 	/// Verify an incoming request's token against the local acceptor.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn verify(&self, token: crate::setup::Token, hold: Option<Hold>) -> RequestVerdict {
 		self.handle.verify_request(token, hold)
 	}
 
 	/// What the session allows in this gate's direction, once it may have changed since `epoch`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_permit(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Permit> {
 		self.handle.poll_permit(self.direction, epoch, waiter)
 	}
 
 	/// Preserve setup ordering before the first discovery snapshot.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_setup_answered(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.handle.poll_setup_answered(waiter)
 	}
 
 	/// Settle tokens that might admit this request before its first wire operation.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if self.admitted {
 			return Poll::Ready(());
@@ -1790,7 +1794,7 @@ impl Gate {
 	/// Resolve once the session no longer allows the path. A union that is still
 	/// `None` (no answer yet, or a version without AUTH) and a session never limited
 	/// allow everything.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_denied(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		while let Poll::Ready(permit) = self.handle.poll_permit(self.direction, &mut self.epoch, waiter) {
 			let path = self.path.as_str();
@@ -1812,7 +1816,7 @@ impl Gate {
 
 /// The default acceptor's answer to the peer's connection credential: the grant
 /// the session's origin handles allow, within the limit as it changes.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct DefaultGrant {
 	handle: Handle,
 	base: Grant,
@@ -1823,7 +1827,7 @@ pub(crate) struct DefaultGrant {
 }
 
 impl DefaultGrant {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn new(handle: Handle, base: Grant) -> Self {
 		let limit = handle.state.read().limit.clone();
 		Self {
@@ -1836,7 +1840,7 @@ impl DefaultGrant {
 	}
 
 	/// The grant to send next: the first, then each one a new limit changes.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Grant> {
 		while let Poll::Ready(limit) = self.handle.poll_limit(&mut self.epoch, waiter) {
 			self.limit = limit;
@@ -1855,7 +1859,7 @@ impl DefaultGrant {
 
 /// The close reason naming a broadcast published outside the grant. [`Error`] carries
 /// no payload, so the path travels here, in the session's own terms.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) fn unauthorized_reason(path: &crate::Path) -> String {
 	format!("unauthorized: {path}")
 }
@@ -1870,7 +1874,7 @@ pub(crate) fn unauthorized_reason(path: &crate::Path) -> String {
 /// publication. Only the dialing side enforces: a server's publish origin is everything
 /// the peer may read, not what it intends to push.
 #[derive(Default)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Enforce {
 	epoch: u64,
 	permit: Option<Patterns>,
@@ -1885,7 +1889,7 @@ pub(crate) struct Enforce {
 impl Enforce {
 	/// Resolve with the first broadcast announced outside the union, or `None` once the
 	/// origin ends.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll(
 		&mut self,
 		handle: &Handle,

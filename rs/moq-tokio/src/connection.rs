@@ -75,11 +75,7 @@ pub struct Backoff {
 	/// pacing would collapse.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub initial: Option<Duration>,
 
 	/// Initial delay before the first reconnect attempt. Defaults to 1s, floored at 50ms.
@@ -105,11 +101,7 @@ pub struct Backoff {
 	/// Maximum delay between reconnect attempts. Defaults to 5s.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub max: Option<Duration>,
 
 	/// Maximum delay between reconnect attempts. Defaults to 5s.
@@ -132,11 +124,7 @@ pub struct Backoff {
 	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
 	/// type's default, and only `None` tells "unset" apart from "retry forever".
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<Duration>,
 
 	// No parser default: the parser stores one as if it were given, and it would then beat a
@@ -214,6 +202,22 @@ pub enum Redirect {
 	SameHost,
 	/// Ignore the URI and retry the current address list.
 	Ignore,
+}
+
+/// What to do when a peer's GOAWAY names no URI, meaning it is restarting where we reached it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Restart {
+	/// Redial the same addresses at once while the drained session keeps serving. Right for
+	/// an address that can lead to another node, such as a fleet name a fresh resolve moves
+	/// off the drained one. The default.
+	#[default]
+	Redial,
+	/// Keep serving on the drained session until the peer closes it, then reconnect as after
+	/// any drop. Right for an address that names one node, where a redial only reaches the
+	/// draining process again. The peer must close the session itself, as a relay does at
+	/// its drain deadline.
+	Wait,
 }
 
 impl Redirect {
@@ -352,11 +356,7 @@ pub struct Goaway {
 	/// does not extend it. Defaults to 10 seconds.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub handover: Option<Duration>,
 
 	/// How long the old session keeps serving after its replacement connects. Defaults to 10s.
@@ -467,6 +467,10 @@ impl Resolved {
 /// distinguishes a permanent give-up from a graceful close.
 #[derive(Default)]
 struct State {
+	/// Advances on every lifecycle update, including identical failed dials.
+	revision: u64,
+	/// The loop has finished and cannot publish another state.
+	ended: bool,
 	/// Tokens to queue before publishing a replacement session to its consumers.
 	tokens: std::sync::Mutex<Vec<std::sync::Weak<auth::Replay>>>,
 	/// Current connection status, or `None` before the first connect.
@@ -526,6 +530,7 @@ impl Shared {
 			if state.session.is_some() {
 				state.presence.sessions_ended += 1;
 			}
+			state.revision += 1;
 			state.status = Some(Status::Connected);
 			state.connects += 1;
 			state.presence.sessions_started += 1;
@@ -544,6 +549,7 @@ impl Shared {
 
 	fn status(&self, status: Status) {
 		if let Ok(mut state) = self.state.write() {
+			state.revision += 1;
 			state.status = Some(status);
 		}
 	}
@@ -551,17 +557,15 @@ impl Shared {
 	/// Nothing is live. Clears the session so a handle can't be handed a closed one,
 	/// and drops the estimates that belonged to it.
 	fn disconnected(&self) {
+		self.offline(None);
+	}
+
+	fn offline(&self, failure: Option<&Error>) {
 		if let Ok(mut state) = self.state.write() {
-			// Count one close per live session; a second call without an
-			// intervening connect (e.g. Drop after the loop already reported
-			// the close) must not move the counter again.
-			if state.session.is_some() {
-				state.presence.sessions_ended += 1;
+			state.offline();
+			if let Some(failure) = failure {
+				state.failure = Some(failure.clone());
 			}
-			state.status = Some(Status::Disconnected);
-			state.version = None;
-			state.transport = None;
-			state.session = None;
 		}
 		let _ = self.send_bw.set(None);
 		let _ = self.recv_bw.set(None);
@@ -570,17 +574,27 @@ impl Shared {
 	/// Record why the loop is retrying, for [`Monitor::failure`].
 	fn retrying(&self, err: &Error) {
 		if let Ok(mut state) = self.state.write() {
+			state.revision += 1;
 			state.failure = Some(err.clone());
 		}
 	}
 
-	/// Record the error the loop gave up with, for [`Connection::closed`]. Nothing is
+	/// The loop is over: drop the session and publish the terminal snapshot in one
+	/// revision, so a watcher never sees a `Disconnected` the loop will not redial
+	/// from. `err` is what it gave up with, for [`Connection::closed`]. Nothing is
 	/// retrying anymore, so [`Monitor::failure`] stops reporting.
-	fn failed(&self, err: Error) {
+	fn end(&self, err: Option<Error>) {
 		if let Ok(mut state) = self.state.write() {
-			state.error = Some(err);
+			if state.ended {
+				return;
+			}
+			state.offline();
+			state.ended = true;
 			state.failure = None;
+			state.error = err;
 		}
+		let _ = self.send_bw.set(None);
+		let _ = self.recv_bw.set(None);
 	}
 }
 
@@ -592,11 +606,7 @@ impl Drop for Shared {
 		// keep the session clone parked here alive and the transport open with
 		// nothing left able to reach it. Releasing it drops the last clone, which
 		// is what closes the transport.
-		self.disconnected();
-		// Nothing retries anymore, however the loop ended.
-		if let Ok(mut state) = self.state.write() {
-			state.failure = None;
-		}
+		self.end(None);
 	}
 }
 
@@ -610,7 +620,99 @@ pub struct Monitor {
 	last_presence: moq_net::stats::Presence,
 }
 
+/// The current lifecycle phase of a reconnecting connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+	/// No session has connected yet.
+	Connecting,
+	/// A session is serving.
+	Connected,
+	/// No session is serving while the connection redials.
+	Disconnected,
+	/// The old session serves while its replacement dials.
+	Migrating,
+	/// The reconnect loop has stopped for good.
+	Closed,
+}
+
+/// One coherent observation of a connection's lifecycle.
+#[derive(Clone, Debug)]
+pub struct Observation {
+	/// An opaque revision to pass back to the next state wait.
+	pub revision: u64,
+	/// The current lifecycle phase, distinct from cumulative statistics presence.
+	pub phase: Phase,
+	/// How many sessions have connected, including replacements.
+	pub connects: u64,
+	/// The latest failed attempt or terminal failure, cleared by a successful connect.
+	pub failure: Option<Error>,
+	/// The live session's negotiated version, or none while offline.
+	pub version: Option<Version>,
+}
+
+impl State {
+	/// Nothing is live: one lifecycle revision that drops the session and its version.
+	fn offline(&mut self) {
+		// Count one close per live session; a second call without an intervening
+		// connect (e.g. Drop after the loop already reported the close) must not
+		// move the counter again.
+		if self.session.is_some() {
+			self.presence.sessions_ended += 1;
+		}
+		self.revision += 1;
+		self.status = Some(Status::Disconnected);
+		self.version = None;
+		self.transport = None;
+		self.session = None;
+	}
+
+	fn observation(&self) -> Observation {
+		Observation {
+			revision: self.revision,
+			phase: if self.ended {
+				Phase::Closed
+			} else {
+				match self.status {
+					None => Phase::Connecting,
+					Some(Status::Connected) => Phase::Connected,
+					Some(Status::Disconnected) => Phase::Disconnected,
+					Some(Status::Migrating) => Phase::Migrating,
+				}
+			},
+			connects: self.connects,
+			failure: self.error.clone().or_else(|| self.failure.clone()),
+			version: self.version,
+		}
+	}
+}
+
 impl Monitor {
+	/// Read the lifecycle fields together under one lock.
+	pub fn state(&self) -> Observation {
+		self.state.read().observation()
+	}
+
+	/// Poll for a lifecycle revision different from the caller's last snapshot.
+	fn poll_state(&self, waiter: &kio::Waiter, after: u64) -> Poll<crate::Result<Observation>> {
+		match self.state.poll(waiter, |state| {
+			if state.revision != after {
+				Poll::Ready(Ok(state.observation()))
+			} else if state.ended {
+				Poll::Ready(Err(terminal(state)))
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(result)) => Poll::Ready(result),
+			Poll::Ready(Err(state)) => Poll::Ready(Err(terminal(&state))),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Wait for a lifecycle revision without sharing a cursor with other observers.
+	pub async fn state_changed(&self, after: u64) -> crate::Result<Observation> {
+		kio::wait(|waiter| self.poll_state(waiter, after)).await
+	}
 	/// Cumulative connects and disconnects of this reconnect loop, the same shape as a relay's
 	/// sessions track: `sessions_started - sessions_ended` is 1 while connected, and a rate is a delta over
 	/// any window.
@@ -741,15 +843,17 @@ impl Connection {
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
+		// Own final-state publication before spawning: aborting an unpolled task
+		// must still drop Shared and publish its terminal revision.
+		let shared = Shared {
+			state: producer,
+			send_bw,
+			recv_bw,
+			closed: task_closed,
+		};
 
 		let task = tokio::spawn(async move {
 			let reconnect = client.reconnect;
-			let shared = Shared {
-				state: producer,
-				send_bw,
-				recv_bw,
-				closed: task_closed,
-			};
 			// Isolated inside `shared`, so a panic still records a terminal error
 			// instead of closing the channels as if the caller had stopped it.
 			let res = crate::panic::isolate(Self::run(&shared, client, addrs))
@@ -762,7 +866,7 @@ impl Connection {
 					true => tracing::error!(%err, "connection loop exited"),
 					false => tracing::info!(%err, "connection closed"),
 				}
-				shared.failed(err);
+				shared.end(Some(err));
 			}
 			// Dropping the producers here closes the channels, signaling consumers.
 		});
@@ -879,16 +983,7 @@ impl Connection {
 					// Wait for the session to end, forwarding its bandwidth estimates into the
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
-					let ended = run_session(shared, &session, &mut draining).await;
-					// Before any status moves, so a watcher woken by `Disconnected` finds why. Only
-					// a retry has a reason to report; a session that ends the loop reports through
-					// `closed` instead.
-					if let Ended::Closed(Err(err)) = &ended
-						&& client.reconnect
-						&& !err.is_terminal()
-					{
-						shared.retrying(err);
-					}
+					let ended = run_session(shared, &session, &mut draining, client.restart).await;
 
 					let tenure = connected.elapsed();
 
@@ -915,7 +1010,6 @@ impl Connection {
 					// sides end up waiting on each other forever. Checked before the
 					// migration branch below, which would otherwise loop back to redial.
 					if !client.reconnect && matches!(ended, Ended::Goaway(_)) {
-						shared.disconnected();
 						return Ok(());
 					}
 
@@ -1015,15 +1109,15 @@ impl Connection {
 						continue;
 					}
 
-					shared.disconnected();
-
+					// Both returns below leave the offline bookkeeping to the terminal
+					// snapshot, so they never publish a `Disconnected` first.
+					//
 					// Refusals and malformed protocol input are settled failures, however long
 					// the session lived. A new connection cannot repair either one.
-					if let Ended::Closed(Err(err)) = &ended {
-						let err = err.clone();
-						if err.is_terminal() {
-							return Err(err);
-						}
+					if let Ended::Closed(Err(err)) = &ended
+						&& err.is_terminal()
+					{
+						return Err(err.clone());
 					}
 
 					// One-shot mode: the session ending ends the connection. Its close
@@ -1035,6 +1129,13 @@ impl Connection {
 							Ended::Goaway(_) => unreachable!("handled before the migration branch"),
 						};
 					}
+
+					// Publish the lost transport and why, in one lifecycle observation.
+					let failure = match &ended {
+						Ended::Closed(Err(err)) => Some(err),
+						_ => None,
+					};
+					shared.offline(failure);
 
 					if healthy {
 						// The backoff window was reset, so a one-off drop reconnects promptly.
@@ -1545,10 +1646,19 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared
 /// One `poll_*` step drives it all: [`poll_forward`] mirrors each kio bandwidth estimate, the
 /// GOAWAY consumer is a kio channel, and the transport's close future (the one non-kio source) is
 /// polled through the waiter's own waker.
-async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut Option<Draining>) -> Ended {
+///
+/// Under [`Restart::Wait`] a GOAWAY naming no URI does not end the wait: the session serves on
+/// until it closes.
+async fn run_session(
+	shared: &Shared,
+	session: &moq_net::Session,
+	draining: &mut Option<Draining>,
+	restart: Restart,
+) -> Ended {
 	let mut send = session.send_bandwidth();
 	let mut recv = RecvBandwidth::default();
-	let goaway = session.draining();
+	// Dropped once a restart is waited out: it is a latch, so it would keep firing.
+	let mut goaway = Some(session.draining());
 	let closed = session.closed();
 	tokio::pin!(closed);
 
@@ -1568,8 +1678,13 @@ async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut
 		// accepting requests and waits for us to leave, so ignoring it is how both
 		// sides end up waiting on each other forever. The caller ends the connection
 		// instead: asked to leave, with no way to migrate, leaving is the answer.
-		if let Poll::Ready(Ok(msg)) = goaway.poll(waiter) {
-			return Poll::Ready(Ended::Goaway(msg));
+		if let Some(Poll::Ready(Ok(msg))) = goaway.as_ref().map(|goaway| goaway.poll(waiter)) {
+			if restart == Restart::Wait && msg.uri().is_empty() {
+				tracing::info!("peer is restarting; serving until it closes the session");
+				goaway = None;
+			} else {
+				return Poll::Ready(Ended::Goaway(msg));
+			}
 		}
 
 		waiter
@@ -1656,7 +1771,11 @@ fn terminal(state: &State) -> Error {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 
@@ -2241,6 +2360,143 @@ mod tests {
 		config.init(Default::default()).expect("build client")
 	}
 
+	#[test]
+	fn observation_keeps_independent_revisions_and_never_misses_registration() {
+		use std::sync::{
+			Arc,
+			atomic::{AtomicUsize, Ordering},
+		};
+		use std::task::{Wake, Waker};
+		struct Wakes(AtomicUsize);
+		impl Wake for Wakes {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+		let shared = shared();
+		let first = Monitor {
+			state: shared.state.consume(),
+			last_presence: Default::default(),
+		};
+		let second = first.clone();
+		let initial = first.state();
+		assert_eq!(initial.phase, Phase::Connecting);
+		assert_eq!(initial.connects, 0);
+		assert!(initial.version.is_none());
+		let failure = Error::ConnectFailed;
+		// The update precedes registration: reading a token must not lose this wake.
+		shared.retrying(&failure);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(next)) = first.poll_state(&waiter, initial.revision) else {
+			panic!("missed earlier update")
+		};
+		assert_eq!(next.phase, Phase::Connecting);
+		assert!(next.failure.is_some());
+		assert!(
+			matches!(second.poll_state(&waiter, initial.revision), Poll::Ready(Ok(_))),
+			"independent observer lost its update"
+		);
+		// Register first: even another failure with the same diagnostic must wake it.
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let registered = kio::Waiter::new(Waker::from(wakes.clone()));
+		assert!(first.poll_state(&registered, next.revision).is_pending());
+		shared.retrying(&failure);
+		assert!(wakes.0.load(Ordering::SeqCst) > 0);
+		let Poll::Ready(Ok(repeated)) = first.poll_state(&waiter, next.revision) else {
+			panic!("identical failed attempt was hidden")
+		};
+		assert_ne!(repeated.revision, next.revision);
+		shared.end(Some(failure));
+		drop(shared);
+		let final_state = first.state();
+		assert_eq!(final_state.phase, Phase::Closed);
+		assert!(final_state.failure.is_some(), "terminal cause must remain observable");
+		assert!(
+			matches!(first.poll_state(&waiter, repeated.revision), Poll::Ready(Ok(state)) if state.phase == Phase::Closed)
+		);
+		assert!(matches!(
+			first.poll_state(&waiter, final_state.revision),
+			Poll::Ready(Err(_))
+		));
+	}
+
+	#[tokio::test]
+	async fn cancelled_observation_does_not_advance_another_waiter() {
+		let shared = shared();
+		let monitor = Monitor {
+			state: shared.state.consume(),
+			last_presence: Default::default(),
+		};
+		let revision = monitor.state().revision;
+		{
+			let mut abandoned = std::pin::pin!(monitor.state_changed(revision));
+			assert!(futures::poll!(&mut abandoned).is_pending());
+		}
+		shared.retrying(&Error::ConnectFailed);
+		let first = monitor.state_changed(revision).await.unwrap();
+		let second = monitor.state_changed(revision).await.unwrap();
+		assert_eq!(first.revision, second.revision);
+	}
+
+	/// Records the phase a watcher reads the moment it is woken, as one on another thread could.
+	struct Woken(Monitor, std::sync::Mutex<Vec<Phase>>);
+
+	impl std::task::Wake for Woken {
+		fn wake(self: std::sync::Arc<Self>) {
+			self.wake_by_ref();
+		}
+		fn wake_by_ref(self: &std::sync::Arc<Self>) {
+			self.1.lock().unwrap().push(self.0.state().phase);
+		}
+	}
+
+	impl Woken {
+		/// Park on the monitor's current revision, for as long as the returned waiter lives.
+		fn watch(monitor: &Monitor) -> (std::sync::Arc<Self>, kio::Waiter) {
+			let woken = std::sync::Arc::new(Self(monitor.clone(), Default::default()));
+			let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
+			assert!(monitor.poll_state(&waiter, monitor.state().revision).is_pending());
+			(woken, waiter)
+		}
+
+		fn phases(&self) -> Vec<Phase> {
+			self.1.lock().unwrap().clone()
+		}
+	}
+
+	#[test]
+	fn ending_the_loop_never_shows_a_redialing_phase() {
+		let shared = shared();
+		let monitor = Monitor {
+			state: shared.state.consume(),
+			last_presence: Default::default(),
+		};
+		let (woken, _waiter) = Woken::watch(&monitor);
+		drop(shared);
+		assert_eq!(woken.phases(), [Phase::Closed]);
+	}
+
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn aborting_before_the_loop_is_polled_publishes_its_final_snapshot() {
+		// The current-thread runtime cannot poll the spawned loop before our first await.
+		let connection = Connection::new(
+			client(),
+			Addrs::collect([Url::parse("http://127.0.0.1:1").unwrap()]).unwrap(),
+		);
+		let monitor = connection.monitor();
+		let initial = monitor.state();
+		connection.abort(moq_net::Error::Cancel);
+		connection.closed().await.unwrap();
+		let final_state = monitor.state_changed(initial.revision).await.unwrap();
+		assert_eq!(final_state.phase, Phase::Closed);
+		assert_eq!(final_state.connects, 0);
+		assert!(monitor.state_changed(final_state.revision).await.is_err());
+	}
+
 	fn shared() -> Shared {
 		Shared {
 			state: kio::Producer::default(),
@@ -2513,12 +2769,21 @@ mod tests {
 		let monitor = connection.monitor();
 
 		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let mut state = monitor.state();
+		while state.phase != Phase::Connected {
+			state = tokio::time::timeout(WAIT, monitor.state_changed(state.revision))
+				.await
+				.unwrap()
+				.unwrap();
+		}
+		let (woken, _waiter) = Woken::watch(&monitor);
 		session.abort(moq_net::Error::App(7));
 		let closed = tokio::time::timeout(WAIT, connection.closed())
 			.await
 			.expect("the connection did not close");
 		assert!(closed.is_err(), "the abort ends the loop with an error");
 		assert!(monitor.failure().is_none(), "nothing is retrying");
+		assert_eq!(woken.phases(), [Phase::Closed], "the loop is not redialing");
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.
@@ -2833,6 +3098,61 @@ mod tests {
 			accepted_a.try_recv().is_err(),
 			"a cached resolve redialed the drained relay"
 		);
+	}
+
+	/// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps
+	/// the session: no migration and no redial. Its close then reconnects like any drop.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_waited_restart_redials_only_once_the_session_closes() {
+		use futures::FutureExt;
+		const WAIT: Duration = Duration::from_secs(10);
+
+		let origin = crate::origin::spawn();
+		let (addr, mut accepted, _task) = serve(origin.clone()).await;
+
+		let subscriber = crate::origin::spawn();
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Some(MIN_BACKOFF);
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(subscriber.clone())
+			.with_restart(Restart::Wait);
+		let mut connection = client.connect(url(&format!("tcp://{addr}/")));
+		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+
+		session.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+
+		// A broadcast announced after the GOAWAY still arrives: the drained session serves.
+		let late = origin.create_broadcast("late").unwrap();
+		late.announce(Default::default()).unwrap();
+		tokio::time::timeout(WAIT, subscriber.consume().routed("late"))
+			.await
+			.expect("the drained session stopped serving")
+			.unwrap();
+		assert!(
+			connection.draining().and_then(|goaway| goaway.peek()).is_some(),
+			"the GOAWAY never arrived"
+		);
+		assert_eq!(
+			connection.status().now_or_never().transpose().unwrap(),
+			None,
+			"the loop left the session"
+		);
+		assert!(accepted.try_recv().is_err(), "redialed while the session served");
+
+		session.abort(moq_net::Error::GoawayTimeout);
+		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Disconnected);
+		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		tokio::time::timeout(WAIT, accepted.recv())
+			.await
+			.expect("never redialed after the close")
+			.unwrap();
 	}
 
 	#[test]

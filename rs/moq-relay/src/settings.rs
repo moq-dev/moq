@@ -4,7 +4,10 @@
 //! merged flag is declared twice. [`usage_rs::config::Registry::drift`] is the test
 //! that the two stay in step.
 
-#![allow(dead_code)]
+#![allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 
 /// Every setting `moq-relay` merges, flattened tokio groups included.
 #[derive(usage_rs::Config)]
@@ -78,6 +81,9 @@ struct Runtime {
 struct Cluster {
 	#[usage(env = "MOQ_CLUSTER_ID", cli("--cluster-id"))]
 	id: Option<u64>,
+
+	#[usage(env = "MOQ_CLUSTER_MAX_HOPS", cli("--cluster-max-hops"))]
+	max_hops: Option<usize>,
 
 	#[usage(env = "MOQ_CLUSTER_CONNECT", cli("--cluster-connect"), parse = "list_by_comma")]
 	connect: Option<Vec<String>>,
@@ -208,7 +214,7 @@ struct Stats {
 	prefix: Option<String>,
 
 	#[usage(env = "MOQ_STATS_INTERVAL", cli("--stats-interval"))]
-	interval: Option<u64>,
+	interval: Option<String>,
 
 	#[usage(env = "MOQ_STATS_NODE", cli("--stats-node"))]
 	node: Option<String>,
@@ -245,10 +251,8 @@ struct Internal {
 struct Session {
 	#[usage(env = "MOQ_SESSION_ANNOUNCES", cli("--session-announces"))]
 	announces: Option<usize>,
-	#[usage(env = "MOQ_SESSION_SUBSCRIPTIONS", cli("--session-subscriptions"))]
-	subscriptions: Option<usize>,
-	#[usage(env = "MOQ_SESSION_FETCHES", cli("--session-fetches"))]
-	fetches: Option<usize>,
+	#[usage(env = "MOQ_SESSION_REQUESTS", cli("--session-requests"))]
+	requests: Option<usize>,
 }
 
 #[derive(usage_rs::Config)]
@@ -256,10 +260,8 @@ struct Session {
 struct Peer {
 	#[usage(env = "MOQ_PEER_ANNOUNCES", cli("--peer-announces"))]
 	announces: Option<usize>,
-	#[usage(env = "MOQ_PEER_SUBSCRIPTIONS", cli("--peer-subscriptions"))]
-	subscriptions: Option<usize>,
-	#[usage(env = "MOQ_PEER_FETCHES", cli("--peer-fetches"))]
-	fetches: Option<usize>,
+	#[usage(env = "MOQ_PEER_REQUESTS", cli("--peer-requests"))]
+	requests: Option<usize>,
 	#[usage(flatten)]
 	quic: PeerQuic,
 }

@@ -4,6 +4,31 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Connection state
+
+Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
+
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate(numerator=30000, denominator=1001)` and move `track=` from encoder output to `audio.Producer` / `video.Producer`.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
+### Video rendition preference
+
+`moq.media.Video` gains `preference`, defaulting to `0`. Prefer keyword construction and upgrade `moq-ffi` alongside the wrapper. Higher values are preferred; compatibility transcodes use `-1`.
+
+### `announce` takes an `AnnounceRoute`
+
+`BroadcastProducer.announce` takes `moq.AnnounceRoute(cost=..., epoch=...)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
+`Route` is only what announcements report. To re-announce an observed route, copy its `cost` and `epoch`.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve()` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel the task or wrap it in `asyncio.wait_for`.
+
 ### Await session shutdown
 
 `Session.shutdown()` changes from a synchronous call to an async operation. Use `await session.shutdown()` and handle its error; an un-awaited call does not initiate shutdown.
@@ -12,11 +37,10 @@ How to update your code for each breaking change, newest first.
 
 Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
 
-### Broadcast finish returns a linger handle
+### Broadcast `finish` no longer closes
 
-`BroadcastProducer.finish()` returns a `BroadcastFinish` handle instead of no value.
-Keep it and await `wait()` to serve finished tracks until their media is stale.
-Use `BroadcastProducer.close()` for an immediate end.
+`BroadcastProducer.finish()` was a deprecated alias for `close()`; it no longer ends the broadcast at once.
+Call `BroadcastProducer.close()` where you called `finish()`.
 
 ### JSON snapshot `delta_ratio` is `deltas`
 
@@ -45,7 +69,7 @@ Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.
 ### Catalog references carry their epoch
 
 `Video` and `Audio` renditions gain `epoch`, the publisher instance their `broadcast` reference names.
-`BroadcastConsumer.resolve(reference)` becomes `resolve(reference, epoch)`; pass the rendition's `epoch` alongside its `broadcast`, or `None` to resolve whichever instance answers.
+`BroadcastConsumer.resolve(reference)` becomes `resolve(id, rendition)`, taking the catalog rendition the reference belongs to and reading its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, raise for a rendition whose broadcast is proven to serve another epoch.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
@@ -90,7 +114,7 @@ A subscription now reads only the groups its own `ranges` cover.
 `TrackDemand.is_used()`, `used()`, and `unused()` are gone.
 `wanted()` returns `None` while nobody subscribes, otherwise the group subscribers want next, and `await wanted_changed()` waits for it to change (the first call returns at once).
 Loop on `wanted_changed()` until it returns non-`None` where you awaited `used()`, and `None` where you awaited `unused()`.
-`TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
+`TrackInfo` gains `refresh`.
 
 ### `CongestionControl` gained `NONE` (#5926)
 
@@ -110,11 +134,11 @@ To start at group `n`, pass one range starting at the absolute anchor for group 
 ### Receive estimates come from `Session.recv_bandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `Session.recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop.
+Hold the consumer `Session.recv_bandwidth` returns to request PROBE, read it with `rate()` or wait with `rate_changed()`, and drop it to stop.
 
 ```python
 bandwidth = session.recv_bandwidth()
-rate = bandwidth.peek() if bandwidth else None
+rate = bandwidth.rate() if bandwidth else None
 ```
 
 ### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
@@ -139,7 +163,7 @@ The decode consumers' `name` argument is `id`.
 ### Native codecs have `audio` and `video` modules (#5694)
 
 `BroadcastProducer.encode_audio` / `encode_video` are `moq.audio.Producer` / `moq.video.Producer`, built from a `moq.media.CatalogProducer`.
-The audio track name moves into `EncoderOutput(track=...)`, and durations and timestamps are `timedelta` (`frame_duration`, `Frame.timestamp`) instead of `_us` integers; a zero `frame_duration` takes the codec's own frame.
+The audio track name belongs to `Producer(track=...)`, and durations and timestamps are `timedelta` (`frame_duration`, `Frame.timestamp`) instead of `_us` integers; a zero `frame_duration` takes the codec's own frame.
 `BroadcastConsumer.decode_audio` / `decode_video` are `await moq.audio.Consumer.subscribe(broadcast, ...)` / `await moq.video.Consumer.subscribe(broadcast, ...)`.
 Producers expose subscriber state only through `demand()`, and a video `gop` is `moq.video.Gop.KEYFRAME(interval=...)`.
 `moq.audio.Encoder` / `moq.video.Encoder` encode without publishing.
@@ -148,7 +172,8 @@ Producers expose subscriber state only through `demand()`, and a video `gop` is 
 audio = moq.audio.Producer(
     moq.media.CatalogProducer(broadcast),
     moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=48000, channels=1),
-    moq.audio.EncoderOutput(codec=moq.audio.Codec.opus(), track="audio", frame_duration=timedelta(milliseconds=20)),
+    moq.audio.EncoderOutput(codec=moq.audio.Codec.opus(), frame_duration=timedelta(milliseconds=20)),
+    track="audio",
 )
 audio.write(moq.audio.Frame(timestamp=timedelta(0), data=pcm))
 ```

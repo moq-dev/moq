@@ -15,7 +15,7 @@ public typealias Frame = MoqFFI.MoqFrame
 public typealias AudioFrame = MoqFFI.MoqAudioFrame
 /// The PCM layout (format, sample rate, channels) written to an `Audio.Producer`.
 public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
-/// The encoder-side config for a published audio track: codec, rate, channels,
+/// The codec-side audio encoder settings: codec, rate, channels,
 /// bitrate, frame duration, and preset.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
 /// What a `VideoConsumer` decodes to: an optional resize, a max delay, and
@@ -35,7 +35,7 @@ public typealias AudioCodec = MoqFFI.MoqAudioCodec
 public typealias VideoFrame = MoqFFI.MoqVideoFrame
 /// The pixel layout, resolution, and framerate written to a `Video.Producer`.
 public typealias VideoEncoderInput = MoqFFI.MoqVideoEncoderInput
-/// The encoder-side config for a published video track: name, codec, bitrate,
+/// The codec-side video encoder settings: codec, bitrate,
 /// keyframe interval, and backend preference.
 public typealias VideoEncoderOutput = MoqFFI.MoqVideoEncoderOutput
 /// A CPU pixel layout (I420 or RGBA): fed to a `Video.Producer`, or delivered
@@ -48,9 +48,12 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
 /// A best-effort raw-track datagram as received: sequence, timestamp, and payload.
 public typealias Datagram = MoqFFI.MoqDatagram
-/// A path-prefix route: the publisher `epoch` it serves (`nil` when unknown),
-/// relay hop ids (oldest first), and its static production and link cost,
-/// lower wins.
+/// How a broadcast advertises its exact path: its static production `cost`,
+/// lower wins, and the publisher `epoch` it serves (`nil` when unknown).
+public typealias AnnounceRoute = MoqFFI.MoqAnnounceRoute
+/// An observed path-prefix route: the publisher `epoch` it serves (`nil` when
+/// unknown), relay hop ids (oldest first), and its static production and link
+/// cost, lower wins.
 public typealias Route = MoqFFI.MoqRoute
 /// A route over a prefix: the origin-relative `prefix`, what each filter
 /// wildcard matched (`captures`, `nil` for a partial overlap), and the `route`
@@ -91,8 +94,11 @@ public typealias CongestionControl = MoqFFI.MoqCongestionControl
 /// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.
 public typealias WebSocketConfig = MoqFFI.MoqWebSocketConfig
 
-/// A connection lifecycle transition reported by `Session.status()`.
-public typealias ConnectionStatus = MoqFFI.MoqConnectionStatus
+/// The connection lifecycle phase.
+public typealias ConnectionPhase = MoqFFI.MoqConnectionPhase
+
+/// One coherent connection lifecycle snapshot.
+public typealias ConnectionState = MoqFFI.MoqConnectionState
 
 /// The network transport carrying an incoming session.
 public typealias Transport = MoqFFI.MoqTransport

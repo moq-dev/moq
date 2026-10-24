@@ -284,12 +284,12 @@ fn lite_session_over_webtransport() {
 
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
-				.connect_lite(
-					moq_net::time::now(),
+				.connect(
+					moq_net::time::Instant::now(),
 					moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
 				)
 				.await
-				.expect("connect_lite");
+				.expect("connect");
 			tokio::spawn(moq_net::time::run(session_driver));
 
 			let bc = {
@@ -335,12 +335,15 @@ fn lite_session_over_webtransport() {
 
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
-				.accept_lite(
-					moq_net::time::now(),
-					moq_uring::transport::Session::new(session, moq_net::transport::Binding::Uri),
+				.accept(
+					moq_net::time::Instant::now(),
+					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
+						session,
+						moq_net::transport::Binding::Uri,
+					)),
 				)
 				.await
-				.expect("accept_lite");
+				.expect("accept");
 			let task_handle = handle.clone();
 			handle.spawn(async move {
 				let _ = task_handle.run(driver).await;
@@ -376,8 +379,10 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 }
 
 /// A client whose CONNECT is expected to fail, reporting how it failed.
-// Its timeout is a watchdog on the tokio peer, not the worker.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+	clippy::disallowed_methods,
+	reason = "its timeout is a watchdog on the tokio peer, not the worker"
+)]
 fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web::ClientError> {
 	std::thread::spawn(move || {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -739,7 +744,7 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 			let mut filler = session.accept_uni().await.expect("accept_uni");
 			read_all(&mut filler).await;
 
-			#[allow(clippy::disallowed_methods)] // A watchdog on the tokio peer, not the worker.
+			#[expect(clippy::disallowed_methods, reason = "a watchdog on the tokio peer, not the worker")]
 			let accept = tokio::time::timeout(std::time::Duration::from_secs(5), session.accept_uni());
 			let mut recv = accept.await.expect("the reset stream arrives").expect("accept_uni");
 			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");

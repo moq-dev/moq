@@ -15,9 +15,6 @@
 //! per connection and CPU per message (see the README).
 
 #[cfg(target_os = "linux")]
-mod duration;
-
-#[cfg(target_os = "linux")]
 mod linux {
 	use std::collections::HashMap;
 	use std::io::Write;
@@ -64,7 +61,7 @@ mod linux {
 
 		/// Stop after this duration. Runs until interrupted (or the targets exit) otherwise.
 		#[usage(long)]
-		duration: Option<crate::duration::Duration>,
+		duration: Option<moq_tokio::cli::Duration>,
 
 		/// Write JSON lines to this file instead of stdout. Truncates on start.
 		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jsonl", "json"))]
@@ -306,15 +303,13 @@ mod linux {
 			out.flush()?;
 
 			anyhow::ensure!(!targets.is_empty(), "all target processes exited");
-			let Some(delay) = next_delay(
-				args.interval.0,
-				args.duration.map(crate::duration::Duration::into_std),
-				start.elapsed(),
-			) else {
+			let Some(delay) = next_delay(args.interval.0, args.duration.map(Into::into), start.elapsed()) else {
 				return Ok(());
 			};
-			// The sampler runs outside any runtime, so it blocks on the host clock.
-			#[allow(clippy::disallowed_methods)]
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the sampler runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(delay);
 		}
 	}

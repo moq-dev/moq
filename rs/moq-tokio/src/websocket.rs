@@ -140,7 +140,24 @@ impl Options {
 	}
 }
 
+/// The largest WebSocket message or frame [`accept`] reads: one qmux record.
+///
+/// Cap the socket at this before upgrading it, so a peer cannot make it buffer more.
+pub fn max_message_size() -> usize {
+	qmux::ws::max_message_size(&crate::qmux_config())
+}
+
+/// A socket config capped at [`max_message_size`], for the sockets upgraded here.
+fn socket_config() -> tungstenite::protocol::WebSocketConfig {
+	let max = max_message_size();
+	tungstenite::protocol::WebSocketConfig::default()
+		.max_message_size(Some(max))
+		.max_frame_size(Some(max))
+}
+
 /// Read SETUP on an upgraded WebSocket, leaving admission to the returned request.
+///
+/// Cap the socket at [`max_message_size`] before the upgrade.
 pub async fn accept<T>(socket: T, options: Options) -> crate::Result<crate::server::Request>
 where
 	T: futures::Stream<Item = std::result::Result<tungstenite::Message, tungstenite::Error>>
@@ -228,11 +245,7 @@ pub struct Config {
 	/// race. Defaults to 200ms, and drops to zero for a server WebSocket already won.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub delay: Option<time::Duration>,
 
 	/// Head start given to the QUIC dial before the WebSocket fallback joins the race. Defaults to 200ms.
@@ -435,6 +448,7 @@ pub(crate) async fn connect(
 				let url = &url;
 				async move {
 					let stream = tokio::net::TcpStream::connect(addr).await?;
+					stream.set_nodelay(true)?;
 					connect_tls_override(tls, name, url, stream, alpns).await
 				}
 			})
@@ -507,10 +521,11 @@ async fn connect_tls_override(
 	);
 
 	let connector = tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()));
-	let (websocket, response) = tokio_tungstenite::client_async_tls_with_config(request, stream, None, Some(connector))
-		.await
-		.map_err(qmux::Error::from)
-		.map_err(Error::connect)?;
+	let (websocket, response) =
+		tokio_tungstenite::client_async_tls_with_config(request, stream, Some(socket_config()), Some(connector))
+			.await
+			.map_err(qmux::Error::from)
+			.map_err(Error::connect)?;
 
 	let negotiated = response
 		.headers()
@@ -676,7 +691,10 @@ impl Listener {
 		let accepted = Arc::new(Mutex::new(None::<(String, Url)>));
 		let accepted_callback = accepted.clone();
 		let protocols = self.protocols.clone();
-		#[allow(clippy::result_large_err)]
+		#[expect(
+			clippy::result_large_err,
+			reason = "the error type is tungstenite's handshake response, not ours"
+		)]
 		let callback = move |request: &tungstenite::handshake::server::Request,
 		               mut response: tungstenite::handshake::server::Response|
 		      -> std::result::Result<_, tungstenite::handshake::server::ErrorResponse> {
@@ -711,7 +729,7 @@ impl Listener {
 		};
 
 		async move {
-			let websocket = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, None)
+			let websocket = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(socket_config()))
 				.await
 				.map_err(qmux::Error::from)
 				.map_err(Error::accept)?;
@@ -733,9 +751,15 @@ impl Listener {
 	async fn accept_socket(&self) -> (tokio::net::TcpStream, net::SocketAddr) {
 		loop {
 			match self.listener.accept().await {
-				Ok(accepted) => {
+				Ok((stream, addr)) => {
+					// qmux already batches records, so Nagle would only hold a batch's
+					// tail for the peer's delayed ACK. Only a reset socket refuses it.
+					if let Err(err) = stream.set_nodelay(true) {
+						tracing::debug!(%addr, %err, "dropped a connection that refused TCP_NODELAY");
+						continue;
+					}
 					self.health.accepted();
-					return accepted;
+					return (stream, addr);
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
@@ -792,7 +816,7 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 				.map(|version| format!("{}{alpn}", version.prefix())),
 		);
 	}
-	protocols.extend(qmux::ALPNS.iter().map(|protocol| (*protocol).to_string()));
+	protocols.extend(qmux::Version::ALL.iter().map(|version| version.alpn().to_string()));
 	protocols
 }
 
@@ -829,6 +853,15 @@ mod tests {
 			"got {err:?}"
 		);
 		assert!(accepted.await.unwrap().is_err());
+	}
+
+	#[tokio::test]
+	async fn listener_disables_nagle() {
+		let listener = Listener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+		let (stream, _) = listener.accept_socket().await;
+		assert!(stream.nodelay().unwrap());
 	}
 
 	#[tokio::test]
@@ -898,7 +931,10 @@ mod tests {
 			let server_name = tls.get_ref().1.server_name().map(str::to_string);
 			let host = Arc::new(Mutex::new(None));
 			let request_host = host.clone();
-			#[allow(clippy::result_large_err)]
+			#[expect(
+				clippy::result_large_err,
+				reason = "the error type is tungstenite's handshake response, not ours"
+			)]
 			let callback = move |request: &tungstenite::handshake::server::Request,
 			            mut response: tungstenite::handshake::server::Response| {
 				*request_host.lock().unwrap() = request

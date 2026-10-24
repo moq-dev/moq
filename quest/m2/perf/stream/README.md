@@ -80,4 +80,3 @@ Decisions (2026-10-22), each with its reason:
 ## Related
 
 - [WebSocket rate caps](/quest/m2/rate-websocket.md) - its IO wrapper sits under the protocol, on the socket the driver now owns
-- [Stream sockets disable Nagle](/quest/m1/tcp-nodelay.md) - the latency fix on the same sockets, landing first

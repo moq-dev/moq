@@ -81,10 +81,9 @@ This README owns the end-to-end proof and the guide once every child lands:
 
 ## Required
 
-- [Mid-group subscriptions widen](/quest/m1/compress/app-range-widen.md) - an application range starting mid-group on a compressed track widens to frame 0 at the subscriber instead of failing with `Lagged`
+- [moq-transport mid-group subscriptions widen](/quest/m1/compress/ietf-range-widen.md) - an application range starting mid-group on a compressed track widens to frame 0 at a moq-transport subscriber instead of failing with `Lagged`
 - [Migrate](/quest/m1/compress/migrate.md) - catalogs, stats, and timelines publish one compressed track; moq-flate, @moq/flate, and every `.z` name are gone
 
 ## Related
 
-- [Refresh](/quest/m1/refresh/README.md) - its byte ratio measures the stored, compressed group
-- [Front eviction](/quest/m2/unbounded-groups/front-eviction.md) - a compressed group's evicted prefix must refill before a reader can inflate past it
+- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - a compressed group's evicted prefix must refill before a reader can inflate past it

@@ -37,7 +37,7 @@ for (const [attribute, value, expected] of [
 	test(`invalid ${attribute}=${value} warns and uses the default`, () => {
 		const Element = require("./element").default;
 		const set = mock(() => {});
-		const target = { connection: { url: { set } }, controls: { volume: { set } } };
+		const target = { connection: { url: { set } }, controls: { audio: { volume: { set } } } };
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		try {
 			expect(() => Element.prototype.attributeChangedCallback.call(target, attribute, null, value)).not.toThrow();

@@ -14,33 +14,55 @@ import {
 } from "./publish_namespace.ts";
 import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
 import { initialMaxRequestId, REQUEST_WINDOW } from "./setup_options.ts";
-import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import { Subscribe, SubscribeError, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
-import { TrackStatusRequest } from "./track.ts";
+import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-test("draft-14 TRACK_STATUS_OK cannot be routed as NAMESPACE_DONE", async () => {
+test("draft-14 status answers route by request ID and a refusal leaves the session usable", async () => {
+	const version = Version.DRAFT_14;
 	const pair = createMockTransportPair(ALPN.DRAFT_14);
-	const control = await Stream.open(pair.server, { version: Version.DRAFT_14 });
-	const adapter = new ControlStreamAdapter(pair.server, control, Version.DRAFT_14, 100n, true);
-	const running = adapter.run();
-	// A writer may yield a task before the rejection assertion below.
-	void running.catch(() => {});
-	const peer = await Stream.accept(pair.client, Version.DRAFT_14);
+	const control = await Stream.open(pair.server, { version });
+	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+	void adapter.run().catch(() => {});
+	const peer = await Stream.accept(pair.client, version);
 	if (!peer) throw new Error("no control stream");
-	await peer.writer.u53(0x0e);
-	await peer.writer.u16(0);
-	// The adapter may reject while the writer yields a browser task.
-	await new Promise<void>((resolve) => {
-		const channel = new MessageChannel();
-		channel.port1.onmessage = () => {
-			channel.port1.close();
-			channel.port2.close();
-			resolve();
-		};
-		channel.port2.postMessage(null);
-	});
-	await expect(running).rejects.toThrow("unexpected message 0x0e");
+	try {
+		for (const refused of [false, true, false]) {
+			const requestId = await adapter.nextRequestId();
+			if (requestId === undefined) throw new Error("no request ID");
+			const stream = await adapter.openBi();
+			await stream.writer.u53(TrackStatusRequest.id);
+			await new TrackStatusRequest({ requestId, trackNamespace: Path.from("room"), trackName: "video" }).encode(
+				stream.writer,
+				version,
+			);
+			expect(await peer.reader.u53()).toBe(TrackStatusRequest.id);
+			expect((await TrackStatusRequest.decode(peer.reader, version)).requestId).toBe(requestId);
+			if (refused) {
+				await peer.writer.u53(0x0f);
+				await new SubscribeError({ requestId, errorCode: 4, reasonPhrase: "missing" }).encode(
+					peer.writer,
+					version,
+				);
+				expect(await stream.reader.u53()).toBe(0x0f);
+				expect((await SubscribeError.decode(stream.reader, version)).requestId).toBe(requestId);
+			} else {
+				await peer.writer.u53(TrackStatusOk.id(version));
+				await new TrackStatusOk({ requestId, largest: { groupId: 4n, objectId: 1n } }).encode(
+					peer.writer,
+					version,
+				);
+				expect(await stream.reader.u53()).toBe(TrackStatusOk.id(version));
+				const status = await TrackStatusOk.decode(stream.reader, version);
+				expect(status.requestId).toBe(requestId);
+				expect(status.largest).toEqual({ groupId: 4n, objectId: 1n });
+			}
+			stream.close();
+		}
+	} finally {
+		adapter.close();
+	}
 });
 
 // Draft-15 is the interesting one: it names its namespace withdrawals instead of

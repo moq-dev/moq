@@ -6,8 +6,10 @@
 //! machine and container framing on top of the same wire path.
 //!
 //! Run it with `just rs bench-session` on a Linux 6.12+ kernel.
-// Benchmarks measure themselves on the host clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "benchmarks measure themselves on the host clock"
+)]
 
 use criterion::{criterion_group, criterion_main};
 
@@ -140,15 +142,15 @@ mod linux {
 					.expect("quic accept");
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(
-						moq_net::time::now(),
-						moq_uring::transport::Session::new(
+					.accept(
+						moq_net::time::Instant::now(),
+						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
 							moq_net::transport::Binding::InBand,
-						),
+						)),
 					)
 					.await
-					.expect("accept_lite");
+					.expect("accept");
 				let _ = server_handle.run(driver).await;
 				session.closed().await;
 			});
@@ -159,15 +161,15 @@ mod linux {
 					let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 					let (session, driver) = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
-						.connect_lite(
-							moq_net::time::now(),
-							moq_uring::transport::Session::new(
+						.connect(
+							moq_net::time::Instant::now(),
+							moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 								quic::web::Session::raw(conn),
 								moq_net::transport::Binding::InBand,
-							),
+							)),
 						)
 						.await
-						.expect("connect_lite");
+						.expect("connect");
 					let task_handle = handle.clone();
 					handle.spawn(async move {
 						let _ = task_handle.run(driver).await;

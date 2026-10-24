@@ -66,5 +66,12 @@ name = "jitter"
 harness = false
 
 [[bench]]
+name = "decode_clock"
+harness = false
+
+[[bench]]
 name = "containers"
 harness = false
+
+[lints]
+workspace = true

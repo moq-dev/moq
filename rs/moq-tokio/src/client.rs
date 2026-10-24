@@ -5,7 +5,7 @@
 //! accept side is [`crate::server`].
 
 use crate::connection::Goaway;
-use crate::{Addrs, Backoff, Connection, Error};
+use crate::{Addrs, Backoff, Connection, Error, Restart};
 #[cfg(all(feature = "websocket", feature = "quic"))]
 use std::future::Future;
 use url::Url;
@@ -56,6 +56,7 @@ pub struct Client {
 	pub(crate) reconnect: bool,
 	pub(crate) backoff: Backoff,
 	pub(crate) goaway: Goaway,
+	pub(crate) restart: Restart,
 	/// Whether the TLS config pins a certificate fingerprint, which only verifies
 	/// the configured host, so a GOAWAY may not redirect elsewhere.
 	pub(crate) pinned: bool,
@@ -144,6 +145,7 @@ impl Client {
 			reconnect: !config.once.unwrap_or(false),
 			backoff: config.backoff,
 			goaway: config.goaway,
+			restart: Restart::default(),
 			pinned: !config.tls.fingerprint.is_empty(),
 			#[cfg(feature = "tcp")]
 			failover_delay,
@@ -204,7 +206,7 @@ impl Client {
 		self
 	}
 
-	/// Cap the announcements and subscriptions this peer can hold on a session.
+	/// Bound what this peer can make a session hold beyond flow control.
 	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
 		self.moq = self.moq.with_limits(limits);
 		self
@@ -241,6 +243,12 @@ impl Client {
 	/// Defaults to true, unless [`crate::connect::Config::once`] turned it off.
 	pub fn with_reconnect(mut self, reconnect: bool) -> Self {
 		self.reconnect = reconnect;
+		self
+	}
+
+	/// Choose what a GOAWAY naming no URI does. Defaults to [`Restart::Redial`].
+	pub fn with_restart(mut self, restart: Restart) -> Self {
+		self.restart = restart;
 		self
 	}
 
@@ -413,7 +421,7 @@ impl Client {
 		// sending it again is a protocol violation. An iroh-only build reads none of this:
 		// that dial waits for the negotiated binding and builds its own.
 		let moq = self.moq_with_path(setup_path(&url));
-		#[allow(unused_variables)]
+		#[allow(unused_variables, reason = "an iroh-only build never reads it")]
 		let moq = match setup_authority(&url) {
 			Some(authority) => moq.with_authority(authority),
 			None => moq,
@@ -653,7 +661,7 @@ impl Dialed {
 			feature = "tcp",
 			feature = "uds"
 		)),
-		allow(dead_code)
+		allow(dead_code, reason = "only a transport feature dials")
 	)]
 	fn new(session: moq_net::Session, transport: crate::Transport) -> Self {
 		Self { session, transport }
@@ -772,14 +780,14 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 	client: &moq_net::Client,
 	transport: S,
 ) -> Result<moq_net::Session, moq_net::Error> {
-	let (session, driver) = client.connect(moq_net::time::now(), transport).await?;
+	let (session, driver) = client.connect(moq_net::time::Instant::now(), transport).await?;
 	use tracing::Instrument;
 	tokio::spawn(crate::panic::isolate(moq_net::time::run(driver)).instrument(tracing::Span::current()));
 	Ok(session)
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 

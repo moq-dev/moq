@@ -5,8 +5,8 @@
 // streaming importer, which infers frame boundaries. Alongside it, a tone per channel
 // (--tone) is encoded through libopus so the matrix exercises the FFI audio path, not only
 // the video one. subscribe connects, waits for a catalog with video and audio, decodes
-// --audio-ms of audio to --audio-out for tone.py to judge, and exits 0 once a non-empty
-// video frame arrives too (exit 1 on timeout or no data).
+// --audio-ms of every audio rendition to --audio-out.<codec> for tone.py to judge, and exits 0
+// once a non-empty video frame arrives too (exit 1 on timeout or no data).
 //
 //   ffmpeg ... -f h264 - | cpp-interop publish --url http://localhost:4443 --broadcast b.hang --tone 440
 //   cpp-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20 \
@@ -24,7 +24,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -180,7 +182,10 @@ void publish_tone(
     }
 }
 
-int publish(const std::string &url, const std::string &path, const Dial &dial, const std::vector<double> &tones) {
+int publish(
+    const std::string &url, const std::string &path, const Dial &dial, const std::vector<double> &tones,
+    const std::string &finish_ack
+) {
     // No deadline to publish: the harness stops the publisher when the round ends.
     const auto forever = Clock::now() + std::chrono::hours(24);
     auto session = connect(url, dial, forever);
@@ -193,11 +198,14 @@ int publish(const std::string &url, const std::string &path, const Dial &dial, c
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
-    output.track = AUDIO_TRACK;
     output.frame_duration_us = AUDIO_FRAME_DURATION_US;
     auto audio = ok(
         moq::AudioProducer::init(
-            catalog, {moq::AudioSampleFormat::kF32, AUDIO_RATE, static_cast<uint32_t>(tones.size())}, output, nullptr
+            catalog,
+            moq::AudioProducerOptions{
+                {moq::AudioSampleFormat::kF32, AUDIO_RATE, static_cast<uint32_t>(tones.size())},
+                output, AUDIO_TRACK, nullptr
+            }
         ),
         "audio producer"
     );
@@ -230,17 +238,50 @@ int publish(const std::string &url, const std::string &path, const Dial &dial, c
     tone.join();
     ok(audio->finish(), "audio finish");
     ok(media->finish(), "video finish");
-    ok(broadcast->close(), "broadcast close");
+    if (!finish_ack.empty()) {
+        const auto started = Clock::now();
+        auto finish = ok(broadcast->finish(), "broadcast finish");
+        const auto linger = std::chrono::microseconds(finish->linger_us());
+        if (linger.count() <= 0) fail("finished media has no linger");
+        std::printf("finish ready linger_us=%llu\n", static_cast<unsigned long long>(finish->linger_us()));
+        std::fflush(stdout);
+        ok(finish->wait().get(), "finish linger");
+        if (Clock::now() - started < linger) fail("finish wait ended before its linger");
+        std::puts("finish ended");
+        std::fflush(stdout);
+        auto health = ok(session->publish()->create_broadcast(path + ".health"), "health broadcast");
+        auto track = ok(health->publish_track("live", std::nullopt), "health track");
+        const std::string payload = "session-alive";
+        ok(track->write_frame({std::vector<uint8_t>(payload.begin(), payload.end()), std::nullopt}), "health write");
+        ok(track->finish(), "health finish");
+        ok(health->announce({}), "health announce");
+        // Only teardown waits on the FIFO; linger has already completed on its own clock.
+        std::ifstream ack(finish_ack);
+        std::string line;
+        if (!std::getline(ack, line) || line != "complete" || session->state().connects != 1) {
+            fail("finish acknowledgement or session continuity failed");
+        }
+        ok(health->close(), "health close");
+        std::puts("finish acknowledged");
+    } else {
+        ok(broadcast->close(), "broadcast close");
+    }
     close_session(session);
     moq::shutdown();
     return 0;
 }
 
-// Decodes the first `audio_ms` of the rendition to `out`.{txt,pcm}, the layout tone.py reads.
+// Decodes the first `audio_ms` of the rendition to `prefix`.<codec>.{txt,pcm}, the layout tone.py
+// reads. The codec is the catalog's up to its first `.` (`opus`, `mp4a`); two renditions of one
+// codec fail rather than overwrite each other.
 void decode_audio(
     const std::shared_ptr<moq::BroadcastConsumer> &consumer, const std::string &id, const moq::Audio &audio,
-    const std::string &out, uint64_t audio_ms, Clock::time_point deadline
+    const std::string &prefix, uint64_t audio_ms, Clock::time_point deadline
 ) {
+    const std::string out = prefix + "." + audio.codec.substr(0, audio.codec.find('.'));
+    if (std::filesystem::exists(out + ".txt")) {
+        fail(("a second " + audio.codec + " rendition").c_str());
+    }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
     output.max_delay_us = MAX_DELAY_US;
@@ -269,22 +310,33 @@ void decode_audio(
 
 int subscribe(
     const std::string &url, const std::string &path, const Dial &dial, double timeout,
-    const std::string &audio_out, uint64_t audio_ms
+    const std::string &audio_out, uint64_t audio_ms, bool finish, size_t expected_frames
 ) {
     const auto deadline =
         Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(timeout));
     auto session = connect(url, dial, deadline);
 
+    std::shared_ptr<moq::AnnounceConsumer> routes;
+    if (finish) {
+        std::puts("finish reader ready");
+        std::fflush(stdout);
+        std::string line;
+        if (!std::getline(std::cin, line) || line != "read") fail("finish read phase was not released");
+        routes = ok(session->consume()->announced({}), "finish announcements");
+    }
+    const auto read_deadline = finish
+        ? Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(timeout))
+        : deadline;
     auto announced = ok(session->consume()->announced_broadcast(path), "announced_broadcast");
-    auto consumer = until(announced->available(), deadline, "available");
+    auto consumer = until(announced->available(), read_deadline, "available");
 
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
     // demand) may announce a rendition in a later update rather than the first snapshot, so
-    // wait for a catalog that has both video and audio.
-    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer), deadline, "catalog consumer");
+    // wait for a catalog that has both video and audio. A finished fixture has video only.
+    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer), read_deadline, "catalog consumer");
     std::optional<moq::Catalog> catalog;
-    while (!catalog || catalog->video.empty() || catalog->audio.empty()) {
-        catalog = until(catalogs->next(), deadline, "catalog");
+    while (!catalog || catalog->video.empty() || (!finish && catalog->audio.empty())) {
+        catalog = until(catalogs->next(), read_deadline, "catalog");
         if (!catalog) {
             fail("catalog stream ended without a video and an audio track");
         }
@@ -292,29 +344,58 @@ int subscribe(
     const auto &[id, video] = *catalog->video.begin();
 
     moq::Subscription subscription;
-    subscription.max_delay_us = MAX_DELAY_US;
+    subscription.max_delay_us = finish ? static_cast<uint64_t>(timeout * 1e6) : MAX_DELAY_US;
     auto media = until(
-        moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), deadline,
+        moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), read_deadline,
         "container consumer"
     );
 
     // Audio first: it has to arrive without a gap, and the video consumer keeps its first frame
-    // (or skips to a newer one) while this reads.
-    const auto &[audio_id, audio] = *catalog->audio.begin();
-    decode_audio(consumer, audio_id, audio, audio_out, audio_ms, deadline);
+    // (or skips to a newer one) while this reads. One rendition at a time, each from its own
+    // subscription, so none waits unread behind another.
+    if (!finish) {
+        for (const auto &[audio_id, audio] : catalog->audio) {
+            decode_audio(consumer, audio_id, audio, audio_out, audio_ms, deadline);
+        }
+    }
 
-    size_t total = 0;
-    while (total == 0) {
-        auto frame = until(media->next(), deadline, "next frame");
+    size_t total = 0, frames = 0;
+    while (finish || total == 0) {
+        auto frame = until(media->next(), read_deadline, "next frame");
         if (!frame) {
             break;
         }
         total += frame->payload.size();
+        if (!frame->payload.empty()) ++frames;
     }
     if (total == 0) {
         fail("no frame data received");
     }
     std::printf("received %zu bytes from \"%s\"\n", total, path.c_str());
+    if (finish) {
+        if (frames != expected_frames) fail("wrong finished media frame count");
+        while (until(catalogs->next(), read_deadline, "catalog EOF")) {}
+        for (;;) {
+            auto event = until(routes->next(), read_deadline, "announcement END");
+            if (!event) fail("origin ended before broadcast withdrawal");
+            const auto *end = std::get_if<moq::AnnounceEvent::kEnd>(&event->get_variant());
+            if (end && end->announce.prefix == path) break;
+        }
+        auto watch = ok(session->consume()->announced_broadcast(path + ".health"), "health watch");
+        auto health = until(watch->available(), read_deadline, "health available");
+        auto track = until(health->subscribe_track("live", std::nullopt), read_deadline, "health subscribe");
+        auto group = until(track->next_group(), read_deadline, "health group");
+        if (!group) fail("missing health group");
+        auto frame = until(group->read_frame(), read_deadline, "health frame");
+        if (!frame || std::string(frame->payload.begin(), frame->payload.end()) != "session-alive" || frame->timestamp_us) {
+            fail("health payload or timestamp");
+        }
+        if (until(group->read_frame(), read_deadline, "health group EOF") ||
+            until(track->next_group(), read_deadline, "health track EOF") || session->state().connects != 1) {
+            fail("health EOF or session continuity");
+        }
+        std::printf("finish clean frames=%zu catalog=eof announce=end health=ok\n", frames);
+    }
     close_session(session);
     moq::shutdown();
     return 0;
@@ -333,12 +414,19 @@ int main(int argc, char **argv) {
     std::string url;
     std::string broadcast;
     Dial dial;
+    bool finish = false;
+    std::string finish_ack;
+    size_t frames = 10;
     std::vector<double> tones;
     std::string audio_out;
     uint64_t audio_ms = 0;
     double timeout = 20;
     for (int i = 2; i < argc; i++) {
         const std::string flag = argv[i];
+        if (flag == "--finish") {
+            finish = true;
+            continue;
+        }
         if (flag == "--grant") {
             dial.grant = true;
             continue;
@@ -353,6 +441,11 @@ int main(int argc, char **argv) {
             broadcast = value;
         } else if (flag == "--timeout") {
             timeout = std::atof(value.c_str());
+        } else if (flag == "--finish-ack") {
+            finish_ack = value;
+        } else if (flag == "--frames") {
+            frames = std::strtoull(value.c_str(), nullptr, 10);
+            if (frames == 0) fail("frames must be positive");
         } else if (flag == "--version") {
             dial.version = value;
         } else if (flag == "--tone") {
@@ -378,13 +471,13 @@ int main(int argc, char **argv) {
         if (tones.empty()) {
             fail("publish needs --tone");
         }
-        return publish(url, broadcast, dial, tones);
+        return publish(url, broadcast, dial, tones, finish_ack);
     }
     if (role == "subscribe") {
-        if (audio_out.empty() || audio_ms == 0) {
+        if (!finish && (audio_out.empty() || audio_ms == 0)) {
             fail("subscribe needs --audio-out and --audio-ms");
         }
-        return subscribe(url, broadcast, dial, timeout, audio_out, audio_ms);
+        return subscribe(url, broadcast, dial, timeout, audio_out, audio_ms, finish, frames);
     }
     fail(("unknown role " + role).c_str());
 }

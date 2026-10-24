@@ -401,7 +401,11 @@ async fn present(
 }
 
 #[cfg(all(test, feature = "tcp"))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 
@@ -419,14 +423,14 @@ mod tests {
 			config.protocol = qmux::Protocol::Negotiate(versions.alpns().iter().map(|alpn| alpn.to_string()).collect());
 			config
 		};
-		let stream = |io| qmux::transport::Stream::new(io, qmux::Version::QMux01, config().max_record_size);
+		let stream = |io| qmux::transport::Stream::new(io);
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let (client, server) = tokio::try_join!(
 			qmux::Session::connect(stream(client), config()),
 			qmux::Session::accept(stream(server), config())
 		)
 		.unwrap();
-		let now = moq_net::time::now();
+		let now = moq_net::time::Instant::now();
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions(versions.clone())

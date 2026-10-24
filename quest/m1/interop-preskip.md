@@ -25,10 +25,8 @@ Things to look out for:
 - The GStreamer subscriber likely fails it today: `opusdec` trims pre-skip only
   from a buffer's `GstAudioClippingMeta`, never from the OpusHead, and `moqsrc`
   attaches none.
+- The Rust CLI also sends the tone as AAC, which every subscriber decodes to
+  `<prefix>.mp4a`. ffmpeg's AAC encoder adds priming samples, so the same
+  check covers a decoder that keeps or drops the wrong number of them.
 
 Public API: none expected. Wire: none.
-
-## Related
-
-- [Native audio decode conformance](/quest/m1/audio-decode-conformance.md) - pre-skip continuity in unit tests
-- [Interop AAC](/quest/m1/interop-aac.md) - AAC priming is the same question

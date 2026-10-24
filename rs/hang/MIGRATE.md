@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Catalog` parses through `FromStr` (#6471)
+
+The inherent `Catalog::from_str` is replaced by `impl FromStr for Catalog`, with the same `Error`.
+Call `json.parse::<Catalog>()`, or bring `std::str::FromStr` into scope to keep calling `Catalog::from_str`.
+
 ### Timeline records describe one track
 
 `timeline::Range` is replaced by `Position { group, frame }`. A `Record` has `start` and exclusive `end` positions for its own track instead of a `tracks` map of inclusive group ranges.

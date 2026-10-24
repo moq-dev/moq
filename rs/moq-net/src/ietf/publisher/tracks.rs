@@ -9,6 +9,7 @@
 //! with PUBLISH_SKIPPED and the subscriber SUBSCRIBEs to what it wants. Draft-18 has no such
 //! skip, so there the request is refused.
 
+use crate::driver::Transport;
 use std::collections::HashSet;
 
 use hashlink::LinkedHashMap;
@@ -165,8 +166,8 @@ struct Listed {
 	namespace: crate::PathOwned,
 	name: Arc<str>,
 	properties: ietf::Properties,
-	/// Closes once the track is no longer listed.
-	listed: kio::Consumer<()>,
+	/// Closes once the track is no longer listed, holding whether it finished.
+	listed: kio::Consumer<bool>,
 	/// Closes once the request is cancelled, which a PUBLISH not yet sent heeds.
 	live: kio::Consumer<()>,
 	/// The subscription slot the PUBLISH holds for as long as it lives.
@@ -200,15 +201,12 @@ enum Wait {
 	Failed(Error),
 }
 
-impl<S> Publisher<S>
-where
-	S: crate::transport::poll::Boxable,
-{
+impl Publisher {
 	/// Answer a SUBSCRIBE_TRACKS: list every track under its prefix until the subscriber
 	/// cancels or the session ends, then let the PUBLISHes it made run to their own end.
 	pub(super) async fn serve_subscribe_tracks_stream(
 		self,
-		mut stream: Stream<S, Version>,
+		mut stream: Stream<Transport, Version>,
 		msg: ietf::SubscribeTracks<'_>,
 	) -> Result<(), Error> {
 		if let Some(error) = super::super::namespace::refusal(&msg.prefix, self.version) {
@@ -420,9 +418,9 @@ where
 	/// ending it, such as a REQUEST_UPDATE we refuse.
 	fn poll_listing_cancel(
 		&self,
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		finished: &mut bool,
-		goaways: &mut super::super::request_stream::Messages<S>,
+		goaways: &mut super::super::request_stream::Messages,
 		cx: &mut std::task::Context<'_>,
 	) -> Poll<Result<(), Error>> {
 		use super::super::request_stream::{NamespaceUpdate, Next};
@@ -476,7 +474,7 @@ where
 	/// Write the pending PUBLISH_SKIPPEDs, buffering the next only once the last is out, so
 	/// a peer that stops reading leaves the rest collapsing in `skips`.
 	fn poll_write_skips(
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		skips: &Skips,
 		waiter: &kio::Waiter,
 		cx: &mut std::task::Context<'_>,
@@ -535,7 +533,7 @@ where
 		};
 		// Each PUBLISH watches its track's entry here: dropping it says the track is no
 		// longer listed.
-		let mut listed: HashMap<Arc<str>, kio::Producer<()>> = HashMap::new();
+		let mut listed: HashMap<Arc<str>, kio::Producer<bool>> = HashMap::new();
 		// The tracks this broadcast queued a skip for, so its end touches only its own.
 		let mut skipped: HashSet<Arc<str>> = HashSet::new();
 		let mut publishes = TaskSet::owned();
@@ -602,7 +600,7 @@ where
 			let Some(event) = event else {
 				return;
 			};
-			let unlist = |listed: &mut HashMap<Arc<str>, kio::Producer<()>>, skipped: &mut HashSet<Arc<str>>| {
+			let unlist = |listed: &mut HashMap<Arc<str>, kio::Producer<bool>>, skipped: &mut HashSet<Arc<str>>| {
 				listed.clear();
 				let mut skips = request.skips.lock();
 				for name in skipped.drain() {
@@ -638,11 +636,21 @@ where
 				// reading the listing for them, adding nothing.
 				Event::Cancelled => adding = false,
 				Event::Track(crate::broadcast::TracksEvent::Synced) => {}
+				Event::Track(
+					crate::broadcast::TracksEvent::Removed { name } | crate::broadcast::TracksEvent::Finished { name },
+				) if skipped.remove(&name) => {
+					request.skips.lock().remove(&(suffix.clone(), name));
+				}
 				Event::Track(crate::broadcast::TracksEvent::Removed { name }) => {
-					if skipped.remove(&name) {
-						request.skips.lock().remove(&(suffix.clone(), name.clone()));
-					}
 					listed.remove(&name);
+				}
+				// Its PUBLISH ends with TRACK_ENDED rather than in error.
+				Event::Track(crate::broadcast::TracksEvent::Finished { name }) => {
+					if let Some(entry) = listed.remove(&name)
+						&& let Ok(mut finished) = entry.write()
+					{
+						*finished = true;
+					}
 				}
 				Event::Track(crate::broadcast::TracksEvent::Added { .. }) if !adding => {}
 				Event::Track(crate::broadcast::TracksEvent::Added { name, info }) => {
@@ -663,8 +671,9 @@ where
 					let Ok(track) = broadcast.track(&name) else {
 						continue;
 					};
-					// Each paused PUBLISH holds a subscription slot; past the cap the peer is
-					// told the track exists rather than left without it.
+					// Each paused PUBLISH holds a subscription slot. Nothing else bounds how many
+					// a peer's listings hold, so past `Limits::requests` the peer is told the
+					// track exists rather than left without it.
 					let Ok(slot) = self.subscriptions.acquire() else {
 						skip(name);
 						continue;
@@ -685,7 +694,7 @@ where
 						}
 						_ => None,
 					};
-					let entry = kio::Producer::new(());
+					let entry = kio::Producer::new(false);
 					let task = Listed {
 						track,
 						namespace: namespace.clone(),
@@ -748,7 +757,7 @@ where
 		let Some(opened) = opened else {
 			return Ok(());
 		};
-		let mut stream = opened?;
+		let mut stream = super::super::request_stream::with_stats(opened?, self.stats(), self.version);
 		let allocated = kio::wait(|waiter| {
 			if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
 				return Poll::Ready(None);
@@ -801,11 +810,12 @@ where
 		let mut finished = false;
 		let mut goaways = super::super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
-		// PUBLISH_OK or REQUEST_ERROR. A track unlisted before the answer has nothing to
-		// end yet, so the request is reset.
+		// PUBLISH_OK or REQUEST_ERROR. A track that left the listing unfinished before the
+		// answer has nothing to end yet, so the request is reset. One that finished waits for
+		// the answer, then ends with TRACK_ENDED, since the peer listed it on the PUBLISH.
 		let answer = kio::wait(|waiter| {
 			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready() || listed.poll_closed(waiter).is_ready() {
+			if session.poll_closed(&mut cx).is_ready() || (listed.poll_closed(waiter).is_ready() && !*listed.read()) {
 				return Poll::Ready(None);
 			}
 			goaways.poll_next(&mut stream.reader, &mut cx).map(Some)
@@ -863,7 +873,7 @@ where
 
 		if let Some(done) = refused {
 			drop(join);
-			return self.write_publish_done(stream, request_id, done, 0).await;
+			return self.write_publish_done(stream, request_id, done, 0, None).await;
 		}
 
 		// Group streams opened over every time the subscription forwarded, which
@@ -892,12 +902,12 @@ where
 					)
 					.await
 				{
-					Ok(Served::Paused) => {
+					Ok(Served::Paused(_)) => {
 						self.pause_join(join.as_ref());
 						self.write_request_ok(&mut stream.writer, request_id, None).await?;
 						// Unlisted while it forwarded: it ends now that it is idle.
 						if listed.is_closed() {
-							break unlisted();
+							break unlisted(&listed);
 						}
 						continue;
 					}
@@ -937,7 +947,7 @@ where
 
 			let update = match wait {
 				Wait::Update(update) => update,
-				Wait::Removed => break unlisted(),
+				Wait::Removed => break unlisted(&listed),
 				Wait::Revoked => {
 					tracing::info!(broadcast = %absolute, track = %name, "publish no longer authorized");
 					break Served::Track(Err(Error::Unauthorized));
@@ -999,12 +1009,12 @@ where
 		};
 
 		drop(join);
-		self.write_publish_done(stream, request_id, done, opened).await
+		self.write_publish_done(stream, request_id, done, opened, None).await
 	}
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
 	/// unless the subscription forwards.
-	fn pause_join(&self, join: Option<&Join<GroupOf<S>>>) {
+	pub(super) fn pause_join(&self, join: Option<&Join<GroupOf<Transport>>>) {
 		if let Some(join) = join {
 			join.joins.lock().insert(join.request_id, Some(Joined::Empty));
 		}
@@ -1015,7 +1025,7 @@ where
 	/// section 9.5). `Err(())` when the subscriber cancelled.
 	async fn resume_failed(
 		&self,
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		request_id: RequestId,
 		answer: bool,
 		err: Error,
@@ -1033,21 +1043,24 @@ where
 	/// with them would be served, until it pauses again or ends. Answers the resuming update
 	/// with where the subscription now joins, when `answer` says one asked. `Err(())` when the
 	/// subscriber cancelled.
-	#[allow(clippy::too_many_arguments)]
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
 	async fn resume_publish(
 		&self,
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		track: &track::Consumer,
 		namespace: &crate::PathOwned,
 		request_id: RequestId,
 		params: &mut Params,
 		how: Resume,
 		dynamic: bool,
-		join: Option<&Join<GroupOf<S>>>,
-		listed: &kio::Consumer<()>,
+		join: Option<&Join<GroupOf<Transport>>>,
+		listed: &kio::Consumer<bool>,
 		gate: &mut crate::auth::Gate,
 		finished: &mut bool,
-		goaways: &mut super::super::request_stream::Messages<S>,
+		goaways: &mut super::super::request_stream::Messages,
 		opened: &mut u64,
 	) -> Result<Served, ()> {
 		let mut subscription = serving_subscription(params.priority);
@@ -1124,7 +1137,6 @@ where
 		)
 		.compression(self.peer_setup.get().await.flate)
 		.ranked(self.priority.clone());
-		serve.pausable = true;
 		serve.dynamic = dynamic;
 		if let Some(value) = how.new_group {
 			serve.request_new_group(value);
@@ -1188,21 +1200,19 @@ where
 		params.priority = crate::ietf::priority::to_wire(applied.priority);
 		params.max_age = applied.max_delay.as_millis().try_into().ok();
 		let served = match served {
-			Ok(Some(Served::Paused)) => Served::Paused,
-			Ok(Some(served)) => {
-				if matches!(served, Served::Track(Ok(()))) {
-					self.write_end_of_track(stream, &mut serve, finished, goaways).await;
-				}
-				served
-			}
+			Ok(Some(served)) => served,
 			Ok(None) => {
 				serve.close_groups();
 				*opened += serve.opened();
 				return Err(());
 			}
-			Err(refusal) if matches!(refusal.error, Error::Cancel) => unlisted(),
+			// Unlisted while it forwarded.
+			Err(refusal) if matches!(refusal.error, Error::Cancel) => unlisted(listed),
 			Err(refusal) => Served::Track(Err(refusal.error)),
 		};
+		if matches!(served, Served::Track(Ok(()))) {
+			self.write_end_of_track(stream, &mut serve, finished, goaways).await;
+		}
 		// Forwarding stops here: PUBLISH_DONE, or the answer to the pause, follows the close
 		// of every data stream.
 		serve.close_groups();
@@ -1211,12 +1221,14 @@ where
 	}
 }
 
-/// How a PUBLISH whose track is no longer listed ends: always in error, never TRACK_ENDED.
-/// A track that leaves the listing may go on elsewhere, as when its broadcast's route is
-/// withdrawn, and a clean end would tell the subscriber it is over. A finished track is
-/// unlisted the same way, so it deliberately ends in error too.
-fn unlisted() -> Served {
-	Served::Track(Err(Error::NotFound))
+/// How a PUBLISH whose track is no longer listed ends: TRACK_ENDED if it finished, otherwise
+/// in error. A track that leaves the listing unfinished may go on elsewhere, as when its
+/// broadcast's route is withdrawn, and a clean end would tell the subscriber it is over.
+fn unlisted(listed: &kio::Consumer<bool>) -> Served {
+	match *listed.read() {
+		true => Served::Track(Ok(())),
+		false => Served::Track(Err(Error::NotFound)),
+	}
 }
 
 #[cfg(test)]
@@ -1224,7 +1236,6 @@ mod tests {
 	use super::*;
 	use crate::model::ProduceTest as _;
 	use crate::transport::memory;
-	use crate::transport::poll::Session as _;
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -1240,7 +1251,7 @@ mod tests {
 	/// the peer's end of its session.
 	struct Harness {
 		version: Version,
-		publisher: Publisher<memory::Session>,
+		publisher: Publisher,
 		session: memory::Session,
 		peer: memory::Session,
 		broadcast: crate::broadcast::Producer,
@@ -1264,7 +1275,7 @@ mod tests {
 		setup.set(declared);
 		let publisher = Publisher::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin.consume(),
 			Control::new(None, false),
 			None,
@@ -1301,12 +1312,19 @@ mod tests {
 
 	impl Harness {
 		/// Send `msg` on a new request stream, dispatched as the session would.
-		async fn request<M: Message>(&mut self, msg: &M) -> Stream<memory::Session, Version> {
-			let mut stream = Stream::open(&mut self.peer, self.version).await.unwrap();
+		async fn request<M: Message>(&mut self, msg: &M) -> Stream<Transport, Version> {
+			let mut stream = Stream::open(&mut crate::driver::Transport::new(self.peer.clone()), self.version)
+				.await
+				.unwrap();
 			stream.writer.varint(M::ID).await.unwrap();
 			stream.writer.encode(msg).await.unwrap();
 
-			let mut accepted = timeout(Stream::accept(&mut self.session, self.version)).await.unwrap();
+			let mut accepted = timeout(Stream::accept(
+				&mut crate::driver::Transport::new(self.session.clone()),
+				self.version,
+			))
+			.await
+			.unwrap();
 			let id = accepted.reader.varint().await.unwrap();
 			let body: ietf::Body = accepted.reader.decode().await.unwrap();
 			let task = self.publisher.handle_stream(id, body, accepted, false).unwrap();
@@ -1315,8 +1333,13 @@ mod tests {
 		}
 
 		/// The next PUBLISH the publisher opens: its stream, namespace, track and FORWARD.
-		async fn publish(&mut self) -> (Stream<memory::Session, Version>, String, String, bool) {
-			let mut stream = timeout(Stream::accept(&mut self.peer, self.version)).await.unwrap();
+		async fn publish(&mut self) -> (Stream<Transport, Version>, String, String, bool) {
+			let mut stream = timeout(Stream::accept(
+				&mut crate::driver::Transport::new(self.peer.clone()),
+				self.version,
+			))
+			.await
+			.unwrap();
 			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
 			let body: ietf::Body = stream.reader.decode().await.unwrap();
 			let publish: ietf::Publish = body.message(self.version).unwrap();
@@ -1331,13 +1354,13 @@ mod tests {
 	}
 
 	/// The next message on a request stream: its type and body.
-	async fn next(stream: &mut Stream<memory::Session, Version>) -> (u64, ietf::Body) {
+	async fn next(stream: &mut Stream<Transport, Version>) -> (u64, ietf::Body) {
 		let id = timeout(stream.reader.varint()).await.unwrap();
 		let body = stream.reader.decode().await.unwrap();
 		(id, body)
 	}
 
-	async fn send<M: Message>(stream: &mut Stream<memory::Session, Version>, msg: &M) {
+	async fn send<M: Message>(stream: &mut Stream<Transport, Version>, msg: &M) {
 		stream.writer.varint(M::ID).await.unwrap();
 		stream.writer.encode(msg).await.unwrap();
 	}
@@ -1348,7 +1371,7 @@ mod tests {
 
 	/// Answer a PUBLISH with a PUBLISH_OK leaving it paused, which draft-20 on cannot
 	/// change. From draft-18 it is sent as REQUEST_OK.
-	async fn publish_ok(stream: &mut Stream<memory::Session, Version>) {
+	async fn publish_ok(stream: &mut Stream<Transport, Version>) {
 		stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
 		stream
 			.writer
@@ -1424,6 +1447,37 @@ mod tests {
 		}
 	}
 
+	/// A track that finishes while its PUBLISH awaits the answer still ends with TRACK_ENDED
+	/// once answered, since the peer listed it on the PUBLISH; a reset would fail its listing.
+	#[moq_clock::test]
+	async fn a_track_finished_before_the_answer_ends_cleanly() {
+		for version in DRAFTS {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut published = HashMap::new();
+			for _ in 0..2 {
+				let (stream, _, name, _) = h.publish().await;
+				published.insert(name, stream);
+			}
+
+			let mut video = published.remove("video").unwrap();
+			let track = h.tracks.remove("video").unwrap();
+			track.finish().unwrap();
+			drop(track);
+			moq_clock::sleep(Duration::from_millis(10)).await;
+			publish_ok(&mut video).await;
+			let (id, body) = next(&mut video).await;
+			assert_eq!(id, ietf::PublishDone::ID, "{version}");
+			let done: ietf::PublishDone = body.message(version).unwrap();
+			assert_eq!(
+				done.status_code,
+				ietf::PublishDoneStatus::TrackEnded.code(version),
+				"{version}"
+			);
+		}
+	}
+
 	/// A REQUEST_UPDATE with FORWARD=1 resumes a paused PUBLISH: its answer names where the
 	/// subscription joins, and new groups flow. FORWARD=0 pauses it again.
 	#[moq_clock::test]
@@ -1460,7 +1514,7 @@ mod tests {
 					.await
 					.unwrap();
 				opened += 1;
-				let mut reader = crate::coding::Reader::new(recv, version);
+				let mut reader = crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 				let mut bytes = Vec::new();
 				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
 					.await
@@ -1511,7 +1565,12 @@ mod tests {
 				let mut request = h.request(&listing(false)).await;
 				assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
 				let mut stream = loop {
-					let mut stream = timeout(Stream::accept(&mut h.peer, version)).await.unwrap();
+					let mut stream = timeout(Stream::accept(
+						&mut crate::driver::Transport::new(h.peer.clone()),
+						version,
+					))
+					.await
+					.unwrap();
 					assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
 					let body: ietf::Body = stream.reader.decode().await.unwrap();
 					let publish: ietf::Publish = body.message(version).unwrap();
@@ -1531,7 +1590,7 @@ mod tests {
 				let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
 					.await
 					.unwrap();
-				let mut reader = crate::coding::Reader::new(recv, version);
+				let mut reader = crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 				let mut bytes = Vec::new();
 				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
 					.await
@@ -1569,7 +1628,10 @@ mod tests {
 			}
 			skipped.sort();
 			assert_eq!(skipped, ["audio", "video"], "{version}");
-			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version
+			)));
 			assert!(opened.is_pending(), "{version}: a skipped track was PUBLISHed");
 		}
 	}
@@ -1637,10 +1699,10 @@ mod tests {
 		}
 	}
 
-	/// Each paused PUBLISH holds a subscription slot; past the cap the track is skipped
-	/// (PUBLISH_BLOCKED, the same message, on draft-18) rather than held.
+	/// Each paused PUBLISH holds a subscription slot; past `Limits::requests` the track is
+	/// skipped (PUBLISH_BLOCKED, the same message, on draft-18) rather than held.
 	#[moq_clock::test]
-	async fn past_the_subscription_cap_a_track_is_skipped() {
+	async fn past_the_request_limit_a_track_is_skipped() {
 		for version in DRAFTS {
 			let mut h = harness(version);
 			h.publisher.subscriptions = crate::session::Slots::new(1);
@@ -1674,7 +1736,10 @@ mod tests {
 				.create_track("captions", crate::track::Info::timed())
 				.unwrap();
 			moq_clock::sleep(Duration::from_millis(10)).await;
-			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version
+			)));
 			assert!(opened.is_pending(), "{version}: PUBLISHed after the cancel");
 
 			drop(h.broadcast);
@@ -1710,7 +1775,10 @@ mod tests {
 				for _ in 0..2 {
 					assert_eq!(next(&mut relisting).await.0, ietf::PublishSkipped::ID);
 				}
-				let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+				let opened = futures::poll!(std::pin::pin!(Stream::accept(
+					&mut crate::driver::Transport::new(h.peer.clone()),
+					version
+				)));
 				assert!(opened.is_pending(), "PUBLISHed a track twice");
 			} else {
 				let _publishes = [h.publish().await, h.publish().await];
@@ -2090,7 +2158,8 @@ mod tests {
 			group.finish().unwrap();
 			moq_clock::sleep(Duration::from_millis(10)).await;
 			while let Poll::Ready(recv) = futures::poll!(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx))) {
-				let mut reader = crate::coding::Reader::new(recv.unwrap(), version);
+				let mut reader =
+					crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv.unwrap()), version);
 				let mut bytes = Vec::new();
 				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
 					.await
@@ -2167,7 +2236,12 @@ mod tests {
 			};
 			let mut request = h.request(&request).await;
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let mut stream = timeout(Stream::accept(&mut h.peer, version)).await.unwrap();
+			let mut stream = timeout(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version,
+			))
+			.await
+			.unwrap();
 			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
 			let body: ietf::Body = stream.reader.decode().await.unwrap();
 			let publish: ietf::Publish = body.message(version).unwrap();
@@ -2281,7 +2355,7 @@ mod tests {
 			});
 			h.publisher = Publisher::new(
 				crate::time::sim(),
-				h.session.clone(),
+				crate::driver::Transport::new(h.session.clone()),
 				h._origin.consume(),
 				Control::new(None, false),
 				None,
@@ -2292,7 +2366,10 @@ mod tests {
 
 			let first = h.request(&listing(false)).await;
 			moq_clock::sleep(Duration::from_millis(10)).await;
-			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version
+			)));
 			assert!(opened.is_pending(), "{version}: listed a track before the setup answer");
 
 			first.writer.abort(&Error::Cancel);
@@ -2326,7 +2403,10 @@ mod tests {
 			let mut request = h.request(&listing(false)).await;
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
 			moq_clock::sleep(Duration::from_millis(10)).await;
-			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version
+			)));
 			assert!(opened.is_pending(), "{version}: listed a track the grant denies");
 
 			auth.authorize(&crate::auth::Grant::all());

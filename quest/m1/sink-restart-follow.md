@@ -16,8 +16,9 @@ route dies, since its subscriptions then end with an error.
 
 Decided with the maintainer on 2026-10-20: widened from the server and push
 sinks to every moq-cli and moq-gst reader. Following a catalog's references
-to other broadcasts stays with
-[reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md).
+to other broadcasts landed for `moqsrc` through `moq_mux::Source::follow`;
+`moq play` resolves a reference once with `Source::resolve`, which waits for
+a sibling's first announcement and keeps it.
 
 Readers with their own follow loop today move onto `announced_broadcast`:
 
@@ -42,19 +43,20 @@ Audit and fix the rest the same way:
   (`EXT-X-DISCONTINUITY`); a failed timeline answers its playlists with a no-store 5xx.
 - `export rtmp`, `export srt`, `export rtc`, both `--listen` (per-viewer
   streams in `moq-rtmp`, `moq-srt`, `moq-rtc`) and `--connect` (one push).
-  SRT already rides the TS follower (`--linger`, `--stitch`); confirm its
+  SRT already rides the TS follower (`--linger`, becoming `--follow` in
+  [TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md),
+  and `--stitch`); confirm its
   listen side does too. FLV and WebRTC need a decision.
 - `transcode`: its source broadcast; following means restarting the ladder
   on the new instance.
 
-Reuse `moq_mux::Source::follow` from
-[reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md),
-built on `announced_broadcast`, rather than one rule per reader (decided
-2026-10-20, maintainer). Each fix lands with a test that replaces the
-publisher while the reader runs.
+Share `moq_mux::follow::Instances::new(origin, path, None)` (decided 2026-10-20,
+maintainer: no reader hand-rolls its own follow loop) rather than one rule per
+reader: it yields `follow::Event::Start` for each instance serving the path and
+`follow::Event::End` once the one handed out stops serving. Build a
+`moq_mux::Source` from each started instance, so its siblings follow through
+`Source::follow` and its exporters pin through `Source::bind`, which waits for
+a sibling's first announcement. Each fix lands
+with a test that replaces the publisher while the reader runs.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - owns `Source::follow`, built on moq-net's announced request

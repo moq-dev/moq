@@ -27,7 +27,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import type { Producer as TrackProducer } from "./track.ts";
+import type { Location, Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -1293,7 +1293,9 @@ test("integration: ietf fetch group is unsupported", async () => {
 	]);
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow("fetch group is not supported for moq-transport");
+	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow(
+		"fetch group is not supported by this session's version",
+	);
 
 	remote.close();
 	client.abort();
@@ -2776,7 +2778,7 @@ async function runSessionDeath(
 	protocol: string,
 	version?: number,
 	local = false,
-): Promise<[Error | null, Error | null]> {
+): Promise<[Error | null, Error | null, Location | undefined]> {
 	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
 
@@ -2815,7 +2817,7 @@ async function runSessionDeath(
 	client.abort();
 	server.abort();
 	origin.close();
-	return [closed, await withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended")];
+	return [closed, await withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended"), track.end()];
 }
 
 for (const [name, protocol, version] of [
@@ -2831,9 +2833,12 @@ for (const [name, protocol, version] of [
 		expect(groupEnd).toBeInstanceOf(SessionError);
 		expect((groupEnd as SessionError).code).toBe(DEATH);
 	});
-	test(`integration: ${name} ends a locally closed track cleanly`, async () => {
-		const [closed] = await runSessionDeath(protocol, version, true);
+	// A local close is a dead route, not finished content: it declares no end, so a resumed
+	// reader's replacement route continues past it.
+	test(`integration: ${name} ends a locally closed track cleanly without declaring an end`, async () => {
+		const [closed, , end] = await runSessionDeath(protocol, version, true);
 		expect(closed).toBeNull();
+		expect(end).toBeUndefined();
 	});
 }
 

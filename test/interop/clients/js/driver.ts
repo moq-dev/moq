@@ -1,20 +1,23 @@
 /**
  * Drives a headless Chromium against the vite-built page (see `serve`) for the interop matrix. publish
- * streams a fake camera and a microphone playing `--audio-file` until killed; subscribe verifies
- * rendered playback, that each audio channel the player outputs carries its `--tone`, and
- * pause/resume.
+ * streams a fake camera and a microphone playing `--audio-file` until killed; subscribe verifies,
+ * once per `--codecs` audio rendition with the player pinned to it, rendered playback, that each
+ * audio channel the player outputs carries its `--tone`, and pause/resume.
  *
  * The publishers on the other side of the matrix are separate processes with no readiness signal,
  * so this driver tolerates a slow announcement with one reload. `media.ts` is the strict path: it
  * waits on an explicit publisher-ready state and never reloads.
  *
  *     bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang --audio-file tone.wav [--version V]
- *     bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20 --tone 440,660 [--version V]
+ *     bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20 --tone 440,660 \
+ *         --codecs opus,mp4a [--version V]
  *
  * `--version` makes the element offer that protocol version alone.
  *
  * @module
  */
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import type { Page } from "playwright";
 import {
@@ -59,9 +62,13 @@ const { positionals, values } = parseArgs({
 		url: { type: "string" },
 		broadcast: { type: "string" },
 		version: { type: "string" },
+		finish: { type: "boolean", default: false },
+		"finish-ack": { type: "string" },
+		frames: { type: "string", default: "10" },
 		timeout: { type: "string", default: "20" },
 		"audio-file": { type: "string" },
 		tone: { type: "string" },
+		codecs: { type: "string" },
 	},
 });
 
@@ -69,26 +76,33 @@ const role = positionals[0];
 const url = values.url;
 const broadcast = values.broadcast;
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
+const finishing = values.finish || values["finish-ack"] !== undefined;
 const audioFile = values["audio-file"];
 const tones = (values.tone ?? "").split(",").filter(Boolean).map(Number);
+// Each audio rendition by codec: the catalog's up to its first `.`.
+const codecs = (values.codecs ?? "").split(",").filter(Boolean);
 if (
 	(role !== "publish" && role !== "subscribe") ||
 	!url ||
 	!broadcast ||
 	!Number.isFinite(timeoutMs) ||
 	timeoutMs <= 0 ||
-	(role === "publish" && !audioFile) ||
-	(role === "subscribe" && (!tones.length || tones.some((hz) => !(hz > 0))))
+	(!finishing && role === "publish" && !audioFile) ||
+	(!finishing && role === "subscribe" && (!tones.length || tones.some((hz) => !(hz > 0)) || !codecs.length))
 ) {
 	console.error(
-		"usage: driver.ts publish --url U --broadcast B --audio-file WAV | subscribe --url U --broadcast B --tone HZ,... [--version V] [--timeout S>0]",
+		"usage: driver.ts publish --url U --broadcast B (--audio-file WAV | --finish-ack FIFO) | subscribe --url U --broadcast B (--tone HZ,... --codecs CODEC,... | --finish [--frames N]) [--version V] [--timeout S>0]",
 	);
 	process.exit(2);
 }
 
-/** Whether every channel the player outputs carries its own tone, judged as tone.py judges a native subscriber. */
-function toneHeard(state: Sample): boolean {
+/**
+ * Whether every channel the player outputs carries its own tone, judged as tone.py judges a native
+ * subscriber, from the `codec` rendition.
+ */
+function toneHeard(state: Sample, codec: string): boolean {
 	return (
+		state.audioCodec?.split(".")[0] === codec &&
 		state.audioContext === "running" &&
 		state.audioChannels === tones.length &&
 		state.tones?.length === tones.length &&
@@ -129,114 +143,190 @@ const browser = await launch([
 	...(audioFile ? [`--use-file-for-fake-audio-capture=${audioFile}`] : []),
 ]);
 
-let code = 1;
-try {
+/**
+ * Play the broadcast in a page of its own, pinned to its `codec` audio rendition: rendered video, the
+ * tone on every channel, then pause and resume. False when the tone check fails, which it reports
+ * with the `audio check failed` marker the harness reads; any other failure throws.
+ */
+async function watch(codec: string): Promise<boolean> {
 	const [page, errors] = await open(
 		browser,
-		pageUrl(server.origin, role, {
-			url,
-			broadcast,
+		pageUrl(server.origin, "subscribe", {
+			url: url as string,
+			broadcast: broadcast as string,
 			...(values.version ? { versions: values.version } : {}),
-			...(role === "subscribe" ? { tone: tones.join(",") } : {}),
+			tone: tones.join(","),
+			codec,
 		}),
-		role,
-		role === "subscribe",
+		`subscribe ${codec}`,
+		true,
 	);
-	if (role === "subscribe") await waitForWatch(page);
+	await waitForWatch(page);
+	const start = Date.now();
+	const startupDeadline = start + timeoutMs;
+	let reloaded = false;
+	let playing: Sample | undefined;
+	while (Date.now() < startupDeadline) {
+		throwPageErrors(errors);
+		const state = await readPlayerState(page);
+		if (state.videoTimestamp !== undefined && state.painted && state.controlLabel === "Pause") {
+			playing = state;
+			break;
+		}
+		// Retry once after the publisher has had time to announce. This preserves
+		// the existing startup tolerance while the interaction checks below stay strict.
+		if (!reloaded && Date.now() - start > timeoutMs / 2) {
+			reloaded = true;
+			await page.reload({ waitUntil: "load" });
+			await waitForWatch(page);
+		}
+		await sleep(POLL_INTERVAL_MS);
+	}
+	if (!playing) {
+		const state = await readPlayerState(page);
+		throw new Error(`timed out waiting for rendered video: ${JSON.stringify(state)}`);
+	}
 
-	if (role === "publish") {
+	const interactionDeadline = Date.now() + timeoutMs;
+	try {
+		// Once audio plays, the tone gets a bounded grace rather than the whole timeout, so a
+		// wrong tone fails as fast as it does in the native subscribers.
+		await waitForState(page, errors, {
+			deadline: interactionDeadline,
+			description: "audible audio",
+			predicate: (state) => state.audioContext === "running" && (state.rms ?? 0) >= TONE_CHECK.minRms,
+		});
+		playing = await waitForState(page, errors, {
+			deadline: Math.min(interactionDeadline, Date.now() + TONE_GRACE_MS),
+			description: "the audio tone",
+			predicate: (state) => toneHeard(state, codec),
+		});
+	} catch (err) {
+		// Only a tone wait that ran out is an audio check failure; a page error reports as itself.
+		if (!(err instanceof Failure)) throw err;
+		// `wrong tone` is the marker the harness's control requires: audible audio from the pinned
+		// rendition, in the publisher's layout, that does not carry its tones. Anything else failing is
+		// a plain audio failure.
+		const state = await readPlayerState(page);
+		const wrongTone =
+			state.audioCodec?.split(".")[0] === codec &&
+			state.audioContext === "running" &&
+			state.audioChannels === tones.length &&
+			state.tones?.length === tones.length &&
+			state.tones.every(({ rms }) => rms >= TONE_CHECK.minRms);
+		console.error(
+			`audio check failed: ${wrongTone ? "wrong tone: " : ""}the ${codec} rendition plays ${state.audioCodec} ` +
+				`with ${state.audioChannels} channels, per channel ${JSON.stringify(state.tones)}, want ${tones} Hz, ` +
+				`loudest ${state.toneHz?.toFixed(0)} Hz`,
+		);
+		console.error(err.message);
+		return false;
+	}
+
+	await pause(page);
+	await waitForState(page, errors, {
+		deadline: interactionDeadline,
+		description: "paused player UI",
+		predicate: (state) =>
+			state.paused && state.pausedAttribute && state.controlLabel === "Play" && state.centerPlayVisible,
+	});
+	const paused = await waitForStablePause(page, errors, interactionDeadline);
+	if (!paused.painted) throw new Error(`pause cleared the preview frame: ${JSON.stringify(paused)}`);
+
+	await page.locator(SELECTORS.ui).locator(SELECTORS.centerPlay).click();
+	const resumed = await waitForState(page, errors, {
+		deadline: interactionDeadline,
+		description: "resumed playback",
+		predicate: (state) =>
+			!state.paused &&
+			!state.pausedAttribute &&
+			state.controlLabel === "Pause" &&
+			!state.centerPlayVisible &&
+			state.videoFrames > paused.videoFrames &&
+			state.videoTimestamp !== undefined &&
+			state.videoTimestamp > (paused.videoTimestamp ?? -1) &&
+			state.audioBytes > paused.audioBytes,
+	});
+
+	throwPageErrors(errors);
+	const heard = playing.tones?.map(({ share }, channel) => `${tones[channel]} Hz ${share.toFixed(2)}`).join(", ");
+	console.error(
+		`rendered, paused, and resumed ${broadcast}: video=${resumed.videoFrames} frames audio=${resumed.audioBytes} bytes of ${playing.audioCodec} (${heard})`,
+	);
+	await closeSessions(page);
+	return true;
+}
+
+let code = 1;
+try {
+	if (!finishing && role === "subscribe") {
+		// Every rendition is judged, even after one fails, so the wrong-tone control sees each refuse.
+		let heard = true;
+		for (const codec of codecs) heard = (await watch(codec)) && heard;
+		code = heard ? 0 : 1;
+	} else if (finishing) {
+		const [page, errors] = await open(
+			browser,
+			pageUrl(server.origin, `finish-${role}`, {
+				url,
+				broadcast,
+				frames: values.frames ?? "10",
+				timeout: String(timeoutMs),
+				...(values.version ? { versions: values.version } : {}),
+			}),
+			role,
+			role === "subscribe",
+		);
+		const wait = async (field: "ready" | "ended" | "result") => {
+			const deadline = Date.now() + timeoutMs;
+			while (Date.now() < deadline) {
+				throwPageErrors(errors);
+				const state = await page.evaluate(() => {
+					const s = window.interopFinish;
+					return (
+						s && { ready: s.ready, ended: s.ended, result: s.result, error: s.error, lingerUs: s.lingerUs }
+					);
+				});
+				if (state?.error) throw new Error(state.error);
+				if (state?.[field]) return state;
+				await sleep(POLL_INTERVAL_MS);
+			}
+			throw new Error(`finish ${field} timed out`);
+		};
+		const ready = await wait("ready");
+		if (role === "subscribe") {
+			console.error("finish reader ready");
+			const input = createInterface({ input: process.stdin });
+			try {
+				if ((await input.question("")) !== "read") throw new Error("expected finish read release");
+			} finally {
+				input.close();
+			}
+			await page.evaluate(() => window.interopFinish?.read());
+		} else {
+			console.error(`finish ready linger_us=${ready.lingerUs}`);
+			await wait("ended");
+			console.error("finish ended");
+			const input = createInterface({ input: createReadStream(values["finish-ack"] as string) });
+			try {
+				if ((await input[Symbol.asyncIterator]().next()).value !== "complete")
+					throw new Error("expected finish acknowledgement");
+			} finally {
+				input.close();
+			}
+			await page.evaluate(() => window.interopFinish?.acknowledge());
+		}
+		console.error((await wait("result")).result);
+		code = 0;
+	} else {
+		await open(
+			browser,
+			pageUrl(server.origin, role, { url, broadcast, ...(values.version ? { versions: values.version } : {}) }),
+			role,
+		);
 		console.error(`publishing ${broadcast} (fake camera + ${audioFile} as the microphone) to ${url}`);
 		// Stream until the orchestrator stops us.
 		await new Promise((resolve) => process.once("SIGTERM", resolve));
-		code = 0;
-	} else {
-		const start = Date.now();
-		const startupDeadline = start + timeoutMs;
-		let reloaded = false;
-		let playing: Sample | undefined;
-		while (Date.now() < startupDeadline) {
-			throwPageErrors(errors);
-			const state = await readPlayerState(page);
-			if (state.videoTimestamp !== undefined && state.painted && state.controlLabel === "Pause") {
-				playing = state;
-				break;
-			}
-			// Retry once after the publisher has had time to announce. This preserves
-			// the existing startup tolerance while the interaction checks below stay strict.
-			if (!reloaded && Date.now() - start > timeoutMs / 2) {
-				reloaded = true;
-				await page.reload({ waitUntil: "load" });
-				await waitForWatch(page);
-			}
-			await sleep(POLL_INTERVAL_MS);
-		}
-		if (!playing) {
-			const state = await readPlayerState(page);
-			throw new Error(`timed out waiting for rendered video: ${JSON.stringify(state)}`);
-		}
-
-		const interactionDeadline = Date.now() + timeoutMs;
-		try {
-			// Once audio plays, the tone gets a bounded grace rather than the whole timeout, so a
-			// wrong tone fails as fast as it does in the native subscribers.
-			await waitForState(page, errors, {
-				deadline: interactionDeadline,
-				description: "audible audio",
-				predicate: (state) => state.audioContext === "running" && (state.rms ?? 0) >= TONE_CHECK.minRms,
-			});
-			playing = await waitForState(page, errors, {
-				deadline: Math.min(interactionDeadline, Date.now() + TONE_GRACE_MS),
-				description: "the audio tone",
-				predicate: toneHeard,
-			});
-		} catch (err) {
-			// Only a tone wait that ran out is an audio check failure; a page error reports as itself.
-			if (!(err instanceof Failure)) throw err;
-			// `wrong tone` is the marker the harness's control requires: audible audio in the publisher's
-			// layout that does not carry its tones. Anything else failing is a plain audio failure.
-			const state = await readPlayerState(page);
-			const wrongTone =
-				state.audioContext === "running" &&
-				state.audioChannels === tones.length &&
-				state.tones?.length === tones.length &&
-				state.tones.every(({ rms }) => rms >= TONE_CHECK.minRms);
-			console.error(
-				`audio check failed: ${wrongTone ? "wrong tone: " : ""}${state.audioChannels} catalog channels, ` +
-					`per channel ${JSON.stringify(state.tones)}, want ${tones} Hz, loudest ${state.toneHz?.toFixed(0)} Hz`,
-			);
-			throw err;
-		}
-
-		await pause(page);
-		await waitForState(page, errors, {
-			deadline: interactionDeadline,
-			description: "paused player UI",
-			predicate: (state) =>
-				state.paused && state.pausedAttribute && state.controlLabel === "Play" && state.centerPlayVisible,
-		});
-		const paused = await waitForStablePause(page, errors, interactionDeadline);
-		if (!paused.painted) throw new Error(`pause cleared the preview frame: ${JSON.stringify(paused)}`);
-
-		await page.locator(SELECTORS.ui).locator(SELECTORS.centerPlay).click();
-		const resumed = await waitForState(page, errors, {
-			deadline: interactionDeadline,
-			description: "resumed playback",
-			predicate: (state) =>
-				!state.paused &&
-				!state.pausedAttribute &&
-				state.controlLabel === "Pause" &&
-				!state.centerPlayVisible &&
-				state.videoFrames > paused.videoFrames &&
-				state.videoTimestamp !== undefined &&
-				state.videoTimestamp > (paused.videoTimestamp ?? -1) &&
-				state.audioBytes > paused.audioBytes,
-		});
-
-		throwPageErrors(errors);
-		const heard = playing.tones?.map(({ share }, channel) => `${tones[channel]} Hz ${share.toFixed(2)}`).join(", ");
-		console.error(
-			`rendered, paused, and resumed ${broadcast}: video=${resumed.videoFrames} frames audio=${resumed.audioBytes} bytes (${heard})`,
-		);
 		code = 0;
 	}
 } finally {
@@ -245,6 +335,7 @@ try {
 	// Close every session before the browser: closing it, or even the page, can end them without
 	// a close, leaving the relay to time them out.
 	for (const page of browser.contexts().flatMap((context) => context.pages())) {
+		await page.evaluate(() => window.interopFinish?.close()).catch(() => {});
 		await closeSessions(page);
 		await page.close().catch(() => {});
 	}

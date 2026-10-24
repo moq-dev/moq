@@ -30,12 +30,11 @@ The library exposes the following C functions, see [api.rs](src/api.rs) for full
 int32_t moq_log_level(const char *level, uintptr_t level_len);
 
 // Session
-int32_t moq_session_connect(const char *url, uintptr_t url_len, const moq_client_config *config, uint32_t origin_publish, uint32_t origin_consume, moq_status_callback on_status, void *user_data);
+int32_t moq_session_connect(const char *url, uintptr_t url_len, const moq_client_config *config, uint32_t origin_publish, uint32_t origin_consume, moq_state_callback on_state, void *user_data);
 moq_client_config moq_client_defaults(void);
 int32_t moq_session_close(uint32_t session);
 int32_t moq_session_bandwidth(uint32_t session);
 int32_t moq_bandwidth_reserve(uint32_t bandwidth, uint32_t track, uint64_t max_bps);
-int32_t moq_bandwidth_set_target(uint32_t bandwidth, uint64_t target_bps, bool present);
 int32_t moq_bandwidth_close(uint32_t bandwidth);
 int32_t moq_reservation_grant(uint32_t reservation, uint64_t *bps, bool *present);
 int32_t moq_reservation_update(uint32_t reservation, uint64_t max_bps);
@@ -48,7 +47,7 @@ int32_t moq_server_fingerprints(uint32_t server, moq_string *dst, uintptr_t coun
 int32_t moq_server_close(uint32_t server);
 int32_t moq_session_request_path(uint32_t request, moq_string *dst);
 int32_t moq_session_request_query(uint32_t request, moq_string *dst);
-int32_t moq_session_request_accept(uint32_t request, uint32_t origin_publish, uint32_t origin_consume, moq_status_callback on_status, void *user_data);
+int32_t moq_session_request_accept(uint32_t request, uint32_t origin_publish, uint32_t origin_consume, moq_state_callback on_state, void *user_data);
 int32_t moq_session_request_reject(uint32_t request, uint16_t code);
 int32_t moq_session_request_free(uint32_t request);
 

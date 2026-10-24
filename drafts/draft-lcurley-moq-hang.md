@@ -218,7 +218,7 @@ A discontinuity marker is a delivery event, not a new epoch, and a system-clock 
 
 ## Track Identity {#identity}
 A track name always means the same content, so a catalog update never redefines an audio or video track.
-A track's identity is the fields a consumer cannot change without reinitializing its decoder or demuxer: `codec`, `description`, and `container`, plus `displayAspectWidth` and `displayAspectHeight` for video and `sampleRate` and `numberOfChannels` for audio.
+A track's identity is the fields a consumer cannot change without reinitializing its decoder or demuxer: `codec`, `description`, and `container`, plus `displayAspectWidth`, `displayAspectHeight`, and `interlaced` for video and `sampleRate` and `numberOfChannels` for audio.
 A publisher MUST NOT change them for a track once a catalog lists it.
 
 Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`.
@@ -261,6 +261,7 @@ type VideoDecoderConfigExtensions = {
   "color": Color | undefined,
   "projection": Projection | undefined,
   "stereo": string | undefined,
+  "interlaced": boolean | undefined,
 }
 ~~~
 
@@ -324,6 +325,10 @@ Its `fov` is the degrees of longitude the picture spans, centred straight ahead:
 
 A consumer MUST treat an unrecognized `projection` kind or `stereo` value as absent, and MUST reject a recognized `projection` kind with a malformed field, such as a `fov` out of range.
 Neither field is part of the track's identity.
+
+`interlaced` is true when each decoded picture weaves two fields, as an H.264 stream with `frame_mbs_only_flag` 0 decodes.
+If absent, it defaults to false; a publisher SHOULD only write it when true.
+A renderer SHOULD deinterlace such a picture, and a consumer MAY choose its decoder by it, since some hardware decoders refuse interlaced streams.
 
 For example:
 
@@ -744,8 +749,10 @@ For example:
 An audio or video rendition MAY declare `warmup`, an integer duration in milliseconds after a group start before its decoded output is presentable without decoding the previous group.
 A publisher MUST round a fractional-millisecond warmup up to the next whole millisecond.
 Absent or `0` means every group start is immediately presentable.
-After a non-continuous join, a consumer MUST decode from the group start and MUST NOT present frames stamped before the group's start plus `warmup`.
-It SHOULD join that much earlier to obtain the requested presentation time.
+After a non-continuous join, a consumer MUST decode from the group start.
+It SHOULD join `warmup` earlier to obtain the requested presentation time.
+Unless it also decodes from an earlier group start, it MUST NOT present frames stamped before the group's start plus `warmup`.
+A consumer that does MAY present those frames, which can show decoding artifacts, but MUST switch to the earlier decoder's frames once that decoder reaches the presented timestamp.
 
 For video, `warmup` can describe a refresh cycle during which decoding converges without an initial keyframe.
 For audio, it describes decoder pre-roll, for example 80 milliseconds for Opus, and does not change the group-start rule.
@@ -1204,7 +1211,7 @@ This document has no IANA actions.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
 
-- Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures.
+- Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures. A consumer also decoding from an earlier group start may present frames before `warmup`, switching to that decoder once it reaches the presented timestamp.
 - Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks.
 - Allowed a DVR to delete timeline objects no checkpoint recovery needs, oldest first.
@@ -1228,6 +1235,7 @@ This document has no IANA actions.
 - Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.
 - Added the optional video `color` field: H.273 primaries, transfer, matrix, and range, plus the SMPTE ST 2086 mastering display and CTA-861.3 content light levels.
 - Added the optional video `projection` (rectilinear, or equirectangular with a longitude `fov`) and `stereo` (mono, left-right, or top-bottom) fields and the optional audio `layout` field (ambisonic).
+- Added the optional video `interlaced` field, true when each decoded picture weaves two fields, and made it part of the track's identity ({{identity}}).
 
 ## moq-hang-03
 {:numbered="false"}

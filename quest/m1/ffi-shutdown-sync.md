@@ -6,7 +6,7 @@
 the draining close before it returns, like `cancel(code)`. A caller waits for
 the drain with the existing async `closed()`. Dropping or never polling a
 future can no longer turn a shutdown into a cancel. Every binding and wrapper
-follows, with a `MIGRATE.md` entry in each affected package.
+follows, and the Impact bullet says how to migrate each affected package.
 
 ## Plan
 
@@ -31,7 +31,10 @@ an extra `begin_shutdown()` beside the async one (two methods for one action).
   with mocked time, in moq-ffi and through the OBS output test.
 - The `release` line's additive async `drain()`
   ([FFI shutdown backport](/quest/m0/ffi-shutdown-backport.md)) maps onto this
-  at the next breaking cut; say so in each MIGRATE entry.
+  at the next breaking cut; say so in the Impact bullet.
+- The `## Unreleased` entries in `rs/moq-ffi` and the wrapper guides say
+  `shutdown` became async against release's synchronous one. The Impact
+  bullet supersedes them, for the cut to collapse into the net change.
 
 Public API: breaking in moq-ffi and every binding. Wire: none.
 

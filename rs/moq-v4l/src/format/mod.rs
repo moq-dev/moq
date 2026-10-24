@@ -22,7 +22,6 @@ pub mod transfer;
 pub use transfer::TransferFunction;
 
 bitflags! {
-	#[allow(clippy::unreadable_literal)]
 	#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 	pub struct Flags : u32 {
 		const PREMUL_ALPHA  = 0x00000001;

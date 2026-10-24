@@ -11,7 +11,6 @@ mod auth;
 mod complete;
 #[cfg(feature = "capture")]
 mod devices;
-mod duration;
 mod fetch;
 mod hls;
 mod moq;
@@ -23,8 +22,6 @@ mod rtmp;
 mod rtsp;
 mod srt;
 mod subscribe;
-#[cfg(test)]
-mod test_env;
 #[cfg(feature = "transcode")]
 mod transcode;
 mod web;
@@ -97,7 +94,7 @@ async fn spawn_server(
 
 	let window = moq
 		.drain_timeout
-		.map(crate::duration::Duration::into_std)
+		.map(Into::into)
 		.unwrap_or(moq_relay::DEFAULT_DRAIN_TIMEOUT);
 	let (trigger, shutdown) = moq_relay::shutdown::Observer::new(window);
 	let server = net.server(moq.server_config(), shutdown.activity().clone())?;
@@ -169,7 +166,7 @@ fn attach_lan(
 	Ok(cluster.with_advertise(advertise))
 }
 
-/// The admission, accounting and shutdown context shared by one listener.
+/// The admission and shutdown context shared by one listener.
 #[derive(Clone)]
 struct Serving {
 	cluster: moq_relay::cluster::Cluster,
@@ -186,7 +183,7 @@ struct Serving {
 /// stage's directions prune the side it does not use, so a subscribe-only export
 /// never announces what a viewer could not have had anyway.
 impl Serving {
-	async fn serve_client(&self, request: moq_tokio::server::Request) -> anyhow::Result<()> {
+	async fn serve_client(&self, mut request: moq_tokio::server::Request) -> anyhow::Result<()> {
 		let origin = &self.cluster.origin;
 		let directions = self.directions;
 		let auth_request = moq_relay::auth::request_for(&self.auth, &request);
@@ -211,20 +208,17 @@ impl Serving {
 		let token = lease.token();
 		let publish = directions
 			.publish
-			.then(|| origin.scope(&token.root, &token.subscribe.path).ok())
+			.then(|| origin.scope(&token.root, &token.subscribe).ok())
 			.flatten();
 		let subscribe = directions
 			.consume
-			.then(|| origin.scope(&token.root, &token.publish.path).ok())
+			.then(|| origin.scope(&token.root, &token.publish).ok())
 			.flatten();
 		if publish.is_none() && subscribe.is_none() {
 			request.reject(moq_tokio::server::Reject::Forbidden).await.ok();
 			anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
 		}
 
-		let stats = self.cluster.stats.tier(token.tier.clone()).session(&token.label);
-		let lease = lease.with_stats(stats.clone());
-		let mut request = request.with_stats(stats);
 		if let Some(publish) = publish {
 			request = request.with_publisher(publish.consume());
 		}
@@ -599,13 +593,13 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if import.source.stdin_format().is_some() {
 						claim("stdin", &mut stdin, &name)?;
 					}
-					let stats = import.stats;
+					let report = import.report;
 					if let Some(mut publish) =
 						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
 					{
-						// Before `run` declares a track, so the stats section rides the first catalog.
-						if stats {
-							publish = publish.with_stats(connection.as_ref().map(moq_tokio::Connection::monitor))?;
+						// Before `run` declares a track, so the `stats` section rides the first catalog.
+						if report {
+							publish = publish.with_report(connection.as_ref().map(moq_tokio::Connection::monitor))?;
 						}
 						locals.push(publish);
 					}
@@ -714,7 +708,7 @@ fn spawn_import(
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	let max_age = import.max_age.map(crate::duration::Duration::into_std);
+	let max_age = import.max_age.map(Into::into);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
 	let target = |name: String| crate::moq::ImportTarget {
@@ -763,9 +757,9 @@ fn spawn_import(
 				let srt = srt.endpoint;
 				if let Some(addr) = srt.listen {
 					let name = require_broadcast(name, "import srt --listen")?;
-					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std(), program));
+					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into(), program));
 				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std(), program));
+					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into(), program));
 				}
 			}
 			ImportSource::Rtsp(rtsp) => {
@@ -831,7 +825,6 @@ fn spawn_export(
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
 			passthrough: stdout.passthrough,
-			sync: stdout.sync,
 			catalog: export.catalog_format,
 			select: export.select,
 		};
@@ -849,7 +842,7 @@ fn spawn_export(
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
-				let max_delay = rtmp.max_delay.into_std();
+				let max_delay = rtmp.max_delay.into();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
 					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_delay));
@@ -885,8 +878,8 @@ fn spawn_export(
 			ExportSink::Archive(args) => {
 				tasks.spawn(archive::export(origin.consume(), name, args));
 			}
-			ExportSink::Stats => {
-				tasks.spawn(report::print_stats(origin.consume(), name));
+			ExportSink::Report => {
+				tasks.spawn(report::print_report(origin.consume(), name));
 			}
 			ExportSink::Echo => {
 				tasks.spawn(report::print_echo(origin.consume(), name));
@@ -987,7 +980,7 @@ fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Resu
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::future::Future;
@@ -1083,14 +1076,14 @@ mod tests {
 		let (client, server) = moq_net::transport::memory::pair(config);
 		let accepting = tokio::spawn(async move {
 			let (session, driver) = moq_net::Server::new()
-				.accept(moq_net::time::now(), server)
+				.accept(moq_net::time::Instant::now(), server)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
 			session
 		});
 		let (_client, client_driver) = moq_net::Client::new()
-			.connect(moq_net::time::now(), client)
+			.connect(moq_net::time::Instant::now(), client)
 			.await
 			.unwrap();
 		// Never dropped, which would close the transport: polled only until the session is served.
@@ -1516,11 +1509,11 @@ mod tests {
 	}
 
 	/// A `--connect` URL can name the broadcast itself, leaving the stage's broadcast empty: the
-	/// connection root, which `export stats` reads like the other point exports.
+	/// connection root, which `export report` reads like the other point exports.
 	#[tokio::test]
-	async fn export_stats_reads_the_connection_root() {
+	async fn export_report_reads_the_connection_root() {
 		let invocation =
-			Invocation::try_parse_from(["moq", "--connect", "http://relay/event", "export", "stats"]).unwrap();
+			Invocation::try_parse_from(["moq", "--connect", "http://relay/event", "export", "report"]).unwrap();
 		let Some(Command::Export(export)) = invocation.stages.into_iter().next() else {
 			panic!("parsed as something other than an export");
 		};

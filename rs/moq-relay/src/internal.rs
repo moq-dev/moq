@@ -500,6 +500,51 @@ fn render_metrics(
 		|c| c.broadcasts_ended,
 	);
 
+	for (name, help, field) in [
+		(
+			"moq_relay_wire_tx_bytes_total",
+			"Transport bytes sent, including framing and retransmissions, excluding IP, UDP, and TCP headers.",
+			(|p: &moq_net::stats::Presence| p.wire_tx) as fn(&moq_net::stats::Presence) -> u64,
+		),
+		(
+			"moq_relay_wire_rx_bytes_total",
+			"Transport bytes received, including framing, excluding IP, UDP, and TCP headers.",
+			(|p: &moq_net::stats::Presence| p.wire_rx) as fn(&moq_net::stats::Presence) -> u64,
+		),
+	] {
+		let _ = writeln!(out, "# HELP {name} {help}");
+		let _ = writeln!(out, "# TYPE {name} counter");
+		for (tier, presence) in snap.sessions() {
+			let _ = writeln!(out, "{name}{{tier=\"{}\"}} {}", tier.as_str(), field(&presence));
+		}
+	}
+
+	let control = snap.control();
+	for (name, help, field) in [
+		(
+			"moq_relay_control_tx_bytes_total",
+			"Control-message bytes encoded for sending, including codec prefixes; excludes transport overhead.",
+			(|b: &moq_net::stats::Bytes| b.tx) as fn(&moq_net::stats::Bytes) -> u64,
+		),
+		(
+			"moq_relay_control_rx_bytes_total",
+			"Control-message bytes decoded, including codec prefixes; excludes transport overhead.",
+			(|b: &moq_net::stats::Bytes| b.rx) as fn(&moq_net::stats::Bytes) -> u64,
+		),
+	] {
+		let _ = writeln!(out, "# HELP {name} {help}");
+		let _ = writeln!(out, "# TYPE {name} counter");
+		for (tier, class, bytes) in &control {
+			let _ = writeln!(
+				out,
+				"{name}{{tier=\"{}\",class=\"{}\"}} {}",
+				tier.as_str(),
+				class.as_str(),
+				field(bytes)
+			);
+		}
+	}
+
 	let _ = writeln!(
 		out,
 		"# HELP moq_relay_requests_total Admitted request/response exchanges."
@@ -581,7 +626,7 @@ fn render_drain(out: &mut String, tally: crate::shutdown::Tally) {
 /// zero so a rate over it is defined from the first scrape. A refused session
 /// never reaches the traffic counters above.
 fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
-	use crate::refusals::Refusal;
+	use crate::refusals::RefusalKind;
 	use std::fmt::Write as _;
 
 	let _ = writeln!(
@@ -590,7 +635,7 @@ fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
 	);
 	let _ = writeln!(out, "# TYPE moq_relay_sessions_refused_total counter");
 	let counts = refusals.snapshot();
-	for &refusal in Refusal::ALL {
+	for &refusal in RefusalKind::ALL {
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_refused_total{{reason=\"{}\"}} {}",
@@ -819,7 +864,7 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1133,10 +1178,10 @@ mod tests {
 	/// defined before the first refusal.
 	#[test]
 	fn refusal_metrics_list_every_reason_from_zero() {
-		use crate::refusals::{Refusal, Refusals};
+		use crate::refusals::{RefusalKind, Refusals};
 
 		let refusals = Refusals::default();
-		refusals.record(Refusal::Unavailable);
+		refusals.record(RefusalKind::Unavailable);
 		let mut body = String::new();
 		render_refusals(&mut body, &refusals);
 
@@ -1144,8 +1189,8 @@ mod tests {
 			body.contains("# TYPE moq_relay_sessions_refused_total counter"),
 			"type header:\n{body}"
 		);
-		for &refusal in Refusal::ALL {
-			let expected = u64::from(refusal == Refusal::Unavailable);
+		for &refusal in RefusalKind::ALL {
+			let expected = u64::from(refusal == RefusalKind::Unavailable);
 			let row = format!(
 				"moq_relay_sessions_refused_total{{reason=\"{}\"}} {expected}",
 				refusal.as_str()
@@ -1170,6 +1215,32 @@ mod tests {
 			body.contains("moq_relay_sessions_closed_total{tier=\"http\"} 0"),
 			"{body}"
 		);
+	}
+
+	#[test]
+	fn wire_metrics_include_internal_sessions_and_keep_final_totals() {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		for tier in ["internal", "edge"] {
+			let session = registry.tier(moq_net::stats::Tier::new(tier)).session("");
+			let source = moq_net::transport::Wire::new();
+			let guard = session.wire(source.clone());
+			source.set_sent_bytes(123);
+			source.set_received_bytes(456);
+			let check = || {
+				let body = render_metrics(&registry.snapshot(), &[], &[]);
+				for (direction, value) in [("tx", 123), ("rx", 456)] {
+					let metric = format!("moq_relay_wire_{direction}_bytes_total");
+					assert!(body.contains(&format!("# TYPE {metric} counter")), "{body}");
+					assert!(body.contains(&format!("{metric}{{tier=\"{tier}\"}} {value}")), "{body}");
+				}
+			};
+			check();
+			check();
+			drop(guard);
+			drop(session);
+			registry.report(&mut Default::default());
+			check();
+		}
 	}
 
 	#[tokio::test]

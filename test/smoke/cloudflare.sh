@@ -261,7 +261,6 @@ for transport in webtransport quic; do
         webtransport) url="$HTTPS_URL" ;;
         quic) url="$MOQT_URL" ;;
     esac
-    # moq-dev's IETF adapter currently forwards subgroup streams, not datagrams.
     # A moderate cadence avoids conflating lossy live-edge turnover with protocol
     # interoperability while still validating sustained multi-group delivery.
     run_round moq-dev "$transport" "$url" subgroup 65536 32 25

@@ -182,8 +182,7 @@ type Read = Container.Read;
 function manualAt(ms: number) {
 	const clock = new Manual();
 	clock.jump(Nano.fromMilli(Milli(ms)));
-	const restore = clock.install();
-	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), restore };
+	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), installed: clock.install() };
 }
 function sample(group: number, timestamp: number, keyframe = true): Read {
 	return {
@@ -213,7 +212,13 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	let resets = 0;
 	const errors: VideoDecoderInit["error"][] = [];
 	const frames: VideoDecoderInit["output"][] = [];
-	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => reads.shift());
+	const configures: VideoDecoderConfig[] = [];
+	// A read that is an Error stands in for a malformed container read.
+	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => {
+		const read = reads.shift() as Read | Error | undefined;
+		if (read instanceof Error) throw read;
+		return read;
+	});
 	if (live) next.mockRestore();
 	class Codec {
 		state = "unconfigured";
@@ -225,7 +230,8 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 			errors.push(callbacks.error);
 			frames.push(callbacks.output);
 		}
-		configure() {
+		configure(config: VideoDecoderConfig) {
+			configures.push(config);
 			this.state = "configured";
 			this.#keyRequired = true;
 		}
@@ -302,21 +308,19 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	// an unknown track.
 	const track = live ? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI }) : undefined;
 	const decoder = new Decoder({ source, sync, enabled });
-	// Opened before the reads below, so it observes every one of them.
-	const arrivals = decoder.arrivals();
 	await microtasks();
 	return {
 		decoder,
-		arrivals,
 		delay,
 		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
 		emit: (timestamp: number, index = -1) => frames.at(index)?.(new Picture(timestamp) as unknown as VideoFrame),
 		get codecs() {
 			return errors.length;
 		},
-		switchRendition(track = "replacement") {
-			catalog.set({ video: { renditions: { [track]: video } } });
+		switchRendition(track = "replacement", fields: Partial<Catalog.VideoConfig> = {}) {
+			catalog.set({ video: { renditions: { [track]: { ...video, ...fields } } } });
 		},
+		configures,
 		enabled,
 		catalog,
 		// The broadcast the rendition reads, and its first track, for a live playback to publish into.
@@ -390,6 +394,23 @@ it("promoting from no active track holds its picture and timestamp until a frame
 		expect(playback.decoder.out.frame.peek()).toBe(held);
 		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(1));
 		expect((held as unknown as Picture).closed).toBe(false);
+	} finally {
+		playback.close();
+	}
+});
+
+it("decodes an interlaced rendition in software and marks its frames interlaced", async () => {
+	const reads: Read[] = [];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		expect(playback.configures.at(-1)?.hardwareAcceleration).toBeUndefined();
+
+		reads.push(sample(10, 1000));
+		playback.switchRendition("video", { interlaced: true });
+		await microtasks();
+		expect(playback.configures.at(-1)?.hardwareAcceleration).toBe("prefer-software");
+		expect(playback.decoder.out.frame.peek()).toBeDefined();
+		expect(playback.decoder.out.interlaced.peek()).toBe(true);
 	} finally {
 		playback.close();
 	}
@@ -490,7 +511,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.outputs).toEqual(stage === "queued" ? [] : [picture]);
 			const before = playback.decoder.out.frame.peek();
 
-			playback.sync.received(Milli(skipTo), "audio", Milli(5000));
+			playback.sync.received(Milli(skipTo), Milli(5000));
 			playback.release();
 			await microtasks();
 			const due = playback.decoder.out.frame.peek();
@@ -500,7 +521,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		} finally {
 			playback.close();
 			await microtasks();
-			clock.restore();
+			clock.installed.close();
 		}
 	}
 
@@ -525,7 +546,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.outputs).toEqual([]);
 
 			// "instant" has no cap, so every newer frame skips the playhead without passing over anything.
-			playback.sync.received(Milli(10_000), "video", Nano.toMilli(Nano(now())));
+			playback.sync.received(Milli(10_000), Nano.toMilli(Nano(now())));
 			playback.release();
 			await microtasks();
 
@@ -546,11 +567,6 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		]);
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
-			for (const timestamp of [1, 1.1, 1.2])
-				expect(await playback.arrivals.next()).toMatchObject({
-					kind: "frame",
-					timestamp: Milli(timestamp),
-				});
 			// Rejected payloads were still received, but never counted as frames.
 			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
 		} finally {
@@ -653,6 +669,26 @@ it("keeps a video failure while the same rendition is muted by its publisher", a
 });
 
 for (const kind of ["legacy", "cmaf"] as const) {
+	// A failure in the read loop, not a WebCodecs callback, must still reach `error` and release
+	// the subscription, instead of leaving the player apparently live.
+	for (const [failure, reads] of [
+		["a malformed read", [new Error("malformed frame")] as unknown as Read[]],
+		["a decode that throws", [sample(1, 100_000, false)]],
+	] as const) {
+		it(`reports ${failure} on ${kind} and releases its subscription`, async () => {
+			const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+			const playback = await guardedPlayback(kind, [...reads]);
+			try {
+				await microtasks();
+				expect(playback.decoder.out.error.peek()).toBeInstanceOf(Error);
+				expect(close).toHaveBeenCalled();
+			} finally {
+				playback.close();
+				close.mockRestore();
+			}
+		});
+	}
+
 	it(`reports the outgoing ${kind} decoder failing during a rendition handover`, async () => {
 		const playback = await guardedPlayback(kind, [sample(1, 100_000)]);
 		try {
@@ -730,15 +766,15 @@ it("a shared audio clock reset cannot present a parked video frame", async () =>
 	} finally {
 		playback.close();
 		await microtasks();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
-it("closing the track releases a video wait parked across a reset", async () => {
+it("closing the track releases a parked video wait", async () => {
 	const clock = manualAt(1000);
 	const reads: Read[] = [];
 	const playback = await guardedPlayback("legacy", reads);
-	const waits: Promise<void>[] = [];
+	const waits: Promise<boolean>[] = [];
 	const original = playback.sync.wait.bind(playback.sync);
 	const wait = spyOn(playback.sync, "wait").mockImplementation((timestamp, signal) => {
 		const waiting = original(timestamp, signal);
@@ -753,10 +789,8 @@ it("closing the track releases a video wait parked across a reset", async () => 
 		playback.enabled.set(true);
 		await microtasks();
 		expect(playback.submitted).toEqual([0, 100_000]);
-		playback.sync.reset();
-		await microtasks();
 		expect(waits.map((waiting) => Bun.peek.status(waiting))).toContain("pending");
-		// No frame re-anchors the shared clock, but the closed track must not leave its wait behind.
+		// Nothing moves the shared clock, but the closed track must not leave its wait behind.
 		playback.enabled.set(false);
 		await microtasks();
 		expect(waits.map((waiting) => Bun.peek.status(waiting))).not.toContain("pending");
@@ -764,7 +798,7 @@ it("closing the track releases a video wait parked across a reset", async () => 
 		wait.mockRestore();
 		playback.close();
 		await microtasks();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -790,7 +824,7 @@ it("a reset drops a parked video frame even when the next anchor restores the re
 	} finally {
 		playback.close();
 		await microtasks();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -877,8 +911,7 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true);
 
-	// The postMessage ring every page without cross-origin isolation plays from, following the
-	// shared delay the way the audio decoder drives the worklet.
+	// The audio ring, following the shared delay the way the audio decoder drives the worklet.
 	const RATE = 48_000;
 	const STEP = 20; // ms of audio inserted and rendered per tick, one Opus frame
 	const samples = (RATE * STEP) / 1000;
@@ -933,7 +966,7 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		follow.close();
 		playback.close();
 		await microtasks();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -965,6 +998,6 @@ it("a video track read from another path does not inherit the outgoing delay", a
 	} finally {
 		playback.close();
 		await microtasks();
-		clock.restore();
+		clock.installed.close();
 	}
 });

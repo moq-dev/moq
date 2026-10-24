@@ -24,6 +24,29 @@ pub use tokio_tungstenite;
 /// [`Error::WebSocket`] wraps a `tungstenite::Error`.
 pub use tokio_tungstenite::tungstenite;
 
+/// The largest WebSocket message or frame a session under `config` reads.
+///
+/// Each message carries one record, or one frame on draft-00, so cap a socket upgraded
+/// elsewhere (see [`Upgraded`]) at this: a larger one is refused anyway, but only after
+/// the socket buffered it whole.
+pub fn max_message_size(config: &Config) -> usize {
+	usize::try_from(config.max_record_size)
+		.unwrap_or(usize::MAX)
+		.max(crate::MAX_FRAME_SIZE)
+}
+
+/// `config` with its message and frame sizes held to [`max_message_size`] of `session`.
+fn capped(
+	config: Option<tungstenite::protocol::WebSocketConfig>,
+	session: &Config,
+) -> tungstenite::protocol::WebSocketConfig {
+	let max = max_message_size(session);
+	let mut config = config.unwrap_or_default();
+	config.max_message_size = Some(config.max_message_size.map_or(max, |size| size.min(max)));
+	config.max_frame_size = Some(config.max_frame_size.map_or(max, |size| size.min(max)));
+	config
+}
+
 /// Keep-alive configuration for WebSocket transports.
 ///
 /// WebSocket has no built-in idle timeout: when the peer's host crashes
@@ -65,7 +88,8 @@ impl Default for KeepAlive {
 /// Use this when the WebSocket handshake was performed by an external
 /// framework (e.g. axum) and the caller already has the negotiated
 /// `Sec-WebSocket-Protocol` value, which names the QMux wire-format version and
-/// application protocol.
+/// application protocol. Disable Nagle on the TCP socket underneath, as with
+/// [`Server::accept`].
 pub struct Upgraded<T> {
 	ws: T,
 	alpn: String,
@@ -104,9 +128,8 @@ where
 	///
 	/// The WebSocket handshake already settled the protocol, so the session starts
 	/// without awaiting the peer's transport parameters, failing later with
-	/// [`Error::HandshakeTimeout`] if they never arrive. Keep
-	/// [`max_record_size`](Config::max_record_size) within the WebSocket's
-	/// frame limit (16 MiB by default), since each record is one message.
+	/// [`Error::HandshakeTimeout`] if they never arrive. Cap the socket's message and
+	/// frame sizes at [`max_message_size`] of `config`, since each record is one message.
 	pub fn with_session_config(mut self, config: Config) -> Self {
 		self.session = config;
 		self
@@ -144,12 +167,12 @@ where
 	fn start(self, side: Side) -> Result<Session, Error> {
 		let (version, protocol) = alpn::parse(Some(&self.alpn))?;
 		let config = self.session.clone().with_negotiated(version, protocol);
-		let transport = self.into_transport(config.version, config.max_record_size)?;
+		let transport = self.into_transport()?;
 		Session::new(transport, side, config)
 	}
 
-	fn into_transport(self, version: Version, max_record_size: u64) -> Result<WsTransport<T>, Error> {
-		let mut transport = WsTransport::new(self.ws, version, max_record_size, Binding::Uri);
+	fn into_transport(self) -> Result<WsTransport<T>, Error> {
+		let mut transport = WsTransport::new(self.ws, Binding::Uri);
 		if let Some(stats) = self.socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
@@ -211,7 +234,7 @@ impl Client {
 		self
 	}
 
-	/// Set the WebSocket configuration (e.g. max message/frame sizes).
+	/// Set the WebSocket configuration, its message and frame sizes held to [`max_message_size`].
 	pub fn with_config(mut self, config: tungstenite::protocol::WebSocketConfig) -> Self {
 		self.config = Some(config);
 		self
@@ -231,9 +254,8 @@ impl Client {
 	///
 	/// The WebSocket handshake already settled the protocol, so the session starts
 	/// without awaiting the peer's transport parameters, failing later with
-	/// [`Error::HandshakeTimeout`] if they never arrive. Keep
-	/// [`max_record_size`](Config::max_record_size) within the WebSocket's
-	/// frame limit (16 MiB by default), since each record is one message.
+	/// [`Error::HandshakeTimeout`] if they never arrive. The socket's message and frame
+	/// sizes are held to [`max_message_size`] of `config`, since each record is one message.
 	pub fn with_session_config(mut self, config: Config) -> Self {
 		self.session = config;
 		self
@@ -264,15 +286,18 @@ impl Client {
 			http::HeaderValue::from_str(&protocol_value).map_err(|_| Error::InvalidProtocol(protocol_value))?,
 		);
 
+		let ws_config = capped(self.config, &self.session);
+
+		// `true` disables Nagle: records are already batched, see `Server::accept`.
 		#[cfg(feature = "wss")]
 		let (ws_stream, response) = {
-			tokio_tungstenite::connect_async_tls_with_config(request, self.config, false, self.connector.clone())
+			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), true, self.connector.clone())
 				.await
 				.map_err(Error::from)?
 		};
 
 		#[cfg(not(feature = "wss"))]
-		let (ws_stream, response) = tokio_tungstenite::connect_async_with_config(request, self.config, false)
+		let (ws_stream, response) = tokio_tungstenite::connect_async_with_config(request, Some(ws_config), true)
 			.await
 			.map_err(Error::from)?;
 
@@ -290,7 +315,7 @@ impl Client {
 		}
 
 		let config = self.session.clone().with_negotiated(version, protocol);
-		let transport = WsTransport::new(ws_stream, config.version, config.max_record_size, Binding::Uri);
+		let transport = WsTransport::new(ws_stream, Binding::Uri);
 		let transport = match self.keep_alive {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
@@ -363,15 +388,17 @@ impl Server {
 	///
 	/// The WebSocket handshake already settled the protocol, so the session starts
 	/// without awaiting the peer's transport parameters, failing later with
-	/// [`Error::HandshakeTimeout`] if they never arrive. Keep
-	/// [`max_record_size`](Config::max_record_size) within the WebSocket's
-	/// frame limit (16 MiB by default), since each record is one message.
+	/// [`Error::HandshakeTimeout`] if they never arrive. The socket's message and frame
+	/// sizes are held to [`max_message_size`] of `config`, since each record is one message.
 	pub fn with_session_config(mut self, config: Config) -> Self {
 		self.session = config;
 		self
 	}
 
 	/// Accept a WebSocket connection, negotiating an offered `(alpn, version)`.
+	///
+	/// Disable Nagle on a TCP `socket` first (`set_nodelay(true)`): records are
+	/// already batched, so Nagle would only hold a batch's tail for the peer's ACK.
 	pub async fn accept<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
 		&self,
 		socket: T,
@@ -388,7 +415,10 @@ impl Server {
 		let supported = self.protocols.clone();
 		let require_protocol = self.require_protocol;
 
-		#[allow(clippy::result_large_err)]
+		#[expect(
+			clippy::result_large_err,
+			reason = "tungstenite's handshake callback fixes the error type"
+		)]
 		let callback = move |req: &server::Request,
 		               mut response: server::Response|
 		      -> Result<server::Response, server::ErrorResponse> {
@@ -444,7 +474,8 @@ impl Server {
 				.unwrap())
 		};
 
-		let ws = tokio_tungstenite::accept_hdr_async_with_config(socket, callback, None).await?;
+		let ws = tokio_tungstenite::accept_hdr_async_with_config(socket, callback, Some(capped(None, &self.session)))
+			.await?;
 
 		let (version, protocol) = negotiated
 			.lock()
@@ -453,12 +484,46 @@ impl Server {
 			.expect("negotiated must be set after successful handshake");
 
 		let config = self.session.clone().with_negotiated(version, protocol);
-		let transport = WsTransport::new(ws, config.version, config.max_record_size, Binding::Uri);
+		let transport = WsTransport::new(ws, Binding::Uri);
 		let transport = match self.keep_alive {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
 		};
 		// Protocol came from the negotiated subprotocol, so no in-band wait.
 		Session::new(transport, Side::Server, config)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use moq_net::transport::poll::Session as _;
+	use tokio::io::AsyncWriteExt;
+
+	/// A frame declaring more than one record is refused at its header rather than
+	/// buffered whole, closing the session well before any timer would.
+	#[tokio::test(start_paused = true)]
+	async fn a_frame_past_one_record_is_refused_at_its_header() {
+		let (mut client, server) = tokio::io::duplex(1 << 16);
+		let accept = tokio::spawn(async move { Server::new().accept(server).await });
+		client
+			.write_all(
+				b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+				Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+				Sec-WebSocket-Protocol: qmux-01\r\n\r\n",
+			)
+			.await
+			.unwrap();
+		let mut session = accept.await.unwrap().unwrap();
+
+		// A masked binary frame declaring 1 MiB, with none of its payload sent.
+		let mut frame = vec![0x82, 0x80 | 127];
+		frame.extend_from_slice(&(1u64 << 20).to_be_bytes());
+		frame.extend_from_slice(&[0; 4]);
+		client.write_all(&frame).await.unwrap();
+
+		tokio::time::timeout(Duration::from_secs(1), session.closed())
+			.await
+			.expect("the socket waited to buffer a frame larger than a record");
 	}
 }

@@ -1,4 +1,4 @@
-use crate::{auth, cluster, incoming::Incoming, refusals::Refusal};
+use crate::{auth, cluster, incoming::Incoming, refusals::RefusalKind};
 
 use axum::http;
 use tracing::Instrument;
@@ -9,7 +9,7 @@ use tracing::Instrument;
 /// the right code instead of sprinkling close/return at each failure site.
 pub(crate) struct StatusError {
 	pub(crate) status: http::StatusCode,
-	refusal: Option<Refusal>,
+	refusal: Option<RefusalKind>,
 	pub(crate) source: anyhow::Error,
 }
 
@@ -93,7 +93,7 @@ impl<R: Incoming> Connection<R> {
 		let admitted = request
 			.within(Box::pin(lifecycle.admit(request.admission(&lifecycle.auth))))
 			.await
-			.inspect_err(|_| lifecycle.cluster.refusals.record(Refusal::Unavailable))
+			.inspect_err(|_| lifecycle.cluster.refusals.record(RefusalKind::Unavailable))
 			.map_err(|err| err.context("admission timed out"))?;
 		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
@@ -284,7 +284,7 @@ impl Lifecycle {
 			let Some(presented) = cluster::Cluster::lan_credential(&request.path) else {
 				return Err(StatusError {
 					status: http::StatusCode::FORBIDDEN,
-					refusal: Some(Refusal::Lan),
+					refusal: Some(RefusalKind::Lan),
 					source: anyhow::anyhow!("LAN peer did not present a membership proof"),
 				});
 			};
@@ -297,14 +297,14 @@ impl Lifecycle {
 				Some(false) => {
 					return Err(StatusError {
 						status: http::StatusCode::FORBIDDEN,
-						refusal: Some(Refusal::Lan),
+						refusal: Some(RefusalKind::Lan),
 						source: anyhow::anyhow!("LAN peer did not present this listener's membership proof"),
 					});
 				}
 				None => {
 					return Err(StatusError {
 						status: http::StatusCode::FORBIDDEN,
-						refusal: Some(Refusal::Lan),
+						refusal: Some(RefusalKind::Lan),
 						source: anyhow::anyhow!("/.cluster request refused: LAN discovery is not enabled"),
 					});
 				}
@@ -507,7 +507,10 @@ mod tests {
 			.start(&tokio::runtime::Handle::current(), async {
 				Ok::<_, anyhow::Error>(async {
 					panic!("injected supervision panic");
-					#[allow(unreachable_code)]
+					#[expect(
+						unreachable_code,
+						reason = "the panic is the point; the `Ok` names the future's output type"
+					)]
 					Ok::<_, anyhow::Error>(())
 				})
 			})

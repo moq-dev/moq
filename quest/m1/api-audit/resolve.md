@@ -53,10 +53,10 @@ and the bindings promote it as a top-level convenience.
   `Subscriber::new` (production), `rs/moq-cli/src/subscribe.rs` and
   `report.rs`, `rs/moq-transcode/examples/transcode.rs`,
   `rs/moq-bench/src/connection.rs`, the hand-rolled resolvers in
-  `rs/moq-mux/src/source.rs`, `rs/moq-hls/src/server/mod.rs` (wall-clock
+  `rs/moq-mux/src/source.rs` (with `moq_mux::follow` on `announced_broadcast`), `rs/moq-hls/src/server/mod.rs` (wall-clock
   `RESOLVE_TIMEOUT`) and `rs/moq-stats/src/aggregate.rs`, the
   `rs/moq-relay/src/web.rs` fetch deadline, the `rs/moq-e2ee/MIGRATE.md`
-  advice to read the epoch via `routed()`, and
+  advice to read the epoch via `routed()` (supersede it in the Impact bullet), and
   `demo/carla/sim/moq_carla_sim/publish.py`, which reads the epoch from an
   announce and then requests unpinned.
 
@@ -73,5 +73,4 @@ Wire: none.
 ## Related
 
 - [Readers follow restarts](/quest/m1/sink-restart-follow.md) - moves readers to `follow`; whichever lands second adopts the other's names
-- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - `moq_mux::Source::follow` builds on the follow operation
 - [Origin fronts park](/quest/m2/origin-front-parks.md) - touches the same retry

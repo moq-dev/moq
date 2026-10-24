@@ -95,19 +95,17 @@ pub struct Config {
 
 	/// How long the first issuance may take before startup fails, e.g. "5m". Defaults to 5 minutes.
 	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_option")]
+	#[serde(with = "humantime_serde")]
 	pub timeout: Option<Duration>,
 
 	#[usage(long = "acme-timeout", env = "MOQ_ACME_TIMEOUT", setting = "acme.timeout")]
 	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
-	timeout_arg: Option<crate::duration::Duration>,
+	timeout_arg: Option<moq_tokio::cli::Duration>,
 }
 
 impl Config {
 	fn timeout(&self) -> Option<Duration> {
-		self.timeout_arg
-			.map(crate::duration::Duration::into_std)
-			.or(self.timeout)
+		self.timeout_arg.map(Into::into).or(self.timeout)
 	}
 
 	/// Validate against the listeners it must serve through and start the client, or `None` when unconfigured.
@@ -467,5 +465,9 @@ impl rustls_acme::AccountCache for Cache {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests;
