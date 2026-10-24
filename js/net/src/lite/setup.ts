@@ -5,7 +5,7 @@
  * @module
  */
 
-import { type Hop, HopSchema } from "../hop.ts";
+import { type Hop, HopSchema, wireHop } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
@@ -246,7 +246,7 @@ export class Setup {
 			params.setVarint(PARAM_ROLE, this.role, version);
 		}
 		if (this.hop !== undefined && this.hop !== 0n) {
-			params.setVarint(PARAM_HOP, this.hop, version);
+			params.setVarint(PARAM_HOP, wireHop(this.hop, version), version);
 		}
 		await params.encode(w);
 	}
