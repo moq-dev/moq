@@ -337,7 +337,6 @@ fn route_failed(err: &Error) -> bool {
 		Error::Transport(_)
 			| Error::IdleTimeout
 			| Error::Session(_)
-			| Error::SessionClosed
 			| Error::GoingAway
 			| Error::GoawayTimeout
 			| Error::Dropped
@@ -1305,6 +1304,15 @@ impl Reader {
 					}
 					Poll::Ready(Ok(sub)) => sub,
 				};
+				// Each copy's wire decides what it resolves: a copy it replaced refusing the
+				// reader's ranges leaves the rest to the copy now serving.
+				if let Some(err) = sub.refused() {
+					if !copy.replaced {
+						return Some(Poll::Ready(Err(err)));
+					}
+					copy.done = Some(Err(err));
+					break;
+				}
 				if ordered {
 					sub.skip_ordered(floor);
 				}
@@ -1454,6 +1462,9 @@ impl Reader {
 					}
 					Poll::Ready(Ok(sub)) => sub,
 				};
+				if let Some(err) = sub.refused() {
+					return Some(Poll::Ready(Err(err)));
+				}
 				match sub.poll_recv_wire_datagram(waiter) {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(datagram))) => {
@@ -2004,8 +2015,7 @@ mod test {
 	use futures::FutureExt;
 
 	use super::*;
-	use crate::Timestamp;
-	use crate::broadcast;
+	use crate::{SessionError, Timestamp, broadcast};
 
 	/// A route's copy of the track.
 	fn copy() -> track::Producer {
@@ -2072,8 +2082,10 @@ mod test {
 			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
 			newer.finish().unwrap();
 			routes.serve(b.consume());
-			open.abort(Error::SessionClosed).unwrap();
-			a.abort(Error::SessionClosed).unwrap();
+			open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
+			a.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
 			assert!(held.poll_read_frame(&waiter).is_pending());
 			let Poll::Ready(request) = dynamic.poll_requested_group(&waiter) else {
 				panic!("recovery fetch")
@@ -2861,7 +2873,8 @@ mod test {
 			sub.poll_recv_group(&kio::Waiter::noop()).is_pending(),
 			"B replays only group 0"
 		);
-		b.abort(Error::SessionClosed).unwrap();
+		b.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
 
 		// C lacks the group; reading a later one from it lets go of what nothing needs.
 		let c = copy();
@@ -2872,8 +2885,10 @@ mod test {
 		assert_eq!(recv(&mut sub).sequence, 1);
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
 
-		open.abort(Error::SessionClosed).unwrap();
-		a.abort(Error::SessionClosed).unwrap();
+		open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
+		a.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(read(&mut reading), None);
 	}
@@ -3340,7 +3355,9 @@ mod test {
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
-			failing.abort(Error::SessionClosed).unwrap();
+			failing
+				.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "ordered={ordered}");
 			assert_eq!(read(&mut reading), None);
 		}
@@ -3382,7 +3399,9 @@ mod test {
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
-			failing.abort(Error::SessionClosed).unwrap();
+			failing
+				.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "ordered={ordered}");
 			assert_eq!(read(&mut reading), None);
 		}
@@ -3469,7 +3488,9 @@ mod test {
 		assert_eq!(reading.sequence, 1);
 		// a's route fails too, after it finished the group.
 		a.clone().abort(Error::Dropped).unwrap();
-		failing.abort(Error::SessionClosed).unwrap();
+		failing
+			.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(read(&mut reading), None);
@@ -3502,7 +3523,11 @@ mod test {
 			failing.write_frame(ts(1), b"a".as_ref()).unwrap();
 			let mut failing = Some(failing);
 			if early {
-				failing.take().unwrap().abort(Error::SessionClosed).unwrap();
+				failing
+					.take()
+					.unwrap()
+					.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+					.unwrap();
 			}
 			let noop = kio::Waiter::noop();
 			let res = match ordered {
@@ -3516,7 +3541,9 @@ mod test {
 			// Reading on must not let go of the replaced copy while the group still needs it.
 			assert_eq!(drain(&mut sub, ordered), Vec::<u64>::new());
 			if let Some(failing) = failing {
-				failing.abort(Error::SessionClosed).unwrap();
+				failing
+					.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+					.unwrap();
 			}
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()));
@@ -3558,7 +3585,9 @@ mod test {
 			// The old route goes away, and the reader polls on and sees its copy end.
 			a.clone().abort(Error::Dropped).unwrap();
 			assert_eq!(drain(&mut sub, ordered), Vec::<u64>::new());
-			failing.abort(Error::SessionClosed).unwrap();
+			failing
+				.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 			assert_eq!(read(&mut reading), None);
 		}
@@ -3957,6 +3986,51 @@ mod test {
 			matches!(start, track::Anchor::Absolute(group) if group >= 10),
 			"the replacement asks from where b resolved the time: {start:?}"
 		);
+	}
+
+	/// Each copy's wire decides which anchors it resolves: a replaced copy that refuses the
+	/// reader's ranges leaves them to the copy serving now, whose own refusal fails the read.
+	#[test]
+	#[cfg(feature = "async")]
+	fn only_the_serving_copy_refuses_an_anchor() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		a.received();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(30));
+		let mut zero = a.create_group(group::Info { sequence: 0 }).unwrap();
+		zero.write_frame(ts(0), b"x".as_ref()).unwrap();
+		assert_eq!(recv(&mut sub).sequence, 0);
+
+		let b = copy();
+		b.received();
+		b.anchored();
+		routes.serve(b.consume());
+		let ranges = [track::Range {
+			start: track::Anchor::Relative(1),
+			end: None,
+		}];
+		sub.update(sub.subscription().with_ranges(ranges)).unwrap();
+		assert!(sub.recv_group().now_or_never().is_none());
+		for sequence in 1..4 {
+			let mut group = b.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(ts(sequence * 1000), b"x".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+		// Asked before b held any group, the relative start resolves at its first.
+		let group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(group.sequence, 1);
+
+		// Served by a copy that can't resolve it, the same range fails.
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		a.received();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(30));
+		sub.update(sub.subscription().with_ranges(ranges)).unwrap();
+		assert!(matches!(sub.recv_group().now_or_never(), Some(Err(Error::Unsupported))));
 	}
 
 	/// Capping a replaced copy never replaces a time end it has not settled: the copy keeps

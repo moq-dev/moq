@@ -7,7 +7,7 @@ Kotlin) and moq-tokio whose sessions can drain before closing and whose qmux
 sessions accept the QUIC stream limit:
 
 - An async `MoqSession.drain()` drains finished tracks within one second
-  and returns any delivery error, as `main`'s async `shutdown()` does
+  and returns any delivery error, as the earlier async shutdown implementation did
   (7bbac3272, with 03fb0d1c1, f9de31167, and #5558's explicit Lite 07 test).
   Explicit `moq-lite-07-wip` waits for the peer to receive the tail; older
   Lite versions, including the default lite-06, and IETF wait only for
@@ -25,8 +25,10 @@ that gain `drain()`) expose it too.
 
 Decided 2026-10-20 (maintainer): additive `drain()` on `release` rather than
 backporting async `shutdown()` as-is. Why: making `shutdown()` async breaks
-the 0.4.x Python, Swift, and Kotlin bindings. `main` keeps async `shutdown()`
-and gains no `drain()`; callers move to it at the next breaking cut.
+the 0.4.x Python, Swift, and Kotlin bindings. `main` requests the drain with synchronous `shutdown()` and reports its result
+through `closed()`; it gains no separate `drain()`. Callers replace the release
+line's awaited `drain()` with `shutdown()` followed by awaiting `closed()` at the
+next breaking cut.
 
 Decided 2026-10-20 (maintainer): keep #5609 in the backport, on a qmux
 0.5.3 published from web-transport's `qmux-v0.5.x`. Why: `release` locks

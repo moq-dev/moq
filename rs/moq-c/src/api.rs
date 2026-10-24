@@ -591,6 +591,8 @@ pub struct moq_subscription {
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
 	/// It caps every range.
 	pub max_delay_us: u64,
+	/// Whether `max_delay_us` is set. When false, moq-net's default applies: zero.
+	pub max_delay_present: bool,
 
 	/// The spans of the track to deliver, or NULL for everything `max_delay_us` still
 	/// considers fresh. A non-NULL pointer with `ranges_len` 0 asks for nothing.
@@ -680,8 +682,10 @@ pub(crate) unsafe fn parse_subscription(
 	};
 	let mut out = moq_net::track::Subscription::default()
 		.with_priority(subscription.priority)
-		.with_max_delay(std::time::Duration::from_micros(subscription.max_delay_us))
 		.with_order(order);
+	if subscription.max_delay_present {
+		out = out.with_max_delay(std::time::Duration::from_micros(subscription.max_delay_us));
+	}
 	if !subscription.ranges.is_null() {
 		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
 		let ranges = ranges

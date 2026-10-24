@@ -116,10 +116,11 @@ pub enum Order {
 /// copy waiting on a fresh upstream answer counts from the live feed's latest group once
 /// it answers, never from the groups an ended feed left in its cache.
 ///
-/// No published wire carries either yet: upstream, a relative or time start is no floor,
-/// the same request as [`Range::oldest`], and a relative or time end is no end. Behind a
-/// moq-transport upstream, which joins without a floor at the live group, `Relative(n)..`
-/// starts there.
+/// Over a session, the copy resolves them only on moq-lite-07, which reports the live edge
+/// and media time and asks upstream for every group the budget allows. A copy received
+/// over an older lite or any moq-transport version refuses each other than [`Range::live`]
+/// and [`Range::oldest`] with [`Error::Unsupported`](crate::Error::Unsupported) on read,
+/// rather than resolve it against the part of the track it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
 	/// The group with this sequence.
@@ -188,6 +189,17 @@ impl Range {
 			},
 			end: end.map(Anchor::Absolute),
 		}
+	}
+
+	/// Whether a wire without ranges carries this range upstream: absolute anchors, and
+	/// the live and oldest starts it spells with no floor.
+	pub(super) fn is_wire(&self) -> bool {
+		let start = match self.start {
+			Anchor::Absolute(_) => true,
+			Anchor::Relative(back) => back == 0 || back == u64::MAX,
+			Anchor::Time(_) => false,
+		};
+		start && matches!(self.end, None | Some(Anchor::Absolute(_)))
 	}
 
 	/// Whether this range certainly delivers nothing, wherever the latest group lands.

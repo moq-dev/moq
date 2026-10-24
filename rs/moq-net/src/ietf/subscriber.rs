@@ -2892,7 +2892,7 @@ impl Subscriber {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 					validity.check(waiter)?;
-					Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+					Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 				})
 				.await
 				{
@@ -3884,7 +3884,7 @@ impl Subscriber {
 					if let Poll::Ready(err) = track.poll_closed(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					Stream::poll_open(&mut opening, this.version, &mut waiter.context())
+					Stream::poll_open_request(&mut opening, this.version, &mut waiter.context())
 				})
 				.await?;
 				stream = super::request_stream::with_stats(stream, this.origin.stats(), this.version);
@@ -4089,7 +4089,7 @@ impl Subscriber {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
 			validity.check(waiter)?;
-			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 		})
 		.await
 		{
@@ -4205,8 +4205,10 @@ impl Subscriber {
 		let dynamic = request.dynamic();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge. Idle
 		// from the accept, so no reader takes it as live in between.
-		let track = request.idle().accept(accepted_info(&ok.properties, self.version));
+		let track = request.idle().stage(accepted_info(&ok.properties, self.version));
+		// Marked received before any reader sees it, so none resolves an anchor this wire dropped.
 		track.received();
+		let track = track.commit();
 		Some(Idle {
 			demand: track.demand(),
 			track,
@@ -5134,7 +5136,7 @@ impl Subscriber {
 			if let Poll::Ready(err) = track::TrackState::poll_closed(&request.state, waiter) {
 				return Poll::Ready(Err(err));
 			}
-			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 		})
 		.await
 		{
@@ -15789,6 +15791,31 @@ mod joining_fetch_tests {
 				);
 				assert_eq!(log.bi_opens(), 0);
 			}
+		}
+	}
+
+	#[moq_clock::test]
+	async fn refusing_a_joining_fetch_spends_no_request_credit() {
+		for version in JOINING_DRAFTS {
+			let session = ScriptedSession::new(Vec::new()).without_credit();
+			let (mut subscriber, track, _tasks) = pending_join(crate::driver::Transport::new(session), version);
+			subscriber.control = Control::new(
+				match version {
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(RequestId(2)),
+					_ => None,
+				},
+				false,
+			);
+			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
+			assert!(
+				joining.poll(&kio::Waiter::noop()).is_ready(),
+				"{version}: refusal must be immediate"
+			);
+			assert_eq!(
+				subscriber.control.poll_next_request_id(&kio::Waiter::noop()),
+				Poll::Ready(RequestId(1)),
+				"{version}: refusal spends neither an ID nor MAX_REQUEST_ID credit"
+			);
 		}
 	}
 
