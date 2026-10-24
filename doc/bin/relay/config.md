@@ -174,8 +174,8 @@ first cores, so two relays on one host, or one limited to fewer CPUs than the
 host has, would crowd onto them. Turn it on for a host the relay has to itself.
 
 `io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
-shares the same reloadable TLS identity, serves every configured version
-like the shared runtime, and refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
+shares the same reloadable TLS identity and serves every configured version
+like the shared runtime. A setting the build or host cannot deliver refuses to
 start rather than being ignored. If io\_uring workers fail to start naming
 `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 
@@ -283,6 +283,7 @@ node = "https://us-west.example.com/"                 # This relay's own URL.
 connect_api = "https://api.example.com/peers"        # Or fetch the peer list (JSON array of URLs and/or objects) live.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 id = 12345                                            # Stable Hop ID across restarts.
+max_hops = 32                                         # Longest accepted/forwarded hop path (1 to 32).
 
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true

@@ -80,7 +80,7 @@ impl crate::listen::Config {
 	///
 	/// When true and [`bind`](Self::bind) is unset, the server runs stream-only
 	/// (no default QUIC listener).
-	#[allow(unused_mut)]
+	#[allow(unused_mut, reason = "only the stream listener features set it")]
 	fn has_stream_listener(&self) -> bool {
 		let mut has = false;
 		#[cfg(feature = "tcp")]
@@ -339,7 +339,7 @@ impl Server {
 			if tls.is_some() && config.tls.configured() {
 				return Err(crate::tls::Error::ConflictingServe.into());
 			}
-			#[allow(unused_mut)]
+			#[allow(unused_mut, reason = "only the stream listener features set it")]
 			let mut needed = cfg!(feature = "quic") && build_quic;
 			#[cfg(feature = "tcp")]
 			{
@@ -554,7 +554,7 @@ impl Server {
 	/// Available before [`listen`](Self::listen), so an owner can register these with
 	/// a metrics endpoint at startup even though the sockets bind there.
 	pub fn accept_health(&self) -> Vec<crate::accept::Health> {
-		#[allow(unused_mut)]
+		#[allow(unused_mut, reason = "only the stream listener features extend it")]
 		let mut health = Vec::new();
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		health.extend(self.streams.health.iter().cloned());
@@ -576,8 +576,10 @@ impl Server {
 	/// leaves nothing bound: the partially built `Listener` drops here, closing
 	/// whatever it opened. Build a fresh `Server` from the (cloneable) config to try
 	/// again.
-	// `mut` is only needed to bind the stream listeners, which a QUIC-only build has none of.
-	#[allow(unused_mut)]
+	#[allow(
+		unused_mut,
+		reason = "`mut` is only needed to bind the stream listeners, which a QUIC-only build has none of"
+	)]
 	pub async fn bind(mut self) -> crate::Result<Listener> {
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		self.streams.bind().await?;
@@ -678,13 +680,13 @@ impl Server {
 			#[cfg(not(feature = "websocket"))]
 			let ws_accept = std::future::ready(None::<()>);
 
-			#[allow(unused_variables)]
+			#[allow(unused_variables, reason = "a build without a transport feature never reads it")]
 			let setup = Setup {
 				activity: self.activity.clone(),
 				server: self.moq.clone(),
 				timeout: self.timeout,
 			};
-			#[allow(unused_variables)]
+			#[allow(unused_variables, reason = "a build without a transport feature never reads it")]
 			let versions = self.versions.clone();
 
 			// An absent transport resolves `None` rather than parking, so its arm is
@@ -1873,7 +1875,11 @@ impl Request {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 
@@ -1972,8 +1978,7 @@ mod tests {
 		tokio::select! {
 			biased;
 			_ = stalled.read_to_end(&mut remaining) => panic!("first handshake ended before second completed"),
-			result = qmux::tcp::Config::new(qmux::Version::QMux01)
-				.protocols(["moq-lite-06"]).connect(addr) => {
+			result = qmux::tcp::connect(addr, { let mut config = qmux::Config::new(qmux::Version::QMux01); config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]); config }) => {
 				result.expect("second handshake completes");
 			}
 		}
@@ -2004,10 +2009,12 @@ mod tests {
 			},
 			tx,
 		);
-		let result = qmux::tcp::Config::new(qmux::Version::QMux01)
-			.protocols(["moq-lite-06"])
-			.connect(addr)
-			.await;
+		let result = qmux::tcp::connect(addr, {
+			let mut config = qmux::Config::new(qmux::Version::QMux01);
+			config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]);
+			config
+		})
+		.await;
 		assert!(result.is_err(), "a closed server must not handshake");
 		task.abort();
 		let _ = task.await;
@@ -2046,8 +2053,7 @@ mod tests {
 		tokio::select! {
 			biased;
 			_ = stalled.read_to_end(&mut remaining) => panic!("first handshake ended before second completed"),
-			result = qmux::uds::Config::new(qmux::Version::QMux01)
-				.protocols(["moq-lite-06"]).connect(&path) => {
+			result = qmux::uds::connect(&path, { let mut config = qmux::Config::new(qmux::Version::QMux01); config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]); config }) => {
 				result.expect("second handshake completes");
 			}
 		}

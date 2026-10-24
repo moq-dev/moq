@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate{Numerator: 30000, Denominator: 1001}` and construct producers with `(catalog, ProducerOptions{Input: input, Output: output, Track: track, Bandwidth: bandwidth})` under the matching audio/video package.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
+### Video rendition preference
+
+`media.Video` gains `Preference int32`. Update unkeyed struct literals or use keyed fields, leaving `Preference: 0` for the default ranking. Upgrade the matching FFI module too. Higher values are preferred; compatibility transcodes use `-1`.
+
+### `Announce` takes an `AnnounceRoute`
+
+`BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
+`Route` is only what announcements report. To re-announce an observed route, copy its `Cost` and `Epoch`.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.Resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
@@ -36,7 +52,7 @@ Pass the new `media.ContainerFormatCmaf` to keep publishing CMAF.
 ### Catalog references carry their epoch
 
 `ffi.MoqVideo` and `ffi.MoqAudio` gain `Epoch`, the publisher instance their `Broadcast` reference names.
-`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, reference, epoch)`; pass the rendition's `Epoch` alongside its `Broadcast`, or `nil` to resolve whichever instance answers.
+`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, rendition)`, taking the catalog rendition (`media.VideoRendition` or `media.AudioRendition`) and reading its `Broadcast` and `Epoch` from it.
 Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another epoch.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
@@ -87,7 +103,7 @@ A subscription now reads only the groups its own `Ranges` cover.
 `TrackDemand.IsUsed`, `Used`, and `Unused` are gone.
 `Wanted()` returns nil while nobody subscribes, otherwise the group subscribers want next, and `WantedChanged(ctx)` waits for it to change (the first call returns at once).
 Loop on `WantedChanged` until it returns non-nil where you called `Used`, and nil where you called `Unused`.
-`TrackInfo` gains `Refresh`. `GroupDemand` is unchanged.
+`TrackInfo` gains `Refresh`.
 
 ### `CongestionControl` gained `CongestionControlNone` (#5926)
 
@@ -107,7 +123,7 @@ To start at group `n`, pass one range starting at the absolute anchor for group 
 ### Receive estimates come from `Session.RecvBandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `Session.RecvBandwidth` returns to request PROBE, read it with `Peek()` or wait with `Changed(ctx)`, and `Close()` it to stop.
+Hold the consumer `Session.RecvBandwidth` returns to request PROBE, read it with `Rate()` or wait with `RateChanged(ctx)`, and `Close()` it to stop.
 It returns `nil` when the version has no PROBE.
 
 ### `AnnouncedBroadcast.Available` waits for the next publisher instance (#5700)
@@ -135,14 +151,14 @@ config := media.TrackConfig{Rendition: media.VideoRendition(id, video)}
 ### Native codecs have `audio` and `video` packages (#5694)
 
 `BroadcastProducer.EncodeAudio` / `EncodeVideo` are `audio.NewProducer` / `video.NewProducer` (`moq.dev/moq/audio`, `moq.dev/moq/video`), built from a `media.CatalogProducer`.
-The audio track name moves into `EncoderOutput.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `audio.Frame.Timestamp`, `video.Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
+The audio track name belongs to `ProducerOptions.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `audio.Frame.Timestamp`, `video.Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
 `BroadcastConsumer.DecodeAudio` / `DecodeVideo` are `audio.Subscribe` / `video.Subscribe`, taking the broadcast after the context.
 Producers expose subscriber state only through `Demand()`, and a video GOP is `video.Keyframe(interval)`.
 `audio.NewEncoder` / `video.NewEncoder` encode without publishing.
 
 ```go
 catalog, err := moqmedia.NewCatalogProducer(broadcast)
-video, err := moqvideo.NewProducer(catalog, moqvideo.EncoderInput{...}, moqvideo.EncoderOutput{...}, nil)
+video, err := moqvideo.NewProducer(catalog, moqvideo.ProducerOptions{Input: input, Output: output})
 err = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 frames, err := moqvideo.Subscribe(ctx, consumer, name, rendition, output)
 ```

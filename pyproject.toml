@@ -84,7 +84,8 @@ target-version = "py310"
 extend-exclude = ["**/_uniffi"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+# RUF100 fails a `noqa` that no longer suppresses anything.
+select = ["E", "F", "W", "I", "RUF100"]
 
 [tool.ruff.format]
 quote-style = "double"

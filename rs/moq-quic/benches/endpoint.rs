@@ -9,7 +9,10 @@ use bytes::{BufMut, BytesMut};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_quic::DatagramEvent;
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "a harness shared by several benches, each using only part of it"
+)]
 mod common;
 
 use common::{Pair, Setup, ThreadCpu};

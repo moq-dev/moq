@@ -3,8 +3,11 @@ package dev.moq
 import dev.moq.media.*
 import dev.moq.audio.Consumer as AudioConsumer
 import dev.moq.audio.Producer as AudioProducer
+import dev.moq.audio.ProducerOptions as AudioProducerOptions
 import dev.moq.video.Consumer as VideoConsumer
 import dev.moq.video.Producer as VideoProducer
+import dev.moq.video.ProducerOptions as VideoProducerOptions
+import dev.moq.video.FrameRate as VideoFrameRate
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
@@ -145,7 +148,7 @@ class SmokeTest {
     /** A settings UI reads its defaults and menus from the library rather than repeating them. */
     @Test
     fun `client defaults and versions come from the library`() {
-        val defaults = clientDefaults()
+        val defaults = uniffi.moq.moqClientDefaults()
         assertNotNull(defaults.quic.maxStreams)
         assertNotNull(defaults.quic.idleTimeout)
         assertNotNull(defaults.timeout)
@@ -501,7 +504,7 @@ class SmokeTest {
             assertEquals(64, fingerprints[0].length)
 
             server.createBroadcast("live").use { broadcast ->
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
                 broadcast.unannounce()
             }
         }
@@ -527,7 +530,7 @@ class SmokeTest {
                 val consumer = origin.consume()
                 assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
                 val announced = consumer.announced(AnnounceConfig())
                 val first = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("live", first.announce.prefix)
@@ -537,7 +540,7 @@ class SmokeTest {
                 assertEquals("live", retracted.announce.prefix)
                 assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
                 assertIs<AnnounceEventStart>(announced.nextRoute())
                 consumer.requestBroadcast("live")
             }
@@ -551,12 +554,12 @@ class SmokeTest {
             origin.createBroadcast("epoch").use { broadcast ->
                 val first = mintEpoch()
                 assertEquals(Instant.fromEpochMilliseconds(1_700_000_000_000), epochTime("018bcfe5-6800-7000-8000-000000000000"))
-                broadcast.announce(Route(epoch = first))
+                broadcast.announce(AnnounceRoute(epoch = first))
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals(first, start.announce.route.epoch)
 
                 val second = mintEpoch()
-                broadcast.announce(Route(epoch = second))
+                broadcast.announce(AnnounceRoute(epoch = second))
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
                 assertEquals(second, restart.announce.route.epoch)
 
@@ -570,7 +573,7 @@ class SmokeTest {
         OriginProducer(OriginConfig()).use { origin ->
             val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
             origin.createBroadcast("room/alice/chat").use { broadcast ->
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
                 val update = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("room/alice/chat", update.announce.prefix)
                 assertEquals(listOf("alice"), update.announce.captures)
@@ -619,8 +622,11 @@ class SmokeTest {
             val catalog = CatalogProducer(broadcast)
             val fine = AudioProducer(
                 catalog,
-                input,
-                AudioEncoderOutput(codec = AudioCodec.opus(), track = "fine", frameDurationUs = 2_500u),
+                AudioProducerOptions(
+                    input = input,
+                    output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDurationUs = 2_500u),
+                    track = "fine",
+                ),
             )
             // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
             fine.write(AudioFrame(timestampUs = 0uL, data = ByteArray(120 * 4)))
@@ -629,8 +635,11 @@ class SmokeTest {
             assertFailsWith<MoqException.Audio> {
                 AudioProducer(
                     catalog,
-                    input,
-                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "coarse", frameDurationUs = 2_000u),
+                    AudioProducerOptions(
+                        input = input,
+                        output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDurationUs = 2_000u),
+                        track = "coarse",
+                    ),
                 )
             }
         }
@@ -694,10 +703,13 @@ class SmokeTest {
             origin.createBroadcast("audio-delay").use { broadcast ->
                 val audio = AudioProducer(
                     CatalogProducer(broadcast),
-                    AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
-                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "mic"),
+                    AudioProducerOptions(
+                        input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
+                        output = AudioEncoderOutput(codec = AudioCodec.opus(), ),
+                        track = "mic",
+                    ),
                 )
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
 
                 val consumer = origin.consume().requestBroadcast("audio-delay")
                 val catalog = CatalogConsumer.subscribe(consumer).next()!!
@@ -733,12 +745,14 @@ class SmokeTest {
             origin.createBroadcast("video-decode-frame").use { broadcast ->
                 val video = VideoProducer(
                     CatalogProducer(broadcast),
-                    VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
-                    // Software so the encode is deterministic everywhere.
-                    VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
-                    null,
+                    VideoProducerOptions(
+                        input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoFrameRate(30000u, 1001u)),
+                        output = VideoEncoderOutput(codec = VideoCodec.H264,  kind = softwareEncoder),
+                        track = "camera",
+                        bandwidth = null,
+                    ),
                 )
-                broadcast.announce(Route())
+                broadcast.announce(AnnounceRoute())
 
                 // Seed the track so a subscriber joining below lands on encoded media.
                 val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }
@@ -785,8 +799,15 @@ class SmokeTest {
         for (codecFirst in listOf(true, false)) {
             BroadcastProducer().use { broadcast ->
                 val codec = AudioCodec.opus()
-                val output = AudioEncoderOutput(codec = codec, track = "mic")
-                val producer = AudioProducer(CatalogProducer(broadcast), input, output)
+                val output = AudioEncoderOutput(codec = codec)
+                val producer = AudioProducer(
+                    CatalogProducer(broadcast),
+                    AudioProducerOptions(
+                        input = input,
+                        output = output,
+                        track = "mic",
+                    ),
+                )
                 if (codecFirst) {
                     codec.close()
                 } else {

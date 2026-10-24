@@ -152,19 +152,23 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	audio, err := moqaudio.NewProducer(catalog, moqaudio.EncoderInput{
-		Format:     moq.AudioSampleFormatF32,
-		SampleRate: audioRate,
-		Channels:   uint32(len(tones)),
-	}, moqaudio.EncoderOutput{
-		Codec:         moq.OpusAudioCodec(),
-		Track:         func() *string { track := audioTrack; return &track }(),
-		FrameDuration: audioFrameDurationUs * time.Microsecond,
-	}, nil)
+	audioTrackName := audioTrack
+	audio, err := moqaudio.NewProducer(catalog, moqaudio.ProducerOptions{
+		Input: moqaudio.EncoderInput{
+			Format:     moq.AudioSampleFormatF32,
+			SampleRate: audioRate,
+			Channels:   uint32(len(tones)),
+		},
+		Output: moqaudio.EncoderOutput{
+			Codec:         moq.OpusAudioCodec(),
+			FrameDuration: audioFrameDurationUs * time.Microsecond,
+		},
+		Track: &audioTrackName,
+	})
 	if err != nil {
 		return err
 	}
-	if err := producer.Announce(moq.Route{}); err != nil {
+	if err := producer.Announce(moq.AnnounceRoute{}); err != nil {
 		return err
 	}
 	fmt.Printf("publishing %q (Annex-B H.264 from stdin + a %v Hz tone) to %s\n", broadcast, tones, url)
@@ -244,7 +248,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := live.Finish(); err != nil {
 		return err
 	}
-	if err := health.Announce(moq.Route{}); err != nil {
+	if err := health.Announce(moq.AnnounceRoute{}); err != nil {
 		return err
 	}
 	ack, err := os.Open(finishAck)

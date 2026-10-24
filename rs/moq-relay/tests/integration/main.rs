@@ -4,7 +4,11 @@
 //! dependencies again, so add new integration tests here as a module.
 //! `drills.rs` stays apart so each drill sensitivity mutation rebuilds only
 //! the drills.
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 
 mod auth_embedder;
 mod auth_lifetime;

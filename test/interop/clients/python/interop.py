@@ -114,9 +114,9 @@ async def publish(
             moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=AUDIO_RATE, channels=len(tones)),
             moq.audio.EncoderOutput(
                 codec=moq.audio.Codec.opus(),
-                track=AUDIO_TRACK,
                 frame_duration=timedelta(microseconds=AUDIO_FRAME_DURATION_US),
             ),
+            track=AUDIO_TRACK,
         )
         producer.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {tones} Hz tone) to {url}")
@@ -360,7 +360,7 @@ def main() -> None:
     except (TimeoutError, asyncio.TimeoutError):
         print("error: timed out waiting for data", file=sys.stderr)
         sys.exit(1)
-    except Exception as err:  # noqa: BLE001 - interop client: any failure is a failure
+    except Exception as err:  # interop client: any failure is a failure
         print(f"error: {err}", file=sys.stderr)
         sys.exit(1)
 
