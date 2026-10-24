@@ -19,13 +19,13 @@ use super::{
 };
 use crate::{
 	AsPath, Epoch, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
-	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
+	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, varint},
 	path::Segment,
 	time::{Deadlines, Instant},
 	util::{Keepalive, SendCell, TaskSet, Tasks, TasksWeak},
 };
 
-/// One relay's identity in a broadcast's hop chain: a 62-bit varint on the wire.
+/// One relay's identity in a broadcast's hop chain: any 64-bit id.
 ///
 /// Names a *hop*, not an [`origin::Producer`](Producer): a relay's routing table is the
 /// origin, and this is the id it stamps into a route's hop chain as an announcement
@@ -36,7 +36,6 @@ use crate::{
 /// on the wire, names nobody, and marks the chain anonymous for route selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Hop {
-	/// 62-bit identifier, so it fits a varint on every wire version.
 	id: u64,
 }
 
@@ -51,11 +50,11 @@ impl Hop {
 
 	/// Build a hop from a stable id.
 	///
-	/// The id must be non-zero and fit in the 62-bit QUIC varint range. Wire
-	/// decode accepts remote id 0 ([`Self::UNKNOWN`]), but a local hop should
-	/// not use it because it cannot be excluded for loop detection.
+	/// The id must be non-zero. Wire decode accepts remote id 0
+	/// ([`Self::UNKNOWN`]), but a local hop should not use it because it cannot be
+	/// excluded for loop detection.
 	pub fn new(id: u64) -> Result<Self, InvalidHop> {
-		if id == 0 || id >= 1u64 << 62 {
+		if id == 0 {
 			return Err(InvalidHop::Range);
 		}
 		Ok(Self { id })
@@ -66,7 +65,7 @@ impl Hop {
 	///
 	/// Older `@moq/lite` clients decode the exclude hop as a JavaScript number
 	/// and reject values above 2^53-1. Keep generated IDs in that range while
-	/// [`Self::new`] accepts the full 62-bit wire range for explicit IDs.
+	/// [`Self::new`] accepts any non-zero 64-bit id.
 	pub fn random() -> Self {
 		let mut rng = rand::rng();
 		let id = rng.random_range(1..(1u64 << 53));
@@ -79,12 +78,20 @@ impl Hop {
 	}
 
 	/// Build a hop from an id read off the wire, where 0 is legal.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn from_wire(id: u64) -> Result<Self, DecodeError> {
-		if id >= 1u64 << 62 {
-			return Err(DecodeError::InvalidValue);
+	pub(crate) const fn from_wire(id: u64) -> Self {
+		Self { id }
+	}
+
+	/// The id this hop carries on a wire whose varints use `form`.
+	///
+	/// A QUIC varint stops at 2^62 - 1, so a larger id travels as [`Self::UNKNOWN`]:
+	/// the route still reaches the peer, losing loop detection through this hop on
+	/// that link only.
+	pub(crate) fn wire_id(self, form: Form) -> u64 {
+		match form {
+			Form::Quic if self.id > varint::MAX_QUIC => Self::UNKNOWN.id,
+			_ => self.id,
 		}
-		Ok(Self { id })
 	}
 }
 
@@ -202,14 +209,13 @@ impl fmt::Display for Hop {
 
 impl<V> Encode<V> for Hop {
 	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
-		w.varint(self.id)?;
-		Ok(())
+		w.varint(self.wire_id(w.form()))
 	}
 }
 
 impl<V> Decode<V> for Hop {
 	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
-		Self::from_wire(r.varint()?)
+		Ok(Self::from_wire(r.varint()?))
 	}
 }
 
@@ -260,8 +266,8 @@ pub struct Hops(Vec<Hop>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidHop {
-	/// The id is zero or outside the 62-bit wire range, so it cannot identify a local
-	/// hop. Only [`Hop::new`] returns this; a chain never holds one.
+	/// The id is zero, so it cannot identify a local hop. Only [`Hop::new`] returns
+	/// this; a chain may still hold the reserved [`Hop::UNKNOWN`].
 	Range,
 
 	/// The list is already at its hop-count cap, which a real path never reaches and a
@@ -277,7 +283,7 @@ pub enum InvalidHop {
 impl fmt::Display for InvalidHop {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::Range => write!(f, "local hop id must be non-zero and below 2^62"),
+			Self::Range => write!(f, "local hop id must be non-zero"),
 			Self::TooMany => write!(f, "too many hops (max {MAX_HOPS})"),
 			Self::Duplicate => write!(f, "hop already in the chain"),
 		}

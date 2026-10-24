@@ -250,8 +250,9 @@ connections when rotated.
 Each relay has a Hop ID: the value it adds to a route's hop list for loop
 detection and shortest-path routing. It is random on every start, which is fine
 for loop detection but makes a restarted relay look like a new node. Set
-`cluster.id` to a stable non-zero integer to pin it, below 2^53 if browser
-clients decode it.
+`cluster.id` to a stable non-zero 64-bit integer to pin it: below 2^53 if older
+browser clients decode it, and below 2^62 to keep loop detection over moq-lite-06
+and older links, which carry a larger id as 0.
 
 ## Failure detection
 
