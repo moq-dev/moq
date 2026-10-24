@@ -72,7 +72,7 @@ Added 2026-10-22 (maintainer, security audit of the relay, auth, stats,
 ACME, and WebRTC): a clean close misreported as a revocation, injectable
 metric tiers, an unbudgeted ACME renewal, unbounded mDNS work per WebRTC
 offer, and an undocumented stats linger cut. The audit's `server_name`
-finding was already owned by the auth contract quest.
+finding was already fixed by moq-dev/moq#6509.
 
 ## Required
 
