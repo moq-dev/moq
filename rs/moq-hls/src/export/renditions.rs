@@ -10,10 +10,11 @@
 //! set as [`Added`](Event::Added) when first consumed, and returning `None` once the source
 //! finishes cleanly, or an error when the recording is incomplete.
 
+use moq_clock::Wall;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Weak};
 use std::task::Poll;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use moq_mux::catalog::hang::Catalog;
 use moq_mux::timeline::Entry;
@@ -72,7 +73,7 @@ struct Feed {
 	/// `availabilityStartTime` falls back to this when the catalog declares no `clock`; set
 	/// once so reloads see a stable presentation, and reset with the window when the
 	/// timeline restarts.
-	anchor: Option<SystemTime>,
+	anchor: Option<Wall>,
 	/// The publisher run every segment URL carries; late-created renditions inherit it.
 	generation: Option<Arc<str>>,
 	/// The playlist window duration applied on every push (see
@@ -159,7 +160,7 @@ impl Producer {
 
 	/// The estimated wall-clock time of timeline `pts` 0 (see [`Feed::anchor`]); `None` until
 	/// the first record arrives.
-	pub fn anchor(&self) -> Option<SystemTime> {
+	pub fn anchor(&self) -> Option<Wall> {
 		self.fanout.feed.read().anchor
 	}
 
@@ -309,11 +310,7 @@ impl Fanout {
 			});
 		}
 		if feed.anchor.is_none() {
-			feed.anchor = Some(
-				SystemTime::from(moq_clock::wall())
-					.checked_sub(end)
-					.unwrap_or(SystemTime::UNIX_EPOCH),
-			);
+			feed.anchor = Some(moq_clock::wall().checked_sub(end).unwrap_or(Wall::UNIX_EPOCH));
 		}
 		let period = feed.last.as_ref().map_or(moq_net::Timestamp::ZERO, |last| {
 			if last.reference == *reference {

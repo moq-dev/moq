@@ -148,9 +148,9 @@ No duplicate quest or workflow edit belongs here.
   and paired comparison correctness. Active PRs already address these.
 - [Perf](/quest/m2/perf/README.md) owns measured channel contention, relay
   allocations, ingest batching, worker quiescence and runtime selection.
-- The [release audit](/quest/m1/release-audit/README.md) owns media reorder
-  queues ([decode-order](/quest/m1/ts-reliability/decode-order.md)) and the HLS
-  contract quests; its QMux copying fix landed in
+- The [release audit](/quest/m1/release-audit/README.md) bounded the media
+  reorder queues in [moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453)
+  and fixed QMux copying in
   [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). MKV
   fragmentation below concerns parser replay before those queues.
 - [Binding bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md),

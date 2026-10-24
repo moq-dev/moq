@@ -65,14 +65,16 @@ See [stream listeners](/bin/relay/auth#stream-listeners).
 
 ## WebRTC data channels (experimental)
 
-Applications that already negotiate a browser `RTCPeerConnection` can pass an
+The private workspace P2P transport is exercised by `test/p2p`; it is not a
+published package. Applications in this checkout that negotiate a browser
+`RTCPeerConnection` can pass an
 [`@moq/p2p` transport](https://github.com/moq-dev/moq/tree/main/js/p2p) to
 `@moq/net`'s connect or accept. One reliable ordered data channel carries qmux
 records, with no datagrams. The application supplies signaling and ICE and
 keeps ownership of the peer connection; closing the transport closes only its
 channel. SCTP ordering means one lost packet can hold back every stream.
 
-Native peers use `moq-tokio`'s `webrtc` feature, which runs its own ICE agent:
+Native peers can opt into `moq-tokio`'s internal `webrtc` feature, which runs its own ICE agent:
 host candidates on every interface, server-reflexive candidates from the STUN
 servers it is given, and mDNS resolution of a browser's `.local` candidates.
 The application still carries the offer, answer, and candidates; the offering

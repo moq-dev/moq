@@ -1214,11 +1214,7 @@ fn frame(samples: &[f32], timestamp_us: u64) -> Result<Frame, Error> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::collections::VecDeque;
 	use std::future::Future;
@@ -2118,7 +2114,8 @@ mod tests {
 	/// the broadcast clock's own correlation, so the published timestamp is exactly that
 	/// instant however late the read happens.
 	mod clock {
-		use std::time::{Duration, SystemTime};
+		use moq_clock::Wall;
+		use std::time::Duration;
 
 		use super::*;
 
@@ -2139,7 +2136,7 @@ mod tests {
 
 		impl Fixture {
 			/// Run a publication over `opens` on a broadcast whose clock began `behind` ago, at `wall`.
-			fn start(behind: Duration, wall: SystemTime, opens: impl IntoIterator<Item = Open>) -> Self {
+			fn start(behind: Duration, wall: Wall, opens: impl IntoIterator<Item = Open>) -> Self {
 				let epoch = Instant::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
@@ -2232,7 +2229,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_late_first_buffer_publishes_its_capture() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(5), SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(5), moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let published = fixture.deliver(&samples, &mut track, &[]).await;
@@ -2245,7 +2242,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_queued_buffer_publishes_its_capture_instant() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(5), SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(5), moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let captured = Instant::now() - Duration::from_millis(40);
@@ -2263,7 +2260,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_buffer_before_the_clock_began_clamps_to_zero() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::ZERO, SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::ZERO, moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			samples
@@ -2286,7 +2283,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_buffer_captured_after_now_clamps_to_the_read() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(1), SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let pushed = fixture.at(Instant::now());
@@ -2311,7 +2308,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_buffer_without_a_capture_instant_publishes_its_read() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(1), SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let pushed = fixture.at(Instant::now());
@@ -2332,7 +2329,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_gap_reanchors_to_the_next_capture_instant() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(1), SystemTime::now(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let second_at = Instant::now() - Duration::from_millis(20);
@@ -2358,7 +2355,7 @@ mod tests {
 			let (second, reopened) = stream(None);
 			let mut fixture = Fixture::start(
 				Duration::from_secs(1),
-				SystemTime::now(),
+				moq_clock::wall(),
 				[Open::Stream(failing), Open::Stream(reopened)],
 			);
 			let mut track = fixture.subscribe().await;
@@ -2389,7 +2386,7 @@ mod tests {
 			let (second, resumed) = stream(None);
 			let mut fixture = Fixture::start(
 				Duration::from_secs(1),
-				SystemTime::now(),
+				moq_clock::wall(),
 				[Open::Stream(input), Open::Stream(resumed)],
 			);
 
@@ -2415,8 +2412,8 @@ mod tests {
 		#[tokio::test]
 		async fn a_system_wall_adjustment_retimes_nothing() {
 			// Whole seconds, so the advertised mapping holds it exactly.
-			let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-			let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
+			let now = moq_clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
+			let wall = Wall::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 			let (samples, input) = stream(None);
 			let mut fixture = Fixture::start(Duration::from_secs(1), wall, [Open::Stream(input)]);
 			let advertised = fixture.catalog.snapshot().clock;
@@ -2442,7 +2439,7 @@ mod tests {
 			let (second, resumed) = stream(None);
 			let mut fixture = Fixture::start(
 				Duration::from_secs(1),
-				SystemTime::now(),
+				moq_clock::wall(),
 				[Open::Stream(input), Open::Stream(resumed)],
 			);
 			let mut live = Vec::new();

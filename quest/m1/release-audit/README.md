@@ -92,7 +92,6 @@ and contract/lifetime investigations. Each
 child records whether its behavior is new on main or inherited from release.
 
 - [OBS decode timing](/quest/m1/release-audit/obs-decode-timing.md) - the shipping OBS source stamps each reordered picture with its own timestamp and drains at clean EOF
-- [Decode order](/quest/m1/ts-reliability/decode-order.md) - the exporters' decode clock holds at most the declared reorder depth, so flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
 
 ## Related
 

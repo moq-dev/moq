@@ -8,7 +8,7 @@ real send groups. Their `web_transport_trait` impls, the sealed
 `Grouped`/`GroupedSend` pair, and every QUIC-only path through moq-tokio's
 async-to-poll adapter (`transport::Session<S>`) are gone; the adapter is left
 serving iroh alone until
-[drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) finishes it.
+[drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) finishes it.
 
 ## Plan
 
