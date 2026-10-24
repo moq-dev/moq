@@ -318,7 +318,7 @@ impl Reader {
 		// A decoder often opens on a track that is already cached: a replacement
 		// decoder subscribes while its predecessor still holds groups, and a
 		// rendition switched away from and back to stays warm on the origin for
-		// `TRACK_IDLE_LINGER` (cached groups, not an upstream subscription). A
+		// `moq_net::model::track::IDLE_LINGER` (cached groups, not an upstream subscription). A
 		// caller that asked for `Start::Latest` wants none of that backlog,
 		// because a cursor starting at sequence zero replays every cached group
 		// at decode speed before reaching live media, which on a thirty-second
