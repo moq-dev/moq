@@ -998,6 +998,19 @@ test("cut forces a keyframe on the next frame, coalescing requests without spaci
 	expect(keys).toEqual([0, 200, 300]);
 });
 
+test("a repeated capture timestamp is dropped rather than failing the track", async () => {
+	let closed: unknown;
+	const keys = await recordKeyframes({}, async ({ encoder, track, send }) => {
+		await send(0);
+		await send(0);
+		encoder.cut();
+		await send(100);
+		closed = track.closed.peek();
+	});
+	expect(keys).toEqual([0, 100]);
+	expect(closed).toBeUndefined();
+});
+
 test("a join over the refresh ratio forces a keyframe on the next frame", async () => {
 	const keys = await recordKeyframes({ refresh: 2 }, async ({ track, send }) => {
 		const watching = track.subscribe();

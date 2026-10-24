@@ -477,6 +477,9 @@ export class Encoder {
 							// Allow half an interval of slack so jittery capture timestamps don't drop
 							// a frame we meant to keep.
 							const targetFrameRate = config?.frameRate;
+							// A repeated timestamp would present with the frame before it, which no reordering
+							// declared allows; a backward one still fails the track at output.
+							if (frame.timestamp === lastEncoded) continue;
 							if (targetFrameRate && lastEncoded !== undefined) {
 								const minGap = Micro.fromSecond((1 / targetFrameRate) as Second);
 								if (frame.timestamp - lastEncoded < minGap - minGap / 2) continue;
