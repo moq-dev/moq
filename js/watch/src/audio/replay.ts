@@ -200,7 +200,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			// The decoder reports each output to the gate the way `AudioBuffer` and `Decoder.#emit` do.
 			const end = (timestamp + micros((pcm.length / rate) * 1000)) as Micro;
 			gate.inserted(timestamp, end);
-			gate.decoded(end);
+			gate.decoded(end, end);
 		}
 	})().catch((error: unknown) => {
 		failure = { error };

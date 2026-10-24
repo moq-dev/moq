@@ -738,14 +738,16 @@ export class Decoder {
 		// either decoding or in the ring.
 		const decoded = (sample.timestamp +
 			Micro.fromSecond((sample.numberOfFrames / sample.sampleRate) as Second)) as Micro;
+		let landed: Micro | undefined;
 		try {
-			this.#place(sample);
+			landed = this.#place(sample);
 		} finally {
-			this.#ring.peek()?.decoded(decoded);
+			this.#ring.peek()?.decoded(decoded, landed);
 		}
 	}
 
-	#place(sample: AudioData) {
+	// Trim the output and write it to the ring, returning where the PCM written ends.
+	#place(sample: AudioData): Micro | undefined {
 		const { timestamp, frameOffset, frames } = this.#terminal.span(sample);
 		const timestampMilli = Milli.fromMicro(timestamp);
 		if (frames === 0) {
@@ -808,6 +810,7 @@ export class Decoder {
 		ring.insert(timestamp, channelData);
 
 		sample.close();
+		return (timestamp + durationMicro) as Micro;
 	}
 
 	#addDecodeBuffered(start: Milli, end: Milli): void {

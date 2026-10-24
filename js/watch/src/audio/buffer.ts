@@ -15,7 +15,8 @@ import type { Data, Init, Latency, Reset, State, Truncate } from "./render";
  *     or refills with the whole target ahead of the playhead, decoded or not. A buffered refill also
  *     stops once the PCM in the ring plus the frames still decoding reach the floor, since the ring
  *     plays through and cannot shed what overflows it;
- *   - while playing, once the playhead is within the floor of it, keeping the ring on its floor;
+ *   - while playing, once the playhead is within the floor of where its output lands, keeping the
+ *     ring on its floor;
  *   - while playing live, also once the media queued behind it covers the hold, so media past the
  *     target reaches the ring, whose skip band catches up to the live edge. Buffered mode plays
  *     through instead.
@@ -58,6 +59,10 @@ export class Backpressure {
 	// timeline starts (the ring anchors there) and the newest ends.
 	#decoding: Micro[] = [];
 	#inserted?: { start: Micro; end: Micro };
+	// How far output lands in the ring behind the frame it was decoded from (Opus pre-skip). A playing
+	// ring compares a frame to its playhead where the output lands, or an offset past the floor would
+	// drain it.
+	#offset = 0;
 
 	#waiters: Array<{ timestamp: Micro; resolve: () => void }> = [];
 
@@ -116,10 +121,12 @@ export class Backpressure {
 	}
 
 	/**
-	 * Note that the decoder produced output ending at `end`, kept or discarded. It answers the oldest
-	 * frame still decoding and every one it reaches past: a decoder may emit nothing for a frame.
+	 * Note that the decoder produced output ending at `end`, which lands in the ring up to `landed`
+	 * unless it was discarded. It answers the oldest frame still decoding and every one it reaches
+	 * past: a decoder may emit nothing for a frame.
 	 */
-	decoded(end: Micro): void {
+	decoded(end: Micro, landed?: Micro): void {
+		if (landed !== undefined) this.#offset = end - landed;
 		let answered = 0;
 		while (answered < this.#decoding.length && (answered === 0 || this.#decoding[answered] < end)) answered++;
 		this.#decoding.splice(0, answered);
@@ -175,6 +182,7 @@ export class Backpressure {
 		this.#parked = false;
 		this.#decoding = [];
 		this.#inserted = undefined;
+		this.#offset = 0;
 		this.#release();
 	}
 
@@ -201,9 +209,12 @@ export class Backpressure {
 		return this.#queued !== undefined && this.#queued >= timestamp + this.#hold;
 	}
 
-	// Where the ring plays from: its reported playhead, else where it anchored or will anchor.
+	// The frame the ring plays from: its reported playhead, else where it anchored or will anchor,
+	// mapped back to the frame its output came from, which is what the queued media covers.
 	#start(): Micro | undefined {
-		return this.#playhead ?? this.#inserted?.start ?? this.#anchor;
+		const start = this.#playhead ?? this.#inserted?.start;
+		if (start !== undefined) return (start + this.#offset) as Micro;
+		return this.#anchor;
 	}
 
 	#admit(timestamp: Micro): boolean {
@@ -218,7 +229,7 @@ export class Backpressure {
 	#due(timestamp: Micro): boolean {
 		const playhead = this.#playhead;
 		if (!this.#stalled && playhead !== undefined) {
-			if (timestamp - this.#headroom <= playhead) return true;
+			if (timestamp - this.#offset - this.#headroom <= playhead) return true;
 			return !this.#buffered && this.#covered(timestamp);
 		}
 
@@ -308,9 +319,12 @@ export class AudioBuffer {
 		return Milli.fromSecond((this.#backpressure.floor / this.rate) as Second);
 	}
 
-	/** Note that the decoder produced output ending at `end` on its own timeline, kept or discarded. */
-	decoded(end: Micro): void {
-		this.#backpressure.decoded(end);
+	/**
+	 * Note that the decoder produced output ending at `end` on its own timeline, which lands in the ring
+	 * up to `landed` unless it was discarded.
+	 */
+	decoded(end: Micro, landed?: Micro): void {
+		this.#backpressure.decoded(end, landed);
 	}
 
 	/** Note that the decoder closed, dropping every frame still decoding. */

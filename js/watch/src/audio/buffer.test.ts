@@ -381,6 +381,20 @@ describe("Backpressure", () => {
 		expect(Bun.peek.status(gate.wait(ms(2040), signal))).toBe("pending");
 	});
 
+	// Opus pre-skip stamps the PCM behind the input it was decoded from, so a playing ring compares a
+	// frame to its playhead where its output lands, or a pre-skip past the floor would drain it.
+	it("releases a playing frame by where its output lands", () => {
+		const gate = new Backpressure(1000, true, Milli(2000));
+		gate.queued(ms(60_000));
+		gate.observe(ms(0), false);
+		const signal = new AbortController().signal;
+		const wait = gate.wait(ms(1500), signal);
+		expect(Bun.peek.status(wait)).toBe("pending");
+		gate.decoded(ms(1020), ms(20));
+		expect(Bun.peek.status(wait)).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(1520), signal))).toBe("pending");
+	});
+
 	// A replacement rendition keeps the ring, and the decoder it replaced never answers its frames.
 	it("refills past frames a closed decoder dropped", () => {
 		const gate = new Backpressure(1000, true, Milli(2000));
