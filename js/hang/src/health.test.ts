@@ -70,8 +70,22 @@ test("a rendition named __proto__ is graded like any other", () => {
 	expect(health.verdict).toBe("unhealthy");
 });
 
-test("a negative interval or age is refused", () => {
+test("a bitrate past u64 saturates where Rust's does", () => {
+	const snapshot = (bytes: number) => Stats.SnapshotSchema.parse({ renditions: { video: { bytes } } });
+	const observer = cases[0].current.observer;
+	const health = Health.publisher({
+		previous: { observer, snapshot: snapshot(0) },
+		current: { observer, snapshot: snapshot(Number.MAX_SAFE_INTEGER) },
+		interval: 1,
+		age: 0,
+	});
+	expect(health.renditions.video.bitrate).toBe(Number("18446744073709551615"));
+});
+
+test("a negative or non-finite interval or age is refused", () => {
 	const c = cases[0];
 	expect(() => grade({ ...c, interval: -1 })).toThrow();
 	expect(() => grade({ ...c, age: Number.NaN })).toThrow();
+	expect(() => grade({ ...c, interval: Number.POSITIVE_INFINITY })).toThrow();
+	expect(() => grade({ ...c, age: Number.POSITIVE_INFINITY })).toThrow();
 });

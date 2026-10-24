@@ -53,7 +53,10 @@ export interface Limits {
 
 /** Grading limits, nested by the report section they apply to. */
 export interface Thresholds {
-	/** Milliseconds past which a report grades unknown, as does a transport sample by its age plus the report's. */
+	/**
+	 * Milliseconds past which a report grades unknown, as does a transport sample by its age plus the report's.
+	 * Loss also needs the previous transport sample's age within it.
+	 */
 	stale: number;
 	/** Limits for the reporting connection: RTT in milliseconds, then loss and headroom (publisher only). */
 	transport: { rtt: Limits; loss: Limits; headroom: Limits };
@@ -245,8 +248,11 @@ const VIEWER: Kind<Echo.Rendition> = {
 };
 
 function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thresholds): Health {
-	if (!(sample.interval >= 0) || !(sample.age >= 0)) {
-		throw new Error(`health: interval ${sample.interval} and age ${sample.age} must be nonnegative milliseconds`);
+	const valid = (ms: number) => Number.isFinite(ms) && ms >= 0;
+	if (!valid(sample.interval) || !valid(sample.age)) {
+		throw new Error(
+			`health: interval ${sample.interval} and age ${sample.age} must be finite nonnegative milliseconds`,
+		);
 	}
 	const current = sample.current.snapshot;
 	let previous: Snapshot<R> | undefined;
@@ -322,9 +328,10 @@ interface Link {
 
 function connection(link: Link, role: Role, thresholds: Thresholds): Connection {
 	const limits = thresholds.transport;
+	const fresh = link.previous && !((link.previous.age ?? 0) > thresholds.stale) ? link.previous : undefined;
 	const lost = (counter: (t: Stats.Transport) => number | undefined) => {
 		const current = counter(link.current);
-		const previous = link.previous && counter(link.previous);
+		const previous = fresh && counter(fresh);
 		return current === undefined || previous === undefined ? undefined : Math.max(0, current - previous);
 	};
 	const lostBytes = lost((t) => t.lostBytes);
@@ -376,8 +383,11 @@ function ratio(count: number, of: number): number | undefined {
 	return of > 0 ? count / of : undefined;
 }
 
+// Rust saturates a bitrate at u64::MAX, which is 2 ** 64 as a double.
+const U64_MAX = 2 ** 64;
+
 function bitrate(bytes: number, interval: number): number {
-	return Math.floor((bytes * 8000) / interval);
+	return Math.min(Math.floor((bytes * 8000) / interval), U64_MAX);
 }
 
 function grade(input: Input, value: number | undefined, verdict: Verdict): Evidence {

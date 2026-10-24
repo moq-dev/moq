@@ -1328,5 +1328,139 @@
 			},
 			"verdict": "unknown"
 		}
+	},
+	{
+		"name": "loss unknown when the previous transport reading is stale",
+		"role": "publisher",
+		"previous": {
+			"observer": {
+				"path": "room/live",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 49200,
+					"lostPackets": 41,
+					"rate": 16772656,
+					"rtt": 2,
+					"age": 6000
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 44489957,
+						"frames": 1554,
+						"keyframes": 35
+					},
+					"1.ts": {
+						"bytes": 983492,
+						"frames": 142
+					},
+					"6.mp2": {
+						"bytes": 984960,
+						"frames": 1710
+					}
+				}
+			}
+		},
+		"current": {
+			"observer": {
+				"path": "room/live",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 49200,
+					"lostPackets": 41,
+					"rate": 13531448,
+					"rtt": 2
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 49908242,
+						"frames": 1677,
+						"keyframes": 40
+					},
+					"1.ts": {
+						"bytes": 1108160,
+						"frames": 160
+					},
+					"6.mp2": {
+						"bytes": 1104192,
+						"frames": 1917
+					}
+				}
+			}
+		},
+		"interval": 4521,
+		"age": 250,
+		"health": {
+			"interval": 4521,
+			"observer": {
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"path": "room/live"
+			},
+			"renditions": {
+				"0.avc3": {
+					"bitrate": 9587763,
+					"bytes": 5418285,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 123,
+					"verdict": "healthy"
+				},
+				"1.ts": {
+					"bitrate": 220602,
+					"bytes": 124668,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 18,
+					"verdict": "healthy"
+				},
+				"6.mp2": {
+					"bitrate": 210983,
+					"bytes": 119232,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 207,
+					"verdict": "healthy"
+				}
+			},
+			"role": "publisher",
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 2,
+						"verdict": "healthy"
+					},
+					{
+						"input": "loss",
+						"verdict": "unknown"
+					},
+					{
+						"input": "headroom",
+						"value": 1.3505316562982286,
+						"verdict": "degraded"
+					}
+				],
+				"verdict": "degraded"
+			},
+			"verdict": "degraded"
+		}
 	}
 ]

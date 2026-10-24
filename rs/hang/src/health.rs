@@ -127,6 +127,7 @@ pub struct Limits<T> {
 #[non_exhaustive]
 pub struct Thresholds {
 	/// A report older than this grades unknown, as does a transport sample whose age plus the report's exceeds it.
+	/// Loss also needs the previous transport sample's age within it.
 	pub stale: Duration,
 	/// Limits for the reporting connection.
 	pub transport: TransportThresholds,
@@ -503,12 +504,15 @@ struct Link<'a> {
 }
 
 /// Grade the connection: RTT for both roles, and loss and headroom where the publisher's sent
-/// media gives them a denominator. A viewer's loss counters describe its own uplink.
+/// media gives them a denominator. A viewer's loss counters describe its own uplink. Loss diffs
+/// the two transport samples, so a stale previous one would stretch it past the interval.
 fn connection(link: &Link<'_>, role: Role, thresholds: &Thresholds) -> Connection {
 	let limits = &thresholds.transport;
+	let previous = link
+		.previous
+		.filter(|previous| previous.age.is_none_or(|age| age <= thresholds.stale));
 	let lost = |counter: fn(&stats::Transport) -> Option<u64>| {
-		link.previous
-			.and_then(|previous| Some(counter(link.current)?.saturating_sub(counter(previous)?)))
+		previous.and_then(|previous| Some(counter(link.current)?.saturating_sub(counter(previous)?)))
 	};
 	let lost_bytes = lost(|t| t.lost_bytes);
 	let lost_packets = lost(|t| t.lost_packets);
