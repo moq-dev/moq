@@ -376,6 +376,7 @@ This document requests no registrations.
 - Require internally minted producing epochs and consume-only bindings for discovered epochs.
 - Require canonical UUIDv7 epochs, carried on the route rather than in the path, leaving HKDF UUID inputs unchanged.
 - Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.
+- Forbid applications from relying on group completeness, which is unauthenticated.
 
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}
