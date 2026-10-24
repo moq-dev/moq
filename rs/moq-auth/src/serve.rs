@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -258,11 +258,7 @@ impl Policy {
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
 		grant.expires = match (expires, self.expires) {
 			(Some(expires), _) => Some(expires),
-			(None, Some(bound)) => Some(
-				SystemTime::from(moq_clock::wall())
-					.checked_add(bound)
-					.ok_or(Denial::ExpiresOutOfRange)?,
-			),
+			(None, Some(bound)) => Some(moq_clock::wall().checked_add(bound).ok_or(Denial::ExpiresOutOfRange)?),
 			(None, None) => None,
 		};
 		grant.revalidate = self.revalidate;
@@ -301,7 +297,7 @@ impl Policy {
 			crate::Error::Key(crate::KeyError::KeyNotFound(_)) => Denial::UnknownKey,
 			other => Denial::InvalidToken(other.to_string()),
 		})?;
-		crate::key::validate_times(&claims, SystemTime::from(moq_clock::wall())).map_err(|err| match err {
+		crate::key::validate_times(&claims, moq_clock::wall()).map_err(|err| match err {
 			crate::Error::TokenExpired => Denial::Expired {
 				root: claims.root.clone(),
 			},
@@ -465,7 +461,7 @@ impl Server {
 		}
 		if policy
 			.expires
-			.is_some_and(|bound| SystemTime::from(moq_clock::wall()).checked_add(bound).is_none())
+			.is_some_and(|bound| moq_clock::wall().checked_add(bound).is_none())
 		{
 			return Err(crate::Error::ExpiresOutOfRange);
 		}
@@ -546,7 +542,6 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::{Algorithm, Bytes, Claims, Client, Error, Peer, Transport, lease::Reason};
@@ -574,10 +569,7 @@ mod tests {
 			..Default::default()
 		};
 		let grant = policy.decide(&request("/demo")).await.unwrap();
-		assert_eq!(
-			grant.expires,
-			Some((moq_clock::wall() + Duration::from_secs(30)).into())
-		);
+		assert_eq!(grant.expires, Some(moq_clock::wall() + Duration::from_secs(30)));
 	}
 
 	fn with_token(mut request: Request, jwt: &str) -> Request {
@@ -585,7 +577,7 @@ mod tests {
 		request
 	}
 
-	fn with_peer(mut request: Request, expires: Option<SystemTime>) -> Request {
+	fn with_peer(mut request: Request, expires: Option<moq_clock::Wall>) -> Request {
 		request.tls = Some(Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
@@ -603,7 +595,7 @@ mod tests {
 		(dir, key)
 	}
 
-	fn sign(key: &Key, root: &str, publish: &[&str], subscribe: &[&str], expires: Option<SystemTime>) -> String {
+	fn sign(key: &Key, root: &str, publish: &[&str], subscribe: &[&str], expires: Option<moq_clock::Wall>) -> String {
 		let claims = Claims::default()
 			.with_root(root)
 			.with_publish(patterns(publish))
@@ -647,12 +639,12 @@ mod tests {
 			..Default::default()
 		};
 		// `exp` is whole seconds on the wire.
-		let secs = SystemTime::now()
-			.duration_since(SystemTime::UNIX_EPOCH)
+		let secs = moq_clock::wall()
+			.checked_duration_since(moq_clock::Wall::UNIX_EPOCH)
 			.unwrap()
 			.as_secs()
 			+ 600;
-		let exp = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+		let exp = moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(secs);
 		let jwt = sign(&key, "demo/room", &["alice/**"], &["**"], Some(exp));
 
 		let grant = policy.decide(&with_token(request("/demo/room/"), &jwt)).await.unwrap();
@@ -673,11 +665,11 @@ mod tests {
 			..Default::default()
 		};
 		let jwt = sign(&key, "demo", &["**"], &[], None);
-		let before = SystemTime::now();
+		let before = moq_clock::wall();
 		let grant = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap();
 		let expires = grant.expires.unwrap();
 		assert!(expires >= before + Duration::from_secs(3600));
-		assert!(expires <= SystemTime::now() + Duration::from_secs(3600));
+		assert!(expires <= moq_clock::wall() + Duration::from_secs(3600));
 	}
 
 	#[tokio::test]
@@ -715,7 +707,7 @@ mod tests {
 			"demo",
 			&["**"],
 			&[],
-			Some(SystemTime::now() - Duration::from_secs(1)),
+			Some(moq_clock::wall() - Duration::from_secs(1)),
 		);
 		let err = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Denial::Expired { .. }), "{err}");
@@ -973,7 +965,7 @@ mod tests {
 			mtls: rules(&["**"], &["**"]),
 			..Default::default()
 		};
-		let not_after = SystemTime::now() + Duration::from_secs(86400 * 30);
+		let not_after = moq_clock::wall() + Duration::from_secs(86400 * 30);
 		let grant = policy.decide(&with_peer(request("/"), Some(not_after))).await.unwrap();
 		assert_eq!(grant.publish, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(not_after));
@@ -1283,7 +1275,7 @@ mod tests {
 			"demo",
 			&["**"],
 			&[],
-			Some(SystemTime::now() + Duration::from_secs(60)),
+			Some(moq_clock::wall() + Duration::from_secs(60)),
 		);
 		let mut same_host = with_token(request("/demo"), &other);
 		same_host.remote = Some("[::ffff:203.0.113.9]:9".parse().unwrap());
@@ -1309,7 +1301,7 @@ mod tests {
 			..limited()
 		})
 		.unwrap();
-		let exp = Some(SystemTime::now() + Duration::from_secs(60));
+		let exp = Some(moq_clock::wall() + Duration::from_secs(60));
 		let a = sign(&key, "demo", &["**"], &[], None);
 		let b = sign(&key, "demo", &["**"], &[], exp);
 		let c = sign(
@@ -1317,7 +1309,7 @@ mod tests {
 			"demo",
 			&["**"],
 			&[],
-			Some(SystemTime::now() + Duration::from_secs(61)),
+			Some(moq_clock::wall() + Duration::from_secs(61)),
 		);
 
 		let mut first = with_token(request("/demo"), &a);
@@ -1373,7 +1365,7 @@ mod tests {
 		use crate::refusal::Reason;
 		let (dir, key) = key_dir();
 		let stranger = Key::generate(Algorithm::HS256, key.kid.clone()).unwrap();
-		let expired = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+		let expired = Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
 		for tier in [None, Some("edge")] {
 			let (client, _) = serve(Policy {
 				keys: Some(Keys::Dir(dir.path().into())),
@@ -1442,7 +1434,7 @@ mod tests {
 			"attacker",
 			&["**"],
 			&[],
-			Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+			Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1)),
 		);
 		let Error::Refused(refusal) = client
 			.connect(with_token(request("/attacker"), &token))

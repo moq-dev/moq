@@ -28,7 +28,7 @@ uv pip install --python "$venv/bin/python" --quiet -e "$here"
 # target. Release, since this is the runtime the worker publishes through.
 uv sync --project "$repo" --locked --no-install-workspace --quiet
 (
-    cd "$repo/py/moq-ffi"
+    cd "$repo"
     VIRTUAL_ENV="$venv" "$repo/.venv/bin/maturin" develop --locked --release --uv
 )
 

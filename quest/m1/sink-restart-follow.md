@@ -20,43 +20,45 @@ to other broadcasts landed for `moqsrc` through `moq_mux::Source::follow`;
 `moq play` resolves a reference once with `Source::resolve`, which waits for
 a sibling's first announcement and keeps it.
 
-Readers with their own follow loop today move onto `announced_broadcast`:
+`moq play`, `moqsrc`, and `transcode` follow through
+`moq_mux::follow::Instances::new(origin, path, None)` (decided 2026-10-20,
+maintainer: no reader hand-rolls its own follow loop). Each
+`follow::Event::Start` builds a `moq_mux::Source` from the instance it hands
+out, and a selected handler's refusal is terminal. `transcode` retires the old
+ladder and publishes a fresh derivative broadcast with its own epoch for each
+source instance; a retired ladder aborts its catalog and rungs with `Cancel`.
 
-- moqsrc: `follow_path` in `rs/moq-gst/src/source/imp.rs` drains
-  `origin.follow` and re-requests on each start, holding its pads across
-  instances.
-- `moq play`: `play` in `rs/moq-cli/src/play/media.rs` does the same and
-  resets its presentation per instance.
-- The TS stitching follower (`rs/moq-mux/src/container/ts/follower.rs`), if
-  `announced_broadcast` fits how it marks a break.
+A finite read such as `fetch`, every stdout export except TS with `--stitch`,
+and TS without `--stitch` stay pinned to the instance they resolved until its
+route dies and its tracks error. Never concatenate independent instances into
+one stream.
 
-A finite read such as `fetch` stays on the one instance it resolved.
+Decided with the maintainer on 2026-10-24, when the play, moqsrc, and
+transcode moves landed:
 
-The stdout exports (`subscribe`) already follow only where the output marks
-the break: TS with `--stitch`. Every other format, and TS without `--stitch`,
-stays pinned to the old instance until its route dies and its tracks error,
-never concatenating independent instances into one stream. Keep that rule.
-Audit and fix the rest the same way:
-
-- `export hls`: `moq-hls`'s server resolves per request; check that a restart
-  moves new requests to the new instance and how a playlist marks the break
-  (`EXT-X-DISCONTINUITY`); a failed timeline answers its playlists with a no-store 5xx.
-- `export rtmp`, `export srt`, `export rtc`, both `--listen` (per-viewer
-  streams in `moq-rtmp`, `moq-srt`, `moq-rtc`) and `--connect` (one push).
-  SRT already rides the TS follower (`--linger`, becoming `--follow` in
+- The TS follower moves onto `Instances` in
   [TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md),
-  and `--stitch`); confirm its
-  listen side does too. FLV and WebRTC need a decision.
-- `transcode`: its source broadcast; following means restarting the ladder
-  on the new instance.
+  which reworks the same wait, so its timers change once.
+- `export hls` gives each instance its own playlist URL. While the old
+  publisher stays live, `Server::broadcaster` (`rs/moq-hls/src/server/mod.rs`)
+  answers new requests from its cached broadcaster, so an overlapping
+  replacement never reaches them; swapping the cache alone would reset the
+  source-derived `EXT-X-MEDIA-SEQUENCE` at a stable URL. Rejected: one
+  continuous playlist with monotonic media and discontinuity sequences. A
+  failed timeline keeps answering its playlists with a no-store 5xx.
+- `export rtmp` and `export rtc`, both `--listen` and `--connect`, stay on the
+  old instance until its route dies, never silently resetting timestamps or
+  codec state. Rejected for now: reconnecting the output per instance, and
+  marking the break in-session.
 
-Share `moq_mux::follow::Instances::new(origin, path, None)` (decided 2026-10-20,
-maintainer: no reader hand-rolls its own follow loop) rather than one rule per
-reader: it yields `follow::Event::Start` for each instance serving the path and
-`follow::Event::End` once the one handed out stops serving. Build a
-`moq_mux::Source` from each started instance, so its siblings follow through
-`Source::follow` and its exporters pin through `Source::bind`, which waits for
-a sibling's first announcement. Each fix lands
-with a test that replaces the publisher while the reader runs.
+Remaining, each with a test that replaces the publisher while the reader runs:
+
+- `export hls`: a playlist URL per instance.
+- `export rtmp` and `export rtc`: confirm both sides stay pinned and fail once
+  the old route dies.
 
 Public API: none. Wire: none.
+
+## Related
+
+- [Finite drain for a replaced run's HLS recording](/quest/m2/hls-restart-drain-cutoff.md) - the recording side of an HLS restart

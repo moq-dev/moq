@@ -437,12 +437,10 @@ impl Producer {
 		self.grouped += self.encoder()?.frame_size() as u64;
 		// Cut as soon as the group is long enough rather than when the next packet arrives, so
 		// the relay sees it finish without waiting. No boundary to give: the next packet bounds
-		// this one, and codec frames have a deterministic duration anyway. Cut before observing
-		// the flush so a failed observation never leaves the group open.
+		// this one, and codec frames have a deterministic duration anyway.
 		if self.grouped >= self.group_samples {
 			self.track.cut(None)?;
 		}
-		self.track.flush(timestamp, moq_net::time::Instant::now())?;
 		Ok(())
 	}
 
@@ -468,7 +466,6 @@ impl Producer {
 				keyframe: false,
 				duration: None,
 			})?;
-			track.flush(timestamp, moq_net::time::Instant::now())?;
 		}
 
 		track.cut(Some(terminal.end))?;

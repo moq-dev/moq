@@ -1,4 +1,4 @@
-# Controlled time
+# [XS] Controlled time
 
 ## Goal
 
@@ -103,9 +103,9 @@ needed by the in-tree QUIC stack and clustering regressions. Unrelated test/priv
 cleanup and the global lint ratchet belong to
 [the follow-up sweep](/quest/m2/time-test-sweep.md).
 
-## Required
-
-- [Public wall times on moq_clock::Wall](/quest/m1/time/wall.md) - public `SystemTime`s become `moq_clock::Wall`, and the ratchets ban the type
+Remaining: every child has landed, with public wall times on `moq_clock::Wall`
+in [#6298](https://github.com/moq-dev/moq/pull/6298). Move the decisions the
+m2 quests still cite into them, then retire this epic.
 
 ## Related
 

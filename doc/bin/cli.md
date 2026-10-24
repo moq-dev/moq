@@ -209,7 +209,8 @@ closes. Playback starts when the name is announced. A
 [restarted publisher](#publisher-runs) starts it over on the new run, with a
 fresh catalog, decoders, and clock. When the announcement ends, what is playing
 finishes and the player waits for the name to return. The log names each run's
-epoch. A catalog with nothing this build can play still ends the player.
+epoch. A refused broadcast request or a catalog with nothing this build can
+play ends the player.
 
 Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
@@ -269,6 +270,10 @@ from H.264 rather than a larger H.265 or AV1 one. When the source changes
 resolution, rungs are resolved again: one that no longer fits finishes, and
 one whose size changed comes back under a new name (`video/360p.2`). Requires
 the `transcode` feature, plus `openh264` on a host without a hardware encoder.
+A restarted source retires the old ladder and publishes a fresh derivative
+instance at the same output path. A clean end waits for the source to return;
+stop the command to finish following. A refused source request or an encoding
+failure ends the command.
 
 ## Announced
 
