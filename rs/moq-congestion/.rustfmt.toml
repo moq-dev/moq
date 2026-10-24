@@ -1,1 +1,2 @@
-# Keep the extracted controllers formatted like their source during the mechanical move.
+# quinn's formatting (rustfmt defaults) rather than rs/.rustfmt.toml, so
+# controller fixes from quinn and noq port without whitespace conflicts.
