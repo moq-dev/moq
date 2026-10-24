@@ -386,6 +386,14 @@ impl MoqClient {
 	}
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl MoqClient {
+	/// Offer only these versions on the next dial, for version-specific tests.
+	pub(crate) fn set_version(&self, version: Vec<moq_net::Version>) -> Result<(), MoqError> {
+		self.configure(|state| state.config.version = version)
+	}
+}
+
 #[cfg(target_arch = "wasm32")]
 #[uniffi::export]
 impl MoqClient {
@@ -881,6 +889,24 @@ impl MoqSession {
 	/// thing per binding.
 	pub fn shutdown(&self) {
 		self.cancel(0);
+	}
+
+	/// Drain finished tracks within one second, then close, returning any drain error.
+	///
+	/// Finish or abort live tracks first; [`shutdown`](Self::shutdown) and
+	/// [`cancel`](Self::cancel) stay immediate. Explicit `moq-lite-07-wip` waits for
+	/// the peer to receive the tail. Older Lite versions, including the default
+	/// lite-06, wait only for transport ACKs. moq-transport (IETF) closes without waiting.
+	pub async fn drain(&self) -> Result<(), MoqError> {
+		let inner = self.inner.clone();
+		crate::ffi::detached(async move {
+			match inner {
+				#[cfg(not(target_arch = "wasm32"))]
+				Inner::Connection(connection) => connection.close().await.map_err(map_closed_error),
+				Inner::Session(session) => session.close().await.map_err(MoqError::from),
+			}
+		})
+		.await
 	}
 
 	/// The publish-side origin: where local broadcasts get advertised

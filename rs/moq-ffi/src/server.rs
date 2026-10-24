@@ -199,6 +199,12 @@ impl MoqServer {
 		}
 		Ok(f(&mut state))
 	}
+
+	/// Accept only these versions, for version-specific tests.
+	#[cfg(test)]
+	pub(crate) fn set_version(&self, version: Vec<moq_net::Version>) -> Result<(), MoqError> {
+		self.configure_listen(|state| state.config.version = version)
+	}
 }
 
 #[uniffi::export]

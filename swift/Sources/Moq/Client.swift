@@ -173,6 +173,12 @@ public final class Session: Sendable {
         ffi.shutdown()
     }
 
+    /// Drain finished tracks within one second, then close, throwing if the drain fails.
+    /// Finish or abort live tracks first; `shutdown()` and `cancel(code:)` stay immediate.
+    public func drain() async throws {
+        try await ffi.drain()
+    }
+
     /// Snapshot the current connection statistics (RTT, bandwidth estimates,
     /// byte/packet counters). Cheap to call; intended for periodic polling.
     /// Individual fields are `nil` when the transport backend doesn't report them.

@@ -182,6 +182,28 @@ async def test_server_request_close():
                 pass
 
 
+async def test_session_drain_closes_an_idle_session():
+    """With nothing left to deliver, drain() closes at once and closed() then returns."""
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        serve_task = asyncio.create_task(server.serve())
+        try:
+            async with moq.Client(
+                f"https://{server.local_addr}",
+                tls_verify=False,
+                bind="127.0.0.1:0",
+            ) as client:
+                session = client.session
+                assert session is not None
+                await asyncio.wait_for(session.drain(), timeout=5.0)
+                await asyncio.wait_for(session.closed(), timeout=5.0)
+        finally:
+            serve_task.cancel()
+            try:
+                await serve_task
+            except asyncio.CancelledError:
+                pass
+
+
 async def test_client_websocket_fallback_options():
     """The fallback knobs reach the native client, and QUIC alone still connects."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:

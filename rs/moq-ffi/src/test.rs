@@ -4860,3 +4860,135 @@ async fn server_cancel_during_listen_releases_the_port() {
 	std::net::UdpSocket::bind(addr).expect("cancel must release the port before it returns");
 	drop(listen);
 }
+
+/// Real sockets exercise the FFI runtime and both accepted/client session handles.
+/// Only lite-07 acknowledges the received tail; default lite-06 closes after transport ACKs.
+async fn drain_pair() -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
+	let lite07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	server.set_version(vec![lite07]).unwrap();
+	let addr = server.listen().await.unwrap();
+	let accepting = server.clone();
+	let accepted = tokio::spawn(async move { accepting.accept().await.unwrap().unwrap().accept().await.unwrap() });
+	let client = MoqClient::new();
+	client.set_tls_verify(false).unwrap();
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_reconnect(false).unwrap();
+	client.set_version(vec![lite07]).unwrap();
+	let connected = client.connect(format!("https://{addr}")).await.unwrap();
+	(server, connected, accepted.await.unwrap())
+}
+
+/// TRACK_INFO holds demand before SUBSCRIBE; receiving a frame proves live delivery started.
+async fn drain_ready(track: &MoqTrackProducer, reader: &MoqTrackConsumer) {
+	let group = track.append_group().unwrap();
+	group
+		.write_frame(MoqFrame {
+			timestamp_us: 0,
+			payload: b"ready".to_vec(),
+		})
+		.unwrap();
+	group.finish().unwrap();
+	let ready = tokio::time::timeout(TIMEOUT, reader.read_frame())
+		.await
+		.expect("subscription ready")
+		.expect("priming read")
+		.expect("priming frame");
+	assert_eq!(ready.payload, b"ready");
+}
+
+#[tokio::test]
+async fn drain_delivers_the_finished_track() {
+	for client_publishes in [false, true] {
+		let (server, client, accepted) = tokio::time::timeout(TIMEOUT, drain_pair()).await.expect("pair");
+		let (publisher, subscriber) = if client_publishes {
+			(&client, &accepted)
+		} else {
+			(&accepted, &client)
+		};
+		let broadcast = create_announced(&publisher.publish(), "tail");
+		let track = broadcast.publish_track("data".into(), None).unwrap();
+		let remote = await_announced(&subscriber.consume(), "tail").await;
+		let reader = tokio::time::timeout(TIMEOUT, remote.subscribe_track("data".into(), None))
+			.await
+			.expect("subscribe")
+			.unwrap();
+		drain_ready(&track, &reader).await;
+		let receiving = tokio::spawn(async move {
+			let frame = reader.read_frame().await?;
+			let end = reader.read_frame().await?;
+			Ok::<_, MoqError>((frame, end))
+		});
+		let closing = publisher.clone();
+		tokio::time::timeout(
+			TIMEOUT,
+			crate::ffi::detached(async move {
+				let group = track.append_group()?;
+				group.write_frame(MoqFrame {
+					timestamp_us: 0,
+					payload: b"last".to_vec(),
+				})?;
+				group.finish()?;
+				track.finish()?;
+				closing.drain().await?;
+				Ok::<(), MoqError>(())
+			}),
+		)
+		.await
+		.expect("drain")
+		.unwrap();
+		let (frame, end) = tokio::time::timeout(TIMEOUT, receiving)
+			.await
+			.expect("read")
+			.unwrap()
+			.unwrap_or_else(|err| panic!("client_publishes={client_publishes}: tail/end: {err:?}"));
+		assert_eq!(frame.unwrap().payload, b"last");
+		assert!(end.is_none());
+		client.cancel(0);
+		accepted.cancel(0);
+		server.cancel();
+	}
+}
+
+#[tokio::test]
+async fn drain_times_out_on_an_unfinished_track() {
+	for client_publishes in [false, true] {
+		let (server, client, accepted) = tokio::time::timeout(TIMEOUT, drain_pair()).await.expect("pair");
+		let (publisher, subscriber) = if client_publishes {
+			(&client, &accepted)
+		} else {
+			(&accepted, &client)
+		};
+		let broadcast = create_announced(&publisher.publish(), "live");
+		let track = broadcast.publish_track("data".into(), None).unwrap();
+		let remote = await_announced(&subscriber.consume(), "live").await;
+		let reader = tokio::time::timeout(TIMEOUT, remote.subscribe_track("data".into(), None))
+			.await
+			.expect("subscribe")
+			.unwrap();
+		drain_ready(&track, &reader).await;
+		let receiving = tokio::spawn(async move { reader.read_frame().await });
+		let start = std::time::Instant::now();
+		let err = tokio::time::timeout(TIMEOUT, publisher.drain())
+			.await
+			.expect("drain")
+			.expect_err("unfinished track must time out");
+		// The FFI runtime owns real sockets and cannot share a paused test clock.
+		// A lower bound still rejects an immediate bail without depending on scheduler latency.
+		assert!(
+			start.elapsed() >= Duration::from_secs(1),
+			"gave up draining after {:?}",
+			start.elapsed()
+		);
+		assert!(
+			matches!(&err, MoqError::Protocol { details } if details.kind == crate::error::MoqProtocolKind::DeliveryTimeout),
+			"{err:?}"
+		);
+		let _ = tokio::time::timeout(TIMEOUT, receiving).await.unwrap().unwrap();
+		client.cancel(0);
+		accepted.cancel(0);
+		server.cancel();
+	}
+}

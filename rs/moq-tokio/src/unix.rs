@@ -247,6 +247,7 @@ pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Sessio
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via Unix socket");
 	qmux::uds::Config::new(WIRE_VERSION)
 		.protocols(protocols.iter().copied())
+		.session_config(crate::qmux_config())
 		.connect(path)
 		.await
 		.map_err(|err| Error::Connect(crate::error::message(err)))
@@ -354,7 +355,9 @@ impl Listener {
 	/// Accept a socket and return its independently driven qmux handshake.
 	pub(crate) async fn accept_pending(&self) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
 		let stream = self.accept_socket().await;
-		let config = qmux::uds::Config::new(WIRE_VERSION).protocols(self.protocols.iter().map(String::as_str));
+		let config = qmux::uds::Config::new(WIRE_VERSION)
+			.protocols(self.protocols.iter().map(String::as_str))
+			.session_config(crate::qmux_config());
 		async move {
 			let cred = stream.peer_cred()?;
 			let cred = PeerCred {

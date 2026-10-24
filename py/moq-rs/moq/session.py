@@ -69,6 +69,15 @@ class Session:
         """Graceful shutdown; equivalent to `cancel(0)` (0 means no error)."""
         self._inner.shutdown()
 
+    async def drain(self) -> None:
+        """Drain finished tracks within one second, then close, raising if the drain fails.
+
+        Finish or abort live tracks first; :meth:`shutdown` and :meth:`cancel` stay
+        immediate. The drain waits for the transport to acknowledge the tail, not
+        for the peer to read it; a moq-transport (IETF) session closes without
+        waiting."""
+        await self._inner.drain()
+
     def publish(self) -> OriginProducer:
         """The publish-side origin: where local broadcasts are advertised to
         the remote. Either the origin wired before connect/accept, or one

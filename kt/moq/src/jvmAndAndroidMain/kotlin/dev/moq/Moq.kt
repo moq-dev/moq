@@ -74,6 +74,19 @@ class Moq internal constructor(
      */
     fun bandwidth(): Bandwidth = session.bandwidth()
 
+    /**
+     * Drain finished tracks within one second, then close the session and cancel the
+     * client, throwing if the drain fails. Finish or abort live tracks first; [close]
+     * stays immediate.
+     */
+    suspend fun drain() {
+        try {
+            session.drain()
+        } finally {
+            client.cancel()
+        }
+    }
+
     /** Gracefully shut down the session and cancel the client, releasing the native handles. */
     override fun close() {
         session.shutdown()

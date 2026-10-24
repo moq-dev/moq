@@ -1,6 +1,6 @@
 name: moq
 description: Idiomatic Dart and Flutter client for Media over QUIC.
-version: 0.1.0
+version: 0.1.1
 repository: https://github.com/moq-dev/moq/tree/main/dart/moq
 issue_tracker: https://github.com/moq-dev/moq/issues
 topics:

@@ -208,4 +208,15 @@ final class Moq {
     session.shutdown();
     _client.cancel();
   }
+
+  /// Drain finished tracks within one second, then close the session and stop
+  /// the client, failing if the drain does. Finish or abort live tracks first;
+  /// [close] stays immediate.
+  Future<void> drain() async {
+    try {
+      await session.drain();
+    } finally {
+      _client.cancel();
+    }
+  }
 }

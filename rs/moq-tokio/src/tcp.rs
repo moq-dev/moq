@@ -164,6 +164,7 @@ async fn connect_addrs(
 		async move {
 			qmux::tcp::Config::new(WIRE_VERSION)
 				.protocols(protocols.iter().map(String::as_str))
+				.session_config(crate::qmux_config())
 				.connect(addr)
 				.await
 				.map_err(|err| Error::Connect(crate::error::message(err)))
@@ -242,7 +243,9 @@ impl Listener {
 	) -> impl Future<Output = Result<(qmux::Session, net::SocketAddr)>> + use<> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted TCP connection");
-		let config = qmux::tcp::Config::new(WIRE_VERSION).protocols(self.protocols.iter().map(String::as_str));
+		let config = qmux::tcp::Config::new(WIRE_VERSION)
+			.protocols(self.protocols.iter().map(String::as_str))
+			.session_config(crate::qmux_config());
 		async move {
 			let session = config
 				.accept(stream)
@@ -301,6 +304,39 @@ mod tests {
 
 		assert_eq!(session.protocol(), Some("moq-test"));
 		accept.await.expect("accept task panicked");
+	}
+
+	/// moq-lite holds a stream open per subscription, so each end of a session must
+	/// let its peer hold far more than qmux's default of 100 open at once.
+	#[tokio::test]
+	async fn sessions_grant_a_thousand_open_streams() {
+		use futures::FutureExt as _;
+
+		let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.expect("bind listener")
+			.with_protocols(["moq-test"]);
+		let addr = listener.local_addr().expect("local addr");
+		let accept = tokio::spawn(async move { listener.accept().await.expect("listener gone").expect("accept") });
+		let candidates = crate::resolve::Candidates::fixed([addr]);
+		let client = connect_addrs(candidates, &["moq-test"], Duration::ZERO)
+			.await
+			.expect("connect failed");
+		let server = accept.await.expect("accept task panicked");
+
+		// Both handshakes are done, so each end knows its peer's grant, and an open
+		// with credit left completes without waiting.
+		for (end, session) in [("client", &client), ("server", &server)] {
+			let mut held = Vec::new();
+			for opened in 0..1_000 {
+				let bi = session.open_bi().now_or_never();
+				let uni = session.open_uni().now_or_never();
+				let (Some(bi), Some(uni)) = (bi, uni) else {
+					panic!("{end} stalled on stream credit after opening {opened} stream pairs");
+				};
+				held.push((bi.expect("open bi"), uni.expect("open uni")));
+			}
+		}
 	}
 
 	#[tokio::test]

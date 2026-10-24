@@ -7946,6 +7946,7 @@ abstract class MoqSessionInterface {
   void cancel({required int code});
   Future<void> closed();
   MoqOriginConsumer consume();
+  Future<void> drain();
   int epoch();
   MoqOriginProducer publish();
   void shutdown();
@@ -8016,6 +8017,17 @@ class MoqSession implements MoqSessionInterface {
       ),
       FfiConverterMoqOriginConsumer.lift,
       null,
+    );
+  }
+
+  Future<void> drain() {
+    return uniffiRustCallAsync(
+      () => uniffi_moq_ffi_fn_method_moqsession_drain(uniffiClonePointer()),
+      ffi_moq_ffi_rust_future_poll_void,
+      ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_free_void,
+      (_) {},
+      moqExceptionErrorHandler,
     );
   }
 
@@ -11502,6 +11514,11 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_consume(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_drain(
+  Pointer<Void> ptr,
+);
+
 @Native<Uint64 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -12431,6 +12448,9 @@ external int uniffi_moq_ffi_checksum_method_moqsession_closed();
 external int uniffi_moq_ffi_checksum_method_moqsession_consume();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqsession_drain();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqsession_epoch();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -13041,6 +13061,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_consume() != 45358) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqsession_drain() != 51983) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_epoch() != 32695) {

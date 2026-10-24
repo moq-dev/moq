@@ -108,6 +108,13 @@ func (s *Session) Shutdown() {
 	s.inner.Shutdown()
 }
 
+// Drain delivers finished tracks within one second, then closes the session,
+// returning an error if the drain fails. Finish or abort live tracks first.
+// Cancelling ctx aborts the session immediately.
+func (s *Session) Drain(ctx context.Context) error {
+	return runErr(ctx, s.inner.Shutdown, s.inner.Drain)
+}
+
 // Cancel closes the session abruptly with an application error code.
 func (s *Session) Cancel(code uint32) {
 	s.inner.Cancel(code)

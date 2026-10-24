@@ -94,6 +94,8 @@ with `session.status()` to log each reconnect; `moq.Backoff` tunes the pacing
 (`timeout_us=0` retries forever); and `moq.connect(..., max_streams=...)`
 raises the peer's inbound stream cap.
 
+Await `session.drain()` to deliver finished tracks before disconnecting. It raises if the drain has not completed within one second. Finish or abort live tracks first; `shutdown()`, `cancel(code)`, and the async context managers stay immediate. The drain waits for the transport to acknowledge the tail, not for the peer to read it; a moq-transport (IETF) session closes without waiting.
+
 The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
 a 200 ms head start. Pass `websocket_enabled=False` to `moq.connect` for a
 QUIC-only relay, or a `websocket_delay` `timedelta` to change the head start.

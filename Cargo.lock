@@ -6872,9 +6872,9 @@ dependencies = [
 
 [[package]]
 name = "qmux"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78229d7c17aefedb12668c8e28db3dc648b69fc80c025c4b899e48982671caf8"
+checksum = "dad25762c86aa1eaf3ef0b660fd83773fe5c961e8b3c3a7a6815f8c155338061"
 dependencies = [
  "bytes",
  "futures",

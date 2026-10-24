@@ -66,6 +66,19 @@ pub mod watch;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
+/// Session settings for every qmux transport (WebSocket, `tcp://`, `unix://`).
+///
+/// moq-lite holds a stream open per subscription, so a qmux session grants the same
+/// stream count as QUIC rather than qmux's default of 100, past which a peer's opens
+/// wait on credit forever.
+#[cfg(any(feature = "websocket", feature = "tcp"))]
+fn qmux_config() -> qmux::Config {
+	let mut config = qmux::Config::default();
+	config.max_streams_bidi = quic::DEFAULT_MAX_STREAMS;
+	config.max_streams_uni = quic::DEFAULT_MAX_STREAMS;
+	config
+}
+
 // Enumerated rather than globbed, so the root surface is a deliberate list and a
 // new `pub` item in these modules doesn't silently join it.
 pub use client::Client;

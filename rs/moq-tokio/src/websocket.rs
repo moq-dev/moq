@@ -352,6 +352,7 @@ pub(crate) async fn connect(
 				.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 				.with_connector(connector)
 				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline; TCP backs off retransmits too far for QUIC's 10s
+				.with_session_config(crate::qmux_config())
 				.connect(url.as_str())
 				.await
 				.map_err(Error::connect)?
@@ -410,7 +411,9 @@ async fn connect_tls_override(
 		.headers()
 		.get(http::header::SEC_WEBSOCKET_PROTOCOL)
 		.and_then(|value| value.to_str().ok());
-	let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::ws::KeepAlive::default());
+	let upgraded = qmux::ws::Upgraded::new(websocket)
+		.with_keep_alive(qmux::ws::KeepAlive::default())
+		.with_session_config(crate::qmux_config());
 	Ok(match negotiated {
 		Some(protocol) => upgraded.with_alpn(protocol).connect(),
 		None => upgraded.connect(),
@@ -597,7 +600,9 @@ impl Listener {
 				.unwrap()
 				.take()
 				.expect("successful upgrade selected a protocol");
-			let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::ws::KeepAlive::default());
+			let upgraded = qmux::ws::Upgraded::new(websocket)
+				.with_keep_alive(qmux::ws::KeepAlive::default())
+				.with_session_config(crate::qmux_config());
 			let session = match &protocol {
 				Some(protocol) => upgraded.with_alpn(protocol).accept(),
 				None => upgraded.accept(),

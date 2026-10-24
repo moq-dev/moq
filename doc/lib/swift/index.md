@@ -82,6 +82,8 @@ broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
 with `session.status()` to log each reconnect; `client.setBackoff` tunes the
 pacing; and `client.setQuicMaxStreams` raises the peer's inbound stream cap.
 
+Use `try await session.drain()` to deliver finished tracks before disconnecting. It throws if the drain has not completed within one second. Finish or abort live tracks first; `shutdown()` and `cancel(code:)` stay immediate. The drain waits for the transport to acknowledge the tail, not for the peer to read it; a moq-transport (IETF) session closes without waiting.
+
 The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
 a 200 ms head start. `client.setWebsocketEnabled(false)` turns it off for a
 QUIC-only relay, and `client.setWebsocketDelay(_:)` changes the head start, in

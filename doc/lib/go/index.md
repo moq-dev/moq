@@ -108,6 +108,8 @@ each reconnect by number; `moq.WithBackoff` tunes the pacing, with
 `moq.RetryForever` as the timeout; and `moq.WithQUICMaxStreams` raises the
 peer's inbound stream cap for a subscriber to many tracks.
 
+`Session().Drain(ctx)` delivers finished tracks before disconnecting and returns an error if the drain has not completed within one second; cancelling ctx aborts immediately. Finish or abort live tracks first; `Client.Close()`, `Shutdown()`, and `Cancel(code)` stay immediate. The drain waits for the transport to acknowledge the tail, not for the peer to read it; a moq-transport (IETF) session closes without waiting.
+
 The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
 a 200 ms head start. `moq.WithWebSocketEnabled(false)` turns it off for a
 QUIC-only relay, and `moq.WithWebSocketDelay` changes the head start.
