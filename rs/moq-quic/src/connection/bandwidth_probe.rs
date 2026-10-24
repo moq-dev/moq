@@ -29,10 +29,11 @@ pub(super) struct BandwidthProbe {
     /// The packet number to resume taking in-flight data from, so the duplicates spread over the
     /// whole flight, oldest first
     cursor: u64,
-    /// The next packet number when a search last found nothing in flight to resend
+    /// Every packet below this holds nothing left to resend
     ///
-    /// Only a packet sent since can hold data to resend, so the search is not repeated until then.
-    dry: Option<u64>,
+    /// A stream's reset, its stop, and an acknowledgment are all final, so a packet found with
+    /// nothing to resend never has any again, and each packet is searched past once.
+    floor: u64,
 }
 
 /// Whether a probe packet may be sent now
@@ -55,7 +56,7 @@ impl BandwidthProbe {
             // Paced at an explicit rate, which resizes the bucket on first use
             pacing: Pacer::new(config.initial_rtt, mtu.into(), mtu, None, now),
             cursor: 0,
-            dry: None,
+            floor: 0,
         }
     }
 
@@ -78,7 +79,7 @@ impl BandwidthProbe {
         max_size: usize,
     ) -> frame::StreamMetaVec {
         let mut written = frame::StreamMetaVec::new();
-        for (pn, packet) in sources(packets, self.cursor) {
+        for (pn, packet) in sources(packets, self.floor, self.cursor) {
             if buf.len() + frame::Stream::SIZE_BOUND >= max_size {
                 break;
             }
@@ -136,28 +137,21 @@ impl Connection {
     /// whether there is one
     fn find_bandwidth_probe_source(&mut self) -> bool {
         let space = &self.spaces[SpaceId::Data];
-        let next = space.next_packet_number;
         let probe = &mut self.bandwidth_probe;
-        if probe.dry == Some(next) {
-            return false;
-        }
-        let found = sources(&space.sent_packets, probe.cursor).find(|(_, packet)| {
+        let found = sources(&space.sent_packets, probe.floor, probe.cursor).find(|(_, packet)| {
             packet
                 .stream_frames
                 .iter()
                 .any(|frame| self.streams.can_duplicate(frame))
         });
         match found {
-            Some((pn, _)) => {
-                probe.cursor = pn;
-                probe.dry = None;
-                true
-            }
+            Some((pn, _)) => probe.cursor = pn,
             None => {
-                probe.dry = Some(next);
-                false
+                probe.floor = space.next_packet_number;
+                probe.cursor = probe.floor;
             }
         }
+        found.is_some()
     }
 
     /// When each probe packet still in flight was sent, and the streams it resends data of
@@ -178,11 +172,16 @@ impl Connection {
     }
 }
 
-/// In-flight packets holding STREAM data sent once, from `cursor` on and then from the oldest
-fn sources(packets: &SentPackets, cursor: u64) -> impl Iterator<Item = (u64, &SentPacket)> {
+/// In-flight packets from `floor` on holding STREAM data sent once, from `cursor` on and then
+/// from the oldest
+fn sources(
+    packets: &SentPackets,
+    floor: u64,
+    cursor: u64,
+) -> impl Iterator<Item = (u64, &SentPacket)> {
     packets
         .range((Bound::Included(cursor), Bound::Unbounded))
-        .chain(packets.range((Bound::Unbounded, Bound::Excluded(cursor))))
+        .chain(packets.range((Bound::Included(floor), Bound::Excluded(cursor))))
         .filter(|(_, packet)| {
             !packet.bandwidth_probe && packet.size != 0 && !packet.stream_frames.is_empty()
         })

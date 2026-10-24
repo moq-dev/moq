@@ -149,7 +149,11 @@ impl SendBuffer {
 
     /// The part of sent `range` past the acknowledged prefix, sized like [`Self::poll_transmit`]
     /// to send again without queueing a retransmission, or `None` if none of it is left
-    pub(super) fn duplicate(&self, range: Range<u64>, max_len: usize) -> Option<(Range<u64>, bool)> {
+    pub(super) fn duplicate(
+        &self,
+        range: Range<u64>,
+        max_len: usize,
+    ) -> Option<(Range<u64>, bool)> {
         let start = range.start.max(self.acked());
         // Truncation abandons data past it
         let end = range.end.min(self.offset);

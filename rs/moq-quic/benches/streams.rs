@@ -198,9 +198,36 @@ fn bench_connection_blocked(c: &mut Criterion<ThreadCpu>) {
     group.finish();
 }
 
+/// Probing against stream count: a client whose controller always lets it probe fills every gap
+/// in its sends with duplicates of the data in flight, up to a 1 Gbit/s target, so the cost per
+/// unique byte against `off` is what probing adds to a sender.
+fn bench_probe(c: &mut Criterion<ThreadCpu>) {
+    const BYTES: usize = 64 << 10;
+    let mut group = c.benchmark_group("send_probe");
+    for streams in [1, 16, 256] {
+        for (label, target) in [("off", 0), ("on", 125_000_000)] {
+            let mut pair = None;
+            group.throughput(Throughput::Bytes((streams * BYTES) as u64));
+            group.bench_function(
+                BenchmarkId::new(format!("streams_{streams}"), format!("probe_{label}")),
+                |b| {
+                    let pair = pair.get_or_insert_with(|| {
+                        Pair::new(Setup {
+                            client_probe_target: target,
+                            ..Setup::default()
+                        })
+                    });
+                    b.iter(|| send(pair, streams, 1, 4, BYTES / 4))
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::config();
-    targets = bench_priority, bench_write_size, bench_connection_blocked
+    targets = bench_priority, bench_write_size, bench_connection_blocked, bench_probe
 }
 criterion_main!(benches);

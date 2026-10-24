@@ -13,6 +13,17 @@ Sessions on moq-tokio and moq-uring then have a sender, so
 
 ## Plan
 
+Open, for the maintainer: where the probe fills. Measured in
+[moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635), ProbeBW_UP alone
+never fires for constant-bitrate media, because an application-limited BBR3
+flow never leaves Startup, and on a small BDP Reno coexistence starts a
+ProbeBW_UP about every second, so filling each costs about 14% of the media
+while the path holds the sender below its target. That PR fills Startup and
+one ProbeBW_UP per `bw_probe_wait`, both at the ProbeBW_UP gain, which keeps
+the overhead under 6% and reaches the target within 5s of the path opening.
+Startup then ends once the probe finds the path full, which "don't force
+Startup exit" below may rule out.
+
 Decided with the maintainer on 2026-10-20: this moved to m1 with the
 session send target, since the native
 [rung disable](/quest/m1/simulcast-rung-disable.md) requires it to resume a
@@ -44,8 +55,6 @@ mechanism wins first" step:
   [per-stream deadlines](/quest/m2/quic-deadline.md) first. They predict
   whether bytes can still arrive before the deadline, which tightens loss
   recovery too, but expiry itself already reaches moq-quic as a reset.
-- Evaluate the IMMEDIATE_ACK extension so ACK delay doesn't obscure a short
-  sample.
 - Implement the sender hook, `transport::poll::Session::probe` returning the
   `transport::Probe` cell the session writes its target to, in moq-quic's
   recovery and pacing layer and the moq-tokio and moq-uring adapters (their

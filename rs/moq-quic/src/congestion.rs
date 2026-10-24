@@ -179,6 +179,12 @@ pub trait Controller: Send + Sync {
         }
     }
 
+    /// Whether the controller ever reports [`ControllerMetrics::probe_inflight`], so an
+    /// application-limited sender can probe for bandwidth through it
+    fn probes(&self) -> bool {
+        false
+    }
+
     /// Duplicate the controller's state
     fn clone_box(&self) -> Box<dyn Controller>;
 

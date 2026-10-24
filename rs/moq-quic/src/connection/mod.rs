@@ -635,8 +635,7 @@ impl Connection {
             let bandwidth_probe = space_id == SpaceId::Data
                 && can_send.is_empty()
                 && !close
-                && match self.bandwidth_probe_ready(now, &controller_metrics, segment_size as u64)
-                {
+                && match self.bandwidth_probe_ready(now, &controller_metrics, segment_size as u64) {
                     bandwidth_probe::Ready::Idle => false,
                     bandwidth_probe::Ready::Blocked(until) => {
                         if let Some(until) = until {
@@ -1606,12 +1605,14 @@ impl Connection {
     /// Probe the path's bandwidth up to `bytes_per_second` while the application sends less
     ///
     /// A congestion controller stops raising its estimate once the application sends less than
-    /// the path carries. While the controller probes for bandwidth (BBR3's ProbeBW_UP) below this
-    /// target, the sender fills the pacing headroom the probe opens with duplicates of STREAM
-    /// data still in flight, sending no more than the target in all, so the probe measures the
-    /// path. Duplicates count against congestion control, as
-    /// [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. Zero,
-    /// the default, never probes.
+    /// the path carries. While the controller probes for bandwidth below this target, the sender
+    /// fills the inflight it allows
+    /// ([`probe_inflight`](crate::congestion::ControllerMetrics::probe_inflight)) with duplicates
+    /// of STREAM data still in flight, sending no more than the target in all, so the probe
+    /// measures the path. Duplicates count against congestion control, as
+    /// [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. A
+    /// controller that never probes ([`Controller::probes`]) ignores the target, and zero, the
+    /// default, never probes.
     pub fn set_probe_target(&mut self, bytes_per_second: u64) {
         self.bandwidth_probe.set_target(bytes_per_second);
     }
@@ -3840,12 +3841,9 @@ impl Connection {
             // duplicates
             if bandwidth_probe {
                 debug_assert!(sent.stream_frames.is_empty());
-                sent.stream_frames = self.bandwidth_probe.write(
-                    &space.sent_packets,
-                    &self.streams,
-                    buf,
-                    max_size,
-                );
+                sent.stream_frames =
+                    self.bandwidth_probe
+                        .write(&space.sent_packets, &self.streams, buf, max_size);
                 debug_assert!(
                     !sent.stream_frames.is_empty(),
                     "a probe found no in-flight data to resend"

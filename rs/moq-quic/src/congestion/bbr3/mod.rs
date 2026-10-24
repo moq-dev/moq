@@ -1795,7 +1795,7 @@ impl Bbr3 {
     /// sustains over BBR.bw. Past that the probe only queues at the bottleneck, which Linux
     /// BBRv3 takes as its cue to leave PROBE_UP. Startup gets the same bound rather than its own
     /// gain: an application-limited flow never leaves Startup, so ProbeBW_UP alone would never
-    /// probe, and the gentler gain keeps the queue no deeper than the media's own.
+    /// probe, and Startup's own gain would queue nearly twice the BDP at the bottleneck.
     ///
     /// At most one ProbeBW_UP per `bw_probe_wait` is filled. Reno coexistence begins one every
     /// BDP's worth of rounds, about a second on a 3 Mbit/s, 40ms path: filling each would cost a
@@ -2073,6 +2073,10 @@ impl Controller for Bbr3 {
             send_quantum: Some(self.send_quantum),
             probe_inflight: self.probe_inflight(),
         }
+    }
+
+    fn probes(&self) -> bool {
+        true
     }
 
     fn clone_box(&self) -> Box<dyn Controller> {
@@ -7531,7 +7535,11 @@ mod test {
         assert_eq!(up(&mut sim, 100), Some(inflight));
         assert_eq!(up(&mut sim, 1100), None, "within the wait");
         sim.bbr.maybe_fill_probe_bw_up(sim.at(2200 * MS));
-        assert_eq!(sim.bbr.probe_inflight(), Some(inflight), "once the wait passes");
+        assert_eq!(
+            sim.bbr.probe_inflight(),
+            Some(inflight),
+            "once the wait passes"
+        );
     }
 
     /// Finishing a probe ages the max-bw window once, so cruise rounds keep the probe's maximum,

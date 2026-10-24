@@ -1313,6 +1313,9 @@ mod tests {
 
 			// web::Session derefs to the driver connection.
 			assert!(is_bbr3(&session), "client connection is not running BBRv3");
+			// BBRv3 can probe, so moq-net gets a target to write.
+			#[cfg(feature = "net")]
+			assert!(session.probe().is_some(), "BBRv3 connection has no probe target");
 			assert!(
 				accepted.await.expect("server task panicked"),
 				"server connection is not running BBRv3"

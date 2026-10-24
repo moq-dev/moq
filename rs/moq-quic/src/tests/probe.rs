@@ -292,7 +292,15 @@ fn run(scenario: &Scenario) -> Outcome {
                 .idle
                 .is_some_and(|(from, until)| at >= from && at < until);
             if !paused {
-                write_frame(&mut pair, client_ch, &mut groups, &mut written, scenario.keyframe, next_frame, now);
+                write_frame(
+                    &mut pair,
+                    client_ch,
+                    &mut groups,
+                    &mut written,
+                    scenario.keyframe,
+                    next_frame,
+                    now,
+                );
                 outcome.frames += 1;
                 outcome.unique += frame_size(scenario.keyframe, next_frame % GOP);
             }
@@ -310,7 +318,16 @@ fn run(scenario: &Scenario) -> Outcome {
         pair.drive_server();
 
         let base = groups[0].id.index();
-        receive(&mut pair, server_ch, base, scenario.keyframe, &mut readings, &written, now, &mut outcome);
+        receive(
+            &mut pair,
+            server_ch,
+            base,
+            scenario.keyframe,
+            &mut readings,
+            &written,
+            now,
+            &mut outcome,
+        );
         if let Some((_, server, _, recv)) = &mut competing {
             if recv.is_none() {
                 *recv = pair.server_streams(*server).accept(Dir::Uni);
@@ -419,7 +436,10 @@ fn write_frame(
 
 /// Write what credit allows of each group's backlog, finishing every ended group once written
 fn flush(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group]) {
-    for group in groups.iter_mut().filter(|g| g.reset.is_none() && !g.finished) {
+    for group in groups
+        .iter_mut()
+        .filter(|g| g.reset.is_none() && !g.finished)
+    {
         let mut stream = pair.client_send(ch, group.id);
         while !group.backlog.is_empty() {
             match stream.write(&group.backlog) {
@@ -608,7 +628,10 @@ fn congested() {
         let (probing, baseline) = compare(&format!("congested buffer {buffer}"), scenario);
         for outcome in [&probing, &baseline] {
             assert!(outcome.expired > 0, "no group expired");
-            assert!(buffer > 7_500 || outcome.queue.dropped > 0, "the queue never overflowed");
+            assert!(
+                buffer > 7_500 || outcome.queue.dropped > 0,
+                "the queue never overflowed"
+            );
         }
     }
 }
@@ -619,18 +642,44 @@ fn steps_keyframes() {
     let _guard = subscribe();
     let (probing, baseline) = compare("steps keyframes", steps());
     probing.rises(Duration::from_secs(20));
-    report_fall("steps keyframes probing", &probing, Duration::from_secs(40), 375_000);
-    report_fall("steps keyframes baseline", &baseline, Duration::from_secs(40), 375_000);
+    report_fall(
+        "steps keyframes probing",
+        &probing,
+        Duration::from_secs(40),
+        375_000,
+    );
+    report_fall(
+        "steps keyframes baseline",
+        &baseline,
+        Duration::from_secs(40),
+        375_000,
+    );
 }
 
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn steps_constant() {
     let _guard = subscribe();
-    let (probing, baseline) = compare("steps constant", Scenario { keyframe: 0, ..steps() });
+    let (probing, baseline) = compare(
+        "steps constant",
+        Scenario {
+            keyframe: 0,
+            ..steps()
+        },
+    );
     probing.rises(Duration::from_secs(20));
-    report_fall("steps constant probing", &probing, Duration::from_secs(40), 375_000);
-    report_fall("steps constant baseline", &baseline, Duration::from_secs(40), 375_000);
+    report_fall(
+        "steps constant probing",
+        &probing,
+        Duration::from_secs(40),
+        375_000,
+    );
+    report_fall(
+        "steps constant baseline",
+        &baseline,
+        Duration::from_secs(40),
+        375_000,
+    );
 }
 
 /// Nothing is in flight while the media pauses, so nothing is resent
