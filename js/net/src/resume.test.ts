@@ -2543,6 +2543,34 @@ test.each([
 	}
 });
 
+// A source that finished a track and closed just before the front concluded ended its listing
+// after that finish, so the front's listing ends after it too.
+test("a concluded front's listing keeps its closed source's finishes", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const from = a.consume();
+	const answer = wireOf(from).lister();
+	answer.add("seq", { priority: 0 });
+	answer.add("live", { priority: 0 });
+	answer.synced();
+	front.serve(from);
+	const tracks = front.consumer.tracks();
+	try {
+		for (const event of [{ kind: "added", name: "seq" }, { kind: "added", name: "live" }, { kind: "synced" }])
+			expect(await tracks.next()).toMatchObject(event);
+		answer.finish("seq");
+		a.close();
+		front.conclude();
+		expect(await tracks.next()).toMatchObject({ kind: "finished", name: "seq" });
+		expect(await tracks.next()).toBeUndefined();
+	} finally {
+		tracks.close();
+		answer.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
 test("only delivery codes are a route failing", () => {
 	// Mirrors `only_delivery_codes_are_a_route_failing` in rs/moq-net/src/model/resume.rs.
 	const delivery = [0x0, 0x1, 0x3, 0x4, 0x31];

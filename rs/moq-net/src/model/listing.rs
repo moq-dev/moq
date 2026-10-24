@@ -273,8 +273,18 @@ impl ListingState {
 		self.generation += 1;
 	}
 
-	/// The broadcast ended: so does every listing of it.
-	pub(super) fn close(&mut self) {
+	/// The broadcast ended: so does every listing of it, first unlisting each track its
+	/// producer created that `finished`, as its holder dropping later would have.
+	pub(super) fn close(&mut self, finished: impl Fn(&str) -> bool) {
+		let done: Vec<Arc<str>> = self
+			.live
+			.iter()
+			.filter(|(name, entry)| entry.own.is_some() && !entry.answered && finished(name))
+			.map(|(name, _)| name.clone())
+			.collect();
+		for name in done {
+			self.remove(&name, true);
+		}
 		self.detach(Ok(()));
 	}
 }
@@ -421,8 +431,22 @@ impl Queue {
 	}
 
 	fn next(&mut self) -> Result<Option<TracksEvent>, Error> {
-		if let Some(end) = &self.end {
-			return end.clone().map(|()| None);
+		match &self.end {
+			Some(Err(err)) => return Err(err.clone()),
+			// A clean end still reports each track that left before it, and how; an add the
+			// reader never read is dropped.
+			Some(Ok(())) => {
+				while let Some((name, pending)) = self.pending.pop_front() {
+					match pending {
+						Pending::Add(_) => {}
+						Pending::Remove { finished } | Pending::Readd { finished, .. } => {
+							return Ok(Some(removal(name, finished)));
+						}
+					}
+				}
+				return Ok(None);
+			}
+			None => {}
 		}
 		if !self.synced && (self.bound == Some(0) || (self.bound.is_some() && self.pending.is_empty())) {
 			self.synced = true;
@@ -454,7 +478,8 @@ fn removal(name: Arc<str>, finished: bool) -> TracksEvent {
 /// The tracks a broadcast lists, from [`Consumer::tracks`].
 ///
 /// Reports every track listed when it was created, then [`TracksEvent::Synced`], then
-/// each change as it happens, until the broadcast ends. Listing a broadcast never
+/// each change as it happens, until the broadcast ends: a clean end comes after each
+/// track that left before it, and a track still listed then ends unfinished. Listing a broadcast never
 /// requests a track: subscribe to each listed one through [`Consumer::track`].
 pub struct Tracks {
 	broadcast: Consumer,
@@ -802,7 +827,47 @@ mod tests {
 		drop(a);
 		assert_eq!(drain(&mut tracks), NONE, "held by the finish");
 		drop(finish);
-		assert_eq!(drain(&mut tracks), ["end"]);
+		assert_eq!(drain(&mut tracks), ["~a", "end"], "the end says it finished");
+	}
+
+	/// A clean end reports each track that left before it, and how, but not one the reader
+	/// never saw; an error ends at once.
+	#[test]
+	fn a_clean_end_follows_the_removals_before_it() {
+		let broadcast = Info::new().produce();
+		let a = broadcast.create_track("a", None).unwrap();
+		let b = broadcast.create_track("b", None).unwrap();
+		let live = broadcast.create_track("live", None).unwrap();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["+a", "+b", "+live", "synced"]);
+		a.finish().unwrap();
+		drop(a);
+		drop(b);
+		let _unseen = broadcast.create_track("unseen", None).unwrap();
+		live.finish().unwrap();
+		broadcast.close();
+		assert_eq!(drain(&mut tracks), ["~a", "-b", "~live", "end"]);
+
+		// A handler's end is clean too, and its abort is not.
+		for abort in [false, true] {
+			let broadcast = Info::new().produce();
+			let lister = broadcast.dynamic().lister().unwrap();
+			lister.add("up", track::Info::default()).unwrap();
+			lister.synced();
+			let mut tracks = broadcast.consume().tracks().unwrap();
+			assert_eq!(drain(&mut tracks), ["+up", "synced"]);
+			lister.finish("up").unwrap();
+			match abort {
+				true => {
+					lister.abort(Error::Cancel);
+					assert_eq!(drain(&mut tracks), [format!("error: {}", Error::Cancel)]);
+				}
+				false => {
+					lister.end();
+					assert_eq!(drain(&mut tracks), ["~up", "end"]);
+				}
+			}
+		}
 	}
 
 	#[test]

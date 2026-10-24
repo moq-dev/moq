@@ -213,6 +213,56 @@ for (const version of drafts) {
 		expect(done.statusCode).toBe(PublishDoneStatus.TRACK_ENDED);
 	});
 
+	// A broadcast ending right after a track finished, by close() or a clean finish(), ends that
+	// track's PUBLISH with TRACK_ENDED, removed first or not and answered or not, while a track
+	// left unfinished still ends in error: PUBLISH_DONE once answered, a reset before.
+	for (const finish of [false, true]) {
+		for (const remove of [false, true]) {
+			for (const answer of [true, false]) {
+				const name = `finish=${finish} remove=${remove} answer=${answer}`;
+				test(`a clean end keeps its finishes, ${name} (${version})`, async () => {
+					const clock = new Manual();
+					const installed = clock.install();
+					using _installed = { [Symbol.dispose]: () => installed.close() };
+					const fx = fixture(version);
+					const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
+					broadcast.announce();
+					const video = broadcast.createTrack("video");
+					broadcast.createTrack("audio");
+					const listing = await fx.list();
+					await ok(listing, version);
+					const published = new Map<string, Stream>();
+					for (let i = 0; i < 2; i++) {
+						const { stream, publish } = await fx.offered(answer);
+						published.set(publish.trackName, stream);
+					}
+					await clock.advance(Nano.zero);
+					video.close();
+					if (remove) broadcast.removeTrack("video");
+					if (finish) broadcast.finish().close();
+					else broadcast.close();
+					await clock.advance(Nano.zero);
+					const videoStream = published.get("video");
+					const audioStream = published.get("audio");
+					if (!videoStream || !audioStream) throw new Error("missing PUBLISH");
+					if (!answer) await publishOk(videoStream, version);
+					expect(await videoStream.reader.u53()).toBe(PublishDone.id);
+					expect((await PublishDone.decode(videoStream.reader, version)).statusCode).toBe(
+						PublishDoneStatus.TRACK_ENDED,
+					);
+					if (!answer) {
+						await expect(audioStream.reader.u53()).rejects.toThrow();
+						return;
+					}
+					expect(await audioStream.reader.u53()).toBe(PublishDone.id);
+					expect((await PublishDone.decode(audioStream.reader, version)).statusCode).toBe(
+						PublishDoneStatus.INTERNAL_ERROR,
+					);
+				});
+			}
+		}
+	}
+
 	test(`track listing skips beyond the cap and rejects overlapping prefixes (${version})`, async () => {
 		const fx = fixture(version, 1);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
