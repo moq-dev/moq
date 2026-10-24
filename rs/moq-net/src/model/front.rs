@@ -495,12 +495,14 @@ impl Front {
 		}
 		let verdict = match result {
 			// A copy claiming the same content with different metadata is
-			// refused rather than reinterpreted.
+			// refused rather than reinterpreted. `refresh` is only a join
+			// heuristic, so a copy may differ there.
 			Ok(info) => match self.info.get(&name) {
 				Some(expected)
 					if expected.timescale != info.timescale
 						|| expected.max_age != info.max_age
-						|| expected.priority != info.priority =>
+						|| expected.priority != info.priority
+						|| expected.compress != info.compress =>
 				{
 					Err(Error::Unsupported)
 				}
