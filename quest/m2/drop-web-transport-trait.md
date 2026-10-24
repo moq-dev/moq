@@ -38,9 +38,10 @@ Notes from related quests:
 - [poll_acked](/quest/m2/quic-ack-hook.md) already puts its hook on moq-net's
   trait because moq-net has no `web-transport-trait` dependency. That holds
   here.
-- [Rust request credit](/quest/m1/rs-request-credit.md) gets qmux's credit
-  query from the in-tree qmux; iroh keeps waiting. Once this lands, that
-  query belongs on each backend's own moq-net impl.
+- [Native request admission](https://github.com/moq-dev/moq/pull/6409) inspects
+  QUIC and qmux credit through moq-net's `poll_open_request`. Iroh keeps
+  waiting, and browser-backed Rust retains its backend behavior. Move that
+  admission hook into each backend's own moq-net impl.
 
 Decided 2026-10-20 (maintainer): moq takes no new dependency on, or work in,
 moq-dev/web-transport; `moq-quic` powers qmux and WebTransport. The iroh
@@ -59,4 +60,3 @@ the upstream web-transport-proto 0.6.3 patch.
 ## Related
 
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - another hook that lives only on moq-net's traits
-- [Rust requests fail fast without stream credit](/quest/m1/rs-request-credit.md) - its credit query moves to each backend's moq-net impl
