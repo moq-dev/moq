@@ -49,5 +49,4 @@ Public API: breaking in moq-ffi, the C ABI, and every wrapper. Wire: none.
 
 ## Related
 
-- [Binding connection state](/quest/m1/api-audit/binding-state.md) - another binding surface reshape across the same wrappers
 - [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - touches the same wrapper packages
