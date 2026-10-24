@@ -6,7 +6,7 @@
 //! `moq <MoQ side> fetch <track>` to read one group.
 //!
 //! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
-//!   and `--cluster-connect` / `--cluster-connect-api`; all optional, at least
+//!   and `--cluster-connect` / `--cluster-api-url`; all optional, at least
 //!   one) attaches the shared Origin to the MoQ network, and comes before the
 //!   first stage. They compose: dial a relay, accept incoming sessions, mesh
 //!   with the LAN, and join a cluster all at once.
@@ -537,9 +537,9 @@ impl MoqSide {
 	}
 
 	/// Whether a WAN cluster dial is configured (`--cluster-connect` or
-	/// `--cluster-connect-api`).
+	/// `--cluster-api-url`).
 	fn cluster_dials(&self) -> bool {
-		!self.cluster.connect.is_empty() || self.cluster.connect_api.is_some()
+		!self.cluster.connect.is_empty() || self.cluster.api.url.is_some()
 	}
 
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
@@ -557,7 +557,7 @@ impl MoqSide {
 			!(self.client.url.is_some()
 				&& self.cluster_dials()
 				&& self.client.bind.is_some_and(|bind| bind.port() != 0)),
-			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-connect-api, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
+			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-api-url, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
 		);
 		#[cfg(feature = "cluster-lan")]
 		{
@@ -2252,11 +2252,7 @@ mod tests {
 			("--listen-tcp-bind", "127.0.0.1:0", "--listen-tcp-bind"),
 			("--broadcast", "room", "--broadcast"),
 			("--cluster-connect", "https://relay.example", "--cluster-connect"),
-			(
-				"--cluster-connect-api",
-				"https://api.example/peers",
-				"--cluster-connect-api",
-			),
+			("--cluster-api-url", "https://api.example/peers", "--cluster-api-url"),
 			("--cluster-node", "https://self.example", "--cluster-node"),
 			("--cluster-token", "cluster.jwt", "--cluster-token"),
 			("--cluster-id", "1", "--cluster-id"),
@@ -2406,7 +2402,7 @@ mod tests {
 		};
 		for peer in [
 			["--cluster-connect", "https://relay.example"],
-			["--cluster-connect-api", "https://api.example/peers"],
+			["--cluster-api-url", "https://api.example/peers"],
 		] {
 			let both = [
 				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:4443"][..],
@@ -2440,7 +2436,7 @@ mod tests {
 			.expect("--connect alone owns a fixed bind");
 	}
 
-	/// `--cluster-connect` / `--cluster-connect-api` attach the process as a
+	/// `--cluster-connect` / `--cluster-api-url` attach the process as a
 	/// cluster peer, so they are a MoQ side on their own. `--cluster-node` is
 	/// identity, not an attachment.
 	#[test]
@@ -2449,14 +2445,8 @@ mod tests {
 			.expect("parse");
 		assert!(cli.moq.validate().is_ok(), "a cluster dial is a MoQ side on its own");
 
-		let cli = Invocation::try_parse_from([
-			"moq",
-			"--cluster-connect-api",
-			"https://api.example/peers",
-			"import",
-			"ts",
-		])
-		.expect("parse");
+		let cli = Invocation::try_parse_from(["moq", "--cluster-api-url", "https://api.example/peers", "import", "ts"])
+			.expect("parse");
 		assert!(cli.moq.validate().is_ok(), "a cluster API is a MoQ side on its own");
 
 		let cli = Invocation::try_parse_from(["moq", "--cluster-node", "https://self.example", "import", "ts"])

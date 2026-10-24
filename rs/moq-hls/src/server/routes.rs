@@ -830,7 +830,7 @@ mod tests {
 			// Recorded as soon as the catalog lists it with its timeline, as a recorder does.
 			let mut renditions = broadcaster.renditions();
 			let rendition = match tokio::time::timeout(TIMEOUT, renditions.next()).await {
-				Ok(Some(crate::export::renditions::Event::Added(rendition))) => rendition,
+				Ok(Ok(Some(crate::export::renditions::Event::Added(rendition)))) => rendition,
 				_ => panic!("{version}: the catalog never listed the rendition"),
 			};
 			let mut cursor = rendition.segments();
