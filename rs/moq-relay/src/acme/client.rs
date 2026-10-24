@@ -17,7 +17,7 @@ use std::{
 use anyhow::Context as _;
 use futures::StreamExt;
 use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
-use rustls_acme::{AcmeState, EventOk};
+use rustls_acme::{AcmeState, EventOk, OrderError};
 use url::Url;
 
 /// How long the first issuance may take by default before startup fails.
@@ -148,7 +148,8 @@ impl Acme {
 		let addr = listener.local_addr()?;
 		let mut failed = self.failures.recent()?;
 		// A spent budget refuses only an order; the certificate it was renewing still serves.
-		if failed.len() >= FAILURE_LIMIT && !Cache::read(&self.cert)?.is_some_and(|pem| current(&pem)) {
+		let spent = failed.len() >= FAILURE_LIMIT;
+		if spent && !Cache::read(&self.cert)?.is_some_and(|pem| current(&pem)) {
 			return Err(self.failures.refuse(&failed, &self.domains, addr, None));
 		}
 
@@ -174,6 +175,11 @@ impl Acme {
 						tracing::info!(domains = %self.domains, "serving the cached ACME certificate");
 						return Ok(());
 					}
+					// rustls-acme could not deploy the cached certificate, so its next poll orders one.
+					event if spent => {
+						let last = event.err().map(|err| err.to_string());
+						return Err(self.failures.refuse(&failed, &self.domains, addr, last.as_deref()));
+					}
 					// Not ready until it is saved: a certificate lost on restart would be ordered again.
 					Ok(EventOk::DeployedNewCert) => {
 						tracing::info!(domains = %self.domains, "issued an ACME certificate");
@@ -184,8 +190,8 @@ impl Acme {
 					Err(rustls_acme::EventError::CertCacheStore(err)) => {
 						return Err(anyhow::Error::new(err).context("failed to save the issued ACME certificate in acme.cache"));
 					}
-					// The directory marked an authorization invalid: one failed validation.
-					Err(err @ rustls_acme::EventError::Order(rustls_acme::OrderError::BadAuth(_))) => {
+					// The directory failed a validation, or may still fail one rustls-acme stopped waiting on.
+					Err(err @ rustls_acme::EventError::Order(OrderError::BadAuth(_) | OrderError::TooManyAttemptsAuth(_))) => {
 						failed = self.failures.record()?;
 						tracing::warn!(%err, domains = %self.domains, failed = failed.len(), "ACME validation failed");
 						if failed.len() >= FAILURE_LIMIT {
@@ -280,19 +286,22 @@ async fn renew(
 				}
 			}
 			Ok(event) => tracing::debug!(?event, "ACME"),
-			Err(err @ rustls_acme::EventError::Order(rustls_acme::OrderError::BadAuth(_))) => match failures.record() {
-				Ok(failed) => tracing::warn!(
-					%err,
-					%domains,
-					failed = failed.len(),
-					"ACME renewal validation failed; still serving the previous certificate"
-				),
-				// Unrecorded, it would never count, so assume the budget is spent.
-				Err(record) => {
-					tracing::error!(%err, record = format!("{record:#}"), %domains, "ACME renewal validation failed and could not be recorded; pausing renewal for an hour");
-					moq_clock::sleep(FAILURE_WINDOW).await;
+			// Counted as in issue.
+			Err(err @ rustls_acme::EventError::Order(OrderError::BadAuth(_) | OrderError::TooManyAttemptsAuth(_))) => {
+				match failures.record() {
+					Ok(failed) => tracing::warn!(
+						%err,
+						%domains,
+						failed = failed.len(),
+						"ACME renewal validation failed; still serving the previous certificate"
+					),
+					// Unrecorded, it would never count, so assume the budget is spent.
+					Err(record) => {
+						tracing::error!(%err, record = format!("{record:#}"), %domains, "ACME renewal validation failed and could not be recorded; pausing renewal for an hour");
+						moq_clock::sleep(FAILURE_WINDOW).await;
+					}
 				}
-			},
+			}
 			Err(err) => tracing::error!(
 				%err,
 				%domains,

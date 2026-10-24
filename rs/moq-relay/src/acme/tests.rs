@@ -745,7 +745,10 @@ async fn renewal_pauses_once_failed_validations_spend_the_budget() {
 	// rustls-acme retries a failed order within seconds; these come back at once.
 	let events = futures::stream::iter([
 		Err(bad_auth()),
-		Err(bad_auth()),
+		// The directory may still fail an authorization rustls-acme stopped waiting on.
+		Err(rustls_acme::EventError::Order(
+			rustls_acme::OrderError::TooManyAttemptsAuth(DOMAIN.into()),
+		)),
 		Err(bad_auth()),
 		Err(bad_auth()),
 		Ok(EventOk::DeployedNewCert),
@@ -790,7 +793,8 @@ async fn renewal_pauses_once_failed_validations_spend_the_budget() {
 }
 
 /// A spent budget still starts on a valid cached certificate, and keeps its
-/// failures so renewal stays paused instead of ordering again.
+/// failures so renewal stays paused instead of ordering again. One rustls-acme
+/// cannot deploy refuses instead, since it would order a replacement.
 #[tokio::test]
 async fn a_spent_budget_still_serves_the_cached_certificate() {
 	let dir = tempfile::tempdir().unwrap();
@@ -808,6 +812,20 @@ async fn a_spent_budget_still_serves_the_cached_certificate() {
 		.expect("the cached certificate deploys at once")
 		.expect("a valid cached certificate serves despite a spent budget");
 	assert_eq!(acme.failures.recent().unwrap().len(), FAILURE_LIMIT);
+
+	// A current leaf without its key, which rustls-acme fails to parse.
+	let leaf = &pem[pem.find("-----BEGIN CERTIFICATE-----").unwrap()..];
+	Cache::write(&acme.cert, leaf.as_bytes()).unwrap();
+	let mut acme = uncontacted(dir.path());
+	let err = tokio::time::timeout(TIMEOUT, acme.issue(&listener))
+		.await
+		.expect("an undeployable cached certificate must not order past the budget")
+		.expect_err("an undeployable cached certificate is no certificate");
+	let message = format!("{err:#}");
+	assert!(
+		message.contains("5 failed validations per hostname per hour"),
+		"{message}"
+	);
 }
 
 /// What the config refuses before anything binds.
