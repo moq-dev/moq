@@ -99,6 +99,7 @@ pub async fn listen_import(
 		origin,
 		name,
 		max_age,
+		linger,
 		bandwidth,
 	} = target;
 	let mut server = Server::bind(addr, latency).await?;
@@ -116,6 +117,7 @@ pub async fn listen_import(
 						.with_max_age(max_age)
 						.with_bandwidth(bandwidth)
 						.with_program(program)
+						.with_linger(linger)
 						.accept(&origin, &name)
 						.await
 					{
@@ -144,7 +146,7 @@ pub async fn listen_export(
 	args: ExportArgs,
 ) -> anyhow::Result<()> {
 	let mut server = Server::bind(addr, Duration::from(args.endpoint.latency)).await?;
-	let (linger, stitch) = (args.linger.into(), args.stitch);
+	let (follow, stitch) = (args.linger.into(), args.stitch);
 	tracing::info!(%addr, %name, "SRT listening (export)");
 	notify_ready();
 
@@ -154,7 +156,7 @@ pub async fn listen_export(
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					let subscribe = subscribe.with_linger(linger).with_stitch(stitch);
+					let subscribe = subscribe.with_follow(follow).with_stitch(stitch);
 					if let Err(err) = subscribe.accept(&origin, &name).await {
 						tracing::warn!(%name, %err, "SRT request ended with error");
 					}
@@ -188,7 +190,8 @@ pub async fn connect_import(
 		.with_max_delay(latency)
 		.with_max_age(target.max_age)
 		.with_bandwidth(target.bandwidth)
-		.with_program(program);
+		.with_program(program)
+		.with_linger(target.linger);
 	client.pull(&target.origin, name).await.map_err(suggest_program)
 }
 
@@ -205,7 +208,7 @@ pub async fn connect_export(
 
 	let client = moq_srt::Client::new(addr, resource)
 		.with_max_delay(args.endpoint.latency.into())
-		.with_linger(args.linger.into())
+		.with_follow(args.linger.into())
 		.with_stitch(args.stitch);
 	Ok(client.publish(&origin, &name).await?)
 }

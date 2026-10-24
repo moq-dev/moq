@@ -127,7 +127,6 @@ class FakeTrack:
         self.name = name
         self.hint = hint
         self.frames: list[tuple[bytes, int]] = []
-        self.flushed: list[int] = []
         self.finished = False
         self.demand_handle = FakeDemand()
 
@@ -136,9 +135,6 @@ class FakeTrack:
 
     def write_frame(self, payload: bytes, timestamp: timedelta) -> None:
         self.frames.append((payload, microseconds(timestamp)))
-
-    def flush(self, timestamp: timedelta) -> None:
-        self.flushed.append(microseconds(timestamp))
 
     def finish(self) -> None:
         self.finished = True
@@ -230,8 +226,7 @@ def test_stream_advertises_publishes_and_forwards_demand(bridge_socket) -> None:
             broadcast.tracks["sd"].demand_handle.want(0)
             assert await _request(reader) == (0x03, struct.pack("<IB", 1, 0b11))
 
-            # Timestamps are rebased onto the first frame's simulation time and
-            # flushed as live encoder output.
+            # Timestamps are rebased onto the first frame's simulation time.
             writer.write(_frame(1, 1, 100, 5_000_000, True, b"idr"))
             writer.write(_frame(1, 0, 100, 5_000_000, True, b"idr-sd"))
             writer.write(_frame(1, 1, 101, 5_033_333, False, b"p"))
@@ -239,7 +234,6 @@ def test_stream_advertises_publishes_and_forwards_demand(bridge_socket) -> None:
             while stream.published != [1, 2]:
                 await asyncio.sleep(0)
             assert broadcast.tracks["hd"].frames == [(b"idr", 0), (b"p", 33_333)]
-            assert broadcast.tracks["hd"].flushed == [0, 33_333]
             assert broadcast.tracks["sd"].frames == [(b"idr-sd", 0)]
             broadcast.tracks["hd"].demand_handle.want(None)
             assert await _request(reader) == (0x03, struct.pack("<IB", 1, 0b01))

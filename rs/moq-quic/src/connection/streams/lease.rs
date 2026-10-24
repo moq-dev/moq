@@ -22,9 +22,6 @@ pub struct Leased {
     chunks: VecDeque<Bytes>,
     /// Bytes in `chunks`.
     len: u64,
-    /// The trailing chunks that still slice the datagram buffers they arrived in, which a byte
-    /// of them keeps whole.
-    fresh: usize,
     /// Bytes whose connection credit is withheld: `len`, plus bytes taken or advanced past but
     /// not yet released.
     held: u64,
@@ -95,7 +92,6 @@ impl Leased {
             false => self.chunks.pop_front().expect("front exists"),
         };
         self.len -= chunk.len() as u64;
-        self.fresh = self.fresh.min(self.chunks.len());
         chunk
     }
 
@@ -117,7 +113,6 @@ impl Leased {
             left -= front.len();
             self.chunks.pop_front();
         }
-        self.fresh = self.fresh.min(self.chunks.len());
     }
 
     /// Return the credit of every byte taken or advanced past.
@@ -127,19 +122,19 @@ impl Leased {
         freed
     }
 
-    /// Copy the fresh chunks out of their datagram buffers, for a reader about to wait on them.
+    /// Lease `read`, copied out of the datagram buffers it arrived in.
     ///
     /// Credit counts the leased bytes, but a slice keeps its whole receive buffer alive, so a
     /// peer splitting a unit into tiny frames would otherwise hold many buffers per byte of
-    /// credit. Bytes handed out without waiting never pay for the copy. Absorbing each smaller
+    /// credit, whether the reader waits on them, parks, or takes them. Absorbing each smaller
     /// predecessor keeps a slowly arriving unit to few chunks while copying each byte only a
     /// logarithmic number of times.
-    fn compact(&mut self) {
-        if self.fresh == 0 {
+    fn extend(&mut self, read: &[Bytes]) {
+        let len: usize = read.iter().map(Bytes::len).sum();
+        if len == 0 {
             return;
         }
-        let mut start = self.chunks.len() - self.fresh;
-        let mut size: usize = self.chunks.range(start..).map(Bytes::len).sum();
+        let (mut start, mut size) = (self.chunks.len(), len);
         while start > 0 && self.chunks[start - 1].len() <= size {
             start -= 1;
             size += self.chunks[start].len();
@@ -148,8 +143,12 @@ impl Leased {
         for chunk in self.chunks.drain(start..) {
             buf.extend_from_slice(&chunk);
         }
+        for chunk in read {
+            buf.extend_from_slice(chunk);
+        }
         self.chunks.push_back(buf.freeze());
-        self.fresh = 0;
+        self.len += len as u64;
+        self.held += len as u64;
     }
 
     pub(super) fn rank(&self, id: StreamId) -> Rank {
@@ -178,15 +177,13 @@ impl Leased {
         self.ready = false;
         self.want = None;
         self.filled = true;
-        let mut read = 0;
+        let mut read = Vec::new();
         while let Some(chunk) = assembler.read(usize::MAX, true) {
-            read += chunk.bytes.len() as u64;
-            self.chunks.push_back(chunk.bytes);
-            self.fresh += 1;
+            read.push(chunk.bytes);
         }
-        self.len += read;
-        self.held += read;
-        read
+        let len = self.len;
+        self.extend(&read);
+        self.len - len
     }
 
     /// Discard the leased bytes for an eviction, returning how many. Taken bytes keep their
@@ -195,7 +192,6 @@ impl Leased {
         let leased = std::mem::take(&mut self.len);
         self.held -= leased;
         self.chunks.clear();
-        self.fresh = 0;
         self.want = None;
         self.ready = false;
         self.evicted = true;
@@ -206,7 +202,6 @@ impl Leased {
     pub(super) fn discard(&mut self) -> u64 {
         self.len = 0;
         self.chunks.clear();
-        self.fresh = 0;
         self.want = None;
         self.ready = false;
         std::mem::take(&mut self.held)
@@ -292,7 +287,6 @@ impl RecvStream<'_> {
             }
             None => {
                 lease.want = Some(want);
-                lease.compact();
                 // It may be waiting behind a gap, which holds eviction off until filled.
                 self.state.unlooked.insert(self.id);
                 // An eviction always has a reader to wake, even with no `MAX_DATA` due yet.
