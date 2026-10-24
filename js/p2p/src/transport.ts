@@ -75,7 +75,7 @@ export class Transport implements WebTransport {
 		// SCTP's negotiated limit is known only after the data channel opens.
 		this.#session = this.#socket.opened.then(() => {
 			if (this.#closing) throw new Error("transport closed before opening");
-			const config = { maxRecordSize: BigInt(this.#socket.maxRecordSize), maxDatagramFrameSize: 0n };
+			const config = { maxRecordSize: BigInt(this.#socket.maxRecordSize), maxDatagramFrameSize: null };
 			const session = server
 				? Session.accept(this.#socket, { config, protocol: `qmux-01.${protocol}` })
 				: new Session(this.#socket, { config });

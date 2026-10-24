@@ -5,6 +5,8 @@
 //! to need credit updates each way, a bidirectional echo, a reset code each way, a datagram
 //! each way where records carry them, and an application close.
 
+#![cfg(any(feature = "tcp", all(unix, feature = "uds")))]
+
 use bytes::{Bytes, BytesMut};
 use moq_net::transport::poll::{RecvStream as _, SendOptions, SendStream as _, Session as _};
 use qmux::{Protocol, Session, Version};
@@ -33,7 +35,7 @@ async fn ours_and_theirs(version: Version, ours_is_client: bool) -> (Session, qm
 	let mut theirs = qmux06::Config::new(old_version(version));
 	theirs.protocol = qmux06::Protocol::Negotiate(vec![PROTOCOL.into()]);
 
-	let ours_transport = qmux::transport::Stream::new(a, ours.version, ours.max_record_size);
+	let ours_transport = qmux::transport::Stream::new(a);
 	let theirs_transport = qmux06::transport::Stream::new(b, theirs.version, theirs.max_record_size);
 	if ours_is_client {
 		let (ours, theirs) = tokio::join!(

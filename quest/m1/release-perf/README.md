@@ -162,6 +162,10 @@ The raw report lived in a scratch directory that has since been removed.
 `just bench <base>` now pairs full Criterion IDs; point `MOQ_BENCH_ARTIFACTS`
 outside the worktree to keep the next one.
 
+## Required
+
+- [Landing skips the parked lock](/quest/m1/release-perf/expiry-landed.md) - `expiry::Wakes::landed` takes no lock when no reader is parked
+
 ## Related
 
 - [Performance audit](/quest/m2/audit-perf.md) - compares nightly to nightly; this epic compares main to release
