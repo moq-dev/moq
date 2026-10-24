@@ -73,7 +73,7 @@ impl Default for Options {
 /// The catalog rendition is registered at construction (not on first write), so
 /// a subscriber that opens the catalog before any frames arrive still sees the
 /// track.
-pub struct Producer<E: CatalogExt = ()> {
+pub struct Producer {
 	// None after a successful finish: keep the track and catalog rendition, not the codec.
 	encoder: Option<Encoder>,
 	bitrate: moq_net::bandwidth::Rate,
@@ -82,7 +82,6 @@ pub struct Producer<E: CatalogExt = ()> {
 	remix: Option<Remix>,
 	resampler: Option<Resampler>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
-	_ext: std::marker::PhantomData<fn() -> E>,
 	pending: Vec<f32>,
 	/// Codec samples a group carries before the packet reaching it closes the group.
 	group_samples: u64,
@@ -117,13 +116,12 @@ struct Terminal {
 /// [`encode`](Self::encode) to supply the layout it describes. Unlike a catalog
 /// [`Reserved`](moq_mux::catalog::Reserved) this does not withhold the catalog:
 /// subscribers see the broadcast without this rendition until it resolves.
-pub(crate) struct Reserved<E: CatalogExt = ()> {
+pub(crate) struct Reserved {
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
-	_ext: std::marker::PhantomData<fn() -> E>,
 }
 
-impl<E: CatalogExt> Reserved<E> {
-	pub(crate) fn new(
+impl Reserved {
+	pub(crate) fn new<E: CatalogExt>(
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		options: &Options,
@@ -146,10 +144,7 @@ impl<E: CatalogExt> Reserved<E> {
 			None,
 		)?;
 
-		Ok(Self {
-			track,
-			_ext: std::marker::PhantomData,
-		})
+		Ok(Self { track })
 	}
 
 	/// Build the encoder for `input` and register the rendition describing it.
@@ -192,7 +187,7 @@ impl<E: CatalogExt> Reserved<E> {
 	}
 
 	/// Spend the reservation on a registered encoder, publishing through the track.
-	pub(crate) fn encode(self, registered: Registered) -> Producer<E> {
+	pub(crate) fn encode(self, registered: Registered) -> Producer {
 		Producer {
 			bitrate: registered.encoder.bitrate(),
 			encoder: Some(registered.encoder),
@@ -200,7 +195,6 @@ impl<E: CatalogExt> Reserved<E> {
 			remix: registered.remix,
 			resampler: registered.resampler,
 			track: self.track,
-			_ext: self._ext,
 			pending: Vec::new(),
 			group_samples: registered.group_samples,
 			grouped: 0,
@@ -227,7 +221,7 @@ pub(crate) struct Registered {
 
 /// What a capture publication needs while its layout is still undiscovered.
 #[cfg(feature = "capture")]
-impl<E: CatalogExt> Reserved<E> {
+impl Reserved {
 	/// The resolved track name, available before the layout is.
 	pub(crate) fn name(&self) -> &str {
 		self.track.name()
@@ -250,10 +244,10 @@ impl<E: CatalogExt> Reserved<E> {
 	}
 }
 
-impl<E: CatalogExt> Producer<E> {
+impl Producer {
 	/// Publish a track encoding `input` into `broadcast`, registering its
 	/// rendition in `catalog` immediately.
-	pub fn new(
+	pub fn new<E: CatalogExt>(
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		input: Input,
@@ -443,12 +437,10 @@ impl<E: CatalogExt> Producer<E> {
 		self.grouped += self.encoder()?.frame_size() as u64;
 		// Cut as soon as the group is long enough rather than when the next packet arrives, so
 		// the relay sees it finish without waiting. No boundary to give: the next packet bounds
-		// this one, and codec frames have a deterministic duration anyway. Cut before observing
-		// the flush so a failed observation never leaves the group open.
+		// this one, and codec frames have a deterministic duration anyway.
 		if self.grouped >= self.group_samples {
 			self.track.cut(None)?;
 		}
-		self.track.flush(timestamp, moq_net::time::now())?;
 		Ok(())
 	}
 
@@ -474,7 +466,6 @@ impl<E: CatalogExt> Producer<E> {
 				keyframe: false,
 				duration: None,
 			})?;
-			track.flush(timestamp, moq_net::time::now())?;
 		}
 
 		track.cut(Some(terminal.end))?;
@@ -576,8 +567,8 @@ mod tests {
 	async fn decoded_frame(consumer: &mut crate::decode::Consumer) -> Result<Option<Frame>, Error> {
 		loop {
 			match consumer.read().await? {
-				Some(crate::decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
-				Some(crate::decode::Read::End { .. }) => {}
+				Some(crate::decode::Read::Frame(frame)) => return Ok(Some(frame)),
+				Some(crate::decode::Read::Gap { .. } | crate::decode::Read::End { .. }) => {}
 				None => return Ok(None),
 			}
 		}

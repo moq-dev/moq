@@ -18,10 +18,8 @@ import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import { liteTimescale } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
-import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
@@ -78,6 +76,11 @@ interface Stamp {
 	 * one served untimed carries its send time instead, unchecked ones included.
 	 */
 	timed: boolean;
+}
+
+/** The timescale a moq-lite hop serves a track at: none for an {@link track.Info.ietf} one. */
+function liteTimescale(info: track.Info): Timescale | undefined {
+	return info.ietf === undefined ? (info.timescale ?? undefined) : undefined;
 }
 
 /** How `version` stamps a track served at `timescale` (see `liteTimescale`), or undefined when it carries none. */
@@ -332,7 +335,7 @@ class SubscriptionControls {
 }
 
 // The later of two locations, either of which may be unknown.
-function newer(a: track.Location | undefined, b: track.Location | undefined): track.Location | undefined {
+function newer(a: track.Position | undefined, b: track.Position | undefined): track.Position | undefined {
 	if (!a || !b) return a ?? b;
 	return b.group > a.group || (b.group === a.group && b.frame > a.frame) ? b : a;
 }
@@ -418,10 +421,6 @@ export class Publisher {
 
 	#quic: WebTransport;
 
-	// Subscriptions and open TRACK streams the peer holds live on this session.
-	#interests: Interests;
-	#fetches: Slots;
-
 	// The one writer for the outbound datagram stream (getWriter locks it), acquired once at
 	// construction when this version + transport carry datagrams, released in close(). Its
 	// presence is the gate: undefined means datagrams aren't served on this connection. All
@@ -460,7 +459,6 @@ export class Publisher {
 	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
 	 * @param auth - The union of our tokens' grants, which bounds what we publish, and when the
 	 *   setup tokens are answered
-	 * @param limits - How many live requests the peer may hold
 	 *
 	 * @internal
 	 */
@@ -470,11 +468,8 @@ export class Publisher {
 		hop: Hop,
 		publish?: OriginConsumer,
 		auth?: { grant: Getter<Grant | undefined>; ready: Promise<void> },
-		limits: Limits = LIMITS,
 	) {
 		this.#quic = quic;
-		this.#interests = new Interests(new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" }));
-		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = auth?.grant;
 		this.#gate = new Gate(auth?.grant);
 		this.#ready = auth?.ready ?? Promise.resolve();
@@ -794,8 +789,6 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
-		// Charged before anything else, as in Rust. A peer past the cap loses the session.
-		const interest = this.#interests.acquire(msg.broadcast, msg.track, "subscribe");
 		// Serve only what our grant lets us publish, and stop once it no longer does. The
 		// watch is armed before the first check and held to the end, so a shrink while the
 		// broadcast resolves is never missed.
@@ -812,7 +805,6 @@ export class Publisher {
 			});
 		} finally {
 			watch.dispose();
-			interest.release();
 		}
 	}
 
@@ -995,30 +987,25 @@ export class Publisher {
 	 * @internal
 	 */
 	async runFetch(msg: Fetch, stream: Stream) {
-		this.#fetches.acquire();
+		if (!hasTrackStream(this.version)) {
+			stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
+			return;
+		}
+		// Like a subscription, the fetch holds its watch until the last frame: a group can stay
+		// open as long as its track, so a check at accept alone would keep serving after a shrink.
+		const revoked = unauthorized(msg.broadcast);
+		let fetched: group.Consumer | undefined;
+		const watch = this.#gate.watch(msg.broadcast, () => {
+			console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+			fetched?.close(revoked);
+			stream.abort(revoked);
+		});
 		try {
-			if (!hasTrackStream(this.version)) {
-				stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
-				return;
-			}
-			// Like a subscription, the fetch holds its watch until the last frame: a group can stay
-			// open as long as its track, so a check at accept alone would keep serving after a shrink.
-			const revoked = unauthorized(msg.broadcast);
-			let fetched: group.Consumer | undefined;
-			const watch = this.#gate.watch(msg.broadcast, () => {
-				console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
-				fetched?.close(revoked);
-				stream.abort(revoked);
+			await this.#serveFetch(msg, stream, watch, (group) => {
+				fetched = group;
 			});
-			try {
-				await this.#serveFetch(msg, stream, watch, (group) => {
-					fetched = group;
-				});
-			} finally {
-				watch.dispose();
-			}
 		} finally {
-			this.#fetches.release();
+			watch.dispose();
 		}
 	}
 
@@ -1076,7 +1063,9 @@ export class Publisher {
 					hold.abort();
 				}
 				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
-				group = await wireOf(front).fetchGroup(msg.track, msg.group, {
+				const fetchGroup = wireOf(front).fetchGroup;
+				if (!fetchGroup) throw new Error("fetch group is not supported by the serving route's version");
+				group = await fetchGroup(msg.track, msg.group, {
 					priority: msg.priority,
 					maxDelay: msg.maxDelay,
 					signal: left.signal,
@@ -1147,7 +1136,7 @@ export class Publisher {
 		let startSequence: number | undefined;
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
-		let first: { group: group.Consumer; largest: track.Location | undefined } | undefined;
+		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
 		let endSent = false;
 
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
@@ -1349,7 +1338,8 @@ export class Publisher {
 						// until each group stream finished or reset. The subscriber leaving
 						// instead cancels whatever is still queued.
 						const drained = Symbol("drained");
-						const end = await Promise.race([Promise.all(groups).then(() => drained), controls.ended]);
+						// `race`, since this repeats per batch of drops against the subscription's end.
+						const end = await race([Promise.all(groups).then(() => drained), controls.ended]);
 						if (end instanceof Error) throw end;
 						if (end !== drained) return false;
 						if (pendingDrops.length > 0) continue;
@@ -1441,11 +1431,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
-		// Charged before anything else and held with the track, as in Rust. A peer past the
-		// cap loses the session.
-		const interest = this.#interests.acquire(msg.broadcast, msg.track, "track");
 		const hold = new AbortController();
-		hold.signal.addEventListener("abort", () => interest.release(), { once: true });
 		// Armed before the first check and held until the answer is acknowledged, so a grant
 		// that shrinks while the answer is blocked on flow control resets it, never sends it.
 		const watch = this.#gate.watch(msg.broadcast, () => {
@@ -1503,9 +1489,6 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTracks(msg: TracksMessage, stream: Stream) {
-		// Charged before anything else and held until the listing ends, as in Rust. A peer past
-		// the cap loses the session.
-		const interest = this.#interests.acquire(msg.broadcast, "", "tracks");
 		const cancel = new AbortController();
 		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`tracks revoked: broadcast=${msg.broadcast}`);
@@ -1558,7 +1541,6 @@ export class Publisher {
 		} finally {
 			tracks?.close();
 			watch.dispose();
-			interest.release();
 		}
 	}
 

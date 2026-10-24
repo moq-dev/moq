@@ -26,7 +26,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// the session as a failed attempt, so the redial waits this long first.
 const BACKOFF: Duration = Duration::from_millis(300);
 
-/// The cluster's `--goaway-handover`: short, so a test observes the old session
+/// The cluster's `--connect-goaway-handover`: short, so a test observes the old session
 /// close quickly, but past [`BACKOFF`] plus the redial, so the draining leg
 /// serves until the replacement takes over.
 const HANDOVER: Duration = Duration::from_secs(1);
@@ -512,7 +512,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"MID-A connects to TOP",
 		connect_once(
 			// An upstream link: MID-A relays for BOTTOM, so it asks TOP for everything.
-			mid_a_client.with_subscriber(mid_a_origin.clone().upstream()),
+			mid_a_client.with_subscriber(mid_a_origin.clone().with_link(moq_net::origin::Link::Upstream)),
 			top_url.parse().expect("parse top url"),
 		),
 	)
@@ -822,7 +822,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	tokio::time::sleep(Duration::from_millis(120)).await;
 
 	// Send the client somewhere that will never finish handshaking. No wire timeout:
-	// our own `--goaway-handover` is then the only thing bounding the old session.
+	// our own `--connect-goaway-handover` is then the only thing bounding the old session.
 	server_session
 		.drain()
 		.send(moq_net::goaway::Goaway::redirect(format!(

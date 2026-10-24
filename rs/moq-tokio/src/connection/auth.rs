@@ -430,7 +430,7 @@ mod tests {
 			qmux::Session::accept(stream(server), config())
 		)
 		.unwrap();
-		let now = moq_net::time::now();
+		let now = moq_net::time::Instant::now();
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions(versions.clone())
@@ -440,12 +440,12 @@ mod tests {
 			(session, AbortOnDrop::new(tokio::spawn(moq_net::time::run(driver))))
 		};
 		let server = async {
-			let request = moq_net::Server::new()
+			let mut request = moq_net::Server::new()
 				.with_versions(versions.clone())
 				.accept_request(now, server)
 				.await
 				.unwrap();
-			let mut requests = request.auth().requests().unwrap();
+			let mut requests = request.requests();
 			let (session, driver) = request.ok().await.unwrap();
 			let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 			let acceptor = tokio::spawn(async move {

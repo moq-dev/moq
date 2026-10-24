@@ -9,8 +9,7 @@ C and C++, Python, Swift, Kotlin, Dart, and Go stop discarding `Gap` and
 
 ## Plan
 
-[One decode read](/quest/m1/api-audit/decode-read.md) gives moq-audio and
-moq-video `decode::Read { Frame, Gap, End }`, but moq-ffi (`audio.rs`,
+moq-audio and moq-video yield `decode::Read { Frame, Gap, End }`, but moq-ffi (`audio.rs`,
 `video.rs`), the hand-written moq-c, and the interop audio client still
 hand over frames only.
 
@@ -19,13 +18,9 @@ Open for this quest: the binding shape. Options are a tagged record per read
 (smaller change for wrappers). Recommend the tagged record, mirroring Rust
 names, and ask the maintainer before implementing.
 
-Breaking in moq-ffi and every wrapper: `MIGRATE.md` entries per package, and
+Breaking in moq-ffi and every wrapper: a migration note per package in the Impact bullet, and
 the Cross-Package Sync table's docs (`doc/lib/*`). Run `just test interop --all`.
 
 Decided 2026-10-23 (maintainer): tracked under the API audit.
 
 Public API: breaking, every binding. Wire: none.
-
-## Required
-
-- [One decode read](/quest/m1/api-audit/decode-read.md) - the Rust `decode::Read` this exposes

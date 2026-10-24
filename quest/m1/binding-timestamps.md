@@ -50,7 +50,7 @@ Decided with the maintainer on 2026-10-18:
   to nearest and says so in its doc; the record itself stays exact.
 - **One PR across every binding**, per the cross-package sync table, so each
   binding breaks once. No shim: the microsecond fields are removed, not kept
-  beside the record. Each package gets a `MIGRATE.md` entry, and `doc/lib/*`
+  beside the record. The Impact bullet says how to migrate each package, and `doc/lib/*`
   and `doc/bin/obs.md` update in the same PR.
 
 Verification: round-trip a 90 kHz tick, a present zero, and untimed through
@@ -61,10 +61,9 @@ Decided 2026-10-20 (maintainer): the moq-c half lands on the
 [generated C package](/quest/m1/c/README.md), not the frozen hand-written
 ABI, so C users break once.
 
+Wall and monotonic times stay `moq_clock::Wall` and `moq_clock::Instant`, not
+media timestamps; keep the types distinct.
+
 ## Required
 
 - [Generated C bindings](/quest/m1/c/README.md) - `moq_timestamp` reaches C through the generated package, so C users break once
-
-## Related
-
-- [Controlled time](/quest/m1/time/README.md) - wall and monotonic time, not media timestamps; keep the types distinct

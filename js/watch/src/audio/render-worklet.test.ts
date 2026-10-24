@@ -82,7 +82,27 @@ describe("render dispatch", () => {
 		]);
 	});
 
-	it("parks on a latency rise and preserves unread PCM through the resize", () => {
+	// A covered ring parks and resumes only on the main thread's word: data decoded before the park
+	// may still land. The echoed epoch is what tells the main thread that state reports no longer
+	// predate the park.
+	it("parks until the next floor update and echoes the park's epoch", () => {
+		const { send, read, sent } = renderer();
+		send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(1)] });
+		expect([...read(20)]).toEqual(Array(20).fill(1));
+		send({ type: "latency", latency: Milli(100), park: 3 });
+		expect([...read(20)]).toEqual(Array(20).fill(0));
+		send({ type: "data", timestamp: Micro(200_000), data: [new Float32Array(20).fill(2)] });
+		expect([...read(20)]).toEqual(Array(20).fill(0));
+		send({ type: "latency", latency: Milli(100) });
+		// It fades back in on the parked audio, not the new data.
+		expect(read(20)[19]).toBe(1);
+		read(20);
+		expect(sent).toEqual([
+			{ type: "state", epoch: 3, timestamp: Micro(60_000), stalled: false, anchored: true, underruns: 0 },
+		]);
+	});
+
+	it("parks on a latency rise and preserves unread PCM", () => {
 		const { send, read } = renderer();
 		send({ type: "data", timestamp: Micro(0), data: [new Float32Array(100).fill(1)] });
 		expect([...read(20)]).toEqual(Array(20).fill(1));

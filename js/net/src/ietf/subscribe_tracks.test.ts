@@ -20,7 +20,7 @@ import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const drafts = [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21, Version.DRAFT_22];
 
-function fixture(version: IetfVersion, subscriptions = 10, grant = new Signal<Grant | undefined>(undefined)) {
+function fixture(version: IetfVersion, requests = 10, grant = new Signal<Grant | undefined>(undefined)) {
 	const pair = createMockTransportPair(ALPN.DRAFT_22);
 	const origin = new Origin();
 	const session = new NativeSession(pair.server, version, false);
@@ -30,7 +30,7 @@ function fixture(version: IetfVersion, subscriptions = 10, grant = new Signal<Gr
 		publish: origin.consume(),
 		requiresSolicitation: true,
 		grant,
-		limits: { announces: 10, subscriptions, fetches: 10 },
+		limits: { announces: 10, requests },
 	});
 	const tasks: Promise<void>[] = [];
 	const streams: Stream[] = [];
@@ -97,7 +97,8 @@ async function update(stream: Stream, version: IetfVersion, id: bigint, forward:
 for (const version of drafts) {
 	test(`track listing pauses, resumes, survives listing cancellation and ends on withdrawal (${version})`, async () => {
 		const clock = new Manual();
-		using _installed = { [Symbol.dispose]: clock.install() };
+		const installed = clock.install();
+		using _installed = { [Symbol.dispose]: () => installed.close() };
 		const fx = fixture(version);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 		broadcast.announce();
@@ -163,7 +164,8 @@ for (const version of drafts) {
 	// ends with TRACK_ENDED once answered, rather than a reset that fails the peer's listing.
 	test(`a track finished before its PUBLISH is answered ends with TRACK_ENDED (${version})`, async () => {
 		const clock = new Manual();
-		using _installed = { [Symbol.dispose]: clock.install() };
+		const installed = clock.install();
+		using _installed = { [Symbol.dispose]: () => installed.close() };
 		const fx = fixture(version);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 		broadcast.announce();
@@ -184,7 +186,8 @@ for (const version of drafts) {
 	// after the transport took the bytes. A track that finishes then is listed already.
 	test(`a track finished as its PUBLISH goes out ends with TRACK_ENDED (${version})`, async () => {
 		const clock = new Manual();
-		using _installed = { [Symbol.dispose]: clock.install() };
+		const installed = clock.install();
+		using _installed = { [Symbol.dispose]: () => installed.close() };
 		const fx = fixture(version);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 		broadcast.announce();
@@ -278,7 +281,8 @@ test("draft-18 refuses SUBSCRIBE to a PUBLISHed track", async () => {
 test("a cancelled listing cannot release its replacement's prefix", async () => {
 	const version = Version.DRAFT_22;
 	const clock = new Manual();
-	using _installed = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _installed = { [Symbol.dispose]: () => installed.close() };
 	const fx = fixture(version);
 	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 	broadcast.announce();
@@ -303,7 +307,8 @@ test("grants hide tracks, revoke PUBLISHes and relist when broadened", async () 
 	const empty = (): Grant => ({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
 	const grant = new Signal<Grant | undefined>(empty());
 	const clock = new Manual();
-	using _installed = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _installed = { [Symbol.dispose]: () => installed.close() };
 	const fx = fixture(version, 10, grant);
 	const listing = await fx.list();
 	await ok(listing, version);
@@ -346,6 +351,19 @@ test("PUBLISH carries listing defaults and honors INCLUDE_PROPERTIES", async () 
 	expect(publish.parameters?.subscriptionFilter).toEqual({ kind: "relative", groups: 2n });
 });
 
+// An omitted SUBSCRIBER_PRIORITY is the drafts' 128, so the PUBLISH restates 128, not the unset 127.
+test("PUBLISH restates an omitted listing priority as 128", async () => {
+	const version = Version.DRAFT_22;
+	const fx = fixture(version);
+	const listing = await fx.list("room", false, new Parameters());
+	await ok(listing, version);
+	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
+	broadcast.announce();
+	broadcast.createTrack("later");
+	const { publish } = await fx.offered();
+	expect(publish.parameters?.subscriberPriority).toBe(128);
+});
+
 test("an update ends only its listing and frees its prefix", async () => {
 	const version = Version.DRAFT_22;
 	const fx = fixture(version);
@@ -367,7 +385,8 @@ test("paused updates keep one slot and release it when the PUBLISH ends", async 
 	const version = Version.DRAFT_22;
 	const fx = fixture(version, 1);
 	const clock = new Manual();
-	using _installed = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _installed = { [Symbol.dispose]: () => installed.close() };
 	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 	broadcast.announce();
 	broadcast.createTrack("video");
@@ -388,7 +407,8 @@ test("a failed PUBLISH stream open returns its subscription slot", async () => {
 	const version = Version.DRAFT_22;
 	const fx = fixture(version, 1);
 	const clock = new Manual();
-	using _installed = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _installed = { [Symbol.dispose]: () => installed.close() };
 	const open = spyOn(fx.session, "openBi").mockRejectedValue(new StreamError(StreamCode.Cancel));
 	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 	broadcast.announce();

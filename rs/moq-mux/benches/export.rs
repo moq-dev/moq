@@ -153,5 +153,123 @@ fn bench_export(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_export);
+criterion_group!(benches, bench_export, video_reorder);
 criterion_main!(benches);
+
+/// A progressive AVC SPS declaring a reorder depth of two (25 fps), as the catalog does.
+const REORDER_SPS: &[u8] = &[
+	0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x26, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00,
+	0xca, 0x3c, 0x48, 0x96, 0x58,
+];
+
+async fn prepare_video(
+	count: usize,
+	size: usize,
+	pattern: &str,
+) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
+	let track = broadcast
+		.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+		profile: 100,
+		constraints: 0,
+		level: 10,
+		inline: false,
+	});
+	config.coded_width = Some(64);
+	config.coded_height = Some(64);
+	config.reorder = Some(2);
+	let mut description = vec![1, 100, 0, 10, 0xff, 0xe1];
+	description.extend_from_slice(&(REORDER_SPS.len() as u16).to_be_bytes());
+	description.extend_from_slice(REORDER_SPS);
+	description.extend_from_slice(&[1, 0, 4, 0x68, 0xce, 0x3c, 0x80]);
+	config.description = Some(description.into());
+	config.container = hang::catalog::Container::Legacy;
+	let mut video = catalog.video(track, Container::Legacy(Kind::Video), config).unwrap();
+	for index in 0..count {
+		let pts = match pattern {
+			"pyramid" => ((index / 9 * 9 + [0, 4, 2, 1, 3, 8, 6, 5, 7][index % 9]) * 3_600) as u64,
+			"flat" => 90_000,
+			"backward" => 90_000 - index as u64,
+			_ => unreachable!(),
+		};
+		let mut payload = vec![0; size];
+		payload[..4].copy_from_slice(&((size - 4) as u32).to_be_bytes());
+		payload[4] = if index == 0 { 0x65 } else { 0x41 };
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_scale(pts, 90_000).unwrap(),
+				duration: None,
+				payload: payload.into(),
+				keyframe: index == 0,
+			})
+			.unwrap();
+	}
+	video.finish().unwrap();
+	catalog.finish().unwrap();
+	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+	let driver = tokio::spawn(moq_net::time::run(driver));
+	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
+	let requests = tokio::spawn(async move {
+		while let Ok(request) = dynamic.requested_broadcast().await {
+			request.accept(consumer.clone());
+		}
+	});
+	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
+	let source = moq_mux::Source::new(origin.consume(), resolved);
+	(
+		source,
+		stream,
+		Fixture {
+			_published: Box::new((broadcast, catalog, video)),
+			_origin: origin,
+			driver,
+			requests,
+		},
+	)
+}
+
+fn video_reorder(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let mut group = c.benchmark_group("video-reorder");
+	group.sample_size(10);
+	group.warm_up_time(Duration::from_millis(50));
+	group.measurement_time(Duration::from_millis(200));
+	for pattern in ["pyramid", "flat", "backward"] {
+		for count in [64, 256, 1024] {
+			for size in [256, 16_384] {
+				group.bench_function(BenchmarkId::new(pattern, format!("{count}x{size}")), |b| {
+					b.iter_batched(
+						|| runtime.block_on(prepare_video(count, size, pattern)),
+						|(source, stream, fixture)| {
+							let refused = runtime.block_on(async {
+								let mut export = moq_mux::container::mkv::Export::new(source, stream)
+									.with_fragment_duration(Duration::ZERO);
+								loop {
+									match export.next().await {
+										Ok(Some(frame)) => {
+											std::hint::black_box(frame);
+										}
+										Ok(None) => break false,
+										Err(_) => break true,
+									}
+								}
+							});
+							assert_eq!(refused, pattern != "pyramid");
+							fixture
+						},
+						BatchSize::PerIteration,
+					);
+				});
+			}
+		}
+	}
+	group.finish();
+}

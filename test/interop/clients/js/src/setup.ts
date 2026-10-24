@@ -73,7 +73,13 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	document.body.appendChild(host);
 
 	const fault = parseFault(params.get("fault"));
-	let fixture: Fixture | undefined = new Fixture(host, url, broadcast, fault);
+	let fixture: Fixture | undefined = new Fixture(host, {
+		url,
+		name: broadcast,
+		fault,
+		versions: versions?.split(","),
+		generation: Number(params.get("generation") ?? 0),
+	});
 
 	// The driver stops and restarts the publisher in place to exercise a same-path republish, which
 	// has to reuse this page so the audio context keeps its user activation.
@@ -84,7 +90,13 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 		},
 		start: () => {
 			fixture?.close();
-			fixture = new Fixture(host, url, broadcast, fault);
+			fixture = new Fixture(host, {
+				url,
+				name: broadcast,
+				fault,
+				versions: versions?.split(","),
+				generation: Number(params.get("generation") ?? 0),
+			});
 		},
 		disableVideo: () => fixture?.setVideo(false),
 		enableVideo: () => fixture?.setVideo(true),
@@ -111,6 +123,18 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	// Only the late-join negative control passes this, to hold the player behind live.
 	const delay = params.get("delay");
 	if (delay) el.setAttribute("delay", delay);
+
+	// The interop matrix checks each audio rendition in a page of its own, pinned by codec (the
+	// catalog's up to its first `.`). The target lands with the catalog, before the player has
+	// probed which renditions it can decode, so no other rendition ever plays here.
+	const codec = params.get("codec");
+	if (codec) {
+		el.signals.run((effect) => {
+			const renditions = effect.get(el.broadcast.out.catalog)?.audio?.renditions ?? {};
+			const name = Object.keys(renditions).find((name) => renditions[name].codec.split(".")[0] === codec);
+			if (name) el.controls.audio.target.set({ name });
+		});
+	}
 
 	const player = document.createElement("moq-watch-ui");
 	player.appendChild(el);

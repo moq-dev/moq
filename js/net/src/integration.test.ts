@@ -28,7 +28,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import type { Location, Producer as TrackProducer } from "./track.ts";
+import type { Position, Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -1294,7 +1294,9 @@ test("integration: ietf fetch group is unsupported", async () => {
 	]);
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow("fetch group is not supported for moq-transport");
+	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow(
+		"fetch group is not supported by this session's version",
+	);
 
 	remote.close();
 	client.abort();
@@ -2777,7 +2779,7 @@ async function runSessionDeath(
 	protocol: string,
 	version?: number,
 	local = false,
-): Promise<[Error | null, Error | null, Location | undefined]> {
+): Promise<[Error | null, Error | null, Position | undefined]> {
 	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
 

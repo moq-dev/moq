@@ -217,8 +217,8 @@ code and the session stays up. A client that publishes outside its grant closes
 the session with `UNAUTHORIZED`, naming the path. A session whose last
 credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
 and reconnect, rather than treating the credential as invalid. moq-transport carries the same
-exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
-to namespace prefixes. Older versions have no grant; the URL token keeps working
+exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), with
+the same patterns. Older versions have no grant; the URL token keeps working
 everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. Naming a fresh token renews the announcement in place with
@@ -235,6 +235,15 @@ must begin at a point a fresh subscriber can decode from (a keyframe, a full
 JSON snapshot). Groups can also be fetched by sequence number, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
+
+Native Rust subscriptions, track queries, fetches, and announcement interest on
+QUIC, WebTransport, or qmux fail locally when the peer has granted no stream
+credit, without retrying. Iroh still waits; browser-backed Rust retains the
+browser's behavior. Once admitted, these requests have no answer deadline:
+each lasts until answered, its demand leaves, or its session closes.
+Announcement-interest refusal is logged and releases discovery sync. The merged
+announcement listing keeps its existing event and sync API, with no per-source
+error result, and continues receiving announcements from unrelated sources.
 
 Each subscription carries the knobs that decide behavior under congestion:
 
@@ -256,9 +265,12 @@ own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
 served. A relay merges its subscribers' ranges into one upstream request, which
-today's wire versions carry as the single span covering them. A time anchor is
-resolved from the groups the serving hop holds; upstream it asks for everything
-max delay allows, and an untimed track refuses it. At the live edge, a time end
+today's wire versions carry as the single span covering them. A relative or time
+anchor resolves on the hop that publishes the track, and over moq-lite-07, which
+reports the live edge and media time and asks upstream for every group the budget
+allows. Over an older lite or any moq-transport version, a subscriber gets every
+anchor but the live and default starts refused as unsupported, and an untimed
+track refuses a time anchor. At the live edge, a time end
 may let one group through before its first frame shows it starts past the end:
 the first group that has yet to start is handed out without waiting for that
 frame, and the next one waits on it. A datagram is judged by its own timestamp.

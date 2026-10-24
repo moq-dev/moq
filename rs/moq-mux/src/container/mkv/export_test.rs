@@ -22,6 +22,119 @@ use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
 /// completeness has to be asked for, exactly as a real recorder does.
 const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// An AVC rendition that declares a reorder depth of two.
+fn declared_avc() -> Live {
+	Live::new(".avc1", |catalog, name| {
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			profile: 100,
+			constraints: 0,
+			level: 10,
+			inline: false,
+		});
+		config.coded_width = Some(64);
+		config.coded_height = Some(64);
+		config.reorder = Some(2);
+		config.container = hang::catalog::Container::Legacy;
+		config.description = Some(
+			crate::codec::h264::build_avcc(
+				&[Bytes::from_static(crate::codec::h264::fixtures::SPS_PYRAMID)],
+				&[Bytes::from_static(PPS)],
+			)
+			.unwrap(),
+		);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
+	})
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_declared_depth_bounds_malformed_video_by_count_and_payload() {
+	for backwards in [false, true] {
+		for count in [16, 128, 1024] {
+			for size in [256, 16_384] {
+				let mut live = declared_avc();
+				for index in 0..count {
+					let mut frame = raw_frame(1_000_000 - if backwards { index } else { 0 }, b"", index == 0);
+					let mut bytes = vec![0; size];
+					bytes[..4].copy_from_slice(&((size - 4) as u32).to_be_bytes());
+					bytes[4] = if index == 0 { 0x65 } else { 0x41 };
+					frame.payload = bytes.into();
+					live.track.write(frame).unwrap();
+				}
+				live.track.finish().unwrap();
+				live.catalog.finish().unwrap();
+				let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+					.with_fragment_duration(std::time::Duration::ZERO)
+					.with_replay();
+				export.next().await.unwrap().unwrap();
+				let mut refused = false;
+				loop {
+					match export.next().await {
+						Err(err) => {
+							assert!(err.to_string().contains("video"), "{err}");
+							refused = true;
+							break;
+						}
+						Ok(None) => break,
+						Ok(Some(_)) => {}
+					}
+					assert!(export.held() <= 2, "a depth-two clock");
+				}
+				assert!(refused, "backwards={backwards} count={count} size={size}");
+				assert!(export.held() <= 2 && export.buffered() <= 4);
+			}
+		}
+	}
+}
+
+/// MKV retains PTS while signed, group-local DTS orders video against audio.
+#[tokio::test(start_paused = true)]
+async fn declared_reorder_starts_before_zero_and_resets_each_group() {
+	let mut live = declared_avc();
+	let mut audio = live.add_track("audio", |catalog, name| {
+		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		config.container = hang::catalog::Container::Legacy;
+		catalog.modify().unwrap().audio.renditions.insert(name, config);
+	});
+	for start in [0, 400_000] {
+		for (index, offset) in [0, 160_000, 80_000, 40_000, 120_000].into_iter().enumerate() {
+			let payload = if index == 0 {
+				&b"\x00\x00\x00\x01\x65"[..]
+			} else {
+				&b"\x00\x00\x00\x01\x41"[..]
+			};
+			live.track
+				.write(raw_frame(start + offset, payload, index == 0))
+				.unwrap();
+		}
+		audio.write(raw_frame(start, b"audio", true)).unwrap();
+	}
+	live.track.finish().unwrap();
+	audio.finish().unwrap();
+	live.catalog.finish().unwrap();
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+		.with_delay(std::time::Duration::from_secs(5))
+		.with_fragment_duration(std::time::Duration::ZERO)
+		.with_replay();
+	export.next().await.unwrap().unwrap();
+	let mut timestamps = Vec::new();
+	while let Some(chunk) = export.next().await.unwrap() {
+		let mut cursor = Cursor::new(chunk);
+		let mut base = 0;
+		for tag in WebmIterator::new(&mut cursor, &[]) {
+			match tag.unwrap() {
+				MatroskaSpec::Timestamp(timestamp) => base = timestamp as i64,
+				MatroskaSpec::SimpleBlock(bytes) => {
+					let block = SimpleBlock::try_from(bytes.as_slice()).unwrap();
+					timestamps.push(base + i64::from(block.timestamp));
+				}
+				_ => {}
+			}
+		}
+	}
+	assert_eq!(timestamps, [0, 160, 80, 0, 40, 120, 400, 560, 480, 400, 440, 520]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn export_header_roundtrip_vp9_opus() {
 	// Build a tiny synthetic WebM with one VP9 video track and one Opus audio track.
@@ -1240,4 +1353,83 @@ async fn disabled_renditions_stay_out_of_the_header_and_idle_after_it() {
 	set_enabled(&mut live, true);
 	live.track.write(raw_frame(20_000, b"main-1", true)).unwrap();
 	assert!(chunk_now(&mut export).await.windows(6).any(|part| part == b"main-1"));
+}
+
+/// Video whose PTS stops advancing past the reorder lookahead in an open group: the export
+/// holds no more than what arrives within the lookahead and the delay. Flat PTS waits the
+/// catalog `jitter`; PTS running backward reads as reordering up to the deepest supported.
+#[tokio::test(start_paused = true)]
+async fn stalled_presentation_time_keeps_the_export_bounded() {
+	use std::time::Duration;
+	let step = Duration::from_millis(20);
+	let delay = Duration::from_millis(100);
+	let jitter = Duration::from_millis(120);
+	let deepest = Duration::from_secs(2);
+	let flat: fn(u64) -> u64 = |_| 10_000_000;
+	let backward: fn(u64) -> u64 = |index| 10_000_000 - index * 10_000;
+	for (name, pts, lookahead) in [("flat", flat, jitter), ("backward", backward, deepest)] {
+		let mut live = Live::avc3();
+		for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+			config.jitter = Some(jitter);
+		}
+		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+			.with_delay(delay)
+			.with_fragment_duration(Duration::ZERO);
+		live.track.write(video_frame(pts(0), true)).unwrap();
+		export.next().await.unwrap().unwrap();
+		let mut most = 0;
+		for index in 1..500 {
+			tokio::time::advance(step).await;
+			live.track.write(video_frame(pts(index), false)).unwrap();
+			while let std::task::Poll::Ready(chunk) = export.poll_next(&kio::Waiter::noop()) {
+				chunk.unwrap().unwrap();
+			}
+			most = most.max(export.buffered());
+		}
+		// What arrived within the wait, the frame just read, and one due to go out.
+		let bound = ((lookahead + delay).as_millis() / step.as_millis()) as usize + 2;
+		assert!(most <= bound, "{name}: {most} frames buffered, over {bound}");
+	}
+}
+
+/// Live B-frames, read as they are sent, keep every frame and its presentation order: the
+/// bound on what the decode clock holds never cuts a valid reorder short.
+#[tokio::test(start_paused = true)]
+async fn live_reordered_video_keeps_every_frame() {
+	use std::time::Duration;
+	let frame = 40_000;
+	let mut live = Live::avc3();
+	for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+		config.jitter = Some(Duration::from_millis(120));
+	}
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+		.with_delay(Duration::from_millis(500))
+		.with_fragment_duration(Duration::ZERO);
+	// A B-pyramid in decode order, a group of nine 40 ms frames at a time.
+	let pyramid = [0, 4, 2, 1, 3, 8, 6, 5, 7];
+	let order: Vec<u64> = (0..10u64)
+		.flat_map(|group| pyramid.map(|i| 1_000_000 + (group * 9 + i) * frame))
+		.collect();
+	live.track.write(video_frame(order[0], true)).unwrap();
+	export.next().await.unwrap().unwrap();
+	let mut blocks = 0;
+	let mut count = |chunk: Bytes| {
+		let mut cursor = Cursor::new(chunk);
+		blocks += WebmIterator::new(&mut cursor, &[])
+			.filter(|tag| matches!(tag, Ok(MatroskaSpec::SimpleBlock(_))))
+			.count();
+	};
+	for (index, &pts) in order.iter().enumerate().skip(1) {
+		tokio::time::advance(Duration::from_micros(frame)).await;
+		live.track.write(video_frame(pts, index % 9 == 0)).unwrap();
+		while let std::task::Poll::Ready(chunk) = export.poll_next(&kio::Waiter::noop()) {
+			count(chunk.unwrap().unwrap());
+		}
+	}
+	live.track.finish().unwrap();
+	live.catalog.finish().unwrap();
+	while let Some(chunk) = export.next().await.unwrap() {
+		count(chunk);
+	}
+	assert_eq!(blocks, order.len());
 }

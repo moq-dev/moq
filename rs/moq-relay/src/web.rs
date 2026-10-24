@@ -191,12 +191,18 @@ pub struct Addrs {
 	pub https: Option<net::SocketAddr>,
 }
 
+/// The implementation WebSocket sessions advertise in SETUP, or `None` for the library's.
+#[derive(Clone, Default)]
+#[cfg_attr(not(feature = "websocket"), allow(dead_code, reason = "websocket-only"))]
+pub(crate) struct Implementation(pub Option<String>);
+
 /// Run a HTTP server using Axum
 pub struct Web {
 	state: Arc<WebState>,
 	config: Config,
 	versions: moq_net::Versions,
 	extensions: moq_net::setup::Extensions,
+	implementation: Implementation,
 	health: moq_tokio::accept::Health,
 	http_listener: Option<net::TcpListener>,
 	https_listener: Option<net::TcpListener>,
@@ -229,6 +235,7 @@ impl Web {
 			config,
 			versions: moq_net::Versions::all(),
 			extensions: Default::default(),
+			implementation: Default::default(),
 			health: moq_tokio::accept::Health::new("web"),
 			http_listener: None,
 			https_listener: None,
@@ -279,12 +286,14 @@ impl Web {
 	}
 
 	/// Serve HTTPS from the ACME resolver, which also answers TLS-ALPN-01 challenges.
+	#[cfg(feature = "acme")]
 	pub(crate) fn with_acme(mut self, resolver: Option<Arc<dyn rustls::server::ResolvesServerCert>>) -> Self {
 		self.acme = resolver;
 		self
 	}
 
 	/// The bound HTTPS socket, where ACME answers challenges before serving starts.
+	#[cfg(feature = "acme")]
 	pub(crate) fn https_listener(&self) -> Option<&net::TcpListener> {
 		self.https_listener.as_ref()
 	}
@@ -307,8 +316,14 @@ impl Web {
 	}
 
 	/// Choose which moq-transport extensions WebSocket sessions offer in SETUP.
-	pub fn with_extensions(mut self, extensions: moq_net::setup::Extensions) -> Self {
+	pub(crate) fn with_extensions(mut self, extensions: moq_net::setup::Extensions) -> Self {
 		self.extensions = extensions;
+		self
+	}
+
+	/// Set the implementation WebSocket sessions advertise in SETUP; empty advertises nothing.
+	pub fn with_implementation(mut self, implementation: impl Into<String>) -> Self {
+		self.implementation = Implementation(Some(implementation.into()));
 		self
 	}
 
@@ -403,6 +418,7 @@ impl Web {
 
 		app.layer(Extension(self.versions.clone()))
 			.layer(Extension(self.extensions))
+			.layer(Extension(self.implementation.clone()))
 			.with_state(self.state.clone())
 	}
 
@@ -575,11 +591,7 @@ fn build_acme_config(
 	tls.resolver = Some(resolver);
 	tls.root = root.to_vec();
 
-	let alpn = vec![
-		b"h2".to_vec(),
-		b"http/1.1".to_vec(),
-		rustls_acme::acme::ACME_TLS_ALPN_NAME.to_vec(),
-	];
+	let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"acme-tls/1".to_vec()];
 	tls.server_config(alpn).context("failed to build https TLS config")
 }
 
@@ -741,7 +753,7 @@ impl<I: HttpStream> HttpStream for TlsStream<I> {
 		self.get_ref().1.alpn_protocol() == Some(b"h2")
 	}
 	fn acme_challenge(&self) -> bool {
-		self.get_ref().1.alpn_protocol() == Some(rustls_acme::acme::ACME_TLS_ALPN_NAME)
+		self.get_ref().1.alpn_protocol() == Some(b"acme-tls/1")
 	}
 	fn server_name(&self) -> Option<&str> {
 		self.get_ref().1.server_name()
@@ -1007,7 +1019,7 @@ async fn admit_http(
 	.inspect_err(|err| state.cluster.refusals.record_auth(err))?;
 	let token = lease.token();
 	let Some(origin) = state.cluster.subscriber(token) else {
-		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
+		state.cluster.refusals.record(crate::refusals::RefusalKind::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 	let stats = state.cluster.stats.tier(token.tier.clone()).request(&token.label);
@@ -1096,11 +1108,15 @@ async fn serve_fetch(
 		let group = match async { crate::fetch_group(&broadcast.track(&track)?, sequence).await }.await {
 			Ok(group) => group,
 			// A miss upstream arrives as the stream reset that refused the FETCH. A datagram
-			// group is never cached, so it is a miss too.
+			// group is never cached, and a group past the track's max age is gone, so both
+			// are misses too.
 			Err(
 				moq_net::Error::NotFound
 				| moq_net::Error::NotFetchable
-				| moq_net::Error::Stream(moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable),
+				| moq_net::Error::Old
+				| moq_net::Error::Stream(
+					moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable | moq_net::StreamError::Old,
+				),
 			) => {
 				return Err(StatusCode::NOT_FOUND);
 			}
@@ -1201,7 +1217,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn http_refusals_count_at_both_endpoints() {
-		use crate::refusals::Refusal;
+		use crate::refusals::RefusalKind;
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
@@ -1255,9 +1271,9 @@ mod tests {
 				};
 				assert_eq!(status, StatusCode::UNAUTHORIZED);
 				let reason = if publish_only {
-					Refusal::Forbidden
+					RefusalKind::Forbidden
 				} else {
-					Refusal::Refused
+					RefusalKind::Refused
 				};
 				assert_eq!(
 					state.cluster.refusals.count(reason),
@@ -1443,6 +1459,58 @@ mod tests {
 				(0, 0)
 			);
 		}
+	}
+
+	/// A group the track's max age has dropped is gone, which is a 404 rather than a 500.
+	#[tokio::test(start_paused = true)]
+	async fn http_fetch_of_an_expired_group_is_not_found() {
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
+		let auth = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		}
+		.init("test", &moq_tokio::tls::Connect::default(), false)
+		.unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let broadcast = cluster.origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast
+			.create_track(
+				"video",
+				moq_net::track::Info::default()
+					.with_timescale(moq_net::Timescale::MILLI)
+					.with_max_age(std::time::Duration::from_millis(500)),
+			)
+			.unwrap();
+		// Group 0 can only present until group 1 starts at 1s, a full second behind the 2s
+		// edge: past the 500ms max age, so it is no longer served.
+		for millis in [0, 1000, 2000] {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let state = Web::new(auth, cluster, certificates, Config::default()).state;
+		let status = serve_fetch(
+			Path("room/video".into()),
+			Query(FetchParams {
+				auth: AuthQuery { jwt: None },
+				group: FetchGroup::Num(0),
+			}),
+			None,
+			None,
+			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
+			"/fetch/room/video?group=0".parse().unwrap(),
+			State(state),
+		)
+		.await
+		.map(|_| ())
+		.into_response()
+		.status();
+		assert_eq!(status, StatusCode::NOT_FOUND);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -2383,7 +2451,7 @@ mod tests {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-06".parse::<moq_net::Version>().unwrap().into())
 				.with_publisher(origin.consume())
-				.connect(moq_net::time::now(), transport)
+				.connect(moq_net::time::Instant::now(), transport)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
