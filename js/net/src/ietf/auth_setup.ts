@@ -2,7 +2,7 @@ import { SetupOption, type SetupOptions } from "./setup_options.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
- * Negotiation of the MoQ Auth extension (draft-lcurley-moq-auth-00) with the AUTH Setup Option.
+ * Negotiation of the MoQ Auth extension (draft-lcurley-moq-auth-01) with the AUTH Setup Option.
  * Kept apart from its request streams in `auth.ts`, which only an established session loads.
  *
  * @module

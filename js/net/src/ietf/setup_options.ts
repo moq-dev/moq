@@ -21,7 +21,7 @@ export const SetupOption = {
 	/** Subscriber max age, from the MoQ Timestamp extension. */
 	MaxAge: 0x915c4n,
 	/** AUTH, from the MoQ Auth extension. See `auth.ts`. */
-	Auth: 0x40b60n,
+	Auth: 0x40b70n,
 	/** ACTIVE_COUNT, from the MoQ Active Count extension. See `active_count.ts`. */
 	ActiveCount: 0x40b64n,
 	/** EPOCH, from the MoQ Epoch extension. See `epoch.ts`. */
