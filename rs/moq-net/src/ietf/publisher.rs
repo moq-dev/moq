@@ -6964,11 +6964,20 @@ mod serve_tests {
 
 	/// The same, with the broadcast announced on `route`.
 	fn serve_route(version: Version, info: crate::track::Info, route: crate::origin::Route) -> Serve {
+		serve_session(version, info, route, ScriptedSession::per_stream(vec![Vec::new()]))
+	}
+
+	/// The same, over `session`.
+	fn serve_session(
+		version: Version,
+		info: crate::track::Info,
+		route: crate::origin::Route,
+		session: ScriptedSession,
+	) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.publish("room", route).unwrap();
 		let track = broadcast.create_track("video", info).unwrap();
 
-		let session = ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
 
 		let peer_setup = peer::PeerSetup::default();
@@ -7447,6 +7456,84 @@ mod serve_tests {
 		assert_eq!(status, ietf::PublishDoneStatus::TrackEnded.code(version));
 		assert_eq!(wire.data.len(), 3, "a fill, a group and an END_OF_TRACK stream");
 		assert_eq!(count, 3);
+		wire.assert_streams_closed_before_publish_done();
+	}
+
+	/// A finished group's stream whose FIN is never acknowledged holds PUBLISH_DONE only until
+	/// the group goes stale: its successor's arrival plus the budget, even under a budget past
+	/// the cache window, which evicts both groups first.
+	#[moq_clock::test]
+	async fn publish_done_waits_on_an_unacknowledged_fin_until_the_group_is_stale() {
+		let version = Version::Draft21;
+		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_uni_fins(1);
+		let h = serve_session(
+			version,
+			crate::track::Info::timed(),
+			crate::origin::Route::default(),
+			session,
+		);
+		// Well past the cache window, which only dates idleness once a sweep passes.
+		let budget = crate::cache::DEFAULT_EXPIRY * 4;
+		let mut msg = subscribe(Filter::NextObject, None);
+		msg.max_age = Some(budget.as_millis() as u64);
+
+		// `create_broadcast` registers the broadcast from a spawned task.
+		moq_clock::sleep(Duration::from_millis(1)).await;
+		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+			.await
+			.unwrap();
+		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+		// The subscription then parks at the live edge.
+		for _ in 0..200 {
+			assert!(futures::poll!(serve.as_mut()).is_pending());
+		}
+
+		// Frozen timestamps, so only the wall clock since group 1 arrived convicts group 0.
+		let append = || {
+			let mut group = h.track.append_group().unwrap();
+			group.write_frame(timestamp(), b"x".as_slice()).unwrap();
+			group.finish().unwrap();
+		};
+		let finished = || {
+			data_streams(&h.log)
+				.values()
+				.filter(|sent| sent.contains(&Sent::Finish))
+				.count()
+		};
+		let step = Duration::from_secs(1);
+		async fn wait<F: std::future::Future>(mut serve: std::pin::Pin<&mut F>, seconds: u64) {
+			for _ in 0..seconds {
+				moq_clock::sim::advance(Duration::from_secs(1)).await;
+				assert!(
+					futures::poll!(serve.as_mut()).is_pending(),
+					"PUBLISH_DONE went out early"
+				);
+			}
+		}
+		append();
+		serve_until(serve.as_mut(), "group 0's FIN went out", || finished() == 1).await;
+		append();
+		serve_until(serve.as_mut(), "group 1's stream finished", || finished() == 2).await;
+
+		// Group 2 arrives later, so a verdict that forgot group 1 would wait for 2's deadline.
+		wait(serve.as_mut(), 10).await;
+		append();
+		h.track.finish().unwrap();
+		serve_until(serve.as_mut(), "group 2's stream finished", || finished() == 3).await;
+
+		// Groups 0 and 1 go idle past the cache window long before the deadline.
+		wait(serve.as_mut(), budget.as_secs() - 12).await;
+		assert!(h.log.resets().is_empty());
+
+		moq_clock::sim::advance(step).await;
+		moq_clock::timeout(step, serve)
+			.await
+			.expect("the stale group releases PUBLISH_DONE")
+			.unwrap();
+		assert_eq!(h.log.resets(), vec![crate::StreamError::Cancel.to_code()]);
+		let wire = Wire::read(&h.log, version);
+		let (status, _) = wire.publish_done.expect("PUBLISH_DONE was sent");
+		assert_eq!(status, ietf::PublishDoneStatus::TrackEnded.code(version));
 		wire.assert_streams_closed_before_publish_done();
 	}
 

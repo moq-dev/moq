@@ -669,6 +669,13 @@ export class Consumer {
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
 		hooks.groupStarted = (group) => group.#state.total.peek() > 0 || group.#state.closed.peek() !== undefined;
+		hooks.groupFate = (group) => {
+			const state = group.#state;
+			return () => {
+				const closed = state.closed.peek();
+				return closed instanceof Error ? closed : undefined;
+			};
+		};
 		hooks.arriveGroup = (group, at) => {
 			group.#state.arrived = at;
 		};
