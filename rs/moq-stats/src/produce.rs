@@ -62,9 +62,9 @@ pub struct Config {
 	/// A group that returns within the linger keeps its broadcast, so a viewer
 	/// leaving and another arriving causes no unannounce and re-announce across
 	/// the mesh. While it lingers empty, every track reads `{}`. Zero
-	/// unannounces on the first drain the group is empty. Subscribers don't
-	/// count: unannouncing ends every track, held ones included. Unused at
-	/// depth `0`.
+	/// unannounces on the first drain the group is empty. Holding a stats track
+	/// doesn't count as an entry: unannouncing ends every track, held ones
+	/// included. Unused at depth `0`.
 	///
 	/// A return after the linger is a new epoch, which an aggregating reader
 	/// keeps as its own node for its grace, so a short linger on a flapping

@@ -136,9 +136,10 @@ returns within the linger keeps its broadcast and epoch, so viewer churn
 doesn't unannounce and re-announce it across the mesh, and its totals
 continue. Once the linger elapses with the group still empty, the broadcast is
 unannounced and its counters dropped; a group that returns later announces a
-new epoch counted from zero. Subscribers don't count as entries: every track
-ends with the broadcast, including presence, prefix, and requested tier tracks
-a subscriber still holds, and a reader follows the group's next announcement.
+new epoch counted from zero. Holding a stats track doesn't count as an entry:
+every track ends with the broadcast, including presence, prefix, and requested
+tier tracks a reader still holds, and the reader follows the group's next
+announcement.
 Within one epoch, group numbers keep increasing across recreated tracks and
 may have gaps.
 
