@@ -961,6 +961,68 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 	let _ = running.await;
 }
 
+/// `listen.extensions` reaches the workers' SETUP, as it does the tokio listener's.
+/// A moq-transport client's connection token reaches the decider while the relay
+/// offers MoQ Auth, and is refused as unsupported once it is turned off, since no
+/// request would carry it.
+#[tokio::test]
+async fn uring_workers_offer_the_configured_extensions() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+	let grant = || moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all.clone()));
+	for offered in [true, false] {
+		let mut config = uring_config(&cert, &key);
+		config.auth.public.clear();
+		config.listen.extensions.auth = offered;
+		let mut relay = Relay::load(config).await.unwrap().with_signals(false);
+		let port = relay.addr().unwrap().port();
+		let mut admissions = relay.admissions().expect("embedded auth");
+		let running = tokio::spawn(relay.run());
+
+		let mut dial = moq_tokio::connect::Config::default();
+		dial.tls.insecure = Some(true);
+		dial.once = Some(true);
+		dial.bind = Some("127.0.0.1:0".parse().unwrap());
+		dial.version = vec!["moq-transport-22".parse().unwrap()];
+		let client = dial.init(Default::default()).unwrap();
+		let url = format!("moql://127.0.0.1:{port}/extensions").parse().unwrap();
+		let (connection, ()) = tokio::join!(connect(client, url), async {
+			let admission = tokio::time::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+			assert!(!admission.attached(), "offered {offered}: the session arrived attached");
+			admission.grant(grant());
+		});
+
+		let auth = connection.auth();
+		let presented = tokio::time::timeout(TIMEOUT, auth.add("token"));
+		match offered {
+			true => {
+				let (token, ()) = tokio::join!(presented, async {
+					let admission = tokio::time::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+					assert!(admission.attached(), "an AUTH token arrived as a new session");
+					admission.grant(grant());
+				});
+				token.expect("the token was never answered").expect("the token was refused");
+			}
+			false => {
+				let err = presented.await.expect("the token was never answered").err();
+				assert!(
+					matches!(err, Some(moq_tokio::Error::MoqNet(moq_net::Error::Unsupported))),
+					"a token without MoQ Auth: {err:?}"
+				);
+			}
+		}
+
+		drop(connection);
+		running.abort();
+		let _ = running.await;
+	}
+}
+
 /// `listen.timeout` bounds every handshake phase from the first packet: TLS,
 /// HTTP/3 before CONNECT, and MoQ SETUP over raw QUIC and WebTransport. Each
 /// phase closes in its own error space.

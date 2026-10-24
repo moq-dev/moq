@@ -101,7 +101,6 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Receive pinning](/quest/m1/quic-receive-pinning.md) - tiny DATAGRAM or STREAM frames cannot pin moq-quic receive batches past the receive budgets
 - [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - receive leases and the connection window keep exact books, and eviction stops scanning every stream
-- [io_uring listen extensions](/quest/m1/uring-listen-extensions.md) - ring listeners offer the configured `[listen] extensions`
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly under the relay conformance profile, except cases that use a subgroup other than 0
