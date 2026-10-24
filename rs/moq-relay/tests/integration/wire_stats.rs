@@ -17,7 +17,8 @@ fn presence(registry: &Registry) -> Presence {
 }
 
 async fn wire_sources(io_uring: bool) {
-	moq_tokio::crypto::install_default().unwrap();
+	// Process-wide: another test in this binary may have installed it first.
+	let _ = moq_tokio::crypto::install_default();
 	let dir = tempfile::tempdir().unwrap();
 	let key = rcgen::KeyPair::generate().unwrap();
 	let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
@@ -34,7 +35,8 @@ async fn wire_sources(io_uring: bool) {
 	config.listen.tls.key = vec![key_path];
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config.stats.enabled = true;
-	config.stats.interval = 3600;
+	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
+	config.stats.interval = Duration::from_secs(3600);
 	config.drain_timeout = Duration::ZERO;
 	if io_uring {
 		config.runtime.workers = Some(1);
@@ -43,6 +45,7 @@ async fn wire_sources(io_uring: bool) {
 	}
 	let relay = Relay::load(config).await.unwrap().with_signals(false);
 	let addr = relay.addr().unwrap();
+	let metrics = format!("http://{}/metrics", relay.internal().addr().unwrap());
 	let registry = relay.cluster().stats.clone();
 	let trigger = relay.shutdown_trigger().clone();
 	let running = tokio::spawn(relay.run());
@@ -61,7 +64,12 @@ async fn wire_sources(io_uring: bool) {
 		let before = tokio::time::timeout(TIMEOUT, async {
 			loop {
 				let row = presence(&registry);
-				if row.active() == 1 && row.wire_tx > 0 && row.wire_rx > 0 {
+				if row.active() == 1
+					&& row.wire_tx > 0
+					&& row.wire_rx > 0
+					&& registry.snapshot().control().iter().any(|(_, class, bytes)| {
+						*class == moq_net::stats::Control::Announce && bytes.tx > 0 && bytes.rx > 0
+					}) {
 					break row;
 				}
 				tokio::task::yield_now().await;
@@ -69,6 +77,34 @@ async fn wire_sources(io_uring: bool) {
 		})
 		.await
 		.expect("admitted session has direct wire counters");
+		let body = reqwest::get(&metrics)
+			.await
+			.unwrap()
+			.error_for_status()
+			.unwrap()
+			.text()
+			.await
+			.unwrap();
+		for direction in ["tx", "rx"] {
+			let prefix = format!("moq_relay_wire_{direction}_bytes_total{{tier=\"\"}} ");
+			let total: u64 = body
+				.lines()
+				.find_map(|line| line.strip_prefix(&prefix))
+				.expect("wire metric")
+				.parse()
+				.unwrap();
+			assert!(total > 0, "live {scheme} transport must reach the ops endpoint: {body}");
+		}
+		for direction in ["tx", "rx"] {
+			let prefix = format!("moq_relay_control_{direction}_bytes_total{{tier=\"\",class=\"announce\"}} ");
+			let total: u64 = body
+				.lines()
+				.find_map(|line| line.strip_prefix(&prefix))
+				.expect("control metric")
+				.parse()
+				.unwrap();
+			assert!(total > 0, "{scheme}: {body}");
+		}
 		drop(connection);
 		let after = tokio::time::timeout(TIMEOUT, async {
 			loop {

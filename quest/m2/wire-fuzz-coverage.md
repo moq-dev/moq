@@ -28,5 +28,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [moq-net internals](/quest/m1/net-internals.md) - the session drivers these targets exercise
 - [CI cost and latency](/quest/m0/ci/README.md) - where the nightly budget lives

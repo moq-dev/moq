@@ -26,7 +26,6 @@ import {
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
-	spreadHash,
 } from "./internal.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
@@ -242,7 +241,6 @@ class CoveringRoot {
 	}
 }
 
-// pending: /quest/m1/public-model/answer.md
 /**
  * One requested path: the notify node for everything watching it.
  *
@@ -315,19 +313,17 @@ interface Candidate extends Advertised {
 }
 
 /**
- * Orders advertisements at `prefix`: the better route, then a local broadcast on a tie, then
- * fewer hops, then the lower {@link spreadHash} of the prefix, matching `route_order` in rs/moq-net.
+ * Orders advertisements at a prefix: the better route, then a local broadcast on a tie, then
+ * fewer hops. A remaining tie is left to the table's newest-first order; see
+ * {@link compareRouteCandidates}.
  */
-function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): number {
-	const order =
+function compareCandidates(a: Candidate, b: Candidate): number {
+	return (
 		compareLinks(a.route, b.route, a.preference, b.preference) ||
 		compareRoutes(a.route, b.route) ||
 		Number(b.exact) - Number(a.exact) ||
-		a.route.hops.length - b.route.hops.length;
-	if (order !== 0) return order;
-	const ha = spreadHash(prefix, a.route.hops);
-	const hb = spreadHash(prefix, b.route.hops);
-	return ha < hb ? -1 : ha > hb ? 1 : 0;
+		a.route.hops.length - b.route.hops.length
+	);
 }
 
 /**
@@ -340,12 +336,12 @@ function compareLinks(a: Route, b: Route, aPreference: Preference, bPreference: 
 }
 
 /**
- * The preferred of `entries` (newest first) for resolving `path`, not skipped: the best route,
- * then fewest hops, then the lowest {@link spreadHash}, then newest. `path` is the requested
- * path for a request, or the prefix itself for an advertisement.
+ * The preferred of `entries` (newest first, at `prefix`) for resolving `path`, not skipped:
+ * see {@link compareRouteCandidates}, then newest.
  */
 function preferredEntry(
 	path: Path.Valid,
+	prefix: Path.Valid,
 	entries: readonly RouteEntry[],
 	skip?: (entry: RouteEntry) => boolean,
 ): RouteEntry | undefined {
@@ -358,7 +354,8 @@ function preferredEntry(
 		}
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		const order = compareLinks(a, b, entry.preference, best.preference) || compareRouteCandidates(path, a, b);
+		const order =
+			compareLinks(a, b, entry.preference, best.preference) || compareRouteCandidates(path, prefix, a, b);
 		if (order < 0) best = entry;
 	}
 	return best;
@@ -513,6 +510,13 @@ class VersionedSignal<T> extends Signal<T> {
 	}
 }
 
+// Navigation belongs to relative references, resolved before publication.
+function publishPath(path: Path.Valid): void {
+	if (Path.parts(path).some((segment) => segment === "." || segment === "..")) {
+		throw new Error("broadcast path contains a navigation segment");
+	}
+}
+
 /** Reactive backing state shared by origin producers and consumers. */
 class OriginState {
 	// Both tables decouple the application producing into the origin from the
@@ -577,9 +581,9 @@ class OriginState {
 			if (list) list.push(local);
 			else out.set(path, [local]);
 		}
-		for (const [prefix, list] of out) {
+		for (const list of out.values()) {
 			// Stable, so equal routes keep the table's newest-first order.
-			if (list.length > 1) list.sort((a, b) => compareCandidates(prefix, a, b));
+			if (list.length > 1) list.sort(compareCandidates);
 		}
 		return out;
 	}
@@ -1012,6 +1016,7 @@ class OriginState {
 			if (!entries) continue;
 			const entry = preferredEntry(
 				path,
+				prefix,
 				entries,
 				(candidate) => !candidate.scope.matches(path) || (skip?.(candidate) ?? false),
 			);
@@ -1233,6 +1238,7 @@ export class Producer implements Table {
 	 */
 	createBroadcast(path: Path.Valid): broadcast.Producer {
 		path = this.#scope.path(path);
+		publishPath(path);
 		const created = this.#state.created;
 		if (!created) throw new Error("origin is closed");
 
@@ -1344,6 +1350,7 @@ export class Producer implements Table {
 
 	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Dynamic {
 		prefix = this.#scope.prefix(prefix);
+		publishPath(prefix);
 		const server = new ServeState(this.#scope.root, prefix, originated);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
@@ -2312,7 +2319,6 @@ export class Dynamic {
 	 *
 	 * @internal
 	 */
-	// pending: /quest/m1/public-model/answer.md
 	updateRoute(
 		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): void {
@@ -2444,7 +2450,6 @@ export class Request {
 	 * @throws Error when handed a broadcast a session delivered. The request stays open.
 	 * @internal
 	 */
-	// pending: /quest/m1/public-model/answer.md
 	accept(source: broadcast.Producer | broadcast.Consumer): void {
 		if (this.#done) {
 			// A withdrawn request takes no answer. Only the handed-off consumer is ours;
