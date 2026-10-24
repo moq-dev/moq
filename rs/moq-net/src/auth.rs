@@ -1113,9 +1113,9 @@ impl Issue {
 	}
 }
 
-/// A request's slot against the session's cap, shared with the application's verification
-/// of its token so work still in flight stays counted after the request ends. Opaque here:
-/// auth only keeps it alive.
+/// A request's slot in the session's count, shared with the application's verification of its
+/// token so work still in flight stays counted after the request ends. Opaque here: auth only
+/// keeps it alive.
 pub(crate) type Hold = std::sync::Arc<dyn std::any::Any + Send + Sync>;
 
 /// The serving task's hold on one peer token's [`Issue`].
@@ -1340,6 +1340,29 @@ impl RequestVerdict {
 			// Done with nothing written: the acceptor dropped the request unanswered.
 			(None, _) => Err(Error::Session(SessionError::Unauthorized).into()),
 		})
+	}
+
+	/// Withdraw the token: the peer ended its request before the acceptor answered.
+	pub(crate) fn withdraw(&self) {
+		if let Some(issue) = &self.issue {
+			issue.lock().peer.get_or_insert(Error::Cancel);
+		}
+	}
+
+	/// Poll until the acceptor lets go of a [`withdraw`](Self::withdraw)n token: at once if it
+	/// was still queued, otherwise once the application that took it answers or drops it.
+	pub(crate) fn poll_released(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let Some(issue) = &self.issue else {
+			return Poll::Ready(());
+		};
+		issue
+			.poll(waiter, |issue| {
+				match issue.taken && !issue.done && issue.outbox.is_empty() {
+					true => Poll::Pending,
+					false => Poll::Ready(()),
+				}
+			})
+			.map(drop)
 	}
 
 	/// After the first grant, poll for the acceptor's next action on this token: a
@@ -2058,6 +2081,36 @@ mod tests {
 		);
 		let _issued = request.accept(Grant::all());
 		assert_eq!(std::sync::Arc::strong_count(&slot), 1, "answered, the slot is released");
+	}
+
+	/// A withdrawn token is released at once if still queued, but one the application took
+	/// only once it answers, so the request's credit outlasts the verification it started.
+	#[test]
+	fn a_withdrawn_token_is_released_once_the_application_lets_go() {
+		let handle = Handle::new(true);
+		let mut requests = handle.requests().unwrap();
+		let token = || crate::setup::Token {
+			kind: crate::setup::Token::OUT_OF_BAND,
+			value: b"jwt".to_vec(),
+		};
+		let waiter = kio::Waiter::noop();
+
+		let queued = handle.verify_request(token(), None);
+		queued.withdraw();
+		assert!(queued.poll_released(&waiter).is_ready(), "queued, released at once");
+		assert!(
+			requests.poll_next(&waiter).is_pending(),
+			"a withdrawn token never reaches the application"
+		);
+
+		let taken = handle.verify_request(token(), None);
+		let Poll::Ready(Some(request)) = requests.poll_next(&waiter) else {
+			panic!("request token missing")
+		};
+		taken.withdraw();
+		assert!(taken.poll_released(&waiter).is_pending(), "taken, held until answered");
+		drop(request);
+		assert!(taken.poll_released(&waiter).is_ready(), "dropped, released");
 	}
 
 	/// Withdrawn tokens leave the queue as it grows, so a peer that keeps presenting and

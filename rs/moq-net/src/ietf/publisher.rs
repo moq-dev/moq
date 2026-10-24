@@ -1215,6 +1215,17 @@ where
 					})
 					.await;
 					let Some(verified) = verified else {
+						// The request keeps its stream, and so its credit, until the application
+						// lets go of the token, so a peer cancelling and resubscribing cannot leave
+						// more verifications in flight than its credit admits.
+						verdict.withdraw();
+						kio::wait(|waiter| {
+							if session.poll_closed(&mut waiter.context()).is_ready() {
+								return Poll::Ready(());
+							}
+							verdict.poll_released(waiter)
+						})
+						.await;
 						return Ok(());
 					};
 					let admitted = crate::auth::RequestGrant::new(
@@ -13409,6 +13420,51 @@ mod serve_tests {
 		assert!(
 			matches!(ended, Error::Cancel),
 			"the late answer lands nowhere: {ended:?}"
+		);
+	}
+
+	/// A peer that cancels a SUBSCRIBE whose token the application took keeps the request's
+	/// stream, and so its credit, until the application answers: cancelling and resubscribing
+	/// cannot leave more verifications in flight than the peer's credit admits.
+	#[moq_clock::test]
+	async fn a_cancelled_subscribe_keeps_its_stream_until_the_application_answers() {
+		const VERSION: Version = Version::Draft18;
+		let auth = crate::auth::Handle::new(false);
+		let mut requests = auth.requests().unwrap();
+		let h = serve_with_auth(VERSION, auth, Vec::new());
+		let stream = Stream::open(&mut h.session.clone(), VERSION).await.unwrap();
+		let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+		let mut taken = None;
+		for _ in 0..10 {
+			assert!(futures::poll!(serving.as_mut()).is_pending(), "verification is pending");
+			if taken.is_none()
+				&& let Poll::Ready(Some(request)) = requests.poll_next(&kio::Waiter::noop())
+			{
+				taken = Some(request);
+			}
+			settle().await;
+		}
+		let taken = taken.expect("the application took the token");
+
+		h.session.close(crate::lite::test_transport::Close::Reset);
+		for _ in 0..10 {
+			assert!(
+				futures::poll!(serving.as_mut()).is_pending(),
+				"the cancelled request let go of its stream before the application answered"
+			);
+			settle().await;
+		}
+		let ended = taken.closed().await;
+		assert!(
+			matches!(ended, Error::Cancel),
+			"the application sees the cancel: {ended:?}"
+		);
+
+		drop(taken.accept(crate::auth::Grant::all()));
+		let res = futures::poll!(serving.as_mut());
+		assert!(
+			matches!(res, Poll::Ready(Ok(()))),
+			"answered, the request ends: {res:?}"
 		);
 	}
 
