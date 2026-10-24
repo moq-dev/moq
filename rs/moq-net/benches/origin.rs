@@ -167,7 +167,9 @@ fn bench_withdraw(c: &mut Criterion) {
 						.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
 						.unwrap();
 					let routes: Vec<_> = (0..publishers)
-						.map(|i| moq_net::fuzz::dynamic_route(&producer, format!("room/{i}"), peer_route(9, 1)).unwrap())
+						.map(|i| {
+							moq_net::fuzz::dynamic_route(&producer, format!("room/{i}"), peer_route(9, 1)).unwrap()
+						})
 						.collect();
 					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
 					for cursor in &mut cursors {
@@ -221,10 +223,14 @@ fn bench_withdraw_wave(c: &mut Criterion) {
 							.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
 							.unwrap();
 						let near: Vec<_> = (0..broadcasts)
-							.map(|i| moq_net::fuzz::dynamic_route(&producer, format!("room/{i}"), route(&[9, 2])).unwrap())
+							.map(|i| {
+								moq_net::fuzz::dynamic_route(&producer, format!("room/{i}"), route(&[9, 2])).unwrap()
+							})
 							.collect();
 						let far: Vec<_> = (0..broadcasts)
-							.map(|i| moq_net::fuzz::dynamic_route(&producer, format!("room/{i}"), route(&[9, 3, 4])).unwrap())
+							.map(|i| {
+								moq_net::fuzz::dynamic_route(&producer, format!("room/{i}"), route(&[9, 3, 4])).unwrap()
+							})
 							.collect();
 						let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
 						for cursor in &mut cursors {
@@ -410,9 +416,12 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 			}
 
 			b.iter(|| {
-				let handle =
-					moq_net::fuzz::dynamic_route(&producer, PATH, peer_route(duplicates as u64 + 1, INCUMBENT_COST - 1))
-						.unwrap();
+				let handle = moq_net::fuzz::dynamic_route(
+					&producer,
+					PATH,
+					peer_route(duplicates as u64 + 1, INCUMBENT_COST - 1),
+				)
+				.unwrap();
 				for cursor in &mut cursors {
 					cursor.next().now_or_never().flatten().expect("announce delivered");
 				}
@@ -553,9 +562,7 @@ fn bench_serve_idle(c: &mut Criterion) {
 			let (producer, _driver) = origin::Producer::new(origin::Config::default());
 			// One route per announced path, exactly as a session lands a peer's.
 			let dynamics: Vec<_> = (0..routes)
-				.map(|i| {
-					producer.dynamic(format!(".stats/p{}/node/edge{i}", i % 8)).unwrap()
-				})
+				.map(|i| producer.dynamic(format!(".stats/p{}/node/edge{i}", i % 8)).unwrap())
 				.collect();
 			b.iter(|| {
 				// A fresh waiter per sweep, so every poll pays a real registration: a
@@ -711,7 +718,8 @@ fn bench_unroutable_churn(c: &mut Criterion) {
 						let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 						let consumer = producer.consume();
 						let server = moq_net::fuzz::dynamic_route(&producer, "room", origin::Route::default()).unwrap();
-						let unrelated = moq_net::fuzz::dynamic_route(&producer, "other", origin::Route::default()).unwrap();
+						let unrelated =
+							moq_net::fuzz::dynamic_route(&producer, "other", origin::Route::default()).unwrap();
 						let mut waiting = Waiting::new(
 							(0..requesters)
 								.map(|i| {

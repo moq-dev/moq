@@ -3462,7 +3462,9 @@ mod session_tests {
 		});
 
 		let session = follow(&element, &origin);
-		let mut old = answered.recv_timeout(Duration::from_secs(5)).expect("the claim answered");
+		let mut old = answered
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the claim answered");
 		let pad = recorder.written(&mut old, 1);
 
 		let mut new = Publisher::new(&origin, epoch(), video_rendition());
