@@ -2,9 +2,13 @@
 //!
 //! [`Control`] turns each grant from a [`bandwidth::Consumer`] into the target
 //! rate a sender should produce, so audio, video, and transcode back off the
-//! same way.
+//! same way. [`Follower`] drives it from a live grant.
 
-use std::time::Duration;
+use std::{
+	pin::Pin,
+	task::{Poll, ready},
+	time::Duration,
+};
 
 use moq_clock::Instant;
 
@@ -87,9 +91,8 @@ impl Policy {
 /// ```
 ///
 /// A raise climbs over several updates, and a grant that has settled sends no
-/// further estimate to climb on. Wake at [`deadline`](Self::deadline) and feed
-/// the latest estimate again, and report a target the sender refused with
-/// [`failed`](Self::failed).
+/// further estimate to climb on, so a sender following a live grant uses
+/// [`Follower`], which also wakes when the ramp allows the next step.
 ///
 /// The time source is a parameter rather than an [`Instant::now`] call so the
 /// policy stays pure and testable. Pass the time the estimate was observed.
@@ -139,7 +142,7 @@ impl Control {
 	/// settled.
 	///
 	/// An update at this instant with an unchanged estimate always returns a change.
-	pub fn deadline(&self) -> Option<Instant> {
+	fn deadline(&self) -> Option<Instant> {
 		self.deadline
 	}
 
@@ -220,7 +223,7 @@ impl Control {
 	/// change again no sooner than one ramp step after `now`, so a quiet grant still
 	/// retries and a sender that keeps failing is not hammered. Does nothing when the
 	/// last update returned no change.
-	pub fn failed(&mut self, now: Instant) {
+	fn failed(&mut self, now: Instant) {
 		let Some(change) = self.last.take() else { return };
 		// The old anchor too, so the retry keeps the ramp allowance it had earned,
 		// the same as a raise suppressed by the deadband.
@@ -266,6 +269,91 @@ impl Control {
 		let nanos = (u128::from(goal - target) * RAMP.as_nanos()).div_ceil(u128::from(target));
 		self.applied?
 			.checked_add(Duration::from_nanos(u64::try_from(nanos).ok()?))
+	}
+}
+
+/// Follows a bandwidth grant through a [`Control`] on the ambient clock.
+///
+/// Wakes on every change to the grant and whenever the ramp allows the next step of
+/// a raise or the retry of a refused change, so a sender climbs back to its ceiling
+/// even after the grant goes quiet.
+pub struct Follower {
+	grant: bandwidth::Consumer,
+	control: Control,
+	/// Armed at the control's deadline, created on first use.
+	timer: Option<moq_clock::Sleep>,
+	/// Feed the current grant on the next poll, after a [`restart`](Self::restart).
+	refeed: bool,
+}
+
+impl Follower {
+	/// Follow `grant` under `policy`, starting at [`Policy::max`].
+	pub fn new(grant: bandwidth::Consumer, policy: Policy) -> Self {
+		Self {
+			grant,
+			control: Control::new(policy),
+			timer: None,
+			refeed: false,
+		}
+	}
+
+	/// The policy the target follows.
+	pub fn policy(&self) -> &Policy {
+		&self.control.policy
+	}
+
+	/// Start over under `policy`, as a fresh [`Follower`] at [`Policy::max`], and feed
+	/// the current grant on the next poll.
+	pub fn restart(&mut self, policy: Policy) {
+		self.control = Control::new(policy);
+		self.refeed = true;
+	}
+
+	/// Poll for the next target the sender should produce at, or the error that
+	/// closed the grant.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<bandwidth::Rate, moq_net::Error>> {
+		loop {
+			let estimate = if std::mem::take(&mut self.refeed) {
+				self.grant.peek()
+			} else if let Poll::Ready(estimate) = self.grant.poll_changed(waiter) {
+				estimate?
+			} else {
+				// Due only when an update with the unchanged grant moves the target, so
+				// this never spins.
+				ready!(self.poll_deadline(waiter));
+				self.grant.peek()
+			};
+			if let Some(target) = self.control.update(estimate, moq_clock::now()) {
+				return Poll::Ready(Ok(target));
+			}
+		}
+	}
+
+	/// The next target the sender should produce at, or the error that closed the grant.
+	pub async fn next(&mut self) -> Result<bandwidth::Rate, moq_net::Error> {
+		kio::wait(|waiter| self.poll_next(waiter)).await
+	}
+
+	/// Take back the target [`next`](Self::next) last returned, because the sender
+	/// failed to apply it.
+	///
+	/// The previous target is restored and asked for again no sooner than one ramp
+	/// step from now, so a quiet grant still retries and a sender that keeps failing
+	/// is not hammered. Does nothing once another poll has fed the grant.
+	pub fn failed(&mut self) {
+		self.control.failed(moq_clock::now());
+	}
+
+	fn poll_deadline(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let Some(at) = self.control.deadline() else {
+			self.timer = None;
+			return Poll::Pending;
+		};
+		let timer = self.timer.get_or_insert_with(|| moq_clock::sleep_until(at));
+		if timer.deadline() != at {
+			timer.reset(at);
+		}
+		waiter.poll_future(Pin::new(timer))
 	}
 }
 
@@ -660,5 +748,66 @@ mod tests {
 		control.failed(start + Duration::from_secs(1));
 		assert_eq!(control.target(), bps(2_000_000));
 		assert_eq!(control.deadline(), None);
+	}
+
+	/// The grant recovers once and never changes again, and the sender refuses the final
+	/// raise once: the follower still wakes on its own and carries the target to the ceiling.
+	#[tokio::test(start_paused = true)]
+	async fn a_follower_recovers_a_quiet_grant() {
+		let grant = bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+
+		grant.set(Some(bps(1_000_000))).unwrap();
+		assert_eq!(follower.next().await.unwrap(), bps(1_000_000));
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		grant.set(Some(bps(4_000_000))).unwrap();
+
+		let mut applied = Vec::new();
+		let mut refused = false;
+		// A minute without a wake is far past anything the ramp still needs.
+		while let Ok(target) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+			let target = target.unwrap();
+			if target == bps(4_000_000) && !refused {
+				refused = true;
+				follower.failed();
+				continue;
+			}
+			applied.push(target);
+		}
+		assert!(refused, "the final raise was never asked for: {applied:?}");
+		assert_eq!(applied.last(), Some(&bps(4_000_000)), "{applied:?}");
+		assert!(applied.windows(2).all(|pair| pair[0] < pair[1]), "{applied:?}");
+	}
+
+	/// A restart feeds the unchanged grant through the new policy at once.
+	#[tokio::test(start_paused = true)]
+	async fn a_restart_feeds_the_current_grant() {
+		let grant = bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		grant.set(Some(bps(3_000_000))).unwrap();
+		assert_eq!(follower.next().await.unwrap(), bps(3_000_000));
+
+		follower.restart(Policy::new(bps(2_000_000)));
+		assert_eq!(follower.policy().max, bps(2_000_000));
+		// The 3 Mbps grant no longer fits under the new 2 Mbps ceiling, which is where a
+		// restart starts, so nothing moves until the grant does.
+		assert!(
+			moq_clock::timeout(Duration::from_secs(60), follower.next())
+				.await
+				.is_err()
+		);
+
+		follower.restart(Policy::new(bps(4_000_000)));
+		assert_eq!(follower.next().await.unwrap(), bps(3_000_000));
+	}
+
+	/// A closed grant ends the follower with the reason.
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_grant_ends_the_follower() {
+		let grant = bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		drop(grant);
+		assert!(follower.next().await.is_err());
 	}
 }

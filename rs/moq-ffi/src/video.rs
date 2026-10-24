@@ -694,19 +694,19 @@ fn spawn_follow(
 /// encoder. Retires on [`BitrateUnsupported`](moq_video::Error::BitrateUnsupported).
 async fn follow_reservation(
 	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
-	mut consumer: moq_net::bandwidth::Consumer,
+	consumer: moq_net::bandwidth::Consumer,
 	ceiling: moq_net::bandwidth::Rate,
 	applied: Arc<AtomicU64>,
 ) {
-	let mut follower = Follower::new(ceiling);
-	while let Some(estimate) = next_grant(&mut consumer, follower.deadline()).await {
+	let mut follower = moq_mux::rate::Follower::new(consumer, moq_mux::rate::Policy::new(ceiling));
+	while let Ok(bitrate) = follower.next().await {
 		let mut guard = inner.lock().unwrap();
 		let Some(producer) = guard.as_mut() else {
 			return;
 		};
 		let ceiling = producer.ceiling;
-		let retune = |bitrate| block_on(producer.encoder.set_bitrate(bitrate));
-		match follower.step(ceiling, estimate, moq_clock::now(), retune) {
+		let set = |bitrate| block_on(producer.encoder.set_bitrate(bitrate));
+		match retune(&mut follower, ceiling, bitrate, set) {
 			Ok(Some(bitrate)) => applied.store(bitrate.as_bps(), Ordering::SeqCst),
 			Ok(None) => {}
 			Err(_) => return,
@@ -714,76 +714,35 @@ async fn follow_reservation(
 	}
 }
 
-/// The next grant, or the current one again at `deadline`; `None` once the grant
-/// is gone for good.
-async fn next_grant(
-	consumer: &mut moq_net::bandwidth::Consumer,
-	deadline: Option<moq_clock::Instant>,
-) -> Option<Option<moq_net::bandwidth::Rate>> {
-	// A raise climbs over several updates, and a settled grant sends no change to
-	// climb on.
-	if let Some(at) = deadline {
-		tokio::select! {
-			estimate = consumer.changed() => return estimate.ok(),
-			() = moq_clock::sleep_until(at) => {}
-		}
-		return Some(consumer.peek());
-	}
-	consumer.changed().await.ok()
-}
-
-/// The grant policy for one encoder, restarted at the manual ceiling whenever
-/// [`MoqVideoProducer::set_bitrate`] moves it.
-struct Follower {
+/// Retune through `set` to the follower's next `bitrate`, unless the manual `ceiling`
+/// moved since it was asked for: then restart the follower under the new ceiling,
+/// which `MoqVideoProducer::set_bitrate` already applied. Returns the bitrate applied, or `Err` with the
+/// name of an encoder that cannot follow at all.
+fn retune(
+	follower: &mut moq_mux::rate::Follower,
 	ceiling: moq_net::bandwidth::Rate,
-	control: moq_mux::rate::Control,
-}
-
-impl Follower {
-	fn new(ceiling: moq_net::bandwidth::Rate) -> Self {
-		Self {
-			ceiling,
-			control: moq_mux::rate::Control::new(moq_mux::rate::Policy::new(ceiling)),
-		}
+	bitrate: moq_net::bandwidth::Rate,
+	set: impl FnOnce(moq_net::bandwidth::Rate) -> Result<(), moq_video::Error>,
+) -> Result<Option<moq_net::bandwidth::Rate>, &'static str> {
+	if ceiling != follower.policy().max {
+		follower.restart(moq_mux::rate::Policy::new(ceiling));
+		return Ok(None);
 	}
-
-	/// When to feed the current grant again, even if it has not changed.
-	fn deadline(&self) -> Option<moq_clock::Instant> {
-		self.control.deadline()
-	}
-
-	/// Feed `estimate` through the policy under `ceiling`, retuning through `retune`
-	/// when the target moves. Returns the bitrate applied, or `Err` with the name of
-	/// an encoder that cannot follow at all.
-	fn step(
-		&mut self,
-		ceiling: moq_net::bandwidth::Rate,
-		estimate: Option<moq_net::bandwidth::Rate>,
-		now: moq_clock::Instant,
-		retune: impl FnOnce(moq_net::bandwidth::Rate) -> Result<(), moq_video::Error>,
-	) -> Result<Option<moq_net::bandwidth::Rate>, &'static str> {
-		if ceiling != self.ceiling {
-			*self = Self::new(ceiling);
+	match set(bitrate) {
+		Ok(()) => {
+			tracing::debug!(bitrate = bitrate.as_bps(), "adjusted encoder bitrate");
+			Ok(Some(bitrate))
 		}
-		let Some(bitrate) = self.control.update(estimate, now) else {
-			return Ok(None);
-		};
-		match retune(bitrate) {
-			Ok(()) => {
-				tracing::debug!(bitrate = bitrate.as_bps(), "adjusted encoder bitrate");
-				Ok(Some(bitrate))
-			}
-			Err(moq_video::Error::BitrateUnsupported(name)) => {
-				tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
-				Err(name)
-			}
-			// The policy takes the target back and retries it at its deadline, so a
-			// quiet grant still recovers.
-			Err(err) => {
-				tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "failed to adjust encoder bitrate");
-				self.control.failed(now);
-				Ok(None)
-			}
+		Err(moq_video::Error::BitrateUnsupported(name)) => {
+			tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
+			Err(name)
+		}
+		// The follower takes the target back and retries it, so a quiet grant still
+		// recovers.
+		Err(err) => {
+			tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "failed to adjust encoder bitrate");
+			follower.failed();
+			Ok(None)
 		}
 	}
 }
@@ -1180,33 +1139,28 @@ mod finish_tests {
 mod follow_tests {
 	use std::time::Duration;
 
+	use moq_mux::rate::{Follower, Policy};
 	use moq_net::bandwidth::Rate;
 
 	use super::*;
 
-	/// Feed `estimate` unchanged at every deadline until the follower settles.
-	fn quiet(
-		follower: &mut Follower,
-		ceiling: Rate,
-		estimate: Rate,
-		retune: &mut impl FnMut(Rate) -> Result<(), moq_video::Error>,
-	) {
-		for _ in 0..1_000 {
-			let Some(at) = follower.deadline() else { return };
-			follower.step(ceiling, Some(estimate), at, &mut *retune).unwrap();
+	/// Retune at every target until the follower goes a minute without one.
+	async fn quiet(follower: &mut Follower, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
+		while let Ok(bitrate) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+			retune(follower, ceiling, bitrate.unwrap(), &mut set).unwrap();
 		}
-		panic!("the deadline never settled");
 	}
 
 	/// The grant recovers once and never changes again, and the final raise fails once:
-	/// the deadline alone still carries the encoder back to its ceiling.
-	#[test]
-	fn a_quiet_grant_retries_a_failed_raise() {
+	/// the follower still carries the encoder back to its ceiling.
+	#[tokio::test(start_paused = true)]
+	async fn a_quiet_grant_retries_a_failed_raise() {
 		let ceiling = Rate::from_mbps(4);
-		let mut follower = Follower::new(ceiling);
+		let grant = moq_net::bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), Policy::new(ceiling));
 		let mut applied = Vec::new();
 		let mut refuse = Some(ceiling);
-		let mut retune = |bitrate| {
+		let mut set = |bitrate| {
 			if refuse.take_if(|refused| *refused == bitrate).is_some() {
 				return Err(moq_video::Error::Unsupported("a transient refusal".into()));
 			}
@@ -1214,57 +1168,57 @@ mod follow_tests {
 			Ok(())
 		};
 
-		let start = moq_clock::now();
-		follower
-			.step(ceiling, Some(Rate::from_mbps(1)), start, &mut retune)
-			.unwrap();
-		follower
-			.step(ceiling, Some(ceiling), start + Duration::from_secs(1), &mut retune)
-			.unwrap();
-		quiet(&mut follower, ceiling, ceiling, &mut retune);
+		grant.set(Some(Rate::from_mbps(1))).unwrap();
+		let bitrate = follower.next().await.unwrap();
+		retune(&mut follower, ceiling, bitrate, &mut set).unwrap();
+		tokio::time::advance(Duration::from_secs(1)).await;
+		grant.set(Some(ceiling)).unwrap();
+		quiet(&mut follower, ceiling, &mut set).await;
 
 		assert_eq!(refuse, None, "the final raise was never refused");
 		assert_eq!(applied.last(), Some(&ceiling), "{applied:?}");
 	}
 
-	/// `set_bitrate` lowers the ceiling while a raise toward the old one is due. The
-	/// follower reads the ceiling under the encoder lock, so the deadline sees the new
-	/// cap and never retunes above it.
-	#[test]
-	fn a_lowered_ceiling_beats_a_due_deadline() {
+	/// `set_bitrate` lowers the ceiling while a raise toward the old one is
+	/// due. The ceiling is read under the encoder lock, so the raise is dropped rather
+	/// than retuning above the new cap, and the encoder recovers to the new cap.
+	#[tokio::test(start_paused = true)]
+	async fn a_lowered_ceiling_beats_a_due_raise() {
 		let old = Rate::from_mbps(4);
 		let lowered = Rate::from_mbps(2);
-		let mut follower = Follower::new(old);
-		let mut applied = Vec::new();
-		let mut retune = |bitrate| {
-			applied.push(bitrate);
+		let grant = moq_net::bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), Policy::new(old));
+		let applied = std::cell::RefCell::new(Vec::new());
+		let set = |bitrate| {
+			applied.borrow_mut().push(bitrate);
 			Ok(())
 		};
 
-		let start = moq_clock::now();
-		follower
-			.step(old, Some(Rate::from_mbps(1)), start, &mut retune)
-			.unwrap();
-		follower
-			.step(old, Some(old), start + Duration::from_secs(1), &mut retune)
-			.unwrap();
-		let due = follower.deadline().expect("a raise toward the old ceiling");
+		grant.set(Some(Rate::from_mbps(1))).unwrap();
+		assert_eq!(follower.next().await.unwrap(), Rate::from_mbps(1));
+		tokio::time::advance(Duration::from_secs(1)).await;
+		grant.set(Some(old)).unwrap();
+		let first = follower.next().await.unwrap();
+		retune(&mut follower, old, first, set).unwrap();
 
 		// `set_bitrate` already retuned the encoder to the new cap.
-		assert_eq!(follower.step(lowered, Some(old), due, &mut retune), Ok(None));
-		assert_eq!(follower.deadline(), None);
+		let due = follower.next().await.unwrap();
+		assert!(due > first, "a raise toward the old ceiling");
+		assert_eq!(retune(&mut follower, lowered, due, set), Ok(None));
+		assert_eq!(follower.policy().max, lowered);
+		quiet(&mut follower, lowered, set).await;
+		assert_eq!(*applied.borrow(), [first], "nothing retuned past the new cap");
 
 		// A later attack and recovery climbs back to the new cap, not the old one.
-		let later = due + Duration::from_secs(1);
-		follower
-			.step(lowered, Some(Rate::from_mbps(1)), later, &mut retune)
-			.unwrap();
-		follower
-			.step(lowered, Some(old), later + Duration::from_secs(1), &mut retune)
-			.unwrap();
-		quiet(&mut follower, lowered, old, &mut retune);
+		grant.set(Some(Rate::from_mbps(1))).unwrap();
+		let bitrate = follower.next().await.unwrap();
+		retune(&mut follower, lowered, bitrate, set).unwrap();
+		tokio::time::advance(Duration::from_secs(1)).await;
+		grant.set(Some(old)).unwrap();
+		quiet(&mut follower, lowered, set).await;
 
+		let applied = applied.into_inner();
 		assert_eq!(applied.last(), Some(&lowered), "{applied:?}");
-		assert!(applied[2..].iter().all(|bitrate| *bitrate <= lowered), "{applied:?}");
+		assert!(applied.iter().all(|bitrate| *bitrate <= lowered), "{applied:?}");
 	}
 }

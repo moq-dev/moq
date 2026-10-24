@@ -569,58 +569,41 @@ impl CaptureSource for DeviceSource {
 	}
 }
 
-/// The live rate control state: the estimate source paired with the policy tracking
-/// it. `None` once it has *retired*, which is the only thing absence means now that
-/// every encoder has a share to read: an allocator with nothing to divide grants
-/// `None` rather than being absent. Retiring stops the `select!` arm from spinning on
-/// a channel that is permanently ready.
+/// The live rate control state. `None` once it has *retired*, which is the only
+/// thing absence means now that every encoder has a share to read: an allocator
+/// with nothing to divide grants `None` rather than being absent. Retiring stops
+/// the `select!` arm from spinning on a channel that is permanently ready.
 #[cfg(feature = "capture")]
-type RateControl = Option<(moq_net::bandwidth::Consumer, rate::Control)>;
+type RateControl = Option<rate::Follower>;
 
-/// Wait for the next bandwidth estimate, or for the policy's deadline to feed the
-/// current one again, or forever when rate control is off or finished.
+/// Wait for the next target bitrate, or forever when rate control is off or finished.
 ///
-/// Cancel-safe: [`Consumer::changed`](moq_net::bandwidth::Consumer::changed)
-/// only reads shared state, so losing this race to a frame drops no estimate,
-/// it just re-reads the latest one next time round.
+/// Cancel-safe: [`Follower::poll_next`](rate::Follower::poll_next) keeps its state in
+/// the follower, so losing this race to a frame drops no target.
 #[cfg(feature = "capture")]
-async fn next_estimate(rate: &mut RateControl) -> Option<Option<moq_net::bandwidth::Rate>> {
-	// Retired: park this arm forever so `select!` ignores it.
-	let Some((bandwidth, control)) = rate else {
-		return std::future::pending().await;
-	};
-	// A raise climbs over several updates, and a settled grant sends no change
-	// to climb on.
-	if let Some(at) = control.deadline() {
-		tokio::select! {
-			estimate = bandwidth.changed() => return estimate.ok(),
-			() = moq_net::time::sleep_until(at) => {}
-		}
-		return Some(bandwidth.peek());
+async fn next_target(rate: &mut RateControl) -> Result<moq_net::bandwidth::Rate, moq_net::Error> {
+	match rate {
+		Some(follower) => follower.next().await,
+		// Retired: park this arm forever so `select!` ignores it.
+		None => std::future::pending().await,
 	}
-	bandwidth.changed().await.ok()
 }
 
-/// Feed an estimate through the policy and retune the encoder if it moved.
+/// Retune the encoder to the next target.
 ///
-/// `None` means the producer is gone (the session ended for good), so rate
-/// control retires; a `Some(None)` estimate means the value is merely
-/// unavailable right now, which the policy holds through.
+/// An error means the grant is gone (the session ended for good), so rate control
+/// retires and the encoder holds its current bitrate.
 #[cfg(feature = "capture")]
-async fn apply_estimate(
+async fn apply_target(
 	encoder: &mut Sink,
 	rate: &mut RateControl,
-	estimate: Option<Option<moq_net::bandwidth::Rate>>,
+	target: Result<moq_net::bandwidth::Rate, moq_net::Error>,
 ) {
-	let Some((_, control)) = rate.as_mut() else { return };
+	let Some(follower) = rate.as_mut() else { return };
 
-	let Some(estimate) = estimate else {
+	let Ok(bitrate) = target else {
 		tracing::debug!("bandwidth estimate ended; holding the current encoder bitrate");
 		*rate = None;
-		return;
-	};
-
-	let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
 		return;
 	};
 
@@ -633,11 +616,11 @@ async fn apply_estimate(
 			tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
 			*rate = None;
 		}
-		// A transient failure: the policy takes the target back and retries it at
-		// its deadline, so a quiet grant still recovers.
+		// A transient failure: the follower takes the target back and retries it,
+		// so a quiet grant still recovers.
 		Err(err) => {
 			tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "failed to adjust encoder bitrate");
-			control.failed(moq_net::time::now());
+			follower.failed();
 		}
 	}
 }
@@ -788,7 +771,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		// so the policy's ceiling is that rate and the target starts there. A
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
-		let mut rate = Some((reservation.consumer(), rate::Control::new(rate::Policy::new(ceiling))));
+		let mut rate = Some(rate::Follower::new(reservation.consumer(), rate::Policy::new(ceiling)));
 		// Per encoder, since a fresh one opens with a keyframe that serves every earlier ask.
 		let mut forced = Cuts::new(served);
 
@@ -807,8 +790,8 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 				}
 				// Retune between frames rather than mid-encode, and only when
 				// the policy says the target actually moved.
-				estimate = next_estimate(&mut rate) => {
-					apply_estimate(&mut encoder, &mut rate, estimate).await;
+				target = next_target(&mut rate) => {
+					apply_target(&mut encoder, &mut rate, target).await;
 					continue;
 				}
 				// A read error is terminal for this selection (the source is gone
@@ -1943,11 +1926,11 @@ mod tests {
 			let mut sink = Sink::open(&config).await.unwrap();
 
 			let estimate = moq_net::bandwidth::Producer::new();
-			let mut rate = Some((estimate.consume(), rate::Control::new(rate::Policy::new(ceiling))));
+			let mut rate = Some(rate::Follower::new(estimate.consume(), rate::Policy::new(ceiling)));
 
 			estimate.set(Some(Rate::from_mbps(1))).unwrap();
-			let next = next_estimate(&mut rate).await;
-			apply_estimate(&mut sink, &mut rate, next).await;
+			let next = next_target(&mut rate).await;
+			apply_target(&mut sink, &mut rate, next).await;
 
 			// The last grant change: the link recovers a second later.
 			tokio::time::advance(Duration::from_secs(1)).await;
@@ -1955,8 +1938,8 @@ mod tests {
 			probe::refuse_once(ceiling.as_bps());
 
 			// A minute without a wake is far past anything the ramp still needs.
-			while let Ok(next) = moq_clock::timeout(Duration::from_secs(60), next_estimate(&mut rate)).await {
-				apply_estimate(&mut sink, &mut rate, next).await;
+			while let Ok(next) = moq_clock::timeout(Duration::from_secs(60), next_target(&mut rate)).await {
+				apply_target(&mut sink, &mut rate, next).await;
 			}
 			let bitrates = probe::bitrates();
 			assert_eq!(bitrates.first(), Some(&1_000_000), "{bitrates:?}");
@@ -1971,8 +1954,7 @@ mod tests {
 					.filter(|(event, _)| *event == "set_bitrate")
 					.count() > bitrates.len()
 			);
-			let (_, control) = rate.expect("a transient failure keeps rate control running");
-			assert_eq!(control.deadline(), None, "settled at the ceiling");
+			assert!(rate.is_some(), "a transient failure keeps rate control running");
 		}
 	}
 }

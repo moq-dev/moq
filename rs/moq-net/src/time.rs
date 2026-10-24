@@ -4,9 +4,6 @@
 
 pub(crate) use moq_clock::{Deadline, Deadlines};
 pub use moq_clock::{Instant, now};
-// Without `async` moq-clock has no runtime, and its timers panic.
-#[cfg(feature = "async")]
-pub use moq_clock::sleep_until;
 
 use crate::Error;
 
