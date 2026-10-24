@@ -83,21 +83,24 @@ impl PeerSetup {
 		}
 	}
 
-	/// Await the peer's SETUP.
+	/// Poll for the peer's SETUP.
 	///
-	/// The peer MUST send exactly one, so this resolves once that stream is read. Waits
+	/// The peer MUST send exactly one, so this is ready once that stream is read. Pending
 	/// forever if it never does; the caller is a session task, cancelled when the driver
 	/// drops.
 	#[cfg(feature = "async")]
+	pub fn poll_get(&self, waiter: &kio::Waiter) -> std::task::Poll<Peer> {
+		let slot = std::task::ready!(self.slot.poll(waiter, |peer| match peer.is_some() {
+			true => std::task::Poll::Ready(()),
+			false => std::task::Poll::Pending,
+		}));
+		std::task::Poll::Ready((*slot).expect("polled for Some"))
+	}
+
+	/// Await the peer's SETUP; see [`Self::poll_get`].
+	#[cfg(feature = "async")]
 	pub async fn get(&self) -> Peer {
-		let slot = self
-			.slot
-			.wait(|peer| match peer.is_some() {
-				true => std::task::Poll::Ready(()),
-				false => std::task::Poll::Pending,
-			})
-			.await;
-		(*slot).expect("waited for Some")
+		kio::wait(|waiter| self.poll_get(waiter)).await
 	}
 }
 

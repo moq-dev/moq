@@ -796,11 +796,16 @@ impl Publisher {
 	///
 	/// Blocks until the peer's SETUP arrives, because the extension changes the NAMESPACE
 	/// encoding: nothing can be advertised until we know whether the peer speaks it.
-	async fn peer(&self) -> cluster::Peer {
+	fn poll_peer(&self, waiter: &kio::Waiter) -> Poll<cluster::Peer> {
 		match cluster::supported(self.version) {
-			true => self.peer_setup.get().await.cluster,
-			false => cluster::Peer::default(),
+			true => self.peer_setup.poll_get(waiter).map(|peer| peer.cluster),
+			false => Poll::Ready(cluster::Peer::default()),
 		}
+	}
+
+	/// Await [`Self::poll_peer`].
+	async fn peer(&self) -> cluster::Peer {
+		kio::wait(|waiter| self.poll_peer(waiter)).await
 	}
 
 	/// Whether the peer requires advertisements to be solicited, from the same SETUP.
@@ -817,8 +822,13 @@ impl Publisher {
 	///
 	/// The same exclusion the announce path applies (see [`Self::select`]), which is what
 	/// keeps advertised paths truthful and prevents subscription cycles of any length.
+	fn poll_serving_origin(&self, waiter: &kio::Waiter) -> Poll<origin::Consumer> {
+		self.poll_peer(waiter).map(|peer| self.excluding(&peer))
+	}
+
+	/// Await [`Self::poll_serving_origin`].
 	pub(super) async fn serving_origin(&self) -> origin::Consumer {
-		self.excluding(&self.peer().await)
+		kio::wait(|waiter| self.poll_serving_origin(waiter)).await
 	}
 
 	/// Our origin handle with [`Self::exclude`] applied, the view both the data plane
@@ -1208,14 +1218,9 @@ impl Publisher {
 				Some(token) => {
 					let verdict = gate.verify(token, Some(slot.clone()));
 					// The subscriber cancelling or the session closing withdraws the token.
-					let mut session = self.session.clone();
-					let verified = kio::wait(|waiter| {
-						if self.poll_withdrawn(&mut session, &mut stream, waiter).is_ready() {
-							return Poll::Ready(None);
-						}
-						verdict.poll_grant(waiter).map(Some)
-					})
-					.await;
+					let verified = self
+						.until_withdrawn(&mut stream, |waiter| verdict.poll_grant(waiter))
+						.await;
 					let Some(verified) = verified else {
 						drop((verdict, slot));
 						self.released(&credit).await;
@@ -1255,37 +1260,41 @@ impl Publisher {
 					// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
 					// the model, through the tagged `origin::Consumer` the broadcast resolves from.
 
-					let setup = async {
-						let refused = |err: Error, resolved| {
-							Subscribed::Refused(err.to_string(), rendezvous_error(err, rendezvous, resolved))
-						};
-						// We just received a subscribe for this exact namespace, so the peer must
-						// have already seen the announcement. `request_broadcast` resolves it
-						// immediately, or falls back to the route covering it (an
-						// `origin::Dynamic`), if any. Pinned to the instance it names, if any:
-						// another is refused, never served.
-						let broadcast = self
-							.serving_origin()
-							.await
-							.request_broadcast(&msg.track_namespace, msg.epoch.clone())
-							.await
-							// The reason is the origin's, not ours: a dynamic router refusing on
-							// authorization or a drain says so, and only an unroutable path means
-							// the broadcast is not here.
-							.map_err(|err| refused(err, false))?;
-						let track = broadcast.track(&msg.track_name).map_err(|err| refused(err, true))?;
-						let (track_serve, edge) = self
-							.subscribe_track(&track, &msg)
-							.await
-							.map_err(|err| refused(err, true))?;
-						Ok((broadcast, track, track_serve, edge))
+					let refused = |err: Error, resolved| {
+						Ok(Subscribed::Refused(
+							err.to_string(),
+							rendezvous_error(err, rendezvous, resolved),
+						))
 					};
-					// A producer may never answer, so the subscriber withdrawing gives back the
-					// demand and the slot at once rather than once it does.
-					let (broadcast, track, mut track_serve, edge) = match self.until_withdrawn(&mut stream, setup).await
-					{
-						Some(Ok(setup)) => setup,
-						Some(Err(refused)) => return Ok(refused),
+					// A producer may never answer, so each setup step ends once the subscriber
+					// withdraws the request, giving back the demand and the slot at once.
+					let Some(origin) = self
+						.until_withdrawn(&mut stream, |waiter| self.poll_serving_origin(waiter))
+						.await
+					else {
+						return Ok(Subscribed::Withdrawn);
+					};
+					// We just received a subscribe for this exact namespace, so the peer must have
+					// already seen the announcement. `request_broadcast` resolves it immediately, or
+					// falls back to the route covering it (an `origin::Dynamic`), if any. Pinned to
+					// the instance it names, if any: another is refused, never served.
+					let requesting = origin.request_broadcast(&msg.track_namespace, msg.epoch.clone());
+					let broadcast = match self.until_withdrawn(&mut stream, |waiter| requesting.poll_ok(waiter)).await {
+						Some(Ok(broadcast)) => broadcast,
+						// The reason is the origin's, not ours: a dynamic router refusing on
+						// authorization or a drain says so, and only an unroutable path means the
+						// broadcast is not here.
+						Some(Err(err)) => return refused(err, false),
+						None => return Ok(Subscribed::Withdrawn),
+					};
+					drop(requesting);
+					let track = match broadcast.track(&msg.track_name) {
+						Ok(track) => track,
+						Err(err) => return refused(err, true),
+					};
+					let (mut track_serve, edge) = match self.subscribe_track(&mut stream, &track, &msg).await {
+						Some(Ok(subscribed)) => subscribed,
+						Some(Err(err)) => return refused(err, true),
 						None => return Ok(Subscribed::Withdrawn),
 					};
 					let cache = track;
@@ -1414,13 +1423,15 @@ impl Publisher {
 								return Ok(Subscribed::Served(served, opened.load(Ordering::Relaxed)));
 							}
 						};
-						let resume_setup = async {
-							let track = broadcast.track(&msg.track_name)?;
-							let (serve, edge) = self.subscribe_track(&track, &msg).await?;
-							Ok::<_, Error>((serve, edge, track))
+						let resumed = match broadcast.track(&msg.track_name) {
+							Ok(track) => self
+								.subscribe_track(&mut stream, &track, &msg)
+								.await
+								.map(|subscribed| subscribed.map(|(serve, edge)| (serve, edge, track))),
+							Err(err) => Some(Err(err)),
 						};
 						// Withdrawn mid-setup, it ends as it would have while paused.
-						let Some(resumed) = self.until_withdrawn(&mut stream, resume_setup).await else {
+						let Some(resumed) = resumed else {
 							return Ok(Subscribed::Served(
 								Served::Track(Ok(())),
 								opened.load(Ordering::Relaxed),
@@ -1534,22 +1545,18 @@ impl Publisher {
 		super::request_stream::poll_withdrawn(stream, self.version, &mut cx)
 	}
 
-	/// Run `step` of a request's setup, or `None` once [`Self::poll_withdrawn`] is ready.
-	///
-	/// The setup's steps (the peer's routes, a broadcast's resolution, a track's subscription)
-	/// are async, so this races a future rather than a poll.
+	/// Poll `step` of a request's setup until ready, or `None` once [`Self::poll_withdrawn`] is.
 	async fn until_withdrawn<T>(
 		&self,
 		stream: &mut Stream<Transport, Version>,
-		step: impl std::future::Future<Output = T>,
+		mut step: impl FnMut(&kio::Waiter) -> Poll<T>,
 	) -> Option<T> {
-		let mut step = std::pin::pin!(step);
 		let mut session = self.session.clone();
 		kio::wait(|waiter| {
 			if self.poll_withdrawn(&mut session, stream, waiter).is_ready() {
 				return Poll::Ready(None);
 			}
-			waiter.poll_future(step.as_mut()).map(Some)
+			step(waiter).map(Some)
 		})
 		.await
 	}
@@ -1803,12 +1810,15 @@ impl Publisher {
 	}
 
 	/// Subscribe to `track` as `msg` asks, resolving its filter at the live edge, as a
-	/// SUBSCRIBE does and each resume of one does again.
+	/// SUBSCRIBE does and each resume of one does again. `None` once the subscriber withdraws
+	/// the request on `stream`, since the producer may never answer.
 	async fn subscribe_track(
 		&self,
+		stream: &mut Stream<Transport, Version>,
 		track: &crate::track::Consumer,
 		msg: &ietf::Subscribe<'_>,
-	) -> Result<(TrackServe, LiveEdge), Error> {
+	) -> Option<Result<(TrackServe, LiveEdge), Error>> {
+		let declared = self.until_withdrawn(stream, |waiter| self.peer_setup.poll_get(waiter)).await?;
 		// A live SUBSCRIBE's NEW_GROUP_REQUEST asks nothing more: subscribing is itself a join,
 		// which the track's refresh ratio judges.
 		let mut subscription = serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
@@ -1832,11 +1842,16 @@ impl Publisher {
 		// becomes readable once the subscription's demand attaches a route, so the edge snapshot
 		// has to come after. The resolved range is applied to the preference right below, before
 		// anything is served.
-		let mut subscribed = track.subscribe(subscription.clone()).await?;
+		let subscribing = track.subscribe(subscription.clone());
+		let mut subscribed = match self.until_withdrawn(stream, |waiter| subscribing.poll_ok(waiter)).await? {
+			Ok(subscribed) => subscribed,
+			Err(err) => return Some(Err(err)),
+		};
+		drop(subscribing);
 
 		// A relay's copy that went idle cannot say where its live edge is until its route
 		// answers again; answering from its cache would advertise a stale one.
-		kio::wait(|waiter| subscribed.poll_live(waiter)).await;
+		self.until_withdrawn(stream, |waiter| subscribed.poll_live(waiter)).await?;
 
 		// The filter and any fill are relative to the live edge, so snapshot it once: the fill
 		// ends exactly where a Next Object subscription begins, which is what lets the draft's
@@ -1861,7 +1876,7 @@ impl Publisher {
 			range,
 			timescale,
 		)
-		.compression(self.peer_setup.get().await.flate)
+		.compression(declared.flate)
 		.ranked(self.priority.clone());
 		// A fixed start is no join, so its NEW_GROUP_REQUEST asks as an update's would.
 		if fixed.start.is_some()
@@ -1869,7 +1884,7 @@ impl Publisher {
 		{
 			serve.request_new_group(value);
 		}
-		Ok((serve, edge))
+		Some(Ok((serve, edge)))
 	}
 
 	/// Hold a paused SUBSCRIBE, answering its updates, until one resumes it: the Request ID of
