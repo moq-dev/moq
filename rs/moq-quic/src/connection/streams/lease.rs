@@ -161,13 +161,21 @@ impl Leased {
         self.ranked
     }
 
-    /// Note that data arrived, waking a waiting reader, and return the stream's rank if it is
-    /// not ranked yet.
+    /// Note that data arrived, waking a waiting reader, and return the stream's rank if it was
+    /// leased but is not ranked yet.
     pub(super) fn arrived(&mut self, id: StreamId) -> Option<Rank> {
         if self.want.take().is_some() {
             self.ready = true;
         }
-        (!std::mem::replace(&mut self.ranked, true)).then(|| self.rank(id))
+        self.rank_once(id)
+    }
+
+    /// Mark a leased stream ranked, returning its rank if it was not already.
+    ///
+    /// A stream never leased is never a candidate: data its reader has not looked at holds
+    /// eviction off, and without any it holds no credit. So plain reads pay nothing here.
+    fn rank_once(&mut self, id: StreamId) -> Option<Rank> {
+        (self.filled && !std::mem::replace(&mut self.ranked, true)).then(|| self.rank(id))
     }
 
     /// Move what `assembler` holds in order into the lease, returning how many bytes.
@@ -371,6 +379,9 @@ impl RecvStream<'_> {
         }
         self.state.unlooked.remove(&self.id);
         self.state.held += recv.lease.fill(&mut recv.assembler);
+        if recv.unread_credit() + recv.lease.held > 0 {
+            self.state.ranks.extend(recv.lease.rank_once(self.id));
+        }
         if recv.lease.end.is_none() {
             recv.lease.end = match recv.reset_code() {
                 Some(code) => Some(End::Reset(code)),
@@ -551,7 +562,7 @@ impl StreamsState {
     }
 
     /// Assert that the lease books balance: [`Self::held`] and [`Self::evicted_held`] sum the
-    /// leases, and every stream holding credit is ranked.
+    /// leases, and every leased stream holding credit is ranked.
     #[cfg(any(test, feature = "fuzz"))]
     pub(crate) fn check_leases(&self) {
         let (mut held, mut evicted_held, mut ranked) = (0, 0, 0);
@@ -566,7 +577,7 @@ impl StreamsState {
             }
             assert_eq!(lease.ranked, self.ranks.contains(&lease.rank(id)), "{id}");
             ranked += usize::from(lease.ranked);
-            if !recv.stopped && recv.unread_credit() + lease.held > 0 {
+            if lease.filled && !recv.stopped && recv.unread_credit() + lease.held > 0 {
                 assert!(lease.ranked, "{id} holds credit unranked");
             }
         }

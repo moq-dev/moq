@@ -55,7 +55,7 @@ symbol stripping. Prefix direct calls with
   written, and finishes only at the length the writer finished at. Every datagram
   carries a sequence number and arrives intact, at most once. After every op, the
   credit each side's receive leases hold sums to what the connection counts as held,
-  and every stream holding credit is ranked for eviction. The network drains at the
+  and every leased stream holding credit is ranked for eviction. The network drains at the
   end, so whatever is still in flight is checked too.
 
   Both sides run `fuzz::Plaintext`, crypto with no TLS and no packet protection, so a

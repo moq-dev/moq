@@ -149,8 +149,9 @@ impl RecvStream<'_> {
 
     /// Stop accepting data on the given receive stream
     ///
-    /// Discards unread data and notifies the peer to stop transmitting. Once stopped, further
-    /// attempts to operate on a stream will yield `ClosedStream` errors.
+    /// Discards unread and leased data, returning its credit, and notifies the peer to stop
+    /// transmitting. Once stopped, further attempts to operate on a stream will yield
+    /// `ClosedStream` errors.
     pub fn stop(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
         let hash_map::Entry::Occupied(mut entry) = self.state.recv.entry(self.id) else {
             return Err(ClosedStream { _private: () });

@@ -146,8 +146,8 @@ pub(crate) struct StreamsState {
     /// Bytes leased from receive streams, taken or not, whose connection credit the application
     /// has not released yet
     pub(super) held: u64,
-    /// Receive streams that may hold connection credit, in eviction order: every such stream,
-    /// and possibly some that no longer do, dropped as the stuck pass reaches them
+    /// Leased receive streams that may hold connection credit, in eviction order: every such
+    /// stream, and possibly some that no longer do, dropped as the stuck pass reaches them
     pub(super) ranks: BTreeSet<Rank>,
     /// Streams evicted to free a stuck receive window, ever
     pub(super) evicted: u64,
@@ -3825,8 +3825,8 @@ mod tests {
     }
 
     /// A peer can spend the window across many streams before any reader looks, so every reader
-    /// then waits on a stuck window. Each wait checks it in constant time, and only the last
-    /// pays one scan of every stream, so a hostile peer cannot make the stuck check quadratic.
+    /// then waits on a stuck window. Each wait checks it in amortized constant time, so a hostile
+    /// peer cannot make the stuck check quadratic.
     #[test]
     fn stuck_check_stays_linear() {
         const STREAMS: u64 = 512;
