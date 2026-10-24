@@ -22,6 +22,7 @@ pub struct Client {
 	peer_hop: Option<crate::Hop>,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
+	auth: Option<crate::auth::Handle>,
 	bandwidth: Option<crate::bandwidth::Allocator>,
 	implementation: Option<String>,
 }
@@ -116,6 +117,18 @@ impl Client {
 		self
 	}
 
+	/// Build every session on `auth`, so each presents the tokens it holds and a route
+	/// naming one of its [`Auth`](crate::auth::Auth)s keeps it across a reconnect. Omit to
+	/// give each session a handle of its own, which ends with it.
+	///
+	/// The handle backs one active session at a time, plus the ones draining after a
+	/// GOAWAY: connecting another while one is still active fails with
+	/// [`Error::Duplicate`].
+	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
+		self.auth = Some(auth);
+		self
+	}
+
 	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
 	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
 	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
@@ -185,6 +198,16 @@ impl Client {
 		self.peer_hop.unwrap_or_else(crate::Hop::random)
 	}
 
+	/// The new session's side of its auth handle: the one from [`with_auth`](Self::with_auth),
+	/// or one of its own. `requests` for moq-transport, where a request carries a token.
+	fn link(&self, supported: bool, requests: bool) -> Result<crate::auth::Link, Error> {
+		match &self.auth {
+			Some(handle) => crate::auth::Link::attach(handle, supported, requests),
+			None if requests => Ok(crate::auth::Link::ietf(supported)),
+			None => Ok(crate::auth::Link::new(supported)),
+		}
+	}
+
 	/// The origin pair a session attaches, tagged and filtered.
 	///
 	/// Reads through the publish (egress) consumer and writes through the
@@ -252,7 +275,7 @@ impl Client {
 			version,
 			our_setup,
 			peer_setup: None,
-			auth: crate::auth::Handle::new(version.has_auth()),
+			auth: self.link(version.has_auth(), false)?,
 		})?;
 
 		Ok(Session::new(
@@ -308,7 +331,7 @@ impl Client {
 				// We advertise the request path in our SETUP for URL-less transports.
 				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
 				// offer it keeps the option out of our SETUP and presents no credential.
-				let auth = crate::auth::Handle::ietf(self.extensions.auth);
+				let auth = self.link(self.extensions.auth, true)?;
 				let peer_implementation = setup::PeerImplementation::default();
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
@@ -464,7 +487,7 @@ impl Client {
 					our_setup: lite::Setup::default(),
 					peer_setup: None,
 					// Negotiated over the bidi SETUP: lite 01/02, which carry no AUTH.
-					auth: crate::auth::Handle::new(v.has_auth()),
+					auth: self.link(v.has_auth(), false)?,
 				})?;
 
 				(
@@ -497,7 +520,7 @@ impl Client {
 
 				let stream = stream.with_version(v);
 				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
-				let auth = crate::auth::Handle::ietf(false);
+				let auth = self.link(false, true)?;
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
