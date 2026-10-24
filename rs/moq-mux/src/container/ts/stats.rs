@@ -202,6 +202,23 @@ impl Stream {
 		self.discarded += current.discarded;
 		self.unconfirmed += current.unconfirmed;
 	}
+
+	/// Set each delivery, damage and frame-sync count to `f` of it and `other`'s, keeping this
+	/// row's track, class and quiet. The TR 101 290 shares are left alone: they are written
+	/// from the merged checks.
+	pub(super) fn combine(&mut self, other: &Self, f: impl Fn(u64, u64) -> u64) {
+		for (ours, theirs) in [
+			(&mut self.units, other.units),
+			(&mut self.resyncs, other.resyncs),
+			(&mut self.discarded, other.discarded),
+			(&mut self.unconfirmed, other.unconfirmed),
+			(&mut self.damaged, other.damaged),
+			(&mut self.unplaced, other.unplaced),
+			(&mut self.refused, other.refused),
+		] {
+			*ours = f(*ours, theirs);
+		}
+	}
 }
 
 /// Audio, video, or other data, as import or export already resolved the PID.

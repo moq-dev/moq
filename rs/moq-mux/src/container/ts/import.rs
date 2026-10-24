@@ -117,12 +117,12 @@ pub struct Import<E: catalog::Catalog = ()> {
 	demux: Demux,
 	/// PIDs whose route changed while handling the current packet, for the parser to restart.
 	restarts: Vec<u16>,
-	/// Whether a PAT or PMT was handled since [`claims_changed`](Self::claims_changed) last
-	/// said so.
+	/// Whether a PAT moved the PMT, or a PMT was handled, since
+	/// [`claims_changed`](Self::claims_changed) last said so.
 	claims_changed: bool,
-	/// The PMT PIDs PATs have named for the imported program, each with its reassembler.
+	/// The PMT PID the latest PAT names for the imported program, with its reassembler.
 	/// Several programs' PMTs may share one.
-	pmt_sections: HashMap<Pid, SectionReassembler>,
+	pmt: Option<(Pid, SectionReassembler)>,
 	/// PMT sections dropped for a CRC mismatch, keyed by PID.
 	crc_errors: BTreeMap<u16, u64>,
 	/// Per elementary-stream-PID codec routing.
@@ -241,7 +241,7 @@ impl<E: catalog::Catalog> Import<E> {
 			demux: Demux::new(supports_mpegts),
 			restarts: Vec::new(),
 			claims_changed: false,
-			pmt_sections: HashMap::new(),
+			pmt: None,
 			crc_errors: BTreeMap::new(),
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
@@ -300,13 +300,13 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Carry on the PMT `sections` began on `pid`, for an importer that starts mid-stream on the
 	/// packet after the ones `sections` read.
 	pub(super) fn with_pmt(mut self, pid: Pid, sections: SectionReassembler) -> Self {
-		self.pmt_sections.insert(pid, sections);
+		self.pmt = Some((pid, sections));
 		self
 	}
 
 	/// Whether this importer reassembles the PMT sections on `pid`, and counts their CRC errors.
 	pub(super) fn reads_pmt(&self, pid: u16) -> bool {
-		Pid::new(pid).is_ok_and(|pid| self.pmt_sections.contains_key(&pid))
+		self.pmt.as_ref().is_some_and(|(pmt, _)| pmt.as_u16() == pid)
 	}
 
 	/// A reservation on this program's timebase, so every stream shifts by its offset.
@@ -360,8 +360,9 @@ impl<E: catalog::Catalog> Import<E> {
 	/// elementary streams and its clock.
 	pub(super) fn claims(&self) -> Vec<u16> {
 		let mut pids: Vec<u16> = self
-			.pmt_sections
-			.keys()
+			.pmt
+			.iter()
+			.map(|(pid, _)| pid)
 			.chain(self.streams.keys())
 			.chain(self.pcr_pid.iter())
 			.map(Pid::as_u16)
@@ -513,7 +514,7 @@ impl<E: catalog::Catalog> Import<E> {
 			if let Some(pat) = &packet.pat {
 				self.handle_pat(pat)?;
 			}
-		} else if self.pmt_sections.contains_key(&pid) {
+		} else if self.pmt.as_ref().is_some_and(|(pmt, _)| *pmt == pid) {
 			self.pmt_packet(pid, packet)?;
 		} else {
 			// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
@@ -528,13 +529,12 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Feed one packet on a PMT PID to its reassembler, applying every good PMT section.
+	/// Feed one packet on the PMT PID to its reassembler, applying every good PMT section.
 	fn pmt_packet(&mut self, pid: Pid, packet: &Packet) -> anyhow::Result<()> {
 		let mut sections = Vec::new();
-		self.pmt_sections
-			.entry(pid)
-			.or_default()
-			.push(packet.pkt, &mut sections);
+		if let Some((_, reassembler)) = &mut self.pmt {
+			reassembler.push(packet.pkt, &mut sections);
+		}
 		for section in sections {
 			// Other tables may share the PID; only a PMT is this path's to check.
 			if section.first() != Some(&psi::PMT_TABLE_ID) {
@@ -1536,7 +1536,8 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 
 	/// Pick the imported program from a whole PAT and learn its PMT PID, so `decode`
-	/// reassembles that PMT and no other.
+	/// reassembles that PMT and no other. A PAT naming another PID for the program moves the
+	/// reassembler there, and the catalog's `program.pmtPid` with it.
 	///
 	/// Every PAT is checked, so a program added mid-stream ends an unselected import, a
 	/// selected program that disappears ends a selected one, and a PAT naming the program under
@@ -1569,11 +1570,23 @@ impl<E: catalog::Catalog> Import<E> {
 				identity.1
 			);
 		}
-		self.pmt_sections.entry(entry.pmt_pid).or_default();
-		self.claims_changed = true;
+		let first = self.identity.replace(identity).is_none();
 		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.liveness.now());
-		if self.identity.is_none() {
-			self.identity = Some(identity);
+		let moved = self.pmt.as_ref().is_none_or(|(pid, _)| *pid != entry.pmt_pid);
+		if moved {
+			if let Some((from, _)) = &self.pmt {
+				tracing::info!(
+					program = entry.program_number,
+					from = from.as_u16(),
+					to = entry.pmt_pid.as_u16(),
+					"TS PMT moved to another PID"
+				);
+			}
+			// A section begun on the old PID no longer speaks for the program.
+			self.pmt = Some((entry.pmt_pid, SectionReassembler::default()));
+			self.claims_changed = true;
+		}
+		if first || moved {
 			self.record_program_identity(pat.transport_stream_id, entry)?;
 		}
 		Ok(())
@@ -10192,6 +10205,50 @@ pub(super) mod test {
 				.expect_err("another identity is refused");
 			assert!(err.to_string().contains("identity"), "{err:#}");
 		}
+	}
+
+	/// A PAT that moves the PMT to another PID moves the import with it: the catalog records
+	/// the new PID, the PMT there revises the program, and the old PID no longer speaks for it.
+	#[test]
+	fn a_moved_pmt_is_followed() {
+		use super::super::fixture::Mux;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default()
+				.with_catalog(crate::catalog::hang::Catalog::<crate::container::ts::catalog::Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt_pid = || {
+			catalog
+				.snapshot()
+				.ext
+				.mpegts
+				.program
+				.as_ref()
+				.map(|program| program.pmt_pid)
+		};
+
+		let mut mux = Mux::default();
+		mux.pat(&[(1, 0x100)]).pmt(0x100, 1, 0x61, &[(MP2, 0x61)], 0);
+		mux.out.extend(mp2_pes(0x61, 0, 90_000, [0xAA, 0xBB]));
+		import.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(pmt_pid(), Some(0x100));
+
+		mux.pat(&[(1, 0x200)])
+			.pmt(0x200, 1, 0x61, &[(MP2, 0x61), (MP2, 0x62)], 0)
+			.pmt(0x100, 1, 0x61, &[], 0);
+		mux.out.extend(mp2_pes(0x61, 1, 108_000, [0xAA, 0xBB]));
+		mux.out.extend(mp2_pes(0x62, 0, 108_000, [0xCC, 0xDD]));
+		import.decode(&mux.out).unwrap();
+		import.finish().unwrap();
+		assert_eq!(pmt_pid(), Some(0x200));
+		assert_eq!(
+			catalog.snapshot().audio.renditions.len(),
+			2,
+			"the PMT on the new PID adds a stream, and the one on the old PID removes none"
+		);
 	}
 
 	/// A section-framed PID the PMT drops keeps its stats row, so what it delivered stays counted.
