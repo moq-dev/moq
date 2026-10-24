@@ -213,6 +213,14 @@ class WindowProducer:
         """Drop ``count`` records from the front of the window, clamped to what it holds."""
         self._inner.pop(count, _opt_us(timestamp, "timestamp"))
 
+    def cut(self) -> None:
+        """Close the open group, so the next edit opens one restating the retained window.
+
+        A no-op when no group is open. Cut at a natural boundary, such as the end of an utterance,
+        so every edit so far sits in a group no later frame extends.
+        """
+        self._inner.cut()
+
     def finish(self) -> None:
         """Finish the track, closing any open group."""
         self._inner.finish()

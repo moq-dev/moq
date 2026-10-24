@@ -219,6 +219,12 @@ extension Json {
             try ffi.pop(count: count, timestampUs: timestampUs)
         }
 
+        /// Close the open group, so the next edit opens one restating the retained window. A no-op
+        /// when no group is open. Cut at a natural boundary, such as the end of an utterance.
+        public func cut() throws {
+            try ffi.cut()
+        }
+
         /// A watch-only handle to whether the track has subscribers.
         public func demand() throws -> TrackDemand {
             TrackDemand(try ffi.demand())

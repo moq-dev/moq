@@ -306,6 +306,13 @@ func (p *WindowProducer) Pop(count uint64, timestamp *time.Duration) error {
 	return p.inner.Pop(count, at)
 }
 
+// Cut closes the open group, so the next edit opens one restating the retained
+// window. It is a no-op when no group is open. Cut at a natural boundary, such as
+// the end of an utterance.
+func (p *WindowProducer) Cut() error {
+	return p.inner.Cut()
+}
+
 // Demand returns a watch-only handle to whether the track has subscribers.
 func (p *WindowProducer) Demand() (*moq.TrackDemand, error) {
 	inner, err := p.inner.Demand()

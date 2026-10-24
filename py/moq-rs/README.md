@@ -216,8 +216,9 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
 `moq.json.SnapshotProducer.update(value, timestamp=None)`,
 `moq.json.StreamProducer.append(value, timestamp=None)`, and
 `moq.json.WindowProducer.push(value, timestamp=None)` / `.pop(count, timestamp=None)` preserve
-optional capture time. A window keeps a sliding run of records a reader can join at any point;
-the catalog has no window mode, so `WindowProducer` takes only the track.
+optional capture time. A window keeps a sliding run of records a reader can join at any point,
+and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
+no window mode, so `WindowProducer` takes only the track.
 `moq.flate.SnapshotProducer` and `moq.flate.StreamProducer` offer the same operations for bytes.
 Omitting time leaves data untimed; choose the track's `timescale` to match.
 

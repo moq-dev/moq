@@ -542,6 +542,15 @@ impl MoqJsonWindowProducer {
 		self.edit(|producer| producer.pop(moq_net::Timed { value: count, at }))
 	}
 
+	/// Close the open group, so the next push or pop opens a new one whose header restates the
+	/// retained window. A no-op when no group is open.
+	///
+	/// Cut at a natural boundary (the end of an utterance, say) so every edit so far sits in a
+	/// group no later frame extends.
+	pub fn cut(&self) -> Result<(), MoqError> {
+		self.edit(|producer| producer.cut())
+	}
+
 	/// A watch-only handle to whether this track has subscribers.
 	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
 		self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?;

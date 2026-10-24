@@ -1,6 +1,7 @@
 """Local pub/sub tests: no network required."""
 
 import asyncio
+import json
 import struct
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -583,6 +584,40 @@ async def test_json_window_roundtrip():
     with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
         producer.push({"n": 3}, timestamp=timedelta(milliseconds=4))
     assert [event async for event in consumer] == []
+
+
+async def test_json_window_cut_restates_the_window():
+    broadcast = moq.BroadcastProducer()
+    producer = moq.json.WindowProducer(broadcast.publish_track("log"))
+    raw = await broadcast.consume().subscribe_track("log")
+    consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
+
+    for n in range(3):
+        producer.push({"n": n})
+    producer.pop(1)
+    events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(4)]
+    assert events == [
+        moq.json.WindowPush(0, {"n": 0}),
+        moq.json.WindowPush(1, {"n": 1}),
+        moq.json.WindowPush(2, {"n": 2}),
+        moq.json.WindowPop(range(0, 1)),
+    ]
+
+    producer.cut()
+    producer.push({"n": 3})
+    while True:
+        group = await asyncio.wait_for(raw.recv_group(), timeout=5.0)
+        assert group is not None
+        if group.sequence > 0:
+            break
+    header = await asyncio.wait_for(group.read_frame(), timeout=5.0)
+    assert header is not None
+    assert json.loads(header.payload) == {"offset": 1, "records": [{"n": 1}, {"n": 2}, {"n": 3}]}
+
+    # The restated records were already delivered, so the reader sees only the new one.
+    event = await asyncio.wait_for(anext(consumer), timeout=5.0)
+    assert event.value == moq.json.WindowPush(3, {"n": 3})
+    producer.finish()
 
 
 async def test_json_window_skips_records_outside_the_checkpoint():

@@ -590,6 +590,14 @@ void main() {
     expect([pop.start, pop.end], [0, 2]);
     expect(timed.timestampUs, 3000);
 
+    // The cut's new group restates record 2, which this reader already has.
+    producer.cut();
+    producer.push(value: jsonEncode({'n': 3}), timestampUs: 4000);
+    final pushed = await consumer.next().timeout(timeout);
+    final push = pushed!.event as moq_json.WindowEventPush;
+    expect(push.index, 3);
+    expect(pushed.timestampUs, 4000);
+
     producer.finish();
     expect(await consumer.next().timeout(timeout), isNull);
     broadcast.close();

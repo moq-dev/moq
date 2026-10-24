@@ -459,18 +459,27 @@ class SmokeTest {
             val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null), config)
             for (n in 1..3) producer.push(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
             producer.pop(2uL, 4_000uL)
-            producer.finish()
 
-            val events = consumer.events().toList()
-            assertEquals(4, events.size)
-            for ((n, timed) in events.take(3).withIndex()) {
+            for (n in 0..2) {
+                val timed = checkNotNull(consumer.next())
                 val push = assertIs<WindowEventPush>(timed.event)
                 assertEquals(n.toULong(), push.index)
                 assertEquals(Status(state = "live${n + 1}"), push.decode<Status>())
                 assertEquals((n + 1).milliseconds, timed.timestamp)
             }
-            assertEquals(WindowEventPop(0uL, 2uL), events[3].event)
-            assertEquals(4.milliseconds, events[3].timestamp)
+            val pop = checkNotNull(consumer.next())
+            assertEquals(WindowEventPop(0uL, 2uL), pop.event)
+            assertEquals(4.milliseconds, pop.timestamp)
+
+            // The cut's new group restates record 2, which this reader already has.
+            producer.cut()
+            producer.push(Status(state = "live4"), timestampUs = 5_000uL)
+            producer.finish()
+            val events = consumer.events().toList()
+            assertEquals(1, events.size)
+            val push = assertIs<WindowEventPush>(events[0].event)
+            assertEquals(3uL, push.index)
+            assertEquals(Status(state = "live4"), push.decode<Status>())
         }
     }
 

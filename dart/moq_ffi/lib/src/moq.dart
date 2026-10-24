@@ -9968,6 +9968,7 @@ class FfiConverterMoqJsonWindowConsumer {
 }
 
 abstract class MoqJsonWindowProducerInterface {
+  void cut();
   MoqTrackDemand demand();
   void finish();
   void pop({required int count, int? timestampUs = null});
@@ -10020,6 +10021,15 @@ class MoqJsonWindowProducer implements MoqJsonWindowProducerInterface {
     rustCall(
       (status) => uniffi_moq_ffi_fn_free_moqjsonwindowproducer(_ptr, status),
     );
+  }
+
+  void cut() {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqjsonwindowproducer_cut(
+        uniffiClonePointer(),
+        status,
+      );
+    }, moqExceptionErrorHandler);
   }
 
   MoqTrackDemand demand() {
@@ -17118,6 +17128,14 @@ external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqjsonwindowproducer_new(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqjsonwindowproducer_cut(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -19380,6 +19398,9 @@ external int uniffi_moq_ffi_checksum_method_moqjsonwindowconsumer_cancel();
 external int uniffi_moq_ffi_checksum_method_moqjsonwindowconsumer_next();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqjsonwindowproducer_cut();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqjsonwindowproducer_demand();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -20084,6 +20105,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonwindowconsumer_next() != 52011) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqjsonwindowproducer_cut() != 9716) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonwindowproducer_demand() != 20175) {

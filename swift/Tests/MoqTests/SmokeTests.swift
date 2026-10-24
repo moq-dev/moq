@@ -404,6 +404,12 @@ final class SmokeTests: XCTestCase {
         let pop = try await consumer.next()
         XCTAssertEqual(pop, Json.Timed(value: .pop(0..<2), timestampUs: 3000))
 
+        // The cut's new group restates record 2, which this reader already has.
+        try producer.cut()
+        try producer.push(Event(n: 3), timestampUs: 4000)
+        let pushed = try await consumer.next()
+        XCTAssertEqual(pushed, Json.Timed(value: .push(index: 3, value: Event(n: 3)), timestampUs: 4000))
+
         try producer.finish()
         let end = try await consumer.next()
         XCTAssertNil(end)

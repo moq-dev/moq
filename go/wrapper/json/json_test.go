@@ -161,15 +161,32 @@ func TestWindow(t *testing.T) {
 	if err := window.Pop(2, ms(3)); err != nil {
 		t.Fatal(err)
 	}
-	if err := window.Finish(); err != nil {
-		t.Fatal(err)
-	}
 
 	want := []moqjson.TimedWindowEvent{
 		{Event: moqjson.WindowPush{Index: 0, Value: json.RawMessage(`{"n":0}`)}, Timestamp: ms(0)},
 		{Event: moqjson.WindowPush{Index: 1, Value: json.RawMessage(`{"n":1}`)}, Timestamp: ms(1)},
 		{Event: moqjson.WindowPush{Index: 2, Value: json.RawMessage(`{"n":2}`)}, Timestamp: ms(2)},
 		{Event: moqjson.WindowPop{Start: 0, End: 2}, Timestamp: ms(3)},
+	}
+	for _, expected := range want {
+		event, err := windowConsumer.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event == nil || !reflect.DeepEqual(*event, expected) {
+			t.Fatalf("event = %+v, want %+v", event, expected)
+		}
+	}
+
+	// The cut's new group restates record 2, which this reader already has.
+	if err := window.Cut(); err != nil {
+		t.Fatal(err)
+	}
+	if err := window.Push(map[string]any{"n": 3}, ms(4)); err != nil {
+		t.Fatal(err)
+	}
+	if err := window.Finish(); err != nil {
+		t.Fatal(err)
 	}
 	var got []moqjson.TimedWindowEvent
 	for event, err := range windowConsumer.All(ctx) {
@@ -178,8 +195,11 @@ func TestWindow(t *testing.T) {
 		}
 		got = append(got, *event)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("events = %+v, want %+v", got, want)
+	tail := []moqjson.TimedWindowEvent{
+		{Event: moqjson.WindowPush{Index: 3, Value: json.RawMessage(`{"n":3}`)}, Timestamp: ms(4)},
+	}
+	if !reflect.DeepEqual(got, tail) {
+		t.Fatalf("events after the cut = %+v, want %+v", got, tail)
 	}
 }
 

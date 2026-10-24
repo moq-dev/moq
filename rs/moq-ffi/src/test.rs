@@ -1476,6 +1476,74 @@ async fn json_window_roundtrip() {
 	assert_eq!(next_window(&consumer).await, None);
 }
 
+/// A cut closes the open group, so the next push opens a new group whose header restates the
+/// retained window, while a live reader sees only the new record.
+#[tokio::test]
+async fn json_window_cut_restates_the_window() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: false,
+		checkpoint_records: None,
+	};
+	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	let raw = subscribe(&broadcast, "log").await;
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await, config).unwrap();
+
+	for n in 0..3 {
+		producer.push(format!(r#"{{"n":{n}}}"#), None).unwrap();
+	}
+	producer.pop(1, None).unwrap();
+	let events = [
+		window_push(0, 0),
+		window_push(1, 1),
+		window_push(2, 2),
+		MoqJsonWindowEvent::Pop { start: 0, end: 1 },
+	];
+	for event in events {
+		assert_eq!(
+			next_window(&consumer).await,
+			Some(MoqJsonWindowTimed {
+				event,
+				timestamp_us: None,
+			})
+		);
+	}
+
+	producer.cut().unwrap();
+	producer.cut().unwrap();
+	producer.push(r#"{"n":3}"#.into(), None).unwrap();
+
+	let group = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let group = raw.recv_group().await.unwrap().expect("expected a group");
+			if group.sequence() > 0 {
+				return group;
+			}
+		}
+	})
+	.await
+	.expect("timed out waiting for the cut's group");
+	assert_eq!(group.sequence(), 1, "a repeated cut opens no extra group");
+	let header = group.read_frame().await.unwrap().expect("expected the header");
+	assert_eq!(
+		serde_json::from_slice::<serde_json::Value>(&header.payload).unwrap(),
+		serde_json::json!({ "offset": 1, "records": [{ "n": 1 }, { "n": 2 }, { "n": 3 }] })
+	);
+
+	// The restated records are already delivered, so the live reader sees only the new one.
+	assert_eq!(
+		next_window(&consumer).await,
+		Some(MoqJsonWindowTimed {
+			event: window_push(3, 3),
+			timestamp_us: None,
+		})
+	);
+
+	producer.finish().unwrap();
+	assert!(matches!(producer.cut(), Err(MoqError::Closed)));
+}
+
 /// A joiner past the refresh ratio gets the window restated in a fresh group, holding only the
 /// checkpoint's records, so it learns of the older ones as a skip.
 #[tokio::test]
