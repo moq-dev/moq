@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Coverage-guided fuzzing: sh/rs/fuzz.sh TARGET [ARGS...]
+# Coverage-guided fuzzing: sh/rs/fuzz.sh [--minimize] TARGET [ARGS...]
 #
 # TARGET names a file in some crate's fuzz/fuzz_targets/, such as moq-net's lite or
 # moq-quic's connection; names are unique across crates. ARGS pass to
@@ -14,7 +14,12 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-target=${1:?usage: sh/rs/fuzz.sh TARGET [ARGS...]}
+action=run
+if [[ ${1:-} == --minimize ]]; then
+    action=cmin
+    shift
+fi
+target=${1:?usage: sh/rs/fuzz.sh [--minimize] TARGET [ARGS...]}
 shift
 
 shopt -s nullglob
@@ -38,7 +43,9 @@ if ! rustup run nightly rustc --version >/dev/null 2>&1; then
     exit 1
 fi
 
-cargo run --locked -q -p "$crate" --features fuzz --example fuzz-seeds -- "$dir"/seeds
+if [[ "$action" == run ]]; then
+    cargo run --locked -q -p "$crate" --features fuzz --example fuzz-seeds -- "$dir"/seeds
+fi
 mkdir -p "$dir"/corpus/"$target"
 
 # Nightly by PATH rather than by `cargo +nightly`: the dev shell puts a
@@ -57,5 +64,8 @@ export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D recursion_depth_exceeding_limit"
 export CARGO_PROFILE_RELEASE_LTO=false
 export CARGO_PROFILE_RELEASE_STRIP=none
 
-cargo fuzz run --fuzz-dir "$dir" "$target" \
-    "$dir"/corpus/"$target" "$dir"/seeds/"$target" "$@"
+corpora=("$dir"/corpus/"$target")
+if [[ "$action" == run ]]; then
+    corpora+=("$dir"/seeds/"$target")
+fi
+cargo fuzz "$action" --fuzz-dir "$dir" "$target" "${corpora[@]}" "$@"
