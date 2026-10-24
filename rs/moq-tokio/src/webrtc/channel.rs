@@ -20,7 +20,7 @@ impl qmux::transport::Transport for Channel {
 	type Writer = Writer;
 	type Reader = Reader;
 
-	fn split(self) -> (Writer, Reader) {
+	fn split(self, _config: &qmux::Config) -> (Writer, Reader) {
 		(self.writer, self.reader)
 	}
 }

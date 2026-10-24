@@ -13,6 +13,13 @@ A standalone producer and `Prepared::broadcast()` expose no public announcement 
 Cloning a publication shares its broadcast and route. A cloned fill producer or `broadcast::Finish` keeps the publication alive after the control handle drops; call `unannounce` to retract sooner.
 Use `publication.finish()` to preserve finished tracks and their existing linger.
 
+### Published names refuse navigation segments
+
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Rust reports `Error::NavigationSegment`; the existing protocol error codes carry the refusal to a peer.
+Path normalization, relative references, and subscription paths retain their semantics.
+
 ### A listing says whether a removed track finished (#6399)
 
 `broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
