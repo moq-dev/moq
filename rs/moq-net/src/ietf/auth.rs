@@ -111,15 +111,15 @@ fn encode_prefixes(patterns: &Patterns, w: &mut Encoder<'_>) -> Result<(), Encod
 
 fn decode_prefixes(r: &mut Decoder<'_>) -> Result<Patterns, DecodeError> {
 	let count = r.varint()?;
-	let mut patterns = Patterns::new();
 	// No preallocation: the count is peer-controlled, and the message size limit bounds
 	// how many prefixes actually fit.
+	let mut patterns = Vec::new();
 	for _ in 0..count {
 		let prefix = decode_namespace(r)?;
-		let pattern = Pattern::subtree(prefix.as_str()).map_err(|_| DecodeError::InvalidValue)?;
-		patterns.insert(pattern);
+		patterns.push(Pattern::subtree(prefix.as_str()).map_err(|_| DecodeError::InvalidValue)?);
 	}
-	Ok(patterns)
+	// Reduce once, so a peer's count never turns into quadratic work.
+	Ok(patterns.into_iter().collect())
 }
 
 impl Message for AuthOk {
@@ -253,6 +253,10 @@ pub(super) fn peer_grant(
 /// says it negotiated the extension. Never returns: a session without it just fails
 /// the tokens as unsupported.
 #[cfg(feature = "async")]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "the presenting task owns each piece of session state it drives"
+)]
 pub(super) async fn run_present<S>(
 	runtime: crate::time::Deadlines,
 	session: S,
@@ -261,6 +265,7 @@ pub(super) async fn run_present<S>(
 	peer_setup: peer::PeerSetup,
 	version: Version,
 	going_away: crate::goaway::GoingAway,
+	stats: crate::stats::Session,
 ) -> Result<(), Error>
 where
 	S: crate::transport::poll::Boxable,
@@ -285,6 +290,7 @@ where
 		.await?
 	{
 		let present = Present {
+			stats: stats.clone(),
 			runtime: runtime.clone(),
 			session: session.clone(),
 			control: control.clone(),
@@ -320,6 +326,7 @@ where
 /// One token's Auth request.
 #[cfg(feature = "async")]
 struct Present<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
 	session: S,
 	control: Control,
@@ -337,6 +344,7 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 			Ok(stream) => stream,
 			Err(err) => return err,
 		};
+		stream = super::request_stream::with_stats(stream, &self.stats, self.version);
 		let request_id = match self.control.next_request_id(&self.runtime).await {
 			Ok(id) => id,
 			Err(err) => return err,
@@ -619,6 +627,7 @@ mod tests {
 				let control = Control::new(Some(RequestId(first + 1)), client);
 				let present = Present {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session: crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit(),
 					control: control.clone(),
 					handle: Handle::new(false),

@@ -26,7 +26,8 @@ pub struct Stream<S: crate::transport::poll::Session, V> {
 }
 
 impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
-	/// Poll opening a new stream with the given version.
+	/// Poll opening a request stream, refused with [Error::NoStreamCredit] when the peer
+	/// grants no more streams.
 	pub fn poll_open(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
 	where
 		V: Clone,
@@ -37,12 +38,32 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
-	/// Open a new stream with the given version.
+	/// Open a request stream, refused with [Error::NoStreamCredit] when the peer grants
+	/// no more streams.
 	pub async fn open(session: &mut S, version: V) -> Result<Self, Error>
 	where
 		V: Clone,
 	{
 		kio::wait(|waiter| Self::poll_open(session, version.clone(), &mut waiter.context())).await
+	}
+
+	/// Poll opening a session control stream (SETUP or GOAWAY), which waits for stream
+	/// credit instead of refusing: the session cannot start or drain without it.
+	pub fn poll_open_control(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
+	where
+		V: Clone,
+	{
+		let (send, recv) =
+			ready!(session.poll_open_bi(cx, Default::default())).map_err(|err| version.transport_error(err))?;
+		Poll::Ready(Ok(Self::build(send, recv, version)))
+	}
+
+	/// Open a session control stream (SETUP or GOAWAY), waiting for stream credit.
+	pub async fn open_control(session: &mut S, version: V) -> Result<Self, Error>
+	where
+		V: Clone,
+	{
+		kio::wait(|waiter| Self::poll_open_control(session, version.clone(), &mut waiter.context())).await
 	}
 
 	/// Poll accepting a new stream with the given version.
@@ -63,7 +84,7 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 		Ok(Self::build(send, recv, version))
 	}
 
-	pub(crate) fn build(send: S::SendStream, recv: S::RecvStream, version: V) -> Self
+	fn build(send: S::SendStream, recv: S::RecvStream, version: V) -> Self
 	where
 		V: Clone,
 	{
@@ -72,6 +93,13 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 		let mut reader = Reader::new(recv, version);
 		reader.set_priority(crate::priority::RECV_CONTROL);
 		Self { writer, reader }
+	}
+
+	pub(crate) fn with_stats(self, stats: &crate::stats::Session) -> Self {
+		Self {
+			writer: self.writer.with_stats(stats),
+			reader: self.reader.with_stats(stats),
+		}
 	}
 
 	/// Cast the stream to a different version, used during version negotiation.

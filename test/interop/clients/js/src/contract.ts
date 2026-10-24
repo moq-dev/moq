@@ -184,6 +184,21 @@ export type Sample = {
 	resources: Resources;
 };
 
+/** A main-thread stall a page logged: one long animation frame and the scripts that ran longest in it. */
+export type LongFrame = {
+	/** When the frame started, in epoch milliseconds, so two pages' logs line up. */
+	at: number;
+	/** How long the frame took, in milliseconds. */
+	duration: number;
+	/** How much of it blocked input, in milliseconds. */
+	blocking: number;
+	/** The longest-running scripts in the frame, or "no script" when the time went elsewhere. */
+	scripts: string;
+};
+
+/** The `window` property each page keeps its {@link LongFrame} log on. */
+export const LONG_FRAMES = "__moqLongFrames";
+
 /** Whether a changed presented frame belongs to playback within the live bound. */
 export function reachesLive(observation: {
 	previous?: number;

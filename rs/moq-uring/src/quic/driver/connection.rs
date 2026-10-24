@@ -928,6 +928,7 @@ impl Driver {
 			to: transmit.destination,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
+			src_ip: transmit.src_ip,
 		};
 		if let Err(err) = tx.send(transmit) {
 			return Poll::Ready(Err(Error::Io(err.to_string())));
