@@ -99,7 +99,6 @@ Binding durations wait on Duration support in the generated C.
 - [Every close records its cause](/quest/m1/close-cause.md) - protocol-violation closes and abandoned SETUP replies record why
 - [Empty segments refused](/quest/m1/empty-segments.md) - `room//cam` fails loud instead of naming `room/cam`
 - [Readers follow restarts](/quest/m1/sink-restart-follow.md) - every moq-cli and moq-gst reader, moqsrc and `moq play` included, follows instances through `announced_broadcast` and an epochless `Restart` where its output can mark it; otherwise it stays on the old instance and fails once that route dies
-- [Readers follow a moved rendition](/quest/m1/rendition-move-follow.md) - moq-rtc, moq-ffi, moq-gst and `moq play` follow a rendition the catalog moves to a new track
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Stats groups as tracks](/quest/m1/stats-group-tracks.md) - one stable node broadcast per stats producer, with each group a produced track listed by TRACKS

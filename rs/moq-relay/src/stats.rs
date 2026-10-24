@@ -101,9 +101,9 @@ impl Default for Config {
 }
 
 impl Config {
-	/// The publish interval, defaulting to one second.
-	pub(crate) fn interval(&self) -> Duration {
-		self.interval.map_or(Duration::from_secs(1), Into::into)
+	/// The publish interval; `None` keeps the producer's default.
+	pub(crate) fn interval(&self) -> Option<Duration> {
+		self.interval.map(Into::into)
 	}
 
 	/// The linger after command-line overrides; `None` keeps the producer's default.
@@ -124,7 +124,7 @@ impl Config {
 		}
 		let prefix = self.prefix.clone();
 		let interval = self.interval();
-		anyhow::ensure!(!interval.is_zero(), "stats.interval must be non-zero");
+		anyhow::ensure!(interval != Some(Duration::ZERO), "stats.interval must be non-zero");
 		let node = self.node.clone().map(PathOwned::from);
 		let depth = self.depth;
 		let linger = self.linger();
@@ -132,9 +132,11 @@ impl Config {
 		let mut config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
-			.with_interval(interval)
 			.with_node(node)
 			.with_depth(depth);
+		if let Some(interval) = interval {
+			config = config.with_interval(interval);
+		}
 		if let Some(linger) = linger {
 			config = config.with_linger(linger);
 		}

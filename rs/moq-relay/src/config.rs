@@ -898,6 +898,24 @@ root = ["ca.pem"]
 		}
 	}
 
+	/// Stats enabled from the CLI alone build at the producer's default interval:
+	/// the parser fills a field it skips with its type's zero, not `Default`.
+	#[tokio::test]
+	async fn cli_stats_build_without_an_interval() {
+		if !test_env::Env::without(&["MOQ_STATS_ENABLED", "MOQ_STATS_INTERVAL"]).isolate() {
+			return;
+		}
+
+		let args = [
+			std::ffi::OsString::from("moq-relay"),
+			std::ffi::OsString::from("--stats-enabled"),
+		];
+		let config = Config::parse_and_merge(args).expect("config load");
+		assert!(config.stats.enabled);
+		let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster");
+		config.stats.build(cluster.origin.clone()).expect("stats build");
+	}
+
 	/// Bare defaults loaded from TOML survive when the CLI does not mention them.
 	#[test]
 	fn cli_does_not_clobber_toml_stats_enabled() {
@@ -925,7 +943,7 @@ linger = "2m"
 			config.stats.enabled,
 			"TOML's stats.enabled=true must not be clobbered by CLI defaults"
 		);
-		assert_eq!(config.stats.interval(), std::time::Duration::from_secs(5));
+		assert_eq!(config.stats.interval(), Some(std::time::Duration::from_secs(5)));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 		assert_eq!(config.stats.depth, 2);
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(120)));
@@ -938,7 +956,7 @@ linger = "2m"
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(30)));
-		assert_eq!(config.stats.interval(), std::time::Duration::from_millis(250));
+		assert_eq!(config.stats.interval(), Some(std::time::Duration::from_millis(250)));
 	}
 
 	/// Bare runtime defaults loaded from TOML survive when the CLI omits them.
