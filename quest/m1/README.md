@@ -84,7 +84,6 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 
 ## Required
 
-- [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
 - [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
 - [SUBSCRIBE_TRACKS follows credit](/quest/m1/listing-credit.md) - a listing holds state in proportion to what the peer reads, not to the catalog
