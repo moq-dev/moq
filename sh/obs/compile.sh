@@ -80,10 +80,16 @@ while true; do
         # link flags, which a syntax-only run reports as unused, once per file.
         # $qt and $ffmpeg stay unquoted on purpose: pkg-config hands back one
         # space-separated string, and splitting it is the intended reading.
-        "$cxx" -std=c++17 -fsyntax-only -Werror -Wno-unused-command-line-argument \
-            "${includes[@]}" $qt $ffmpeg \
-            -DMOQ_FRONTEND_ENABLED -DMOQ_VERSION_STRING='"0.0.0"' "${sources[next]}" \
-            </dev/null >"$logs/$next" 2>&1 &
+        # The job is a subshell around the compiler, so it exits even when the
+        # compiler is killed: bash 5.2 drops a job that a signal ends before
+        # `wait -n` collects it. The trailing exit keeps bash from exec'ing the
+        # compiler in the subshell's place.
+        (
+            "$cxx" -std=c++17 -fsyntax-only -Werror -Wno-unused-command-line-argument \
+                "${includes[@]}" $qt $ffmpeg \
+                -DMOQ_FRONTEND_ENABLED -DMOQ_VERSION_STRING='"0.0.0"' "${sources[next]}"
+            exit
+        ) </dev/null >"$logs/$next" 2>&1 &
         set +m
         running[$!]=$next
         next=$((next + 1))
