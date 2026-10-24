@@ -4,7 +4,7 @@
 
 moq-relay's release targets on x86_64 and aarch64 use graviola as their rustls
 provider, and their graph compiles no C: no aws-lc-sys, ring, `cc`, or `cmake`,
-checked with `cargo tree -i`. Every other target, and every other crate that uses
+checked with `cargo tree -i` for each release target triple. Every other target, and every other crate that uses
 aws-lc-rs today, keeps it.
 
 ## Plan

@@ -12,7 +12,9 @@ GroupConsumer)`), from a fresh report against rust2's UniFFI fork.
 on 2026-10-13 because UniFFI keyed types by bare name, so no generator could
 take the same noun from two crates.
 [kixelated/rust2#21](https://github.com/kixelated/rust2/pull/21) fixes that in
-every generator of rust2's fork, reusing #5460's two-crate harness. What #5460
+every generator of rust2's fork, reusing #5460's two-crate harness. Swift takes
+same-named types only with one module per crate, while moq's Swift package builds
+one module today, so the report covers that packaging change. What #5460
 measured still stands until re-measured: each extra crate adds about 48 KB of
 scaffolding to the cdylib.
 

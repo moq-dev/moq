@@ -13,5 +13,6 @@ Either rename one of the two in moq-ffi, or fix the C backend in
 and a type can never map to the same C name. Ask the maintainer which before
 starting.
 
-Public API: the C name of one of the two items, or of every colliding pair the
-generator renames. Wire: none.
+Public API: a rename in moq-ffi changes that item's name in every binding (Python,
+Swift, Kotlin, Dart, Go, C++, and C); a generator fix changes only the C names of
+the pairs it renames. Wire: none.
