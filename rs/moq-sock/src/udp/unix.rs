@@ -97,7 +97,7 @@ impl UdpSocketState {
         let mut may_fragment = false;
         #[cfg_attr(
             not(any(target_os = "linux", target_os = "android")),
-            expect(unused_mut)
+            expect(unused_mut, reason = "only the Linux GRO path sets it")
         )]
         let mut gro_segments = 1;
 
@@ -476,12 +476,11 @@ impl UdpSocketState {
 
 #[cfg(not(any(apple, target_os = "openbsd", target_os = "netbsd")))]
 fn send(
-    #[allow(unused_variables)] // only used on Linux
-    state: &UdpSocketState,
+    #[allow(unused_variables, reason = "only used on Linux")] state: &UdpSocketState,
     io: SockRef<'_>,
     transmit: &Transmit<'_>,
 ) -> io::Result<()> {
-    #[allow(unused_mut)] // only mutable on FreeBSD
+    #[allow(unused_mut, reason = "only mutable on FreeBSD")]
     let mut encode_src_ip = true;
     #[cfg(target_os = "freebsd")]
     {
@@ -599,7 +598,10 @@ fn send(state: &UdpSocketState, io: SockRef<'_>, transmit: &Transmit<'_>) -> io:
 }
 
 #[cfg(any(target_os = "openbsd", target_os = "netbsd", apple))]
-#[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
+#[cfg_attr(
+    apple_fast,
+    allow(dead_code, reason = "unused when apple_fast is enabled")
+)]
 pub(crate) fn send_single(
     state: &UdpSocketState,
     io: SockRef<'_>,
@@ -676,7 +678,10 @@ fn recv_via_recvmmsg(
     solarish,
     apple
 ))]
-#[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
+#[cfg_attr(
+    apple_fast,
+    allow(dead_code, reason = "unused when apple_fast is enabled")
+)]
 pub(crate) fn recv_single(
     io: SockRef<'_>,
     bufs: &mut [IoSliceMut<'_>],
@@ -698,15 +703,17 @@ pub(crate) fn recv_single(
     Ok(1)
 }
 
-#[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
+#[cfg_attr(
+    apple_fast,
+    allow(dead_code, reason = "unused when apple_fast is enabled")
+)]
 fn prepare_msg(
     transmit: &Transmit<'_>,
     dst_addr: &socket2::SockAddr,
     hdr: &mut libc::msghdr,
     iov: &mut libc::iovec,
     ctrl: &mut cmsg::Aligned<[u8; cmsg::LEN]>,
-    #[allow(unused_variables)] // only used on FreeBSD & macOS
-    encode_src_ip: bool,
+    #[allow(unused_variables, reason = "only used on FreeBSD & macOS")] encode_src_ip: bool,
     sendmsg_einval: bool,
 ) {
     iov.iov_base = transmit.contents.as_ptr() as *const _ as *mut _;
@@ -793,7 +800,10 @@ fn prepare_msg(
     encoder.finish();
 }
 
-#[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
+#[cfg_attr(
+    apple_fast,
+    allow(dead_code, reason = "unused when apple_fast is enabled")
+)]
 fn prepare_recv(
     buf: &mut IoSliceMut<'_>,
     name: &mut MaybeUninit<libc::sockaddr_storage>,
@@ -870,7 +880,10 @@ impl ControlMetadata {
             (libc::IPPROTO_IPV6, libc::IPV6_TCLASS) => unsafe {
                 // Temporary hack around broken macos ABI. Remove once upstream fixes it.
                 // https://bugreport.apple.com/web/?problemID=48761855
-                #[allow(clippy::unnecessary_cast)] // cmsg.cmsg_len defined as size_t
+                #[allow(
+                    clippy::unnecessary_cast,
+                    reason = "`cmsg_len` is `size_t` on glibc but narrower on other libcs"
+                )]
                 if cfg!(apple)
                     && cmsg.cmsg_len as usize == libc::CMSG_LEN(size_of::<u8>() as _) as usize
                 {
@@ -896,7 +909,13 @@ impl ControlMetadata {
             (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => {
                 let pktinfo = unsafe { cmsg.decode::<libc::in6_pktinfo>() };
                 self.dst_ip = Some(IpAddr::V6(Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr)));
-                #[cfg_attr(not(target_os = "android"), expect(clippy::unnecessary_cast))]
+                #[cfg_attr(
+                    not(target_os = "android"),
+                    expect(
+                        clippy::unnecessary_cast,
+                        reason = "`ipi6_ifindex` is already `u32` off Android"
+                    )
+                )]
                 {
                     self.interface_index = Some(pktinfo.ipi6_ifindex as u32);
                 }
@@ -966,7 +985,10 @@ mod gso {
         1
     }
 
-    #[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
+    #[cfg_attr(
+        apple_fast,
+        allow(dead_code, reason = "unused when apple_fast is enabled")
+    )]
     pub(super) fn set_segment_size(
         #[cfg(not(apple_fast))] _encoder: &mut cmsg::Encoder<'_, libc::msghdr>,
         #[cfg(apple_fast)] _encoder: &mut cmsg::Encoder<'_, msghdr_x>,

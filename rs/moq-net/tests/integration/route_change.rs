@@ -520,7 +520,7 @@ pinned_tests! {
 /// partway through group 1: `A` has handed on (1, 0) and (1, 1) while `P` has already
 /// moved on to group 2. `B` (warmed by another reader on `W`) holds everything, so `R`
 /// resumes there from (1, 2).
-async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<Delivery> {
+async fn lagging_route_dies(version: Version) {
 	async fn lagged(version: Version, from: &origin::Producer, to: &origin::Producer, lag: Duration) -> MockPair {
 		let mut options = MockConnectOptions::new(version);
 		options.server_publish = Some(from.consume());
@@ -580,27 +580,46 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<Deliver
 	write(&mut group, 1, 3);
 	group.finish().unwrap();
 	let mut group = track.append_group().unwrap();
-	write(&mut group, 2, 0);
+	for frame in 0..FRAMES {
+		write(&mut group, 2, frame);
+	}
+	group.finish().unwrap();
 
 	a_r.server.abort(Error::Cancel);
 	a_r.client.abort(Error::Cancel);
 	settle().await;
-	moq_clock::sim::spawn(async move {
-		let _keep = (broadcast, track, group, p_a, p_b, b_w, b_r, warm, a_r, p, a, b, r, w);
-		std::future::pending::<()>().await
-	});
-	rx
+	for (sequence, frame) in (2..FRAMES)
+		.map(|frame| (1, frame))
+		.chain((0..FRAMES).map(|frame| (2, frame)))
+	{
+		let timestamp = Timestamp::from_millis(1_000 + sequence * 100 + frame).unwrap();
+		assert_eq!(
+			next_timed(&mut rx).await,
+			(sequence, Some(timestamp), payload(sequence, frame)),
+			"{version}"
+		);
+	}
+	settle().await;
+	assert!(
+		matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+		"{version}: trailing delivery, or the subscription ended"
+	);
+	let _keep = (broadcast, track, group, p_a, p_b, b_w, b_r, warm, a_r, p, a, b, r, w);
 }
 
-/// Lite carries the resume point upstream, so the rest of the group and the next one
-/// arrive in order.
 #[moq_clock::test]
 async fn lite_resumes_after_a_lagging_route_dies() {
-	let version: Version = "moq-lite-07-wip".parse().unwrap();
-	let mut rx = lagging_route_dies(version).await;
-	assert_eq!(next(&mut rx).await, (1, payload(1, 2)));
-	assert_eq!(next(&mut rx).await, (1, payload(1, 3)));
-	assert_eq!(next(&mut rx).await, (2, payload(2, 0)));
+	lagging_route_dies("moq-lite-07-wip".parse().unwrap()).await;
+}
+
+#[moq_clock::test]
+async fn ietf_17_resumes_after_a_lagging_route_dies() {
+	lagging_route_dies("moq-transport-17".parse().unwrap()).await;
+}
+
+#[moq_clock::test]
+async fn ietf_22_resumes_after_a_lagging_route_dies() {
+	lagging_route_dies("moq-transport-22".parse().unwrap()).await;
 }
 
 /// `P` publishes through the relay `O`, which `M1` and `M2` both pull from, and `E`

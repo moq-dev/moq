@@ -7,9 +7,9 @@
 //! connection's timeout, and wakes stream waiters. The returned
 //! [`Connection`] implements [`web_transport_trait::poll`], so
 //! wrapping it with `crate::transport::Session::new` and
-//! [`moq_net::transport::Binding::InBand`] lets
-//! `moq_net::Client::connect_lite` / `Server::accept_lite` run real moq-lite
-//! sessions on the worker; everything is `Rc`-shared and `!Send` by design.
+//! [`moq_net::transport::Binding::InBand`], then `crate::transport::Local`, lets
+//! `moq_net::Client::connect` / `Server::accept` run real MoQ sessions on the
+//! worker; everything is `Rc`-shared and `!Send` by design.
 //!
 //! An [`Endpoint`] serves many connections on one socket, demuxed by
 //! connection id; [`client::connect`] and [`server::accept`] are its
@@ -34,10 +34,6 @@ pub use driver::{Connection, Lease, RecvStream, SendGroup, SendOptions, SendStre
 pub use endpoint::Endpoint;
 /// The flow-control limits a live connection can change; see [`Connection::set_limits`].
 pub use moq_quic::{Limits, LimitsError};
-
-/// The QUIC payload size every full datagram in a GSO train uses, and the
-/// stride GRO coalesces with.
-pub(crate) const SEGMENT: usize = 1350;
 
 /// A TLS certificate chain and the private key that signs for it, as PEM.
 /// One value, so neither half can be configured alone.
@@ -138,6 +134,10 @@ pub struct Transport {
 	/// connection, or `None` (the default) to send none and let the idle
 	/// timeout decide.
 	pub keep_alive: Option<std::time::Duration>,
+	/// Probe for a path MTU above the 1200-byte floor every QUIC path carries,
+	/// off by default. A probe the path drops costs only itself, and a path
+	/// that later shrinks falls back to the floor.
+	pub mtu_discovery: bool,
 	/// Where to write qlog traces, or `None` (the default) to write none.
 	///
 	/// moq-quic takes one sink per transport config, so this writes one file
@@ -160,6 +160,7 @@ impl Default for Transport {
 			send_window: None,
 			congestion: Congestion::default(),
 			keep_alive: None,
+			mtu_discovery: false,
 			#[cfg(feature = "qlog")]
 			qlog: None,
 		}
