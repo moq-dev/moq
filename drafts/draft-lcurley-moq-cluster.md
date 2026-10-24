@@ -94,7 +94,8 @@ Like BGP's MULTI_EXIT_DISC ({{?RFC4271, Section 5.1.4}}), the value only means s
 
 
 # Hop IDs {#hop-ids}
-A **Hop ID** is a variable-length integer naming one endpoint in a path.
+A **Hop ID** is a variable-length integer naming one endpoint in a path, spanning 64 bits.
+A relay forwarding a path over a link whose integer encoding cannot carry a Hop ID sends 0 in its place ({{zero}}).
 
 Hop IDs SHOULD be unique among the endpoints an advertisement can traverse.
 An endpoint MAY pick one at random, since collisions in a 64-bit space are unlikely, or use a configured identifier that survives restarts.
@@ -316,6 +317,7 @@ The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a le
 # Appendix A: Changelog
 
 ## moq-cluster-02
+- Hop IDs span 64 bits; a link whose integer encoding cannot carry one sends 0 in its place.
 - Exactly one NAMESPACE parameter block is appended when any extension that uses it is negotiated, holding the parameters of all of them. Under MoQ Epoch, only advertisements with the same EPOCH are redundant copies, and an update never changes the instance.
 - A namespace names one broadcast whichever publisher serves it, and a publisher MUST NOT reuse one for different content. A receiver MAY fail a subscription over between any of its advertisements, continuing from the first object the subscriber lacks instead of at a group boundary. Replaces the first-Hop-ID publisher identity.
 - Defined request resolution against the longest covering prefix; every refusal is terminal, including between several publishers of one namespace, and capacity is signaled only by withdrawing or re-pricing the advertisement.

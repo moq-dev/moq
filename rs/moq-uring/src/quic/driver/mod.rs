@@ -283,10 +283,11 @@ fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Err
 		transport.mtu_discovery_config(None);
 	}
 	transport.congestion_controller_factory(match config.congestion {
-		Congestion::Loss => Arc::new(moq_quic::congestion::CubicConfig::default())
-			as Arc<dyn moq_quic::congestion::ControllerFactory + Send + Sync>,
-		Congestion::Delay => Arc::new(moq_quic::congestion::Bbr3Config::default()),
-		Congestion::None => Arc::new(moq_quic::congestion::Unlimited),
+		Congestion::Loss => {
+			Arc::new(moq_congestion::CubicConfig::default()) as Arc<dyn moq_congestion::ControllerFactory + Send + Sync>
+		}
+		Congestion::Delay => Arc::new(moq_congestion::Bbr3Config::default()),
+		Congestion::None => Arc::new(moq_congestion::Unlimited),
 	});
 	Ok(transport)
 }

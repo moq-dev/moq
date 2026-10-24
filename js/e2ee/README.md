@@ -22,7 +22,8 @@ types only, so nothing in the package can open a producer under a chosen epoch; 
 
 The application names tracks by their semantic names. `Broadcast.Producer` wraps the
 `@moq/net` broadcast and creates each track under its physical name, so only physical names
-reach the relays. `createTrack` resolves once the net track has committed its timescale, so
+reach the relays. A physical name is the semantic name encrypted under the generation: a relay
+learns only its length rounded up to 16 bytes. `createTrack` resolves once the net track has committed its timescale, so
 every write is checked against it. `close()` ends the wrapped broadcast.
 
 ```ts
@@ -58,6 +59,7 @@ backpressure. Consumer reads wait for the network outside the pump, so a stalled
 never holds up another group's opens.
 
 A grouped authentication failure ends the track with `Failure` code `authentication`; a
-bad datagram is an `authentication` event and the track continues. Every subscription through
+datagram that fails to open is dropped as an `identity`, `oversize`, or `authentication`
+event and the track continues. Every subscription through
 one consuming generation shares each key's AEAD budget, so resubscribing cannot reset it. A consumer keeps a
 1024-bit datagram duplicate window below the greatest sequence it opened.

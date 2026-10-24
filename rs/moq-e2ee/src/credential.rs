@@ -4,13 +4,14 @@ use std::fmt;
 use std::sync::Arc;
 
 use aws_lc_rs::hkdf::{self, HKDF_SHA256};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::Result;
 use crate::generation;
-use crate::limits::{KEY_LEN, NAME_LEN, PATH_LABEL, PROFILE, SECRET_LEN, check_bytes, check_u53};
-use crate::name::encode;
+use crate::limits::{PATH_LABEL, PATH_LEN, PROFILE, SECRET_LEN, check_bytes, check_u53};
 use moq_net::Epoch;
 
 /// What the application distributes over its own authenticated channel.
@@ -83,8 +84,8 @@ impl Credential {
 	///
 	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes.
 	pub fn path(&self, semantic: &str) -> Result<moq_net::PathOwned> {
-		let material = self.expand(&self.path_info(semantic)?)?;
-		Ok(moq_net::Path::new(encode(material).as_str()).into_owned())
+		let material: [u8; PATH_LEN] = self.expand(&self.path_info(semantic)?);
+		Ok(moq_net::Path::new(&URL_SAFE_NO_PAD.encode(material)).into_owned())
 	}
 
 	/// Mint a fresh epoch and a producing generation whose clones share track claims.
@@ -106,14 +107,14 @@ impl Credential {
 		Ok(info)
 	}
 
-	/// HKDF-Expand 16 bytes of output for `info`.
-	pub(crate) fn expand(&self, info: &[u8]) -> Result<[u8; KEY_LEN]> {
-		const { assert!(KEY_LEN == NAME_LEN) };
+	/// HKDF-Expand `N` bytes of output for `info`.
+	pub(crate) fn expand<const N: usize>(&self, info: &[u8]) -> [u8; N] {
+		const { assert!(N <= 255 * 32, "HKDF-SHA-256 output limit") };
 		let info = [info];
-		let okm = self.0.prk.expand(&info, Len16).map_err(|_| crate::Error::Identity)?;
-		let mut out = [0u8; KEY_LEN];
-		okm.fill(&mut out).map_err(|_| crate::Error::Identity)?;
-		Ok(out)
+		let okm = self.0.prk.expand(&info, Len(N)).expect("HKDF length within the limit");
+		let mut out = [0u8; N];
+		okm.fill(&mut out).expect("HKDF fills its own length");
+		out
 	}
 
 	#[cfg(test)]
@@ -127,11 +128,11 @@ impl Credential {
 	}
 }
 
-struct Len16;
+struct Len(usize);
 
-impl hkdf::KeyType for Len16 {
+impl hkdf::KeyType for Len {
 	fn len(&self) -> usize {
-		KEY_LEN
+		self.0
 	}
 }
 

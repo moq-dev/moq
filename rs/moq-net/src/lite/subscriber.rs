@@ -44,7 +44,7 @@ pub(super) struct SubscriberConfig {
 	/// [`crate::origin::Cost::DRAIN`], so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
 	/// Our tokens' grants: a subscription the union stops covering is cancelled.
-	pub auth: crate::auth::Handle,
+	pub auth: crate::auth::Link,
 }
 
 #[derive(Clone)]
@@ -87,7 +87,7 @@ pub(super) struct Subscriber {
 	/// [`SourceServe`] machines.
 	sources: kio::Queue<MintedSource>,
 	going_away: crate::goaway::GoingAway,
-	auth: crate::auth::Handle,
+	auth: crate::auth::Link,
 	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
 }
@@ -1646,7 +1646,7 @@ impl AnnouncePrefix {
 					// (`origin::Consumer::with_hidden`).
 					stream.writer.buffer(&lite::AnnounceRequest {
 						prefix: self.prefix.as_path(),
-						exclude_hop: self.subscriber.self_origin.id(),
+						exclude_hop: self.subscriber.self_origin,
 						hidden: true,
 					})?;
 					self.state = PrefixState::Send { stream };
@@ -2221,7 +2221,7 @@ mod tests {
 			}
 			moq_clock::sleep(crate::tail::GRACE * 2).await;
 
-			let lowered = Some(Subscription::default().with_groups(2..));
+			let lowered = Some(Subscription::default().with_range(2..));
 			// The SUBSCRIBE in force, already answered.
 			let floor = Position::group(if update { 5 } else { 2 });
 			let mut sub = Sub::Active(SubStream {
@@ -2673,7 +2673,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let mut uni = UniServe {
 			subscriber,
@@ -2809,7 +2809,7 @@ mod tests {
 					peer_hop: None,
 					cost: None,
 					going_away: Default::default(),
-					auth: crate::auth::Handle::new(false),
+					auth: crate::auth::Link::new(false),
 				});
 				// The track is untimed where the subscriber drops received timestamps.
 				let track = track::Producer::new(
@@ -2869,7 +2869,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 
 			let mut track = track::Producer::new(
@@ -2960,7 +2960,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let pool = crate::cache::Pool::unbounded();
 		let mut info = crate::track::Info::default().with_timescale(framing.timescale);
@@ -3146,7 +3146,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		// The copy is untimed where the wire's timestamps may be send times.
@@ -3259,7 +3259,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let track = track::Producer::new(
@@ -3331,7 +3331,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -3403,7 +3403,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -3473,7 +3473,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -3532,7 +3532,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -3631,7 +3631,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -3704,7 +3704,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -3757,7 +3757,7 @@ mod tests {
 				cost: Some(1),
 				peer_hop: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 			let mut driver = SubscriberDriver::new(subscriber, Vec::new(), false);
 			assert!(driver.poll(&kio::Waiter::noop()).is_pending());
@@ -3799,7 +3799,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -3841,7 +3841,7 @@ mod tests {
 	/// route that keeps it served.
 	fn listed_source(
 		session: SinkSession,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 		validity: crate::model::broadcast::RequestValidity,
 	) -> (SourceServe, crate::broadcast::Consumer, kio::Producer<()>) {
 		let subscriber = Subscriber::new(SubscriberConfig {
@@ -3878,7 +3878,7 @@ mod tests {
 	/// syncing its readers or asking the peer, which would refuse it until then.
 	#[moq_clock::test]
 	async fn a_listing_waits_for_its_token() {
-		let auth = crate::auth::Handle::new(true);
+		let auth = crate::auth::Link::new(true);
 		let token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
 		let open = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(open.consume());
@@ -3905,7 +3905,7 @@ mod tests {
 	/// request without an epoch would list its replacement.
 	#[moq_clock::test]
 	async fn a_listing_of_a_retired_instance_never_reaches_the_wire() {
-		let auth = crate::auth::Handle::new(true);
+		let auth = crate::auth::Link::new(true);
 		let token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
 		let open = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(open.consume());
@@ -3925,8 +3925,8 @@ mod tests {
 	/// A listing outside the session's scope is refused before it reaches the wire.
 	#[moq_clock::test]
 	async fn a_listing_outside_the_scope_is_refused() {
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant::default());
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
 		let open = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(open.consume());
 		let (mut serve, consumer, _route) = listed_source(session.clone(), auth, Default::default());
@@ -3941,7 +3941,7 @@ mod tests {
 	/// what the session no longer allows, and leaves the session up.
 	#[moq_clock::test]
 	async fn a_narrower_limit_resets_a_listing() {
-		let auth = crate::auth::Handle::new(false);
+		let auth = crate::auth::Link::new(false);
 		let open = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(open.consume());
 		let (mut serve, consumer, _route) = listed_source(session.clone(), auth.clone(), Default::default());
@@ -3954,7 +3954,7 @@ mod tests {
 			Some(Ok(Some(crate::broadcast::TracksEvent::Synced)))
 		));
 
-		auth.authorize(&crate::auth::Grant::default());
+		auth.handle().authorize(&crate::auth::Grant::default());
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
 		assert!(matches!(tracks.next().now_or_never(), Some(Err(Error::Unauthorized))));
 		assert_eq!(session.log.resets(), vec![crate::StreamError::Unauthorized.to_code()]);
@@ -3965,7 +3965,7 @@ mod tests {
 	/// holding its task and track until a token that may never be answered.
 	#[moq_clock::test]
 	async fn an_unused_track_stops_waiting_for_auth() {
-		let auth = crate::auth::Handle::new(true);
+		let auth = crate::auth::Link::new(true);
 		let _token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -4036,7 +4036,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
@@ -4090,7 +4090,7 @@ mod tests {
 		// Writes park, so the SUBSCRIBE is on an open stream but not yet flushed.
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_bi(gate.consume());
-		let auth = crate::auth::Handle::new(false);
+		let auth = crate::auth::Link::new(false);
 
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
@@ -4130,7 +4130,7 @@ mod tests {
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 		assert_eq!(session.log.bi_opens(), 1, "the SUBSCRIBE stream is open");
 
-		auth.authorize(&crate::auth::Grant::default());
+		auth.handle().authorize(&crate::auth::Grant::default());
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
 
 		let unauthorized = crate::StreamError::Unauthorized.to_code();
@@ -4166,7 +4166,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 			let broadcast = crate::broadcast::Info::new().produce();
 			let producer = broadcast
@@ -4235,7 +4235,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -4280,7 +4280,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -4791,7 +4791,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -4846,7 +4846,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let mut announced = Announced::default();
@@ -4900,7 +4900,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let path = Path::new("pool").to_owned();
 		let mut announced = Announced::default();
@@ -4969,7 +4969,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let mut announced = Announced::default();
 		subscriber
@@ -5025,7 +5025,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -5084,7 +5084,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -5143,7 +5143,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		// The sender's identity is already in the chain: the route came back through it.
@@ -5210,7 +5210,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		// The path as advertised to the peer: our hop is already in the chain.
@@ -5270,7 +5270,7 @@ mod tests {
 			peer_hop: Some(assigned),
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		// An announce with an empty chain and no responder id: the versions that
@@ -5317,7 +5317,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let hops = crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]).unwrap();
@@ -5399,7 +5399,7 @@ mod tests {
 			cost: None,
 			peer_hop: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		(subscriber, consumer)
 	}
@@ -5467,7 +5467,7 @@ mod tests {
 		let mut cursor = consumer.announced();
 		cursor.expect_next_active("room/host").await;
 
-		auth.authorize(&crate::auth::Grant {
+		auth.handle().authorize(&crate::auth::Grant {
 			publish: Default::default(),
 			subscribe: [crate::Pattern::subtree("other").unwrap()].into_iter().collect(),
 			expires: None,
@@ -5508,7 +5508,7 @@ mod tests {
 			cost: None,
 			peer_hop: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -5592,7 +5592,7 @@ mod tests {
 			cost: Some(1),
 			peer_hop: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let mut prefix = AnnouncePrefix::new(
 			subscriber.clone(),
@@ -5660,7 +5660,7 @@ mod tests {
 			cost: Some(1),
 			peer_hop: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		(
 			AnnouncePrefix::new(
@@ -5838,7 +5838,7 @@ mod tests {
 			cost: Some(1),
 			peer_hop: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let slots = crate::session::Slots::new(2);
 		subscriber.announces = slots.clone();
@@ -6293,10 +6293,8 @@ impl TrackServe {
 		// subscriber holds, so ask from the head of its group instead: the first frame then
 		// arrives at once and says where the live feed is.
 		if !self.subscriber.version.has_largest() {
-			subscription.set_bounds(
-				subscription.start().map(|start| Position::group(start.group)),
-				subscription.end(),
-			);
+			let start = subscription.start().map(|start| Position::group(start.group));
+			*subscription = std::mem::take(subscription).with_start(start);
 		}
 		if self.subscriber.version.has_frame_bounds() {
 			return;
@@ -6320,7 +6318,7 @@ impl TrackServe {
 				"widening frame bounds to whole groups for an older peer"
 			);
 		}
-		subscription.set_bounds(start, end);
+		*subscription = std::mem::take(subscription).with_start(start).with_end(end);
 	}
 
 	/// Apply a subscription-demand change: hand back an [`Establish`] to open the
@@ -6345,7 +6343,8 @@ impl TrackServe {
 			Some(mut subscription) => {
 				// The wire carries one range: the span of every range asked for, which the
 				// subscribers' own reads narrow again.
-				subscription.set_bounds(subscription.start(), subscription.end());
+				let start = subscription.start();
+				subscription = subscription.with_start(start);
 				producer.widen_compressed(&mut subscription);
 				self.widen_frame_bounds(&mut subscription);
 				match sub {
@@ -6354,7 +6353,7 @@ impl TrackServe {
 						// the subscriber has no start of its own: a quiet track (a catalog) sends
 						// that group again, which says the cache is current.
 						if subscription.start().is_none() {
-							subscription.set_bounds(producer.idle_newest().map(Position::group), subscription.end());
+							subscription = subscription.with_start(producer.idle_newest().map(Position::group));
 						}
 						// Open an upstream SUBSCRIBE for the first subscriber.
 						Ok(Begin::Establish(self.prepare_establish(producer, subscription)))

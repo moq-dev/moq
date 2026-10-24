@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::{Controller, ControllerFactory};
 use crate::Instant;
-use crate::packet::SpaceId;
+use crate::SpaceId;
 
 /// No congestion control: a window that never shrinks, too large to pace.
 ///

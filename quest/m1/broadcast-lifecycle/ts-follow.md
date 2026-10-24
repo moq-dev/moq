@@ -28,11 +28,10 @@ Decided with the maintainer on 2026-10-23:
   (`rs/moq-cli/src/args.rs`) keeps refusing; point its message at `--follow`
   only where following applies.
 - Move the follower onto `moq_mux::follow::Instances` here (decided
-  2026-10-24), as [readers follow restarts](/quest/m1/sink-restart-follow.md)
-  did for `moq play`, `moqsrc`, and `transcode`. `with_linger` waits from the
+  2026-10-24), as `moq play`, `moqsrc`, and `transcode` already do. `with_linger` waits from the
   announcement through resolution and the first catalog, but `Instances`
   yields `Start` only after resolution, so settle what `--follow` bounds
-  before moving the timer onto it. Coordinate the name with that quest.
+  before moving the timer onto it.
 - Docs: `doc/bin/cli.md`, plus a migration note for moq-cli, moq-mux, and
   moq-srt in the Impact bullet.
 
