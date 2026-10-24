@@ -1397,6 +1397,45 @@ mod tests {
 		assert!(matches!(bi, Err(crate::quic::web::ReadError::Reset(0))), "{bi:?}");
 	}
 
+	/// A stream dropped before its end is stopped with WebTransport code 0, not the driver's raw
+	/// 0, which falls outside the HTTP/3 range and reaches the writer as an invalid stop.
+	#[tokio::test]
+	async fn drop_stops_with_mapped_code() {
+		let (client_conn, server_conn, _endpoints) = pair().await;
+		let (client, server) = tokio::join!(
+			Session::connect(client_conn, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server_conn).await.unwrap().ok().await },
+		);
+		let (client, server) = (client.unwrap(), server.unwrap());
+
+		let mut uni = client.open_uni(Default::default()).await.unwrap();
+		uni.write_all(b"unread").await.unwrap();
+		let (mut bi, _client_recv) = client.open_bi(Default::default()).await.unwrap();
+		bi.write_all(b"unread").await.unwrap();
+
+		let mut recv = server.accept_uni().await.unwrap();
+		recv.read_chunk(usize::MAX).await.unwrap();
+		drop(recv);
+		let (_server_send, mut recv) = server.accept_bi().await.unwrap();
+		recv.read_chunk(usize::MAX).await.unwrap();
+		drop(recv);
+
+		let stopped = |mut send: SendStream| async move {
+			loop {
+				if let Err(err) = send.write(b"more").await {
+					return err;
+				}
+			}
+		};
+		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), async {
+			tokio::join!(stopped(uni), stopped(bi))
+		})
+		.await
+		.unwrap();
+		assert!(matches!(uni, crate::quic::web::WriteError::Stopped(0)), "{uni:?}");
+		assert!(matches!(bi, crate::quic::web::WriteError::Stopped(0)), "{bi:?}");
+	}
+
 	/// A stream that names another session is dropped, and the session's own stream after it
 	/// still arrives.
 	#[tokio::test]

@@ -38,7 +38,7 @@ Bring the options to the maintainer with a recommendation before building:
 - **The native floor.** Lease at `MIN_RECEIVE_WINDOW` or native's 128 MiB.
   Simplest, and one behavior across transports, at the largest allowance.
 - **A smaller qmux floor.** Only lite-01/02 needs the 64 MiB term, and
-  [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) removes
+  [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) removes
   the frame term. MAX_DATA can only grow, so a session can start at the floor
   its version needs and extend once SETUP (or a WebSocket subprotocol) names a
   legacy version. A floor below some supported unit must refuse it loudly.
@@ -64,6 +64,6 @@ QMux MAX_DATA and STOP_SENDING only, no MoQ format change.
 
 ## Related
 
-- [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) - frame credit returns per segment, shrinking the floor's frame term
+- [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - frame credit returns per segment, shrinking the floor's frame term
 - [WebSocket caps](/quest/m2/rate-websocket.md) - paced reads on the same sessions, inside the window
 - [Transport x version benches](/quest/m2/bench-transport-sweep.md) - where a per-session memory and throughput sweep belongs
