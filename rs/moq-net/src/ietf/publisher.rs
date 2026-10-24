@@ -3876,7 +3876,7 @@ where
 	/// instance it replaces still holds its stream when the new one opens.
 	async fn open_request(&self) -> Result<Option<Stream<S, Version>>, Error> {
 		let mut session = self.session.clone();
-		let mut open = std::pin::pin!(Stream::open(&mut session, self.version));
+		let mut open = std::pin::pin!(Stream::open_request(&mut session, self.version));
 		let mut timeout = crate::time::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
 
 		kio::wait(|waiter| {
@@ -16144,7 +16144,11 @@ mod tests {
 				}
 				tick().await;
 			}
-			assert_eq!(occurrences(&log, b"lonely-cam"), 1, "{version}: never came back on its own");
+			assert_eq!(
+				occurrences(&log, b"lonely-cam"),
+				1,
+				"{version}: never came back on its own"
+			);
 			assert!(log.closes().is_empty());
 			assert_eq!(
 				control.poll_next_request_id(&kio::Waiter::noop()),

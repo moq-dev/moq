@@ -350,7 +350,13 @@ pub fn start(config: Config<crate::driver::Transport>) -> Result<(Driver, crate:
 											reader,
 										})
 									}
-									_ => Stream::open(&mut crate::driver::Transport::new(sub_ns_adapter), version).await,
+									_ => {
+										Stream::open_request(
+											&mut crate::driver::Transport::new(sub_ns_adapter),
+											version,
+										)
+										.await
+									}
 								}
 							}
 							.await;
@@ -562,7 +568,7 @@ pub fn start(config: Config<crate::driver::Transport>) -> Result<(Driver, crate:
 						let sub_ns_session = sub_ns_session.clone();
 						prefixes.push(async move {
 							let mut sub_ns_session = sub_ns_session;
-							let stream = match Stream::open(&mut sub_ns_session, version).await {
+							let stream = match Stream::open_request(&mut sub_ns_session, version).await {
 								Ok(stream) => stream,
 								Err(Error::NoStreamCredit) => {
 									tracing::warn!(%prefix, "subscribe_namespace refused without stream credit");
@@ -1592,7 +1598,11 @@ mod tests {
 			let log = session.log.clone();
 			let mut session = crate::driver::Transport::new(session);
 			let setup = if version == Version::Draft16 {
-				Some(Stream::open_control(&mut session, version).await.expect("setup waits for credit"))
+				Some(
+					Stream::open(&mut session, version)
+						.await
+						.expect("setup waits for credit"),
+				)
 			} else {
 				None
 			};

@@ -2901,7 +2901,7 @@ where
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 					validity.check(waiter)?;
-					Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+					Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 				})
 				.await
 				{
@@ -3900,7 +3900,7 @@ where
 					if let Poll::Ready(err) = track.poll_closed(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					Stream::poll_open(&mut opening, this.version, &mut waiter.context())
+					Stream::poll_open_request(&mut opening, this.version, &mut waiter.context())
 				})
 				.await?;
 				stream = super::request_stream::with_stats(stream, this.origin.stats(), this.version);
@@ -4106,7 +4106,7 @@ where
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
 			validity.check(waiter)?;
-			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 		})
 		.await
 		{
@@ -5206,7 +5206,7 @@ where
 			if let Poll::Ready(err) = track::TrackState::poll_closed(&request.state, waiter) {
 				return Poll::Ready(Err(err));
 			}
-			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 		})
 		.await
 		{

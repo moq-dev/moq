@@ -435,7 +435,7 @@ where
 
 		let mut session = self.session.clone();
 		let opened = {
-			let mut opening = std::pin::pin!(Stream::open(&mut session, self.version));
+			let mut opening = std::pin::pin!(Stream::open_request(&mut session, self.version));
 			kio::wait(|waiter| {
 				if live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
@@ -633,7 +633,7 @@ where
 		};
 		let mut session = self.session.clone();
 		let opened = {
-			let mut opening = std::pin::pin!(Stream::open(&mut session, self.version));
+			let mut opening = std::pin::pin!(Stream::open_request(&mut session, self.version));
 			kio::wait(|waiter| {
 				if gone(waiter) {
 					return Poll::Ready(None);

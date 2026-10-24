@@ -606,7 +606,7 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 						return Poll::Ready(Error::GoingAway);
 					}
 					let token = token.clone();
-					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
+					let mut stream = match ready!(Stream::poll_open_request(&mut self.session, self.version, &mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
 					};
@@ -824,7 +824,7 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 					self.state = SendGoawayState::Open { payload };
 				}
 				SendGoawayState::Open { payload } => {
-					let mut stream = match ready!(Stream::poll_open_control(&mut self.session, self.version, &mut cx)) {
+					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => {
 							tracing::warn!(%err, "failed to send goaway");

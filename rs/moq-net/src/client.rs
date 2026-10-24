@@ -379,9 +379,7 @@ impl Client {
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
-		let mut stream = Stream::open_control(&mut session, encoding)
-			.await?
-			.with_stats(&self.stats);
+		let mut stream = Stream::open(&mut session, encoding).await?.with_stats(&self.stats);
 
 		// The encoding is always an IETF version for SETUP negotiation.
 		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;

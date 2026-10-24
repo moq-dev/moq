@@ -26,9 +26,27 @@ pub struct Stream<S: crate::transport::poll::Session, V> {
 }
 
 impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
-	/// Poll opening a request stream, refused with [Error::NoStreamCredit] when the peer
-	/// grants no more streams.
+	/// Poll opening a new stream with the given version, waiting for stream credit.
 	pub fn poll_open(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
+	where
+		V: Clone,
+	{
+		let (send, recv) =
+			ready!(session.poll_open_bi(cx, Default::default())).map_err(|err| version.transport_error(err))?;
+		Poll::Ready(Ok(Self::build(send, recv, version)))
+	}
+
+	/// Open a new stream with the given version, waiting for stream credit.
+	pub async fn open(session: &mut S, version: V) -> Result<Self, Error>
+	where
+		V: Clone,
+	{
+		kio::wait(|waiter| Self::poll_open(session, version.clone(), &mut waiter.context())).await
+	}
+
+	/// Poll opening a request stream, refused with [Error::NoStreamCredit] when the peer
+	/// grants no more streams instead of parking work the caller cannot see.
+	pub fn poll_open_request(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
 	where
 		V: Clone,
 	{
@@ -40,30 +58,11 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 
 	/// Open a request stream, refused with [Error::NoStreamCredit] when the peer grants
 	/// no more streams.
-	pub async fn open(session: &mut S, version: V) -> Result<Self, Error>
+	pub async fn open_request(session: &mut S, version: V) -> Result<Self, Error>
 	where
 		V: Clone,
 	{
-		kio::wait(|waiter| Self::poll_open(session, version.clone(), &mut waiter.context())).await
-	}
-
-	/// Poll opening a session control stream (SETUP or GOAWAY), which waits for stream
-	/// credit instead of refusing: the session cannot start or drain without it.
-	pub fn poll_open_control(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
-	where
-		V: Clone,
-	{
-		let (send, recv) =
-			ready!(session.poll_open_bi(cx, Default::default())).map_err(|err| version.transport_error(err))?;
-		Poll::Ready(Ok(Self::build(send, recv, version)))
-	}
-
-	/// Open a session control stream (SETUP or GOAWAY), waiting for stream credit.
-	pub async fn open_control(session: &mut S, version: V) -> Result<Self, Error>
-	where
-		V: Clone,
-	{
-		kio::wait(|waiter| Self::poll_open_control(session, version.clone(), &mut waiter.context())).await
+		kio::wait(|waiter| Self::poll_open_request(session, version.clone(), &mut waiter.context())).await
 	}
 
 	/// Poll accepting a new stream with the given version.
@@ -127,7 +126,7 @@ mod tests {
 			let mut cx = Context::from_waker(std::task::Waker::noop());
 			for _ in 0..2 {
 				assert!(matches!(
-					Stream::poll_open(&mut session, version, &mut cx),
+					Stream::poll_open_request(&mut session, version, &mut cx),
 					Poll::Ready(Err(Error::NoStreamCredit))
 				));
 			}
@@ -149,7 +148,7 @@ mod tests {
 		let gate = kio::Producer::new(false);
 		let mut session = ScriptedSession::gated_open(Vec::new(), gate.consume());
 		let mut cx = Context::from_waker(std::task::Waker::noop());
-		assert!(Stream::poll_open(&mut session, Version::Lite07, &mut cx).is_pending());
+		assert!(Stream::poll_open_request(&mut session, Version::Lite07, &mut cx).is_pending());
 		{
 			let Ok(mut open) = gate.write() else {
 				panic!("gate is still live");
@@ -157,7 +156,7 @@ mod tests {
 			*open = true;
 		}
 		assert!(matches!(
-			Stream::poll_open(&mut session, Version::Lite07, &mut cx),
+			Stream::poll_open_request(&mut session, Version::Lite07, &mut cx),
 			Poll::Ready(Ok(_))
 		));
 		assert_eq!(session.log.bi_opens(), 1);

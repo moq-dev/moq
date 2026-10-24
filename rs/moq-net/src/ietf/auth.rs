@@ -340,7 +340,7 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 	/// Send the token, then track its grant until either side ends it, resolving with why.
 	#[cfg(feature = "async")]
 	async fn run(&self, token: Bytes) -> Error {
-		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
+		let mut stream = match Stream::open_request(&mut self.session.clone(), self.version).await {
 			Ok(stream) => stream,
 			Err(err) => return err,
 		};
