@@ -57,8 +57,8 @@ mod connection;
 pub use crate::connection::{
     Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, CreditStats,
     Datagrams, Event, FinishError, FrameStats, LeaseError, Leased, PathStats, ReadError,
-    ReadableError, RecvStream, SendDatagramError, SendGroup, SendGroups, SendOptions,
-    SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
+    ReadableError, RecvStream, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
+    ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "mux")]
 #[doc(hidden)]
