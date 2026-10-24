@@ -2,6 +2,8 @@ import { expect, setSystemTime, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { Decoder } from "./flate/decoder.ts";
+import { Encoder } from "./flate/encoder.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
@@ -25,13 +27,13 @@ function settle(): Promise<void> {
 // what came due; `advance` also drains what those timers schedule.
 function manualTime(initial: number) {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const to = (ms: number) => Nano(Nano.fromMilli(Milli(ms)) - clock.now());
 	clock.jump(to(initial));
 	return {
 		set: (ms: number) => clock.jump(to(ms)),
 		advance: (ms: number) => clock.advance(to(ms)),
-		restore,
+		installed,
 	};
 }
 
@@ -276,6 +278,40 @@ test("datagram buffers drop oldest at capacity without delaying active subscribe
 		expect((await slow.recvDatagram())?.sequence).toBe(sequence);
 	}
 	expect(await slow.recvDatagram()).toBeUndefined();
+});
+
+// A received compressed datagram inflates far past its wire size, so each reader inflates
+// its own copy: a slow reader's queue holds only the slices, never what a fast one realized.
+test("a datagram queue holds no plain copy another reader realized", async () => {
+	const producer = new TrackProducer("test").accept({ compress: true });
+	const slow = producer.subscribe();
+	const fast = producer.subscribe();
+	const plain = new Uint8Array(65535);
+	const slice = new Encoder().frame(plain);
+	expect(slice.length).toBeLessThan(128);
+	const decode = spyOn(Decoder.prototype, "frame");
+	try {
+		const count = 64;
+		for (let sequence = 0; sequence < count; sequence++) {
+			hooks.writeDatagram(producer, { sequence, payload: slice }, plain.length);
+		}
+		const arrived = decode.mock.calls.length;
+		const read = [];
+		for (let sequence = 0; sequence < count; sequence++) {
+			const datagram = await fast.recvDatagram();
+			expect(datagram?.payload).toEqual(plain);
+			read.push(datagram);
+		}
+		expect(decode.mock.calls.length).toBe(arrived + count);
+		for (let sequence = 0; sequence < count; sequence++) {
+			const datagram = await slow.recvDatagram();
+			expect(datagram).not.toBe(read[sequence]);
+			expect(datagram?.payload).toEqual(plain);
+		}
+		expect(decode.mock.calls.length).toBe(arrived + 2 * count);
+	} finally {
+		decode.mockRestore();
+	}
 });
 
 test("insertDatagram preserves an explicit sequence", async () => {
@@ -753,7 +789,7 @@ test("zero latency takes the latest group when ages are equal", async () => {
 
 		expect((await track.recvGroup())?.sequence).toBe(1);
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -876,7 +912,7 @@ test("a stamped successor expires a group stalled before its first frame", async
 		expect((await track.recvGroup())?.sequence).toBe(1);
 		expect(track.recvGroup()).resolves.toBeUndefined();
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -986,7 +1022,7 @@ test("a handed-out group still expires while its first frame is stalled", async 
 		await expect(pending).rejects.toMatchObject({ code: StreamCode.Old });
 		expect(await closed).toMatchObject({ code: StreamCode.Old });
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1122,7 +1158,7 @@ test("a stalled track keeps only its newest group", () => {
 		expect(drain(producer.subscribe({ maxDelay: Milli(1000) }))).toEqual([2]);
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1147,7 +1183,7 @@ test("frozen timestamps still age out by wall clock", () => {
 		expect(drain(producer.subscribe({ maxDelay: Milli(1000) }))).toEqual([2]);
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1171,7 +1207,7 @@ test("a group shared by two tracks ages each from its own arrival", () => {
 	} finally {
 		first.close();
 		second.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1189,7 +1225,7 @@ test("a startup burst ages out by media time", () => {
 		expect(drain(producer.subscribe({ maxDelay: Milli(1500) }))).toEqual([2, 3, 4]);
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1225,7 +1261,7 @@ test("a parked read wakes at its wall deadline", async () => {
 			expect(await read).toMatchObject({ code: StreamCode.Old });
 		} finally {
 			producer.close();
-			clock.restore();
+			clock.installed.close();
 		}
 	}
 });
@@ -1268,7 +1304,7 @@ test("an evicted successor with unread frames still starts the wall clock", asyn
 		expect(await guarded).toMatchObject({ code: StreamCode.Old });
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1315,7 +1351,7 @@ test("a failed successor hands the wall clock on after the cache evicts it", asy
 		expect(await guarded).toMatchObject({ code: StreamCode.Old });
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1341,7 +1377,7 @@ test("a run of empty groups ages out by wall clock", () => {
 		expect(drain(producer.subscribe({ maxDelay: Milli(1000) }))).toEqual([RUN + 1]);
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1363,7 +1399,7 @@ test("a live track retains its newest closed group through idle expiry", async (
 		replay.close();
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1390,7 +1426,7 @@ test("retention eviction surfaces as a gap for a handed-out group", async () => 
 
 		await expect(group.readFrame()).rejects.toThrow(TooFarBehind);
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1414,7 +1450,7 @@ test("idle expiry reclaims an ended track's held mirror", async () => {
 
 		await expect(group.readFrame()).rejects.toBeInstanceOf(TooFarBehind);
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1439,7 +1475,7 @@ test("retention reclaims a group the publisher abandoned open", async () => {
 		// A gap, not a clean finish: the publisher never ended this group.
 		await expect(group.readFrame()).rejects.toBeInstanceOf(TooFarBehind);
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1469,7 +1505,7 @@ test("an idle live edge ages out once a newer group arrives", async () => {
 		);
 		expect(await Promise.race([read, settle().then(() => "still parked")])).toBeInstanceOf(TooFarBehind);
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1491,7 +1527,7 @@ test("an abandoned open group ages out with no further write", async () => {
 		expect(await read).toBeInstanceOf(TooFarBehind);
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1511,7 +1547,7 @@ test("publisher maxAge does not change the idle cache deadline", async () => {
 			expect(idle.closed.peek()).toBeInstanceOf(TooFarBehind);
 		} finally {
 			producer.close();
-			clock.restore();
+			clock.installed.close();
 		}
 	}
 });
@@ -1537,7 +1573,7 @@ test("retention pruning preserves clean EOF for a drained mirror", async () => {
 		expect(await group.readFrame()).toBeUndefined();
 		expect(await group.closed).toBeNull();
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -1556,7 +1592,7 @@ test("system clock changes do not affect the latency budget", async () => {
 		expect((await track.recvGroup())?.sequence).toBe(1);
 	} finally {
 		setSystemTime();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -2538,7 +2574,7 @@ test("an omitted publisher limit still ages idle groups out", async () => {
 		after.close();
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -2559,7 +2595,7 @@ test("a live track does not pin an aborted newest group", () => {
 		late.close();
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -2584,7 +2620,7 @@ test("closing a track keeps an idle newest group for subscribers to drain", asyn
 		expect(late.tryRecvGroup()).toBeUndefined();
 		late.close();
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -2622,7 +2658,7 @@ test("a late subscriber to a closed unlimited track is released once the cache a
 		producer.subscribe().close();
 		expect(added.filter(([map, key]) => map.has(key)).length).toBe(0);
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -2694,7 +2730,7 @@ test("an ended track's buffered groups age out for a stale subscriber", async ()
 			else expect(stale.tryRecvGroup()).toBeUndefined();
 		} finally {
 			producer.close();
-			clock.restore();
+			clock.installed.close();
 		}
 	}
 });
@@ -2806,7 +2842,7 @@ test("unknown track metadata keeps presentation-time expiry until accepted", () 
 		expect(drain(producer.subscribe({ maxDelay: Milli(500) }))).toEqual([2, 3]);
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -2835,7 +2871,7 @@ test("an untimed subscriber starts at the oldest fresh group", () => {
 		expect(drain(live)).toEqual([5]);
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -3041,7 +3077,7 @@ test("a mid-group end survives eviction and a filtered late reader", async () =>
 		reader.close();
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -3159,7 +3195,7 @@ test("a gap is forgotten once a group above it is past the budget", () => {
 			expect(hooks.deliveredRuns(subscriber)).toBe(1);
 		}
 	} finally {
-		time.restore();
+		time.installed.close();
 	}
 });
 
@@ -3183,7 +3219,7 @@ test("an endless track with gaps remembers only those within the budget", () => 
 		stampGroup(producer, 2995, 2995);
 		expect(drainGroups(subscriber)).toEqual([2995]);
 	} finally {
-		time.restore();
+		time.installed.close();
 	}
 });
 
@@ -3300,7 +3336,7 @@ test("an evicted group still bounds, and a late group below it is unverified", a
 		expect(timestamps.has(1)).toBe(true);
 		expect(timestamps.get(1)).toBeUndefined();
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -3501,7 +3537,7 @@ for (const [waited, clean] of [
 			if (clean) expect(await next).toBeUndefined();
 			else await expect(next).rejects.toThrow("dropped");
 		} finally {
-			clock.restore();
+			clock.installed.close();
 		}
 	});
 }
@@ -3523,7 +3559,7 @@ test("an evicted group still fills a pending tail", async () => {
 		expect(await reader.recvGroup()).toBeUndefined();
 		producer.close();
 	} finally {
-		clock.restore();
+		clock.installed.close();
 	}
 });
 

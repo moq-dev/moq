@@ -17,7 +17,7 @@ import {
 	TooFarBehind,
 	toStreamCode,
 } from "./error.ts";
-import { Compression } from "./flate/group.ts";
+import { datagramSlice, type Stored, sliceView } from "./flate/group.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import {
@@ -491,6 +491,9 @@ export class Consumer {
 	fetchGroup(sequence: number, options?: FetchGroupOptions): Promise<GroupConsumer> {
 		if (options?.maxDelay !== undefined) {
 			options = { ...options, maxDelay: wireMillis("maxDelay", options.maxDelay) };
+		}
+		if (!this.#broadcast.fetchGroup) {
+			return Promise.reject(new Error("fetch group is not supported by this session's version"));
 		}
 		return this.#broadcast.fetchGroup(this.name, sequence, options);
 	}
@@ -973,20 +976,18 @@ export class Producer {
 		}
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).
-		const compressed = new Map<Datagram, Datagram>();
+		const compressed = new Map<Datagram, Stored>();
 		for (const sink of this.#sinks) {
 			if (resolved.compress) {
 				sink.datagrams.mutate((datagrams) => {
 					for (let index = 0; index < datagrams.length; index++) {
-						const datagram = datagrams[index];
-						let stored = compressed.get(datagram);
-						if (!stored) {
-							const flate = new Compression();
-							stored = Object.assign(flate.push(datagram), { sequence: datagram.sequence });
-							flate.finish();
-							compressed.set(datagram, stored);
+						const { sequence, timestamp, payload } = datagrams[index];
+						let slice = compressed.get(datagrams[index]);
+						if (!slice) {
+							slice = datagramSlice(payload);
+							compressed.set(datagrams[index], slice);
 						}
-						datagrams[index] = stored;
+						datagrams[index] = Object.assign(sliceView(timestamp, slice), { sequence });
 					}
 				});
 			}
@@ -1498,16 +1499,19 @@ export class Producer {
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
-	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
-	#publishDatagram(datagram: Datagram): void {
-		this.#advance(datagram.sequence, false);
-		this.#arrive(datagram.sequence);
-		this.#finishLargest(datagram.sequence);
+	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache). A
+	// compressed track's rings share only `slice`: each holds its own lazy view of it.
+	#publishDatagram(datagram: Datagram, slice?: Stored): void {
+		const { sequence, timestamp } = datagram;
+		this.#advance(sequence, false);
+		this.#arrive(sequence);
+		this.#finishLargest(sequence);
 		for (const sink of this.#sinks) {
 			sink.received.set(this.#received);
+			const queued = slice ? Object.assign(sliceView(timestamp, slice), { sequence }) : datagram;
 			sink.datagrams.mutate((list) => {
 				if (list.length === MAX_DATAGRAMS) list.shift();
-				list.push(datagram);
+				list.push(queued);
 			});
 		}
 	}
@@ -1559,15 +1563,9 @@ export class Producer {
 			(!Number.isSafeInteger(inflated) || inflated < 0 || !this.#state.info.peek()?.compress)
 		)
 			throw new ProtocolViolation("unexpected inflated datagram size");
-		if (this.#state.info.peek()?.compress) {
-			const flate = new Compression();
-			const frame = flate.push(datagram, inflated);
-			// A bad best-effort datagram is dropped on arrival, before any reader receives it.
-			if (inflated !== undefined) void frame.payload;
-			flate.finish();
-			datagram = Object.assign(frame, { sequence });
-		}
-		this.#publishDatagram(datagram);
+		// A bad best-effort datagram is dropped on arrival, before any reader receives it.
+		const slice = this.#state.info.peek()?.compress ? datagramSlice(payload, inflated) : undefined;
+		this.#publishDatagram(datagram, slice);
 	}
 
 	/**

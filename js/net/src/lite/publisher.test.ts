@@ -873,7 +873,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 
 test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group and frame bounds", async (version) => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const sub = await servedSubscription({ version, startGroup: 0, startFrame: 1, endGroup: 1, endFrame: 0 });
 	const reader = sub.datagrams.getReader();
 	// Datagrams go out in arrival order, so each batch inserts its out-of-range ones ahead of
@@ -915,7 +915,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group 
 		await reader.cancel();
 		await sub.close();
 		await sub.serving;
-		restore();
+		installed.close();
 	}
 });
 
@@ -966,7 +966,7 @@ test("lite draft-06: a cut dropped then re-created is not served", async () => {
 // stream is reset with `Old` and the group dropped.
 test("lite draft-06: a group stream that never completes is reset once the group goes stale", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const budget = Milli(1_000);
 	// The track's max age caps the subscription's budget.
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, maxAge: budget });
@@ -997,7 +997,7 @@ test("lite draft-06: a group stream that never completes is reset once the group
 		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
 	} finally {
 		await sub.close();
-		restore();
+		installed.close();
 	}
 });
 

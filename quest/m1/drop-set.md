@@ -137,7 +137,7 @@ fold-or-`TooFarBehind` rule as a Rust eviction. A run sits between cached
 sequences, so there are at most about one per cached sequence (alternating
 drop and arrival), and JS run state grows no faster than the JS cache
 itself. The JS byte bound for both is
-[JS unbounded groups](/quest/m2/unbounded-groups/js.md).
+[JS unbounded groups](/quest/m1/unbounded-groups/js.md).
 
 The per-cursor record keeps resolved-demand's pool bound and floor rule,
 with "final" narrowed: only a delivered run or a budget-independent drop (a
@@ -227,4 +227,4 @@ unchanged.
 ## Related
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
-- [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache
+- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache
