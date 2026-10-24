@@ -113,7 +113,7 @@ async def test_fetch_of_a_dropped_group_is_not_found():
         fill.drop_groups(5, 6)
 
     task = asyncio.create_task(reject())
-    with pytest.raises(moq.Error.NotFound):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.NotFound):
         await consumer.fetch_group("events", 5)
     await task
 
