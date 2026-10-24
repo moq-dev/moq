@@ -28,6 +28,9 @@ typedef Transport = MoqTransport;
 /// The congestion control family for a QUIC connection.
 typedef CongestionControl = MoqCongestionControl;
 
+/// Certificate trust and the mTLS identity for `ConnectOptions.tls`.
+typedef ClientTls = MoqClientTls;
+
 /// The publish side of an origin: create broadcasts so subscribers can discover them.
 typedef OriginProducer = MoqOriginProducer;
 
@@ -54,6 +57,9 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 
 /// A pending wait for a route to cover a specific path.
 typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
+
+/// How a broadcast advertises its exact path: its static production cost and publisher epoch.
+typedef AnnounceRoute = MoqAnnounceRoute;
 
 /// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
 typedef Announce = MoqAnnounce;
@@ -106,9 +112,6 @@ typedef TrackConsumer = MoqTrackConsumer;
 /// A request to produce one uncached group for a fetch consumer.
 typedef GroupRequest = MoqGroupRequest;
 
-/// A watch-only handle to whether any caller still wants a requested group; holding it keeps nothing open.
-typedef GroupDemand = MoqGroupDemand;
-
 /// The write side of a single group: append frames to it.
 typedef GroupProducer = MoqGroupProducer;
 
@@ -160,8 +163,11 @@ typedef AuthToken = MoqAuthToken;
 /// What the peer lets this side do: publish and subscribe patterns, and an expiry.
 typedef Grant = MoqGrant;
 
-/// A connection lifecycle transition reported by [Session.status].
-typedef ConnectionStatus = MoqConnectionStatus;
+/// A connection lifecycle transition reported by [Session.state].
+typedef ConnectionPhase = MoqConnectionPhase;
+
+/// One coherent connection lifecycle snapshot.
+typedef ConnectionState = MoqConnectionState;
 
 /// Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
 typedef Backoff = MoqBackoff;

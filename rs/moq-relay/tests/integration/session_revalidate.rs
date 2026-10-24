@@ -6,7 +6,7 @@
 //! session.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -21,7 +21,6 @@ use moq_tokio::moq_net;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
-#[allow(clippy::large_enum_variant)]
 enum Answer {
 	Grant(Grant),
 	Status(u16),
@@ -100,7 +99,7 @@ fn all() -> Patterns {
 /// A grant that lasts an hour and would not re-check on its own during a test.
 fn grant() -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+	grant.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 	grant.revalidate = Some(Duration::from_secs(3600));
 	grant
 }

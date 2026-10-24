@@ -116,7 +116,10 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 
 	// The stock loop serves everything: the uring workers own QUIC, the shared
@@ -216,7 +219,10 @@ async fn uring_workers_serve_every_configured_version() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let running = tokio::spawn(relay.run());
 
@@ -291,7 +297,8 @@ async fn uring_workers_serve_every_configured_version() {
 
 /// A session the workers accept reports its peer address, the listener's
 /// address, and the name the client dialed, as the tokio listener does: the
-/// SNI on raw QUIC and WebTransport alike.
+/// SNI on raw QUIC and WebTransport alike, and none for an IP-literal dial, which
+/// sends no SNI, rather than the WebTransport CONNECT host.
 #[tokio::test]
 async fn uring_workers_report_link_facts() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -301,7 +308,10 @@ async fn uring_workers_report_link_facts() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let local = relay.addr().expect("bound address");
 	let port = local.port();
 	let sessions = relay.sessions().clone();
@@ -309,18 +319,22 @@ async fn uring_workers_report_link_facts() {
 
 	let mut connections = Vec::new();
 	for scheme in ["moql", "https"] {
-		let url: url::Url = format!("{scheme}://localhost:{port}/link").parse().expect("parse url");
-		connections.push(connect(client(), url).await);
+		for host in ["localhost", "127.0.0.1"] {
+			let url: url::Url = format!("{scheme}://{host}:{port}/link/{host}")
+				.parse()
+				.expect("parse url");
+			connections.push(connect(client(), url).await);
+		}
 	}
 
 	// A client can see its session established before the relay lists it.
 	let deadline = std::time::Instant::now() + TIMEOUT;
 	let views = loop {
 		let views = sessions.list(&Default::default());
-		if views.len() == 2 {
+		if views.len() == 4 {
 			break views;
 		}
-		assert!(std::time::Instant::now() < deadline, "expected 2 sessions: {views:?}");
+		assert!(std::time::Instant::now() < deadline, "expected 4 sessions: {views:?}");
 		tokio::time::sleep(Duration::from_millis(25)).await;
 	};
 	for view in &views {
@@ -328,7 +342,8 @@ async fn uring_workers_report_link_facts() {
 		assert!(remote.ip().is_loopback() && remote.port() != 0, "peer address {remote}");
 		assert_ne!(remote, local, "the peer is not the listener");
 		assert_eq!(view.local, Some(local), "listener address");
-		assert_eq!(view.server_name.as_deref(), Some("localhost"), "dialed name");
+		let sni = view.path.ends_with("/localhost").then_some("localhost");
+		assert_eq!(view.server_name.as_deref(), sni, "dialed name of {}", view.path);
 	}
 
 	drop(connections);
@@ -560,7 +575,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	config.auth.url = Some(spawn_auth_server(mtls_only()).await);
 	config.listen.tls.root = vec![root];
 
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let running = tokio::spawn(relay.run());
 
@@ -651,7 +666,7 @@ async fn uring_workers_write_qlog_traces() {
 	std::fs::create_dir(&traces).expect("create qlog dir");
 	let mut config = uring_config(&cert, &key);
 	config.quic.qlog = Some(traces.clone());
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let running = tokio::spawn(relay.run());
 
@@ -736,7 +751,7 @@ async fn uring_refusals_reach_metrics() {
 	let mut config = uring_config(&cert, &key);
 	config.auth.public = vec!["anon/**".parse().unwrap()];
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let internal = relay.internal().addr().expect("internal listener bound");
 	let running = tokio::spawn(relay.run());
@@ -823,7 +838,7 @@ async fn uring_forwards_the_setup_token() {
 	let (cert, key) = certificate(dir.path());
 	let mut config = uring_config(&cert, &key);
 	config.auth.public.clear();
-	let mut relay = Relay::load(config).await.unwrap();
+	let mut relay = Relay::load(config).await.unwrap().with_signals(false);
 	let addr = relay.addr().unwrap();
 	let mut admissions = relay.admissions().expect("embedded auth");
 	let token = moq_auth::Token {
@@ -910,7 +925,7 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 	let (cert, key) = certificate(dir.path());
 	let mut config = uring_config(&cert, &key);
 	config.auth.public.clear();
-	let mut relay = Relay::load(config).await.unwrap();
+	let mut relay = Relay::load(config).await.unwrap().with_signals(false);
 	let port = relay.addr().unwrap().port();
 	let mut admissions = relay.admissions().expect("embedded auth");
 	let deciding = tokio::spawn(async move {
@@ -976,7 +991,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		let mut config = uring_config(&cert, &key);
 		config.listen.timeout = Some(LISTEN);
 		config.quic.congestion_control = Some(moq_tokio::quic::CongestionControl::None);
-		let relay = Relay::load(config).await.expect("load relay");
+		let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 		let port = relay.addr().expect("workers bound an address").port();
 		let addr = SocketAddr::from(([127, 0, 0, 1], port));
 		let running = tokio::spawn(relay.run());
@@ -1090,20 +1105,14 @@ async fn stall_after_hello(server: SocketAddr) -> (SocketAddr, tokio::sync::ones
 /// The harness keeps only the connection target, including its span on worker and shared tasks.
 #[tokio::test]
 async fn uring_sessions_log_their_close_under_a_connection_span() {
-	use tracing_subscriber::layer::SubscriberExt;
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	if !supported() {
 		return;
 	}
 	let logs = Logs::default();
-	let subscriber = tracing_subscriber::fmt()
-		.with_ansi(false)
-		.with_writer(logs.clone())
-		.finish()
-		.with(tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO));
-	// Worker threads need the same dispatcher as the shared runtime. Global is
-	// safe because nextest runs each test in its own process.
-	tracing::subscriber::set_global_default(subscriber).expect("test owns the global subscriber");
+	let _logging = logs.capture();
+	let parent = tracing::info_span!(target: "moq_relay::connection", "embedder");
+	let _parent = parent.enter();
 	let dir = tempfile::tempdir().unwrap();
 	let (cert, key) = certificate(dir.path());
 	let relay = Relay::load(uring_config(&cert, &key))
@@ -1138,6 +1147,13 @@ async fn uring_sessions_log_their_close_under_a_connection_span() {
 	let closed: Vec<_> = text.lines().filter(|line| line.contains("connection closed")).collect();
 	assert_eq!(negotiated.len(), 2, "{text}");
 	assert_eq!(closed.len(), 2, "{text}");
+	assert!(
+		negotiated
+			.iter()
+			.chain(&closed)
+			.all(|line| line.contains("embedder:conn{")),
+		"worker and shared-runtime logs must keep their embedder parent: {text}"
+	);
 	for id in 0..2 {
 		for lines in [&negotiated, &closed] {
 			assert!(

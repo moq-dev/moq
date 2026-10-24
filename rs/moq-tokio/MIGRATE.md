@@ -4,11 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### WebRTC data channels are internal
-
-The feature-gated `webrtc` module is hidden from public API documentation while it has no application consumer.
-Existing source integrations still enable the `webrtc` feature explicitly.
-
 ### The connection receive window is 128 MiB, and has a floor (#5878)
 
 `quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.

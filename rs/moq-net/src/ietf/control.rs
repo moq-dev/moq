@@ -136,7 +136,7 @@ impl Control {
 				incoming: None,
 				// The peer takes the other parity: a client's IDs are even, a server's odd.
 				modern: Spent::new(u64::from(client)),
-				history: crate::session::Limits::default().requests(),
+				history: crate::session::Limits::default().window(),
 				going_away: false,
 			}),
 		}
@@ -484,7 +484,7 @@ mod tests {
 	/// Skipping to the top of a production-sized window records one run, not every ID.
 	#[test]
 	fn draft16_a_jump_is_one_run_split_only_by_requests_inside_it() {
-		let window = crate::session::Limits::default().requests();
+		let window = crate::session::Limits::default().window();
 		let control = Control::new(None, false).with_window(window, false, Version::Draft16);
 		let top = 2 * (window - 1);
 		let runs = |control: &Control| {

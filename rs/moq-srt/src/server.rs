@@ -16,8 +16,7 @@
 //!
 //! This mirrors `moq-tokio`'s `Server` / `Request`, so the gateway stays
 //! unopinionated about auth: the embedder (e.g. a relay verifying the stream id
-//! as a JWT) owns that policy. For the unauthenticated convenience that accepts
-//! everything and routes by prefix, use [`crate::run`].
+//! as a JWT) owns that policy.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -602,7 +601,7 @@ pub(crate) async fn serve_subscribe(
 		// program clock re-anchors the pacing rather than mapping the new timeline
 		// through the old anchor. srt-tokio paces on std's clock, where a late payload
 		// keeps its past instant, so TSBPD still sees its spacing from its neighbors.
-		for (at, payload) in egress.push(&frame, subscriber.discontinuity(), moq_net::time::now()) {
+		for (at, payload) in egress.push(&frame, subscriber.discontinuity(), moq_net::time::Instant::now()) {
 			socket.send((at.into_std(), payload)).await?;
 		}
 	}
@@ -670,7 +669,11 @@ fn parse_stream_id(stream_id: Option<&StreamId>) -> Option<(String, ConnectionMo
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use std::time::Instant as StdInstant;
 
@@ -682,7 +685,7 @@ mod tests {
 	/// already buffered from an earlier pacing instant.
 	#[test]
 	fn chunker_flushes_before_the_pacing_instant_changes() {
-		let first = moq_net::time::now();
+		let first = moq_net::time::Instant::now();
 		let second = first + Duration::from_millis(25);
 		let mut chunker = SrtChunker::default();
 
@@ -790,7 +793,7 @@ mod tests {
 	fn the_33_bit_wrap_is_not_a_rewind() {
 		// 2^33 ticks of the 90 kHz TS clock, in microseconds: where a PTS wraps.
 		const WRAP: u64 = (1u64 << 33) * 100 / 9;
-		let start = moq_net::time::now();
+		let start = moq_net::time::Instant::now();
 		let mut egress = Egress::default();
 
 		let before = egress.push(&frame(WRAP - 25_000, &[1; SRT_PAYLOAD]), 0, start);
@@ -817,7 +820,7 @@ mod tests {
 	#[test]
 	fn a_new_clock_re_anchors_the_pacing() {
 		const SLOT: Duration = Duration::from_millis(25);
-		let start = moq_net::time::now();
+		let start = moq_net::time::Instant::now();
 		let mut egress = Egress::default();
 
 		// Ten minutes into the program, on the muxer's 25ms grid.
@@ -849,7 +852,7 @@ mod tests {
 	#[test]
 	fn a_new_clock_flushes_the_partial_chunk_first() {
 		const SLOT: Duration = Duration::from_millis(25);
-		let start = moq_net::time::now();
+		let start = moq_net::time::Instant::now();
 		let mut egress = Egress::default();
 
 		// A partial chunk buffered under the first generation, then a new clock paced at

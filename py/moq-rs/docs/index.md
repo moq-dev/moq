@@ -36,6 +36,10 @@ asyncio.run(main())
 
    Client
    connect
+   ClientTls
+   QuicConfig
+   WebSocketConfig
+   Backoff
    Server
    Session
    Request
@@ -63,7 +67,6 @@ asyncio.run(main())
    TrackRequest
    GroupProducer
    GroupRequest
-   GroupDemand
 ```
 
 ## Subscribing
@@ -210,6 +213,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    media.VideoProperties
    VideoCodec
    VideoPixelFormat
+   video.FrameRate
    VideoEncoderInput
    VideoEncoderOutput
    VideoEncoderKind
@@ -221,6 +225,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    Subscription
    TrackInfo
    FetchGroupOptions
+   AnnounceRoute
    Route
    ConnectionStats
 ```

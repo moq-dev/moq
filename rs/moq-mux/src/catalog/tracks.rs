@@ -658,7 +658,8 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let mut resolved = Self::resolved(&self.supplied, &estimate);
 		// A measurement never lowers the published jitter or delay, including one raised through
 		// `modify`.
-		let published = self.config()?.estimate();
+		let mut config = self.config()?;
+		let published = config.estimate();
 		resolved.jitter = resolved.jitter.max(published.jitter);
 		resolved.delay = resolved.delay.max(published.delay);
 		self.detected = estimate;
@@ -676,7 +677,6 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let throttled = self.published.as_ref().is_some_and(|published| {
 			published.bitrate == resolved.bitrate && published.framerate == resolved.framerate
 		});
-		let mut config = self.config()?;
 		config.set_estimate(resolved.clone());
 		self.stage(config)?.commit_estimate(throttled)?;
 		self.published = Some(resolved);
@@ -703,10 +703,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !self.present {
 			return Err(crate::Error::NotPublished);
 		}
-		let mut catalog = self.catalog.snapshot();
-		C::get_mut(&mut catalog, &self.name)
-			.cloned()
-			.ok_or(crate::Error::NotPublished)
+		self.catalog.config::<C>(&self.name).ok_or(crate::Error::NotPublished)
 	}
 
 	pub(crate) fn replace(&mut self, config: C) -> crate::Result<()> {
@@ -943,7 +940,7 @@ mod tests {
 	}
 
 	/// Feed ~40ms 100 kB frames over more than the bitrate window, with a measured
-	/// 40ms container batch span. PTS spacing alone says nothing about flush delay.
+	/// 40ms container batch span. PTS spacing alone says nothing about jitter.
 	fn feed<E: CatalogExt, C: RenditionConfig<E>>(rendition: &mut Rendition<E, C>) {
 		let mut estimator = super::super::Estimator::new();
 		estimator.burst(Duration::from_millis(40));

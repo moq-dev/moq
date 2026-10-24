@@ -138,7 +138,7 @@ struct Data<T> {
 
 /// A JSON snapshot producer, kept beside the signal that stops its refresh task.
 struct JsonSnapshot {
-	data: Data<moq_mux::json::Snapshot<serde_json::Value, Extra>>,
+	data: Data<moq_mux::json::Snapshot<serde_json::Value>>,
 
 	/// Closed when the entry is removed, which wakes the refresh task to stop.
 	_alive: kio::Producer<()>,
@@ -175,13 +175,13 @@ pub struct Publish {
 	json_snapshot: NonZeroSlab<JsonSnapshot>,
 
 	/// JSON stream producers (lossless append-log tracks), advertised the same way.
-	json_stream: NonZeroSlab<Data<moq_mux::json::Stream<serde_json::Value, Extra>>>,
+	json_stream: NonZeroSlab<Data<moq_mux::json::Stream<serde_json::Value>>>,
 
 	/// Binary snapshot producers (lossy latest-value tracks of opaque bytes), advertised the same way.
-	binary_snapshot: NonZeroSlab<Data<moq_mux::binary::Snapshot<Extra>>>,
+	binary_snapshot: NonZeroSlab<Data<moq_mux::binary::Snapshot>>,
 
 	/// Binary stream producers (lossless append-log tracks of opaque bytes), advertised the same way.
-	binary_stream: NonZeroSlab<Data<moq_mux::binary::Stream<Extra>>>,
+	binary_stream: NonZeroSlab<Data<moq_mux::binary::Stream>>,
 
 	/// Demand watchers. Close signals shutdown; the task delivers a final callback, then removes itself.
 	demand: NonZeroSlab<DemandEntry>,
@@ -397,14 +397,6 @@ impl Publish {
 	pub fn media_frame(&mut self, media: Id, data: &[u8], timestamp: hang::container::Timestamp) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 		track.decode(data, Some(timestamp))?;
-		Ok(())
-	}
-
-	/// Record a locally encoded frame's transport handoff. Generic imports remain clock-free
-	/// unless their caller explicitly identifies the frame as encoder output.
-	pub fn media_flush(&mut self, media: Id, timestamp: hang::container::Timestamp) -> Result<(), Error> {
-		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-		track.flush(timestamp, moq_net::time::now())?;
 		Ok(())
 	}
 
@@ -956,9 +948,9 @@ impl Publish {
 	/// state; a late joiner only sees the newest value. The catalog entry (`json.tracks.<name>`,
 	/// `mode: snapshot`) is written now and retired when the track finishes or fails.
 	///
-	/// With deltas on, the track carries a refresh ratio of 8: a joiner that would download more
-	/// than eight snapshots' worth of deltas gets the value restated in a fresh group, by a task
-	/// that runs until the track is finished.
+	/// With deltas on, the track carries a refresh ratio of 8: a join after more than eight
+	/// snapshots' worth of deltas asks for the value restated in a fresh group, which a task
+	/// answers until the track is finished.
 	pub fn json_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::json::Config) -> Result<Id, Error> {
 		let refresh = config.deltas.then_some(8);
 		let data = self.data_track(broadcast, name, refresh, |catalog, track| {

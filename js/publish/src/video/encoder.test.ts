@@ -1,24 +1,24 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep } from "@moq/clock";
+import { type Installed, Manual, Milli, Nano, sleep } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
-import { Baseline } from "../jitter";
+import { Estimator, Order } from "../order";
 import { Encoder } from "./encoder";
 
 // How long a fake hardware probe takes on the installed clock.
 const PROBE = Nano.fromMilli(Milli(5));
 
 let clock = new Manual();
-let restore = () => {};
+let installed: Installed | undefined;
 beforeEach(() => {
 	clock = new Manual();
-	restore = clock.install();
+	installed = clock.install();
 });
-afterEach(() => restore());
+afterEach(() => installed?.close());
 
 class FakeVideoEncoder {
 	static instances: FakeVideoEncoder[] = [];
@@ -118,7 +118,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => track.close(),
 	};
-	const broadcast = { video: () => rendition, baseline: new Baseline() };
+	const broadcast = { video: () => rendition, order: new Order() };
 	const capture = {
 		in: { source: new Signal(undefined) },
 		out: {
@@ -165,7 +165,7 @@ test("a demand gap marks a discontinuity and leaves the broadcast-owned track op
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture: capture as never,
 	});
 
@@ -222,7 +222,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -304,7 +304,7 @@ test("every published config fits a probe for its own codec", async () => {
 
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -623,9 +623,10 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(fanout) },
 	};
 	const enabled = new Signal(true);
+	const order = new Order();
 	const encoder = new Encoder("video", {
 		enabled,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order } as never,
 		capture: capture as never,
 	});
 
@@ -647,6 +648,8 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 			{ timestamp: 66_000 + 33_333, keyFrame: true, black: true },
 		]);
 		expect(encoder.out.active.peek()).toBe(false);
+		// The black keyframe is written during teardown, which must not seat the stopped rendition again.
+		expect(new Estimator().write(0, order)).toBe(false);
 
 		// Muting releases the capture; the rendition keeps advertising what it last published.
 		source.set(undefined);
@@ -785,7 +788,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -956,7 +959,7 @@ async function recordKeyframes(
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture: capture as never,
 	});
 
@@ -1211,7 +1214,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture: capture as never,
 	});
 	const send = async (millis: number) => {
@@ -1281,7 +1284,7 @@ test("the catalog bitrate and frame rate only rise", async () => {
 	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture: capture as never,
 		bandwidth,
 	});
@@ -1326,7 +1329,7 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 		track: new Signal<Moq.Track.Producer | undefined>(undefined),
 		close: () => {},
 	});
-	const first = { video: rendition, baseline: new Baseline() };
+	const first = { video: rendition, order: new Order() };
 	const broadcast = new Signal<unknown>(first);
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
@@ -1348,7 +1351,7 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 		expect(encoder.out.catalog.peek()).toMatchObject({ codedWidth: 1920, codedHeight: 1072, framerate: 60 });
 		const bitrate = encoder.out.catalog.peek()?.bitrate ?? 0;
 
-		broadcast.set({ video: rendition, baseline: new Baseline() });
+		broadcast.set({ video: rendition, order: new Order() });
 		// The previous broadcast's probe never describes the new track, even while its own runs.
 		for (let i = 0; i < 5; i++) await Promise.resolve();
 		expect(encoder.out.catalog.peek()).toBeUndefined();
@@ -1371,7 +1374,7 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 		enabled.set(false);
 		await settle();
 		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
-		broadcast.set({ video: rendition, baseline: new Baseline() });
+		broadcast.set({ video: rendition, order: new Order() });
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeUndefined();
 	} finally {

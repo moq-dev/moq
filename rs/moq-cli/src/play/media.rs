@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Context;
 use hang::moq_net;
 use moq_mux::catalog::{self, Stream};
-use moq_net::announce::Event as AnnounceEvent;
+use moq_mux::follow::{Event as FollowEvent, Instances};
 // The ambient clock, which follows tokio's paused clock when a test drives the
 // playout clock itself.
 use moq_clock::Instant;
@@ -76,25 +76,24 @@ impl<O: Output> Media<O> {
 	/// and an end lets what is playing finish while waiting for the next start. An
 	/// update is the same instance, which its subscriptions already ride out.
 	async fn play(self) -> anyhow::Result<()> {
-		let mut follow = self.origin.follow(&self.broadcast)?;
+		let mut follow = Instances::new(&self.origin, &self.broadcast, None)?;
 		let mut playing = None;
 
 		loop {
 			tokio::select! {
 				event = follow.next() => {
-					// The origin is gone, so nothing can announce the path again.
-					let Some(event) = event else { return Ok(()) };
-					let announce = match event {
-						AnnounceEvent::Start(announce) | AnnounceEvent::Restart(announce) => announce,
-						AnnounceEvent::Update(_) => continue,
-						AnnounceEvent::End(_) => {
+					let broadcast = match event {
+						Ok(FollowEvent::Start(broadcast)) => broadcast,
+						Ok(FollowEvent::End) => {
 							tracing::info!(broadcast = %self.broadcast, "offline, waiting for it to return");
 							continue;
 						}
+						Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => return Ok(()),
+						Err(err) => return Err(err).context("failed to follow the broadcast"),
 					};
 					tracing::info!(
 						broadcast = %self.broadcast,
-						epoch = announce.route.epoch.as_ref().map(tracing::field::display),
+						epoch = broadcast.info().epoch.as_ref().map(tracing::field::display),
 						"online"
 					);
 
@@ -104,7 +103,7 @@ impl<O: Output> Media<O> {
 					self.video.lock().unwrap().clear();
 					self.drained.notify_one();
 					self.output.send(Event::Wake);
-					playing = Some(Box::pin(self.play_broadcast()));
+					playing = Some(Box::pin(self.play_broadcast(broadcast)));
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
@@ -118,14 +117,8 @@ impl<O: Output> Media<O> {
 		}
 	}
 
-	/// Play the broadcast now at the path until its catalog and every track it
-	/// started end.
-	async fn play_broadcast(&self) -> anyhow::Result<()> {
-		let broadcast = self
-			.origin
-			.request_broadcast(&self.broadcast, None)
-			.await
-			.context("failed to subscribe to the broadcast")?;
+	/// Play the instance handed out by the follower until its catalog and tracks end.
+	async fn play_broadcast(&self, broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 		let source = moq_mux::Source::new(self.origin.clone(), broadcast.clone());
 		let mut catalogs = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
 			.await
@@ -485,7 +478,8 @@ async fn play_audio<O: Output>(
 	// timeline can declare its end before its first PCM, so ends queue until a
 	// frame crosses them.
 	let receive = async {
-		let mut current = None;
+		// Media went missing since the last frame, so the next one does not continue it.
+		let mut lost = false;
 		let mut ends = VecDeque::new();
 		loop {
 			// Stop reading while play is held behind a resume with more than the age
@@ -506,21 +500,23 @@ async fn play_audio<O: Output>(
 			let ended = matches!(event, Ok(None));
 			let delay = consumer.delay();
 			let crossing = match &event {
-				Ok(Some(moq_audio::decode::Read::End { discontinuity, .. })) => {
-					ends.push_back((*discontinuity, role.declare()));
+				Ok(Some(moq_audio::decode::Read::End { end })) => {
+					ends.push_back((Duration::from(*end), role.declare()));
 					None
 				}
-				Ok(Some(moq_audio::decode::Read::Frame { discontinuity, frame }))
-					if current != Some(*discontinuity) =>
-				{
-					// The first frame continues nothing, unless a track joined while paused
-					// declared an end before it.
-					let first = current.replace(*discontinuity).is_none();
-					// Every end before this timeline was crossed. Only the last one has
+				// Playback restarts at the frame after it, so that is what carries it.
+				Ok(Some(moq_audio::decode::Read::Gap { .. })) => {
+					lost = true;
+					continue;
+				}
+				Ok(Some(moq_audio::decode::Read::Frame(frame))) => {
+					let lost = std::mem::take(&mut lost);
+					// A frame at or past an end comes from the encoder that replaced it; one
+					// before it is the stopped encoder's drain. Only the last end crossed has
 					// replacement media; the ones before it ended empty timelines.
 					let mut crossed = None;
-					while let Some(&(ended, transition)) = ends.front()
-						&& ended < *discontinuity
+					while let Some(&(end, transition)) = ends.front()
+						&& Duration::from(frame.timestamp) >= end
 					{
 						ends.pop_front();
 						if let Some(skipped) = crossed.replace(transition) {
@@ -532,8 +528,8 @@ async fn play_audio<O: Output>(
 							role.plan(transition, frame.timestamp, Some(lead(delay, frame)));
 							Some(Crossing::Resume(transition))
 						}
-						None if first => None,
-						None => Some(Crossing::Loss),
+						None if lost => Some(Crossing::Loss),
+						None => None,
 					}
 				}
 				_ => None,
@@ -549,9 +545,11 @@ async fn play_audio<O: Output>(
 		}
 	};
 	let play = async {
-		// The timeline the role's mapping serves, and an end declared for a later
-		// one, which can only be mapped once that timeline resumes.
-		let mut mapped = None;
+		// Whether a timeline is playing and its end is already declared, and an end
+		// declared past that one, for a later timeline that can only be mapped once it
+		// resumes.
+		let mut playing = false;
+		let mut ended = false;
 		let mut deferred = None;
 		let mut sequential = false;
 		loop {
@@ -563,11 +561,12 @@ async fn play_audio<O: Output>(
 				arrived.notified().await;
 			};
 			let frame = match event {
-				Ok(Some(moq_audio::decode::Read::Frame { discontinuity, frame })) => {
-					mapped = Some(discontinuity);
+				Ok(Some(moq_audio::decode::Read::Frame(frame))) => {
+					playing = true;
 					match crossing {
 						Some(Crossing::Loss) => {
 							deferred = None;
+							ended = false;
 							role.gap();
 							sequential = false;
 						}
@@ -585,10 +584,13 @@ async fn play_audio<O: Output>(
 							if let Some(at) = at {
 								moq_clock::sleep_until(at).await;
 							}
-							if let Some((ended, end)) = deferred.take()
-								&& ended == discontinuity
+							ended = false;
+							// An end this frame did not cross ends the timeline it resumes.
+							if let Some(end) = deferred.take()
+								&& Duration::from(frame.timestamp) < Duration::from(end)
 							{
 								role.end(end)?;
+								ended = true;
 							}
 							sequential = true;
 							timeline = AudioTimeline::default();
@@ -599,14 +601,17 @@ async fn play_audio<O: Output>(
 					}
 					frame
 				}
-				Ok(Some(moq_audio::decode::Read::End { discontinuity, end })) => {
-					if mapped.is_none_or(|mapped| mapped == discontinuity) {
-						role.end(end)?;
+				Ok(Some(moq_audio::decode::Read::End { end })) => {
+					if playing && ended {
+						deferred = Some(end);
 					} else {
-						deferred = Some((discontinuity, end));
+						role.end(end)?;
+						ended = true;
 					}
 					continue;
 				}
+				// Never queued: receive folds it into the next frame's crossing.
+				Ok(Some(moq_audio::decode::Read::Gap { .. })) => continue,
 				Ok(None) => break,
 				// One bad packet is that packet's problem: the decoder stays usable, so
 				// skip it rather than ending playback and taking the video window down
@@ -712,7 +717,7 @@ async fn drain(sink: impl Sink) {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use bytes::Bytes;
 	use hang::catalog::{AudioCodec, AudioConfig};
@@ -1466,6 +1471,23 @@ mod tests {
 		);
 	}
 
+	/// A selected handler's explicit refusal is terminal, rather than an offline gap that a
+	/// later announcement might fix. Waiting forever hides a wrong path or denied request.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_broadcast_ends_the_player() {
+		let origin = moq_tokio::origin::spawn();
+		let handler = origin.dynamic_route("", Default::default()).unwrap();
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		let request = handler.requested_broadcast().await.unwrap();
+		request.reject(moq_net::Error::NotFound);
+		tokio::time::timeout(Duration::from_secs(1), player)
+			.await
+			.expect("a refusal held the player")
+			.unwrap();
+		assert!(recorder.events().iter().any(|event| matches!(event, Event::Failed(_))));
+	}
+
 	/// Without epochs (moq-lite 06), a restart that overlaps the old route still
 	/// replaces it: the newest announcement wins the path.
 	#[tokio::test]
@@ -1485,7 +1507,7 @@ mod tests {
 		// A restart without an epoch waits out the origin's update hold, since a
 		// withdrawal wave's stale route looks just like one, and the player joins the
 		// new broadcast at its live edge.
-		tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD).await;
+		tokio::time::sleep(moq_net::origin::Config::default().update_hold).await;
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;

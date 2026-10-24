@@ -4,7 +4,10 @@
 //!
 //! Without the `runtime` feature there are no timers, and reads fall back to std,
 //! except in the browser, where std has no clock and `web_async::time` still reads.
-#![allow(clippy::disallowed_methods)]
+#![cfg_attr(
+	not(target_arch = "wasm32"),
+	expect(clippy::disallowed_methods, reason = "this backend is where the host clock is read")
+)]
 
 #[cfg(feature = "runtime")]
 use std::{future::Future, pin::Pin};
@@ -319,10 +322,10 @@ mod tests {
 		first.block_on(async {
 			let _ = crate::now();
 			tokio::time::advance(Duration::from_secs(60)).await;
-			let _ = crate::anchor();
+			let _ = crate::origin();
 		});
 		second.block_on(async {
-			let (instant, _) = crate::anchor();
+			let (instant, _) = crate::origin();
 			assert_eq!(instant, crate::now());
 		});
 	}
@@ -341,15 +344,15 @@ mod tests {
 		runtime.block_on(async {
 			let _ = crate::now();
 			tokio::time::advance(Duration::from_secs(3_600)).await;
-			let _ = crate::anchor();
+			let _ = crate::origin();
 		});
-		let (instant, _) = crate::anchor();
+		let (instant, _) = crate::origin();
 		assert!(instant <= crate::now(), "{instant:?} > {:?}", crate::now());
 	}
 
 	/// On a running clock, a converted instant is the same moment on std's clock.
 	#[test]
-	#[allow(clippy::disallowed_methods)]
+	#[expect(clippy::disallowed_methods, reason = "the test compares against std's clock")]
 	fn std_conversion_is_exact_on_a_running_clock() {
 		let before = std::time::Instant::now();
 		let now = crate::now();
@@ -505,7 +508,7 @@ mod browser_read_tests {
 		let start = crate::now();
 		assert!(crate::now() >= start);
 		assert!(crate::wall() > crate::Wall::UNIX_EPOCH);
-		let (instant, _) = crate::anchor();
+		let (instant, _) = crate::origin();
 		assert!(instant <= crate::now());
 	}
 }

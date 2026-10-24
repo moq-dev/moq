@@ -20,7 +20,6 @@ pub mod cluster;
 mod config;
 mod connection;
 mod critical;
-mod duration;
 mod fetch;
 mod http_client;
 mod incoming;
@@ -37,8 +36,6 @@ pub mod shutdown;
 pub mod stats;
 #[cfg(any(feature = "stun", test))]
 pub mod stun;
-#[cfg(test)]
-mod test_env;
 #[cfg(feature = "test-support")]
 mod test_support;
 #[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -65,6 +62,7 @@ fn configured_tier(label: Option<String>) -> moq_net::stats::Tier {
 pub use config::*;
 pub use connection::*;
 pub use fetch::*;
+#[cfg(feature = "test-support")]
 pub use incoming::{Accepted, Incoming};
 pub use relay::*;
 #[cfg(feature = "test-support")]

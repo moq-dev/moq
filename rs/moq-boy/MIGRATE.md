@@ -11,5 +11,5 @@ Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`) to capture them; without `SSLKEYLOGFILE`
 
 ### Build with `--features openh264` (#5771)
 
-moq-boy encodes with OpenH264, which is now opt-in, and Cargo refuses to build or install its binary without it.
+moq-boy encodes with OpenH264, which is now opt-in, and refuses to start without it.
 Install with `cargo install moq-boy --features openh264`. The Nix package already enables it.

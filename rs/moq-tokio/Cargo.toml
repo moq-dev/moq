@@ -76,6 +76,7 @@ hex = { workspace = true }
 hmac = { workspace = true, optional = true }
 http = { version = "1", optional = true }
 humantime = "2.3"
+humantime-serde = { workspace = true }
 if-addrs = { workspace = true, optional = true }
 kio = { workspace = true, optional = true }
 mdns-sd = { workspace = true, optional = true }
@@ -159,6 +160,8 @@ socket2 = { workspace = true, features = ["all"] }
 # A fake STUN server for the WebRTC server-reflexive candidate test.
 stun-types = { workspace = true }
 tempfile = "3"
+# Runs the key log tests with `SSLKEYLOGFILE` set, in a child process.
+test-env = { path = "../test-env" }
 # test-util adds tokio::time::pause/auto-advance for the time-dependent tests.
 tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls = { workspace = true }
@@ -178,3 +181,5 @@ required-features = ["net"]
 name = "integration"
 path = "tests/integration/main.rs"
 required-features = ["net"]
+[lints]
+workspace = true

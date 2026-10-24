@@ -7,7 +7,7 @@
 //! `track_aborted_scan` isolates the other half of delivery: how much a cached
 //! prefix of aborted groups costs the scan that has to walk past it.
 //!
-//! `track_gc` is the cache's clock-driven half: the per-poll [`cache::Pool::gc`]
+//! `track_gc` is the cache's clock-driven half: the per-poll [`cache::Pool::poll`]
 //! call every origin driver makes, and the due expiry pass it runs over every track.
 //!
 //! `track_subscriber_churn` measures viewers joining and leaving beside steady ones:
@@ -26,6 +26,9 @@
 //! `track_sparse_read` hands out groups from a feed with every other sequence missing,
 //! holding a fixed number of gaps the reader still remembers: each hand-out must cost the
 //! same however many gaps it holds, so a walk over them shows up as a slope.
+//!
+//! `track_sparse_expire` opens one new gap while one old gap expires, so a full expiry
+//! rescan on each arrival shows up as a slope over the gaps still within budget.
 //!
 //! `track_gap_flush` forgets every remembered gap in one hand-out, each below an aborted
 //! group still cached: the successor they share must be found once, not once per gap.
@@ -48,6 +51,13 @@
 //! `track_fetch_expiry` polls budgeted fetched readers over independent fanout and
 //! retained-history axes, so expiry work that scans either table appears as a slope.
 //!
+//! `track_fetch_budgets` writes the frame that crosses every budgeted fetch's deadline, over
+//! live readers and finished fetches with budgets of their own: deadlines the finished
+//! fetches left indexed show up as a slope over them.
+//!
+//! `track_fetch_park` parks one more budgeted fetch beside live readers on deadlines of their
+//! own, so a park that sweeps the whole index shows up as a slope over the readers.
+//!
 //! `track_range_demand` moves one reader between ranges nobody else holds, over readers
 //! holding a given number of distinct overlapping ranges: both axes must stay flat, since
 //! a change touches only the moved range, never the rest of the audience's.
@@ -65,6 +75,11 @@
 //! for the groups outside its ranges, so a widening scans only the span it newly covers,
 //! and a scan of the cache or the audience shows up as a slope.
 //!
+//! `track_datagram_pressure` appends datagrams across tracks sharing a bounded pool, each
+//! holding a backlog for a reader that never reads, with small plain payloads and with
+//! compressed zeros that inflate far past their wire size: the pool bills both forms, so the
+//! retained bytes stay near capacity and the append cost stays flat over tracks and backlog.
+//!
 //! `track_time_end` lands groups one at a time behind a sequence that never arrives, each
 //! drained by readers whose range ends at a time no group reaches, swept over the groups and
 //! the readers: an unsettled time end walks on from where it stopped, so a rescan of the
@@ -72,8 +87,10 @@
 //!
 //! Run with `cargo bench -p moq-net --bench track`.
 
-// Custom timings measure the real time the work took, not the ambient clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "custom timings measure the real time the work took, not the ambient clock"
+)]
 
 use std::hint::black_box;
 use std::sync::{Arc, Barrier};
@@ -152,6 +169,7 @@ const FETCH_HISTORY: [usize; 3] = [1, 32, 512];
 
 struct FetchReaders {
 	_broadcast: broadcast::Producer,
+	_track: track::Producer,
 	_open: moq_net::group::Producer,
 	readers: Vec<moq_net::group::Consumer>,
 	waiters: Vec<kio::Waiter>,
@@ -189,6 +207,7 @@ impl FetchReaders {
 		}
 		Self {
 			_broadcast: broadcast,
+			_track: track,
 			_open: open,
 			readers: fetched,
 			waiters: (0..readers).map(|_| kio::Waiter::noop()).collect(),
@@ -321,7 +340,7 @@ impl Swept {
 			.collect();
 		// The first call starts the pool's clock and runs its first pass.
 		let now = Instant::now();
-		pool.gc(now, &kio::Waiter::noop());
+		pool.poll(now, &kio::Waiter::noop());
 		Self {
 			_broadcast: broadcast,
 			_tracks: tracks,
@@ -385,7 +404,7 @@ impl Aged {
 		let pool = broadcast.info().pool.clone();
 		// The driver's first collection, which arms wall-clock deadlines.
 		let now = Instant::now();
-		pool.gc(now, &kio::Waiter::noop());
+		pool.poll(now, &kio::Waiter::noop());
 		let mut reads = Vec::with_capacity(tracks);
 		let tracks = (0..tracks)
 			.map(|i| {
@@ -432,7 +451,7 @@ fn bench_wall(c: &mut Criterion) {
 			group.bench_function(BenchmarkId::new("idle", &id), |b| {
 				let aged = Aged::new(tracks, groups);
 				let waiter = kio::Waiter::noop();
-				b.iter(|| black_box(aged.pool.gc(aged.now, &waiter)));
+				b.iter(|| black_box(aged.pool.poll(aged.now, &waiter)));
 			});
 			// Re-polling one parked read re-arms its deadline.
 			group.bench_function(BenchmarkId::new("repoll", &id), |b| {
@@ -453,7 +472,7 @@ fn bench_wall(c: &mut Criterion) {
 					|| Aged::new(tracks, groups),
 					|aged| {
 						// Past every deadline, which setup armed after `now`.
-						black_box(aged.pool.gc(aged.now + 2 * AGED_BUDGET, &kio::Waiter::noop()));
+						black_box(aged.pool.poll(aged.now + 2 * AGED_BUDGET, &kio::Waiter::noop()));
 						aged
 					},
 					BatchSize::PerIteration,
@@ -472,7 +491,7 @@ fn bench_gc(c: &mut Criterion) {
 		group.bench_with_input(BenchmarkId::new("idle", tracks), &tracks, |b, &tracks| {
 			let swept = Swept::new(tracks);
 			let waiter = kio::Waiter::noop();
-			b.iter(|| black_box(swept.pool.gc(swept.now, &waiter)));
+			b.iter(|| black_box(swept.pool.poll(swept.now, &waiter)));
 		});
 		// Also advance supplied time, so reusing an identical instant cannot hide clock work.
 		group.bench_with_input(BenchmarkId::new("advancing", tracks), &tracks, |b, &tracks| {
@@ -481,7 +500,7 @@ fn bench_gc(c: &mut Criterion) {
 			let waiter = kio::Waiter::noop();
 			b.iter(|| {
 				now += Duration::from_nanos(1);
-				black_box(swept.pool.gc(now, &waiter))
+				black_box(swept.pool.poll(now, &waiter))
 			});
 		});
 		// A due pass, stepping one sweep interval per call.
@@ -493,7 +512,7 @@ fn bench_gc(c: &mut Criterion) {
 			let waiter = kio::Waiter::noop();
 			b.iter(|| {
 				now += interval;
-				black_box(swept.pool.gc(now, &waiter))
+				black_box(swept.pool.poll(now, &waiter))
 			});
 		});
 	}
@@ -583,6 +602,105 @@ fn bench_fanout_frame(c: &mut Criterion) {
 				});
 			},
 		);
+	}
+	group.finish();
+}
+
+/// A track with groups presenting at 0..4 s and the last still open, `readers` budgeted
+/// fetches of group 2 parked on its expiry, and `history` finished fetches of it, each with
+/// its own budget, so each indexed a deadline of its own.
+struct FetchBudgets {
+	_broadcast: broadcast::Producer,
+	_track: track::Producer,
+	consumer: track::Consumer,
+	open: moq_net::group::Producer,
+	/// The live fetches' waiters, which keep their deadlines registered.
+	_readers: Vec<kio::Waiter>,
+}
+
+impl FetchBudgets {
+	fn new(readers: usize, history: usize) -> Self {
+		let broadcast = broadcast::Producer::new(broadcast::Info::default());
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		for second in 0..4u64 {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(Timestamp::from_secs(second).unwrap(), Bytes::from_static(b"f"))
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let mut open = track.append_group().unwrap();
+		open.write_frame(Timestamp::from_secs(4).unwrap(), Bytes::from_static(b"f"))
+			.unwrap();
+
+		let mut fetched = Self {
+			_broadcast: broadcast,
+			consumer: track.consume(),
+			_track: track,
+			open,
+			_readers: Vec::with_capacity(readers),
+		};
+		for i in 0..history {
+			drop(fetched.fetch(readers + i));
+		}
+		fetched._readers = (0..readers).map(|i| fetched.fetch(i)).collect();
+		fetched
+	}
+
+	/// Fetch group 2 with budget `i`, distinct from every other, returning the waiter that
+	/// keeps its deadlines registered.
+	fn fetch(&self, i: usize) -> kio::Waiter {
+		let waiter = kio::Waiter::noop();
+		let budget = Duration::from_millis(1_500) + Duration::from_micros(i as u64);
+		let options = moq_net::group::Fetch::default().with_max_delay(budget);
+		let mut pending = self.consumer.fetch_group(2, options);
+		assert!(matches!(kio::Task::poll(&mut *pending, &waiter), Poll::Ready(Ok(_))));
+		waiter
+	}
+}
+
+/// One more budgeted fetch, with a budget of its own, beside `readers` live ones: parking it
+/// must not scan the deadlines the live readers hold, so a sweep per park shows up as a slope.
+fn bench_fetch_park(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_fetch_park");
+	for readers in [1, 64, 1_024] {
+		group.bench_with_input(BenchmarkId::from_parameter(readers), &readers, |b, &readers| {
+			let fetched = FetchBudgets::new(readers, 0);
+			let mut next = readers;
+			b.iter(|| {
+				next += 1;
+				fetched.fetch(next)
+			});
+		});
+	}
+	group.finish();
+}
+
+/// The write that crosses every budgeted fetch's deadline, beside live readers and the
+/// finished fetches before them: the write must cost what the live readers do, so deadlines
+/// left indexed by fetches that already finished show up as a slope over the history.
+fn bench_fetch_budgets(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_fetch_budgets");
+	for history in [0, 1_024, 16_384] {
+		for readers in [1, 64] {
+			group.bench_with_input(
+				BenchmarkId::new(format!("history_{history}"), readers),
+				&(readers, history),
+				|b, &(readers, history)| {
+					b.iter_batched(
+						|| FetchBudgets::new(readers, history),
+						|mut fetched| {
+							fetched
+								.open
+								.write_frame(Timestamp::from_secs(10).unwrap(), Bytes::from_static(b"f"))
+								.unwrap();
+							fetched
+						},
+						BatchSize::PerIteration,
+					);
+				},
+			);
+		}
 	}
 	group.finish();
 }
@@ -922,6 +1040,68 @@ fn bench_datagram_subscriber_join(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Datagram payloads for `track_datagram_pressure`: a small plain one, and the largest
+/// payload of zeros on a compressed track, which inflates far past its DEFLATE form.
+const DATAGRAM_PAYLOADS: [(&str, usize, bool); 2] = [("plain", PAYLOAD, false), ("zeros", u16::MAX as usize, true)];
+
+/// Tracks sharing one bounded pool, each holding `queued` datagrams for a reader that never
+/// reads, while one datagram is appended to the next track and read by its fast reader.
+///
+/// The pool bills every buffered datagram, so what the slow readers retain stays near the
+/// pool's capacity however many tracks or queued datagrams there are (printed per case), and
+/// appending must cost the same: a walk over the other tracks or the backlog shows as a slope.
+fn bench_datagram_pressure(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_datagram_pressure");
+	group.throughput(Throughput::Elements(1));
+	for (name, size, compress) in DATAGRAM_PAYLOADS {
+		let payload = Bytes::from(vec![0u8; size]);
+		for tracks in [1, 16, 64] {
+			for queued in [1, 8, 64] {
+				let mut info = broadcast::Info::default();
+				info.pool = cache::Pool::new(cache::Config::default().with_capacity(CACHE_CAPACITY));
+				let pool = info.pool.clone();
+				let broadcast = broadcast::Producer::new(info);
+				let mut held: Vec<_> = (0..tracks)
+					.map(|index| {
+						let mut track = broadcast
+							.create_track(format!("bench{index}").as_str(), timed().with_compress(compress))
+							.unwrap();
+						let slow = track.subscribe(None);
+						let fast = track.subscribe(None);
+						for _ in 0..queued {
+							track.append_datagram(Timestamp::ZERO, payload.clone()).unwrap();
+						}
+						(track, slow, fast)
+					})
+					.collect();
+				let waiter = kio::Waiter::noop();
+				for (_, _, fast) in &mut held {
+					while let Poll::Ready(Ok(Some(_))) = fast.poll_recv_datagram(&waiter) {}
+				}
+				eprintln!(
+					"track_datagram_pressure/{name}/{tracks}t/{queued}q: {} bytes retained",
+					pool.used()
+				);
+
+				let mut next = 0;
+				group.bench_function(BenchmarkId::new(format!("{name}/{tracks}t"), queued), |b| {
+					b.iter(|| {
+						let (track, _, fast) = &mut held[next % tracks];
+						next += 1;
+						track.append_datagram(Timestamp::ZERO, payload.clone()).unwrap();
+						let Poll::Ready(Ok(Some(datagram))) = fast.poll_recv_datagram(&waiter) else {
+							panic!("the fast reader takes each datagram");
+						};
+						black_box(datagram);
+					});
+				});
+				drop((held, broadcast));
+			}
+		}
+	}
+	group.finish();
+}
+
 /// Queues a parked read as woken, so the bench visits only what an append wakes.
 struct Woken {
 	read: usize,
@@ -1019,6 +1199,64 @@ fn bench_parked_read(c: &mut Criterion) {
 /// opening a gap at the top, and the lowest missing one, closing the gap at the bottom, so
 /// the count stays fixed. Swept over the gaps so a per-hand-out cost that grows with them
 /// shows up as a slope.
+struct Sparse {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	sub: track::Subscriber,
+	next: u64,
+	missing: u64,
+	timed: bool,
+}
+
+impl Sparse {
+	fn new(info: track::Info, gaps: u64) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", info.clone()).unwrap();
+		let sub = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let mut sparse = Self {
+			_broadcast: broadcast,
+			track,
+			sub,
+			next: gaps * 2,
+			missing: 1,
+			timed: info.timescale.is_some(),
+		};
+		for gap in 0..gaps {
+			sparse.hand_out(gap * 2);
+		}
+		// Fill beyond the cache queue's initial power-of-two capacity outside timing.
+		// Its amortized growth is independent of how many ledger gaps remain open.
+		if gaps != 0 {
+			sparse.advance();
+		}
+		sparse
+	}
+
+	fn hand_out(&mut self, sequence: u64) {
+		let timestamp = self.timed.then(|| Timestamp::from_micros(sequence).unwrap());
+		let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+		group.write_frame(timestamp, Bytes::from_static(b"x")).unwrap();
+		group.finish().unwrap();
+		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
+			panic!("the group is cached");
+		};
+		black_box(read);
+	}
+
+	// A profiling boundary excludes filling the initial sparse backlog.
+	#[inline(never)]
+	fn read_pair(&mut self) {
+		self.advance();
+	}
+
+	fn advance(&mut self) {
+		self.hand_out(self.next);
+		self.hand_out(self.missing);
+		self.next += 2;
+		self.missing += 2;
+	}
+}
+
 fn bench_sparse_read(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_sparse_read");
 	group.throughput(Throughput::Elements(2));
@@ -1026,36 +1264,80 @@ fn bench_sparse_read(c: &mut Criterion) {
 		for gaps in [16u64, 256, 4096] {
 			group.bench_function(BenchmarkId::new(name, gaps), |b| {
 				b.iter_custom(|iterations| {
-					let broadcast = broadcast::Info::default().produce();
-					let track = broadcast.create_track("bench", info.clone()).unwrap();
-					let mut sub =
-						track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
-					// Microseconds, so no run lasts long enough to cross the budget.
-					let timestamp = |sequence: u64| info.timescale.map(|_| Timestamp::from_micros(sequence).unwrap());
-					let mut hand_out = |sequence: u64| {
-						let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-						group
-							.write_frame(timestamp(sequence), Bytes::from_static(b"x"))
-							.unwrap();
-						group.finish().unwrap();
-						let Poll::Ready(Ok(Some(read))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
-							panic!("the group is cached");
-						};
-						black_box(read);
-					};
-					// Every odd sequence is missing until the bottom gap closes.
-					for gap in 0..gaps {
-						hand_out(gap * 2);
-					}
+					let mut sparse = Sparse::new(info.clone(), gaps);
 					let start = WallInstant::now();
-					for iteration in 0..iterations {
-						hand_out((gaps + iteration) * 2);
-						hand_out(iteration * 2 + 1);
+					for _ in 0..iterations {
+						sparse.read_pair();
 					}
 					start.elapsed()
 				});
 			});
 		}
+	}
+	group.finish();
+}
+
+/// A sparse feed that opens one gap per millisecond, keeping `gaps` within its budget.
+struct Expiring {
+	sparse: Sparse,
+	pool: cache::Pool,
+	now: Instant,
+}
+
+impl Expiring {
+	fn new(gaps: u64) -> Self {
+		let mut sparse = Sparse::new(track::Info::default(), 0);
+		sparse
+			.sub
+			.update(track::Subscription::default().with_max_delay(Duration::from_millis(gaps)))
+			.unwrap();
+		let pool = sparse._broadcast.info().pool.clone();
+		// Supply time ahead of the host clock, so only these steps age the gaps even
+		// under an instruction profiler. No cache capacity or idle expiry is enabled.
+		let mut fixture = Self {
+			sparse,
+			pool,
+			now: Instant::now() + Duration::from_secs(3600),
+		};
+		for gap in 0..gaps {
+			fixture.pool.poll(fixture.now, &kio::Waiter::noop());
+			fixture.sparse.hand_out(gap * 2);
+			fixture.now += Duration::from_millis(1);
+		}
+		fixture.sparse.next = gaps * 2;
+		// The eviction queue trails arrivals by one entry: warm both capacities.
+		fixture.step();
+		fixture.step();
+		fixture
+	}
+
+	// One new arrival expires one old gap; excludes building the initial ledger.
+	#[inline(never)]
+	fn arrive(&mut self) {
+		self.step();
+	}
+
+	fn step(&mut self) {
+		self.now += Duration::from_millis(1);
+		self.pool.poll(self.now, &kio::Waiter::noop());
+		self.sparse.hand_out(self.sparse.next);
+		self.sparse.next += 2;
+	}
+}
+
+fn bench_sparse_expire(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_sparse_expire");
+	for gaps in [16u64, 256, 4096] {
+		group.bench_function(BenchmarkId::from_parameter(gaps), |b| {
+			b.iter_custom(|iterations| {
+				let mut expiring = Expiring::new(gaps);
+				let start = WallInstant::now();
+				for _ in 0..iterations {
+					expiring.arrive();
+				}
+				start.elapsed()
+			});
+		});
 	}
 	group.finish();
 }
@@ -1100,6 +1382,8 @@ impl GapFlush {
 	}
 
 	/// Hand out a group two hours on, which puts every remembered gap past the budget.
+	// A profiling boundary excludes publishing the groups and their aborts.
+	#[inline(never)]
 	fn flush(&mut self) {
 		let mut group = self
 			.track
@@ -1123,7 +1407,7 @@ impl GapFlush {
 fn bench_gap_flush(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_gap_flush");
 	group.sample_size(10);
-	for gaps in [64u64, 512, 4096] {
+	for gaps in [16u64, 64, 256, 512, 4096] {
 		group.throughput(Throughput::Elements(gaps));
 		group.bench_function(BenchmarkId::from_parameter(gaps), |b| {
 			b.iter_batched_ref(|| GapFlush::new(gaps), GapFlush::flush, BatchSize::PerIteration);
@@ -1362,6 +1646,8 @@ criterion_group!(
 	bench_fanout,
 	bench_fanout_frame,
 	bench_fetch_expiry,
+	bench_fetch_budgets,
+	bench_fetch_park,
 	bench_parallel_write,
 	bench_aborted_scan,
 	bench_gc,
@@ -1373,8 +1659,10 @@ criterion_group!(
 	bench_range_serving,
 	bench_subscriber_preferences,
 	bench_datagram_subscriber_join,
+	bench_datagram_pressure,
 	bench_parked_read,
 	bench_sparse_read,
+	bench_sparse_expire,
 	bench_gap_flush,
 	bench_wall,
 	bench_empty_run,

@@ -238,13 +238,7 @@ public enum Media {
             try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
         }
 
-        /// Record a local encoder's frame handoff on the broadcast media clock.
-        /// Call after `writeFrame` only for local encoder output.
-        public func flush(timestampUs: UInt64) throws {
-            try ffi.flush(timestampUs: timestampUs)
-        }
-
-        /// Mark a timeline break and restart handoff measurement, preserving advertised jitter.
+        /// Mark a timeline break, preserving the advertised jitter and delay.
         public func discontinuity() throws {
             try ffi.discontinuity()
         }

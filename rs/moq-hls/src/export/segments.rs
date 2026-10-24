@@ -18,10 +18,11 @@
 //! every reload. A new reference lists its records under its own tag, continuing past the last
 //! advertised number rather than reusing the old one's URIs.
 
+use moq_clock::Wall;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::task::Poll;
-use std::time::{Duration, SystemTime};
+use std::task::{Poll, ready};
+use std::time::Duration;
 
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -51,6 +52,8 @@ struct State {
 	failed: Option<crate::Error>,
 	/// Bumped whenever the window is cleared, so a latch on what it listed can tell it is stale.
 	resets: u64,
+	/// Total rows appended, so a cursor can detect eviction even before its first read.
+	produced: u64,
 }
 
 /// Numbers the broadcast's content timeline: the sequence bumps wherever the timeline breaks.
@@ -179,7 +182,10 @@ impl Row {
 }
 
 /// A consistent read of the window, for rendering one playlist (the serve path only).
-#[cfg_attr(not(feature = "server"), allow(dead_code))]
+#[cfg_attr(
+	not(feature = "server"),
+	allow(dead_code, reason = "only the `server` feature uses it")
+)]
 pub(crate) struct Window {
 	/// The `EXT-X-MEDIA-SEQUENCE` of the first listed segment: its source segment number, so
 	/// sequence numbers line up across renditions and edges.
@@ -198,15 +204,18 @@ pub(crate) struct Window {
 enum Next {
 	/// A segment is ready to fetch.
 	Ready(Row),
-	/// No further segment will ever appear (the timeline ended).
-	Ended,
+	/// No further segment will ever appear (the timeline ended or failed).
+	Done,
 	/// Nothing new yet; wait for the next window change.
 	Pending,
 }
 
 impl State {
 	/// Snapshot the current window. Every row is a complete segment, so all are listed.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	fn window(&self) -> Window {
 		Window {
 			sequence: self.sequence,
@@ -217,21 +226,17 @@ impl State {
 		}
 	}
 
-	/// The first segment past `after`, for a cursor.
-	///
-	/// Rows are complete the moment they arrive. Segments evicted from the front of the
-	/// window before the cursor reached them are skipped: the cursor resumes at the oldest
-	/// row still in the window. A reset starts a new window, whose numbers may restart lower.
-	fn next_after(&self, after: Option<&(u64, u64)>) -> Next {
-		let next = self.rows.iter().find(|r| match after {
-			Some((resets, after)) => *resets != self.resets || r.segment > *after,
-			None => true,
-		});
-		match next {
-			Some(row) => Next::Ready(row.clone()),
-			None if self.ended => Next::Ended,
-			None => Next::Pending,
+	/// The row at a cursor's append position, refusing any lost prefix or reset.
+	fn next_at(&self, position: (u64, u64)) -> Result<Next> {
+		let first = self.produced - self.rows.len() as u64;
+		if position.0 != self.resets || position.1 < first {
+			return Err(crate::Error::RecordingLagged);
 		}
+		Ok(match self.rows.get((position.1 - first) as usize) {
+			Some(row) => Next::Ready(row.clone()),
+			None if self.ended || self.failed.is_some() => Next::Done,
+			None => Next::Pending,
+		})
 	}
 }
 
@@ -246,6 +251,7 @@ impl Producer {
 				ended: false,
 				failed: None,
 				resets: 0,
+				produced: 0,
 			}),
 		}
 	}
@@ -273,6 +279,7 @@ impl Producer {
 
 		state.discontinuity = row.discontinuity;
 		state.rows.push_back(row);
+		state.produced += 1;
 
 		while let Some(window) = window {
 			let rest = match state.rows.get(1) {
@@ -323,7 +330,7 @@ impl Producer {
 	}
 
 	/// Mark the reference timeline failed with `err`: every listing refuses with it instead of
-	/// ending. Call [`close`](Self::close) after, so cursors end once drained.
+	/// ending, and cursors return it once drained. No row is pushed after.
 	pub fn fail(&self, err: crate::Error) {
 		if let Ok(mut state) = self.state.write() {
 			state.failed.get_or_insert(err);
@@ -341,8 +348,8 @@ impl Producer {
 	}
 
 	/// Close the channel: no more rows will arrive. A [`Consumer`] drains the segments it
-	/// can still see and then ends; the serve path keeps reading the frozen window. Call after
-	/// [`end`](Self::end) when the timeline is over, or on its own when a rendition is retired.
+	/// can still see and then errors unless [`end`](Self::end) or [`fail`](Self::fail) confirmed
+	/// how it ended. The serve path keeps reading the frozen window.
 	pub fn close(&self) {
 		let _ = self.state.close();
 	}
@@ -353,7 +360,10 @@ impl Producer {
 	}
 
 	/// Snapshot the current window (serve path).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub fn window(&self) -> Window {
 		self.state.read().window()
 	}
@@ -373,7 +383,10 @@ impl Producer {
 	/// (DASH `$Time$` addressing), or `None` when no listed row starts there. Exact match is
 	/// safe because the rendered `S@t` and this lookup convert the same [`Row::pts`] the same
 	/// way.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub fn segment_number_at(&self, tag: &str, time: u64, timescale: moq_net::Timescale) -> Option<u64> {
 		let state = self.state.read();
 		state
@@ -398,7 +411,10 @@ impl Producer {
 
 	/// Whether the playlist has anything to serve yet (at least one segment, or the broadcast
 	/// already ended).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub fn is_playable(&self) -> bool {
 		let state = self.state.read();
 		state.ended || !state.rows.is_empty()
@@ -406,7 +422,10 @@ impl Producer {
 
 	/// Poll until [`is_playable`](Self::is_playable) or the reference timeline failed, for the
 	/// serve path's long-poll.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub fn poll_playable(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let poll = self.state.poll_ref(waiter, |state| {
 			if state.ended || state.failed.is_some() || !state.rows.is_empty() {
@@ -437,10 +456,12 @@ impl Producer {
 
 	/// A cursor over segments, starting from the oldest still in the window.
 	pub fn subscribe(&self, rendition: Arc<Rendition>) -> Consumer {
+		let consumer = self.state.consume();
+		let state = self.state.read();
 		Consumer {
-			state: self.state.consume(),
+			state: consumer,
 			rendition,
-			after: None,
+			position: (state.resets, state.produced - state.rows.len() as u64),
 			feed: None,
 		}
 	}
@@ -455,7 +476,7 @@ pub struct Segment {
 	/// Presentation duration.
 	pub duration: Duration,
 	/// Wall-clock start time, when the timeline advertises an anchor.
-	pub program_date_time: Option<SystemTime>,
+	pub program_date_time: Option<Wall>,
 	/// The absolute timeline discontinuity sequence within this broadcaster.
 	///
 	/// Use the first retained segment's value as `EXT-X-DISCONTINUITY-SEQUENCE`, then write
@@ -477,9 +498,8 @@ pub struct Segment {
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
-	/// Last fetched or skipped segment, with its window reset epoch; errors leave it unchanged
-	/// so callers can retry.
-	after: Option<(u64, u64)>,
+	/// The reset epoch and next append position; errors leave it unchanged.
+	position: (u64, u64),
 	feed: Option<Feed>,
 }
 
@@ -506,54 +526,79 @@ impl Consumer {
 		self.rendition.init().await
 	}
 
-	/// The next segment, with its media; `None` once the rendition ends, including when its
-	/// timeline failed.
+	/// The next segment, with its media; `None` only once the rendition ends cleanly, so a
+	/// recording that reads to `None` is complete.
+	///
+	/// Once a timeline fails (the reference's, or this rendition's own), the cursor drains the
+	/// segments it still covers, then fails every call with
+	/// [`TimelineFailed`](crate::Error::TimelineFailed), as [`Rendition::playlist`] does. A
+	/// denied referenced broadcast fails every call with its authorization error.
 	///
 	/// Waits for the next segment to resolve on this rendition, then FETCHes and transmuxes its
-	/// frames. A segment whose groups already left the relay cache (or that is a gap for this
-	/// rendition) is skipped, resuming at the next one, rather than surfaced as an error; a real
-	/// fetch/transmux failure is returned, leaving the cursor to retry it on the next call.
+	/// frames. A gap for this rendition is skipped. Missing window rows or unavailable media
+	/// fail the recording instead of silently omitting segments. Fetch/transmux errors leave
+	/// the cursor in place so the caller can retry.
 	/// A bound instance's retained media drains after End or Restart; a replacement's media
 	/// is never read under the old rows.
 	pub async fn next(&mut self) -> Result<Option<Segment>> {
 		loop {
-			let Some((row, resets)) = kio::wait(|waiter| self.poll_next(waiter)).await else {
+			let Some(row) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
 				return Ok(None);
 			};
-			kio::wait(|waiter| self.rendition.poll_resolved(waiter, &row)).await;
-			// The rendition's timeline failed: the cursor ends, and its playlist answers the error.
-			if self.rendition.is_failed(&row) {
-				return Ok(None);
+			kio::wait(|waiter| {
+				// The refusal settles the binding, not this rendition's timeline, so watch both.
+				self.rendition.poll_media(waiter);
+				self.rendition.authorize()?;
+				self.rendition.poll_resolved(waiter, &row).map(Ok::<_, crate::Error>)
+			})
+			.await?;
+			// This rendition's timeline failed before covering the row, so no later row resolves.
+			if let Some(err) = self.rendition.own_failure()
+				&& self.rendition.is_failed(&row)
+			{
+				return Err(err);
 			}
-			let media = self.rendition.fetch(&row).await?;
-			self.after = Some((resets, row.segment));
-			if let Some(media) = media {
-				return Ok(Some(Segment {
-					segment: row.segment,
-					media,
-					duration: row.duration,
-					program_date_time: self.rendition.wall_clock(row.pts),
-					discontinuity: row.discontinuity,
-				}));
+			if self.rendition.is_gap(&row) {
+				self.position.1 += 1;
+				continue;
 			}
+			let media = self
+				.rendition
+				.fetch(&row)
+				.await?
+				.ok_or(crate::Error::SegmentUnavailable { segment: row.segment })?;
+			self.position.1 += 1;
+			return Ok(Some(Segment {
+				segment: row.segment,
+				media,
+				duration: row.duration,
+				program_date_time: self.rendition.wall_clock(row.pts),
+				discontinuity: row.discontinuity,
+			}));
 		}
 	}
 
-	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<(Row, u64)>> {
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Row>>> {
 		self.poll_feed(waiter);
-		let poll = self
-			.state
-			.poll(waiter, |state| match state.next_after(self.after.as_ref()) {
-				Next::Ready(row) => Poll::Ready(Some((row, state.resets))),
-				Next::Ended => Poll::Ready(None),
-				Next::Pending => Poll::Pending,
-			});
-		match poll {
-			Poll::Ready(Ok(found)) => Poll::Ready(found),
-			// The producer closed without a clean end (broadcast dropped): no more segments.
-			Poll::Ready(Err(_)) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
+		// A refused binding never held media, so there is nothing to drain. `poll_feed` registered
+		// the wake for a refusal that arrives while the window waits for rows.
+		if let Err(err) = self.rendition.authorize() {
+			return Poll::Ready(Err(err));
 		}
+		let found = match ready!(self.state.poll(waiter, |state| -> Poll<Result<Option<Row>>> {
+			match state.next_at(self.position)? {
+				Next::Ready(row) => Poll::Ready(Ok(Some(row))),
+				Next::Done => Poll::Ready(Ok(None)),
+				Next::Pending => Poll::Pending,
+			}
+		})) {
+			Ok(found) => found?,
+			Err(_) => return Poll::Ready(Err(crate::Error::IncompleteRecording)),
+		};
+		if found.is_some() {
+			return Poll::Ready(Ok(found));
+		}
+		Poll::Ready(self.rendition.check().map(|()| None))
 	}
 
 	/// Hold a live subscription on the media track the rendition is bound to now.
@@ -688,7 +733,7 @@ mod tests {
 
 	#[test]
 	fn a_continuous_timeline_keeps_one_discontinuity() {
-		// A cursor that skips a record (uncached, or a gap for its rendition) must not mark the
+		// A cursor that skips a declared gap for its rendition must not mark the
 		// next one: a sibling that fetched it wouldn't, and players require renditions to agree.
 		let mut timeline = Discontinuities::default();
 		assert_eq!(timeline.stamp(secs(0), secs(2)), 0);
@@ -766,53 +811,56 @@ mod tests {
 	}
 
 	#[test]
-	fn next_after_walks_segments() {
+	fn cursor_walks_segments() {
 		let live = Producer::new();
 		let window = Some(Duration::from_secs(30));
 		live.push(row(0, 0, 0, 2_000), window);
 		live.push(row(1, 1, 2_000, 2_000), window);
 
-		let Next::Ready(first) = live.state.read().next_after(None) else {
+		let Next::Ready(first) = live.state.read().next_at((0, 0)).unwrap() else {
 			panic!("expected a segment");
 		};
 		assert_eq!(first.segment, 0);
-		let after = |segment| Some((0, segment));
-		let Next::Ready(second) = live.state.read().next_after(after(0).as_ref()) else {
+		let next = |segment| (0, segment);
+		let Next::Ready(second) = live.state.read().next_at(next(1)).unwrap() else {
 			panic!("expected a segment");
 		};
 		assert_eq!(second.segment, 1);
 		assert!(
-			matches!(live.state.read().next_after(after(1).as_ref()), Next::Pending),
+			matches!(live.state.read().next_at(next(2)).unwrap(), Next::Pending),
 			"nothing further while live"
 		);
 
 		live.end();
-		assert!(matches!(live.state.read().next_after(after(1).as_ref()), Next::Ended));
+		assert!(matches!(live.state.read().next_at(next(2)).unwrap(), Next::Done));
 	}
 
-	/// A cleared window may restart its numbering lower, so a cursor past a higher number of the
-	/// old window still yields the new one's rows.
 	#[test]
-	fn a_new_reference_restarts_the_cursor() {
+	fn cursors_refuse_lost_rows_and_resets() {
 		let live = Producer::new();
-		let window = Some(Duration::from_secs(30));
-		live.push(row(5, 5, 10_000, 2_000), window);
-		let Next::Ready(old) = live.state.read().next_after(None) else {
-			panic!("expected a segment");
-		};
-
+		for segment in 5..8 {
+			live.push(row(segment, segment, segment * 2_000, 2_000), None);
+		}
+		// One cursor consumed the first row, another has not read anything yet.
+		live.retire(5);
+		assert!(matches!(
+			live.state.read().next_at((0, 0)),
+			Err(crate::Error::RecordingLagged)
+		));
+		assert!(matches!(live.state.read().next_at((0, 1)), Ok(Next::Ready(_))));
+		live.retire(7);
+		assert!(matches!(
+			live.state.read().next_at((0, 1)),
+			Err(crate::Error::RecordingLagged)
+		));
+		assert!(matches!(live.state.read().next_at((0, 3)), Ok(Next::Pending)));
 		live.clear();
-		let switched = Row {
-			reference: Arc::new((Kind::Video, "other".to_string(), "other".to_string())),
-			..row(0, 0, 0, 2_000)
-		};
-		live.push(switched, window);
-		let after = Some((0, old.segment));
-		let Next::Ready(next) = live.state.read().next_after(after.as_ref()) else {
-			panic!("the new reference's first row follows");
-		};
-		assert_eq!(next.segment, 0);
-		assert_ne!(tag(&next.reference), tag(&old.reference), "its URLs carry another tag");
+		live.push(row(0, 0, 0, 2_000), None);
+		assert!(matches!(
+			live.state.read().next_at((0, 3)),
+			Err(crate::Error::RecordingLagged)
+		));
+		assert!(matches!(live.state.read().next_at((1, 3)), Ok(Next::Ready(_))));
 	}
 
 	#[test]
@@ -829,12 +877,12 @@ mod tests {
 		};
 		live.push(switched, window);
 		assert_eq!(live.window().sequence, 5);
-		let Next::Ready(next) = live.state.read().next_after(Some(&(0, 5))) else {
+		let Next::Ready(next) = live.state.read().next_at((0, 1)).unwrap() else {
 			panic!("the replacement's row follows");
 		};
 		assert_eq!(next.segment, 6);
 		assert_ne!(tag(&next.reference), tag(&old_reference));
-		assert!(matches!(live.state.read().next_after(Some(&(0, 6))), Next::Pending));
+		assert!(matches!(live.state.read().next_at((0, 2)).unwrap(), Next::Pending));
 		live.retire(5);
 		assert_eq!(live.window().sequence, 6);
 		assert!(live.row(&tag(&old_reference), 5).is_none());

@@ -13,12 +13,10 @@
 //! managing a single connection and all the related state (such as streams).
 
 #![warn(missing_docs)]
-#![cfg_attr(test, allow(dead_code))]
-// Fixes welcome:
-#![warn(unreachable_pub)]
-#![allow(clippy::cognitive_complexity)]
-#![allow(clippy::too_many_arguments)]
-#![warn(clippy::use_self)]
+#![cfg_attr(
+    test,
+    allow(dead_code, reason = "test builds compile helpers only some tests call")
+)]
 
 use std::{
     fmt,
@@ -40,7 +38,6 @@ mod entropy;
 pub mod fuzz;
 mod range_set;
 #[cfg(all(test, any(feature = "rustls-aws-lc-rs", feature = "rustls-ring")))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests;
 pub mod transport_parameters;
 mod varint;
@@ -60,6 +57,7 @@ pub use crate::connection::{
     SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "mux")]
+#[doc(hidden)]
 pub use connection::mux;
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;
@@ -117,11 +115,9 @@ pub use token_memory_cache::TokenMemoryCache;
 
 // Deal with time
 // MoQ's clock, so a caller-driven clock (a test's or the simulator's) reaches the state machine.
-pub(crate) use moq_clock::Instant;
-#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
-pub(crate) use std::time::{Duration, SystemTime, UNIX_EPOCH};
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-pub(crate) use web_time::{Duration, SystemTime, UNIX_EPOCH};
+pub(crate) use moq_clock::{Instant, Wall};
+pub(crate) use std::time::Duration;
+pub(crate) const UNIX_EPOCH: Wall = Wall::UNIX_EPOCH;
 
 /// The QUIC protocol version implemented.
 pub const DEFAULT_SUPPORTED_VERSIONS: &[u32] = &[

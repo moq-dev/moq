@@ -37,15 +37,12 @@ async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_
 	config.connect.bind = Some("127.0.0.1:0".parse().expect("parse client bind"));
 	config.connect.tls.insecure = Some(true);
 	config.connect.version.extend(cluster_version);
-	#[allow(deprecated)]
-	{
-		config.auth.public = vec![moq_auth::Pattern::all()];
-	}
+	config.auth.public = vec![moq_auth::Pattern::all()];
 	config.cluster.id = Some(id);
 	config.cluster.connect = connect.into_iter().map(moq_relay::cluster::Peer::new).collect();
 
 	// `load` binds the TCP listener, so the port is ours before anyone dials it.
-	let relay = Relay::load(config).await.expect("relay load");
+	let relay = Relay::load(config).await.expect("relay load").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener is configured").port();
 	let internal = relay.internal().addr().expect("internal listener is configured").port();
 	let task = tokio::spawn(async move {

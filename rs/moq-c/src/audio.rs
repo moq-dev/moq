@@ -33,7 +33,7 @@ use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 ///
 /// <https://developer.mozilla.org/en-US/docs/Web/API/AudioData/format>
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_audio_sample_format {
 	/// Unsigned 8-bit PCM samples, interleaved by channel.
@@ -71,7 +71,6 @@ fn audio_format_from_u32(value: u32) -> Result<moq_audio::Format, Error> {
 
 /// PCM layout the caller hands to [`moq_encode_audio_frame`].
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_audio_encoder_input {
 	/// `moq_audio_sample_format` discriminant.
 	pub format: u32,
@@ -87,7 +86,6 @@ pub struct moq_audio_encoder_input {
 /// "match the input (snapping the rate up to a libopus-supported
 /// value if necessary)".
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_audio_encoder_output {
 	/// Codec id, UTF-8: "opus", "pcm", or "aac". AAC encodes through the
 	/// platform's encoder, so a host without one refuses it.
@@ -108,7 +106,6 @@ pub struct moq_audio_encoder_output {
 
 /// PCM layout the caller wants out of [`moq_decode_audio`].
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_audio_decoder_output {
 	/// The moq_audio_sample_format discriminant.
 	pub format: u32,
@@ -133,7 +130,6 @@ pub struct moq_audio_decoder_output {
 /// [`moq_decode_audio_frame_free`]) or borrowed by the publish call
 /// (the publisher copies before returning).
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_audio_frame {
 	/// The presentation timestamp in microseconds.
 	pub timestamp_us: u64,
@@ -148,7 +144,7 @@ pub struct moq_audio_frame {
 /// An audio producer, shared so the Opus encode in `write` runs with the global
 /// lock released. See [`Shared`].
 pub(crate) struct AudioEncoder {
-	producer: moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>,
+	producer: moq_audio::encode::Producer,
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
 	finished: crate::publish::Finished,
 }
@@ -258,8 +254,9 @@ impl Audio {
 				biased;
 				_ = &mut close => return Ok(()),
 				frame = consumer.read() => match frame {
-					Ok(Some(moq_audio::decode::Read::Frame { frame, .. })) => frame,
-					Ok(Some(moq_audio::decode::Read::End { .. })) => continue,
+					Ok(Some(moq_audio::decode::Read::Frame(frame))) => frame,
+					// The C ABI hands over PCM only.
+					Ok(Some(moq_audio::decode::Read::Gap { .. } | moq_audio::decode::Read::End { .. })) => continue,
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather

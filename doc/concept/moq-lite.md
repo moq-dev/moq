@@ -73,6 +73,10 @@ bytes. A hop of 0 is the anonymous mark and travels the chain unchanged. A
 route that passed through an anonymous hop at any depth ranks below
 every fully identified route, whatever the costs say.
 
+A relay operator can lower the [hop-path cap](/bin/relay/cluster#topology) to
+limit the detours explored after a withdrawal. It drops longer paths while
+preserving route selection among those within the cap.
+
 A broadcast exists only while it is announced, in the same process and across
 a session: one that is created but never announced can be neither discovered
 nor requested. Retracting a route stops new requests from resolving through it
@@ -232,6 +236,15 @@ JSON snapshot). Groups can also be fetched by sequence number, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 
+Native Rust subscriptions, track queries, fetches, and announcement interest on
+QUIC, WebTransport, or qmux fail locally when the peer has granted no stream
+credit, without retrying. Iroh still waits; browser-backed Rust retains the
+browser's behavior. Once admitted, these requests have no answer deadline:
+each lasts until answered, its demand leaves, or its session closes.
+Announcement-interest refusal is logged and releases discovery sync. The merged
+announcement listing keeps its existing event and sync API, with no per-source
+error result, and continues receiving announcements from unrelated sources.
+
 Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
@@ -252,9 +265,12 @@ own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
 served. A relay merges its subscribers' ranges into one upstream request, which
-today's wire versions carry as the single span covering them. A time anchor is
-resolved from the groups the serving hop holds; upstream it asks for everything
-max delay allows, and an untimed track refuses it. At the live edge, a time end
+today's wire versions carry as the single span covering them. A relative or time
+anchor resolves on the hop that publishes the track, and over moq-lite-07, which
+reports the live edge and media time and asks upstream for every group the budget
+allows. Over an older lite or any moq-transport version, a subscriber gets every
+anchor but the live and default starts refused as unsupported, and an untimed
+track refuses a time anchor. At the live edge, a time end
 may let one group through before its first frame shows it starts past the end:
 the first group that has yet to start is handed out without waiting for that
 frame, and the next one waits on it. A datagram is judged by its own timestamp.
@@ -288,8 +304,9 @@ moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
 a receiver drops every timestamp it gets over them and the track arrives
 untimed.
 Timestamps received over moq-transport, whose peers may stamp arrival times,
-are not checked and are only passed on over moq-transport: a relay serves that
-track to moq-lite untimed.
+are not checked. Rust relays preserve them across moq-lite 07 when both peers
+negotiate the [ietf extension](/draft/moq-ietf), which carries their origin and
+keeps them unchecked. A moq-lite peer without it receives that track untimed.
 
 A publisher may compress a track, which pays off for repetitive data such as
 JSON and not for media. Each group's frames become one DEFLATE stream
@@ -326,6 +343,33 @@ Put together, a conference might use:
 
 Under light congestion video drops the tail of a group; under heavy congestion
 video stops and audio lags by at most 500 ms. No protocol change, just knobs.
+
+### Refresh
+
+A publisher can opt a track into refresh by setting its byte ratio. A new
+subscriber asks for a fresh group only when the current group's bytes after
+its first frame exceed that ratio times the first frame's size. A ratio of 2,
+for example, permits two snapshots' worth of deltas before a join asks for a
+new snapshot. Equality does not trigger it, and neither elapsed time nor more
+deltas trigger it without a join.
+
+The request does not hold back cached groups: a joiner may receive the old
+group before the publisher answers. The ratio is a refresh trigger, not a cap
+on the bytes that joiner downloads.
+
+The publisher drives the track's `Demand::wanted`: when it passes the largest
+group written, open a new group with a keyframe or complete snapshot. A Rust
+moq-json snapshot producer answers this by driving its `refresh()` alongside
+updates. It restates the current value at its newest source timestamp, with a
+new group number. Existing readers continue into that group too.
+
+Each relay judges a join from its own cache and forwards fresh-group demand
+upstream when needed, all the way to the publisher. Preserving the ratio across
+sessions requires opt-in moq-lite 07 (`moq-lite-07-wip`) at every hop. Older
+moq-lite versions do not carry refresh; moq-transport's dynamic-groups feature
+carries it with a ratio of zero, so any join after a delta asks for a new group.
+Tracks without a ratio, JSON append streams, and importers that cannot force
+keyframes do not use this mechanism.
 
 ## Datagrams
 

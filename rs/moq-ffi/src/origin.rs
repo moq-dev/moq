@@ -29,29 +29,17 @@ pub struct MoqAnnounceConfig {
 	pub hidden: bool,
 }
 
-/// A path-prefix route: hops, a static cost, and the publisher epoch for an advertisement.
+/// How a broadcast advertises its exact path: a static cost and the publisher epoch.
 ///
-/// Pair one with `MoqBroadcastProducer::announce` for an exact path, or with
-/// `MoqOriginProducer::dynamic` for a prefix. Observe them with
-/// `MoqOriginConsumer::announced`. A route claims capability, not inventory: by
-/// convention a publisher announces each broadcast's exact path, so subscribers
-/// can enumerate broadcasts, while a service advertises a prefix and answers
-/// whatever is requested beneath it.
+/// Pass one to `MoqBroadcastProducer::announce`. The hop chain is the origin's to build,
+/// so a local publisher cannot claim relay hops it never took.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
-pub struct MoqRoute {
-	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
-	/// anonymous mark and is legal on a received chain.
-	#[uniffi(default = [])]
-	pub hops: Vec<u64>,
+pub struct MoqAnnounceRoute {
 	/// Preference among routes covering the same prefix: lower wins. A publisher
 	/// sets its production cost here: zero for content it is already producing,
 	/// larger for content it would have to start producing on demand.
 	#[uniffi(default = 0)]
 	pub cost: u64,
-	/// Whether the chain holds a 0 anywhere. An anonymous route ranks below every
-	/// fully identified one, whatever the costs say.
-	#[uniffi(default = false)]
-	pub anonymous: bool,
 	/// The publisher instance the route serves, as UUIDv7 text, or `None` when unknown.
 	///
 	/// A publisher that can restart sets a fresh one per run from `moq_mint_epoch`, so
@@ -59,6 +47,38 @@ pub struct MoqRoute {
 	/// serve the same bytes, so redundant publishers share one. Among routes at a
 	/// prefix the newest epoch wins, and changing it is a `MoqAnnounceEvent::Restart`.
 	#[uniffi(default = None)]
+	pub epoch: Option<String>,
+}
+
+impl TryFrom<MoqAnnounceRoute> for moq_net::origin::Route {
+	type Error = MoqError;
+
+	fn try_from(route: MoqAnnounceRoute) -> Result<Self, MoqError> {
+		let mut out = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::new(route.cost));
+		if let Some(epoch) = route.epoch {
+			out = out.with_epoch(epoch.parse()?);
+		}
+		Ok(out)
+	}
+}
+
+/// An observed path-prefix route: hops, a static cost, and the publisher epoch.
+///
+/// Carried by `MoqAnnounceConsumer` events. A route claims capability, not
+/// inventory: by convention a publisher announces each broadcast's exact path,
+/// so subscribers can enumerate broadcasts, while a service advertises a prefix
+/// with `MoqOriginProducer::dynamic` and answers whatever is requested beneath it.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MoqRoute {
+	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
+	/// anonymous mark.
+	pub hops: Vec<u64>,
+	/// Preference among routes covering the same prefix: lower wins.
+	pub cost: u64,
+	/// Whether the chain holds a 0 anywhere. An anonymous route ranks below every
+	/// fully identified one, whatever the costs say.
+	pub anonymous: bool,
+	/// The publisher instance the route serves, as UUIDv7 text, or `None` when unknown.
 	pub epoch: Option<String>,
 }
 
@@ -70,30 +90,6 @@ impl From<moq_net::origin::Route> for MoqRoute {
 			anonymous: route.is_anonymous(),
 			epoch: route.epoch.map(|epoch| epoch.to_string()),
 		}
-	}
-}
-
-impl TryFrom<MoqRoute> for moq_net::origin::Route {
-	type Error = MoqError;
-
-	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
-		let mut hops = moq_net::Hops::new();
-		for id in route.hops {
-			let origin = if id == 0 {
-				moq_net::Hop::UNKNOWN
-			} else {
-				moq_net::Hop::new(id).map_err(|e| MoqError::InvalidRoute { reason: e.to_string() })?
-			};
-			hops.push(origin)
-				.map_err(|e| MoqError::InvalidRoute { reason: e.to_string() })?;
-		}
-		let mut out = moq_net::origin::Route::default()
-			.with_cost(moq_net::origin::Cost::new(route.cost))
-			.with_hops(hops);
-		if let Some(epoch) = route.epoch {
-			out = out.with_epoch(epoch.parse()?);
-		}
-		Ok(out)
 	}
 }
 
@@ -109,9 +105,10 @@ pub fn moq_mint_epoch() -> String {
 #[uniffi::export]
 pub fn moq_epoch_time_ms(epoch: String) -> Result<u64, MoqError> {
 	let epoch: moq_net::Epoch = epoch.parse()?;
-	let since = epoch.time().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-	// A UUIDv7 holds 48 bits of milliseconds, so this never truncates.
-	Ok(since.as_millis() as u64)
+	// This numeric API retains UUIDv7's full 48-bit range, beyond Wall's year 2554.
+	// Parsing above guarantees these fields are canonical hexadecimal Unix milliseconds.
+	let text = epoch.as_str();
+	Ok(u64::from_str_radix(&text[..8], 16).unwrap() << 16 | u64::from_str_radix(&text[9..13], 16).unwrap())
 }
 
 /// An origin in which broadcasts can be published.
@@ -400,8 +397,7 @@ impl MoqOriginProducer {
 	/// claims every path). A service that only serves some of them advertises
 	/// the covering prefix and rejects the rest as they are requested. Hold
 	/// the returned handle while the route should stay advertised and missing
-	/// broadcasts should be served. Create, attach this for tracks served on
-	/// demand, populate, then announce.
+	/// broadcasts should be served.
 	pub fn dynamic(&self, prefix: String) -> Result<Arc<MoqOriginDynamic>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.inner.driver.check()?;

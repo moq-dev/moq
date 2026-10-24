@@ -5,8 +5,8 @@
 // streaming importer, which infers frame boundaries. Alongside it, a tone per channel
 // (--tone) is encoded through libopus so the matrix exercises the FFI audio path, not only
 // the video one. subscribe connects, waits for a catalog with video and audio, decodes
-// --audio-ms of audio to --audio-out for tone.py to judge, and exits 0 once a non-empty
-// video frame arrives too (exit 1 on timeout or no data).
+// --audio-ms of every audio rendition to --audio-out.<codec> for tone.py to judge, and exits 0
+// once a non-empty video frame arrives too (exit 1 on timeout or no data).
 //
 //   ffmpeg ... -f h264 - | cpp-interop publish --url http://localhost:4443 --broadcast b.hang --tone 440
 //   cpp-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20 \
@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -69,7 +70,8 @@ std::shared_ptr<moq::Session> open_session;
 [[noreturn]] void exit_failed() {
     // Taken first, so a failure while closing cannot close it again.
     if (auto session = std::exchange(open_session, nullptr)) {
-        session->shutdown().wait_for(std::chrono::seconds(5));
+        session->shutdown();
+        session->closed().wait_for(std::chrono::seconds(5));
     }
     std::exit(1);
 }
@@ -152,7 +154,8 @@ std::shared_ptr<moq::Session> connect(const std::string &url, const Dial &dial, 
 // once, and stopping the runtime right after it can leave the relay to time the connection out.
 void close_session(const std::shared_ptr<moq::Session> &session) {
     open_session = nullptr;
-    until(session->shutdown(), Clock::now() + std::chrono::seconds(5), "session shutdown");
+    session->shutdown();
+    until(session->closed(), Clock::now() + std::chrono::seconds(5), "session shutdown");
 }
 
 // Feeds the encoder a real-time tone per channel, interleaved, until `stop` is set.
@@ -197,11 +200,14 @@ int publish(
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
-    output.track = AUDIO_TRACK;
     output.frame_duration_us = AUDIO_FRAME_DURATION_US;
     auto audio = ok(
         moq::AudioProducer::init(
-            catalog, {moq::AudioSampleFormat::kF32, AUDIO_RATE, static_cast<uint32_t>(tones.size())}, output, nullptr
+            catalog,
+            moq::AudioProducerOptions{
+                {moq::AudioSampleFormat::kF32, AUDIO_RATE, static_cast<uint32_t>(tones.size())},
+                output, AUDIO_TRACK, nullptr
+            }
         ),
         "audio producer"
     );
@@ -254,7 +260,7 @@ int publish(
         // Only teardown waits on the FIFO; linger has already completed on its own clock.
         std::ifstream ack(finish_ack);
         std::string line;
-        if (!std::getline(ack, line) || line != "complete" || session->connects() != 1) {
+        if (!std::getline(ack, line) || line != "complete" || session->state().connects != 1) {
             fail("finish acknowledgement or session continuity failed");
         }
         ok(health->close(), "health close");
@@ -267,11 +273,17 @@ int publish(
     return 0;
 }
 
-// Decodes the first `audio_ms` of the rendition to `out`.{txt,pcm}, the layout tone.py reads.
+// Decodes the first `audio_ms` of the rendition to `prefix`.<codec>.{txt,pcm}, the layout tone.py
+// reads. The codec is the catalog's up to its first `.` (`opus`, `mp4a`); two renditions of one
+// codec fail rather than overwrite each other.
 void decode_audio(
     const std::shared_ptr<moq::BroadcastConsumer> &consumer, const std::string &id, const moq::Audio &audio,
-    const std::string &out, uint64_t audio_ms, Clock::time_point deadline
+    const std::string &prefix, uint64_t audio_ms, Clock::time_point deadline
 ) {
+    const std::string out = prefix + "." + audio.codec.substr(0, audio.codec.find('.'));
+    if (std::filesystem::exists(out + ".txt")) {
+        fail(("a second " + audio.codec + " rendition").c_str());
+    }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
     output.max_delay_us = MAX_DELAY_US;
@@ -341,10 +353,12 @@ int subscribe(
     );
 
     // Audio first: it has to arrive without a gap, and the video consumer keeps its first frame
-    // (or skips to a newer one) while this reads.
+    // (or skips to a newer one) while this reads. One rendition at a time, each from its own
+    // subscription, so none waits unread behind another.
     if (!finish) {
-        const auto &[audio_id, audio] = *catalog->audio.begin();
-        decode_audio(consumer, audio_id, audio, audio_out, audio_ms, deadline);
+        for (const auto &[audio_id, audio] : catalog->audio) {
+            decode_audio(consumer, audio_id, audio, audio_out, audio_ms, deadline);
+        }
     }
 
     size_t total = 0, frames = 0;
@@ -379,7 +393,7 @@ int subscribe(
             fail("health payload or timestamp");
         }
         if (until(group->read_frame(), read_deadline, "health group EOF") ||
-            until(track->next_group(), read_deadline, "health track EOF") || session->connects() != 1) {
+            until(track->next_group(), read_deadline, "health track EOF") || session->state().connects != 1) {
             fail("health EOF or session continuity");
         }
         std::printf("finish clean frames=%zu catalog=eof announce=end health=ok\n", frames);

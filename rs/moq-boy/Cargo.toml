@@ -49,3 +49,6 @@ usage-rs = { workspace = true, features = ["completions", "config"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

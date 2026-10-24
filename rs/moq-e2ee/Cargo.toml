@@ -31,3 +31,6 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 [[bench]]
 name = "protect"
 harness = false
+
+[lints]
+workspace = true

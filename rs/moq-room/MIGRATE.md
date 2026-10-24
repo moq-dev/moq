@@ -4,10 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Workspace-only package
-
-This crate sets `publish = false`. Use the workspace source; the published room implementation is `@moq/room`.
-
 ### `chat::PRIORITY` is signed (#6142)
 
 `chat::PRIORITY` is an `i8`, still 10.

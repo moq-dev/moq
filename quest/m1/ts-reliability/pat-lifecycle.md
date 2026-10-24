@@ -14,10 +14,11 @@ What the code does today:
 - A PAT naming another PMT PID for the program adds a reassembler but never
   drops the old one, and `program.pmtPid` keeps the first.
 - `Programs` ignores a program a later PAT adds, without a warning.
-- Under `--program all`, a later PAT that removes one program reaches every
-  per-program `Import`; the removed program's `handle_pat` errors,
-  `Programs::feed` propagates it, and the whole multiplex ingest stops,
-  including unrelated programs.
+- Under `--program all`, the shared parser hands a later PAT that removes one
+  program to every program's `Import`; the removed program's `handle_pat`
+  errors, `Programs::decode` propagates it, and the whole multiplex ingest
+  stops, including unrelated programs. `Programs` sees each whole PAT first
+  (`Packet::pat`), so it can retire or start programs there instead.
 - A PAT naming another `transport_stream_id`, or a single-program import's
   PAT naming another program, already refuses the import.
 
@@ -42,11 +43,3 @@ Tests use the generated `fixture::Mux` builder: a PMT PID move, and a
 `--program all` MPTS whose PAT adds a program, drops one and later restores
 it: the other program runs uninterrupted, and the returning one publishes a
 new epoch.
-
-## Required
-
-- [Shared parser](/quest/m1/ts-reliability/shared-parser.md) - one parser owns the PID map this plan's accounting needs
-
-## Related
-
-- [PMT export](/quest/m1/ts-reliability/pmt-export.md) - the export follows a moved PMT PID with a new PAT

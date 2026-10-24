@@ -72,7 +72,7 @@ refused means an error or a counted drop.
 | CAT, EMM/ECM, ATSC PSIP, other SI PIDs, unlisted PIDs, TS scrambling | Outside the profile, raw lane; counted when the import reads every program. Today dropped uncounted | [routes](/quest/m1/ts-reliability/stream-routes.md) |
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
 | Program identity, program and ES descriptors | Preserved: descriptors follow each PMT revision; an identity change refuses | landed |
-| PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the PMT is rebuilt at the next `version_number`. Import landed; today refusal or stale PMT on export | [PMT export](/quest/m1/ts-reliability/pmt-export.md) |
+| PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the export rebuilds the PMT at the next `version_number` | landed |
 | PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch. Today ignored, or the whole multiplex stops | [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) |
 | Programs without video | Preserved when the PMT names a PCR PID; refused without one | landed |
 | PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID | landed |
@@ -84,8 +84,7 @@ refused means an error or a counted drop.
 Decided in the 2026-10-22 root-cause audit: the rows above kept getting
 patched one at a time because two foundations were missing. Decode time is
 reconstructed from history instead of decode order, and import state has no
-owner that retires it. Those quests, and the shared parser that the routes
-and PAT plans build on, rank ahead of the remaining rows. Rejected: carrying
+owner that retires it. Those quests rank ahead of the remaining rows. Rejected: carrying
 decode time in every frame container, one shared ingest byte budget,
 and replacing the demux with GStreamer or another parser (it fixes neither
 cause). Out of scope for now: decoupling catalog publication from mux-rate
@@ -101,8 +100,6 @@ remain with their current quests.
 
 - [State bound](/quest/m1/ts-reliability/state-bound.md) - SI and revision state retire with what the source stops repeating
 - [Decode order](/quest/m1/ts-reliability/decode-order.md) - TS, MKV and FLV author DTS from decode order and a declared `reorder` depth
-- [Shared parser](/quest/m1/ts-reliability/shared-parser.md) - `--program all` scans the multiplex once
-- [PMT export](/quest/m1/ts-reliability/pmt-export.md) - a TS export announces each PMT revision, mux rate included, at the next `version_number`
 - [Access units](/quest/m1/ts-reliability/pes-access-units.md) - a PES carrying several access units publishes each at its own time
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
@@ -110,6 +107,5 @@ remain with their current quests.
 
 ## Related
 
-- [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - TS identity alone is not ST 2022-7, which also needs matching RTP headers
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
 

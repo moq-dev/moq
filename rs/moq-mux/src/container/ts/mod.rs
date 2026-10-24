@@ -25,11 +25,11 @@
 
 mod adts;
 mod damage;
+mod demux;
 mod export;
 mod follower;
 mod health;
 mod import;
-mod lane;
 mod mux_rate;
 mod programs;
 mod psi;
@@ -71,3 +71,5 @@ mod pes_packet_test;
 mod recovery_test;
 #[cfg(test)]
 mod release_test;
+#[cfg(test)]
+mod revision_test;

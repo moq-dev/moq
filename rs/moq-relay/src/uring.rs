@@ -87,7 +87,13 @@ struct Serve {
 /// [`bind`](Self::bind) opens every socket, so a returned value already owns
 /// the listen address and a port conflict is an error here rather than a
 /// worker that quietly died. [`spawn`](Self::spawn) starts every thread, and
-/// nothing is served until [`serve`](Self::serve).
+/// nothing is served until [`Spawned::serve`].
+///
+/// ```compile_fail
+/// fn serve_before_spawn(mut bound: moq_relay::uring::Workers) {
+///     bound.serve();
+/// }
+/// ```
 pub struct Workers {
 	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
@@ -111,7 +117,7 @@ pub struct Workers {
 	stops: Vec<Arc<Stop>>,
 	/// Releases each spawned worker to accept; dropped unsent, it exits instead.
 	starts: Vec<std::sync::mpsc::Sender<()>>,
-	/// A worker's fatal error, reported to whoever polls [`failed`](Self::failed).
+	/// A worker's fatal error, reported to whoever polls [`Spawned::failed`].
 	failures: tokio::sync::mpsc::UnboundedReceiver<anyhow::Error>,
 	failures_tx: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
 
@@ -280,14 +286,14 @@ impl Workers {
 	/// authentication and session supervision. Returns once every worker is
 	/// set up; a worker that cannot start (an old kernel, a ring failure) is
 	/// an error here rather than a thread that quietly died. Nothing accepts
-	/// until [`serve`](Self::serve), so a failure here has served nobody.
+	/// until [`Spawned::serve`], so a failure here has served nobody.
 	pub fn spawn(
-		&mut self,
+		mut self,
 		cluster: cluster::Cluster,
 		auth: auth::Auth,
 		shutdown: shutdown::Observer,
 		sessions: crate::session::Registry,
-	) -> anyhow::Result<()> {
+	) -> anyhow::Result<Spawned> {
 		let serve = Serve {
 			cluster,
 			auth,
@@ -325,9 +331,13 @@ impl Workers {
 				start: start_rx,
 				failures: self.failures_tx.clone(),
 			};
+			// A scoped embedder subscriber belongs to these workers too; threads do
+			// not inherit their creator's tracing dispatcher.
+			let dispatch = tracing::dispatcher::get_default(Clone::clone);
+			let parent = tracing::Span::current();
 			let thread = std::thread::Builder::new()
 				.name(format!("moq-uring-{index}"))
-				.spawn(move || run_worker(spawn))
+				.spawn(move || tracing::dispatcher::with_default(&dispatch, || parent.in_scope(|| run_worker(spawn))))
 				.with_context(|| format!("failed to spawn io_uring worker {index}"))?;
 
 			// A worker that fails setup drops its sender, so a recv error and
@@ -349,11 +359,11 @@ impl Workers {
 			self.starts.push(start_tx);
 		}
 
-		Ok(())
+		Ok(Spawned { workers: self })
 	}
 
-	/// Start every [`spawn`](Self::spawn)ed worker accepting.
-	pub fn serve(&mut self) {
+	/// Start every [`Workers::spawn`]ed worker accepting.
+	fn serve(&mut self) {
 		for start in self.starts.drain(..) {
 			// A worker that died since setup is reported through `failed`.
 			let _ = start.send(());
@@ -362,7 +372,7 @@ impl Workers {
 
 	/// The first worker's fatal error. Pends until one dies, which a healthy
 	/// group never does, so this composes into a `select!` loop.
-	pub async fn failed(&mut self) -> anyhow::Error {
+	async fn failed(&mut self) -> anyhow::Error {
 		match self.failures.recv().await {
 			Some(err) => err,
 			// Senders live in `self`, so this is unreachable; pend regardless.
@@ -371,7 +381,7 @@ impl Workers {
 	}
 
 	/// Stop every worker and wait for its thread, off the caller's runtime.
-	pub async fn shutdown(mut self) {
+	async fn shutdown(mut self) {
 		let threads = self.signal();
 		if threads.is_empty() {
 			return;
@@ -386,6 +396,26 @@ impl Workers {
 			stop.stop();
 		}
 		std::mem::take(&mut self.threads)
+	}
+}
+
+/// Workers that have all initialized and can now begin accepting sessions.
+pub struct Spawned {
+	workers: Workers,
+}
+
+impl Spawned {
+	/// Release every initialized worker to accept sessions.
+	pub fn serve(&mut self) {
+		self.workers.serve();
+	}
+	/// Wait for the first worker's fatal error.
+	pub async fn failed(&mut self) -> anyhow::Error {
+		self.workers.failed().await
+	}
+	/// Stop every worker and wait until its thread has ended.
+	pub async fn shutdown(self) {
+		self.workers.shutdown().await;
 	}
 }
 
@@ -414,12 +444,6 @@ impl std::fmt::Debug for Workers {
 /// One qlog sink is built for the whole group and cloned into every worker, so
 /// the traces share a single writer thread however many workers there are.
 fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::Transport> {
-	// The datagram path fixes both payload ceilings at SEGMENT and hands
-	// `conn.send` slices of exactly that, so there is no larger size to find.
-	anyhow::ensure!(
-		!quic.mtu_discovery,
-		"io_uring workers send a fixed-size UDP payload, so quic.mtu_discovery has nothing to discover"
-	);
 	// The tokio path reports this through `moq_tokio::Error::QlogUnsupported`,
 	// which nothing builds here: this listener is the io_uring stack.
 	#[cfg(not(feature = "qlog"))]
@@ -449,6 +473,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
+	transport.mtu_discovery = quic.mtu_discovery;
 	// `[quic]` resolves every window, defaults included, so both runtimes run
 	// the same ones rather than each backend's own.
 	transport.receive_window = Some(quic.receive_window);
@@ -490,7 +515,7 @@ struct Spawn {
 	/// Reports setup back to [`Workers::spawn`], which blocks on it so a
 	/// worker that cannot start is an error there rather than a dead thread.
 	ready: std::sync::mpsc::Sender<anyhow::Result<()>>,
-	/// Fires on [`Workers::serve`]; closes when the group stops first.
+	/// Fires on [`Spawned::serve`]; closes when the group stops first.
 	start: std::sync::mpsc::Receiver<()>,
 	/// Where a fatal error goes once the worker is running.
 	failures: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
@@ -725,16 +750,10 @@ async fn serve_connection(
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,
 	};
-	let session = moq_uring::transport::Session::new(transport, binding);
-	let now = moq_net::time::now();
-	// moq-lite on its own ALPN runs unboxed on this worker. Everything else
-	// (moq-transport, and the versions that negotiate in a bidi SETUP, which a
-	// browser offering no subprotocol falls back to) boxes its futures with a
-	// native `Send` bound, which only a `Local` session meets.
-	let unboxed = alpn
-		.as_deref()
-		.and_then(moq_net::Version::from_alpn)
-		.is_some_and(|version| version.is_lite());
+	// moq-net boxes the transport with a native `Send` bound, which only a `Local`
+	// session meets; it still never leaves this worker.
+	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, binding));
+	let now = moq_net::time::Instant::now();
 	let mut accepted = Accepted {
 		handle,
 		conn,
@@ -746,24 +765,12 @@ async fn serve_connection(
 		alpn,
 		url,
 	};
-	match unboxed {
-		true => {
-			let request = accepted
-				.deadline
-				.bound(server.accept_request_lite(now, session))
-				.await
-				.context("moq handshake failed")?;
-			serve_request(accepted, request, lifecycle).await
-		}
-		false => {
-			let request = accepted
-				.deadline
-				.bound(server.accept_request(now, moq_uring::transport::Local::new(session)))
-				.await
-				.context("moq handshake failed")?;
-			serve_request(accepted, request, lifecycle).await
-		}
-	}
+	let request = accepted
+		.deadline
+		.bound(server.accept_request(now, session))
+		.await
+		.context("moq handshake failed")?;
+	serve_request(accepted, request, lifecycle).await
 }
 
 /// A connection past its transport handshake, with the facts read off it
@@ -780,14 +787,14 @@ struct Accepted {
 	url: Option<moq_uring::url::Url>,
 }
 
-/// A started session's supervision, boxed so both handshake paths return one type.
+/// A started session's supervision.
 type Supervision = futures::future::BoxFuture<'static, anyhow::Result<()>>;
 
 /// Authenticate on the shared runtime, then start the session on the worker.
 /// Returns the session's supervision, which runs on the shared runtime too.
-async fn serve_request<S: moq_net::transport::poll::Session>(
+async fn serve_request(
 	accepted: Accepted,
-	request: moq_net::server::Handshake<S>,
+	request: moq_net::server::Handshake,
 	lifecycle: &Lifecycle,
 ) -> anyhow::Result<Supervision> {
 	let Accepted {
@@ -815,13 +822,8 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 	}
 	auth_request.remote = Some(remote);
 	auth_request.local = Some(serve.local);
-	// Like the tokio listener: the SNI, else the host a WebTransport client addressed.
-	auth_request.server_name = sni.or_else(|| {
-		url.as_ref()
-			.and_then(|url| url.host_str())
-			.filter(|host| !host.is_empty())
-			.map(str::to_owned)
-	});
+	// Only the SNI, like the tokio listener: the CONNECT host selected no certificate.
+	auth_request.server_name = sni;
 	auth_request.alpn = alpn.clone();
 	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 	let admission = lifecycle.clone();
@@ -832,7 +834,7 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 		.await
 		.inspect_err(|err| {
 			if matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::Timeout)) {
-				serve.cluster.refusals.record(crate::refusals::Refusal::Unavailable);
+				serve.cluster.refusals.record(crate::refusals::RefusalKind::Unavailable);
 			}
 		})?;
 	let (admitted, registration) = match decided {
@@ -871,7 +873,7 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 	if let Some(publisher) = publisher {
 		request = request.with_subscriber(publisher);
 	}
-	let lease = lease.preparing(request.auth(), request.role())?;
+	let lease = lease.preparing(request.auth(), request.requests(), request.role())?;
 	let serving = serve.shutdown.serve();
 	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
 	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the
@@ -907,7 +909,7 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -917,7 +919,6 @@ mod tests {
 	/// `Config` is non-exhaustive, so the windows are filled in after `default`
 	/// rather than in a struct literal.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn windows_are_applied() {
 		let mut quic = moq_tokio::quic::Config::default();
 		quic.receive_window = Some(128 << 20);
@@ -930,9 +931,17 @@ mod tests {
 		assert_eq!(transport.send_window, Some(32 << 20));
 	}
 
+	/// `quic.mtu_discovery` reaches the workers as it does the tokio backends: off unless set.
+	#[test]
+	fn mtu_discovery_is_applied() {
+		let mut quic = moq_tokio::quic::Config::default();
+		assert!(!transport(&quic.resolve()).expect("default").mtu_discovery);
+		quic.mtu_discovery = Some(true);
+		assert!(transport(&quic.resolve()).expect("discovery").mtu_discovery);
+	}
+
 	/// Incomplete messages hold connection credit, so the window has to fit the largest.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn a_receive_window_below_the_largest_message_is_refused() {
 		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
 		let mut quic = moq_tokio::quic::Config::default();
@@ -951,7 +960,6 @@ mod tests {
 	/// left at the documented defaults: the tokio backends apply `Resolved`'s
 	/// windows as they are, and the workers must get exactly those.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn windows_match_the_tokio_runtime() {
 		let mut set = moq_tokio::quic::Config::default();
 		set.receive_window = Some(256 << 20);
@@ -983,10 +991,10 @@ mod tests {
 	/// A direct `bind` validates `[quic]` too, so a key log nobody can read back fails
 	/// instead of binding and logging nothing.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn bind_refuses_a_keylog_without_sslkeylogfile() {
-		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
+			return;
+		}
 		let mut server = moq_tokio::server::Config::default();
 		server.quic.keylog = Some(true);
 		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
@@ -1012,9 +1020,9 @@ mod tests {
 		let mut server = moq_tokio::server::Config::default();
 		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		server.listen.tls.generate = vec!["localhost".into()];
-		let mut workers = Workers::bind(server, moq_tokio::worker::Config::new(2)).unwrap();
+		let workers = Workers::bind(server, moq_tokio::worker::Config::new(2)).unwrap();
 		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
-		workers
+		let workers = workers
 			.spawn(
 				cluster,
 				auth::Auth::refuse("test"),

@@ -31,13 +31,14 @@ pub struct MoqSubscription {
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age of a non-latest group before it is skipped, in microseconds.
-	/// `0` skips immediately; a larger value tolerates that much reordering.
+	/// Maximum age of a non-latest group before it is skipped, in microseconds, or null
+	/// for moq-net's default: `0`, which skips immediately. A larger value tolerates that
+	/// much reordering.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	#[uniffi(default = 0)]
-	pub max_delay_us: u64,
+	#[uniffi(default = None)]
+	pub max_delay_us: Option<u64>,
 	/// The spans of the track to deliver, or null for everything `max_delay_us` still
 	/// considers fresh. An empty list asks for nothing.
 	///
@@ -155,9 +156,10 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 	type Error = MoqError;
 
 	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
-		let mut subscription = moq_net::track::Subscription::default()
-			.with_priority(s.priority)
-			.with_max_delay(std::time::Duration::from_micros(s.max_delay_us));
+		let mut subscription = moq_net::track::Subscription::default().with_priority(s.priority);
+		if let Some(max_delay) = s.max_delay_us {
+			subscription = subscription.with_max_delay(std::time::Duration::from_micros(max_delay));
+		}
 		if let Some(ranges) = s.ranges {
 			subscription = subscription.with_ranges(
 				ranges
@@ -256,27 +258,23 @@ impl MoqBroadcastConsumer {
 
 #[uniffi::export]
 impl MoqBroadcastConsumer {
-	/// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
+	/// Resolve a catalog rendition to the broadcast serving its track.
 	///
-	/// `reference` is [`MoqVideo::broadcast`] / [`MoqAudio::broadcast`]: absent or empty names
-	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). `epoch` is
-	/// the same rendition's [`MoqVideo::epoch`] / [`MoqAudio::epoch`], the publisher instance the
-	/// reference names: a broadcast proven to serve another one fails with `Mux` instead of
-	/// resolving, while a route without an epoch cannot prove one, so there it is best effort.
-	/// Call it on a rendition that carries a reference before [`Self::subscribe_track`] or
-	/// [`Self::fetch_group`], which take a track name rather than a rendition. The rendition-based
-	/// consumers (`MoqMediaTrackConsumer::subscribe`, `MoqMediaGroupConsumer::fetch`,
-	/// `MoqVideoConsumer::subscribe`, `MoqAudioConsumer::subscribe`) resolve both themselves.
+	/// The rendition's `broadcast` reference, absent or empty, names this broadcast; anything
+	/// else names a sibling relative to it (e.g. `./source`). Its `epoch` is the publisher
+	/// instance the reference names: a broadcast proven to serve another one fails with `Mux`
+	/// instead of resolving, while a route without an epoch cannot prove one, so there it is best
+	/// effort. Call it on a rendition that carries a reference before [`Self::subscribe_track`] or
+	/// [`Self::fetch_group`], which take the rendition's `track` (or its ID when unset) rather
+	/// than a rendition. The rendition-based consumers (`MoqMediaTrackConsumer::subscribe`,
+	/// `MoqMediaGroupConsumer::fetch`, `MoqVideoConsumer::subscribe`,
+	/// `MoqAudioConsumer::subscribe`) resolve it themselves.
 	///
 	/// Errors if this broadcast came from a local producer rather than an origin, since a
-	/// standalone broadcast has no sibling to name, and reports a sibling that exists but is not
-	/// announced yet as unroutable rather than waiting for it (see
-	/// [`MoqOriginConsumer::request_broadcast`](crate::origin::MoqOriginConsumer::request_broadcast)).
-	pub async fn resolve(
-		&self,
-		reference: Option<String>,
-		epoch: Option<String>,
-	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+	/// standalone broadcast has no sibling to name. A sibling nothing announces yet is waited for,
+	/// so a late one resolves once it is announced; cancel the call to give up on it.
+	pub async fn resolve(&self, rendition: MoqRendition) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let (reference, epoch, _, _) = rendition.into_parts();
 		let broadcast = self.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 		Ok(Arc::new(match self.origin.clone() {
 			Some(origin) => Self::routed(broadcast, origin, self.driver.clone()),

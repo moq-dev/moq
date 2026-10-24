@@ -20,9 +20,17 @@ moq --connect https://relay.example.com/anon --broadcast my-stream.hang import h
 The CLI serves the one `--broadcast` it was given, at
 `/{broadcast}/master.m3u8` and `/{broadcast}/manifest.mpd`.
 
-Import follows a live playlist until every rendition's playlist ends with
-`EXT-X-ENDLIST`, then keeps the finished broadcast up until its media is stale
-(see [retention](/bin/cli#retention-and-latency)).
+Import follows a live playlist, joining a few segments behind its live edge,
+until every rendition's playlist ends with `EXT-X-ENDLIST`. It then keeps the
+finished broadcast up until its media is stale
+(see [retention](/bin/cli#retention-and-latency)). A playlist that has already
+ended, such as a VOD recording, is refused with an error rather than imported.
+An `EXT-X-DISCONTINUITY` keeps the source's timestamps. Timestamp resets are not
+supported: if a rendition's timestamps go backwards under the same `EXT-X-MAP`,
+such as an encoder restart, the import fails with an error. Import the restarted
+source as a new broadcast. Import fetches only from the playlist's origin
+(scheme, host, and port): a reference or redirect to another origin, such as a
+separate CDN host, fails the import.
 
 ## How export works
 
@@ -61,13 +69,14 @@ returns HTTP 400. A live-only timeline or range past a finished recording
 returns HTTP 416 instead of a partial clip, and a failed timeline returns 500.
 
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
-and `--cors-origin` opens it to browsers. See `moq export hls --help`.
+and `--cors-origin` opens it to browsers. HLS TLS reads `MOQ_HLS_TLS_*`;
+`MOQ_LISTEN_TLS_*` configures only the MoQ listener. See `moq export hls --help`.
 
 ## Import
 
 Import handles classic HLS; LL-HLS parts are not implemented. It publishes the
 playlist's own media times, and anchors the catalog clock on the first imported
-segment. Each fMP4 segment is split into one frame per sample; `--passthrough`
+segment. Each fMP4 segment is split into one frame per sample; `--cmaf`
 publishes each fragment whole as CMAF instead, keeping its exact sample timing.
 
 The library, including the recorder cursors for mirroring a broadcast to

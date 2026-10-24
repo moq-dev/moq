@@ -9,13 +9,12 @@ handle; only the owner closes the origin.
 
 Decided 2026-10-22 (API audit). Verified: `origin.scope(...).close()` closes
 the owner (`js/net/src/origin.ts`), undercutting the `Table` interface, which
-exists so a borrower cannot close the origin. `withPreference` is removed by
-[moq-net exports](/quest/m1/api-audit/net-exports.md).
+exists so a borrower cannot close the origin. `withPreference` is gone.
 
 - A derived handle's `close()` releases what that handle registered.
 - moq.pro relies on the old behavior in `e2e/src/relay-stats.ts` and
   `dev/smoke.ts`, where the scoped handle is the only one kept; note the
-  change in `js/net/MIGRATE.md` so the upgrade keeps the owner.
+  change in the Impact bullet so the upgrade keeps the owner.
 
 Check Rust's derived handles for the same behavior and match.
 

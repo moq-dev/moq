@@ -29,12 +29,12 @@ The `backend` input (also an attribute on the elements) picks the graphics API:
   Mac, and Android, and on Linux Chrome with many GPUs, so the console logs
   which one was picked and why.
 - `webgpu`: WebGPU only. Where it is missing, nothing draws and `out.error` is
-  `"unsupported"`.
+  a `NotSupportedError`.
 - `2d`: Canvas2D only.
 
 The choice is made once per canvas, before drawing, since a canvas keeps the
 first kind of context it hands out. A lost GPU device is replaced. If no GPU
-comes back, drawing stops and `out.error` is `"surface-lost"`: hand the
+comes back, drawing stops and `out.error` is an `InvalidStateError`: hand the
 renderer a fresh canvas, and `auto` picks again. The elements swap their
 `<canvas>` child for a copy themselves.
 

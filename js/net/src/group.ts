@@ -270,7 +270,6 @@ export class Producer {
 		return makeConsumer(this.#state);
 	}
 
-	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * Create an independent read handle that receives every frame written here.
 	 *
@@ -569,6 +568,13 @@ export class Consumer {
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
 		hooks.groupStarted = (group) => group.#state.total.peek() > 0 || group.#state.closed.peek() !== undefined;
+		hooks.groupFate = (group) => {
+			const state = group.#state;
+			return () => {
+				const closed = state.closed.peek();
+				return closed instanceof Error ? closed : undefined;
+			};
+		};
 		hooks.arriveGroup = (group, at) => {
 			group.#state.arrived = at;
 		};
@@ -954,6 +960,7 @@ export class Consumer {
 			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
 		}
 		this.#abandon();
+		this.#recover?.close?.();
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;

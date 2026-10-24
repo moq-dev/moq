@@ -15,7 +15,7 @@ import (
 func ExampleClient_Announced() {
 	ctx := context.Background()
 
-	client, err := moq.Dial(ctx, "https://relay.example.com")
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func ExampleClient_Announced() {
 func ExampleClient_CreateBroadcast() {
 	ctx := context.Background()
 
-	client, err := moq.Dial(ctx, "https://relay.example.com")
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func ExampleClient_CreateBroadcast() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	_ = broadcast.Announce(moq.Route{})
+	_ = broadcast.Announce(moq.AnnounceRoute{})
 
 	pts := 20 * time.Millisecond
 	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: &pts}); err != nil {
@@ -76,11 +76,14 @@ func ExampleClient_CreateBroadcast() {
 func ExampleClient_Session_stats() {
 	ctx := context.Background()
 
-	client, err := moq.Dial(ctx, "https://relay.example.com",
-		moq.WithTLSRoots("/etc/ssl/custom-ca.pem"),
-		moq.WithTLSSystemRoots(true),
-		moq.WithTLSFingerprints("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-	)
+	systemRoots := true
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{
+		TLS: moq.ClientTLS{
+			Roots:        []string{"/etc/ssl/custom-ca.pem"},
+			SystemRoots:  &systemRoots,
+			Fingerprints: []string{"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+		},
+	})
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -4,11 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Import dependencies directly
-
-The `Hang`, `Net`, `Publish`, `Signals`, and `Watch` namespace re-exports are removed.
-Import from `@moq/hang`, `@moq/net`, `@moq/publish`, `@moq/signals`, and `@moq/watch` directly, and declare those packages in your application's dependencies.
-
 ### Chat events carry their send time
 
 `Chat.Subscriber.recv()` returns `{ value, at }`: `value` is the event `recv()` used to return, and `at` is its frame's timestamp.

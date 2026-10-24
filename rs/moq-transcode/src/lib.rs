@@ -66,6 +66,9 @@ pub async fn run(
 /// The split exists so a caller can attach [`active`] before any encoding
 /// starts. [`run`](Self::run) consumes the transcoder, so take the cursors you
 /// want first.
+///
+/// Dropping this handle or its run future cancels its catalog and closes the output, including
+/// when the future was never polled.
 pub struct Transcoder {
 	source: moq_net::broadcast::Consumer,
 	output: moq_net::broadcast::Producer,
@@ -111,15 +114,15 @@ impl Transcoder {
 	}
 
 	/// Serve the ladder until the source broadcast ends.
-	pub async fn run(self) -> Result<(), Error> {
+	pub async fn run(mut self) -> Result<(), Error> {
 		let Self {
 			source,
 			output,
 			config,
-			mut derived,
-			mut dynamic,
+			derived,
+			dynamic,
 			active,
-		} = self;
+		} = &mut self;
 
 		// The source catalog drives everything; wait for a snapshot with a usable
 		// video rendition (the first may precede the source publishing its video).
@@ -145,7 +148,7 @@ impl Transcoder {
 		let mut ladder = pipeline::Pipeline::new(
 			source.clone(),
 			config.clone(),
-			active,
+			active.clone(),
 			decoders,
 			source_name,
 			source_config,
@@ -209,14 +212,41 @@ impl Transcoder {
 	}
 }
 
+impl Drop for Transcoder {
+	fn drop(&mut self) {
+		// The owner exists before `run` is polled. A cancelled prologue must close the
+		// already registered catalog too. Abort preserves an earlier clean finish or error.
+		self.derived.clone().abort(moq_net::Error::Cancel);
+		self.output.close();
+	}
+}
+
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 
 	use super::*;
 
-	/// A live source broadcast; the producers are kept so the tracks stay open
-	/// for the duration of the test.
+	/// Constructing a transcoder registers its catalog synchronously, so even an unpolled
+	/// run future owns published state that must end deliberately when abandoned.
+	#[tokio::test(start_paused = true)]
+	async fn an_unpolled_run_cancels_its_registered_catalog() {
+		let source = moq_net::broadcast::Info::new().produce();
+		let output = moq_net::broadcast::Info::new().produce();
+		let consumer = output.consume();
+		let transcoder = Transcoder::new(source.consume(), output.clone(), Default::default()).unwrap();
+		let mut catalog = consumer
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		drop(transcoder.run());
+		assert!(consumer.is_closed());
+		assert!(matches!(catalog.recv_group().await, Err(moq_net::Error::Cancel)));
+	}
+
+	/// A live source broadcast, whose producers keep its tracks open.
 	struct Source {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,

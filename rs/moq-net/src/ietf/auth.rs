@@ -8,6 +8,8 @@
 //! The wire carries prefixes, so a grant is told only when it is a union of subtrees.
 //! Anything narrower is refused with NOT_SUPPORTED rather than widened.
 
+#[cfg(feature = "async")]
+use crate::driver::Transport;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -223,9 +225,7 @@ fn from_code(code: u64) -> Error {
 
 /// Refuse an AUTH past our GOAWAY cutoff with AUTH_ERROR, the only answer its presenter reads.
 #[cfg(feature = "async")]
-pub(super) async fn refuse_going_away<S: crate::transport::poll::Session>(
-	mut stream: Stream<S, Version>,
-) -> Result<(), Error> {
+pub(super) async fn refuse_going_away(mut stream: Stream<Transport, Version>) -> Result<(), Error> {
 	let reply = AuthError {
 		code: GOING_AWAY,
 		reason: "going away".to_string(),
@@ -253,18 +253,20 @@ pub(super) fn peer_grant(
 /// says it negotiated the extension. Never returns: a session without it just fails
 /// the tokens as unsupported.
 #[cfg(feature = "async")]
-pub(super) async fn run_present<S>(
+#[expect(
+	clippy::too_many_arguments,
+	reason = "the presenting task owns each piece of session state it drives"
+)]
+pub(super) async fn run_present(
 	runtime: crate::time::Deadlines,
-	session: S,
+	session: Transport,
 	control: Control,
 	handle: Handle,
 	peer_setup: peer::PeerSetup,
 	version: Version,
 	going_away: crate::goaway::GoingAway,
-) -> Result<(), Error>
-where
-	S: crate::transport::poll::Boxable,
-{
+	stats: crate::stats::Session,
+) -> Result<(), Error> {
 	if !peer_setup.get().await.auth {
 		handle.unsupported();
 		return std::future::pending().await;
@@ -285,6 +287,7 @@ where
 		.await?
 	{
 		let present = Present {
+			stats: stats.clone(),
 			runtime: runtime.clone(),
 			session: session.clone(),
 			control: control.clone(),
@@ -319,9 +322,10 @@ where
 
 /// One token's Auth request.
 #[cfg(feature = "async")]
-struct Present<S: crate::transport::poll::Session> {
+struct Present {
+	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
-	session: S,
+	session: Transport,
 	control: Control,
 	handle: Handle,
 	version: Version,
@@ -329,16 +333,17 @@ struct Present<S: crate::transport::poll::Session> {
 }
 
 #[cfg(feature = "async")]
-impl<S: crate::transport::poll::Boxable> Present<S> {
+impl Present {
 	/// Send the token, then track its grant until either side ends it, resolving with why.
 	#[cfg(feature = "async")]
 	async fn run(&self, token: Bytes) -> Error {
-		let request_id = match self.control.next_request_id(&self.runtime).await {
-			Ok(id) => id,
+		let mut stream = match Stream::open_request(&mut self.session.clone(), self.version).await {
+			Ok(stream) => stream,
 			Err(err) => return err,
 		};
-		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
-			Ok(stream) => stream,
+		stream = super::request_stream::with_stats(stream, &self.stats, self.version);
+		let request_id = match self.control.next_request_id(&self.runtime).await {
+			Ok(id) => id,
 			Err(err) => return err,
 		};
 		if let Err(err) = stream.writer.encode_message(&Auth { request_id, token }).await {
@@ -441,9 +446,9 @@ pub(super) struct Serve {
 impl Serve {
 	/// Answer one Auth request. The stream lives as long as the token.
 	#[cfg(feature = "async")]
-	pub(super) async fn run<S: crate::transport::poll::Session>(
+	pub(super) async fn run(
 		self,
-		mut stream: Stream<S, Version>,
+		mut stream: Stream<Transport, Version>,
 		msg: Auth,
 		version: Version,
 	) -> Result<(), Error> {
@@ -522,11 +527,11 @@ impl crate::coding::Decode<Version> for Unexpected {
 /// Write the acceptor's replies until either side ends the token. `default` feeds
 /// the default acceptor's grant into the outbox as it changes.
 #[cfg(feature = "async")]
-async fn serve_issue<S: crate::transport::poll::Session>(
+async fn serve_issue(
 	runtime: &crate::time::Deadlines,
 	issue: &kio::Shared<Issue>,
 	mut default: Option<&mut crate::auth::DefaultGrant>,
-	stream: &mut Stream<S, Version>,
+	stream: &mut Stream<Transport, Version>,
 	version: Version,
 	goaways: &mut super::request_stream::GoAways,
 ) -> Result<(), Error> {
@@ -609,6 +614,33 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[cfg(feature = "async")]
+	#[moq_clock::test]
+	async fn auth_refused_without_credit_spends_no_request_id() {
+		for version in [Version::Draft17, Version::Draft19] {
+			for client in [false, true] {
+				let first = if client { 0 } else { 1 };
+				let control = Control::new(Some(RequestId(first + 1)), client);
+				let present = Present {
+					runtime: crate::time::sim(),
+					stats: Default::default(),
+					session: crate::driver::Transport::new(
+						crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit(),
+					),
+					control: control.clone(),
+					handle: Handle::new(false),
+					version,
+					id: 0,
+				};
+				assert!(matches!(present.run(Bytes::new()).await, Error::NoStreamCredit));
+				assert_eq!(
+					control.poll_next_request_id(&kio::Waiter::noop()),
+					Poll::Ready(RequestId(first))
+				);
+			}
+		}
+	}
 
 	const VERSION: Version = Version::Draft17;
 

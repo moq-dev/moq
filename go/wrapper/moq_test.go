@@ -232,16 +232,21 @@ func TestEncodeAudioWithOpusObject(t *testing.T) {
 		}
 		codec := moq.OpusAudioCodec()
 		name := "mic"
-		output := moqaudio.EncoderOutput{Codec: codec, Track: &name, FrameDuration: 20 * time.Millisecond}
+		output := moqaudio.EncoderOutput{Codec: codec, FrameDuration: 20 * time.Millisecond}
 		catalog, err := moqmedia.NewCatalogProducer(broadcast)
 		if err != nil {
 			t.Fatal(err)
 		}
-		producer, err := moqaudio.NewProducer(catalog, moqaudio.EncoderInput{
-			Format:     moq.AudioSampleFormatF32,
-			SampleRate: 48000,
-			Channels:   1,
-		}, output, nil)
+		producer, err := moqaudio.NewProducer(catalog, moqaudio.ProducerOptions{
+			Input: moqaudio.EncoderInput{
+				Format:     moq.AudioSampleFormatF32,
+				SampleRate: 48000,
+				Channels:   1,
+			},
+			Output:    output,
+			Track:     &name,
+			Bandwidth: nil,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -283,15 +288,16 @@ func TestAudioConsumerDelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	audio, err := moqaudio.NewProducer(catalogProducer,
-		moqaudio.EncoderInput{Format: moq.AudioSampleFormatF32, SampleRate: 48000, Channels: 1},
-		moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &track},
-		nil,
-	)
+	audio, err := moqaudio.NewProducer(catalogProducer, moqaudio.ProducerOptions{
+		Input:     moqaudio.EncoderInput{Format: moq.AudioSampleFormatF32, SampleRate: 48000, Channels: 1},
+		Output:    moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec()},
+		Track:     &track,
+		Bandwidth: nil,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Announce(moq.Route{}); err != nil {
+	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -366,7 +372,12 @@ func TestEncodeAudioFrameDurations(t *testing.T) {
 		t.Fatal(err)
 	}
 	fineName := "fine"
-	fine, err := moqaudio.NewProducer(catalog, input, moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &fineName, FrameDuration: 2500 * time.Microsecond}, nil)
+	fine, err := moqaudio.NewProducer(catalog, moqaudio.ProducerOptions{
+		Input:     input,
+		Output:    moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), FrameDuration: 2500 * time.Microsecond},
+		Track:     &fineName,
+		Bandwidth: nil,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +390,12 @@ func TestEncodeAudioFrameDurations(t *testing.T) {
 	}
 
 	coarseName := "coarse"
-	_, err = moqaudio.NewProducer(catalog, input, moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &coarseName, FrameDuration: 2 * time.Millisecond}, nil)
+	_, err = moqaudio.NewProducer(catalog, moqaudio.ProducerOptions{
+		Input:     input,
+		Output:    moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), FrameDuration: 2 * time.Millisecond},
+		Track:     &coarseName,
+		Bandwidth: nil,
+	})
 	if !errors.Is(err, moq.ErrAudio) {
 		t.Fatalf("err = %v, want ErrAudio: 2 ms is not an opus frame duration", err)
 	}
@@ -430,16 +446,16 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	video, err := moqvideo.NewProducer(catalogProducer,
-		moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: 30},
-		// Software both ways so the test is deterministic everywhere.
-		moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.SoftwareEncoder()},
-		nil,
-	)
+	video, err := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
+		Input:     moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
+		Output:    moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.SoftwareEncoder()},
+		Track:     &track,
+		Bandwidth: nil,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Announce(moq.Route{}); err != nil {
+	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -593,13 +609,6 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if request.Sequence() != 7 || request.Priority() != 11 {
 		t.Fatalf("unexpected request: sequence=%d priority=%d", request.Sequence(), request.Priority())
 	}
-	demand, err := request.Demand()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if demand.Sequence() != 7 || !demand.IsUsed() {
-		t.Fatalf("unexpected demand: sequence=%d used=%v", demand.Sequence(), demand.IsUsed())
-	}
 	produced, err := request.Accept()
 	if err != nil {
 		t.Fatal(err)
@@ -645,7 +654,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Announce(moq.Route{}); err != nil {
+	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -821,8 +830,9 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 	}
 
 	order := moq.OrderAscending
+	maxDelay := 10 * time.Second
 	consumer, err := track.Consume(&moq.Subscription{
-		MaxDelay: 10 * time.Second,
+		MaxDelay: &maxDelay,
 		Ranges:   []moq.Range{{Start: moq.AnchorRelative{Groups: 2}}},
 		Order:    &order,
 	})
@@ -1432,7 +1442,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatal("an unannounced broadcast must be unroutable")
 	}
 
-	if err := broadcast.Announce(moq.Route{Cost: 3}); err != nil {
+	if err := broadcast.Announce(moq.AnnounceRoute{Cost: 3}); err != nil {
 		t.Fatal(err)
 	}
 	announced, err := consumer.Announced(moq.AnnounceOptions{})
@@ -1456,7 +1466,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatal("an unannounced broadcast must be unroutable")
 	}
 
-	if err := broadcast.Announce(moq.Route{}); err != nil {
+	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 	nextAnnounced(t, ctx, announced)
@@ -1484,14 +1494,14 @@ func TestAnnouncedPatternCaptures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := audio.Announce(moq.Route{}); err != nil {
+	if err := audio.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 	chat, err := origin.CreateBroadcast("room/alice/chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := chat.Announce(moq.Route{}); err != nil {
+	if err := chat.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1522,7 +1532,7 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := chat.Announce(moq.Route{}); err != nil {
+	if err := chat.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1555,7 +1565,7 @@ func TestAnnouncedEpochRestarts(t *testing.T) {
 	if at, err := moq.EpochTime("018bcfe5-6800-7000-8000-000000000000"); err != nil || !at.Equal(time.UnixMilli(1_700_000_000_000)) {
 		t.Fatalf("EpochTime = %v, %v; want 2023-11-14T22:13:20Z", at, err)
 	}
-	if err := broadcast.Announce(moq.Route{Epoch: &first}); err != nil {
+	if err := broadcast.Announce(moq.AnnounceRoute{Epoch: &first}); err != nil {
 		t.Fatal(err)
 	}
 	if start := nextAnnounced(t, ctx, announced); start.Route.Epoch == nil || *start.Route.Epoch != first {
@@ -1563,7 +1573,7 @@ func TestAnnouncedEpochRestarts(t *testing.T) {
 	}
 
 	second := moq.MintEpoch()
-	if err := broadcast.Announce(moq.Route{Epoch: &second}); err != nil {
+	if err := broadcast.Announce(moq.AnnounceRoute{Epoch: &second}); err != nil {
 		t.Fatal(err)
 	}
 	restart, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventRestart)

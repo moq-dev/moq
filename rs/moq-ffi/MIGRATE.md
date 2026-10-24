@@ -5,6 +5,36 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Connection state
+
+`MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.
+
+### Exact encoder rates and publication options
+
+Encoder configuration is breaking: `MoqVideoEncoderInput.framerate` is now a
+`MoqVideoFrameRate { numerator, denominator }` (use `{30, 1}` for 30 fps or
+`{30000, 1001}` for NTSC). Zero components and rates above 1,000,000 fps are
+refused. `track` moves out of both encoder output records into
+`MoqAudioProducerOptions` / `MoqVideoProducerOptions`, alongside `input`,
+`output`, and optional `bandwidth`. Producers now take `(catalog, options)`;
+codec-only encoders keep their input/output arguments and take no publication
+settings. Regenerate bindings and rebuild the native library together.
+
+### Video rendition preference
+
+`MoqVideo` gains `preference: i32`. Set it to `0` in record literals to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Regenerate bindings and rebuild them with the matching native library.
+
+### `announce` takes a `MoqAnnounceRoute`
+
+`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
+`MoqRoute` is only what `MoqAnnounceConsumer` reports, so its fields lose their defaults, and `MoqError::InvalidRoute` is gone.
+To re-announce an observed route, copy its `cost` and `epoch`.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it or race it against a timeout.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `MoqJsonSnapshotConfig::delta_ratio` is replaced by `deltas: bool` (default `true`).
@@ -32,7 +62,7 @@ Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
 ### Catalog references carry their epoch
 
 `MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `epoch: None`.
-`MoqBroadcastConsumer::resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `None` to resolve whichever instance answers.
+`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `epoch` from it.
 Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
@@ -84,7 +114,6 @@ A subscription now reads only the groups its own `ranges` cover, rather than sta
 `wanted()` returns null while nobody subscribes, otherwise the group subscribers want next, and `wanted_changed()` waits for it to change (the first call returns at once).
 Loop on `wanted_changed()` until it returns non-null where you awaited `used()`, and null where you awaited `unused()`.
 `MoqTrackInfo` gains `refresh`, the ratio past which a joining subscriber asks for a new group.
-`MoqGroupDemand` is unchanged.
 
 ### `MoqCongestionControl` gained `None` (#5926)
 
@@ -109,11 +138,11 @@ A start group `n` is `MoqRange { start: MoqAnchor::Absolute { group: n, frame: 0
 ### Receive estimates come from `MoqSession::recv_bandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `MoqSession::recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop. `MoqConnectionStats::estimated_recv_rate_bps` is gone.
+Hold the consumer `MoqSession::recv_bandwidth` returns to request PROBE, read it with `rate()` or wait with `rate_changed()`, and drop it to stop. `MoqConnectionStats::estimated_recv_rate_bps` is gone.
 
 ```rust
 let bandwidth = session.recv_bandwidth();
-let rate = bandwidth.as_ref().and_then(|b| b.peek());
+let rate = bandwidth.as_ref().and_then(|b| b.rate());
 ```
 
 ### `available()` waits for the next publisher instance (#5700)
@@ -142,7 +171,7 @@ let config = MoqMediaTrackConfig { rendition: MoqRendition::Video { id, config: 
 ### Native codecs have audio and video namespaces (#5694)
 
 `MoqBroadcastProducer::encode_audio` / `encode_video` are the `MoqAudioProducer::new` / `MoqVideoProducer::new` constructors, which take the broadcast's `MoqMediaCatalogProducer`.
-The audio track name moves into `MoqAudioEncoderOutput::track`, and a zero `frame_duration_us` (the new default) takes the codec's own frame.
+The audio track name belongs to `MoqAudioProducerOptions::track`, and a zero `frame_duration_us` (the new default) takes the codec's own frame.
 `MoqBroadcastConsumer::decode_audio` / `decode_video` are `MoqAudioConsumer::subscribe` / `MoqVideoConsumer::subscribe`, taking the broadcast first.
 The producers' `name()`, `used()`, and `unused()` are gone; read subscriber state through `demand()`.
 `MoqVideoEncoderOutput::gop` is `Option<MoqVideoGop>`, so `Some(30)` is `Some(MoqVideoGop::Keyframe { interval: 30 })`.
@@ -150,7 +179,7 @@ Codec-only `MoqAudioEncoder` / `MoqVideoEncoder` encode without publishing.
 
 ```rust
 let catalog = MoqMediaCatalogProducer::new(broadcast)?;
-let video = MoqVideoProducer::new(&catalog, input, output, None)?;
+let video = MoqVideoProducer::new(&catalog, MoqVideoProducerOptions { input, output, track: None, bandwidth: None })?;
 let frames = MoqVideoConsumer::subscribe(&consumer, name, rendition, decoder).await?;
 ```
 

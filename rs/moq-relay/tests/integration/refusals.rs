@@ -42,7 +42,10 @@ struct Running {
 	stats: moq_net::stats::Registry,
 	origin: moq_net::origin::Consumer,
 	quic: SocketAddr,
-	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "websocket"),
+		allow(dead_code, reason = "only the `websocket` feature uses it")
+	)]
 	http: SocketAddr,
 	metrics: String,
 	trigger: moq_relay::shutdown::Trigger,
@@ -51,7 +54,7 @@ struct Running {
 
 async fn start(config: Config) -> Running {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let stats = relay.stats().registry().clone();
 	let origin = relay.cluster().origin.consume();
 	let quic = relay.quic_addr().expect("quic listener bound");
@@ -225,7 +228,7 @@ async fn unavailable_auth_server_is_counted() {
 /// A refusal creates the root stats group even when no session was ever admitted.
 #[tokio::test]
 async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metrics() {
-	use moq_net::stats::{Refusal, Tier};
+	use moq_net::stats::{RefusalKind, Tier};
 	let dir = tempfile::tempdir().unwrap();
 	let mut config = config(dir.path(), false);
 	config.auth.public = vec!["anon/**".parse().unwrap()];
@@ -265,7 +268,7 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 	relay
 		.stats
 		.tier(Tier::new("gateway"))
-		.refuse("tenant", Refusal::Forbidden);
+		.refuse("tenant", RefusalKind::Forbidden);
 	assert_eq!(
 		relay.refused("forbidden").await,
 		1,
@@ -379,8 +382,8 @@ async fn expired_verified_tokens_count_under_the_token_root_and_auth_tier() {
 	key.to_file(&key_path).unwrap();
 	let mut claims = moq_auth::Claims::default()
 		.with_root("verified/tenant")
-		.with_subscribe(moq_auth::Pattern::all());
-	claims.expires = Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+		.with_subscribe([moq_auth::Pattern::all()]);
+	claims.expires = Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
 	let token = key.sign(&claims).unwrap();
 	for tier in [None, Some("edge")] {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

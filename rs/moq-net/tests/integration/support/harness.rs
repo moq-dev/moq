@@ -5,7 +5,7 @@
 //! over a [`super::mock::MockSession`] pair and spawns both protocol drivers, giving tests
 //! two live sessions ready for pub/sub without any real QUIC or network I/O.
 
-#![allow(dead_code)]
+#![allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 
 use std::sync::{
 	Arc,
@@ -240,8 +240,8 @@ pub async fn peer_with_latency(
 	b: &origin::Producer,
 	latency: std::time::Duration,
 ) -> MockPair {
-	let a = a.clone().peer();
-	let b = b.clone().peer();
+	let a = a.clone().with_link(moq_net::origin::Link::Peer);
+	let b = b.clone().with_link(moq_net::origin::Link::Peer);
 	let mut options = MockConnectOptions::new(version);
 	options.client_publish = Some(a.consume().with_hidden(true));
 	options.client_subscribe = Some(a);

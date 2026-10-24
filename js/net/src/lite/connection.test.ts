@@ -12,9 +12,17 @@ import { wireOf } from "../wire.ts";
 import { Connection, probeLevel } from "./connection.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
+import { Group as GroupMessage } from "./group.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
-import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
+import {
+	decodeSubscribeResponse,
+	encodeSubscribeResponse,
+	Subscribe,
+	SubscribeEnd,
+	SubscribeStart,
+} from "./subscribe.ts";
+import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
@@ -200,7 +208,7 @@ function mockDeadline() {
 	const clock = new Manual();
 	return {
 		expire: () => clock.advance(Nano.fromMilli(Milli(1000))),
-		restore: clock.install(),
+		installed: clock.install(),
 	};
 }
 
@@ -327,7 +335,7 @@ test("a lite-07 subscriber withholding FIN holds close until the deadline", asyn
 		expect(await failure).toHaveProperty("message", "session close timed out");
 		expect(served.closed()).toBe(true);
 	} finally {
-		deadline.restore();
+		deadline.installed.close();
 		served.cleanup();
 	}
 });
@@ -344,7 +352,7 @@ test("a lite-07 subscriber FIN releases close", async () => {
 		await closing;
 		expect(served.closed()).toBe(true);
 	} finally {
-		deadline.restore();
+		deadline.installed.close();
 		served.cleanup();
 	}
 });
@@ -361,7 +369,7 @@ test("abort during the close drain ends the session at once", async () => {
 		await closing;
 		expect(served.closed()).toBe(true);
 	} finally {
-		deadline.restore();
+		deadline.installed.close();
 		served.cleanup();
 	}
 });
@@ -408,7 +416,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 		await closing;
 		expect(closed).toBe(true);
 	} finally {
-		deadline.restore();
+		deadline.installed.close();
 		fin.release();
 		server.abort();
 		broadcast.close();
@@ -471,7 +479,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 		await closing;
 		expect(closed).toBe(true);
 	} finally {
-		deadline.restore();
+		deadline.installed.close();
 		fin.release();
 		client.abort();
 		server.abort();
@@ -597,6 +605,54 @@ for (const [alpn, version] of [
 			await new Goaway("").encode(goaway.writer, version);
 			goaway.writer.close();
 			expect((await wireOf(connection).goaway).uri).toBe("");
+		} finally {
+			connection.abort();
+		}
+	});
+}
+
+// A group stream that breaks the protocol ends the session, so a hostile peer cannot repeat
+// it on every stream.
+for (const violation of ["a partial group", "a group past the declared end"] as const) {
+	test(`${violation} closes the session with PROTOCOL_VIOLATION`, async () => {
+		const version = Version.DRAFT_07;
+		const pair = createMockTransportPair(ALPN_07_WIP);
+		const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+		try {
+			const track = wireOf(connection).consume(Path.from("room")).track("video").subscribe();
+
+			// The publisher, played by hand: answer TRACK_INFO, start the subscription, and
+			// leave any other stream the session opens (such as PROBE) open.
+			let sub: Stream | undefined;
+			while (!sub) {
+				const stream = await Stream.accept(pair.server, version);
+				if (!stream) throw new Error("the subscriber never subscribed");
+				const id = await stream.reader.u53();
+				if (id === StreamId.Track) {
+					await TrackMessage.decode(stream.reader, version);
+					await new TrackInfo({ maxAge: 60_000, timescale: Timescale.MILLI }).encode(stream.writer, version);
+					stream.close();
+				} else if (id === StreamId.Subscribe) {
+					await Subscribe.decode(stream.reader, version);
+					sub = stream;
+				}
+			}
+			await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0) }, version);
+
+			let group: GroupMessage;
+			if (violation === "a partial group") {
+				// The subscriber never asked to start mid-group.
+				group = new GroupMessage({ subscribe: 0n, sequence: 0, frameStart: 5 });
+			} else {
+				await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2) }, version);
+				group = new GroupMessage({ subscribe: 0n, sequence: 2 });
+			}
+			const writer = await Writer.open(pair.server, { version });
+			await writer.u53(DataType.Group);
+			await group.encode(writer, version);
+
+			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+			track.close();
 		} finally {
 			connection.abort();
 		}

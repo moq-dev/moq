@@ -231,7 +231,10 @@ mod tests {
 			assert!(poll_once(&mut sleep).is_pending());
 
 			// Idle on tokio's paused clock for an hour: the installed clock stays put.
-			#[allow(clippy::disallowed_methods)]
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the test idles on tokio's clock, not the installed one"
+			)]
 			tokio::time::sleep(Duration::from_secs(3_600)).await;
 			assert_eq!(crate::now(), start);
 			assert!(poll_once(&mut sleep).is_pending());
@@ -281,14 +284,14 @@ mod tests {
 		});
 	}
 
-	/// Wall time and the anchor come from the installed clock, and a wall step passes no time.
+	/// Wall time and the origin come from the installed clock, and a wall step passes no time.
 	#[test]
 	fn wall_reads_the_installed_clock() {
 		let runtime = runtime(false);
 		let clock = Manual::new().install(runtime.handle());
 		let _entered = runtime.enter();
 		assert_eq!(crate::wall(), Manual::WALL_START);
-		assert_eq!(crate::anchor(), (Instant::ZERO, Manual::WALL_START));
+		assert_eq!(crate::origin(), (Instant::ZERO, Manual::WALL_START));
 
 		clock.advance(Duration::from_secs(5));
 		assert_eq!(crate::wall(), Manual::WALL_START + Duration::from_secs(5));
@@ -296,9 +299,9 @@ mod tests {
 		assert_eq!(crate::wall(), Manual::WALL_START);
 		assert_eq!(crate::now(), Instant::ZERO + Duration::from_secs(5));
 		assert_eq!(
-			crate::anchor(),
+			crate::origin(),
 			(Instant::ZERO, Manual::WALL_START),
-			"the anchor is fixed at its first read"
+			"the origin is fixed at its first read"
 		);
 	}
 

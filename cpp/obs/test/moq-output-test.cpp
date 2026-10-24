@@ -402,6 +402,23 @@ struct MoQOutputStatsTest {
 		std::lock_guard<std::mutex> lock(output.mutex);
 		output.live = false;
 	}
+	// A fast first connect and drop can coalesce before the UI observes Connected.
+	static bool ObserveCoalescedFirstConnect(MoQOutput &output)
+	{
+		std::lock_guard<std::recursive_mutex> signal_lock(output.signal_mutex);
+		auto current = output.attempt;
+		if (!current || !current->session)
+			return false;
+		current->pending.reset();
+		current->connected = false;
+		output.connect_time_ms = 0;
+		auto state = current->session->state();
+		state.phase = moq::ConnectionPhase::kDisconnected;
+		state.version.reset();
+		output.OnState(current, std::move(state));
+		return current->connected && !current->live && output.GetConnectTime() > 0;
+	}
+
 	// Whether every audio and video track holds a reservation.
 	static bool Reserved(MoQOutput &output)
 	{
@@ -458,6 +475,17 @@ int main()
 		output.Stop();
 	}
 	printf("each start announces a fresh epoch, reconnect preserves it: ok\n");
+
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput output(nullptr, OUTPUT);
+		CHECK(output.Start());
+		CHECK(WaitFor([&] { return output.IsLiveSession(); }));
+		CHECK(MoQOutputStatsTest::ObserveCoalescedFirstConnect(output));
+		output.Stop();
+	}
+	printf("a coalesced first connection is remembered while offline: ok\n");
 
 	for (int retirement = 0; retirement < 3; ++retirement) {
 		TestRelay relay;

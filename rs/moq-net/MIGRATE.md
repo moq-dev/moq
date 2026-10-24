@@ -4,6 +4,41 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
+
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
+
+### Published names refuse navigation segments
+
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Rust reports `Error::NavigationSegment`; the existing protocol error codes carry the refusal to a peer.
+Path normalization, relative references, and subscription paths retain their semantics.
+
+### A listing says whether a removed track finished (#6399)
+
+`broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
+`broadcast::Lister::finish()`, which ended every reader as if the broadcast ended, is `Lister::end()`. `Lister::finish(name)` now unlists a track as finished, beside `remove(name)` for one that left unfinished.
+
+### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
+
+Match the version yourself: lite-01, lite-02, and moq-transport draft 14 negotiate the version in SETUP; every other version negotiates it through ALPN.
+
+### Sessions box their transport (#6176)
+
+`Driver` and `server::Handshake` lose their transport type parameter: write `moq_net::Driver` and `moq_net::server::Handshake`.
+`Client::connect_lite`, `Server::accept_lite`, and `Server::accept_request_lite` are gone; call `connect`, `accept`, or `accept_request`, which accept every ALPN.
+Every session now takes a `transport::poll::Boxable` transport, whose streams must also be `Sync` on native.
+A `!Send` transport wraps itself in a type that checks the thread on use, such as `moq_uring::transport::Local`.
+`Client::connect` and `Server::accept_request` are plain functions returning `impl Future`, so call them as before with `.await`.
+
+### `track::Producer::largest()` is a getter
+
+`track::Producer::largest(&self)` returns the track's largest location now, `None` before any, instead of streaming each newer one; `track::Producer::poll_largest` is gone.
+Replace `poll_largest(&kio::Waiter::noop())` and `largest().await` on a producer with `largest()`.
+To wait for each newer one, keep a reader and follow its stream: `let mut reader = producer.consume();`, then `reader.largest().await`.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
@@ -192,7 +227,7 @@ Handle it like any other skipped group.
 ### Track readers follow `largest()` instead of reading `latest()` (#5725)
 
 `latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.
-Await `largest()` and read `.group` where you used the sequence; where you read the edge without waiting, poll `poll_largest` once with `kio::Waiter::noop()`.
+Await `largest()` and read `.group` where you used the sequence; on a `Producer`, `largest()` reads the edge without waiting.
 It streams the newest location, the current one at once and then each newer one, and `None` once the track ends.
 A new group or datagram raises it at frame 0 before any frame lands, and it can name a frame the publisher reported before its group arrives.
 
@@ -404,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)

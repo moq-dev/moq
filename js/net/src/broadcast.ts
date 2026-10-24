@@ -72,6 +72,8 @@ class BroadcastState {
 	active = 0;
 	// The demand watcher of each open track, disposed when it closes or leaves the broadcast.
 	demands = new Map<track.Producer, Dispose>();
+	// Run synchronously once the broadcast closes, before `closed` notifies its observers.
+	closers = new Set<() => void>();
 }
 
 // Each track updates the aggregate on an edge, so a demand change touches only its track.
@@ -152,6 +154,8 @@ function closeState(state: BroadcastState) {
 	state.requested.mutate((requests) => {
 		requests.length = 0;
 	});
+	for (const fn of state.closers) fn();
+	state.closers.clear();
 }
 
 // The producer already serving `name`, evicting entries that can no longer serve it.
@@ -255,7 +259,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 }
 
 // The newest frame cached for `name`, without subscribing: undefined when nobody serves it yet.
-function largest(state: BroadcastState, name: string): track.Location | undefined {
+function largest(state: BroadcastState, name: string): track.Position | undefined {
 	const producer = lookup(state, name);
 	return producer && hooks.cachedLargest(producer);
 }
@@ -321,7 +325,11 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
 
 let makeDemand: (state: BroadcastState) => Demand;
 
-/** A watch-only view of demand for any track in a broadcast. */
+/**
+ * A watch-only view of demand for any track in a broadcast.
+ *
+ * @internal Tests only; nothing outside the package consumes it.
+ */
 export class Demand {
 	#state: BroadcastState;
 	private constructor(state: BroadcastState) {
@@ -384,6 +392,11 @@ export class Producer {
 			producer.#announcer = undefined;
 			return announcer;
 		};
+		hooks.onClosed = (producer, fn) => {
+			const closers = producer.#state.closers;
+			closers.add(fn);
+			return () => closers.delete(fn);
+		};
 		stampProducer = (producer, path) => {
 			producer.#path = path;
 		};
@@ -397,7 +410,11 @@ export class Producer {
 		return this.#state.closed;
 	}
 
-	/** Watch demand for the broadcast's tracks. */
+	/**
+	 * Watch demand for the broadcast's tracks.
+	 *
+	 * @internal Tests only; nothing outside the package consumes it.
+	 */
 	demand(): Demand {
 		return this.#demand;
 	}

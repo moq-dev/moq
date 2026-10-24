@@ -1,3 +1,5 @@
+use crate::driver::Transport;
+use crate::transport::poll::Session as _;
 use std::{
 	collections::{HashMap, VecDeque},
 	sync::{Arc, Mutex, Weak},
@@ -443,14 +445,14 @@ impl<E: crate::transport::Error> crate::transport::Error for AdapterError<E> {
 	}
 }
 
-pub enum AdapterSend<S: crate::transport::poll::Session> {
-	Real(S::SendStream),
+pub(crate) enum AdapterSend {
+	Real(crate::transport::boxed::SendStream),
 	Virtual(VirtualSendStream),
 }
 
-impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
-	type Error = AdapterError<<S::SendStream as crate::transport::poll::SendStream>::Error>;
-	type Group = <S::SendStream as crate::transport::poll::SendStream>::Group;
+impl crate::transport::poll::SendStream for AdapterSend {
+	type Error = AdapterError<<crate::transport::boxed::SendStream as crate::transport::poll::SendStream>::Error>;
+	type Group = <crate::transport::boxed::SendStream as crate::transport::poll::SendStream>::Group;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		match self {
@@ -503,20 +505,23 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 	}
 }
 
-#[allow(clippy::large_enum_variant)]
-pub enum AdapterRecv<S: crate::transport::poll::Session> {
-	Real(S::RecvStream),
+#[cfg_attr(
+	target_pointer_width = "64",
+	expect(
+		clippy::large_enum_variant,
+		reason = "one per stream, so boxing a variant would add an allocation per stream to save bytes nothing holds in bulk"
+	)
+)]
+pub(crate) enum AdapterRecv {
+	Real(crate::transport::boxed::RecvStream),
 	Virtual(crate::transport::poll::Buffered<VirtualRecvStream>),
 }
 
-impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
-	type Error = AdapterError<<S::RecvStream as crate::transport::poll::RecvStream>::Error>;
-	type Lease<'a>
-		= AdapterLease<'a, S>
-	where
-		S: 'a;
+impl crate::transport::poll::RecvStream for AdapterRecv {
+	type Error = AdapterError<<crate::transport::boxed::RecvStream as crate::transport::poll::RecvStream>::Error>;
+	type Lease<'a> = AdapterLease<'a>;
 
-	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<AdapterLease<'_, S>, Self::Error>> {
+	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<AdapterLease<'_>, Self::Error>> {
 		match self {
 			Self::Real(s) => s
 				.poll_lease(cx, want)
@@ -544,12 +549,12 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 }
 
 /// A [`Lease`](crate::transport::poll::Lease) of an [`AdapterRecv`].
-pub enum AdapterLease<'a, S: crate::transport::poll::Session + 'a> {
-	Real(<S::RecvStream as crate::transport::poll::RecvStream>::Lease<'a>),
+pub(crate) enum AdapterLease<'a> {
+	Real(<crate::transport::boxed::RecvStream as crate::transport::poll::RecvStream>::Lease<'a>),
 	Virtual(crate::transport::poll::BufferedLease<'a>),
 }
 
-impl<S: crate::transport::poll::Session> Buf for AdapterLease<'_, S> {
+impl Buf for AdapterLease<'_> {
 	fn remaining(&self) -> usize {
 		match self {
 			Self::Real(l) => l.remaining(),
@@ -579,7 +584,7 @@ impl<S: crate::transport::poll::Session> Buf for AdapterLease<'_, S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> crate::transport::poll::Lease for AdapterLease<'_, S> {
+impl crate::transport::poll::Lease for AdapterLease<'_> {
 	fn is_fin(&self) -> bool {
 		match self {
 			Self::Real(l) => l.is_fin(),
@@ -848,8 +853,9 @@ impl Shared {
 }
 
 #[derive(Clone)]
-pub struct ControlStreamAdapter<S: crate::transport::poll::Session> {
-	inner: S,
+pub(crate) struct ControlStreamAdapter {
+	stats: crate::stats::Session,
+	inner: Transport,
 	shared: Arc<Shared>,
 	control: Control,
 	version: Version,
@@ -857,9 +863,10 @@ pub struct ControlStreamAdapter<S: crate::transport::poll::Session> {
 	park: kio::Park,
 }
 
-impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
-	pub fn new(inner: S, control: Control, version: Version) -> Self {
+impl ControlStreamAdapter {
+	pub fn new(inner: Transport, control: Control, version: Version) -> Self {
 		Self {
+			stats: Default::default(),
 			inner,
 			shared: Arc::new(Shared::default()),
 			control,
@@ -868,14 +875,18 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		}
 	}
 
+	pub(super) fn with_stats(mut self, stats: &crate::stats::Session) -> Self {
+		self.stats = stats.clone();
+		self
+	}
+
 	/// Open a real (non-virtual) bidi stream, bypassing control stream multiplexing.
 	/// Used for v16 SubscribeNamespace which moved to its own bidi stream.
-	pub async fn open_native_bi(&mut self) -> Result<(AdapterSend<S>, AdapterRecv<S>), crate::Error> {
-		let (send, recv) = self
-			.inner
-			.open_bi(Default::default())
+	pub async fn open_native_bi(&mut self) -> Result<(AdapterSend, AdapterRecv), crate::Error> {
+		let (send, recv) = kio::wait(|waiter| self.inner.poll_open_request(&mut waiter.context(), Default::default()))
 			.await
-			.map_err(|_| crate::Error::Closed)?;
+			.map_err(crate::Error::from_transport)?
+			.ok_or(crate::Error::NoStreamCredit)?;
 		Ok((AdapterSend::Real(send), AdapterRecv::Real(recv)))
 	}
 
@@ -886,8 +897,8 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	/// instead of the session tearing down.
 	pub async fn run(
 		&self,
-		reader: Reader<S::RecvStream, Version>,
-		writer: Writer<S::SendStream, Version>,
+		reader: Reader<crate::transport::boxed::RecvStream, Version>,
+		writer: Writer<crate::transport::boxed::SendStream, Version>,
 		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		let res = {
@@ -924,39 +935,22 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	/// message. Best-effort: an encode failure or a closed control stream is
 	/// logged and dropped, since the session is tearing down anyway.
 	pub(super) fn send_goaway(&self, uri: &str, timeout_ms: u64, version: Version) {
-		use crate::coding::Encode;
-
 		let msg = crate::ietf::GoAway {
 			new_session_uri: std::borrow::Cow::Borrowed(uri),
 			timeout: timeout_ms,
 			request_id: None,
 		};
 
-		// The size prefix is a u16 on a stream shared with every other request, so the
-		// encode refuses a body that would wrap it and desynchronize the framing for all.
-		let mut raw = Vec::new();
-		let mut w = Encoder::new(&mut raw, version.into());
-		if let Err(err) = w
-			.varint(crate::ietf::GoAway::ID)
-			.and_then(|()| msg.encode(&mut w, version))
-		{
+		if let Err(err) = self.queue_message(&msg, version) {
 			tracing::warn!(%err, "failed to encode goaway");
-			return;
-		}
-
-		if !self.shared.control.push(raw.into()) {
-			tracing::debug!("control stream closed; goaway not sent");
 		}
 	}
 
-	/// Refuse an update no request here can apply, naming its own Request ID. Draft 14
-	/// answers no update.
+	/// Refuse an update no request here can apply, naming its own Request ID.
 	fn refuse_update(&self, request_id: RequestId) {
 		if self.version == Version::Draft14 {
 			return;
 		}
-		let mut raw = Vec::new();
-		let mut w = crate::coding::Encoder::new(&mut raw, self.version.into());
 		let msg = ietf::RequestError {
 			request_id: Some(request_id),
 			error_code: super::error::request::to_code(
@@ -967,36 +961,36 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 			reason_phrase: "update not supported".into(),
 			retry_interval: 0,
 		};
-		if let Err(err) = w
-			.varint(ietf::RequestError::ID)
-			.and_then(|()| crate::coding::Encode::encode(&msg, &mut w, self.version))
-		{
+		if let Err(err) = self.queue_message(&msg, self.version) {
 			tracing::warn!(%err, "failed to encode REQUEST_ERROR");
-			return;
 		}
-		// A closed control stream means the session is ending; there is no one to answer.
-		let _ = self.shared.control.push(raw.into());
 	}
 
 	/// Queue a MAX_REQUEST_ID granting the peer room up to `max`.
 	fn send_max_request_id(&self, max: RequestId) {
-		let mut raw = Vec::new();
-		let mut w = crate::coding::Encoder::new(&mut raw, self.version.into());
-		let msg = ietf::MaxRequestId { request_id: max };
-		if let Err(err) = w
-			.varint(ietf::MaxRequestId::ID)
-			.and_then(|()| crate::coding::Encode::encode(&msg, &mut w, self.version))
-		{
+		if let Err(err) = self.queue_message(&ietf::MaxRequestId { request_id: max }, self.version) {
 			tracing::warn!(%err, "failed to encode MAX_REQUEST_ID");
-			return;
 		}
-		// A closed control stream means the session is ending; there is no one to grant.
-		let _ = self.shared.control.push(raw.into());
+	}
+
+	fn queue_message<T: Message>(&self, msg: &T, version: Version) -> Result<(), Error> {
+		use crate::coding::Encode;
+		let mut raw = Vec::new();
+		let mut encoder = Encoder::new(&mut raw, version.into());
+		encoder.varint(T::ID)?;
+		msg.encode(&mut encoder, version)?;
+		let selector = crate::coding::varint::size(T::ID, version.into()).map_err(crate::coding::EncodeError::from)?;
+		self.stats
+			.control(super::message::control(T::ID, version), raw.len() - selector, false);
+		if !self.shared.control.push(raw.into()) {
+			tracing::debug!("control stream closed; message not sent");
+		}
+		Ok(())
 	}
 
 	/// Writer task: drains the queue and writes to the control stream. The peer's
 	/// STOP_SENDING, seen while idle or as a failed write, is a protocol violation.
-	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
+	async fn run_write(&self, mut writer: Writer<crate::transport::boxed::SendStream, Version>) -> Result<(), Error> {
 		loop {
 			let msg = kio::wait(|waiter| {
 				// Never finished, so any end is the peer's or the session's.
@@ -1022,7 +1016,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	/// Dispatcher loop that reads control stream messages and routes them.
 	async fn run_read(
 		&self,
-		mut reader: Reader<S::RecvStream, Version>,
+		mut reader: Reader<crate::transport::boxed::RecvStream, Version>,
 		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		loop {
@@ -1040,6 +1034,9 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 				.await
 				.map_err(super::session::control_stream_error)?
 				.0;
+
+			self.stats
+				.control(super::message::control(type_id, self.version), body.len() + 2, true);
 
 			// Reconstruct raw message bytes: [type_id][size][body]
 			let raw = encode_raw(type_id, &body, self.version);
@@ -1306,9 +1303,9 @@ fn lookup_namespace_request_id(
 	Ok(namespaces.get(direction, &ns))
 }
 
-impl<S: crate::transport::poll::Session> crate::transport::poll::Session for ControlStreamAdapter<S> {
-	type SendStream = AdapterSend<S>;
-	type RecvStream = AdapterRecv<S>;
+impl crate::transport::poll::Session for ControlStreamAdapter {
+	type SendStream = AdapterSend;
+	type RecvStream = AdapterRecv;
 	type Error = crate::Error;
 
 	fn poll_accept_bi(
@@ -1350,6 +1347,17 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 			AdapterSend::Virtual(send),
 			AdapterRecv::Virtual(crate::transport::poll::Buffered::new(recv)),
 		)))
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
 	}
 
 	fn poll_open_uni(
@@ -2154,9 +2162,9 @@ mod tests {
 		ids: &[u64],
 		then: &[u8],
 	) -> (
-		ControlStreamAdapter<crate::lite::test_transport::ScriptedSession>,
-		Reader<crate::lite::test_transport::ScriptedRecv, Version>,
-		Writer<crate::lite::test_transport::SinkSend, Version>,
+		ControlStreamAdapter,
+		Reader<crate::transport::boxed::RecvStream, Version>,
+		Writer<crate::transport::boxed::SendStream, Version>,
 		crate::lite::test_transport::Log,
 	) {
 		use crate::lite::test_transport::{Log, ScriptedSession, SinkSend};
@@ -2173,26 +2181,109 @@ mod tests {
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		// We are the server, so the client's request IDs are even.
 		let control = Control::new(None, false).with_window(window, false, VERSION);
-		let adapter = ControlStreamAdapter::new(session, control, VERSION);
+		let adapter = ControlStreamAdapter::new(Transport::new(session.clone()), control, VERSION);
 		let log = Log::default();
-		let writer = Writer::new(SinkSend::new(log.clone()), VERSION);
-		(adapter, Reader::new(recv, VERSION), writer, log)
+		let writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log.clone())),
+			VERSION,
+		);
+		(
+			adapter,
+			Reader::new(crate::transport::boxed::RecvStream::new(recv), VERSION),
+			writer,
+			log,
+		)
+	}
+
+	#[moq_clock::test]
+	async fn legacy_multiplexing_counts_a_control_body_once() {
+		use crate::{
+			coding::{Encode, Stream},
+			lite::test_transport::{Log, ScriptedSession, SinkSend},
+			stats::{Bytes, Control as Class, Registry, Tier},
+		};
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let registry = Registry::new(Default::default());
+			let stats = registry.tier(Tier::default()).session("");
+			let msg = ietf::FetchCancel {
+				request_id: RequestId(0),
+			};
+			let body = msg.encode_bytes(version).unwrap();
+			let raw_response = encode_raw(ietf::FetchCancel::ID, &body.slice(2..), version);
+			let mut session = ScriptedSession::new(raw_response.to_vec());
+			let (_, recv) = crate::transport::poll::Session::open_bi(&mut session, Default::default())
+				.await
+				.unwrap();
+			let adapter = ControlStreamAdapter::new(Transport::new(session.clone()), Control::new(None, true), version)
+				.with_stats(&stats);
+			let mut virtual_stream = super::super::request_stream::with_stats(
+				Stream::open(&mut crate::driver::Transport::new(adapter.clone()), version)
+					.await
+					.unwrap(),
+				&stats,
+				version,
+			);
+			let msg = ietf::FetchCancel {
+				request_id: RequestId(0),
+			};
+			let size = msg.encode_bytes(version).unwrap().len() as u64;
+			virtual_stream.writer.encode_message(&msg).await.unwrap();
+			let raw = adapter.shared.control.pop().await.unwrap();
+			let log = Log::default();
+			let mut physical = Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log.clone())),
+				version,
+			);
+			physical.write_all(&mut raw.clone()).await.unwrap();
+			assert_eq!(
+				registry.snapshot().control(),
+				vec![(Tier::default(), Class::Fetch, Bytes { tx: size, rx: 0 })],
+				"{version:?}"
+			);
+			assert_eq!(*log.writes.lock().unwrap(), raw);
+			let (_, goaway) = crate::goaway::Handle::new(false);
+			let mut reading = std::pin::pin!(adapter.run_read(
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+				goaway
+			));
+			assert!(futures::poll!(reading.as_mut()).is_pending());
+			assert_eq!(virtual_stream.reader.varint().await.unwrap(), ietf::FetchCancel::ID);
+			virtual_stream.reader.decode::<ietf::FetchCancel>().await.unwrap();
+			assert_eq!(
+				registry.snapshot().control(),
+				vec![(Tier::default(), Class::Fetch, Bytes { tx: size, rx: size })],
+				"virtual decode counted a physical frame twice: {version:?}"
+			);
+			adapter.send_max_request_id(RequestId(123));
+			assert!(
+				registry
+					.snapshot()
+					.control()
+					.iter()
+					.any(|(_, class, bytes)| *class == Class::Other && bytes.tx > 0),
+				"adapter-generated messages bypassed the typed writer"
+			);
+		}
 	}
 
 	#[moq_clock::test]
 	async fn a_legacy_control_stream_fin_or_reset_is_a_protocol_violation() {
 		use crate::lite::test_transport::{DeadStreamSession, ScriptedSession};
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-			let mut session = ScriptedSession::eof(Vec::new());
-			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
-			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let session = ScriptedSession::eof(Vec::new());
+			let stream = crate::coding::Stream::open(&mut Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let adapter = ControlStreamAdapter::new(Transport::new(session.clone()), Control::new(None, true), version);
 			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
 
-			let mut session = DeadStreamSession::bis(0);
-			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
-			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let session = DeadStreamSession::bis(0);
+			let stream = crate::coding::Stream::open(&mut Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let adapter = ControlStreamAdapter::new(Transport::new(session.clone()), Control::new(None, true), version);
 			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
@@ -2205,11 +2296,13 @@ mod tests {
 	async fn a_legacy_control_stream_stopped_while_idle_is_a_protocol_violation() {
 		use crate::transport::memory;
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-			let (mut session, mut peer) = memory::pair(memory::Config::default());
-			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let (session, mut peer) = memory::pair(memory::Config::default());
+			let stream = crate::coding::Stream::open(&mut Transport::new(session.clone()), version)
+				.await
+				.unwrap();
 			let mut remote = crate::coding::Stream::accept(&mut peer, version).await.unwrap();
 			remote.reader.abort(&Error::Cancel);
-			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let adapter = ControlStreamAdapter::new(Transport::new(session.clone()), Control::new(None, true), version);
 			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let res = moq_clock::timeout(
 				std::time::Duration::from_secs(10),
@@ -2280,11 +2373,19 @@ mod tests {
 			let script = encode_raw(ietf::SubscribeUpdate::ID, &Bytes::copy_from_slice(body), version);
 			let mut session = ScriptedSession::new(script.to_vec());
 			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-			let adapter = ControlStreamAdapter::new(session, Control::new(None, false), version);
+			let adapter =
+				ControlStreamAdapter::new(Transport::new(session.clone()), Control::new(None, false), version);
 			let log = Log::default();
-			let writer = Writer::new(SinkSend::new(log.clone()), version);
+			let writer = Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log.clone())),
+				version,
+			);
 			let (_, goaway) = crate::goaway::Handle::new(true);
-			let mut run = std::pin::pin!(adapter.run(Reader::new(recv, version), writer, goaway));
+			let mut run = std::pin::pin!(adapter.run(
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+				writer,
+				goaway
+			));
 			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}");
 
 			let written = log.writes.lock().unwrap().clone();

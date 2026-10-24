@@ -524,7 +524,6 @@ impl Pipelines {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use moq_net::Timestamp;
 
@@ -551,6 +550,7 @@ mod tests {
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	#[tokio::test]
 	#[ignore = "needs a PipeWire desktop and Vulkan GPU"]
+	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	async fn packed_dmabuf_renders_through_vulkan() {
 		let instance = wgpu::Instance::default();
 		let adapter = instance
@@ -578,7 +578,9 @@ mod tests {
 		let mut renderer = Renderer::new(&device, &queue, Config::new()).expect("a renderer");
 
 		let capture = crate::capture::Config {
-			source: crate::capture::Source::Display(None),
+			source: crate::capture::Source::Portal(crate::capture::portal::Selection::new(
+				crate::capture::portal::Kind::Screen,
+			)),
 			..Default::default()
 		};
 		let mut stream = crate::capture::open(&capture).await.expect("portal screen capture");

@@ -17,7 +17,7 @@ Docker; see [Install](/setup/install).
 | --- | --- | --- |
 | `import` | `ts`, `fmp4`, `flv`, `avc3` | Read a container from stdin (usually FFmpeg). |
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
-| `import` | `hls <url>` | Pull a remote HLS playlist. |
+| `import` | `hls <url>` | Follow a remote live HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
@@ -58,13 +58,6 @@ Pending handshakes and admission requests share the same drain window, and an
 open stdin pipe does not keep the process alive afterward. Admission is part of
 the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission without
 a deadline.
-
-Add `--stats-enabled` before the first stage to publish accepted-session and
-traffic counters with the relay's `--stats-*` settings. An export-only listener
-publishes nothing to its sessions, so they cannot read these stats. These
-listener settings require a MoQ listener. Grants still scope which broadcasts
-each session can publish or subscribe to, including stats; see the relay's
-[statistics configuration](/bin/relay/config#stats).
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
 one; every flag is documented there. Flags renamed between releases are listed in
@@ -125,7 +118,7 @@ service; `export ts --passthrough` writes it back out. FLV accepts the same
 legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
 fMP4 import splits each fragment into one frame per sample, so players need no
-MP4 parser. `import fmp4 --passthrough` publishes each fragment whole as
+MP4 parser. `import fmp4 --cmaf` publishes each fragment whole as
 [`cmaf`](/concept/hang#container) instead, keeping the source's exact sample
 timing.
 
@@ -216,7 +209,8 @@ closes. Playback starts when the name is announced. A
 [restarted publisher](#publisher-runs) starts it over on the new run, with a
 fresh catalog, decoders, and clock. When the announcement ends, what is playing
 finishes and the player waits for the name to return. The log names each run's
-epoch. A catalog with nothing this build can play still ends the player.
+epoch. A refused broadcast request or a catalog with nothing this build can
+play ends the player.
 
 Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
@@ -245,12 +239,13 @@ ceiling that backends with live bitrate control lower to fit the connection.
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.
 
-On Wayland, bare `--window` asks the system portal to choose one window;
-there is no window id to look up or supply. An explicit `--window <id>` still
-selects a native window, including XWayland windows through their X11 ids.
-The portal may reuse its grant when capture reopens within the same process;
-a new process shows the picker again. Bare `--window` requires a Linux build
-with `pipewire`; other builds require an explicit window id.
+On Wayland, bare `--window` and bare `--display` ask the system portal to
+choose one window or screen; there is no id to look up or supply. An explicit
+`--window <id>` or `--display <id>` still selects a native source, including
+XWayland's through their `x11:` ids, and any other id fails rather than opening
+the picker. The portal may reuse its grant when capture reopens within the same
+process; a new process shows the picker again. Bare `--window` requires a Linux
+build with `pipewire`; other builds require an explicit window id.
 
 Requires the `capture` feature, plus `openh264` on a host without a hardware
 encoder. On Linux the microphone needs the ALSA
@@ -275,6 +270,10 @@ from H.264 rather than a larger H.265 or AV1 one. When the source changes
 resolution, rungs are resolved again: one that no longer fits finishes, and
 one whose size changed comes back under a new name (`video/360p.2`). Requires
 the `transcode` feature, plus `openh264` on a host without a hardware encoder.
+A restarted source retires the old ladder and publishes a fresh derivative
+instance at the same output path. A clean end waits for the source to return;
+stop the command to finish following. A refused source request or an encoding
+failure ends the command.
 
 ## Announced
 
@@ -387,7 +386,7 @@ MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
 so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
-`--cluster-connect-api`) share `--connect-bind` with `--connect`, and each binds
+`--cluster-api-url`) share `--connect-bind` with `--connect`, and each binds
 it, while LAN dials take an ephemeral port. So a fixed `--connect-bind` port with
 both `--connect` and a WAN cluster peer is refused at startup: use port 0, or drop
 `--connect` (unset `MOQ_CONNECT` if it supplies the URL).
@@ -424,7 +423,7 @@ ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
 broadcast at once, and a reconnect, which publishes a newer
 [epoch](/concept/moq-lite#publisher-epochs) at the same path, ends the wait.
 
-`export ts`, `export flv`, and `export mkv` take `--delay` instead, like an SRT
+`export ts`, `export flv`, `export rtmp`, and `export mkv` take `--delay` instead, like an SRT
 receiver's latency, all tracks in decode order, so two exporters of one broadcast
 emit the same order. FLV and MKV mux each frame that long after its decode time
 (default 500 ms). TS output runs that far behind the source (default 1 s): the
@@ -435,7 +434,7 @@ top. A frame arriving after its deadline is dropped, and video resumes at its
 next keyframe. The delay also bounds how stale a group may get, so `--delay 0`
 writes each frame as soon as it is read and drops none as late, but still skips
 a stalled group once a newer one is ready.
-FLV and MKV reject their former `--max-delay` spelling with a migration
+FLV, MKV and RTMP refuse the released `--max-age` spelling with a migration
 message. The output follows the source's clock within what ISO/IEC 13818-1
 allows a TS PCR. A source further off fails the export, naming its rate, once
 it has used half the delay; a brief network stall only drops what it made late.
@@ -448,24 +447,6 @@ bytes. A run that arrives after its deadline is dropped and counted, leaving a
 continuity error, and the rest carry on. It takes neither `--linger`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
-
-`export ts --sync` renders every packet from the broadcast alone, so two exports
-of it, joined at different moments and fed with different skew, emit identical
-TS for the content both receive, continuity counters included, as the legs of a
-1+1 pair must; an SMPTE ST 2022-7 pair also needs identical RTP framing around
-it, which this command does not write. Each PID gets a fixed lane of the constant rate, sized
-for its codec's most, with video taking the rest; content one leg lacks leaves
-its packets as stuffing there. The PCR rides a PID of its own, and each PID's
-continuity counter restarts at every group with the break flagged. It needs a
-constant rate, the same on every leg since the lanes follow from it
-(`--mux-rate`, or the catalog's), costing headroom over the
-source's (a 10 Mb/s channel needs about 12), and takes neither `--stitch` nor
-`--passthrough`. A group that starts behind the one before it, on a lane too
-narrow to absorb that one, is logged and counted in `overruns`: the legs can
-differ there. So can reordered video whose SPS declares no reorder depth
-(`max_num_reorder_frames`), which is logged, and SI while one leg holds an older
-revision than the other or around an SI table the catalog adds or drops, which
-each leg takes up when its catalog update arrives.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
@@ -483,11 +464,11 @@ default version every return is a replacement. An export that fails while the br
 a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
 so the other formats refuse `--linger`.
 
-## Stats and feedback
+## Reports and feedback
 
-`import --stats` names a stats track in the catalog and reports what each
-rendition has written, about once a second while someone subscribes, with the
-connection's RTT, estimated send rate, and loss. It covers the stdin imports;
+`import --report` names a track in the catalog's `stats` section and reports
+what each rendition has written, about once a second while someone subscribes,
+with the connection's RTT, estimated send rate, and loss. It covers the stdin imports;
 capture, the gateways, `archive`, and `ts --program all` refuse it.
 
 `export --echo <name>` answers a publisher that solicits feedback: under the
@@ -496,15 +477,15 @@ the export reads has received and its newest arrival, until the export ends.
 It covers the stdout container exports and needs a hang catalog, so MSF
 refuses it.
 
-The `stats` and `echo` sinks print reports as JSON lines. `export stats`
-follows one broadcast's stats track until the broadcast ends; `export echo`
+The `report` and `echo` sinks print reports as JSON lines. `export report`
+follows one broadcast's report track until the broadcast ends; `export echo`
 prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
 `--broadcast` as they come and go, reading one that ends for 5 s more for its
 final report. Either sink stops reading a report that grows past 1 MiB.
 
 ```bash
-moq ... --broadcast event import --stats ts < feed.ts
-moq ... --broadcast event export stats
+moq ... --broadcast event import --report ts < feed.ts
+moq ... --broadcast event export report
 moq ... --broadcast event export --echo alice ts > out.ts
 moq ... --broadcast viewers export echo
 ```

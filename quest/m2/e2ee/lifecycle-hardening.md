@@ -26,7 +26,7 @@ Decided 2026-10-22 from the security audit, with the maintainer:
 
 The epoch section in `drafts/draft-lcurley-moq-e2ee.md` already states the rule; link it from the TypeScript docs rather than restating it.
 
-Public API: the TypeScript entrypoint stops exporting the concrete generation class, a breaking change recorded under `## Unreleased` in a new `js/e2ee/MIGRATE.md` with the replacement interface or factory. Wire: none.
+Public API: the TypeScript entrypoint stops exporting the concrete generation class, a breaking change whose Impact bullet names the replacement interface or factory. Wire: none.
 
 ## Related
 

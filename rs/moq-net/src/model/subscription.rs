@@ -66,7 +66,7 @@ pub struct Subscription {
 	/// (pre-Lite05 moq-lite, or moq-transport without TIMESCALE), which is judged by the
 	/// wall clock alone. A read waiting in a superseded group wakes at that deadline only
 	/// when something collects the track's cache pool: an origin's driver does, and a
-	/// standalone track needs [`Pool::gc`](crate::cache::Pool::gc) called, as its idle
+	/// standalone track needs [`Pool::poll`](crate::cache::Pool::poll) called, as its idle
 	/// expiry already does. Otherwise it is judged only when something else wakes the read.
 	pub max_delay: Duration,
 	/// The spans of the track to deliver; see [`Range`].
@@ -109,12 +109,15 @@ pub enum Order {
 ///
 /// A relative or time anchor resolves at the hop that serves it, when it starts serving
 /// and again whenever the subscriber replaces its ranges. Before any group exists a
-/// relative anchor resolves at the first one, so [`Range::live`] starts there.
+/// relative anchor resolves at the first one, so [`Range::live`] starts there. A relay's
+/// copy waiting on a fresh upstream answer counts from the live feed's latest group once
+/// it answers, never from the groups an ended feed left in its cache.
 ///
-/// No published wire carries either yet: upstream, a relative or time start is no floor,
-/// the same request as [`Range::oldest`], and a relative or time end is no end. Behind a
-/// moq-transport upstream, which joins without a floor at the live group, `Relative(n)..`
-/// starts there.
+/// Over a session, the copy resolves them only on moq-lite-07, which reports the live edge
+/// and media time and asks upstream for every group the budget allows. A copy received
+/// over an older lite or any moq-transport version refuses each other than [`Range::live`]
+/// and [`Range::oldest`] with [`Error::Unsupported`](crate::Error::Unsupported) on read,
+/// rather than resolve it against the part of the track it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
 	/// This exact position.
@@ -184,6 +187,17 @@ impl Range {
 			},
 			end: end.map(|end| Anchor::Absolute(Position::group(end))),
 		}
+	}
+
+	/// Whether a wire without ranges carries this range upstream: absolute anchors, and
+	/// the live and oldest starts it spells with no floor.
+	pub(super) fn is_wire(&self) -> bool {
+		let start = match self.start {
+			Anchor::Absolute(_) => true,
+			Anchor::Relative(back) => back == 0 || back == u64::MAX,
+			Anchor::Time(_) => false,
+		};
+		start && matches!(self.end, None | Some(Anchor::Absolute(_)))
 	}
 
 	/// Whether this range certainly delivers nothing, wherever the latest group lands.
@@ -307,7 +321,6 @@ impl Subscription {
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
 	#[cfg(any(feature = "async", test))]
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn start(&self) -> Option<Position> {
 		let mut floor: Option<Position> = None;
 		for range in &self.ranges {
@@ -324,7 +337,6 @@ impl Subscription {
 	///
 	/// The form a wire without ranges carries, alongside [`Self::start`].
 	#[cfg(any(feature = "async", test))]
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn end(&self) -> Option<Position> {
 		let mut end = Some(Position::default());
 		for range in &self.ranges {
@@ -339,7 +351,6 @@ impl Subscription {
 	/// Replace the ranges with one from `start` (or [`Range::oldest`]'s) to `end`: the form
 	/// a wire without ranges carries.
 	#[cfg(any(feature = "async", test))]
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn set_bounds(&mut self, start: Option<Position>, end: Option<Position>) {
 		self.ranges = vec![Range {
 			start: start.map_or(Range::oldest().start, Anchor::Absolute),
@@ -349,7 +360,6 @@ impl Subscription {
 
 	/// Replace the start of [`Self::set_bounds`]'s one range, keeping its end.
 	#[cfg(feature = "async")]
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn with_start(mut self, start: impl Into<Option<Position>>) -> Self {
 		self.set_bounds(start.into(), self.end());
 		self
@@ -357,7 +367,6 @@ impl Subscription {
 
 	/// Replace the end of [`Self::set_bounds`]'s one range, keeping its start.
 	#[cfg(any(feature = "async", test))]
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn with_end(mut self, end: impl Into<Option<Position>>) -> Self {
 		self.set_bounds(self.start(), end.into());
 		self
@@ -524,7 +533,6 @@ impl Position {
 	}
 
 	/// The first group this exclusive end excludes whole, `None` past the last group.
-	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn final_sequence(self) -> Option<u64> {
 		self.group.checked_add(u64::from(self.frame != 0))
 	}
@@ -536,7 +544,6 @@ impl Position {
 /// before 5, `..=5` reads through it, and `..` removes the cap. A [`Bound`] converts
 /// too, for callers holding one (a decoded wire field, or [`Position::group_end`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// pending: /quest/m1/public-model/serve.md
 pub(crate) struct Cap(Option<u64>);
 
 impl Cap {

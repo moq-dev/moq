@@ -18,7 +18,6 @@ import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import { liteTimescale } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
@@ -78,6 +77,11 @@ interface Stamp {
 	 * one served untimed carries its send time instead, unchecked ones included.
 	 */
 	timed: boolean;
+}
+
+/** The timescale a moq-lite hop serves a track at: none for an {@link track.Info.ietf} one. */
+function liteTimescale(info: track.Info): Timescale | undefined {
+	return info.ietf === undefined ? (info.timescale ?? undefined) : undefined;
 }
 
 /** How `version` stamps a track served at `timescale` (see `liteTimescale`), or undefined when it carries none. */
@@ -332,7 +336,7 @@ class SubscriptionControls {
 }
 
 // The later of two locations, either of which may be unknown.
-function newer(a: track.Location | undefined, b: track.Location | undefined): track.Location | undefined {
+function newer(a: track.Position | undefined, b: track.Position | undefined): track.Position | undefined {
 	if (!a || !b) return a ?? b;
 	return b.group > a.group || (b.group === a.group && b.frame > a.frame) ? b : a;
 }
@@ -873,6 +877,15 @@ export class Publisher {
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
 		// subscription; awaited during teardown so it doesn't outlive the subscription.
 		let datagrams = Promise.resolve();
+		const bounds: FrameBounds = {
+			startGroup: msg.startGroup,
+			startFrame: msg.startFrame,
+			endGroup: msg.endGroup,
+			endFrame: msg.endFrame,
+		};
+		// Datagram reads continue while a reliable response is blocked, so they use
+		// the latest decoded bounds rather than the reliable loop's next-pop snapshot.
+		const datagramBounds = { ...bounds };
 		let controls: SubscriptionControls | undefined;
 		// Lite-05 and later name every sequence below the end that this subscription never
 		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
@@ -918,7 +931,7 @@ export class Publisher {
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
 			if (this.#datagramWriter) {
-				datagrams = this.#runDatagrams(msg.id, track, stamp, served);
+				datagrams = this.#runDatagrams(track, { sub: msg.id, stamp, served, bounds: datagramBounds });
 			}
 
 			controls = new SubscriptionControls({
@@ -927,6 +940,12 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
+					Object.assign(datagramBounds, {
+						startGroup: update.startGroup,
+						startFrame: update.startFrame,
+						endGroup: update.endGroup,
+						endFrame: update.endFrame,
+					});
 					// Every update restates the wanted group. Past our largest it is a join, which
 					// repeats the pending ask; at or below it the group already exists.
 					const largest = hooks.peekLargest(track).largest?.group;
@@ -951,12 +970,7 @@ export class Publisher {
 				publisher,
 				compress,
 				served,
-				bounds: {
-					startGroup: msg.startGroup,
-					startFrame: msg.startFrame,
-					endGroup: msg.endGroup,
-					endFrame: msg.endFrame,
-				},
+				bounds,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1066,7 +1080,9 @@ export class Publisher {
 					hold.abort();
 				}
 				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
-				group = await wireOf(front).fetchGroup(msg.track, msg.group, {
+				const fetchGroup = wireOf(front).fetchGroup;
+				if (!fetchGroup) throw new Error("fetch group is not supported by the serving route's version");
+				group = await fetchGroup(msg.track, msg.group, {
 					priority: msg.priority,
 					maxDelay: msg.maxDelay,
 					signal: left.signal,
@@ -1137,7 +1153,7 @@ export class Publisher {
 		let startSequence: number | undefined;
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
-		let first: { group: group.Consumer; largest: track.Location | undefined } | undefined;
+		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
 		let endSent = false;
 
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
@@ -1339,7 +1355,8 @@ export class Publisher {
 						// until each group stream finished or reset. The subscriber leaving
 						// instead cancels whatever is still queued.
 						const drained = Symbol("drained");
-						const end = await Promise.race([Promise.all(groups).then(() => drained), controls.ended]);
+						// `race`, since this repeats per batch of drops against the subscription's end.
+						const end = await race([Promise.all(groups).then(() => drained), controls.ended]);
 						if (end instanceof Error) throw end;
 						if (end !== drained) return false;
 						if (pendingDrops.length > 0) continue;
@@ -1616,7 +1633,16 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runDatagrams(sub: bigint, track: track.Subscriber, stamp: Stamp | undefined, served: Run[] | undefined) {
+	async #runDatagrams(
+		track: track.Subscriber,
+		options: {
+			sub: bigint;
+			stamp: Stamp | undefined;
+			served: Run[] | undefined;
+			bounds: FrameBounds;
+		},
+	) {
+		const { sub, stamp, served, bounds } = options;
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
 		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
@@ -1625,6 +1651,8 @@ export class Publisher {
 			for (;;) {
 				const datagram = await track.recvDatagram();
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
+				// A datagram is frame 0 of its group, subject to the reliable frame range.
+				if (frameRange(bounds, datagram.sequence).start > 0) continue;
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
 				const ts = stamp === undefined ? undefined : wireTime(datagram.timestamp, stamp);

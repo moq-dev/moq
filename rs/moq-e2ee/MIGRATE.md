@@ -4,10 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Workspace-only package
-
-This crate sets `publish = false`. Use the workspace source while no shipping application consumes it.
-
 ### Tracks are named semantically through `broadcast` wrappers (#5876)
 
 `generation::Producer::produce` and `generation::Consumer::consume` are private.

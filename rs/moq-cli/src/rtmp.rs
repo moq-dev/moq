@@ -40,25 +40,25 @@ pub struct ExportArgs {
 	/// FLV frame release delay and stalled-group budget. Late video resumes at
 	/// its next keyframe; zero releases available frames without deadline drops.
 	#[usage(long, default = "500ms")]
-	pub max_delay: crate::duration::Duration,
+	pub delay: moq_tokio::cli::Duration,
 
-	/// The released spelling of [`Self::max_delay`].
+	/// The released spelling of `--delay`.
 	#[usage(long = "max-age", hide = true)]
-	max_age: Option<crate::duration::Duration>,
+	max_age: Option<moq_tokio::cli::Duration>,
 
-	/// The released spelling of [`Self::max_delay`], before `--max-age`.
+	/// The released spelling of `--delay`, before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<moq_tokio::cli::Duration>,
 }
 
 impl ExportArgs {
 	pub(crate) fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
 		if self.max_age.is_some() {
-			found.flag("--max-age", None, "--max-delay");
+			found.flag("--max-age", None, "--delay");
 		}
 		if self.latency_max.is_some() {
-			found.flag("--latency-max", None, "--max-delay");
+			found.flag("--latency-max", None, "--delay");
 		}
 		found
 	}
@@ -151,8 +151,8 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 
 	let client = Client::connect(addr, &app)
 		.await?
-		.with_import_max_age(target.max_age)
-		.with_import_bandwidth(target.bandwidth);
+		.with_max_age(target.max_age)
+		.with_bandwidth(target.bandwidth);
 	Ok(client.pull(&key, &target.origin, name).await?)
 }
 
@@ -175,7 +175,7 @@ pub async fn connect_export(
 	tracing::info!(%addr, %app, %name, "RTMP client pushing");
 	notify_ready();
 
-	let client = Client::connect(addr, &app).await?.with_export_max_delay(max_delay);
+	let client = Client::connect(addr, &app).await?.with_max_delay(max_delay);
 	Ok(client.publish(&key, origin, &name).await?)
 }
 

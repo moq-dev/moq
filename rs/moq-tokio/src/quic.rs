@@ -46,7 +46,7 @@ pub mod web;
 pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
 
 impl ServerId {
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "only the QUIC backend reads it")]
 	pub(crate) fn len(&self) -> usize {
 		self.0.len()
 	}
@@ -183,11 +183,7 @@ pub struct Config {
 	/// QUIC uses the smaller of both ends' timeouts, so either side can shorten it.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub idle_timeout: Option<Duration>,
 
 	/// Idle timeout before an inactive connection is dropped. Defaults to 10s.
@@ -207,11 +203,7 @@ pub struct Config {
 	/// interval above 5s still sends those path pings, and `0s` leaves both at 5s.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub keep_alive: Option<Duration>,
 
 	/// Keep-alive ping interval. Defaults to 3s; 0s disables it.
@@ -582,10 +574,7 @@ impl Config {
 			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
 			_ => Ok(()),
 		}?;
-		// rustls logs nothing without a path, which would hide the mistake the same way.
-		if self.keylog == Some(true) && std::env::var_os("SSLKEYLOGFILE").is_none_or(|path| path.is_empty()) {
-			return Err(crate::Error::KeylogUnset);
-		}
+		validate_keylog(self.keylog, std::env::var_os("SSLKEYLOGFILE").as_deref())?;
 		validate_idle_timeout(Some(self.resolve().idle_timeout))?;
 		validate_streams(self.max_streams)?;
 		validate_windows(self)
@@ -625,6 +614,18 @@ impl Config {
 			keylog: self.keylog.unwrap_or(false),
 		}
 	}
+}
+
+/// Reject a key log with no file to write to, given the file `SSLKEYLOGFILE` names.
+///
+/// rustls logs nothing without a path, which would hide the mistake the way an
+/// ignored qlog directory would.
+#[cfg(feature = "_transport")]
+fn validate_keylog(keylog: Option<bool>, file: Option<&std::ffi::OsStr>) -> crate::Result<()> {
+	if keylog == Some(true) && file.is_none_or(std::ffi::OsStr::is_empty) {
+		return Err(crate::Error::KeylogUnset);
+	}
+	Ok(())
 }
 
 /// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
@@ -746,7 +747,10 @@ impl Resolved {
 	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
 	/// send rate steady enough for a live encoder to track, which is what this stack
 	/// carries.
-	#[cfg_attr(not(any(feature = "quic", feature = "iroh")), allow(dead_code))]
+	#[cfg_attr(
+		not(any(feature = "quic", feature = "iroh")),
+		allow(dead_code, reason = "only the QUIC backends use it")
+	)]
 	pub(crate) fn congestion(&self) -> CongestionControl {
 		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}
@@ -755,7 +759,7 @@ impl Resolved {
 	///
 	/// Only meaningful once [`Config::validate`] has passed; a build without the
 	/// `qlog` feature never gets here with a directory set.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
 	}
@@ -764,7 +768,7 @@ impl Resolved {
 	///
 	/// Only the iroh backend consults this, to reject a GSO-off request it can't
 	/// satisfy; the other backends toggle GSO directly.
-	#[cfg_attr(not(feature = "iroh"), allow(dead_code))]
+	#[cfg_attr(not(feature = "iroh"), allow(dead_code, reason = "only the `iroh` feature uses it"))]
 	pub(crate) fn gso_disabled(&self) -> bool {
 		self.gso == Some(false)
 	}
@@ -963,19 +967,18 @@ mod tests {
 	#[cfg(feature = "_transport")]
 	#[test]
 	fn keylog_requires_a_path() {
-		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
-		assert!(Config::default().validate().is_ok());
-
-		let set = Config {
-			keylog: Some(true),
-			..Default::default()
-		};
-		assert!(matches!(set.validate(), Err(crate::Error::KeylogUnset)));
-
-		// SAFETY: as above.
-		unsafe { std::env::set_var("SSLKEYLOGFILE", "/tmp/keys.log") };
-		assert!(set.validate().is_ok());
+		let file = Some(std::ffi::OsStr::new("/tmp/keys.log"));
+		let empty = Some(std::ffi::OsStr::new(""));
+		for keylog in [None, Some(false)] {
+			assert!(validate_keylog(keylog, None).is_ok());
+		}
+		for unset in [None, empty] {
+			assert!(matches!(
+				validate_keylog(Some(true), unset),
+				Err(crate::Error::KeylogUnset)
+			));
+		}
+		assert!(validate_keylog(Some(true), file).is_ok());
 	}
 
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the

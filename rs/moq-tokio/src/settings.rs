@@ -4,7 +4,10 @@
 //! merged flag is declared twice: once on the `Args` structs the binaries parse,
 //! and once here. [`usage_rs::config::Registry::drift`] is the test that the two stay in step.
 
-#![allow(dead_code)]
+#![allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 
 /// Accept-side settings (`[listen]`, `--listen-*`).
 #[derive(usage_rs::Config)]
@@ -197,31 +200,31 @@ struct ConnectTls {
 	host_name: Option<String>,
 }
 
-/// `[connect.backoff]` / `--backoff-*`.
+/// `[connect.backoff]` / `--connect-backoff-*`.
 #[derive(usage_rs::Config)]
 #[usage(prefix = "connect.backoff")]
 struct ConnectBackoff {
-	#[usage(env = "MOQ_BACKOFF_INITIAL", cli("--backoff-initial"))]
+	#[usage(env = "MOQ_CONNECT_BACKOFF_INITIAL", cli("--connect-backoff-initial"))]
 	initial: Option<String>,
 
-	#[usage(env = "MOQ_BACKOFF_MULTIPLIER", cli("--backoff-multiplier"))]
+	#[usage(env = "MOQ_CONNECT_BACKOFF_MULTIPLIER", cli("--connect-backoff-multiplier"))]
 	multiplier: Option<u32>,
 
-	#[usage(env = "MOQ_BACKOFF_MAX", cli("--backoff-max"))]
+	#[usage(env = "MOQ_CONNECT_BACKOFF_MAX", cli("--connect-backoff-max"))]
 	max: Option<String>,
 
-	#[usage(env = "MOQ_BACKOFF_TIMEOUT", cli("--backoff-timeout"))]
+	#[usage(env = "MOQ_CONNECT_BACKOFF_TIMEOUT", cli("--connect-backoff-timeout"))]
 	timeout: Option<String>,
 }
 
-/// `[connect.goaway]` / `--goaway-*`.
+/// `[connect.goaway]` / `--connect-goaway-*`.
 #[derive(usage_rs::Config)]
 #[usage(prefix = "connect.goaway")]
 struct ConnectGoaway {
-	#[usage(env = "MOQ_GOAWAY_REDIRECT", cli("--goaway-redirect"))]
+	#[usage(env = "MOQ_CONNECT_GOAWAY_REDIRECT", cli("--connect-goaway-redirect"))]
 	redirect: Option<String>,
 
-	#[usage(env = "MOQ_GOAWAY_HANDOVER", cli("--goaway-handover"))]
+	#[usage(env = "MOQ_CONNECT_GOAWAY_HANDOVER", cli("--connect-goaway-handover"))]
 	handover: Option<String>,
 }
 

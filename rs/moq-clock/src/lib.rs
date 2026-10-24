@@ -22,6 +22,9 @@
 //! The `sim` feature adds the `sim` module, a deterministic executor whose clock
 //! starts at [`Instant::ZERO`], and the `#[moq_clock::test]` attribute that runs an
 //! `async fn` test on it. Enable it for dev-dependencies only.
+//!
+//! The `serde` feature adds `serde::UnixSeconds`, matching existing integer
+//! Unix-second JSON encodings for wall times.
 
 #![warn(missing_docs)]
 
@@ -33,6 +36,8 @@ mod instant;
 compile_error!("the `manual` feature installs on a tokio runtime, which the browser has none of");
 mod manual;
 mod runtime;
+#[cfg(feature = "serde")]
+pub mod serde;
 #[cfg(feature = "sim")]
 pub mod sim;
 mod timer;
@@ -96,10 +101,13 @@ pub fn wall() -> Wall {
 	runtime::wall()
 }
 
-/// The first monotonic and wall readings observed on the ambient clock.
+/// The ambient clock's origin: an instant and its wall time, fixed at the first read.
 ///
-/// Unlike [`wall`], the wall half does not change after a clock correction.
-pub fn anchor() -> (Instant, Wall) {
+/// It maps instants onto wall time and, unlike [`wall`], does not move after a clock
+/// correction. `@moq/clock`'s `origin()` returns only the wall time of instant zero, in
+/// milliseconds; here [`Wall`] is nanoseconds and comes paired with an instant, since a
+/// runtime clock's instant zero predates 1970.
+pub fn origin() -> (Instant, Wall) {
 	#[cfg(feature = "manual")]
 	if let Some(clock) = deadline::installed() {
 		return clock.anchor();

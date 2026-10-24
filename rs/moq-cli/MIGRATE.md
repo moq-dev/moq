@@ -4,11 +4,9 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
-### Native WebRTC data channels are opt-in
+### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
-The default features no longer enable `moq_tokio::webrtc` data channels.
-Enable `webrtc` explicitly in a source build that integrates that transport.
-`moq import rtc` and `moq export rtc` still include the WHIP/WHEP gateway and its ICE dependencies.
+Enable `nvidia` instead; the old names were aliases for it.
 
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 

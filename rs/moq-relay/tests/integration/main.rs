@@ -4,14 +4,22 @@
 //! dependencies again, so add new integration tests here as a module.
 //! `drills.rs` stays apart so each drill sensitivity mutation rebuilds only
 //! the drills.
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+//! Relay fixtures opt out of process signals with `with_signals(false)`: only
+//! `shutdown_signal` owns those signals, which reach every listener in this process.
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 
-mod auth_embedder;
 mod auth_lifetime;
 mod cluster_close;
+mod cluster_drain;
 mod cluster_idle;
 mod cluster_unknown;
+#[cfg(feature = "test-support")]
 mod connection;
+#[cfg(feature = "test-support")]
 mod drain;
 mod embed;
 mod goaway_cluster;
