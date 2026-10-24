@@ -30,7 +30,7 @@ key = "key.pem"
 # validates over web.https, which must be reachable on TCP port 443.
 # [acme]
 # domains = ["relay.example.com"]
-# dir = "/var/lib/moq-relay/acme"
+# cache = "/var/lib/moq-relay/acme"
 
 # See docs/auth.md for more information.
 [auth]
@@ -39,7 +39,7 @@ key = "key.pem"
 #   moq auth serve --listen 127.0.0.1:4440 --key root.jwk \
 #     --public-subscribe 'anon/**' --public-subscribe 'demo/**' \
 #     --public-publish 'anon/**' --public-publish 'demo/viewer/**' \
-#     --mtls-publish '**' --mtls-subscribe '**' --mtls-peer
+#     --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer
 #
 # For multiple keys with rotation, give it `--key-dir /path/to/keys/` instead:
 # keys are named {kid}.jwk and resolved by the kid in the JWT header.
