@@ -1450,8 +1450,8 @@ impl Cluster {
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
-	/// marked [`origin::Producer::peer`] when the grant names a cluster peer and
-	/// [`origin::Producer::upstream`] when that peer is upstream.
+	/// linked as [`origin::Link::Peer`] when the grant names a cluster peer and
+	/// [`origin::Link::Upstream`] when that peer is upstream.
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
 		self.mounted(token)?.scope(&token.root, &token.publish).ok()
@@ -1462,8 +1462,8 @@ impl Cluster {
 	/// (overlapping another) admits nothing.
 	fn mounted(&self, token: &auth::Token) -> Option<origin::Producer> {
 		let mut origin = match (token.upstream, token.peer) {
-			(true, _) => self.origin.clone().upstream(),
-			(false, true) => self.origin.clone().peer(),
+			(true, _) => self.origin.clone().with_link(origin::Link::Upstream),
+			(false, true) => self.origin.clone().with_link(origin::Link::Peer),
 			(false, false) => self.origin.clone(),
 		};
 		for (at, target) in &token.mounts {
@@ -2027,8 +2027,8 @@ impl Cluster {
 		// never offered another upstream's. A peer that predates the hidden opt-in
 		// still discovers our hidden routes; see `Cluster::scope`.
 		let origin = match target.upstream {
-			true => self.origin.clone().upstream(),
-			false => self.origin.clone().peer(),
+			true => self.origin.clone().with_link(origin::Link::Upstream),
+			false => self.origin.clone().with_link(origin::Link::Peer),
 		};
 		let stats = self.stats.tier(self.cluster_tier()).session("");
 		let mut client = client
@@ -2120,7 +2120,7 @@ impl Cluster {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 		let mut client = self
 			.peer_client(true, target.fingerprint.as_deref())?
-			.with_origin(self.origin.clone().peer());
+			.with_origin(self.origin.clone().with_link(origin::Link::Peer));
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}

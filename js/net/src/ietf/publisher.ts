@@ -29,7 +29,7 @@ import * as Path from "../path.ts";
 import { Priority } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Groups, Info, Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
+import type { Groups, Info, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
@@ -1273,7 +1273,7 @@ export class Publisher {
 	/** Preserve the original terminal on a separate stream when its group already sent FIN. */
 	async #runEndOfTrack(options: {
 		requestId: bigint;
-		final: TrackLocation;
+		final: TrackPosition;
 		publisherPriority: number;
 		unsubscribed: Promise<void>;
 		streams: StreamCount;
