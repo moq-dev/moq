@@ -446,11 +446,13 @@ async fn forwards_the_setup_token() {
 				.await
 				.expect("connect WebSocket")
 		} else {
-			qmux::tcp::Config::new(qmux::Version::QMux01)
-				.protocols(["moqt-16"])
-				.connect(("127.0.0.1", port))
-				.await
-				.expect("connect TCP")
+			qmux::tcp::connect(("127.0.0.1", port), {
+				let mut config = qmux::Config::new(qmux::Version::QMux01);
+				config.protocol = qmux::Protocol::Negotiate(vec!["moqt-16".into()]);
+				config
+			})
+			.await
+			.expect("connect TCP")
 		};
 		let (mut send, mut recv) = session
 			.open_bi(Default::default())

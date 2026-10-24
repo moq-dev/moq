@@ -59,6 +59,7 @@ pub use crate::connection::{
     SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "mux")]
+#[doc(hidden)]
 pub use connection::mux;
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;

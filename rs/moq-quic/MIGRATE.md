@@ -15,6 +15,10 @@ including `default-features = false` builds which previously used `NoneTokenLog`
 To preserve that explicit policy use `validation_token.log(Arc::new(NoneTokenLog)).sent(0)`.
 Normal defaults and moq-tokio's existing Bloom behavior are unchanged.
 
+### `mux` is an internal integration surface
+
+The `mux` module is hidden from public API documentation; use the `qmux` crate for reliable-transport sessions. It remains public only so qmux can share the stream state machine.
+
 Each entry is a change from `quinn-proto`.
 
 ### `StreamEvent::Acked` (#5817)

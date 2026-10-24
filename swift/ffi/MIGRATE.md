@@ -11,6 +11,10 @@ configuration is adapted, creates new Unix logs with mode 0600, and refuses an
 existing group/other-accessible file (for example mode 0644) without changing it.
 Make an existing log private before enabling key logging.
 
+### Video rendition preference
+
+`MoqVideo` gains `preference: Int32`, defaulting to `0`. Regenerate the bindings and rebuild against the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.

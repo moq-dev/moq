@@ -308,6 +308,12 @@ impl WaiterList {
 		self.entries.iter().all(|entry| entry.strong_count() == 0)
 	}
 
+	/// Drop every entry without waking it.
+	pub(crate) fn clear(&mut self) {
+		self.drained();
+		self.entries.clear();
+	}
+
 	/// Wake all live waiters, draining the list.
 	pub fn wake(&mut self) {
 		self.drained();

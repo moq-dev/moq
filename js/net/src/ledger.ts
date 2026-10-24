@@ -10,7 +10,6 @@ import { Instant, Milli, Nano } from "@moq/clock";
  */
 export const GRACE = Milli(1000);
 
-// private: plumbing
 /** The grace for a subscription with `maxDelay`: how long it was willing to wait for a late group anyway, or {@link GRACE} without one. */
 export function grace(maxDelay: Milli): Milli {
 	return maxDelay > 0 ? maxDelay : GRACE;
