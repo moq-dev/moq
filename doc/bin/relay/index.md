@@ -57,7 +57,10 @@ between releases are listed in
 `moq-relay` is also a library, for an application that wants extra HTTP
 routes or in-process workers against the cluster origin. Load a `Relay`, take
 what you need, and call `run`, which keeps the listeners, QUIC workers, and
-shutdown inside the relay.
+shutdown inside the relay. An embedded CLI calls
+`config.relay.merge(&cli_layer)?` after its own `parse_from_with_settings` to
+load the relay file and environment, retain provenance, and refuse obsolete
+spellings. CLI-only fields on the embedding root stay intact.
 
 ```rust
 use axum::routing::get;
@@ -89,7 +92,7 @@ relay.with_web(web).run().await?;
   from `relay.shutdown().activity()` and pass `relay.shutdown().clone()` to
   `Connection::with_shutdown`, so the drain waits for its handshakes too.
 - To serve a session from any other moq-net transport, such as the in-memory
-  one in tests, read its SETUP with `moq_net::Server::accept_request` and pass
+  one in tests, enable the `test-support` feature, read its SETUP with `moq_net::Server::accept_request` and pass
   `Accepted::new(handshake, transport)` to `Connection::new`. The client must
   send its path in the SETUP.
 - To decide admissions yourself, leave `[auth]` empty and answer

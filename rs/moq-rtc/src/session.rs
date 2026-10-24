@@ -11,7 +11,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use moq_clock::Instant;
 
@@ -318,8 +317,15 @@ pub(crate) struct IngestClock {
 
 impl IngestClock {
 	/// Record the newest RTP-to-NTP correlation for a track.
+	///
+	/// A report outside the wall range is ignored, keeping the track on arrival
+	/// time: RFC 3550 lets a sender without a wall clock report NTP time zero.
 	fn observe(&mut self, mid: str0m::media::Mid, sender: str0m::rtp::rtcp::SenderInfo) {
-		self.tracks.entry(mid).or_default().sender = Some(SenderAnchor::new(sender));
+		let Ok(anchor) = SenderAnchor::new(sender) else {
+			tracing::debug!(?mid, "ignoring a sender report outside the wall range");
+			return;
+		};
+		self.tracks.entry(mid).or_default().sender = Some(anchor);
 		self.establish_ntp_epoch();
 	}
 
@@ -403,22 +409,16 @@ struct SenderAnchor {
 }
 
 impl SenderAnchor {
-	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> Self {
-		Self {
-			ntp_us: system_time_to_micros(sender.ntp_time),
+	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> std::result::Result<Self, moq_clock::OutOfRange> {
+		let wall = moq_clock::Wall::try_from(sender.ntp_time)?;
+		Ok(Self {
+			ntp_us: wall.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH).as_micros() as i128,
 			rtp_us: media_time_to_micros(&sender.rtp_time) as i128,
-		}
+		})
 	}
 
 	fn capture_time_us(self, media_us: u64) -> i128 {
 		self.ntp_us + media_us as i128 - self.rtp_us
-	}
-}
-
-fn system_time_to_micros(time: SystemTime) -> i128 {
-	match time.duration_since(UNIX_EPOCH) {
-		Ok(duration) => duration.as_micros() as i128,
-		Err(err) => -(err.duration().as_micros() as i128),
 	}
 }
 
@@ -580,13 +580,43 @@ pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr)
 
 #[cfg(test)]
 mod tests {
-	use std::time::{Duration, UNIX_EPOCH};
+	use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 	use str0m::media::Mid;
 	use str0m::rtp::Ssrc;
 	use str0m::rtp::rtcp::SenderInfo;
 
 	use super::*;
+
+	#[test]
+	fn sender_reports_outside_the_wall_range_are_ignored() {
+		let mut clock = IngestClock::default();
+		let audio = Mid::from("0");
+		let video = Mid::from("1");
+		let t0 = Instant::now();
+		assert_eq!(clock.normalize(audio, t0, 0), 0);
+		assert_eq!(clock.normalize(video, t0 + Duration::from_millis(50), 0), 50_000);
+
+		// NTP time zero (1900), which a sender without a wall clock may report, and past 2554.
+		let ntp_zero = UNIX_EPOCH - Duration::from_secs(2_208_988_800);
+		clock.observe(audio, sender_info(1, ntp_zero, 0));
+		clock.observe(
+			video,
+			sender_info(2, UNIX_EPOCH + Duration::from_secs(18_446_744_074), 0),
+		);
+		assert!(clock.tracks.values().all(|track| track.sender.is_none()));
+
+		// Both tracks stay on arrival time.
+		assert_eq!(
+			clock.normalize(audio, t0 + Duration::from_secs(1), 1_000_000),
+			1_000_000
+		);
+		assert_eq!(
+			clock.normalize(video, t0 + Duration::from_millis(1_050), 1_000_000),
+			1_050_000
+		);
+		assert!(SenderAnchor::new(sender_info(1, UNIX_EPOCH, 0)).is_ok());
+	}
 
 	#[test]
 	fn media_flow_respects_negotiated_direction() {

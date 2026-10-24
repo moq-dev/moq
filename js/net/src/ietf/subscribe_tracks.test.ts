@@ -351,6 +351,19 @@ test("PUBLISH carries listing defaults and honors INCLUDE_PROPERTIES", async () 
 	expect(publish.parameters?.subscriptionFilter).toEqual({ kind: "relative", groups: 2n });
 });
 
+// An omitted SUBSCRIBER_PRIORITY is the drafts' 128, so the PUBLISH restates 128, not the unset 127.
+test("PUBLISH restates an omitted listing priority as 128", async () => {
+	const version = Version.DRAFT_22;
+	const fx = fixture(version);
+	const listing = await fx.list("room", false, new Parameters());
+	await ok(listing, version);
+	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
+	broadcast.announce();
+	broadcast.createTrack("later");
+	const { publish } = await fx.offered();
+	expect(publish.parameters?.subscriberPriority).toBe(128);
+});
+
 test("an update ends only its listing and frees its prefix", async () => {
 	const version = Version.DRAFT_22;
 	const fx = fixture(version);

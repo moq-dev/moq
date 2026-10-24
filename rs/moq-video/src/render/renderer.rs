@@ -550,7 +550,7 @@ mod tests {
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	#[tokio::test]
 	#[ignore = "needs a PipeWire desktop and Vulkan GPU"]
-	#[expect(clippy::disallowed_methods, reason = "a real portal capture runs on the host clock")]
+	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	async fn packed_dmabuf_renders_through_vulkan() {
 		let instance = wgpu::Instance::default();
 		let adapter = instance

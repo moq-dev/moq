@@ -184,12 +184,12 @@ const (
 )
 
 // Versions lists the protocol versions offered by default, most preferred
-// first, spelled the way WithVersions takes them.
+// first, spelled the way ClientConfig.Versions takes them.
 func Versions() []string {
 	return ffi.MoqVersions()
 }
 
-// QlogSupported reports whether this build can write qlog traces for WithQUICQlog.
+// QlogSupported reports whether this build can write qlog traces for QUICConfig.Qlog.
 func QlogSupported() bool {
 	return ffi.MoqQlogSupported()
 }

@@ -262,10 +262,9 @@ impl Publisher {
 			.discovery(!declared.hidden || self.origin.includes_hidden());
 		let mut announced = origin.announced();
 
-		stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 		stream
 			.writer
-			.encode(&ietf::RequestOk {
+			.encode_message(&ietf::RequestOk {
 				request_id: None,
 				active: None,
 				largest: None,
@@ -279,7 +278,7 @@ impl Publisher {
 			prefix: prefix.clone(),
 			forward: msg.forward,
 			params: Params {
-				priority: msg.subscriber_priority.unwrap_or(crate::ietf::priority::ABSENT_WIRE),
+				priority: msg.subscriber_priority.unwrap_or(crate::ietf::priority::DEFAULT_WIRE),
 				order: msg.group_order,
 				filter: msg.filter.unwrap_or(Filter::Unfiltered),
 				max_age: None,
@@ -453,13 +452,15 @@ impl Publisher {
 						),
 					};
 					let code = request::to_code(&err, request::Kind::SubscribeNamespace, self.version);
-					stream.writer.buffer_varint(ietf::RequestError::ID)?;
-					stream.writer.buffer(&ietf::RequestError {
-						request_id: None,
-						error_code: code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})?;
+					stream.writer.buffer_message(
+						ietf::RequestError::ID,
+						&ietf::RequestError {
+							request_id: None,
+							error_code: code,
+							reason_phrase: reason.into(),
+							retry_interval: 0,
+						},
+					)?;
 					return Poll::Ready(Ok(()));
 				}
 				Ok(Some(Next::GoAway { redirect })) => goaways.receive(redirect)?,
@@ -490,11 +491,13 @@ impl Publisher {
 				break;
 			};
 			drop(pending);
-			stream.writer.buffer_varint(ietf::PublishSkipped::ID)?;
-			stream.writer.buffer(&ietf::PublishSkipped {
-				suffix,
-				track_name: name.as_ref().into(),
-			})?;
+			stream.writer.buffer_message(
+				ietf::PublishSkipped::ID,
+				&ietf::PublishSkipped {
+					suffix,
+					track_name: name.as_ref().into(),
+				},
+			)?;
 		}
 		Ok(())
 	}
@@ -775,7 +778,6 @@ impl Publisher {
 		self.pause_join(join.as_ref());
 
 		tracing::debug!(id = %request_id, broadcast = %absolute, track = %name, "publish started");
-		stream.writer.buffer_varint(ietf::Publish::ID)?;
 		let publish = ietf::Publish {
 			request_id,
 			track_namespace: namespace.clone(),
@@ -791,7 +793,7 @@ impl Publisher {
 			filter: Some(params.filter),
 		};
 		let written = {
-			let mut writing = std::pin::pin!(stream.writer.encode(&publish));
+			let mut writing = std::pin::pin!(stream.writer.encode_message(&publish));
 			kio::wait(|waiter| {
 				if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
@@ -2253,6 +2255,22 @@ mod tests {
 				"{version}"
 			);
 			assert_eq!(publish.filter, stated.then_some(Filter::NextObject), "{version}");
+		}
+	}
+
+	/// An omitted SUBSCRIBER_PRIORITY is the drafts' 128, so each PUBLISH restates 128 rather
+	/// than this stack's unset 127.
+	#[moq_clock::test]
+	async fn a_listing_without_a_priority_states_the_default() {
+		for version in DRAFTS.into_iter().filter(|version| Filter::is_draft20(*version)) {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut stream = timeout(Stream::accept(&mut h.peer, version)).await.unwrap();
+			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
+			let body: ietf::Body = stream.reader.decode().await.unwrap();
+			let publish: ietf::Publish = body.message(version).unwrap();
+			assert_eq!(publish.subscriber_priority, Some(128), "{version}");
 		}
 	}
 
