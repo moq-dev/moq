@@ -389,11 +389,12 @@ impl Misses {
 			// one check judges it whole. Groups arrive out of order, so a fresh late group
 			// keeps the stretch below it owed while the ones around it go stale.
 			let mut from = run.start;
-			// An aborted group is a hole, so a fill still owes it.
+			// Only the live feed's arrivals split the run: an aborted group is a hole, and a
+			// backfill is a fill's answer, reaching the reader once that fill publishes it.
 			let cached = state
 				.lookup
 				.range(run.clone())
-				.filter(|(_, slot)| !slot.is_aborted())
+				.filter(|(_, slot)| slot.is_walked())
 				.map(|(&sequence, _)| sequence);
 			for at in cached.chain(std::iter::once(run.end)) {
 				if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget, waiter) {

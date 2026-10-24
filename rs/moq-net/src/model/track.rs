@@ -16617,6 +16617,34 @@ mod test {
 		assert!(fill.is_wanted(3), "the aborted group never arrived");
 	}
 
+	/// A backfill cached before its fill publishes the answer is not a live arrival: the reader
+	/// keeps it owed, so the answer still reaches it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_backfill_cached_before_its_answer_stays_owed() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let ascending = |groups| replay().with_groups(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(0..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		// The window inside `Fill::accept` between caching the group and publishing the answer.
+		let _writing = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(3, 0, None)
+			.unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert!(fill.is_wanted(3), "the answer has not reached the reader yet");
+	}
+
 	/// An ordered reader taking a filled group leaves the fill at once, so a reader that drops
 	/// the group without reading on stops holding the fill's source.
 	#[test]
