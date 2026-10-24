@@ -5,9 +5,9 @@
 kio exports an append-only log channel whose consumers read committed entries
 by cursor without taking a lock, and the hottest moq-net channels the
 [epic](/quest/m2/perf/kio-channel-contention/README.md)'s baseline names
-(expected: `TrackState` arrival order, and `GroupState` frames if the
-[group storage benchmark](/quest/m1/group-storage-bench.md) picks the log)
-move onto it.
+(expected: `TrackState` arrival order, and `GroupState`'s tail run, which
+[Front eviction](/quest/m1/unbounded-groups/front-eviction.md) lays out for
+it) move onto it.
 Lands with the contended bench (`rs/kio/benches/contended.rs`) and `just bench-profile lock` before and after; a
 measured no-win abandons it.
 
@@ -54,18 +54,27 @@ measured no-win abandons it.
   already provides.
 - Breaking moq-net's model internals is allowed; check whether any public
   moq-net API changes and sync `js/net` if so.
-- Decided 2026-10-20 (maintainer): `GroupState` storage is chosen by the
-  [group storage benchmark](/quest/m1/group-storage-bench.md) against
-  [Front eviction](/quest/m1/unbounded-groups/front-eviction.md)'s sorted
-  runs before either lands. The maintainer leans toward this log, or a ring
-  buffer, because performance matters more than middle eviction.
+- The group storage benchmark
+  ([moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627), numbers in
+  the [epic](/quest/m2/perf/kio-channel-contention/README.md)) prototyped
+  this log for `GroupState`: 10 to 40% less per reader than the mutex across
+  cores at 1,024 readers, within 15% on one thread, and about 15 ns more per
+  append. A ring buffer was rejected. Recommended, pending the maintainer:
+  Front eviction lands the layout (a tail run from an advancing base, refills
+  in runs below it) under the mutex, and this replaces only the tail run.
+  Refills stay in their own locked runs, since they are written out of order.
+- From the prototype: segments doubling from 4 to 64 slots keep a one-frame
+  group as cheap as today. Linking a segment to the next by `Weak`, with the
+  log holding the strong references, bounds a reader that stopped polling to
+  pinning its own segment, not every one after it. Those pinned bytes are
+  still uncharged to the cache pool once evicted.
+- Parking still takes the waiter mutex, which is now the edge reader's only
+  acquire; the
+  [version counter](/quest/m2/perf/kio-channel-contention/version.md)'s
+  split waiter lists are the lever there.
 
 ## Required
 
-- [Group storage benchmark](/quest/m1/group-storage-bench.md) - picks the log, a ring buffer, or sorted runs for `GroupState` frames
+- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - lays out `GroupState`'s tail run and refill runs, so this replaces only the tail run's storage
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - if per-worker replicas win, each channel's cross-core readers collapse to one flow-controlled stream per worker and this log is likely abandoned
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - the same question with nothing shared
-
-## Related
-
-- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - the other proposal for `GroupState` storage, decided by the same benchmark

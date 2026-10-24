@@ -18,8 +18,7 @@ moq-transport.
 
 ## Plan
 
-Decided 2026-10-23 (maintainer): moved from m2 to m1 with the
-[group storage benchmark](/quest/m1/group-storage-bench.md), holding the next
+Decided 2026-10-23 (maintainer): moved from m2 to m1, holding the next
 breaking cut, so a long-lived log such as a moq-json `Stream` has no record
 ceiling in that release. Making `Stream` roll groups instead was rejected:
 its readers reject a second group (`Rolled`), and a `Window` that never pops
@@ -52,13 +51,20 @@ Decided 2026-10-16 (maintainer interview):
 - QUIC receive credit is released per segment, so an arbitrary-size frame
   never needs a matching receive allowance. The aim is to avoid
   over-allocating, not to bound a frame.
-- Refills patch the group's state in place, written only below
-  `committed` so they never race the tail writer. They replace today's
-  separate `Slot.head` copy. Whether the state is sorted runs or the
-  [append-only log](/quest/m2/perf/kio-channel-contention/log.md) (or a ring
-  buffer) is the [group storage benchmark](/quest/m1/group-storage-bench.md)'s
-  call (decided 2026-10-20, maintainer, leaning log because hot-path
-  performance matters more than evicting the middle).
+- Refills patch the group's state in place, written only below the tail
+  run's base so they never race the tail writer. They replace today's
+  separate `Slot.head` copy.
+- Storage (group storage benchmark,
+  [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627), recommended
+  pending the maintainer, who leaned log on 2026-10-20): the
+  [append-only log](/quest/m2/perf/kio-channel-contention/log.md)'s layout,
+  a tail run from a base that only advances plus refilled runs below it,
+  landed by Front eviction under today's mutex. Prototyped, that layout cost
+  what today's `VecDeque` does; the lock-free log cost 10 to 40% less per
+  reader across cores at 1,024 readers and about 15 ns more per append, and
+  waits on the log quest. A ring buffer was rejected: an uncapped group has
+  no size to give it. Numbers are in the
+  [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md).
 - Readers pin nothing: reads refresh recency as today. A reader that
   falls into an evicted run refills like a joiner. With nothing to refill
   from, it gets `Error::Evicted`. Within a group, victims go front to back.

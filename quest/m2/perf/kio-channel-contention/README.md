@@ -150,11 +150,70 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
 - The append-only log waits on the spikes, since per-thread sessions would
   leave each replica's mutex uncontended.
 
-Decided 2026-10-20 (maintainer): the
-[group storage benchmark](/quest/m1/group-storage-bench.md) chooses between
-the log (or a ring buffer) and unbounded groups' sorted runs for
-`GroupState` before either lands, leaning log because performance matters
-more than middle eviction.
+Group storage benchmark (2026-10-24,
+[moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627)): four
+prototypes of `GroupState`'s frame storage, behind its append, cursor read
+(eight frames per call, like `Prefetch`), park, front eviction, and refill
+only. The bench is
+[`rs/moq-net/benches/storage.rs` at `2cfc0a6`](https://github.com/moq-dev/moq/blob/2cfc0a666dd79d4dbf068ffb27b8059ecb3019e7/rs/moq-net/benches/storage.rs)
+and did not merge.
+
+- `deque`: today's `VecDeque` plus offset in the kio mutex.
+- `runs`: Front eviction's sorted runs, the tail run inline, in the mutex.
+- `log`: write-once slots in refcounted segments (4 doubling to 64 slots),
+  a Release-stored length, lock-free cursor reads, an atomic base, and
+  refills in a side run below the base behind its own mutex. Parking takes
+  a waiter mutex.
+- `ring`: a fixed ring of reused slots, each behind an `RwLock` (tokio's
+  broadcast design), since a reused slot can't be read lock-free without
+  epoch reclamation.
+
+Host: the same 24-core Core Ultra 7 270K Plus, never quiet (load average 29
+to 43, 6 to 110 runnable threads at a case's start, median 18). Each case
+runs every shape back to back, three passes; the table is the median pass's
+10th-percentile round, ns per reader, at 1,024 readers. Rows with 16
+readers are dominated by releasing the worker threads and are omitted.
+
+| workload | threads | deque | runs | log | ring |
+| --- | --- | --- | --- | --- | --- |
+| one-frame groups | 1 | 80 | 80 | 41 | 34 |
+| one-frame groups | 4 | 252 | 240 | 151 | 120 |
+| one-frame groups | 16 | 283 | 275 | 175 | 140 |
+| edge, 1 frame per round | 1 | 58 | 58 | 51 | 59 |
+| edge, 1 frame per round | 4 | 222 | 219 | 197 | 217 |
+| edge, 1 frame per round | 16 | 497 to 1,412 | 477 to 2,581 | 344 to 2,901 | 347 to 432 |
+| burst, 8 frames per round | 1 | 132 | 132 | 125 | 185 |
+| burst, 8 frames per round | 4 | 409 | 391 | 256 | 501 |
+| burst, 8 frames per round | 16 | 682 | 630 | 416 | 474 |
+| refill beside the tail | 1 | - | 58 | 65 | 68 |
+| refill beside the tail | 4 | - | 217 | 198 | 222 |
+| refill beside the tail | 16 | - | 472 | 358 | 358 |
+
+The 16-thread edge row varied that much between passes, so it ranks
+nothing. One thread appending a 60-frame group, ns per frame (Criterion
+median): deque 30, runs 30, log 46, ring 42. Draining it: 14, 15, 12, 19.
+
+- `runs` costs what `deque` does everywhere, so the shape is free. It is not
+  faster: refills and the tail share one mutex.
+- `log` costs 10 to 40% less per reader across cores, most when a reader
+  drains several frames, and within 15% either way on one thread. Its
+  writer pays about 15 ns more per append (the SeqCst fence before checking for parked
+  readers, and the slot's `OnceLock`). Parking still takes a mutex, so an
+  edge reader saves one of its two acquires per wake, not both.
+- `ring` is rejected. A group with no frame cap has no size to give it, and
+  growing stops every reader or needs epochs. Its per-slot locks cost 40%
+  more for a burst on one thread and lose to the log across cores. It wins
+  one-frame groups only because its reader holds no channel handle.
+- Not run: `just bench-profile lock` on a multi-frame shape
+  (`bench/workloads/video-heavy.toml` is one), which needs
+  `kernel.perf_event_paranoid=-1` and this host has 4. So a relay's share of
+  `GroupState` wait with multi-frame groups is still unmeasured.
+
+Recommendation (pending the maintainer): Front eviction lays frames out
+as the log will, a tail run from an advancing base plus refilled runs below
+it, under today's mutex, and the
+[append-only log](/quest/m2/perf/kio-channel-contention/log.md) later
+replaces only the tail run's storage, with the above as its expected win.
 A 2026-10-22 staging CDN chat profile (default tokio runtime, `f57c0aad`,
 DWARF stacks, 36% incomplete) put waiter registration at 1.97% self-time, the
 fourth-largest site, on a 501-connection chat shape. It agrees with this
