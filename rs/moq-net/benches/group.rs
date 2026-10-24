@@ -372,25 +372,38 @@ fn bench_stamp(c: &mut Criterion) {
 	let payload = Bytes::from(vec![0u8; PAYLOAD]);
 	let mut g = c.benchmark_group("track_stamp_groups");
 	for &n in &DEPTHS {
-		g.bench_with_input(BenchmarkId::new("append", n), &n, |b, &n| {
-			b.iter_custom(|iters| {
-				let mut total = Duration::ZERO;
-				let mut left = iters;
-				while left > 0 {
-					let ctx = filled_track(n, &payload);
-					let batch = left.min(n as u64);
-					let start = Instant::now();
-					for _ in 0..batch {
-						let mut group = ctx.track.append_group().unwrap();
-						group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-						group.finish().unwrap();
+		for waiting in [false, true] {
+			let name = if waiting { "append_waiting" } else { "append" };
+			g.bench_with_input(BenchmarkId::new(name, n), &n, |b, &n| {
+				b.iter_custom(|iters| {
+					let mut total = Duration::ZERO;
+					let mut left = iters;
+					while left > 0 {
+						let ctx = filled_track(n, &payload);
+						// A pending fetch keeps the landing index occupied beyond this batch,
+						// separating the no-reader fast path from an unrelated parked read.
+						let dynamic = waiting.then(|| ctx.track.dynamic());
+						let mut fetching = dynamic
+							.as_ref()
+							.map(|_| ctx.track.consume().fetch_group((2 * n + 1) as u64, None));
+						let waiter = kio::Waiter::noop();
+						if let Some(fetching) = &mut fetching {
+							assert!(kio::Task::poll(&mut **fetching, &waiter).is_pending());
+						}
+						let batch = left.min(n as u64);
+						let start = Instant::now();
+						for _ in 0..batch {
+							let mut group = ctx.track.append_group().unwrap();
+							group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+							group.finish().unwrap();
+						}
+						total += start.elapsed();
+						left -= batch;
 					}
-					total += start.elapsed();
-					left -= batch;
-				}
-				total
+					total
+				});
 			});
-		});
+		}
 		// N groups created before any is stamped, then stamped in order: each one's upper
 		// neighbor is a run of unstamped groups, which a slot scan walks.
 		g.bench_with_input(BenchmarkId::new("sparse", n), &n, |b, &n| {

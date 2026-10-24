@@ -7,6 +7,11 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+#[cfg(loom)]
+use ::loom::sync::atomic::AtomicBool;
+#[cfg(not(loom))]
+use std::sync::atomic::AtomicBool;
+
 use super::Timestamp;
 
 /// A track's parked group reads, indexed by the events that can expire them, so a frame
@@ -38,6 +43,14 @@ pub(super) struct Wakes {
 	/// frame below every one skips the lock. Ordered by the starts index's lock, which a
 	/// read takes after registering and a first frame before checking this.
 	starts_from: AtomicU64,
+	/// Whether either landing index has entries. Registration, clearing, and the
+	/// landing check use RMWs: a landing
+	/// publishes the group state with Release, and registration acquires it before
+	/// judging successors. Either registration observes the landing or the landing
+	/// observes the registration. RMWs preserve that release sequence through other
+	/// landings and drains; a plain load could miss a concurrent registration.
+	/// The parked lock serializes registration and clearing after both indices drain.
+	landing_waiters: AtomicBool,
 	parked: kio::Lock<Parked>,
 }
 
@@ -92,6 +105,7 @@ impl Default for Wakes {
 		Self {
 			earliest: AtomicU64::new(u64::MAX),
 			starts_from: AtomicU64::new(u64::MAX),
+			landing_waiters: AtomicBool::new(false),
 			parked: kio::Lock::default(),
 		}
 	}
@@ -184,12 +198,9 @@ impl Wakes {
 
 	/// Park `waiter` until a group lands above `sequence`.
 	pub(super) fn watch_landing(&self, sequence: u64, waiter: &kio::Waiter) {
-		self.parked
-			.lock()
-			.landings
-			.entry(sequence)
-			.or_default()
-			.register(waiter);
+		let mut parked = self.parked.lock();
+		parked.landings.entry(sequence).or_default().register(waiter);
+		self.landing_waiters.swap(true, Ordering::Acquire);
 	}
 
 	/// Park `waiter`, holding group `sequence` from another copy, until it or a group
@@ -205,6 +216,7 @@ impl Wakes {
 			parked.held_sweep = sweep_at(parked.held.len());
 		}
 		parked.held.entry(sequence).or_default().register(waiter);
+		self.landing_waiters.swap(true, Ordering::Acquire);
 	}
 
 	/// Park until this exact group is cached, or a declared boundary excludes it.
@@ -267,6 +279,11 @@ impl Wakes {
 	/// sequence. Reads below `oldest`, the first group still cached, can no longer expire
 	/// and are forgotten; held groups are not.
 	pub(super) fn landed(&self, below: Option<u64>, sequence: u64, oldest: u64) {
+		// Publish even when no reader is registered yet. Keep true until the drain
+		// holds the lock, so another concurrent landing cannot skip its own range.
+		if !self.landing_waiters.fetch_or(false, Ordering::Release) {
+			return;
+		}
 		let mut woken = Vec::new();
 		{
 			let mut parked = self.parked.lock();
@@ -284,6 +301,8 @@ impl Wakes {
 				woken.extend(parked.held.remove(&at));
 			}
 			parked.held_sweep = lower(parked.held_sweep, parked.held.len());
+			self.landing_waiters
+				.swap(!parked.landings.is_empty() || !parked.held.is_empty(), Ordering::AcqRel);
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -294,6 +313,7 @@ impl Wakes {
 			let mut parked = self.parked.lock();
 			self.earliest.store(u64::MAX, Ordering::Relaxed);
 			self.starts_from.store(u64::MAX, Ordering::Relaxed);
+			self.landing_waiters.swap(false, Ordering::AcqRel);
 			std::mem::take(&mut *parked)
 		};
 		let lists = parked.deadlines.into_values().chain(parked.landings.into_values());
@@ -322,9 +342,29 @@ impl Wakes {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod test {
 	use super::*;
+
+	#[test]
+	fn landing_hint_keeps_both_indices_armed() {
+		let wakes = Wakes::default();
+		let waiter = kio::Waiter::noop();
+		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
+		wakes.watch_landing(0, &waiter);
+		wakes.watch_held(10, &waiter);
+		wakes.landed(None, 1, 0);
+		assert!(
+			wakes.landing_waiters.load(Ordering::Relaxed),
+			"the held group still waits"
+		);
+		wakes.landed(Some(1), 10, 1);
+		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
+		wakes.watch_held(11, &waiter);
+		wakes.watch_landing(12, &waiter);
+		wakes.wake_all();
+		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
+	}
 
 	/// Each route switch parks the groups then in flight; once their readers drop, the
 	/// next switch's park must not find them still indexed.

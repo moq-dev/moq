@@ -318,6 +318,7 @@ doctest *args:
 loom *args:
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: "$@"
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom "$@"
+    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
 
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it.
 quic-sim:
