@@ -566,8 +566,13 @@ test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces 
 		for (const path of [".", "./child", ".session", ".session/extension", ".application", ".sessionish"]) {
 			const pair = createMockTransportPair(ALPNS[version]);
 			const { pub, origin } = publisher(pair.server, { session: new NativeSession(pair.server, version, true) });
-			const broadcast = publish(origin, Path.from(path));
-			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			// Navigation segments cannot be published. A covering application
+			// route still proves these reserved requests are refused before lookup.
+			const navigation = path.split("/")[0] === ".";
+			const claim = navigation ? origin.dynamic(Path.empty()) : undefined;
+			const requested = claim?.requested().next();
+			const broadcast = navigation ? undefined : publish(origin, Path.from(path));
+			const track = broadcast?.createTrack("video", { timescale: Timescale.MILLI });
 			const request = requestStream(version);
 			try {
 				await pub.runTrackStatusRequest(trackStatus(path), request.stream);
@@ -581,9 +586,11 @@ test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces 
 				}
 			} finally {
 				request.cancel();
-				track.close();
-				broadcast.close();
+				track?.close();
+				broadcast?.close();
+				claim?.close();
 				origin.close();
+				if (requested) expect((await requested).done).toBe(true);
 			}
 		}
 	}

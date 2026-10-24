@@ -1336,6 +1336,15 @@ impl RouteEntry {
 	}
 }
 
+// Published names are literal coordinates. Navigation belongs to Relative,
+// resolved before publication, so a name remains stable when carried by a URL.
+fn publish_path(path: &Path) -> Result<(), Error> {
+	if path.parts().any(|segment| matches!(segment, "." | "..")) {
+		return Err(Error::NavigationSegment);
+	}
+	Ok(())
+}
+
 /// What `scope` lets a route at `claim` serve: see [`RouteEntry::reach`].
 fn reach(scope: &Patterns, claim: &Pattern) -> Vec<Pattern> {
 	scope
@@ -2154,7 +2163,8 @@ impl Producer {
 	/// [`mount`](Self::mount),
 	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
 	/// [`Path::MAX_PARTS`], [`Error::InvalidPath`] if it holds a segment no
-	/// pattern can spell (`*` or `**`), or [`Error::Closed`] once the origin's
+	/// pattern can spell (`*` or `**`), [`Error::NavigationSegment`] for a literal `.` or `..`,
+	/// or [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
 		let full = self.root.join(path.as_path()).to_owned();
@@ -2165,6 +2175,7 @@ impl Producer {
 	/// A new broadcast at `full` with its announcer withheld, so it cannot announce
 	/// until the announcer is handed back.
 	fn create_withheld(&self, full: PathOwned) -> Result<(broadcast::Producer, Announcer), Error> {
+		publish_path(&full)?;
 		if !self.scope.permits(&full) || !self.scope.publishes(&full) {
 			return Err(Error::Unauthorized);
 		}
@@ -2520,6 +2531,7 @@ impl Announcing {
 	/// The requested prefix as-is, refused when its subtree does not overlap the scope.
 	fn new(producer: &Producer, prefix: impl AsPath) -> Result<Self, Error> {
 		let requested = producer.root.join(prefix.as_path()).to_owned();
+		publish_path(&requested)?;
 		if requested.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
@@ -13042,6 +13054,22 @@ mod tests {
 		// still be holding the table lock the watch unregisters under.
 		drop(producer);
 		let _pending = consumer.request_broadcast("room/a", None);
+	}
+
+	#[moq_clock::test]
+	async fn published_names_refuse_navigation_segments() {
+		let producer = origin(1).produce();
+		for path in ["room/./cam", "room/../cam", ".", ".."] {
+			assert!(producer.create_broadcast(path).is_err(), "created {path}");
+			assert!(producer.announce(path, Route::default()).is_err(), "announced {path}");
+		}
+		let scoped = producer
+			.scope("room/..", &Patterns::from_iter([Pattern::all()]))
+			.unwrap();
+		assert!(scoped.create_broadcast("cam").is_err());
+		for path in ["room/.pro/cam", "room/a..b", "room/cam"] {
+			producer.create_broadcast(path).unwrap();
+		}
 	}
 
 	#[moq_clock::test]
