@@ -223,8 +223,10 @@ everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. Naming a fresh token renews the announcement in place with
 `REQUEST_UPDATE` from draft 16, and re-announces it on drafts 14 and 15, so it
-can outlive the token it started with. The token belongs to the session that added it, so after a
-reconnect the application adds it again and re-announces. moq-lite has no
+can outlive the token it started with. A token added to a reconnecting
+connection's auth handle is presented on every session it makes, so the
+announcement keeps it across a reconnect with no re-add or re-announce; one
+added to a single session's handle ends with that session. moq-lite has no
 per-request token, so there an announcement rides the session's scope.
 
 ## Subscriptions

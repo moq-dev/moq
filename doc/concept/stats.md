@@ -136,8 +136,12 @@ returns within the linger keeps its broadcast and epoch, so viewer churn
 doesn't unannounce and re-announce it across the mesh, and its totals
 continue. Once the linger elapses with the group still empty, the broadcast is
 unannounced and its counters dropped; a group that returns later announces a
-new epoch counted from zero. Within one epoch, group numbers keep increasing
-across recreated tracks and may have gaps.
+new epoch counted from zero. Holding a stats track doesn't count as an entry:
+every track ends with the broadcast, including presence, prefix, and requested
+tier tracks a reader still holds, and the reader follows the group's next
+announcement.
+Within one epoch, group numbers keep increasing across recreated tracks and
+may have gaps.
 
 ## Tracks
 
@@ -170,9 +174,10 @@ A presence track exists only while subscribed. Ask for `<label>/presence.json`
 for any stats label in the group (`presence.json` for the empty label). The relay
 answers with the label's current sessions and counts from there, holding a label
 with no sessions open at `{}`, and stops producing it once the last subscriber
-leaves. A prefix track works the same way for any broadcast prefix in the
-group: ask for `<path>/prefix.json` (`prefix.json` for the empty prefix). A
-label or prefix outside the group, or any other name, is refused.
+leaves or, at depth 1 or more, its group lingers out. A prefix track works the
+same way for any broadcast prefix in the group: ask for `<path>/prefix.json`
+(`prefix.json` for the empty prefix). A label or prefix outside the group, or
+any other name, is refused.
 
 ## Frames
 

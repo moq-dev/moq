@@ -19,11 +19,14 @@ export interface Datagram {
  * Outcome of reading one protected datagram.
  *
  * - `datagram`: authenticated plaintext.
- * - `authentication`: the datagram failed to authenticate, or had a sequence or size no publisher
- *   could seal; it was dropped and the track continues.
+ * - `authentication`: the datagram failed to authenticate; dropped, track continues.
  * - `duplicate`: the sequence was already opened inside the retained window; dropped, track continues.
+ * - `identity`: the sequence is above `2^53-1`; dropped, track continues.
+ * - `oversize`: the payload is shorter than the tag or longer than the datagram cap; dropped, track continues.
  */
 export type Event =
 	| { kind: "datagram"; datagram: Datagram }
 	| { kind: "authentication"; sequence: number }
-	| { kind: "duplicate"; sequence: number };
+	| { kind: "duplicate"; sequence: number }
+	| { kind: "identity"; sequence: number }
+	| { kind: "oversize"; sequence: number };

@@ -33,9 +33,9 @@ Decided 2026-10-22 (API audit):
   path (`[listen.lb]`).
 - moq-quic's unused features, `rustls` alias, and crate docs moved to
   [quic-api trim](/quest/m1/quic-api/trim.md) (2026-10-23).
-- Public only for tests: `lease::Producer::{due, failed}` and `Due` go
-  `pub(crate)` (drop the `tokio` feature), `connect::Config.quic` and
+- Public only for tests: moq-auth `lease::Producer::{due, failed}` and `Due`
+  go `pub(crate)` (drop moq-auth's `tokio` feature), `connect::Config.quic` and
   `listen::Config.quic` (read only by `deprecated()`) go `pub(crate)`, and
   moq-uring `manual` and kio `sim` are renamed `_manual`/`_sim` or gated.
 
-Public API: moq-tokio breaking. Wire: none.
+Public API: moq-tokio, moq-auth breaking. Wire: none.

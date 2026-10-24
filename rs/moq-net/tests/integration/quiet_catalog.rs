@@ -174,7 +174,7 @@ async fn resume_then_fresh(version: Version, in_process: bool) -> Result<(), Str
 		let _sub = resume_remote
 			.track("catalog.json")
 			.unwrap()
-			.subscribe(track::Subscription::default().with_groups(1..))
+			.subscribe(track::Subscription::default().with_range(1..))
 			.await
 			.expect("resume subscribe");
 		moq_clock::sleep(Duration::from_secs(60)).await;

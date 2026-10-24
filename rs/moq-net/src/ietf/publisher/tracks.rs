@@ -2520,7 +2520,7 @@ mod tests {
 	async fn a_listing_waits_for_the_setup_answer() {
 		for version in [Version::Draft18, Version::Draft22] {
 			let mut h = harness(version);
-			let auth = crate::auth::Handle::new(true);
+			let auth = crate::auth::Link::new(true);
 			let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 			let setup = peer::PeerSetup::default();
 			setup.set(peer::Peer {
@@ -2570,8 +2570,8 @@ mod tests {
 		};
 		for version in [Version::Draft18, Version::Draft22] {
 			let mut h = harness(version);
-			let auth = crate::auth::Handle::new(false);
-			auth.authorize(&nothing());
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&nothing());
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
 
 			let mut request = h.request(&listing(false)).await;
@@ -2583,13 +2583,13 @@ mod tests {
 			)));
 			assert!(opened.is_pending(), "{version}: listed a track the grant denies");
 
-			auth.authorize(&crate::auth::Grant::all());
+			auth.handle().authorize(&crate::auth::Grant::all());
 			let (mut first, ..) = h.publish().await;
 			let (mut second, ..) = h.publish().await;
 			publish_ok(&mut first).await;
 			publish_ok(&mut second).await;
 
-			auth.authorize(&nothing());
+			auth.handle().authorize(&nothing());
 			for stream in [&mut first, &mut second] {
 				assert_eq!(next(stream).await.0, ietf::PublishDone::ID, "{version}");
 			}

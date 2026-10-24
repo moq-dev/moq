@@ -3106,15 +3106,19 @@ mod session_tests {
 		/// Write a keyframe whose every byte is `tag`, stamped with the time since publishing so a
 		/// synced sink renders it on time.
 		fn write(&mut self, tag: u8) {
+			let frame = self.frame(tag);
+			self.video.write(frame).unwrap();
+		}
+
+		/// The keyframe [`Self::write`] writes for `tag`.
+		fn frame(&self, tag: u8) -> moq_mux::container::Frame {
 			let elapsed = self.start.elapsed().as_micros() as u64;
-			self.video
-				.write(moq_mux::container::Frame {
-					timestamp: moq_net::Timestamp::from_micros(elapsed).unwrap(),
-					payload: bytes::Bytes::from(vec![tag; 64]),
-					keyframe: true,
-					duration: None,
-				})
-				.unwrap();
+			moq_mux::container::Frame {
+				timestamp: moq_net::Timestamp::from_micros(elapsed).unwrap(),
+				payload: bytes::Bytes::from(vec![tag; 64]),
+				keyframe: true,
+				duration: None,
+			}
 		}
 
 		/// Move the timestamps of later frames `by` ahead.
@@ -4200,6 +4204,74 @@ mod session_tests {
 			!recorder.seen().contains(&Seen::Buffer(pad, 2)),
 			"another epoch played: {:?}",
 			recorder.seen()
+		);
+		recorder.assert_one_pad_held();
+	}
+
+	/// A rendition the catalog moves to another track, in its broadcast and then in a sibling one,
+	/// plays on from it on the same pad, and nothing more from the track it left gets through.
+	#[test]
+	fn a_moved_rendition_plays_on_the_same_pad() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+
+		let mut room = Publisher::new(&origin, Default::default(), video_rendition());
+		let session = follow(&element, &origin);
+		let pad = recorder.written(&mut room, 1);
+
+		// Moved to another track of the broadcast, which the publisher writes from now on.
+		let moved = room
+			.broadcast
+			.create_track("moved", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let moved = moq_mux::container::Producer::new(
+			moved,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		let mut left = std::mem::replace(&mut room.video, moved);
+		room.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("video")
+			.unwrap()
+			.track = Some("moved".into());
+		assert_eq!(recorder.written(&mut room, 2), pad, "the move took another pad");
+		left.write(room.frame(1)).unwrap();
+		recorder.written(&mut room, 3);
+
+		// Moved to a sibling broadcast on the same clock.
+		let mut cam = Publisher::sibling(&origin, Default::default());
+		cam.start = room.start;
+		{
+			let mut guard = room.catalog.modify().unwrap();
+			let config = guard.video.renditions.get_mut("video").unwrap();
+			config.track = None;
+			config.broadcast = Some("./cam".into());
+		}
+		assert_eq!(recorder.written(&mut cam, 4), pad, "the move took another pad");
+		room.write(3);
+		recorder.written(&mut cam, 5);
+		stop(session);
+
+		let seen = recorder.seen();
+		let after = |tag: u8| {
+			let at = seen
+				.iter()
+				.position(|seen| *seen == Seen::Buffer(pad.clone(), tag))
+				.unwrap();
+			&seen[at..]
+		};
+		assert!(
+			!after(2).contains(&Seen::Buffer(pad.clone(), 1)),
+			"the track it left kept playing: {seen:?}"
+		);
+		assert!(
+			!after(4).contains(&Seen::Buffer(pad.clone(), 3)),
+			"the track it left kept playing: {seen:?}"
 		);
 		recorder.assert_one_pad_held();
 	}

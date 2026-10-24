@@ -39,7 +39,6 @@ use requests::Requests;
 use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
-pub(crate) use subscription::Cap;
 // Datagram stays flat at the crate root (a small track-adjacent wire type),
 // not under a role module.
 pub use datagram::*;
