@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Shutdown requests the drain synchronously
 
-`session.shutdown()` and `moq.shutdown()` request a drain synchronously. Await `session.closed()` (or `moq.session.closed()`) to wait and report delivery failures. `Moq.close()` still cancels immediately.
+`session.shutdown()` and `moq.shutdown()` request a drain synchronously. Await `session.closed()` (or `moq.session.closed()`) to wait and report delivery failures. `moq.shutdown()` no longer releases the client, so close the `Moq` (or leave its `use { }`) after `closed()` returns; `Moq.close()` still cancels immediately.
 When upgrading from the release-line additive async `drain()` backport, replace suspending `session.drain()` with `session.shutdown(); session.closed()`; `main` has no separate `drain()` method.
 
 ### Video rendition preference
