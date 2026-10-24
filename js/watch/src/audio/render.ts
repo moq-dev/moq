@@ -38,8 +38,8 @@ export interface Data {
 export interface Latency {
 	type: "latency";
 	latency: Milli;
-	// When set, also hold playback until the next data message, keeping what is buffered. Echoed like
-	// a reset's epoch, so state from before the park cannot report the ring playing.
+	// When set, also hold playback, keeping what is buffered, until the next latency message without
+	// it. Echoed like a reset's epoch, so state from before the park cannot report the ring playing.
 	park?: number;
 }
 

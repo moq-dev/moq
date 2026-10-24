@@ -35,14 +35,15 @@ export class Backpressure {
 	#headroom = 0 as Micro;
 	#hold = 0 as Micro;
 
-	// The newest media timestamp received, decoded or not, unset until one is.
-	#received?: Micro;
+	// The newest media timestamp queued ahead of the decoder, unset while none is.
+	#queued?: Micro;
 
 	// The ring as last observed. The playhead is undefined until one is known on the current timeline.
 	#playhead?: Micro;
 	#stalled = true;
-	// Whether the ring is parked for a hold the queued media does not cover yet. Only a write or a
-	// floor update releases a park, so a floor update has to carry it while the hold stays uncovered.
+	// Whether the ring is parked for a hold the queued media does not cover yet. The worklet keeps a
+	// park until the next floor update, so only this decides when it ends: a write of output decoded
+	// before the park cannot.
 	#parked = false;
 
 	// The first and latest frames released since the ring stalled. A stalled ring refills to the
@@ -68,7 +69,8 @@ export class Backpressure {
 	 * Split `delay` between the floor and the hold. Returns true when the ring must park with the new
 	 * floor: a rise in the hold that the queued media does not cover yet holds playback until it does,
 	 * the way a deeper floor parks the ring until it refills, since video holds the extra delay on its
-	 * own. A ring already parked stays parked while the remaining hold is uncovered.
+	 * own. A floor update ends a park, so a ring already parked stays parked while the remaining hold
+	 * is uncovered.
 	 */
 	setLatency(delay: Milli): boolean {
 		this.#floor = ringSamples(this.#rate, delay);
@@ -81,13 +83,7 @@ export class Backpressure {
 		// parking a ring that is still stalled changes nothing.
 		const playhead = this.#playhead;
 		this.#parked = (rise || this.#parked) && playhead !== undefined && !this.#covered(playhead + this.#headroom);
-		if (this.#parked) {
-			// Only a write resumes a parked ring, so the park starts a fresh refill: the frames an
-			// earlier refill released must not hold back the one that resumes it.
-			this.#stalled = true;
-			this.#first = undefined;
-			this.#last = undefined;
-		}
+		if (this.#parked) this.#stalled = true;
 		this.#release();
 		return this.#parked;
 	}
@@ -97,17 +93,23 @@ export class Backpressure {
 		this.#playhead = playhead;
 		this.#stalled = stalled;
 		if (!stalled) {
-			this.#parked = false;
 			this.#first = undefined;
 			this.#last = undefined;
 		}
 		this.#release();
 	}
 
-	/** Note the newest media timestamp received, decoded or not, or undefined until one is. */
-	received(newest: Micro | undefined): void {
-		this.#received = newest;
+	/**
+	 * Note the newest media timestamp queued ahead of the decoder, or undefined once none is. Returns
+	 * true when that covers the hold of a parked ring, which a floor update then resumes.
+	 */
+	queued(newest: Micro | undefined): boolean {
+		this.#queued = newest;
+		const playhead = this.#playhead;
+		const resume = this.#parked && playhead !== undefined && this.#covered(playhead + this.#headroom);
+		if (resume) this.#parked = false;
 		this.#release();
+		return resume;
 	}
 
 	wait(timestamp: Micro, signal: AbortSignal): Promise<void> {
@@ -160,7 +162,7 @@ export class Backpressure {
 	// Whether the queued media reaches the hold past `timestamp`.
 	#covered(timestamp: number): boolean {
 		if (this.#hold === 0) return true;
-		return this.#received !== undefined && this.#received >= timestamp + this.#hold;
+		return this.#queued !== undefined && this.#queued >= timestamp + this.#hold;
 	}
 
 	#admit(timestamp: Micro): boolean {
@@ -285,11 +287,13 @@ export class AudioBuffer {
 	}
 
 	/**
-	 * Note the newest media timestamp received, decoded or not, or undefined until one is. The
-	 * media is what covers the part of the target held encoded.
+	 * Note the newest media timestamp queued ahead of the decoder, or undefined once none is. The
+	 * queue is what covers the part of the target held encoded, so it is what resumes a parked ring.
 	 */
-	received(newest: Micro | undefined): void {
-		this.#backpressure.received(newest);
+	queued(newest: Micro | undefined): void {
+		if (!this.#backpressure.queued(newest)) return;
+		const msg: Latency = { type: "latency", latency: this.#latency() };
+		this.#worklet.port.postMessage(msg);
 	}
 
 	/**

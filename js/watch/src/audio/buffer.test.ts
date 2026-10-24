@@ -283,9 +283,9 @@ describe("Backpressure", () => {
 		const gate = new Backpressure(1000, false, Milli(2000));
 		gate.observe(ms(0), false);
 		const wait = gate.wait(ms(1000), new AbortController().signal);
-		gate.received(ms(2499));
+		gate.queued(ms(2499));
 		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.received(ms(2500));
+		gate.queued(ms(2500));
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
 	});
 
@@ -293,7 +293,7 @@ describe("Backpressure", () => {
 		const gate = new Backpressure(1000, true, Milli(2000));
 		gate.observe(ms(0), false);
 		const wait = gate.wait(ms(1000), new AbortController().signal);
-		gate.received(ms(60_000));
+		gate.queued(ms(60_000));
 		expect(Bun.peek.status(wait)).toBe("pending");
 		gate.observe(ms(500), false);
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
@@ -302,9 +302,9 @@ describe("Backpressure", () => {
 	it("starts a stalled ring only once the queued media covers the hold", () => {
 		const gate = new Backpressure(1000, true, Milli(2000));
 		const wait = gate.wait(ms(0), new AbortController().signal);
-		gate.received(ms(1499));
+		gate.queued(ms(1499));
 		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.received(ms(1500));
+		gate.queued(ms(1500));
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
 	});
 
@@ -312,34 +312,32 @@ describe("Backpressure", () => {
 	// outright would overflow the fixed ring before the worklet reports it playing.
 	it("refills a covered buffered ring only to its floor", () => {
 		const gate = new Backpressure(1000, true, Milli(2000));
-		gate.received(ms(60_000));
+		gate.queued(ms(60_000));
 		const signal = new AbortController().signal;
 		expect(Bun.peek.status(gate.wait(ms(0), signal))).toBe("fulfilled");
 		expect(Bun.peek.status(gate.wait(ms(500), signal))).toBe("fulfilled");
 		expect(Bun.peek.status(gate.wait(ms(520), signal))).toBe("pending");
 	});
 
-	// A park holds the ring until its next write, so it starts a fresh refill: the frames a refill
-	// released before the ring reported playing must not hold back the write that resumes it.
-	it("releases the frame that resumes a buffered ring parked after a refill", () => {
+	// A refill that released its floor before the ring reported playing holds the next frame back, so
+	// no write could end the park. The queued media covering the hold is what ends it, once.
+	it("resumes a park once the queued media covers the hold", () => {
 		const gate = new Backpressure(1000, true, Milli(1000));
-		gate.received(ms(1000));
+		expect(gate.queued(ms(1000))).toBe(false);
 		const signal = new AbortController().signal;
 		for (let t = 0; t <= 500; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
 		gate.observe(ms(0), true);
 		expect(gate.setLatency(Milli(2000))).toBe(true);
-		const wait = gate.wait(ms(520), signal);
-		gate.received(ms(2019));
-		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.received(ms(2020));
-		expect(Bun.peek.status(wait)).toBe("fulfilled");
+		expect(gate.queued(ms(1999))).toBe(false);
+		expect(gate.queued(ms(2000))).toBe(true);
+		expect(gate.queued(ms(3000))).toBe(false);
 	});
 
 	// An utterance that arrived whole before the reset changes nothing queued, so nothing would
 	// report it again: forgetting it would hold its first frame until the next utterance.
 	it("keeps what is queued across a reset", () => {
 		const gate = new Backpressure(1000, true, Milli(2000));
-		gate.received(ms(5000));
+		gate.queued(ms(5000));
 		gate.observe(ms(0), false);
 		gate.reset();
 		expect(Bun.peek.status(gate.wait(ms(0), new AbortController().signal))).toBe("fulfilled");
@@ -394,9 +392,9 @@ describe("AudioBuffer past its decoded floor", () => {
 			// The ring holds 500 ms decoded; the rest of the hour waits upstream.
 			const hold = HOUR - 500;
 			const wait = buffer.wait(ms(0), new AbortController().signal);
-			buffer.received(ms(hold - 1));
+			buffer.queued(ms(hold - 1));
 			expect(Bun.peek.status(wait)).toBe("pending");
-			buffer.received(ms(hold));
+			buffer.queued(ms(hold));
 			expect(Bun.peek.status(wait)).toBe("fulfilled");
 		} finally {
 			buffer.close();
@@ -415,7 +413,7 @@ describe("AudioBuffer past its decoded floor", () => {
 				const { buffer, sent, state } = fake(Milli(1000));
 				try {
 					state(ms(100), stalled, 0);
-					buffer.received(ms(queued));
+					buffer.queued(ms(queued));
 					buffer.setLatency(Milli(1500));
 					expect(sent.slice(1)).toEqual([
 						{ type: "latency", latency: Milli(500), ...(parked ? { park: 1 } : {}) },
@@ -428,19 +426,20 @@ describe("AudioBuffer past its decoded floor", () => {
 	}
 
 	// The ring resumes on any floor update without a park, so a fall that leaves the remaining hold
-	// uncovered parks again, and one the queued media covers lets the ring resume.
+	// uncovered parks again, and the queued media covering it resumes the ring.
 	it("keeps a park across a fall until the queued media covers the hold", () => {
 		const { buffer, sent, state } = fake(Milli(1000));
 		try {
 			state(ms(0), false, 0);
-			buffer.received(ms(1000));
+			buffer.queued(ms(1000));
 			buffer.setLatency(Milli(2000));
 			buffer.setLatency(Milli(1800));
-			buffer.received(ms(1800));
+			buffer.queued(ms(1800));
 			buffer.setLatency(Milli(1600));
 			expect(sent.slice(1)).toEqual([
 				{ type: "latency", latency: Milli(500), park: 1 },
 				{ type: "latency", latency: Milli(500), park: 2 },
+				{ type: "latency", latency: Milli(500) },
 				{ type: "latency", latency: Milli(500) },
 			]);
 		} finally {
@@ -453,7 +452,7 @@ describe("AudioBuffer past its decoded floor", () => {
 		const { buffer, state } = fake(Milli(1000));
 		try {
 			state(ms(200), false, 0);
-			buffer.received(ms(1599));
+			buffer.queued(ms(1599));
 			buffer.setLatency(Milli(1500));
 			const wait = buffer.wait(ms(700), new AbortController().signal);
 			state(ms(200), false, 0);

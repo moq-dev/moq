@@ -155,14 +155,15 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	// The decode gate, and the worklet's ring on the floor it sets, the way `AudioBuffer` drives both.
 	const gate = new Backpressure(rate, false, delay);
 	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, gate.floor) });
-	const observe = () => gate.observe(ring.timestamp, ring.stalled);
+	const observe = () => gate.observe(ring.anchored ? ring.timestamp : undefined, ring.stalled);
 
-	// Arrived media, read or still in the consumer, is what covers the part of the target held encoded.
+	// Arrived but not yet decoded media, read or still in the consumer, is what covers the part of the
+	// target held encoded, and what resumes a parked ring.
 	const read = new Signal<Micro | undefined>(undefined);
 	signals.run((effect) => {
 		let newest = effect.get(read);
 		for (const { end } of effect.get(consumer.buffered)) newest = Math.max(newest ?? 0, micros(end)) as Micro;
-		gate.received(newest);
+		if (gate.queued(newest)) ring.setLatency(millis(rate, gate.floor));
 	});
 
 	// The decoder's read loop, with the codec taken out. A failure is rethrown at the next quantum.

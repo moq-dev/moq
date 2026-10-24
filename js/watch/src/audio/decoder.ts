@@ -477,7 +477,10 @@ export class Decoder {
 			decoder.configure(decoderConfig);
 
 			const order = this.#order();
-			const play = (reads: FrameRead[]) => this.#play(effect, decoder, decoderConfig, order, reads);
+			const play = (reads: FrameRead[]) => {
+				read.set(order.newest(reads) as Micro | undefined);
+				return this.#play(effect, decoder, decoderConfig, order, reads);
+			};
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (next?.kind !== "frame") {
@@ -493,7 +496,6 @@ export class Decoder {
 					continue;
 				}
 				const { frame } = next;
-				read.set(frame.timestamp as Micro);
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
@@ -562,7 +564,10 @@ export class Decoder {
 			decoder.configure(decoderConfig);
 
 			const order = this.#order();
-			const play = (reads: FrameRead[]) => this.#play(effect, decoder, decoderConfig, order, reads);
+			const play = (reads: FrameRead[]) => {
+				read.set(order.newest(reads) as Micro | undefined);
+				return this.#play(effect, decoder, decoderConfig, order, reads);
+			};
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (next?.kind !== "frame") {
@@ -578,7 +583,6 @@ export class Decoder {
 					continue;
 				}
 				const { frame } = next;
-				read.set(frame.timestamp);
 
 				const timestamp = Milli.fromMicro(frame.timestamp);
 				const late = this.sync.received(timestamp, frame.arrival);
@@ -685,10 +689,10 @@ export class Decoder {
 			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
 
-		// What has arrived is what covers the part of the target held encoded, so the decode loop's
-		// held frame is released once enough is queued behind it. That includes frames the loop has
-		// read but not decoded yet: a buffered head waits in the reorder buffer until it spans the
-		// whole target, leaving the consumer empty.
+		// What has arrived but not been decoded is what covers the part of the target held encoded, so
+		// the decode loop's held frame is released once enough is queued behind it. That includes the
+		// frames the loop has read but not decoded yet: a buffered head waits in the reorder buffer
+		// until it spans the whole target, leaving the consumer empty.
 		const read = new Signal<Micro | undefined>(undefined);
 		effect.run((inner) => {
 			const ring = inner.get(this.#ring);
@@ -698,7 +702,7 @@ export class Decoder {
 				const micro = Micro.fromMilli(end);
 				if (newest === undefined || micro > newest) newest = micro;
 			}
-			ring.received(newest);
+			ring.queued(newest);
 		});
 
 		// Feed the arrival estimate into the playout target. It outlives this consumer, so the target

@@ -9,6 +9,8 @@ export class AudioRingBuffer {
 	readonly rate: number;
 	readonly channels: number;
 	#stalled = true;
+	// Held stalled for the part of the target above the floor, until the next floor update.
+	#parked = false;
 	#underruns = 0;
 
 	// Samples in the most recent write, i.e. one decoded chunk. The overflow band tolerates this
@@ -80,7 +82,7 @@ export class AudioRingBuffer {
 		return this.#buffer[0]?.length;
 	}
 
-	/** Move the floor, which never exceeds the fixed capacity. */
+	/** Move the floor, which never exceeds the fixed capacity, and end a park. */
 	setLatency(latency: Milli): void {
 		const latencySamples = Math.ceil(this.rate * Second.fromMilli(latency));
 		if (latencySamples <= 0) throw new Error("empty buffer");
@@ -92,6 +94,7 @@ export class AudioRingBuffer {
 		// already covers the new floor.
 		if (latencySamples > this.#latencySamples) this.#stalled = true;
 		this.#latencySamples = latencySamples;
+		this.#parked = false;
 
 		// Resume a refill that the buffer already covers, which `write` would only notice on the
 		// next frame, never for a source that has stopped.
@@ -99,14 +102,15 @@ export class AudioRingBuffer {
 	}
 
 	/**
-	 * Hold playback until the next write, keeping what is buffered.
+	 * Hold playback until the next floor update, keeping what is buffered.
 	 *
 	 * For a rise in the part of the target held encoded upstream: the ring already covers its floor,
-	 * so only the main thread knows when the received media covers the rest, and it releases the next
-	 * frame exactly then.
+	 * so only the main thread knows when the received media covers the rest. A write does not resume
+	 * it, since output decoded before the park may still land.
 	 */
 	park(): void {
 		this.#stalled = true;
+		this.#parked = true;
 	}
 
 	write(timestamp: Micro, data: Float32Array[]): void {
@@ -188,9 +192,9 @@ export class AudioRingBuffer {
 		}
 
 		// Start playback once we've buffered the latency target. This is the only way out of a
-		// stall, so an underrun mid-playback refills to the target before resuming rather than
-		// playing the next chunk on an empty cushion.
-		if (this.length >= this.#latencySamples) {
+		// stall but a park, so an underrun mid-playback refills to the target before resuming rather
+		// than playing the next chunk on an empty cushion.
+		if (!this.#parked && this.length >= this.#latencySamples) {
 			this.#stalled = false;
 		}
 	}
@@ -213,6 +217,7 @@ export class AudioRingBuffer {
 		this.#readIndex = 0;
 		this.#writeIndex = 0;
 		this.#stalled = true;
+		this.#parked = false;
 		this.#anchored = false;
 	}
 

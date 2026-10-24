@@ -415,7 +415,7 @@ describe("setLatency", () => {
 });
 
 describe("park", () => {
-	it("holds a covered ring until the next write, keeping what it buffered", () => {
+	it("holds a covered ring until the next floor update, keeping what it buffered", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 50 as Milli });
 		write(buffer, 0 as Milli, 100, { channels: 1, value: 1.0 });
 		expect(read(buffer, 10, 1)[0].length).toBe(10);
@@ -424,9 +424,12 @@ describe("park", () => {
 		expect(buffer.stalled).toBe(true);
 		expect(read(buffer, 10, 1)[0].length).toBe(0);
 
-		// The main thread releases the next frame only once the media it holds encoded covers the
-		// target, so that write is what resumes playback.
+		// Output decoded before the park can still land, so a write does not resume it.
 		write(buffer, 100 as Milli, 10, { channels: 1, value: 2.0 });
+		expect(buffer.stalled).toBe(true);
+
+		// The main thread knows when the media it holds encoded covers the target.
+		buffer.setLatency(50 as Milli);
 		expect(buffer.stalled).toBe(false);
 		expect(read(buffer, 10, 1)[0]).toEqual(new Float32Array(10).fill(1.0));
 	});
