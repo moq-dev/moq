@@ -27,7 +27,7 @@ breaks one API once.
   `map_fetch_error`, moq-c `NOT_FOUND`); a fetched `Old` becomes a miss too,
   where relay HTTP answers 500 and moq-c reports `OLD` today. Both stay as wire
   stream errors, and `Old` still aborts a cut group mid-read.
-  Each affected package gets a `MIGRATE.md` entry.
+  The Impact bullet says how to migrate each affected package.
 - A one-range subscription for a cached live group missing the frames its
   range starts at needs a head fill. Frame bounds
   ([moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129)) hand such a

@@ -555,6 +555,54 @@ void main() {
     broadcast.close();
   });
 
+  test('JSON window yields pushes and pops in order', () async {
+    final broadcast = MoqBroadcastProducer();
+    final producer = moq_json.WindowProducer(
+      track: broadcast.publishTrack(
+        name: 'log',
+        info: MoqTrackInfo(timescale: 1000000),
+      ),
+      config: moq_json.WindowConfig(compression: true),
+    );
+    final track = await broadcast
+        .consume()
+        .subscribeTrack(name: 'log', subscription: null)
+        .timeout(timeout);
+    final consumer = moq_json.WindowConsumer(
+      track: track,
+      config: moq_json.WindowConfig(compression: true),
+    );
+
+    for (var n = 0; n < 3; n++) {
+      producer.push(value: jsonEncode({'n': n}), timestampUs: n * 1000);
+    }
+    producer.pop(count: 2, timestampUs: 3000);
+
+    for (var n = 0; n < 3; n++) {
+      final timed = await consumer.next().timeout(timeout);
+      final push = timed!.event as moq_json.WindowEventPush;
+      expect(push.index, n);
+      expect(jsonDecode(push.value), {'n': n});
+      expect(timed.timestampUs, n * 1000);
+    }
+    final timed = await consumer.next().timeout(timeout);
+    final pop = timed!.event as moq_json.WindowEventPop;
+    expect([pop.start, pop.end], [0, 2]);
+    expect(timed.timestampUs, 3000);
+
+    // The cut's new group restates record 2, which this reader already has.
+    producer.cut();
+    producer.push(value: jsonEncode({'n': 3}), timestampUs: 4000);
+    final pushed = await consumer.next().timeout(timeout);
+    final push = pushed!.event as moq_json.WindowEventPush;
+    expect(push.index, 3);
+    expect(pushed.timestampUs, 4000);
+
+    producer.finish();
+    expect(await consumer.next().timeout(timeout), isNull);
+    broadcast.close();
+  });
+
   test('decoded video frame owns its picture', () async {
     final broadcast = BroadcastProducer();
     final video = moq_video.Producer(

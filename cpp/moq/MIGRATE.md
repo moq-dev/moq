@@ -4,10 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Generated free functions drop the `moq_` prefix (#6476)
+### Connection state
 
-`moq::moq_foo` is `moq::foo`, the name `moq.hpp` already wrapped most of them as; `moq::moq_epoch_time_ms` is `moq::epoch_time_ms`.
-Regenerate the C++ bindings with `uniffi-bindgen-cpp` `v0.11.0-kixelated.6+v0.32.2`.
+`Client::connect` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `state_changed(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
 
 ### Exact encoder rates and publication options
 
