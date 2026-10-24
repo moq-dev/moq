@@ -19,7 +19,7 @@ The generator is a fork, [kixelated/uniffi-bindgen-cpp](https://github.com/kixel
 ```bash
 cargo install uniffi-bindgen-cpp --locked \
     --git https://github.com/kixelated/uniffi-bindgen-cpp \
-    --tag v0.11.0-kixelated.6+v0.32.2
+    --rev 2e9dd2b2678a70e5557aba4f8f972753362ce9db
 ```
 
 `flake.nix` pins the same tag and lists every other place that names it.
