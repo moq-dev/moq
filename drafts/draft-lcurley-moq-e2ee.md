@@ -354,6 +354,9 @@ No state survives an instance: nothing needs to be persisted across restarts to 
 Empty AAD does not weaken the binding: every immutable end-to-end field is in the HKDF info or the nonce.
 Timestamps are excluded because relays rewrite them; a relay can therefore shift or reorder authentic objects in time within a receiver's tolerance.
 
+Nothing authenticates where a group ends.
+A relay can end a group after any frame, and a receiver cannot tell the truncated group from a shorter one, so an application MUST NOT rely on group completeness.
+
 The opaque path segment is a deterministic function of the secret and semantic broadcast name; physical track names are deterministic functions of the secret and epoch.
 An attacker without the secret cannot predict them; an attacker with the secret can derive every name, which is intended.
 
