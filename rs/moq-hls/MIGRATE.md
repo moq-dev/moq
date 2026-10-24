@@ -4,11 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Playlist and manifest wall times use `moq_clock::Wall`
+### Denied broadcast references report authorization failure
 
-Program date times, MPD availability and publish times, and `export::Renditions::anchor` use `moq_clock::Wall` instead of `SystemTime`.
-Pass `moq_clock::wall()` for now, convert third-party timestamps with `Wall::try_from`, and pass `wall.into()` to formatters that take `SystemTime`.
-HLS and DASH text encodings are unchanged.
+A rendition whose referenced broadcast is outside the source origin's scope now
+returns `Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized))` from
+playlist (ranged too), init and segment reads, and from the segment cursor,
+instead of behaving like missing media.
+`Broadcaster::ready` and `Rendition::playable` settle on that refusal. Embedders
+should answer it with an uncacheable 403; the HTTP server does so automatically.
+Allowed renditions keep serving, and missing or disconnected media remains 404.
 
 ### A failed timeline fails the segment cursor
 

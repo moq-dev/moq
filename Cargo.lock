@@ -5111,6 +5111,7 @@ dependencies = [
  "http-body",
  "http-cache-reqwest",
  "humantime",
+ "humantime-serde",
  "hyper-util",
  "libc",
  "moq-auth 0.2.1",
@@ -5332,6 +5333,7 @@ dependencies = [
  "hmac 0.13.0",
  "http",
  "humantime",
+ "humantime-serde",
  "if-addrs",
  "jni 0.22.4",
  "kio 0.6.2",
@@ -11132,9 +11134,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-proto"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a81bcc79bf48ad0b819bfa51ec28524ee7c356056d43c316727d6b505dcc71e"
+checksum = "d2baf87f7a4701d964fd23529b440db3da535b1d7539289f7a463c3481dafcff"
 dependencies = [
  "bytes",
  "http",

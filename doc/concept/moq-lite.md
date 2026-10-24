@@ -236,6 +236,15 @@ JSON snapshot). Groups can also be fetched by sequence number, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 
+Native Rust subscriptions, track queries, fetches, and announcement interest on
+QUIC, WebTransport, or qmux fail locally when the peer has granted no stream
+credit, without retrying. Iroh still waits; browser-backed Rust retains the
+browser's behavior. Once admitted, these requests have no answer deadline:
+each lasts until answered, its demand leaves, or its session closes.
+Announcement-interest refusal is logged and releases discovery sync. The merged
+announcement listing keeps its existing event and sync API, with no per-source
+error result, and continues receiving announcements from unrelated sources.
+
 Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |

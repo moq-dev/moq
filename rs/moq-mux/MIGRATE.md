@@ -4,11 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Wall anchors use `moq_clock::Wall`
+### TS service information expires on the program clock
 
-`Clock::{at,wall_clock}` and `catalog::Timebase::place` use `moq_clock::Wall` in place of `SystemTime`.
-Pass `moq_clock::wall()` for the current wall, use `Wall::try_from(system_time)?` for a third-party timestamp, and convert returned values with `SystemTime::from` only at a third-party boundary.
-The portable wall range is 1970-2554; catalog encodings are unchanged.
+TS import retracts SI sub-tables and incomplete generations that stop repeating within their table's maximum interval (30 seconds for unknown tables).
+Repeat current tables within that interval; stale tables no longer remain advertised indefinitely.
+Host time and stalled PCR do not age SI, and existing readers can finish snapshots they already hold.
 
 ### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
 

@@ -4,12 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Certificate expiry uses `moq_clock::Wall`
-
-`tls::PeerIdentity::expiry` returns `Option<moq_clock::Wall>` in place of `Option<SystemTime>`.
-Convert with `SystemTime::from` only where a third-party API needs it.
-A `notAfter` past 2554, such as rcgen's default year 4096, saturates to the last representable `Wall`, and one before 1970 to `Wall::UNIX_EPOCH`.
-
 ### The connection receive window is 128 MiB, and has a floor (#5878)
 
 `quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.

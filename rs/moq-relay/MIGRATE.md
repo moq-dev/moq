@@ -5,12 +5,6 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
-### Session start times use `moq_clock::Wall`
-
-`session::View::started` uses `moq_clock::Wall` instead of `SystemTime`.
-Convert with `SystemTime::from` at a third-party boundary, or measure since `Wall::UNIX_EPOCH` with `saturating_duration_since`.
-The session JSON still carries integer Unix seconds.
-
 ### Auth `server_name` is the SNI only (#6509)
 
 The auth request's `server_name` no longer falls back to the HTTP `Host` header, `:authority`, or the WebTransport CONNECT host: it is absent over plain `http://` and `ws://` and for an IP-literal dial, while HTTPS and `wss://` report the SNI.

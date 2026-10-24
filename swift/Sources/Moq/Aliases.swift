@@ -94,8 +94,11 @@ public typealias CongestionControl = MoqFFI.MoqCongestionControl
 /// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.
 public typealias WebSocketConfig = MoqFFI.MoqWebSocketConfig
 
-/// A connection lifecycle transition reported by `Session.status()`.
-public typealias ConnectionStatus = MoqFFI.MoqConnectionStatus
+/// The connection lifecycle phase.
+public typealias ConnectionPhase = MoqFFI.MoqConnectionPhase
+
+/// One coherent connection lifecycle snapshot.
+public typealias ConnectionState = MoqFFI.MoqConnectionState
 
 /// The network transport carrying an incoming session.
 public typealias Transport = MoqFFI.MoqTransport

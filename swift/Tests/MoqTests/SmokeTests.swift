@@ -380,6 +380,42 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
+    func testJsonWindowRoundTrip() async throws {
+        struct Event: Codable, Equatable {
+            let n: Int
+        }
+
+        let broadcast = try BroadcastProducer()
+        let producer = try Json.WindowProducer<Event>(
+            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000)), compression: true)
+        let consumer = try Json.WindowConsumer<Event>(
+            track: try await broadcast.consume().subscribeTrack(name: "log"), compression: true)
+
+        for n in 0..<3 {
+            try producer.push(Event(n: n), timestampUs: UInt64(n) * 1000)
+        }
+        try producer.pop(2, timestampUs: 3000)
+
+        for n in 0..<3 {
+            let event = try await consumer.next()
+            XCTAssertEqual(
+                event, Json.Timed(value: .push(index: UInt64(n), value: Event(n: n)), timestampUs: UInt64(n) * 1000))
+        }
+        let pop = try await consumer.next()
+        XCTAssertEqual(pop, Json.Timed(value: .pop(0..<2), timestampUs: 3000))
+
+        // The cut's new group restates record 2, which this reader already has.
+        try producer.cut()
+        try producer.push(Event(n: 3), timestampUs: 4000)
+        let pushed = try await consumer.next()
+        XCTAssertEqual(pushed, Json.Timed(value: .push(index: 3, value: Event(n: 3)), timestampUs: 4000))
+
+        try producer.finish()
+        let end = try await consumer.next()
+        XCTAssertNil(end)
+        try broadcast.close()
+    }
+
     func testJsonProducersReportDemand() async throws {
         let broadcast = try BroadcastProducer()
         let snapshot = try Json.SnapshotProducer<[String: Int]>(

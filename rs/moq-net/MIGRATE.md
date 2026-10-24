@@ -4,13 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Epoch wall time is a fallible `moq_clock::Wall`
-
-`Epoch::time` returns `Result<moq_clock::Wall, moq_clock::OutOfRange>` instead of `SystemTime`.
-Use `epoch.time()?` and convert with `SystemTime::from` only at a third-party API boundary.
-Every canonical UUIDv7 remains a valid identity, including one whose 48-bit timestamp is later than Wall's year 2554 limit; only its wall-time view fails.
-Epoch text, ordering, bytes, and protocol acceptance are unchanged.
-
 ### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
 Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
@@ -446,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)

@@ -4,12 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Public wall times use `moq_clock::Wall`
-
-`catalog::Clock::wall_clock` and `echo::Arrival::{wall,new}` use `moq_clock::Wall` in place of `SystemTime`.
-Read the ambient wall with `moq_clock::wall()`, convert a third-party `SystemTime` with `Wall::try_from`, and convert back with `SystemTime::from` at that API's boundary.
-Times outside 1970-2554 fail with `TimestampOverflow`; catalog and echo JSON units are unchanged.
-
 ### `Catalog` parses through `FromStr` (#6471)
 
 The inherent `Catalog::from_str` is replaced by `impl FromStr for Catalog`, with the same `Error`.

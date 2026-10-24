@@ -39,4 +39,4 @@ Public API: moq-mux gains the helper. moq-cli gains `--linger` on publishing
 subcommands; `moq export --linger` keeps its meaning until
 [TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md)
 renames it. moqsink's `linger` returns as a duration (the boolean never
-shipped in a release, so no MIGRATE entry). Wire: none.
+shipped in a release, so no migration note). Wire: none.

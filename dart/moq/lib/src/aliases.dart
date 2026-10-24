@@ -28,6 +28,9 @@ typedef Transport = MoqTransport;
 /// The congestion control family for a QUIC connection.
 typedef CongestionControl = MoqCongestionControl;
 
+/// Certificate trust and the mTLS identity for `ConnectOptions.tls`.
+typedef ClientTls = MoqClientTls;
+
 /// The publish side of an origin: create broadcasts so subscribers can discover them.
 typedef OriginProducer = MoqOriginProducer;
 
@@ -160,8 +163,11 @@ typedef AuthToken = MoqAuthToken;
 /// What the peer lets this side do: publish and subscribe patterns, and an expiry.
 typedef Grant = MoqGrant;
 
-/// A connection lifecycle transition reported by [Session.status].
-typedef ConnectionStatus = MoqConnectionStatus;
+/// A connection lifecycle transition reported by [Session.state].
+typedef ConnectionPhase = MoqConnectionPhase;
+
+/// One coherent connection lifecycle snapshot.
+typedef ConnectionState = MoqConnectionState;
 
 /// Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
 typedef Backoff = MoqBackoff;

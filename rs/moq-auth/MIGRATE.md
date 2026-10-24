@@ -4,14 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Claim and grant times use `moq_clock::Wall`
-
-`Claims::{expires,issued,not_before}`, their builder arguments, `Grant::expires`, and `request::Peer::expires` use `moq_clock::Wall` instead of `SystemTime`.
-Stamp them with `moq_clock::wall()`, or use `Wall::try_from` for third-party timestamps.
-JWT and auth JSON still encode integer Unix seconds, with the same rounding.
-Decoding saturates on every platform: a time before 1970 reads as `Wall::UNIX_EPOCH` and one past 2554 as the last representable `Wall`, so expiry checks are unchanged.
-That last `Wall` encodes as `18446744074`, so an auth server now sees a relay's certificate expiry past 2554, such as rcgen's default year 4096, as that value.
-
 ### `serve::Refusal` is `serve::Denial` (#6510)
 
 The reference server's policy failure is `serve::Denial`, so `Refusal` names only the shared 403 body, `moq_auth::Refusal`.

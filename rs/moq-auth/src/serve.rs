@@ -54,6 +54,35 @@ pub struct Limits {
 	pub remote: Option<usize>,
 }
 
+/// A verified certificate's cluster-link role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+	/// A cluster peer that may exchange routes in either direction.
+	Peer,
+	/// A peer that is never offered routes learned from another upstream.
+	Upstream,
+}
+
+impl std::str::FromStr for Link {
+	type Err = &'static str;
+	fn from_str(value: &str) -> Result<Self, Self::Err> {
+		match value {
+			"peer" => Ok(Self::Peer),
+			"upstream" => Ok(Self::Upstream),
+			_ => Err("expected peer or upstream"),
+		}
+	}
+}
+
+impl std::fmt::Display for Link {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(match self {
+			Self::Peer => "peer",
+			Self::Upstream => "upstream",
+		})
+	}
+}
+
 /// The decisions the server answers with, evaluated in order and stopping at the
 /// first that applies: a JWT, then a verified certificate, then the anonymous rules.
 /// A malformed or expired token is a refusal, never a fall through.
@@ -81,12 +110,9 @@ pub struct Policy {
 	/// What a session presenting a verified certificate is granted, rooted at `/`;
 	/// empty refuses it.
 	pub mtls: Permissions,
-	/// Mark every session presenting a verified certificate as a cluster
-	/// [peer](Grant::peer), for a mesh whose relays dial each other with mTLS.
-	pub mtls_peer: bool,
-	/// Mark every certificate's peer as [upstream](Grant::upstream) too. Requires
-	/// [`mtls_peer`](Self::mtls_peer).
-	pub mtls_upstream: bool,
+	/// The cluster-link role granted only to sessions presenting a verified certificate.
+	pub mtls_link: Option<Link>,
+
 	/// The tier stamped on every grant.
 	pub tier: Option<String>,
 	/// How often the relay re-checks each grant; `None` never re-checks. The contract
@@ -237,8 +263,8 @@ impl Policy {
 		};
 		grant.revalidate = self.revalidate;
 		grant.tier = self.tier.clone();
-		grant.peer = certificate && self.mtls_peer;
-		grant.upstream = certificate && self.mtls_upstream;
+		grant.peer = certificate && self.mtls_link.is_some();
+		grant.upstream = certificate && self.mtls_link == Some(Link::Upstream);
 		Ok((grant, root))
 	}
 
@@ -428,11 +454,8 @@ pub struct Server {
 impl Server {
 	/// A server answering with `policy`, refusing one that asks for a re-check without
 	/// a bound, bounds grants past the clock's range, caps sessions without the
-	/// re-check that ages out a dead relay's, or marks an upstream that is not a peer.
+	/// re-check that ages out a dead relay's,.
 	pub fn new(policy: Policy) -> crate::Result<Self> {
-		if policy.mtls_upstream && !policy.mtls_peer {
-			return Err(crate::Error::UpstreamWithoutPeer);
-		}
 		if policy.revalidate.is_some() && policy.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
 		}
@@ -957,7 +980,7 @@ mod tests {
 		assert_eq!(policy.decide(&request("/")).await.unwrap_err(), Denial::NoPublicGrant);
 	}
 
-	/// `mtls_peer` and `mtls_upstream` mark a certificate's grant, and only a certificate's.
+	/// The link role marks only a certificate's grant, never an anonymous session or JWT.
 	#[tokio::test]
 	async fn mtls_peer_marks_only_certificates() {
 		let (dir, key) = key_dir();
@@ -965,14 +988,14 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			public: rules(&["**"], &["**"]),
 			mtls: rules(&["**"], &["**"]),
-			mtls_peer: true,
+			mtls_link: Some(Link::Peer),
 			..Default::default()
 		};
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
 		assert!(grant.peer && !grant.upstream);
 
 		let policy = Policy {
-			mtls_upstream: true,
+			mtls_link: Some(Link::Upstream),
 			..policy
 		};
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
@@ -985,15 +1008,23 @@ mod tests {
 		assert!(!grant.peer && !grant.upstream);
 	}
 
-	/// An upstream that is not a peer would answer grants every relay refuses.
-	#[test]
-	fn a_server_refuses_an_upstream_that_is_not_a_peer() {
-		let policy = Policy {
-			mtls: rules(&["**"], &["**"]),
-			mtls_upstream: true,
-			..Default::default()
-		};
-		assert!(matches!(Server::new(policy), Err(Error::UpstreamWithoutPeer)));
+	/// Every representable mTLS link role produces a valid wire grant.
+	#[tokio::test]
+	async fn mtls_link_roles_preserve_the_grant_contract() {
+		for (link, peer, upstream) in [
+			(None, false, false),
+			(Some(Link::Peer), true, false),
+			(Some(Link::Upstream), true, true),
+		] {
+			let policy = Policy {
+				mtls: rules(&["**"], &["**"]),
+				mtls_link: link,
+				..Default::default()
+			};
+			let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
+			assert_eq!((grant.peer, grant.upstream), (peer, upstream));
+			grant.validate().unwrap();
+		}
 	}
 
 	/// A certificate would override a JWT meant to narrow it, and a JWT would narrow or

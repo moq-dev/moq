@@ -10,12 +10,6 @@ The `mux` module is hidden from public API documentation; use the `qmux` crate f
 
 Each entry is a change from `quinn-proto`.
 
-### Wall times use `moq_clock::Wall`
-
-`TimeSource::now` and `TokenLog::check_and_insert` take or return `moq_clock::Wall` in place of `SystemTime`.
-Custom clocks return `moq_clock::wall()` or convert third-party timestamps with `Wall::try_from`.
-The wall range is 1970-2554; encoded token seconds are unchanged, and out-of-range issue times or expiry arithmetic refuse a token instead of overflowing.
-
 ### `StreamEvent::Acked` (#5817)
 
 `StreamEvent` gained `Acked { id, offset }`, reported when the answer changes for the lowest offset a `SendStream::acked` call is waiting for: the stream's acknowledged prefix reached it, or `STOP_SENDING` or a reset made it fail.

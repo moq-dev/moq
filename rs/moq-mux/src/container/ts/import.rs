@@ -400,6 +400,10 @@ impl<E: catalog::Catalog> Import<E> {
 					self.liveness.pcr(pcr);
 					if let Some(now) = self.liveness.now() {
 						self.health.tick(now);
+						self.si.advance(
+							std::time::Duration::from_secs(now / PCR_HZ)
+								+ std::time::Duration::from_nanos((now % PCR_HZ) * 1_000 / 27),
+						);
 					}
 					if self.supports_mpegts {
 						let ready = self.mux_rate.ready();
