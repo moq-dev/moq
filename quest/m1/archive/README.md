@@ -24,7 +24,7 @@ archive (per-track `.timeline.z` records named by the catalog's root
   layout and catalog section are deleted with no version bump or migration
   path; an old prefix holds no keys the new consumer recognizes and is
   refused as empty. This supersedes the earlier rule to preserve the v1 and v2
-  formats. Add the `moq-archive` and `hang` entries to their `MIGRATE.md`.
+  formats. The Impact bullet says how to migrate in `moq-archive` and `hang`.
 - **Discovery is pull**, decided 2026-10-19 in place of SUBSCRIBE_ALL's push:
   ANNOUNCE finds the broadcasts under a prefix, a moq-lite TRACKS request
   lists each broadcast's tracks as they appear, and the archive SUBSCRIBEs per

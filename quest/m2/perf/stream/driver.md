@@ -46,7 +46,7 @@ tungstenite stays in this quest, driven from the one task (it runs over any
 change on its own.
 
 Public API: the constructor shape changes in `qmux`, `moq-tokio`, and any
-binding that starts a qmux session. Add `MIGRATE.md` entries.
+binding that starts a qmux session. The Impact bullet says how to migrate.
 
 ## Required
 

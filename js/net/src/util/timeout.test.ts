@@ -12,7 +12,7 @@ test("withTimeout: rejects with TimeoutError after deadline", async () => {
 		// never settles
 	});
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	try {
 		const timed = withTimeout(pending, Nano(10), "timed out").catch((err: unknown) => err);
 		await clock.advance(Nano(9));
@@ -20,7 +20,7 @@ test("withTimeout: rejects with TimeoutError after deadline", async () => {
 		await clock.advance(Nano(1));
 		expect(await timed).toBeInstanceOf(TimeoutError);
 	} finally {
-		restore();
+		installed.close();
 	}
 });
 

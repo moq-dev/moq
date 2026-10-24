@@ -1076,7 +1076,9 @@ export class Publisher {
 					hold.abort();
 				}
 				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
-				group = await wireOf(front).fetchGroup(msg.track, msg.group, {
+				const fetchGroup = wireOf(front).fetchGroup;
+				if (!fetchGroup) throw new Error("fetch group is not supported by the serving route's version");
+				group = await fetchGroup(msg.track, msg.group, {
 					priority: msg.priority,
 					maxDelay: msg.maxDelay,
 					signal: left.signal,

@@ -2227,8 +2227,7 @@ mod tests {
 				request_id: RequestId(0),
 			};
 			let size = msg.encode_bytes(version).unwrap().len() as u64;
-			virtual_stream.writer.buffer_varint(ietf::FetchCancel::ID).unwrap();
-			virtual_stream.writer.encode(&msg).await.unwrap();
+			virtual_stream.writer.encode_message(&msg).await.unwrap();
 			let raw = adapter.shared.control.pop().await.unwrap();
 			let log = Log::default();
 			let mut physical = Writer::new(

@@ -2,10 +2,11 @@
 // against the workspace moq-c (the C bindings, built by `cargo build -p moq-c`).
 //
 // moq-c is a handle + callback API: connect, consume a broadcast, get a
-// catalog snapshot via callback, start the video track and the audio decoder,
-// and a callback fires as each frame arrives. Once a non-empty video frame has
-// landed and --audio-ms of audio has been decoded to --audio-out (for tone.py to
-// judge) we close and drain every registration, then return 0; a timeout exits 1.
+// catalog snapshot via callback, start the video track and a decoder per audio
+// rendition, and a callback fires as each frame arrives. Once a non-empty video
+// frame has landed and --audio-ms of every audio rendition has been decoded to
+// --audio-out.<codec> (for tone.py to judge) we close and drain every
+// registration, then return 0; a timeout exits 1.
 // --finish instead verifies the complete finite tail, clean media/catalog EOF,
 // withdrawal, and a live session.
 // Publishing isn't wired up: the raw-stream importer that the other clients use
@@ -37,7 +38,24 @@ typedef struct {
     const char *path;
 } finish_t;
 
+typedef struct ctx ctx_t;
+
+// One audio rendition's decoder, where it writes (PREFIX.<codec>.{txt,pcm}, the codec being the
+// catalog's up to its first `.`), and how much it has written. `got` is set once `samples`
+// reaches `want`, and `done` by the decoder's terminal callback.
 typedef struct {
+    ctx_t *ctx;
+    int32_t track;
+    FILE *log, *pcm;
+    uint64_t samples, want;
+    uint32_t frame_bytes;
+    int got, done;
+} audio_t;
+
+// The most audio renditions this client decodes; a catalog offering more fails it.
+#define MAX_AUDIO 4
+
+struct ctx {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     int got; // a non-empty frame arrived
@@ -49,25 +67,25 @@ typedef struct {
     int32_t catalog;
     int32_t video_track; // handle from moq_consume_video (0 until on_catalog starts it)
 
-    // The audio decoder (0 until on_catalog starts it), where it writes, and how
-    // much it has written. `audio_got` is set once `audio_samples` reaches `audio_want`.
-    int32_t audio_track;
-    FILE *audio_log, *audio_pcm;
-    uint64_t audio_ms, audio_samples, audio_want;
-    uint32_t audio_frame_bytes;
-    int audio_got;
+    // The audio decoders, started together by the first catalog with audio. `audio_error`
+    // names why they could not all start.
+    audio_t audio[MAX_AUDIO];
+    uint32_t audio_count;
+    const char *audio_out;
+    uint64_t audio_ms;
+    const char *audio_error;
 
     // One flag per registration handed &ctx, set by that registration's terminal
     // (<= 0) callback. main returns only once every registration is done: that terminal is
     // moq-c's documented last touch of user_data, so it is what makes main's
     // frame safe to destroy.
-    int done_status, done_broadcast, done_catalog, done_frame, done_audio;
-} ctx_t;
+    int done_status, done_broadcast, done_catalog, done_frame;
+};
 
 // Callbacks run on moq-c's runtime thread; main waits on the condvar. ctx lives
 // on main's stack and moq-c keeps the pointer until each registration's
 // terminal (<= 0) callback fires, so main must not return until every one of
-// them has. Closing the session ends its status registration alone;
+// them has. Closing the session ends its state registration alone;
 // moq_origin_announced_broadcast, moq_consume_catalog and moq_consume_video each
 // keep the pointer until their own terminal. See drain() at the bottom.
 static void done(ctx_t *c, int *flag) {
@@ -77,17 +95,18 @@ static void done(ctx_t *c, int *flag) {
     pthread_mutex_unlock(&c->mu);
 }
 
-static void on_status(void *ud, int32_t code) {
+static void on_state(void *ud, const moq_connection_state *state) {
     ctx_t *c = (ctx_t *)ud;
-    fprintf(stderr, "session status: %d\n", code);
-    if (c->finish.enabled && code > 0) {
+    fprintf(stderr, "session state: phase=%d connects=%llu failure=%d\n", (int)state->phase,
+            (unsigned long long)state->connects, state->failure);
+    if (c->finish.enabled && state->connects > 0) {
         pthread_mutex_lock(&c->mu);
-        c->finish.connected = code;
-        if (code > 1) c->finish.failed = 1;
+        c->finish.connected = (int)state->connects;
+        if (state->connects > 1) c->finish.failed = 1;
         pthread_cond_broadcast(&c->cv);
         pthread_mutex_unlock(&c->mu);
     }
-    if (code <= 0) done(c, &c->done_status);
+    if (state->phase == MOQ_CONNECTION_PHASE_CLOSED) done(c, &c->done_status);
 }
 
 static void on_frame(void *ud, int32_t frame) {
@@ -117,32 +136,110 @@ static void on_frame(void *ud, int32_t frame) {
     moq_consume_frame_free((uint32_t)frame);
 }
 
-// Writes each decoded audio frame to the files tone.py reads, until enough has arrived.
+// Writes each decoded audio frame to its rendition's files for tone.py, until enough has arrived.
 // Runs on moq-c's runtime thread, the only writer, so the files need no lock.
 static void on_audio(void *ud, int32_t frame) {
-    ctx_t *c = (ctx_t *)ud;
+    audio_t *a = (audio_t *)ud;
+    ctx_t *c = a->ctx;
     if (frame <= 0) { // 0 = ended, negative = error
         if (frame < 0) fprintf(stderr, "audio decode error: %d\n", frame);
-        done(c, &c->done_audio);
+        done(c, &a->done);
         return;
     }
     moq_audio_frame f;
     memset(&f, 0, sizeof(f));
-    if (moq_decode_audio_frame((uint32_t)frame, &f) == 0 && c->audio_samples < c->audio_want) {
-        uint64_t samples = f.data_size / c->audio_frame_bytes;
-        fprintf(c->audio_log, "%llu %llu\n", (unsigned long long)f.timestamp_us, (unsigned long long)samples);
-        fwrite(f.data, 1, f.data_size, c->audio_pcm);
-        c->audio_samples += samples;
-        if (c->audio_samples >= c->audio_want) {
-            fflush(c->audio_log);
-            fflush(c->audio_pcm);
+    if (moq_decode_audio_frame((uint32_t)frame, &f) == 0 && a->samples < a->want) {
+        uint64_t samples = f.data_size / a->frame_bytes;
+        fprintf(a->log, "%llu %llu\n", (unsigned long long)f.timestamp_us, (unsigned long long)samples);
+        fwrite(f.data, 1, f.data_size, a->pcm);
+        a->samples += samples;
+        if (a->samples >= a->want) {
+            fflush(a->log);
+            fflush(a->pcm);
             pthread_mutex_lock(&c->mu);
-            c->audio_got = 1;
+            a->got = 1;
             pthread_cond_broadcast(&c->cv);
             pthread_mutex_unlock(&c->mu);
         }
     }
     moq_decode_audio_frame_free((uint32_t)frame);
+}
+
+// Whether every audio rendition has decoded enough, once any has started. Called under the lock.
+static int audio_got(ctx_t *c) {
+    for (uint32_t i = 0; i < c->audio_count; i++) {
+        if (!c->audio[i].got) return 0;
+    }
+    return c->audio_count > 0;
+}
+
+// Whether every started audio decoder has delivered its terminal. Called under the lock.
+static int audio_done(ctx_t *c) {
+    for (uint32_t i = 0; i < c->audio_count; i++) {
+        if (!c->audio[i].done) return 0;
+    }
+    return 1;
+}
+
+// Opens one rendition's files exclusively, so two renditions of one codec fail rather than
+// overwrite each other. Returns why it could not, or NULL.
+static const char *open_audio(ctx_t *c, audio_t *a, const moq_audio_config *cfg) {
+    if (cfg->channel_count == 0) return "an audio rendition without channels";
+    size_t codec = 0;
+    while (codec < cfg->codec_len && cfg->codec[codec] != '.') codec++;
+    char path[4096];
+    snprintf(path, sizeof(path), "%s.%.*s.txt", c->audio_out, (int)codec, cfg->codec);
+    a->log = fopen(path, "wx");
+    snprintf(path, sizeof(path), "%s.%.*s.pcm", c->audio_out, (int)codec, cfg->codec);
+    a->pcm = fopen(path, "wbx");
+    if (!a->log || !a->pcm) return "cannot create an audio rendition's files (a second rendition of one codec?)";
+    a->ctx = c;
+    a->frame_bytes = 4 * cfg->channel_count;
+    a->want = c->audio_ms * cfg->sample_rate / 1000;
+    fprintf(a->log, "%u %u\n", cfg->sample_rate, cfg->channel_count);
+    return NULL;
+}
+
+// Starts a decoder for every audio rendition the catalog offers, at its codec's own rate and
+// layout, so the catalog's are what tone.py checks.
+static void start_audio(ctx_t *c, int32_t catalog) {
+    moq_audio_config cfg;
+    uint32_t count = 0;
+    const char *error = NULL;
+    for (;; count++) {
+        memset(&cfg, 0, sizeof(cfg));
+        if (moq_consume_audio_config((uint32_t)catalog, count, &cfg) != 0) break;
+        if (count == MAX_AUDIO) {
+            error = "the catalog offers more audio renditions than this client decodes";
+            break;
+        }
+        error = open_audio(c, &c->audio[count], &cfg);
+        if (error) break;
+    }
+    // Registered before any starts, so drain() owes a terminal for each one from here on.
+    pthread_mutex_lock(&c->mu);
+    c->audio_count = count;
+    pthread_mutex_unlock(&c->mu);
+    for (uint32_t i = 0; i < count && !error; i++) {
+        moq_audio_decoder_output out;
+        memset(&out, 0, sizeof(out));
+        out.format = MOQ_AUDIO_SAMPLE_FORMAT_F32;
+        out.max_delay_us = 1000000;
+        int32_t track = moq_decode_audio((uint32_t)catalog, i, &out, on_audio, &c->audio[i]);
+        pthread_mutex_lock(&c->mu);
+        if (track > 0) c->audio[i].track = track;
+        else {
+            fprintf(stderr, "moq_decode_audio failed: %d\n", track);
+            error = "moq_decode_audio failed";
+        }
+        pthread_mutex_unlock(&c->mu);
+    }
+    if (error) {
+        pthread_mutex_lock(&c->mu);
+        c->audio_error = error;
+        pthread_cond_broadcast(&c->cv);
+        pthread_mutex_unlock(&c->mu);
+    }
 }
 
 // Delivers a broadcast handle for each publisher instance serving the path, then
@@ -194,33 +291,11 @@ static void on_catalog(void *ud, int32_t catalog) {
 
     pthread_mutex_lock(&c->mu);
     int start = c->video_track <= 0;
-    // A finish reader checks the video tail alone.
-    int start_audio = !c->finish.enabled && c->audio_track <= 0;
+    // A finish reader checks the video tail alone. Like video, a lazy publisher may add audio
+    // in a later update, so the first catalog with audio starts every rendition it offers.
+    int audio = !c->finish.enabled && c->audio_count == 0;
     pthread_mutex_unlock(&c->mu);
-
-    if (start_audio) {
-        // Like video, a lazy publisher may add audio in a later update. Decode at
-        // the codec's own rate and layout, so the catalog's are what tone.py checks.
-        moq_audio_config acfg;
-        memset(&acfg, 0, sizeof(acfg));
-        if (moq_consume_audio_config((uint32_t)catalog, 0, &acfg) == 0 && acfg.channel_count > 0) {
-            c->audio_frame_bytes = 4 * acfg.channel_count;
-            c->audio_want = c->audio_ms * acfg.sample_rate / 1000;
-            fprintf(c->audio_log, "%u %u\n", acfg.sample_rate, acfg.channel_count);
-            moq_audio_decoder_output out;
-            memset(&out, 0, sizeof(out));
-            out.format = MOQ_AUDIO_SAMPLE_FORMAT_F32;
-            out.max_delay_us = 1000000;
-            int32_t track = moq_decode_audio((uint32_t)catalog, 0, &out, on_audio, ud);
-            if (track > 0) {
-                pthread_mutex_lock(&c->mu);
-                c->audio_track = track;
-                pthread_mutex_unlock(&c->mu);
-            } else {
-                fprintf(stderr, "moq_decode_audio failed: %d\n", track);
-            }
-        }
-    }
+    if (audio) start_audio(c, catalog);
 
     if (start) {
         // A lazy publisher may announce video in a later catalog update, so this
@@ -401,16 +476,22 @@ static void finish(ctx_t *c, const struct timespec *deadline) {
 static void drain(ctx_t *c) {
     pthread_mutex_lock(&c->mu);
     int32_t track = c->video_track;
-    int32_t audio = c->audio_track;
+    int32_t audio[MAX_AUDIO];
+    uint32_t audio_count = c->audio_count;
     int cancel_frame = !c->finish.enabled || !c->done_frame;
     int cancel_catalog = !c->finish.enabled || !c->done_catalog;
     // A track that was never started registered nothing, so it owes no terminal.
     if (track <= 0) c->done_frame = 1;
-    if (audio <= 0) c->done_audio = 1;
+    for (uint32_t i = 0; i < audio_count; i++) {
+        audio[i] = c->audio[i].track;
+        if (audio[i] <= 0) c->audio[i].done = 1;
+    }
     pthread_mutex_unlock(&c->mu);
 
     if (track > 0 && cancel_frame) moq_consume_video_cancel((uint32_t)track);
-    if (audio > 0) moq_decode_audio_cancel((uint32_t)audio);
+    for (uint32_t i = 0; i < audio_count; i++) {
+        if (audio[i] > 0) moq_decode_audio_cancel((uint32_t)audio[i]);
+    }
     if (cancel_catalog) moq_consume_catalog_cancel((uint32_t)c->catalog);
     moq_origin_announced_broadcast_cancel((uint32_t)c->broadcast_wait);
     if (c->finish.enabled) {
@@ -424,13 +505,16 @@ static void drain(ctx_t *c) {
     deadline.tv_sec += 10;
 
     pthread_mutex_lock(&c->mu);
-    while (!(c->done_frame && c->done_audio && c->done_catalog && c->done_broadcast && c->done_status &&
+    while (!(c->done_frame && audio_done(c) && c->done_catalog && c->done_broadcast &&
+             c->done_status &&
              (!c->finish.enabled || (c->finish.done_announce && c->finish.done_health_wait && c->finish.done_health)))) {
         if (pthread_cond_timedwait(&c->cv, &c->mu, &deadline) != 0) break; // timed out
     }
-    int ok = c->done_frame && c->done_audio && c->done_catalog && c->done_broadcast && c->done_status &&
+    int ok = c->done_frame && audio_done(c) && c->done_catalog && c->done_broadcast &&
+             c->done_status &&
              (!c->finish.enabled || (c->finish.done_announce && c->finish.done_health_wait && c->finish.done_health));
-    int f = c->done_frame, a = c->done_audio, ct = c->done_catalog, b = c->done_broadcast, s = c->done_status;
+    int f = c->done_frame, a = audio_done(c), ct = c->done_catalog, b = c->done_broadcast,
+        s = c->done_status;
     pthread_mutex_unlock(&c->mu);
 
     if (!ok) {
@@ -475,18 +559,8 @@ int main(int argc, char **argv) {
     pthread_mutex_init(&c.mu, NULL);
     pthread_cond_init(&c.cv, NULL);
 
-    if (!finish_mode) {
-        char path[4096];
-        snprintf(path, sizeof(path), "%s.txt", audio_out);
-        c.audio_log = fopen(path, "w");
-        snprintf(path, sizeof(path), "%s.pcm", audio_out);
-        c.audio_pcm = fopen(path, "wb");
-        if (!c.audio_log || !c.audio_pcm) {
-            fprintf(stderr, "error: cannot write %s.{txt,pcm}\n", audio_out);
-            return 1;
-        }
-        c.audio_ms = (uint64_t)audio_ms;
-    }
+    c.audio_out = audio_out;
+    c.audio_ms = (uint64_t)audio_ms;
 
     c.origin = moq_origin_create();
     if (c.origin <= 0) {
@@ -506,7 +580,7 @@ int main(int argc, char **argv) {
     }
 
     // origin_publish = 0 disables publishing; consume via our origin.
-    c.session = moq_session_connect(url, strlen(url), version ? &config : NULL, 0, (uint32_t)c.origin, on_status, &c);
+    c.session = moq_session_connect(url, strlen(url), version ? &config : NULL, 0, (uint32_t)c.origin, on_state, &c);
     if (c.session <= 0) {
         // A registration that fails never invokes its callback, so &c isn't held
         // yet and returning is still safe here.
@@ -573,18 +647,19 @@ int main(int argc, char **argv) {
     if (finish_mode) finish(&c, &deadline);
     else {
         pthread_mutex_lock(&c.mu);
-        while (!c.got || !c.audio_got) {
+        while ((!c.got || !audio_got(&c)) && !c.audio_error) {
             if (pthread_cond_timedwait(&c.cv, &c.mu, &deadline) != 0) break; // timed out
         }
-        int got = c.got, audio_got = c.audio_got;
+        int got = c.got, audio = audio_got(&c);
+        const char *audio_error = c.audio_error;
         pthread_mutex_unlock(&c.mu);
 
-        if (!got || !audio_got) {
-            fail("error: timed out waiting for data (video=%d audio=%d)\n", got, audio_got);
+        if (audio_error) fail("error: %s\n", audio_error);
+        if (!got || !audio) {
+            fail("error: timed out waiting for data (video=%d audio=%d)\n", got, audio);
         }
 
-        fprintf(stderr, "received a frame and %llu audio samples from %s\n", (unsigned long long)c.audio_samples,
-                broadcast);
+        fprintf(stderr, "received a frame and %u audio renditions from %s\n", c.audio_count, broadcast);
     }
 
     // The data path succeeded, which is all this interop client verifies. Returning
@@ -593,9 +668,9 @@ int main(int argc, char **argv) {
     // still live behind its LazyLock.
     drain(&c);
     if (finish_mode) moq_consume_close((uint32_t)c.finish.health_broadcast);
-    else {
-        fclose(c.audio_log);
-        fclose(c.audio_pcm);
+    for (uint32_t i = 0; i < c.audio_count; i++) {
+        fclose(c.audio[i].log);
+        fclose(c.audio[i].pcm);
     }
     moq_consume_close((uint32_t)bc);
     moq_origin_close((uint32_t)c.origin);

@@ -4,14 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Native request opens refuse missing stream credit
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
-Implement `transport::poll::Session::poll_open_request(cx, options)` separately from the waiting `poll_open_bi`.
-Return `Ready(Ok(None))` when QUIC stream credit is exhausted, before retaining an open operation; return `Pending` only while completing an already admitted stream's transport header.
-A refused request returns `Error::NoStreamCredit` locally and maps to `StreamError::Internal` when relayed.
-Native QUIC/WebTransport on tokio and io\_uring, and qmux, implement nonwaiting admission.
-Iroh retains its waiting behavior because upstream noq cannot expose a nonwaiting open; browser-backed Rust retains its backend behavior.
-Announcement interest refuses internally and releases its discovery snapshot, while the aggregate listing keeps its existing event/sync API without a per-source error result.
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
 
 ### Published names refuse navigation segments
 
@@ -443,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)
