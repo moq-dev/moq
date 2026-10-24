@@ -117,10 +117,17 @@ program aboard, for what demultiplexing cannot carry, such as a scrambled
 service; `export ts --passthrough` writes it back out. FLV accepts the same
 legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
-fMP4 import splits each fragment into one frame per sample, so players need no
-MP4 parser. `import fmp4 --passthrough` publishes each fragment whole as
-[`cmaf`](/concept/hang#container) instead, keeping the source's exact sample
-timing.
+The stdin imports can mark the broadcast for VR, since none of their bitstreams
+say so: `--projection equirectangular` for 360 video (`equirectangular:180` for
+VR180), `--stereo left-right` or `top-bottom` for a picture that packs both eyes,
+and `--audio-layout ambisonic` for AmbiX audio. An ambisonic track without a
+square channel count of at least 4 is refused.
+
+```bash
+ffmpeg -re -i vr180.mp4 -c copy -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer - |
+    moq --connect https://relay.example.com/anon --broadcast vr.hang \
+    import --projection equirectangular:180 --stereo left-right fmp4
+```
 
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network

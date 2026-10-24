@@ -20,6 +20,7 @@ questions to a harness. For builds and CI selection, see the
 | [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser and native audio playout stay within budget over an impaired path |
 | [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
 | qmux | `just test qmux` | `@moq/qmux`, as client and as server, interoperates with the Rust qmux 0.6.3 release on every QMux draft |
+| vr | `just test vr` | `demo/vr` paints a stereo 360 broadcast per eye facing forward, and its ambisonic decode follows the head |
 | video | `just test video` | the `@moq/video` renderer paints through WebGPU and falls back to Canvas2D after losing the GPU |
 | [json-properties](json-properties.md) | `just test json-properties` | both Snapshot codecs reconstruct, and both Window codecs emit the exact events for, random JSON sequences with replayable seeds |
 

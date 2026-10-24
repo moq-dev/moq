@@ -103,6 +103,10 @@ smoke *args:
 portrait:
     ./portrait/run.sh
 
+# Paint a stereo 360 broadcast per eye in demo/vr, and turn its ambisonic decode with the head.
+vr:
+    ./vr/run.sh
+
 # Negative control: no publisher, every subscriber must time out (proves the
 
 # harness can actually report failure).

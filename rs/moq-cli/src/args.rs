@@ -318,6 +318,14 @@ impl Invocation {
 			{
 				anyhow::bail!("--report names a track in the catalog the import builds, but {reason}");
 			}
+			if let Command::Import(import) = command
+				&& import.spatial() != moq_mux::catalog::Spatial::default()
+				&& import.source.stdin_format().is_none()
+			{
+				anyhow::bail!(
+					"--projection, --stereo, and --audio-layout stamp the catalog a stdin import builds, which this source does not"
+				);
+			}
 			let Command::Export(export) = command else {
 				continue;
 			};
@@ -759,6 +767,21 @@ pub struct Import {
 	#[usage(long)]
 	pub report: bool,
 
+	/// How each video picture maps onto the viewer's view: `rectilinear`, or `equirectangular`
+	/// with an optional `:fov` in degrees (`equirectangular:180` for VR180). The stdin imports only.
+	#[usage(long)]
+	pub projection: Option<ProjectionArg>,
+
+	/// How each video picture packs both eyes: `mono`, `left-right`, or `top-bottom`. The stdin
+	/// imports only.
+	#[usage(long)]
+	pub stereo: Option<StereoArg>,
+
+	/// What each audio track's channels carry: `ambisonic` for AmbiX, which needs a square channel
+	/// count of at least 4. The stdin imports only.
+	#[usage(long)]
+	pub audio_layout: Option<AudioLayoutArg>,
+
 	/// The single source feeding the Origin.
 	#[usage(subcommand)]
 	pub source: ImportSource,
@@ -774,6 +797,71 @@ impl Import {
 			found.flag("--latency-max", None, "--max-age");
 		}
 		found
+	}
+
+	/// The spatial metadata the flags stamp onto each rendition.
+	pub fn spatial(&self) -> moq_mux::catalog::Spatial {
+		moq_mux::catalog::Spatial {
+			projection: self.projection.clone().map(|arg| arg.0),
+			stereo: self.stereo.clone().map(|arg| arg.0),
+			layout: self.audio_layout.clone().map(|arg| arg.0),
+		}
+	}
+}
+
+/// An `import --projection` value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectionArg(pub hang::catalog::Projection);
+
+impl std::str::FromStr for ProjectionArg {
+	type Err = String;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		use hang::catalog::Projection;
+
+		let projection = match arg.split_once(':') {
+			None if arg == "rectilinear" => Projection::Rectilinear,
+			None if arg == "equirectangular" => Projection::Equirectangular { fov: None },
+			Some(("equirectangular", fov)) => {
+				let fov = fov.parse().map_err(|_| format!("expected a field of view in degrees, got `{fov}`"))?;
+				Projection::Equirectangular { fov: Some(fov) }
+			}
+			_ => return Err(format!("expected `rectilinear` or `equirectangular[:fov]`, got `{arg}`")),
+		};
+		projection.check().map_err(|err| err.to_string())?;
+		Ok(Self(projection))
+	}
+}
+
+/// An `import --stereo` value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StereoArg(pub hang::catalog::Stereo);
+
+impl std::str::FromStr for StereoArg {
+	type Err = String;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		match arg.parse() {
+			Ok(hang::catalog::Stereo::Unknown(_)) | Err(_) => {
+				Err(format!("expected `mono`, `left-right`, or `top-bottom`, got `{arg}`"))
+			}
+			Ok(stereo) => Ok(Self(stereo)),
+		}
+	}
+}
+
+/// An `import --audio-layout` value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioLayoutArg(pub hang::catalog::AudioLayout);
+
+impl std::str::FromStr for AudioLayoutArg {
+	type Err = String;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		match arg.parse() {
+			Ok(hang::catalog::AudioLayout::Unknown(_)) | Err(_) => Err(format!("expected `ambisonic`, got `{arg}`")),
+			Ok(layout) => Ok(Self(layout)),
+		}
 	}
 }
 
@@ -1465,6 +1553,59 @@ mod tests {
 			let err = import(source).validate().unwrap_err().to_string();
 			assert!(err.contains("--report"), "{source:?}: {err}");
 		}
+	}
+
+	/// The spatial flags parse into the catalog's types, refuse what it can't name, and only
+	/// stamp a catalog a stdin import builds.
+	#[test]
+	fn spatial_flags_parse_and_need_a_stdin_import() {
+		use hang::catalog::{AudioLayout, Projection, Stereo};
+
+		let import = |flags: &[&str], source: &[&str]| {
+			let argv = ["moq", "--connect", "http://relay", "--broadcast", "room", "import"];
+			Invocation::try_parse_from(argv.iter().chain(flags).chain(source).copied())
+		};
+		let flags = [
+			"--projection",
+			"equirectangular:180",
+			"--stereo",
+			"left-right",
+			"--audio-layout",
+			"ambisonic",
+		];
+		let invocation = import(&flags, &["fmp4"]).unwrap();
+		invocation.validate().unwrap();
+		let Command::Import(parsed) = &invocation.stages[0] else {
+			panic!("expected an import stage");
+		};
+		assert_eq!(
+			parsed.spatial(),
+			moq_mux::catalog::Spatial {
+				projection: Some(Projection::Equirectangular { fov: Some(180.0) }),
+				stereo: Some(Stereo::LeftRight),
+				layout: Some(AudioLayout::Ambisonic),
+			}
+		);
+
+		for value in ["rectilinear", "equirectangular"] {
+			import(&["--projection", value], &["avc3"]).unwrap().validate().unwrap();
+		}
+		for flag in [
+			["--projection", "equirectangular:0"],
+			["--projection", "equirectangular:361"],
+			["--projection", "cubemap"],
+			["--stereo", "interleaved"],
+			["--audio-layout", "5.1"],
+		] {
+			assert!(import(&flag, &["fmp4"]).is_err(), "{flag:?}");
+		}
+
+		let err = import(&["--stereo", "left-right"], &["hls", "http://origin/master.m3u8"])
+			.unwrap()
+			.validate()
+			.unwrap_err()
+			.to_string();
+		assert!(err.contains("--stereo"), "{err}");
 	}
 
 	/// `--echo` reports what a stdout container export reads from a hang catalog, under one

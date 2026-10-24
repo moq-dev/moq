@@ -1,0 +1,6 @@
+{
+        "extends": "../../js/tsconfig.json",
+        "compilerOptions": { "module": "esnext", "moduleResolution": "bundler", "outDir": "dist" },
+        "include": ["src", "../../js/common/worklet.d.ts"]
+}
+

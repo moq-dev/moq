@@ -724,7 +724,8 @@ fn spawn_import(
 		warn_if_missing_format(&name);
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(max_age)
-			.with_bandwidth(bandwidth.clone());
+			.with_bandwidth(bandwidth.clone())
+			.with_spatial(import.spatial());
 		let mut publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
 			..
