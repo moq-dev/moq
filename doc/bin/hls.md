@@ -69,13 +69,14 @@ returns HTTP 400. A live-only timeline or range past a finished recording
 returns HTTP 416 instead of a partial clip, and a failed timeline returns 500.
 
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
-and `--cors-origin` opens it to browsers. See `moq export hls --help`.
+and `--cors-origin` opens it to browsers. HLS TLS reads `MOQ_HLS_TLS_*`;
+`MOQ_LISTEN_TLS_*` configures only the MoQ listener. See `moq export hls --help`.
 
 ## Import
 
 Import handles classic HLS; LL-HLS parts are not implemented. It publishes the
 playlist's own media times, and anchors the catalog clock on the first imported
-segment. Each fMP4 segment is split into one frame per sample; `--passthrough`
+segment. Each fMP4 segment is split into one frame per sample; `--cmaf`
 publishes each fragment whole as CMAF instead, keeping its exact sample timing.
 
 The library, including the recorder cursors for mirroring a broadcast to

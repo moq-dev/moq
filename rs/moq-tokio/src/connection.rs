@@ -80,9 +80,9 @@ pub struct Backoff {
 
 	/// Initial delay before the first reconnect attempt. Defaults to 1s, floored at 50ms.
 	#[usage(
-		name = "backoff-initial",
+		name = "connect-backoff-initial",
 		long,
-		env = "MOQ_BACKOFF_INITIAL",
+		env = "MOQ_CONNECT_BACKOFF_INITIAL",
 		setting = "connect.backoff.initial"
 	)]
 	#[serde(default, rename = "__cli_initial", skip_serializing_if = "Option::is_none")]
@@ -90,9 +90,9 @@ pub struct Backoff {
 
 	/// Multiplier applied to delay after each failure. Defaults to 2.
 	#[usage(
-		name = "backoff-multiplier",
+		name = "connect-backoff-multiplier",
 		long,
-		env = "MOQ_BACKOFF_MULTIPLIER",
+		env = "MOQ_CONNECT_BACKOFF_MULTIPLIER",
 		default = "2",
 		setting = "connect.backoff.multiplier"
 	)]
@@ -105,7 +105,12 @@ pub struct Backoff {
 	pub max: Option<Duration>,
 
 	/// Maximum delay between reconnect attempts. Defaults to 5s.
-	#[usage(name = "backoff-max", long, env = "MOQ_BACKOFF_MAX", setting = "connect.backoff.max")]
+	#[usage(
+		name = "connect-backoff-max",
+		long,
+		env = "MOQ_CONNECT_BACKOFF_MAX",
+		setting = "connect.backoff.max"
+	)]
 	#[serde(default, rename = "__cli_max", skip_serializing_if = "Option::is_none")]
 	max_arg: Option<CliDuration>,
 
@@ -119,7 +124,7 @@ pub struct Backoff {
 	/// Resets after a stable connection (one that outlives the initial backoff) outside a redirect
 	/// loop, so a flapping session that reconnects then immediately drops still counts toward the
 	/// timeout. Set to `Some(Duration::ZERO)` for unlimited retries. `None` takes the default. When this config was
-	/// parsed from the command line, a `--backoff-timeout` given there wins over this field.
+	/// parsed from the command line, a `--connect-backoff-timeout` given there wins over this field.
 	///
 	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
 	/// type's default, and only `None` tells "unset" apart from "retry forever".
@@ -131,13 +136,43 @@ pub struct Backoff {
 	// window set in code. The default lives in [`Backoff::window`] instead.
 	/// Maximum time to spend retrying before giving up. Defaults to 10s; 0s retries forever.
 	#[usage(
-		name = "backoff-timeout",
+		name = "connect-backoff-timeout",
 		long,
-		env = "MOQ_BACKOFF_TIMEOUT",
+		env = "MOQ_CONNECT_BACKOFF_TIMEOUT",
 		setting = "connect.backoff.timeout"
 	)]
 	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
 	timeout_arg: Option<CliDuration>,
+	#[usage(
+		name = "backoff-initial",
+		long = "backoff-initial",
+		env = "MOQ_BACKOFF_INITIAL",
+		hide = true
+	)]
+	#[serde(skip)]
+	legacy_initial: Option<CliDuration>,
+
+	#[usage(
+		name = "backoff-multiplier",
+		long = "backoff-multiplier",
+		env = "MOQ_BACKOFF_MULTIPLIER",
+		hide = true
+	)]
+	#[serde(skip)]
+	legacy_multiplier: Option<u32>,
+
+	#[usage(name = "backoff-max", long = "backoff-max", env = "MOQ_BACKOFF_MAX", hide = true)]
+	#[serde(skip)]
+	legacy_max: Option<CliDuration>,
+
+	#[usage(
+		name = "backoff-timeout",
+		long = "backoff-timeout",
+		env = "MOQ_BACKOFF_TIMEOUT",
+		hide = true
+	)]
+	#[serde(skip)]
+	legacy_timeout: Option<CliDuration>,
 }
 
 impl Default for Backoff {
@@ -150,11 +185,48 @@ impl Default for Backoff {
 			max_arg: None,
 			timeout: Some(DEFAULT_TIMEOUT),
 			timeout_arg: None,
+			legacy_initial: None,
+			legacy_multiplier: None,
+			legacy_max: None,
+			legacy_timeout: None,
 		}
 	}
 }
 
 impl Backoff {
+	pub(crate) fn deprecated(&self) -> crate::cli::Deprecated {
+		let mut found = crate::cli::Deprecated::default();
+		if self.legacy_initial.is_some() {
+			found.flag(
+				"--backoff-initial",
+				Some("MOQ_BACKOFF_INITIAL"),
+				"--connect-backoff-initial / MOQ_CONNECT_BACKOFF_INITIAL",
+			);
+		}
+		if self.legacy_multiplier.is_some() {
+			found.flag(
+				"--backoff-multiplier",
+				Some("MOQ_BACKOFF_MULTIPLIER"),
+				"--connect-backoff-multiplier / MOQ_CONNECT_BACKOFF_MULTIPLIER",
+			);
+		}
+		if self.legacy_max.is_some() {
+			found.flag(
+				"--backoff-max",
+				Some("MOQ_BACKOFF_MAX"),
+				"--connect-backoff-max / MOQ_CONNECT_BACKOFF_MAX",
+			);
+		}
+		if self.legacy_timeout.is_some() {
+			found.flag(
+				"--backoff-timeout",
+				Some("MOQ_BACKOFF_TIMEOUT"),
+				"--connect-backoff-timeout / MOQ_CONNECT_BACKOFF_TIMEOUT",
+			);
+		}
+		found
+	}
+
 	/// The retry window in effect, where zero means unlimited: the flag, then the typed field, then
 	/// the default.
 	fn window(&self) -> Duration {
@@ -341,9 +413,9 @@ pub struct Goaway {
 	/// chose, `follow` also lets it name the host, and `ignore` redials the
 	/// current address list.
 	#[usage(
-		name = "goaway-redirect",
+		name = "connect-goaway-redirect",
 		long,
-		env = "MOQ_GOAWAY_REDIRECT",
+		env = "MOQ_CONNECT_GOAWAY_REDIRECT",
 		value_enum,
 		default = "same-host",
 		setting = "connect.goaway.redirect"
@@ -361,13 +433,31 @@ pub struct Goaway {
 
 	/// How long the old session keeps serving after its replacement connects. Defaults to 10s.
 	#[usage(
-		name = "goaway-handover",
+		name = "connect-goaway-handover",
 		long,
-		env = "MOQ_GOAWAY_HANDOVER",
+		env = "MOQ_CONNECT_GOAWAY_HANDOVER",
 		setting = "connect.goaway.handover"
 	)]
 	#[serde(default, rename = "__cli_handover", skip_serializing_if = "Option::is_none")]
 	handover_arg: Option<CliDuration>,
+	#[usage(
+		name = "goaway-redirect",
+		long = "goaway-redirect",
+		env = "MOQ_GOAWAY_REDIRECT",
+		value_enum,
+		hide = true
+	)]
+	#[serde(skip)]
+	legacy_redirect: Option<Redirect>,
+
+	#[usage(
+		name = "goaway-handover",
+		long = "goaway-handover",
+		env = "MOQ_GOAWAY_HANDOVER",
+		hide = true
+	)]
+	#[serde(skip)]
+	legacy_handover: Option<CliDuration>,
 }
 
 impl Default for Goaway {
@@ -376,6 +466,8 @@ impl Default for Goaway {
 			redirect: Redirect::SameHost,
 			handover: Some(DEFAULT_HANDOVER),
 			handover_arg: None,
+			legacy_redirect: None,
+			legacy_handover: None,
 		}
 	}
 }
@@ -437,6 +529,25 @@ impl Pacing {
 const DEFAULT_HANDOVER: Duration = Duration::from_secs(10);
 
 impl Goaway {
+	pub(crate) fn deprecated(&self) -> crate::cli::Deprecated {
+		let mut found = crate::cli::Deprecated::default();
+		if self.legacy_redirect.is_some() {
+			found.flag(
+				"--goaway-redirect",
+				Some("MOQ_GOAWAY_REDIRECT"),
+				"--connect-goaway-redirect / MOQ_CONNECT_GOAWAY_REDIRECT",
+			);
+		}
+		if self.legacy_handover.is_some() {
+			found.flag(
+				"--goaway-handover",
+				Some("MOQ_GOAWAY_HANDOVER"),
+				"--connect-goaway-handover / MOQ_CONNECT_GOAWAY_HANDOVER",
+			);
+		}
+		found
+	}
+
 	fn resolve(&self) -> Resolved {
 		Resolved {
 			redirect: self.redirect,
@@ -1187,7 +1298,7 @@ impl Connection {
 			// replacement dial, so a predecessor can still be draining when that dial
 			// fails and lands here. A plain sleep would stop enforcing its handover
 			// until some later dial succeeded, holding an upstream that asked to drain
-			// open for the whole retry window, or forever with `--backoff-timeout=0`.
+			// open for the whole retry window, or forever with `--connect-backoff-timeout=0`.
 			sleep_draining(wait, &mut draining, shared).await;
 			retry.delay = pacing.next(retry.delay);
 		}
@@ -1817,8 +1928,11 @@ mod tests {
 		assert_eq!(parsed.backoff.window(), DEFAULT_TIMEOUT);
 
 		// And a flag still lands where the merge can see it.
-		let parsed =
-			Wrapper::parse_from(&[std::ffi::OsStr::new("--backoff-initial"), std::ffi::OsStr::new("3s")]).unwrap();
+		let parsed = Wrapper::parse_from(&[
+			std::ffi::OsStr::new("--connect-backoff-initial"),
+			std::ffi::OsStr::new("3s"),
+		])
+		.unwrap();
 		assert_eq!(Pacing::new(&parsed.backoff).initial, Duration::from_secs(3));
 	}
 
@@ -1842,9 +1956,9 @@ mod tests {
 
 		// Flags passed: they land where the merge can see them.
 		let parsed = Wrapper::parse_from(&[
-			std::ffi::OsStr::new("--goaway-redirect"),
+			std::ffi::OsStr::new("--connect-goaway-redirect"),
 			std::ffi::OsStr::new("ignore"),
-			std::ffi::OsStr::new("--goaway-handover"),
+			std::ffi::OsStr::new("--connect-goaway-handover"),
 			std::ffi::OsStr::new("3s"),
 		])
 		.unwrap();
@@ -3212,7 +3326,7 @@ mod duration_tests {
 		initial_set_in_code_beats_parser_default,
 		Backoff,
 		initial,
-		"--backoff-initial",
+		"--connect-backoff-initial",
 		|c: &Backoff| Pacing::new(c).initial,
 		|d: Duration| d.max(MIN_BACKOFF)
 	);
@@ -3220,7 +3334,7 @@ mod duration_tests {
 		max_set_in_code_beats_parser_default,
 		Backoff,
 		max,
-		"--backoff-max",
+		"--connect-backoff-max",
 		|c: &Backoff| Pacing::new(c).max,
 		|d: Duration| d.max(DEFAULT_INITIAL)
 	);
@@ -3228,7 +3342,7 @@ mod duration_tests {
 		timeout_set_in_code_beats_parser_default,
 		Backoff,
 		timeout,
-		"--backoff-timeout",
+		"--connect-backoff-timeout",
 		|c: &Backoff| c.window(),
 		|d| d
 	);
@@ -3236,7 +3350,7 @@ mod duration_tests {
 		handover_set_in_code_beats_parser_default,
 		Goaway,
 		handover,
-		"--goaway-handover",
+		"--connect-goaway-handover",
 		|c: &Goaway| c.resolve().handover,
 		|d| d
 	);

@@ -370,15 +370,15 @@ pub struct Serve {
 	listen_public: bool,
 
 	/// The key file a `jwt` is verified against.
-	#[usage(long, conflicts = "--key-dir", value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
+	#[usage(long, conflicts("--key-dir", "--key-set"), value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 	key: Option<PathBuf>,
 
 	/// A directory of `{kid}.jwk` files, selected by the token's `kid`.
-	#[usage(long, conflicts = "--key", value_hint = usage_rs::ValueHint::DirPath)]
+	#[usage(long, conflicts("--key", "--key-set"), value_hint = usage_rs::ValueHint::DirPath)]
 	key_dir: Option<PathBuf>,
 
 	/// A JWK Set file, selecting one verification key by the token's `kid`.
-	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("json", "jwks"))]
+	#[usage(long, conflicts("--key", "--key-dir"), value_hint = usage_rs::ValueHint::FilePath, extensions("json", "jwks"))]
 	key_set: Option<PathBuf>,
 
 	/// Patterns an anonymous session may publish, rooted at `/` (repeatable); `foo/**` for a subtree.
@@ -476,9 +476,6 @@ impl Serve {
 				subscribe.iter().cloned().collect::<moq_auth::Patterns>(),
 			)
 		};
-		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
-			anyhow::bail!("--key-set conflicts with --key and --key-dir");
-		}
 		let mut policy = Policy::default();
 		policy.keys = match (&self.key, &self.key_dir, &self.key_set) {
 			(Some(key), _, _) => Some(Keys::File(key.clone())),
@@ -641,6 +638,25 @@ mod tests {
 	}
 
 	#[test]
+	fn verification_key_sources_conflict_in_the_parser() {
+		let flags = ["--key", "--key-dir", "--key-set"];
+		for first in flags {
+			assert!(parse(&["moq", "auth", "serve", first, "unused"]).is_ok());
+			for second in flags {
+				if first == second {
+					continue;
+				}
+				let err = parse(&["moq", "auth", "serve", first, "unused", second, "unused"])
+					.expect_err("key sources must conflict before loading files");
+				assert!(
+					err.to_string().contains(first) && err.to_string().contains(second),
+					"{err}"
+				);
+			}
+		}
+	}
+
+	#[test]
 	fn serve_refuses_a_public_bind_without_saying_so() {
 		let err = serve(&["moq", "auth", "serve", "--listen", "0.0.0.0:4440"])
 			.listener()
@@ -712,11 +728,7 @@ mod tests {
 			.policy()
 			.unwrap();
 		assert!(matches!(&set.keys, Some(Keys::Set(path)) if path == std::path::Path::new("/keys.jwks")));
-		assert!(
-			serve(&["moq", "auth", "serve", "--key", "/key.jwk", "--key-set", "/keys.jwks"])
-				.policy()
-				.is_err()
-		);
+		assert!(parse(&["moq", "auth", "serve", "--key", "/key.jwk", "--key-set", "/keys.jwks"]).is_err());
 
 		// Nothing configured is a server that refuses everyone, and like 0.14, never
 		// re-checks or closes a session on its own.
