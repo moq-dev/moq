@@ -1015,9 +1015,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.9.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877bf67ac8e52449eb2f9e98a344ea163beb70dd1f9eebe3cc5357dcfeaee4df"
+checksum = "86e055fa6e3e40ad6187ba25b6855eeb635d5271f8e0f0e1e9a5826b8d75bea0"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1557,9 +1557,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.5"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+checksum = "cc907c45bb7e9ef8fc3778defd0f3cd8c81288f1b4e748eba064948f20c47122"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -1603,9 +1603,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.3"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
  "subtle",
@@ -2093,9 +2093,9 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "elliptic-curve"
-version = "0.14.1"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d65aa39b3a5c1c9c1b745c9a019234bb7a21b77abcb4f4d266d706e2d577d65"
+checksum = "0ad4496221fcfc21015fd8c0e26fcfab00504832dc0604f52acdd7bad2a8dc81"
 dependencies = [
  "base16ct 1.0.0",
  "crypto-bigint",
@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.21.17"
+version = "0.21.18"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2960,9 +2960,9 @@ dependencies = [
 
 [[package]]
 name = "http-cache"
-version = "1.0.0-alpha.8"
+version = "1.0.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac8c55c3569d8e89e459134dbf6e0fd3bb0d00ef126646f7cc2d12b5b547e72c"
+checksum = "2b668f8d78e9c962a3abf1ba5b457366f91f39a4d98df92dc615aa82455805e5"
 dependencies = [
  "bytes",
  "http",
@@ -2979,9 +2979,9 @@ dependencies = [
 
 [[package]]
 name = "http-cache-reqwest"
-version = "1.0.0-alpha.9"
+version = "1.0.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0257762bf6d62b7b36da8654823b9f1a05ca0132f045fa60b09e69c85534ca70"
+checksum = "062cdf758bb9b88858411e354135c819251a0597147db53de9b337e8717e6f26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3895,7 +3895,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.6.18"
+version = "0.6.19"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4183,7 +4183,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4275,7 +4275,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.5.18"
+version = "0.5.19"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4295,7 +4295,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.14.8"
+version = "0.14.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -4353,7 +4353,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.4.18"
+version = "0.4.19"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -4387,7 +4387,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.4.18"
+version = "0.4.19"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4407,7 +4407,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "axum",
  "bytes",
@@ -4466,7 +4466,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.10.17"
+version = "0.10.18"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4624,7 +4624,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -4683,7 +4683,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.3.18"
+version = "0.3.19"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -4704,7 +4704,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.3.17"
+version = "0.3.18"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4756,7 +4756,7 @@ dependencies = [
 
 [[package]]
 name = "moq-srt"
-version = "0.3.17"
+version = "0.3.18"
 dependencies = [
  "bytes",
  "futures",
@@ -4860,7 +4860,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4936,7 +4936,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "ash",
@@ -6872,9 +6872,9 @@ dependencies = [
 
 [[package]]
 name = "qmux"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78229d7c17aefedb12668c8e28db3dc648b69fc80c025c4b899e48982671caf8"
+checksum = "dad25762c86aa1eaf3ef0b660fd83773fe5c961e8b3c3a7a6815f8c155338061"
 dependencies = [
  "bytes",
  "futures",
@@ -8058,9 +8058,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.16.3"
+version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
+checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
 name = "smawk"
@@ -9500,9 +9500,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.28.0"
+version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
+checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -9924,18 +9924,18 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.10"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.10"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]
