@@ -1733,24 +1733,26 @@ impl Request {
 			active,
 			..
 		} = self;
-		let ok = async {
-			let (session, driver) = handshake.ok().await?;
-			use tracing::Instrument;
-			let driver = tokio::spawn(
-				async move {
-					crate::panic::isolate(async move {
-						let _active = active;
-						moq_net::time::run(driver).await;
-						Ok(())
-					})
-					.await
-					.unwrap_or(Err(Error::Panic))
-				}
-				.instrument(tracing::Span::current()),
-			);
-			Ok((session, driver))
-		};
-		Deadline::bound(deadline.as_ref(), ok).await
+		// moq-net enforces it, so a reply the peer never took counts in the session's stats.
+		let mut handshake = *handshake;
+		if let Some(deadline) = deadline {
+			handshake = handshake.with_deadline(deadline.at);
+		}
+		let (session, driver) = handshake.ok().await?;
+		use tracing::Instrument;
+		let driver = tokio::spawn(
+			async move {
+				crate::panic::isolate(async move {
+					let _active = active;
+					moq_net::time::run(driver).await;
+					Ok(())
+				})
+				.await
+				.unwrap_or(Err(Error::Panic))
+			}
+			.instrument(tracing::Span::current()),
+		);
+		Ok((session, driver))
 	}
 
 	/// Returns the network transport carrying this session.
@@ -2405,7 +2407,7 @@ mod tests {
 
 	/// Answering SETUP is part of the handshake: a moq-transport peer that sends
 	/// its SETUP but never grants credit for the reply is refused at the same
-	/// deadline, rather than held open by keep-alives.
+	/// deadline, rather than held open by keep-alives, and the session counts it.
 	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn stalled_setup_reply_is_closed_at_the_deadline() {
@@ -2445,16 +2447,31 @@ mod tests {
 		};
 		assert_eq!(start.elapsed(), std::time::Duration::ZERO);
 
-		let ok = async { Ok(request.ok().await.map(drop)?) };
-		let err = Deadline::bound(deadline.as_ref(), ok)
-			.await
-			.expect_err("a reply the peer never took completed");
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let request = Request {
+			active: setup.activity.enter().unwrap(),
+			transport: Transport::WebSocket,
+			url: None,
+			authority: None,
+			identity: None,
+			link: Link::default(),
+			handshake: Box::new(request),
+			#[cfg(feature = "quic")]
+			quic: None,
+			deadline,
+		}
+		.with_stats(registry.tier(Default::default()).session("room"));
+		let Err(err) = request.ok().await else {
+			panic!("a reply the peer never took completed");
+		};
 		assert!(matches!(err, Error::MoqNet(moq_net::Error::Timeout)), "{err}");
 		assert_eq!(start.elapsed(), timeout);
 		assert_eq!(
 			*peer.closed.lock().unwrap(),
 			Some(moq_net::SessionError::Timeout.to_code())
 		);
+		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
+		assert_eq!(failed.count(moq_net::stats::Failure::Application), 1, "{failed:?}");
 	}
 
 	/// The deadline bounds only the handshake: a session that finished in time

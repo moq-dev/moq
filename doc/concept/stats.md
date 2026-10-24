@@ -357,7 +357,10 @@ ignore `expired`; newer readers default a missing counter to zero.
 subset of `sessions_ended`, so the live count is unchanged. A clean close by
 either side, a drain, or a shutdown is not a failure. A grant that expires
 mid-session counts as `expired`; one revoked or narrowed out from under it
-counts as `application`. A reader treats a missing object as zeros.
+counts as `application`. Each session records how it ended, so a grant revoked
+after its session already closed does not count, and a dialed link that
+reconnects fails only if its last session did. A reader treats a missing object
+as zeros.
 
 `requests` counts admitted request/response exchanges under the token's label and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.

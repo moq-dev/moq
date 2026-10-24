@@ -8,8 +8,9 @@ or nothing.
 
 ## Plan
 
-[One clean close](/quest/m1/api-audit/clean-close.md) adds the session's close
-cause, but some closes bypass it and close the transport directly:
+The session records its close cause (`Closing` in
+`rs/moq-net/src/session.rs`), but some closes bypass it and close the
+transport directly:
 `lite::error::control` (`rs/moq-net/src/lite/error.rs`),
 `request_update::too_many` (`rs/moq-net/src/ietf/request_update.rs`), and the
 IETF dispatcher's protocol-violation close. Over QUIC those still record a
@@ -21,7 +22,3 @@ The relay's shutdown drain drops `request.ok()` at its deadline
 Record it as the handshake deadline already does.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [One clean close](/quest/m1/api-audit/clean-close.md) - introduces the close cause

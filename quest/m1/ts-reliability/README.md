@@ -103,7 +103,6 @@ remain with their current quests.
 - [Access units](/quest/m1/ts-reliability/pes-access-units.md) - a PES carrying several access units publishes each at its own time
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
-- [Program cap](/quest/m1/ts-reliability/program-cap.md) - a PAT listing every program number cannot create a broadcast per program
 
 ## Related
 
