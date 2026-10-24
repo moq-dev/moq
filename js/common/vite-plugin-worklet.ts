@@ -11,12 +11,15 @@ const BLOB = "?worklet-blob";
  * Usage: import url from "./my-worklet.ts?worklet"; await addModule(await url(base));
  *
  * The default export resolves to `new URL("<name>.js", base)` when given a base, for pages whose CSP
- * refuses blob: and that host the file themselves. Builds emit it to `assets/<name>.js`. Without a
- * base it resolves to a blob: URL, whose inlined source sits behind a dynamic import so code-splitting
- * bundlers only fetch it when used. Never `import.meta.url`: many consumer bundlers drop the asset.
+ * refuses blob: and that host the file themselves. Builds emit it to `assets/<name>.js` and the dev
+ * server serves it there. Without a base it resolves to a blob: URL, whose inlined source sits behind
+ * a dynamic import so code-splitting bundlers only fetch it when used. Never `import.meta.url`: many
+ * consumer bundlers drop the asset.
  */
 export function worklet(alias?: Record<string, string>): Plugin {
 	let production = false;
+	// The dev server's hosted files, by `assets/<name>.js`, filled as their importers load.
+	const hosted = new Map<string, string>();
 
 	// Rolldown is Vite's own bundler and runs in-process, so nothing outlives the build.
 	const compile = async (path: string) => {
@@ -40,6 +43,23 @@ export function worklet(alias?: Record<string, string>): Plugin {
 
 		configResolved(config) {
 			production = config.command === "build";
+		},
+
+		configureServer(server) {
+			server.middlewares.use(async (req, res, next) => {
+				const { pathname } = new URL(req.url ?? "/", "http://localhost");
+				const base = server.config.base;
+				const path = pathname.startsWith(base) ? hosted.get(pathname.slice(base.length)) : undefined;
+				if (!path) return next();
+
+				try {
+					const code = await compile(path);
+					res.setHeader("Content-Type", "text/javascript");
+					res.end(code);
+				} catch (err) {
+					next(err);
+				}
+			});
 		},
 
 		async resolveId(source, importer) {
@@ -70,6 +90,8 @@ export function worklet(alias?: Record<string, string>): Plugin {
 
 			if (production) {
 				this.emitFile({ type: "asset", fileName: `assets/${name}`, source: await compile(path) });
+			} else {
+				hosted.set(`assets/${name}`, path);
 			}
 
 			return [
