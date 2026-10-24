@@ -1001,8 +1001,9 @@ run_publisher() {
     client_flags "$lang"
     case "$lang" in
         rust)
-            # A finished import stays up for its max-age; `stop_publisher` allows 10 s to close.
-            # The wire-compat FETCH lanes keep the video-only Annex-B input.
+            # A finished import stays up for its linger (a released CLI: its max-age);
+            # `stop_publisher` allows 10 s to close. The wire-compat FETCH lanes keep the
+            # video-only Annex-B input.
             if [[ "$AUDIO" -eq 1 ]]; then
                 # The max-age caps every reader's max delay, so it covers the longest, the native
                 # JS audio readers' 5 s. Each 1 s fragment lands as one burst, so with a 1 s
