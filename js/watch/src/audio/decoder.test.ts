@@ -223,6 +223,7 @@ afterEach(() => {
 // Hands frames to whichever container consumer is reading, and ends a consumer's reads on close. An
 // Error stands in for a malformed read.
 function feed() {
+	let currentConsumer: Container.Consumer | undefined;
 	const closed = new WeakSet<Container.Consumer>();
 	const queue: (Read | Error)[] = [];
 	let waiter:
@@ -230,6 +231,7 @@ function feed() {
 		| undefined;
 
 	spyOn(Container.Consumer.prototype, "next").mockImplementation(function (this: Container.Consumer) {
+		currentConsumer = this;
 		if (closed.has(this)) return Promise.resolve(undefined);
 		const read = queue.shift();
 		if (read instanceof Error) return Promise.reject(read);
@@ -249,19 +251,27 @@ function feed() {
 		close.call(this);
 	});
 
-	return (read: Read | Error) => {
+	const push = (read: Read | Error) => {
 		const current = waiter;
 		waiter = undefined;
 		if (!current) queue.push(read);
 		else if (read instanceof Error) current.reject(read);
 		else current.resolve(read);
 	};
+	return {
+		push,
+		// Network arrivals can advance while next() is held behind decoder backpressure.
+		buffered: (ranges: Container.BufferedRanges) => {
+			if (!currentConsumer) throw new Error("consumer has not started");
+			(currentConsumer.buffered as Signal<Container.BufferedRanges>).set(ranges);
+		},
+	};
 }
 
 async function play(initial: Delay, buffered = false, cmaf = false) {
 	// These cases test timeline handover after the optional decoder has loaded.
 	if (cmaf) await import("@moq/hang/cmaf");
-	const push = feed();
+	const { push, buffered: queued } = feed();
 	const truncate = spyOn(AudioRingBuffer.prototype, "truncate");
 	const reset = spyOn(AudioRingBuffer.prototype, "reset");
 	const insert = spyOn(AudioRingBuffer.prototype, "write");
@@ -319,6 +329,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		delay,
 		sync,
 		push,
+		queued,
 		enabled,
 		decoding,
 		context: decoder.out.context,
@@ -1273,5 +1284,102 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 		remove();
 		sync.close();
 		logged.mockRestore();
+	}
+});
+
+it.each([false, true])("does not bridge a missing network range to release shared startup (CMAF=%s)", async (cmaf) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const playback = await play(Milli(1500), true, cmaf);
+	const video = new Signal<{ start: Milli; end: Milli } | null>({ start: Milli(20), end: Milli(1520) });
+	const remove = playback.sync.register(new Signal(Milli(1500)), video);
+	try {
+		await playback.play(25);
+		playback.queued([
+			{ start: Milli(520), end: Milli(620) },
+			{ start: Milli(1500), end: Milli(3020) },
+		]);
+		const next = frame();
+		next.group = 1;
+		playback.push(next);
+		await microtasks();
+		await clock.advance(Nano.zero);
+		const ring = playback.rings()[0];
+		expect(ring.ring?.length).toBe(24000);
+		expect(playback.sync.playing.peek()).toBe(false);
+		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(0);
+		// The gap fills without another frame being pulled out of the consumer.
+		playback.queued([{ start: Milli(520), end: Milli(3020) }]);
+		await clock.advance(Nano.zero);
+		expect(playback.sync.playing.peek()).toBe(true);
+		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
+	} finally {
+		remove();
+		playback.close();
+		await microtasks();
+		installed.close();
+	}
+});
+
+it("does not bridge a hole in a released encoded head", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const playback = await play(Milli(1500), true);
+	try {
+		await playback.play(30);
+		frameTimestamp = 2_000_000;
+		await playback.play(30);
+		await clock.advance(Nano.zero);
+		expect(playback.rings()[0].ring?.length).toBe(24000);
+		expect(playback.sync.playing.peek()).toBe(false);
+	} finally {
+		playback.close();
+		await microtasks();
+		installed.close();
+	}
+});
+
+it("closing with a hole pending cannot release startup on a late arrival", async () => {
+	const playback = await play(Milli(1500), true);
+	const disconnect = spyOn(FakeWorklet.prototype, "disconnect");
+	const closeTrack = spyOn(Moq.Track.Subscriber.prototype, "close");
+	try {
+		await playback.play(25);
+		playback.queued([{ start: Milli(1500), end: Milli(3020) }]);
+		const next = frame();
+		next.group = 1;
+		playback.push(next);
+		await microtasks();
+		expect(playback.sync.playing.peek()).toBe(false);
+		const context = playback.context.peek() as unknown as FakeContext;
+		const decoded = playback.inserted().length;
+		playback.close();
+		await microtasks();
+		playback.queued([{ start: Milli(520), end: Milli(3020) }]);
+		await microtasks();
+		expect(context.calls.close).toBe(1);
+		expect(disconnect).toHaveBeenCalled();
+		expect(closeTrack).toHaveBeenCalled();
+		expect(playback.inserted()).toHaveLength(decoded);
+	} finally {
+		playback.close();
+		await microtasks();
+		disconnect.mockRestore();
+		closeTrack.mockRestore();
+	}
+});
+
+it("keeps rounded packet endpoints contiguous above the PCM floor", async () => {
+	const playback = await play(Milli(1500), true);
+	try {
+		await playback.play(30);
+		// Container timestamps are rounded to microseconds independently of sample durations.
+		frameTimestamp += 1;
+		await playback.play(70);
+		expect(playback.rings()[0].ring?.length).toBe(24000);
+		expect(playback.sync.playing.peek()).toBe(true);
+	} finally {
+		playback.close();
+		await microtasks();
 	}
 });

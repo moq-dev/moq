@@ -30,6 +30,11 @@ import { Terminal } from "./terminal";
 
 type FrameRead = Extract<Container.Read, { kind: "frame" }>;
 
+type Queued = {
+	newest: Micro | undefined;
+	buffered: Container.BufferedRanges;
+};
+
 /** Signals the decoder reads. */
 export type DecoderInput = {
 	// Whether to download the audio track. Defaults to true.
@@ -111,7 +116,7 @@ export class Decoder {
 
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<Container.BufferedRanges>([]);
-	#queued = new Signal<Micro | undefined>(undefined);
+	#queued = new Signal<Container.BufferedRanges | undefined>(undefined);
 
 	// Audio ring bridging the main thread and the worklet.
 	#ring = new Signal<AudioBuffer | undefined>(undefined);
@@ -180,12 +185,16 @@ export class Decoder {
 			if (!effect.get(this.source.out.config)) return undefined;
 			const span = effect.get(this.#decodeBuffered)[0];
 			if (!span) return null;
-			// The target above the PCM floor stays encoded. Count only the hold already queued
-			// behind decoded output, so startup neither demands unbounded PCM nor skips its floor.
-			const queued = effect.get(this.#queued);
+			// Deep targets stay encoded, but a later range cannot fill a hole after decoded audio.
+			const queued = effect.get(this.#queued) ?? [];
 			const hold = Milli.fromMicro(ringHold(effect.get(this.sync.out.delay)));
-			const end = Math.max(span.end, Math.min(span.end + hold, Milli.fromMicro(queued ?? Micro.zero)));
-			return { start: span.start, end: Milli(end) };
+			let end = span.end;
+			for (const range of queued) {
+				// Match decoded-span rounding slack; do not bridge a missing packet.
+				if (range.start > end + 1) break;
+				end = Milli(Math.max(end, range.end));
+			}
+			return { start: span.start, end: Milli(Math.min(end, span.end + hold)) };
 		});
 		this.#signals.cleanup(this.sync.register(playout, startup));
 		this.#identity = this.#signals.computed((effect) => {
@@ -494,7 +503,7 @@ export class Decoder {
 
 			const order = this.#order();
 			const play = (reads: FrameRead[]) => {
-				read.set(order.newest(reads) as Micro | undefined);
+				read.set({ newest: order.newest(reads) as Micro | undefined, buffered: queuedRanges(reads, config) });
 				return this.#play(effect, decoder, decoderConfig, order, reads);
 			};
 			for (;;) {
@@ -583,7 +592,7 @@ export class Decoder {
 
 			const order = this.#order();
 			const play = (reads: FrameRead[]) => {
-				read.set(order.newest(reads) as Micro | undefined);
+				read.set({ newest: order.newest(reads) as Micro | undefined, buffered: queuedRanges(reads, config) });
 				return this.#play(effect, decoder, decoderConfig, order, reads);
 			};
 			for (;;) {
@@ -684,7 +693,7 @@ export class Decoder {
 		sub: Moq.Track.Subscriber,
 		format: Container.Format,
 		{ config, path }: { config: DecoderConfig; path: Moq.Path.Valid },
-	): { consumer: Container.Consumer; read: Signal<Micro | undefined> } {
+	): { consumer: Container.Consumer; read: Signal<Queued> } {
 		const outgoing = this.#consumer;
 		const continues = outgoing?.path === path;
 		const consumer = new Container.Consumer(sub, {
@@ -711,16 +720,18 @@ export class Decoder {
 		// the decode loop's held frame is released once enough is queued behind it. That includes the
 		// frames the loop has read but not decoded yet: a buffered head waits in the reorder buffer
 		// until it spans the whole target, leaving the consumer empty.
-		const read = new Signal<Micro | undefined>(undefined);
+		const read = new Signal<Queued>({ newest: undefined, buffered: [] });
 		effect.run((inner) => {
 			const ring = inner.get(this.#ring);
 			if (!ring) return;
-			let newest = inner.get(read);
-			for (const { end } of inner.get(consumer.buffered)) {
+			const pending = inner.get(read);
+			const network = inner.get(consumer.buffered);
+			let newest = pending.newest;
+			for (const { end } of network) {
 				const micro = Micro.fromMilli(end);
 				if (newest === undefined || micro > newest) newest = micro;
 			}
-			inner.set(this.#queued, newest);
+			inner.set(this.#queued, Container.mergeBufferedRanges(network, pending.buffered));
 			ring.queued(newest);
 		});
 
@@ -960,4 +971,19 @@ function spawnFatal(effect: Effect, failure: Signal<Error | undefined>, task: ()
 			failure.set(error instanceof Error ? error : new Error(String(error)));
 		}
 	});
+}
+
+// Released reads are timestamp ordered and remain owned by the decode loop while it waits. Count
+// their actual duration, not the distance to the next packet, which could include missing audio.
+function queuedRanges(reads: FrameRead[], config: DecoderConfig): Container.BufferedRanges {
+	const ranges: Container.BufferedRanges = [];
+	for (const { frame } of reads) {
+		const start = Milli.fromMicro(frame.timestamp);
+		const duration = packetDuration(config.codec, frame) ?? frameDuration(config) ?? Milli.zero;
+		const end = Milli(start + duration);
+		const last = ranges.at(-1);
+		if (last && start <= last.end + 1) last.end = Milli(Math.max(last.end, end));
+		else ranges.push({ start, end });
+	}
+	return ranges;
 }
