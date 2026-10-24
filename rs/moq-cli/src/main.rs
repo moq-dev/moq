@@ -623,13 +623,24 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	}
 	.await;
 
-	// Even on a setup error. Detach before the stages drop: an interrupted stage would end
-	// its open tracks unfinished, which a reader takes for the publisher failing. Once the
-	// session is closed, they end as the route lost, which a reader follows.
-	detach(connection, client, &cluster).await;
+	// Even on a setup error.
+	stop(detach(connection, client, &cluster), &mut tasks, local).await;
+	result
+}
+
+/// Leave the MoQ network, then stop the stages.
+///
+/// In this order an interrupted stage's open tracks end with the session that served them,
+/// which a relay reports as a lost route and a reader follows. Stopping the stages first would
+/// end them unfinished, which a reader takes for the publisher failing.
+async fn stop(
+	leave: impl std::future::Future<Output = ()>,
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+	local: tokio::task::LocalSet,
+) {
+	leave.await;
 	tasks.shutdown().await;
 	drop(local);
-	result
 }
 
 /// Close everything [`spawn_moq`] attached. The process exits next, so the relay
@@ -1308,6 +1319,79 @@ mod tests {
 			.run_until(drive(&mut tasks, Signals::new().unwrap(), None))
 			.await
 			.unwrap();
+	}
+
+	/// An interrupted stage's open track reaches a remote reader as its session closing, which
+	/// a TS follower follows, not as a track dropped unfinished (`Stream(Internal)`).
+	#[tokio::test(start_paused = true)]
+	async fn an_interrupted_stage_ends_its_tracks_as_the_session_closing() {
+		let mut config = moq_net::transport::memory::Config::default();
+		config.protocol = Some("moq-lite-06".into());
+		let (client, server) = moq_net::transport::memory::pair(config);
+		let relay = moq_tokio::origin::spawn();
+		let subscriber = relay.clone();
+		let accepting = tokio::spawn(async move {
+			let (session, driver) = moq_net::Server::new()
+				.with_subscriber(subscriber)
+				.accept(moq_net::time::Instant::now(), server)
+				.await
+				.unwrap();
+			tokio::spawn(moq_net::time::run(driver));
+			session
+		});
+		let publisher = moq_tokio::origin::spawn();
+		let (session, driver) = moq_net::Client::new()
+			.with_publisher(publisher.consume())
+			.connect(moq_net::time::Instant::now(), client)
+			.await
+			.unwrap();
+		tokio::spawn(moq_net::time::run(driver));
+		let _relayed = accepting.await.unwrap();
+
+		let broadcast = publisher.create_broadcast("demo").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let track = broadcast.create_track("live", info).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, b"live".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let reader = relay.consume();
+		reader.routed("demo").await.unwrap();
+		let mut live = reader
+			.request_broadcast("demo", None)
+			.await
+			.unwrap()
+			.track("live")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		assert!(live.recv_group().await.unwrap().is_some());
+
+		let local = tokio::task::LocalSet::new();
+		let mut tasks = JoinSet::new();
+		let stage: Pipeline = Box::pin(async move {
+			let _open = (broadcast, track);
+			std::future::pending().await
+		});
+		supervise(&local, [stage], &mut tasks);
+		stop(
+			async move {
+				let _ = session.close().await;
+			},
+			&mut tasks,
+			local,
+		)
+		.await;
+
+		let end = loop {
+			match live.recv_group().await {
+				Ok(Some(_)) => continue,
+				end => break end.map(|_| ()),
+			}
+		};
+		assert!(matches!(end, Err(moq_net::Error::Session(_))), "{end:?}");
 	}
 
 	/// A stream bind failure fails startup before the caller can report READY, and
