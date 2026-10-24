@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`MoqTrackDynamic.RequestedGroup()` is now `RequestedFill()`, returning a `*MoqFill`: `StartGroup()`, `StartFrame()`, `EndGroup()`, `Priority()`, `MaxDelayUs()`, `Order()`, `Next()`, `Accept(sequence)`, `DropGroups(start, end)`, `IsUsed()`, and `Unused()`.
+`MoqGroupRequest` and `MoqGroupDemand` are removed: serve each group `Next()` names, and watch `IsUsed()` or `Unused()` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `Next()` skips it, and `IsWanted(sequence)` and `Unwanted(sequence)` say when to stop serving one.
+A refusal carries no application code: `DropGroups` fails the waiting fetches with `NotFound`.
+A fill also arrives for history a subscription covers that the cache lacks, not only for a fetch.
+`MoqSubscription.MaxDelayUs` is `*uint64`, where `nil` leaves the publisher's max age alone to bound delivery.
+Regenerate the bindings for the changed types and checksums.
+
 ### Connection state
 
 Generated connection APIs now expose `MoqConnectionState` and `MoqConnectionPhase`, with `state()` and revision-based `state_changed(after)` instead of status, connect-count, and failure polls. Connect returns before its first dial completes. Regenerate bindings from the matching Rust metadata.
@@ -36,7 +46,7 @@ Regenerate the bindings for the changed `resolve` checksum.
 
 ### Priorities are signed (#6142)
 
-`MoqTrackInfo.Priority`, `MoqSubscription.Priority`, `MoqFetchGroupOptions.Priority`, and `MoqGroupRequest.Priority()` are `int8`, higher first, and 0 is the unset midpoint.
+`MoqTrackInfo.Priority`, `MoqSubscription.Priority`, `MoqFetchGroupOptions.Priority`, and `MoqFill.Priority()` are `int8`, higher first, and 0 is the unset midpoint.
 `MoqTrackInfo.Priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 Regenerate the bindings for the changed checksums.

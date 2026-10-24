@@ -825,7 +825,12 @@ impl Expired {
 			.await
 			.unwrap()
 			.ordered();
-		let retained = retained.next_group().await.unwrap();
+		// Polled once, before the reader serves anything: a fill would answer group 0 from the
+		// archive, so only what the cache still holds is ready now.
+		let retained = match retained.poll_next_group(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(group) => group.unwrap(),
+			std::task::Poll::Pending => None,
+		};
 		assert!(
 			retained.is_none_or(|group| group.sequence > 0),
 			"the initial timeline groups must really be evicted"

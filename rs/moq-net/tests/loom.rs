@@ -466,11 +466,11 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 		let consumer = track.consume();
 
 		let first = consumer.fetch_group(5, None);
-		let request = block_on(dynamic.requested_group()).expect("requested");
+		let request = block_on(dynamic.requested_fill()).expect("requested");
 
 		let leaver = thread::spawn(move || {
 			drop(first);
-			request.demand().is_used().then_some(request)
+			request.is_used().then_some(request)
 		});
 		let mut retry = consumer.fetch_group(5, None);
 		let request = match leaver.join().unwrap() {
@@ -480,10 +480,10 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 				if let std::task::Poll::Ready(Err(err)) = polled {
 					panic!("the retry joined a withdrawn attempt: {err}");
 				}
-				block_on(dynamic.requested_group()).expect("the retry queued a fresh request")
+				block_on(dynamic.requested_fill()).expect("the retry queued a fresh request")
 			}
 		};
-		request.accept(None).expect("accept").finish().expect("finish");
+		request.accept(5, None).expect("accept").finish().expect("finish");
 		block_on(retry).expect("the retry resolves");
 	});
 }
