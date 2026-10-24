@@ -993,7 +993,10 @@ mod tests {
 		drop((old_catalog, old_track, old_media, old));
 		let deadline = tokio::time::Instant::now() + TIMEOUT;
 		while status(&app, &old_playlist).await != StatusCode::NOT_FOUND {
-			assert!(tokio::time::Instant::now() < deadline, "the closed instance kept serving");
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"the closed instance kept serving"
+			);
 			tokio::time::sleep(Duration::from_millis(50)).await;
 		}
 		assert_eq!(status(&app, &old_segment).await, StatusCode::NOT_FOUND);
@@ -1074,7 +1077,12 @@ mod tests {
 
 		let server = Server::new(origin.consume(), crate::export::Config::default());
 		let app = server.router();
-		wait_listed(&app, &format!("/live/@{RUN}/video/video0/media.m3u8"), "seg/656e3d1b.0.m4s").await;
+		wait_listed(
+			&app,
+			&format!("/live/@{RUN}/video/video0/media.m3u8"),
+			"seg/656e3d1b.0.m4s",
+		)
+		.await;
 		let broadcaster = server.broadcaster("live").await.expect("broadcaster");
 		broadcaster.set_generation(Some("run-1")).unwrap();
 
@@ -1093,7 +1101,10 @@ mod tests {
 			status(&app, &format!("/live/@{RUN}/video/video0/{init}")).await,
 			StatusCode::OK
 		);
-		assert_eq!(status(&app, &format!("/live/@{RUN}/video/video0/init.mp4")).await, StatusCode::NOT_FOUND);
+		assert_eq!(
+			status(&app, &format!("/live/@{RUN}/video/video0/init.mp4")).await,
+			StatusCode::NOT_FOUND
+		);
 		assert_eq!(
 			status(&app, &format!("/live/@{RUN}/video/video0/init.0000000000000000.mp4")).await,
 			StatusCode::NOT_FOUND
@@ -1142,7 +1153,12 @@ mod tests {
 		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
 		let run = listed(&server, "live").await;
 		let app = server.router();
-		wait_listed(&app, &format!("/live/@{run}/video/video0/media.m3u8"), "seg/656e3d1b.0.m4s").await;
+		wait_listed(
+			&app,
+			&format!("/live/@{run}/video/video0/media.m3u8"),
+			"seg/656e3d1b.0.m4s",
+		)
+		.await;
 
 		let response = oneshot(app, &format!("/live/@{run}/video/video0/seg/656e3d1b.0.m4s")).await;
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -1162,7 +1178,12 @@ mod tests {
 		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
 		let run = listed(&server, "live").await;
 		let app = server.router();
-		wait_listed(&app, &format!("/live/@{run}/video/video0/media.m3u8"), "seg/656e3d1b.0.m4s").await;
+		wait_listed(
+			&app,
+			&format!("/live/@{run}/video/video0/media.m3u8"),
+			"seg/656e3d1b.0.m4s",
+		)
+		.await;
 
 		let remote = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("live", None))
 			.await
@@ -1388,7 +1409,12 @@ mod tests {
 		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
 		let run = listed(&server, "room/live").await;
 		let app = server.router();
-		wait_listed(&app, &format!("/room/live/@{run}/video/video0/media.m3u8"), "seg/656e3d1b.0.m4s").await;
+		wait_listed(
+			&app,
+			&format!("/room/live/@{run}/video/video0/media.m3u8"),
+			"seg/656e3d1b.0.m4s",
+		)
+		.await;
 
 		// Waited on rather than requested once: a client only asks about what it watches.
 		let remote_media = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().routed_broadcast("room/source"))

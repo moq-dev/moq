@@ -159,7 +159,8 @@ mod tests {
 			.expect("announce source broadcast");
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())
 			.expect("create source catalog");
-		let bridge = crate::codec::opus::Bridge::new(broadcast, catalog.clone(), 48_000, 2).expect("create Opus bridge");
+		let bridge =
+			crate::codec::opus::Bridge::new(broadcast, catalog.clone(), 48_000, 2).expect("create Opus bridge");
 		(Box::new(bridge), catalog)
 	}
 
@@ -229,7 +230,11 @@ mod tests {
 
 		let _new = take_over(&origin).await;
 		push(&mut *old, 40_000, OLD_PACKET);
-		assert_eq!(next_payload(&mut played).await, OLD_PACKET, "the viewer left its instance");
+		assert_eq!(
+			next_payload(&mut played).await,
+			OLD_PACKET,
+			"the viewer left its instance"
+		);
 
 		kill(old, old_catalog);
 		let ended = tokio::time::timeout(TIMEOUT, session)
@@ -284,7 +289,11 @@ mod tests {
 
 		let _new = take_over(&origin).await;
 		push(&mut *old, 40_000, OLD_PACKET);
-		assert_eq!(next_payload(&mut played).await, OLD_PACKET, "the push left its instance");
+		assert_eq!(
+			next_payload(&mut played).await,
+			OLD_PACKET,
+			"the push left its instance"
+		);
 
 		kill(old, old_catalog);
 		let pushed = tokio::time::timeout(TIMEOUT, pushed)

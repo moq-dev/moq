@@ -508,7 +508,10 @@ mod tests {
 		})
 		.await;
 		let kept = server.instance("live", old_epoch.as_str()).await;
-		assert!(kept.is_some_and(|kept| Arc::ptr_eq(&kept, &first)), "the old instance serves");
+		assert!(
+			kept.is_some_and(|kept| Arc::ptr_eq(&kept, &first)),
+			"the old instance serves"
+		);
 
 		drop(old);
 		eventually(async || server.instance("live", old_epoch.as_str()).await.is_none()).await;

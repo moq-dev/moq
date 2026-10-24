@@ -777,8 +777,7 @@ mod tests {
 			broadcast
 				.announce(origin::Route::default().with_epoch(epoch.clone()))
 				.unwrap();
-			let catalog =
-				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 			let mut importer = FlvImport::new(broadcast, catalog.reserve());
 			importer.decode(&flv::file_header()).unwrap();
 			importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
@@ -826,11 +825,12 @@ mod tests {
 		until(OLD_IDR).await;
 
 		let epoch = moq_net::Epoch::mint();
+		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&epoch)).unwrap();
 		let (_new, _new_catalog) = publish(&upstream, &epoch, NEW_IDR);
-		let local = upstream.consume();
-		while local.request_broadcast("live/cam0", None).await.unwrap().info().epoch.as_ref() != Some(&epoch) {
-			tokio::time::sleep(Duration::from_millis(10)).await;
-		}
+		tokio::time::timeout(Duration::from_secs(5), instances.next())
+			.await
+			.expect("the new publisher takes over")
+			.unwrap();
 
 		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
 		delta.extend_from_slice(OLD_DELTA);
