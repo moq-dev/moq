@@ -524,7 +524,6 @@ impl Pipelines {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use moq_net::Timestamp;
 
@@ -551,6 +550,7 @@ mod tests {
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	#[tokio::test]
 	#[ignore = "needs a PipeWire desktop and Vulkan GPU"]
+	#[expect(clippy::disallowed_methods, reason = "a real portal capture runs on the host clock")]
 	async fn packed_dmabuf_renders_through_vulkan() {
 		let instance = wgpu::Instance::default();
 		let adapter = instance
