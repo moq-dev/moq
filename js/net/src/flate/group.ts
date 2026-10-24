@@ -31,6 +31,27 @@ export function stored(frame: Frame): Stored | undefined {
 	return slices.get(frame);
 }
 
+/**
+ * A datagram's stored form: a local payload encoded, or a received slice checked to inflate
+ * to `inflated` bytes. The checked copy is dropped, since each reader inflates its own.
+ */
+export function datagramSlice(payload: Uint8Array, inflated?: number): Stored {
+	if (inflated === undefined) return { payload: new Encoder().frame(payload), inflated: payload.length };
+	new Decoder().frame(payload, inflated);
+	return { payload, inflated };
+}
+
+/** One reader's lazy plain view of a slice, so no queue retains a copy another reader inflated. */
+export function sliceView(timestamp: Timestamp | undefined, slice: Stored): Frame {
+	let plain: Uint8Array | undefined;
+	const frame = new SliceFrame(timestamp, () => {
+		plain ??= new Decoder().frame(slice.payload, slice.inflated);
+		return plain;
+	});
+	slices.set(frame, slice);
+	return frame;
+}
+
 /** One group's stored form and lazy plain copy, shared by every mirror. */
 export class Compression {
 	#encoder?: Encoder;

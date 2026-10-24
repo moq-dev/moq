@@ -182,8 +182,7 @@ type Read = Container.Read;
 function manualAt(ms: number) {
 	const clock = new Manual();
 	clock.jump(Nano.fromMilli(Milli(ms)));
-	const restore = clock.install();
-	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), restore };
+	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), installed: clock.install() };
 }
 function sample(group: number, timestamp: number, keyframe = true): Read {
 	return {
@@ -522,7 +521,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		} finally {
 			playback.close();
 			await microtasks();
-			clock.restore();
+			clock.installed.close();
 		}
 	}
 
@@ -767,7 +766,7 @@ it("a shared audio clock reset cannot present a parked video frame", async () =>
 	} finally {
 		playback.close();
 		await microtasks();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -799,7 +798,7 @@ it("closing the track releases a parked video wait", async () => {
 		wait.mockRestore();
 		playback.close();
 		await microtasks();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -825,7 +824,7 @@ it("a reset drops a parked video frame even when the next anchor restores the re
 	} finally {
 		playback.close();
 		await microtasks();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -967,7 +966,7 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		follow.close();
 		playback.close();
 		await microtasks();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 
@@ -999,6 +998,6 @@ it("a video track read from another path does not inherit the outgoing delay", a
 	} finally {
 		playback.close();
 		await microtasks();
-		clock.restore();
+		clock.installed.close();
 	}
 });

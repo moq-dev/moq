@@ -48,8 +48,8 @@ const DEFAULT_PRIORITY: i8 = 0;
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
-/// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog.
-/// The payload size limit also bounds the buffer's memory use.
+/// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog. The buffer
+/// bills its bytes to the track's [`cache::Pool`], which drops the oldest under pressure.
 pub(super) const MAX_DATAGRAMS: usize = 64;
 
 /// Slack before the eviction order is rebuilt, so a track holding just a few groups
@@ -380,9 +380,10 @@ pub(crate) struct TrackState {
 	// what each track writes and never touches another track's cache.
 	debt: u64,
 
-	// Datagrams in arrival order, bounded by `MAX_DATAGRAMS`. Shares the group
-	// sequence namespace but is otherwise independent.
-	datagrams: VecDeque<super::datagram::Stored>,
+	// Datagrams in arrival order, bounded by `MAX_DATAGRAMS` and billed to the pool, which
+	// drops the oldest under pressure. Shares the group sequence namespace but is otherwise
+	// independent.
+	datagrams: VecDeque<super::datagram::Buffered>,
 
 	// Number of datagrams dropped off the front (over capacity), mapping a subscriber's absolute
 	// cursor to an index into `datagrams` (mirrors `offset` for groups).
@@ -1058,10 +1059,17 @@ impl TrackState {
 	/// resumes at the oldest still-buffered datagram, skipping the lost ones.
 	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(super::datagram::Stored, usize)>>> {
 		let start = index.saturating_sub(self.datagram_offset);
-		if self.readable()
-			&& let Some(datagram) = self.datagrams.get(start)
+		// An ended track's expiry releases its oldest in place, which a reader skips like a drop.
+		for (i, datagram) in self
+			.datagrams
+			.iter()
+			.enumerate()
+			.skip(start)
+			.filter(|_| self.readable())
 		{
-			return Poll::Ready(Ok(Some((datagram.clone(), self.datagram_offset + start))));
+			if let Some(stored) = datagram.stored() {
+				return Poll::Ready(Ok(Some((stored, self.datagram_offset + i))));
+			}
 		}
 
 		// Nothing buffered at the cursor: the track ending terminates the datagram stream too.
@@ -1080,16 +1088,27 @@ impl TrackState {
 	}
 
 	/// Push a datagram, dropping the oldest when the send buffer is full.
+	///
+	/// Billed before the debt is settled, so its bytes accrue debt, but pushed after, so the
+	/// newcomer is never a victim of its own write.
 	fn push_datagram(&mut self, datagram: super::datagram::Stored) {
+		let datagram = super::datagram::Buffered::new(datagram, &self.cache);
+		self.charge_debt();
 		if self.datagrams.len() == MAX_DATAGRAMS {
-			self.datagrams.pop_front();
-			self.datagram_offset += 1;
+			self.drop_datagram();
 		}
 		let sequence = datagram.sequence;
 		self.datagrams.push_back(datagram);
 		let now = self.cache.pool().now_wall();
 		self.record_arrival(sequence, now);
 		self.shown(sequence);
+	}
+
+	/// Drop the oldest buffered datagram, releasing its bill.
+	fn drop_datagram(&mut self) {
+		if self.datagrams.pop_front().is_some() {
+			self.datagram_offset += 1;
+		}
 	}
 
 	/// Find the smallest-sequence cached group in `window` satisfying
@@ -1335,13 +1354,44 @@ impl TrackState {
 	/// so judging the newest group, the common case, costs no clock read.
 	fn superseded(&self, sequence: u64, servable: &Servable, budget: Duration) -> bool {
 		self.arrival(sequence, servable)
-			.is_some_and(|successor| self.aged(successor, budget))
+			.is_some_and(|successor| self.aged(successor.arrived, budget))
 	}
 
-	/// Whether a full `budget` passed since `successor` arrived.
-	fn aged(&self, successor: &Slot, budget: Duration) -> bool {
+	/// Whether a full `budget` passed since a successor `arrived`.
+	fn aged(&self, arrived: crate::time::Instant, budget: Duration) -> bool {
 		let now = self.cache.pool().now_wall();
-		now.saturating_duration_since(successor.arrived) >= budget
+		now.saturating_duration_since(arrived) >= budget
+	}
+
+	/// When a group was superseded, given `arrival`, its cached successor in `servable`: when
+	/// `arrival` arrived, or when the successor `superseded` recorded did, unless a group landed
+	/// between them since. The record outlives the successor's eviction: otherwise an evicted
+	/// successor restarts the clock at whichever newer group the cache still holds, which a
+	/// budget past the cache window never reaches. A recorded successor that failed hands the
+	/// clock on, as a re-read does, whether or not the cache has reclaimed it yet.
+	fn superseded_at(
+		&self,
+		arrival: Option<&Slot>,
+		servable: &Servable,
+		superseded: Option<&Superseded>,
+	) -> Option<crate::time::Instant> {
+		let Some(superseded) = superseded else {
+			return arrival.map(|slot| slot.arrived);
+		};
+		let mut last = superseded.0.lock().unwrap_or_else(PoisonError::into_inner);
+		if let Some(recorded) = &*last
+			&& !recorded.fate.failed()
+			&& servable.contains(recorded.sequence)
+			&& arrival.is_none_or(|slot| slot.group.sequence > recorded.sequence)
+		{
+			return Some(recorded.arrived);
+		}
+		*last = arrival.map(|slot| Successor {
+			sequence: slot.group.sequence,
+			arrived: slot.arrived,
+			fate: slot.group.fate(),
+		});
+		arrival.map(|slot| slot.arrived)
 	}
 
 	/// Whether the group at `sequence` has drifted further behind `edge` than `budget`
@@ -1400,18 +1450,27 @@ impl TrackState {
 	/// `budget`. Parking on every track change instead wakes each of N parked reads per append.
 	///
 	/// The caller parks on a group landing above `sequence` first, in the way that fits
-	/// whether this track holds it.
-	fn poll_drifted(&self, sequence: u64, servable: &Servable, budget: Duration, waiter: &kio::Waiter) -> bool {
+	/// whether this track holds it. A reader holding the group passes its `superseded`, so
+	/// the wall clock outlives the successor's eviction; see [`Self::superseded_at`].
+	fn poll_drifted(
+		&self,
+		sequence: u64,
+		servable: &Servable,
+		budget: Duration,
+		superseded: Option<&Superseded>,
+		waiter: &kio::Waiter,
+	) -> bool {
 		// Unbounded until a group lands above. Registered before judging, so a racing abort
 		// is observed or wakes us, and armed for whichever successor this pass selected, so
 		// re-selecting re-arms it.
-		let Some(arrival) = self.watch_abort(waiter, |state| state.arrival(sequence, servable)) else {
+		let arrival = self.watch_abort(waiter, |state| state.arrival(sequence, servable));
+		let Some(arrived) = self.superseded_at(arrival, servable, superseded) else {
 			return false;
 		};
-		if let Some(deadline) = arrival.arrived.checked_add(budget) {
+		if let Some(deadline) = arrived.checked_add(budget) {
 			self.cache.watch_wall(deadline, waiter);
 		}
-		if self.aged(arrival, budget) {
+		if self.aged(arrived, budget) {
 			return true;
 		}
 		let reach = loop {
@@ -1553,9 +1612,11 @@ impl TrackState {
 			}
 		}
 
-		self.arrival
-			.front()
-			.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
+		self.datagrams.front().is_some_and(|datagram| datagram.expired())
+			|| self
+				.arrival
+				.front()
+				.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
 			|| self
 				.evict
 				.front()
@@ -1563,9 +1624,10 @@ impl TrackState {
 			|| self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK
 	}
 
-	/// Expire an ended track's idle groups, whose closed channel refuses the write
-	/// [`Self::evict_expired_scan`] takes: abort them in place, releasing their frames,
-	/// and retire expired cuts, leaving slots that every read path skips.
+	/// Expire an ended track's idle groups and datagrams, whose closed channel refuses the
+	/// write [`Self::evict_expired_scan`] takes: abort the groups in place, releasing their
+	/// frames, retire expired cuts, and release the datagrams, leaving entries that every
+	/// read path skips.
 	pub(super) fn expire_closed(&self, scan: ExpiryScan) {
 		for (sequence, stamp) in &self.evict {
 			let Some(slot) = self.lookup.get(sequence) else {
@@ -1578,6 +1640,12 @@ impl TrackState {
 				slot.retired.store(true, Ordering::Relaxed);
 			} else {
 				slot.abort(Error::Old);
+			}
+		}
+		// Released oldest first, so the expired ones stay a prefix that readers skip.
+		for datagram in &self.datagrams {
+			if !datagram.release_expired() {
+				break;
 			}
 		}
 	}
@@ -1623,6 +1691,11 @@ impl TrackState {
 				// on a frame that will never arrive.
 				self.uncache(sequence).unwrap().abort(Error::Old);
 			}
+		}
+
+		// A datagram is never the live edge a late joiner needs, so even the newest goes.
+		while self.datagrams.front().is_some_and(|datagram| datagram.expired()) {
+			self.drop_datagram();
 		}
 
 		// Trim dead leading arrival entries to advance the subscriber offset. An
@@ -1986,7 +2059,9 @@ impl TrackState {
 				self.debt = self.debt.saturating_add(accrued).min(pool.used());
 				// Cap each payment at twice what was written so one write never dumps
 				// a deep backlog at once; the remainder carries to the next write.
-				self.pay_debt(&pool, written.saturating_mul(2));
+				let cap = written.saturating_mul(2);
+				let paid = self.pay_debt(&pool, cap);
+				self.pay_datagrams(cap.saturating_sub(paid));
 			}
 			// Under capacity there is nothing to work off, and stale debt would
 			// cause a spurious eviction burst at the next pressure spike.
@@ -2021,17 +2096,17 @@ impl TrackState {
 	/// the debt onto the tracks holding that staler content. When the next victim
 	/// is larger than the remaining debt it is left in place and the debt carries
 	/// over, so a small write never evicts a huge group (once the debt does cover
-	/// it, that one victim may overshoot `cap`).
-	fn pay_debt(&mut self, pool: &cache::Pool, cap: u64) {
+	/// it, that one victim may overshoot `cap`). Returns the bytes it freed.
+	fn pay_debt(&mut self, pool: &cache::Pool, cap: u64) -> u64 {
 		let average = pool.average().unwrap_or(0);
 		let mut paid = 0u64;
 		let mut scanned = 0usize;
 		for _ in 0..self.evict.len() {
 			if self.debt == 0 || paid >= cap || scanned >= EVICT_SCAN {
-				return;
+				break;
 			}
 			let Some((sequence, stamp)) = self.evict.pop_front() else {
-				return;
+				break;
 			};
 			let Some(slot) = self.lookup.get(&sequence) else {
 				// Evicted or expired; discard the dead entry.
@@ -2065,12 +2140,27 @@ impl TrackState {
 			let size = slot.cache_size();
 			if size > self.debt {
 				self.evict.push_front((sequence, stamp));
-				return;
+				break;
 			}
 
 			self.debt -= size;
 			paid = paid.saturating_add(size);
 			self.uncache(sequence).unwrap().abort(Error::Evicted);
+		}
+		paid
+	}
+
+	/// Drop this track's oldest buffered datagrams toward the debt its groups left, freeing
+	/// at most `cap` bytes. Like a group, one larger than the remaining debt stays.
+	fn pay_datagrams(&mut self, cap: u64) {
+		let mut paid = 0u64;
+		while let Some(datagram) = self.datagrams.front()
+			&& paid < cap
+			&& datagram.bytes() <= self.debt
+		{
+			self.debt -= datagram.bytes();
+			paid = paid.saturating_add(datagram.bytes());
+			self.drop_datagram();
 		}
 	}
 
@@ -4413,7 +4503,7 @@ impl Consumer {
 			let state = state.read();
 			let budget = clamp_max_delay(budget, state.max_age_bound());
 			state.cache.wakes().watch_held(sequence, waiter);
-			match state.poll_drifted(sequence, &Servable::ALL, budget, waiter) {
+			match state.poll_drifted(sequence, &Servable::ALL, budget, None, waiter) {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
@@ -5100,7 +5190,7 @@ impl kio::Task for Fetching {
 			let state = state.read();
 			let budget = clamp_max_delay(self.max_delay.unwrap_or(Duration::MAX), state.max_age_bound());
 			state.cache.wakes().watch_landing(sequence, waiter);
-			if state.poll_drifted(sequence, &Servable::ALL, budget, waiter) {
+			if state.poll_drifted(sequence, &Servable::ALL, budget, None, waiter) {
 				return Poll::Ready(Err(Error::Old));
 			}
 		}
@@ -5111,6 +5201,7 @@ impl kio::Task for Fetching {
 			state: state.weak(),
 			sequence,
 			max_delay: self.max_delay,
+			superseded: Superseded::default(),
 		});
 		let resolve = |mut group: group::Consumer| {
 			group.start_at(frame_start);
@@ -5283,6 +5374,7 @@ struct GroupExpiry {
 	/// What the cursor can be served; see [`Cursor::published`].
 	servable: kio::Consumer<Published>,
 	sequence: u64,
+	superseded: Superseded,
 }
 
 /// Keeps one fetched group tied to this caller's age budget without adding live demand.
@@ -5290,6 +5382,20 @@ struct FetchExpiry {
 	state: kio::ConsumerWeak<TrackState>,
 	sequence: u64,
 	max_delay: Option<Duration>,
+	superseded: Superseded,
+}
+
+/// The successor a handed-out group was last judged by, so the group stays judgeable once
+/// the cache evicts both; see [`TrackState::superseded_at`]. Each reader keeps its own, so
+/// the memory is bounded by the groups readers hold.
+#[derive(Default)]
+struct Superseded(Mutex<Option<Successor>>);
+
+/// A successor, when it arrived, and whether it has since failed.
+struct Successor {
+	sequence: u64,
+	arrived: crate::time::Instant,
+	fate: group::Fate,
 }
 
 impl group::Expiry for FetchExpiry {
@@ -5300,6 +5406,7 @@ impl group::Expiry for FetchExpiry {
 			state: state.unwrap_or_else(|| self.state.clone()),
 			sequence: self.sequence,
 			max_delay: self.max_delay,
+			superseded: Superseded::default(),
 		})
 	}
 
@@ -5313,7 +5420,7 @@ impl group::Expiry for FetchExpiry {
 		};
 		let budget = clamp_max_delay(budget, state.max_age_bound());
 		state.cache.wakes().watch_landing(self.sequence, waiter);
-		state.poll_drifted(self.sequence, &Servable::ALL, budget, waiter) && state.lookup.contains_key(&self.sequence)
+		state.poll_drifted(self.sequence, &Servable::ALL, budget, Some(&self.superseded), waiter)
 	}
 }
 
@@ -5326,6 +5433,7 @@ impl group::Expiry for GroupExpiry {
 			subscription: self.subscription.clone(),
 			servable: self.servable.clone(),
 			sequence: self.sequence,
+			superseded: Superseded::default(),
 		})
 	}
 
@@ -5348,7 +5456,7 @@ impl group::Expiry for GroupExpiry {
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
 		state.cache.wakes().watch_landing(self.sequence, waiter);
-		state.poll_drifted(self.sequence, &servable, budget, waiter) && state.lookup.contains_key(&self.sequence)
+		state.poll_drifted(self.sequence, &servable, budget, Some(&self.superseded), waiter)
 	}
 }
 
@@ -5432,6 +5540,14 @@ impl Servable {
 
 	/// No group.
 	const NONE: Self = Self::Run { start: 0, end: Some(0) };
+
+	/// Whether group `sequence` is among these.
+	fn contains(&self, sequence: u64) -> bool {
+		match self {
+			Self::Run { start, end } => sequence >= *start && end.is_none_or(|end| sequence < end),
+			Self::Runs(runs) => runs.contains(&sequence),
+		}
+	}
 
 	/// The groups in `runs`, disjoint and lowest first. Only several runs allocate: every
 	/// subscriber resolves one, so the common single run stays off the heap.
@@ -6055,6 +6171,7 @@ impl Cursor {
 			subscription: self.subscription.consume(),
 			servable: self.published.consume(),
 			sequence,
+			superseded: Superseded::default(),
 		}))
 	}
 
@@ -8807,9 +8924,10 @@ mod test {
 	#[cfg(feature = "async")]
 	fn untimed_datagram_replay_keeps_the_buffer() {
 		let mut producer = untimed_producer();
+		// Far past the delay, but within the pool's idle window.
 		for _ in 0..3 {
 			producer.append_datagram(None, b"x".as_slice()).unwrap();
-			elapse(&producer, Duration::from_secs(60));
+			elapse(&producer, Duration::from_secs(5));
 		}
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::ZERO));
 		for sequence in 0..3 {
@@ -9671,6 +9789,165 @@ mod test {
 		}
 	}
 
+	/// A handed-out group stays judgeable after the cache evicts it, and its successor too:
+	/// under a budget past the cache window, a stream still waiting on it (a FIN never
+	/// acknowledged) is convicted once its successor's arrival plus the budget passes, not
+	/// by whichever newer group the cache still holds. The newest group never is. A
+	/// subscribed group and a fetched one are judged alike.
+	#[test]
+	fn an_evicted_group_is_judged_by_its_evicted_successor() {
+		let mut producer = track_producer_expiring("test", cache::DEFAULT_EXPIRY);
+		let budget = cache::DEFAULT_EXPIRY * 2;
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let waiter = kio::Waiter::noop();
+		let expired = |held: &mut [group::Consumer; 2]| {
+			held.each_mut()
+				.map(|group| group.poll_expired_while_pending(&waiter, true))
+		};
+
+		// Frozen timestamps, so the wall clock alone convicts.
+		append_at(&mut producer, 0);
+		let fetch = group::Fetch::default().with_max_delay(budget);
+		let mut held = [
+			subscriber.assert_group(),
+			producer
+				.consume()
+				.fetch_group(0, fetch)
+				.now_or_never()
+				.unwrap()
+				.unwrap(),
+		];
+		for group in &mut held {
+			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
+			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+		}
+		assert_eq!(expired(&mut held), [false; 2], "the newest group");
+
+		elapse(&producer, Duration::from_secs(1));
+		let mut last = append_at(&mut producer, 0); // the successor
+		assert_eq!(expired(&mut held), [false; 2]);
+
+		// The track runs on, a group a second, until a second short of the deadline.
+		for _ in 0..budget.as_secs() - 1 {
+			elapse(&producer, Duration::from_secs(1));
+			last = append_at(&mut producer, 0);
+		}
+		producer.broadcast.pool.sweep();
+		let state = producer.state.read();
+		assert!(
+			!state.lookup.contains_key(&0) && !state.lookup.contains_key(&1),
+			"both evicted"
+		);
+		drop(state);
+		assert_eq!(expired(&mut held), [false; 2], "early");
+
+		elapse(&producer, Duration::from_secs(1));
+		assert_eq!(expired(&mut held), [true; 2], "the successor arrived a budget ago");
+
+		// The newest group outlives any budget.
+		let mut newest = subscriber.assert_group();
+		while newest.sequence < last {
+			newest = subscriber.assert_group();
+		}
+		elapse(&producer, budget * 2);
+		assert!(!newest.poll_expired_while_pending(&waiter, true), "the newest group");
+	}
+
+	/// A recorded successor that failed hands the clock on to the next live group even once
+	/// the cache reclaimed it before the reader looked again, rather than convicting by the
+	/// failed one's arrival. A subscribed group and a fetched one are judged alike.
+	#[test]
+	fn a_reclaimed_failed_successor_hands_the_clock_on() {
+		let mut producer = track_producer_expiring("test", cache::DEFAULT_EXPIRY);
+		let budget = cache::DEFAULT_EXPIRY * 2;
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let waiter = kio::Waiter::noop();
+		let expired = |held: &mut [group::Consumer; 2]| {
+			held.each_mut()
+				.map(|group| group.poll_expired_while_pending(&waiter, true))
+		};
+
+		append_at(&mut producer, 0);
+		let fetch = group::Fetch::default().with_max_delay(budget);
+		let mut held = [
+			subscriber.assert_group(),
+			producer
+				.consume()
+				.fetch_group(0, fetch)
+				.now_or_never()
+				.unwrap()
+				.unwrap(),
+		];
+		for group in &mut held {
+			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
+			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+		}
+
+		let failed = producer.append_group().unwrap();
+		assert_eq!(expired(&mut held), [false; 2], "the successor is recorded");
+		failed.abort(Error::Cancel).unwrap();
+		let replacement = Duration::from_secs(10);
+		elapse(&producer, replacement);
+		append_at(&mut producer, 0);
+		producer.broadcast.pool.sweep();
+		assert!(!producer.state.read().lookup.contains_key(&1), "reclaimed");
+
+		elapse(&producer, budget - replacement);
+		assert_eq!(
+			expired(&mut held),
+			[false; 2],
+			"the failed successor arrived a budget ago"
+		);
+
+		elapse(&producer, replacement);
+		assert_eq!(expired(&mut held), [true; 2], "the next live one arrived a budget ago");
+	}
+
+	/// On an ended track the cache expires idle groups in place rather than reclaiming them,
+	/// so the reads skip them like any aborted group. A recorded successor that aged out that
+	/// way still convicts the group before it once it arrived a budget ago.
+	#[test]
+	fn an_ended_track_judges_by_its_expired_successor() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		let budget = cache::DEFAULT_EXPIRY * 2;
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let waiter = kio::Waiter::noop();
+
+		append_at(&mut producer, 0);
+		let mut held = subscriber.assert_group();
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_none());
+
+		pool.step(Duration::from_secs(1));
+		append_at(&mut producer, 0); // the successor
+		assert!(
+			!held.poll_expired_while_pending(&waiter, true),
+			"the successor is recorded"
+		);
+		let state = producer.state.downgrade();
+		producer.finish().unwrap();
+		drop(producer);
+
+		// The first sweep dates the groups idle, the second expires them.
+		let idle = cache::DEFAULT_EXPIRY + Duration::from_secs(1);
+		pool.sweep();
+		pool.step(idle);
+		pool.sweep();
+		assert_eq!(
+			state.read(|state| state.lookup.get(&1).is_some_and(Slot::is_aborted)),
+			Some(true),
+			"expired in place"
+		);
+		assert!(!held.poll_expired_while_pending(&waiter, true), "early");
+
+		pool.step(budget - idle);
+		assert!(
+			held.poll_expired_while_pending(&waiter, true),
+			"the successor arrived a budget ago"
+		);
+	}
+
 	/// Empty groups are handed out like any other and retired by the wall clock like an
 	/// untimed one, whether they finished without a frame or are still open with none. A
 	/// publisher flooding a run of them cannot pin the group before the run either.
@@ -10046,6 +10323,31 @@ mod test {
 		// already past the budget.
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(2)));
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
+	}
+
+	/// A fetch with a budget parks on its deadlines even when it returns a cached group at
+	/// once, and fetches with distinct budgets never share one. Fetches that finish must not
+	/// leave their deadlines indexed for as long as the track lives.
+	#[test]
+	#[cfg(feature = "async")]
+	fn departed_budgets_leave_no_deadlines_behind() {
+		let mut producer = track_producer("test", Info::timed());
+		for second in 0..5 {
+			append_at(&mut producer, second * 1000);
+		}
+		let consumer = producer.consume();
+		for i in 0..1_000 {
+			let budget = Duration::from_millis(1_500) + Duration::from_micros(i);
+			let fetch = group::Fetch::default().with_max_delay(budget);
+			let group = consumer.fetch_group(2, fetch).now_or_never().unwrap().unwrap();
+			assert_eq!(group.sequence, 2);
+		}
+		let cache = producer.state.read().cache.clone();
+		let (media, wall) = cache.wakes().deadlines_indexed();
+		assert!(
+			media <= 32 && wall <= 32,
+			"{media} media and {wall} wall deadlines indexed"
+		);
 	}
 
 	#[test]
@@ -15539,6 +15841,151 @@ mod test {
 			"interleaved datagrams must not bypass the budget: {}",
 			pool.used()
 		);
+	}
+
+	/// A received compressed datagram inflates far past its wire size, so the send buffer
+	/// bills both forms to the pool, and pressure drops each track's oldest instead of
+	/// letting every track retain a full buffer of inflated payloads.
+	#[test]
+	#[cfg(feature = "async")]
+	fn received_compressed_datagrams_are_billed() {
+		let capacity = 1024;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let plain = bytes::Bytes::from(vec![0u8; super::super::datagram::MAX_DATAGRAM_PAYLOAD]);
+		let deflated = super::super::flate::Encoder::new().frame(&plain);
+		assert!(
+			deflated.len() < 128,
+			"the payload compresses to {} bytes",
+			deflated.len()
+		);
+
+		let tracks = 16;
+		let mut held = Vec::new();
+		for track in 0..tracks {
+			let mut producer = Producer::new(
+				broadcast.clone(),
+				format!("track{track}").as_str(),
+				Info::timed().with_compress(true),
+			);
+			let subscriber = producer.subscribe(None);
+			for sequence in 0..MAX_DATAGRAMS as u64 {
+				let datagram = Datagram {
+					sequence,
+					timestamp: Some(Timestamp::ZERO),
+					payload: deflated.clone(),
+				};
+				producer
+					.insert_deflated_datagram(datagram.into(), plain.len() as u64)
+					.unwrap();
+			}
+			held.push((producer, subscriber));
+		}
+
+		let retained: u64 = held
+			.iter()
+			.flat_map(|(producer, _)| {
+				let state = producer.state.read();
+				state
+					.datagrams
+					.iter()
+					.map(|datagram| {
+						let stored = datagram.stored().unwrap();
+						(stored.payload.len() + stored.deflated.as_ref().unwrap().len()) as u64
+					})
+					.collect::<Vec<_>>()
+			})
+			.sum();
+		assert!(
+			pool.used() >= retained,
+			"{retained} retained bytes, {} billed",
+			pool.used()
+		);
+		// Each track keeps only its newest, which no write ever evicts on its own account.
+		let newest = (plain.len() + deflated.len()) as u64;
+		assert!(
+			retained <= tracks * newest,
+			"{retained} bytes retained across {tracks} tracks"
+		);
+
+		for (_, subscriber) in &mut held {
+			assert_eq!(
+				recv_datagram(subscriber).payload,
+				plain,
+				"the newest is still delivered"
+			);
+		}
+		drop(held);
+		assert_eq!(pool.used(), 0, "the buffers release their bill when the tracks go");
+	}
+
+	/// A datagram the full buffer pushes out releases its bill, so the pool holds exactly
+	/// what the buffer retains.
+	#[test]
+	fn a_full_datagram_buffer_bills_what_it_retains() {
+		let pool = cache::Pool::unbounded();
+		let mut producer = track_producer_pooled("test", pool.clone());
+		for _ in 0..MAX_DATAGRAMS * 2 {
+			producer.append_datagram(Timestamp::ZERO, vec![0u8; 1000]).unwrap();
+		}
+		let state = producer.state.read();
+		assert_eq!(state.datagrams.len(), MAX_DATAGRAMS);
+		let billed: u64 = state.datagrams.iter().map(|datagram| datagram.bytes()).sum();
+		assert_eq!(pool.used(), billed);
+	}
+
+	/// A track that stops sending datagrams cannot pin its buffer in the shared pool: the
+	/// sweep reclaims it once idle, the newest too, since no late joiner needs it.
+	#[test]
+	fn pool_sweep_expires_idle_datagrams() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		for _ in 0..3 {
+			producer.append_datagram(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		}
+		assert!(pool.used() > 0);
+
+		elapse(&producer, Duration::from_secs(2));
+		pool.sweep();
+
+		assert!(
+			producer.state.read().datagrams.is_empty(),
+			"the sweep reclaimed idle datagrams"
+		);
+		assert_eq!(pool.used(), 0);
+	}
+
+	/// An ended track's closed state refuses the write that pops a datagram, so a stale
+	/// reader would pin its buffer: the sweep releases each idle one in place instead,
+	/// and the reader skips it like a dropped one.
+	#[test]
+	#[cfg(feature = "async")]
+	fn pool_sweep_expires_an_ended_tracks_datagrams() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		let mut stale = producer.subscribe(None);
+		producer.append_datagram(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		pool.step(Duration::from_secs(6));
+		producer.append_datagram(Timestamp::ZERO, b"new".as_slice()).unwrap();
+		producer.finish().unwrap();
+		drop(producer);
+
+		// Only the oldest is idle for the whole window.
+		pool.step(Duration::from_secs(6));
+		pool.sweep();
+		assert!(pool.used() > 0, "the newest is still within the window");
+		assert_eq!(
+			recv_datagram(&mut stale).payload,
+			b"new".as_slice(),
+			"the reader skips the released one"
+		);
+
+		pool.step(Duration::from_secs(6));
+		pool.sweep();
+		assert_eq!(pool.used(), 0, "the sweep released every idle datagram");
 	}
 
 	/// An aborted group releases its access sample along with its bytes, from any

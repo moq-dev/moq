@@ -11,7 +11,7 @@ configured, as the tokio listeners already do.
 and never applies `listen.extensions`; the tokio path
 (`rs/moq-relay/src/relay.rs`, `websocket.rs`) does. Apply them and add a uring
 test that a configured extension is negotiated.
-[Relay config](/quest/m1/api-audit/relay-config.md) keeps extensions as the
+The relay config audit ([#6535](https://github.com/moq-dev/moq/pull/6535)) keeps extensions as the
 operator's interop knob, so every listener must honor it.
 
 Public API: none. Wire: none.

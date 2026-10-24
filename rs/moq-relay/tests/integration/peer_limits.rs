@@ -37,7 +37,7 @@ pub(crate) fn config(dir: &std::path::Path) -> Config {
 	config.listen.tls.cert = vec![cert];
 	config.listen.tls.key = vec![key];
 	config.quic.max_streams = Some(VIEWER_STREAMS);
-	config.peer.quic.max_streams = std::num::NonZeroU64::new(4 * PROBE as u64).unwrap();
+	config.limits.peer.quic.max_streams = std::num::NonZeroU64::new(4 * PROBE as u64).unwrap();
 	config
 }
 
@@ -168,30 +168,39 @@ async fn refused_at_load(set: impl FnOnce(&mut Config)) -> String {
 	}
 }
 
-/// A limit QUIC cannot advertise or honor is refused at load, in `[peer.quic]`
+/// A limit QUIC cannot advertise or honor is refused at load, in `[limits.peer.quic]`
 /// and `[quic]` alike, rather than wedging the peer or the handshake later.
 #[tokio::test]
 async fn unadvertisable_quic_limits_are_refused_at_load() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let err = refused_at_load(|config| {
-		config.peer.quic.receive_window = std::num::NonZeroU64::new(1 << 62).unwrap();
+		config.limits.peer.quic.receive_window = std::num::NonZeroU64::new(1 << 62).unwrap();
 	})
 	.await;
-	assert!(err.contains("[peer.quic]") && err.contains("receive_window"), "{err}");
+	assert!(
+		err.contains("[limits.peer.quic]") && err.contains("receive_window"),
+		"{err}"
+	);
 
 	// Incomplete messages hold connection credit, so the window has to fit the largest.
 	let err = refused_at_load(|config| {
 		let window = moq_net::transport::MIN_RECEIVE_WINDOW - 1;
-		config.peer.quic.receive_window = std::num::NonZeroU64::new(window).unwrap();
+		config.limits.peer.quic.receive_window = std::num::NonZeroU64::new(window).unwrap();
 	})
 	.await;
-	assert!(err.contains("[peer.quic]") && err.contains("largest message"), "{err}");
+	assert!(
+		err.contains("[limits.peer.quic]") && err.contains("largest message"),
+		"{err}"
+	);
 
 	let err = refused_at_load(|config| {
-		config.peer.quic.max_streams = std::num::NonZeroU64::new((1 << 60) + 1).unwrap();
+		config.limits.peer.quic.max_streams = std::num::NonZeroU64::new((1 << 60) + 1).unwrap();
 	})
 	.await;
-	assert!(err.contains("[peer.quic]") && err.contains("max_streams"), "{err}");
+	assert!(
+		err.contains("[limits.peer.quic]") && err.contains("max_streams"),
+		"{err}"
+	);
 
 	// Zero lets the peer open nothing, so it is refused too rather than wedging the connection.
 	for max_streams in [0, (1 << 60) + 1] {
