@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -10,6 +10,7 @@ import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { nextTask } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
@@ -242,6 +243,53 @@ test("an announced request follows the reconnect on the same handle", async () =
 		clientOrigin.close();
 		for (const broadcast of published) broadcast.close();
 		for (const session of sessions) session.abort();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("an ended auth handle gives up instead of retrying", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/");
+	const servers: Promise<{ abort(): void }>[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		servers.push(accept(pair.server, url));
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	const clock = new Manual();
+	const restore = clock.install();
+	// Bounded by task turns rather than wall time, advancing the clock a millisecond per turn
+	// so a reconnect, if the loop tried one, would be dialed well within the bound.
+	const until = async (done: () => boolean) => {
+		for (let i = 0; i < 100 && !done(); i++) {
+			await nextTask();
+			await clock.advance(Nano.fromMilli(Milli(1)));
+		}
+		expect(done()).toBe(true);
+	};
+
+	// An unbounded retry window, so only the ended handle can stop the loop.
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		await until(() => reload.established.peek() !== undefined);
+		const aborted = new Error("auth handle aborted");
+		reload.auth.abort(aborted);
+		(await servers[0])?.abort();
+
+		await until(() => reload.error.peek() !== undefined);
+		expect(reload.error.peek()).toBe(aborted);
+		expect(servers.length).toBe(1);
+	} finally {
+		warned.mockRestore();
+		reload.close();
+		restore();
 		globalThis.WebTransport = original;
 	}
 });

@@ -1159,8 +1159,8 @@ impl MoqSession {
 	pub fn auth(&self) -> Arc<MoqAuth> {
 		Arc::new(MoqAuth::new(match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => crate::auth::Handle::Connection(connection.auth()),
-			Inner::Session(session) => crate::auth::Handle::Session(session.auth()),
+			Inner::Connection(connection) => connection.auth(),
+			Inner::Session(session) => session.auth(),
 		}))
 	}
 

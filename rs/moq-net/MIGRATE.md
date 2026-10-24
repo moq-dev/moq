@@ -4,6 +4,25 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### An auth handle can outlive its session (#6109)
+
+`auth::Handle::new()` creates a handle that backs no session yet; pass it to `Client::with_auth` and every session that client connects presents the tokens it holds.
+A `Route` naming one of its `Auth`s keeps that token across a reconnect, so drop the code that added the token again and re-announced after one.
+The handle backs one active session at a time, plus the ones draining after a GOAWAY: connecting another while one is still active fails with `Error::Duplicate`. Give independent concurrent sessions separate handles.
+`Handle::grant()` and `Auth::grant()` follow the newest open session, so they read `None` while disconnected instead of keeping the last session's grant.
+`Auth::closed()` resolves only on the peer's verdict (a refusal, `Unsupported`, or a clean close after a grant) or the handle's end, which `Handle::abort` triggers; a session ending is not one.
+A handle a session creates for itself still ends with that session.
+On moq-lite, a token refused with a code that may pass (`Internal`, `TooManyRequests`, `Timeout`) is presented again after a backoff of 1s doubling to 30s, instead of `add` failing with that code.
+`Handle::add` resolves with `(Auth, Answer)` instead of `Auth`: `Answer::Granted` when a peer granted the token on its AUTH stream, or `Answer::Requests` when only the requests that name it carry it (moq-transport without AUTH).
+The answer holds after the session drops, unlike `Auth::grant()`, so read it rather than inferring support from a missing grant.
+
+```rust
+// Before
+let token = handle.add(jwt).await?;
+// After
+let (token, answer) = handle.add(jwt).await?;
+```
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.

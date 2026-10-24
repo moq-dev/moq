@@ -1,5 +1,7 @@
 import { Milli, Nano, sleep } from "@moq/clock";
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
+import type * as Auth from "../auth.ts";
+import { vacant } from "../auth_session.ts";
 import { error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
@@ -204,6 +206,16 @@ export interface ConnectProps {
 	extensions?: Extensions.Extensions;
 
 	/**
+	 * Build the session on `auth`, so it presents every token the handle holds and a route
+	 * naming one of its `Auth`s keeps it across a reconnect. Omit to give the session a handle
+	 * of its own, which ends with it.
+	 *
+	 * The handle backs one active session at a time, plus the ones draining after a GOAWAY:
+	 * connecting another while one is still active rejects with {@link Auth.Duplicate}.
+	 */
+	auth?: Auth.Handle;
+
+	/**
 	 * Aborts the connection attempt with the signal's reason. An already-aborted
 	 * signal rejects before anything opens, and aborting after the connection is
 	 * established has no effect. Use `AbortSignal.timeout(ms)` for a deadline.
@@ -214,6 +226,8 @@ export interface ConnectProps {
 /** The per-session wiring shared by every negotiated protocol path. */
 type SessionProps = {
 	publish?: OriginConsumer;
+	/** The auth handle the session is built on, or undefined for one of its own. */
+	handle?: Auth.Handle;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
 	/** The moq-transport extensions this side offers. */
@@ -239,6 +253,8 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
 	signal.throwIfAborted();
+	// Fail before dialing; the session checks again when it attaches.
+	if (props.auth) vacant(props.auth);
 
 	// Resolves on abort so every in-flight transport tears itself down.
 	const { promise: abort, resolve } = Promise.withResolvers<void>();
@@ -277,6 +293,7 @@ async function connectInner(raw: URL, props: Omit<ConnectProps, "url">, abort: P
 	const url = dialable(raw);
 	const wiring: SessionProps = {
 		publish: props.publish,
+		handle: props.auth,
 		client: true,
 		extensions: Extensions.offered(props.extensions),
 	};

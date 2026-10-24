@@ -145,7 +145,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 ## Required
 
 - [IETF AUTH_OK patterns](/quest/m1/auth/ietf-patterns.md) - moq-transport's AUTH_OK carries lite's patterns, so an exact or wildcard grant is admitted on draft 17+
-- [Auth outlives its session](/quest/m1/auth/issuer.md) - one `auth::Handle` spans a connection's sessions, so a route's auth survives a reconnect
 - [Token in band](/quest/m1/auth/token-in-band.md) - extra credentials ride
   AUTH streams: a session starts on the token its SETUP or URL carried and its
   AUTH streams add the rest

@@ -141,8 +141,8 @@ key can itself be **scoped** at generation (`--root`, `--publish`,
 On moq-lite-07-wip or moq-transport draft-17 and later with MoQ Auth negotiated,
 a client can present another JWT without reconnecting. Present its replacement
 before the current grant expires and keep the returned token handle alive.
-The native `Connection::auth()` handle re-presents retained tokens after a
-reconnect; the JavaScript session's `auth.add()` presents one for that session.
+The auth handle a reconnecting connection owns (native `Connection::auth()`,
+JavaScript `connection.auth`) presents its tokens again on every reconnect.
 Older versions refuse in-band tokens.
 
 Each accepted token adds its publish and subscribe patterns to the session's
@@ -176,8 +176,8 @@ one that times out while waiting is refused without being sent. A sent check
 always runs to completion, so the connection's `end` stays its last request and
 `--limit-token` counts stay exact. On moq-lite, an
 auth server that cannot answer, by timeout or outage, refuses a token as a
-transient error, and `Connection::auth()` presents it again on its reconnect
-backoff. On moq-transport the refusal is final and the token ends. Retrying
+transient error, and the client presents it again after a backoff of 1s
+doubling to 30s. On moq-transport the refusal is final and the token ends. Retrying
 never extends an accepted grant, so a session whose last grant expires during an
 outage still closes.
 

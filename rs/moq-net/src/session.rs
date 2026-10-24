@@ -295,6 +295,9 @@ impl Session {
 	/// The tokens this side presented and the grant they earned, plus the tokens
 	/// the peer presents. See [`auth`].
 	///
+	/// The handle passed to [`Client::with_auth`](crate::Client::with_auth), or else one
+	/// this session created for itself, which ends with it.
+	///
 	/// On moq-lite-07-wip, and on moq-transport draft-17+ when both sides negotiate the
 	/// MoQ Auth extension, each side presents its connection's credential right after
 	/// setup. Older versions, and peers that do not negotiate it, leave the grant `None`.
@@ -307,7 +310,7 @@ impl Session {
 pub(super) struct Handles {
 	pub stats: crate::stats::Session,
 	pub goaway: goaway::Handle,
-	pub auth: auth::Handle,
+	pub auth: auth::Link,
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
 	/// them to the peer (moq-lite PROBE). Sampled only while a consumer exists.
 	pub estimate: Option<kio::Producer<Estimate>>,
@@ -331,6 +334,8 @@ impl Session {
 			stats: context,
 			bandwidth,
 		} = handles;
+		let goaway = Arc::new(goaway);
+		auth.drain_with(goaway.clone());
 		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
 		if let Some(estimate) = &estimate
@@ -375,6 +380,7 @@ impl Session {
 			sampled: None,
 			mode: SamplerMode::Idle,
 			drain: Drain::Idle,
+			auth: auth.clone(),
 		};
 
 		let session = Self {
@@ -385,8 +391,8 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,
-			goaway: Arc::new(goaway),
-			auth,
+			goaway,
+			auth: auth.handle().clone(),
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -436,6 +442,9 @@ pub(crate) struct Supervisor {
 	drain: Drain,
 	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
 	wire: Option<crate::stats::Wire>,
+	/// This session's side of its auth handle, closed before the end is published so a
+	/// replacement session built on the same handle never finds this one still active.
+	auth: auth::Link,
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -476,11 +485,10 @@ impl Supervisor {
 				Drain::Done(res) => Some(res),
 				_ => None,
 			};
+			let err = self.version.transport_error(err);
+			self.auth.close(err.clone());
 			if let Ok(mut closed) = self.closed.write() {
-				*closed = Some(Ended {
-					err: self.version.transport_error(err),
-					drain,
-				});
+				*closed = Some(Ended { err, drain });
 			}
 			return Poll::Ready(());
 		}

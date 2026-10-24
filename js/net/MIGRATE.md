@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### An auth handle can outlive its session (#6109)
+
+`Auth.Handle` is now a class: `new Auth.Handle()` backs no session yet, and `connect({ auth })` builds the session on it, so every session built on one presents the tokens it holds.
+A reconnecting `Connection` owns one as `connection.auth`; a route naming one of its `Auth.Auth`s keeps that token across a reconnect, so drop the code that added the token again and re-announced after one.
+A handle backs one active session at a time, plus the ones draining after a GOAWAY: connecting another while one is still active rejects with `Auth.Duplicate`, and so does a second `requests()` call, which threw a plain `Error` before.
+`Established.auth` returns the session's handle, so its `grant` and each `Auth.Auth`'s `grant` read undefined once the session closes, instead of an empty grant.
+`Auth.Auth.closed` settles only on the peer's verdict or the handle's end (`handle.abort()`); a session ending is not one, except for a handle the session created for itself.
+`Auth.None` is removed; nothing returned it.
+On moq-lite, a token refused with a code that may pass (`Internal`, `TooManyRequests`, `Timeout`) is presented again after a backoff of 1s doubling to 30s, instead of `add` rejecting with that code.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.

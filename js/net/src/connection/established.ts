@@ -33,6 +33,9 @@ export interface Established {
 	 * presents. On moq-lite-07-wip, and on moq-transport draft-17+ when both sides negotiate
 	 * MoQ Auth, each side presents its connection's credential right after setup.
 	 * Otherwise the grant stays undefined.
+	 *
+	 * The handle passed to `connect` as `auth`, or else one the session created for itself,
+	 * which ends with it.
 	 */
 	readonly auth: Auth.Handle;
 

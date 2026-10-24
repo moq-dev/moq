@@ -1,7 +1,5 @@
 //! The reconnect loop around a session, and the [`Monitor`] that observes it.
 
-pub mod auth;
-
 use std::task::{Poll, ready};
 use std::time::Duration;
 
@@ -206,7 +204,8 @@ pub enum Redirect {
 	/// range, or the metadata service, and nothing here resolves it to find out. A
 	/// *literal* loopback, private, link-local, or IPC target is still refused, but
 	/// that catches a misconfigured peer, not a hostile one. Use it only with an
-	/// upstream trusted with the local network.
+	/// upstream trusted with the local network and with the tokens on
+	/// [`Connection::auth`], which every session presents, on any host.
 	Follow,
 	/// Follow only when the host matches the configured URL, so a peer can move us
 	/// between ports or schemes but not to another host. The default.
@@ -483,8 +482,6 @@ impl Resolved {
 /// distinguishes a permanent give-up from a graceful close.
 #[derive(Default)]
 struct State {
-	/// Tokens to queue before publishing a replacement session to its consumers.
-	tokens: std::sync::Mutex<Vec<std::sync::Weak<auth::Replay>>>,
 	/// Current connection status, or `None` before the first connect.
 	status: Option<Status>,
 	/// How many sessions have been live on this handle, counting the current one.
@@ -523,6 +520,8 @@ struct Shared {
 	send_bw: BandwidthProducer,
 	recv_bw: BandwidthProducer,
 	closed: CloseGuard,
+	/// The auth handle every session is built on, ended with the loop.
+	auth: moq_net::auth::Handle,
 }
 
 impl Shared {
@@ -536,7 +535,6 @@ impl Shared {
 			return;
 		}
 		if let Ok(mut state) = self.state.write() {
-			auth::replay(&state, session, state.connects + 1);
 			// A migration replaces a live session without a disconnect in between, so
 			// its end is counted here, keeping `started - ended` at 1 while connected.
 			if state.session.is_some() {
@@ -610,9 +608,26 @@ impl Drop for Shared {
 		// is what closes the transport.
 		self.disconnected();
 		// Nothing retries anymore, however the loop ended.
-		if let Ok(mut state) = self.state.write() {
-			state.failure = None;
-		}
+		let failed = match self.state.write() {
+			Ok(mut state) => {
+				state.failure = None;
+				state.error.clone()
+			}
+			Err(state) => state.error.clone(),
+		};
+		// No session will present the tokens again, so they end with the loop.
+		let aborted = self.closed.lock().unwrap().clone();
+		let err = match (aborted, failed) {
+			(Some(err), _) | (None, Some(Error::MoqNet(err))) => err,
+			(None, Some(err)) if err.is_auth() => moq_net::Error::Unauthorized,
+			(None, Some(err)) => moq_net::Error::Transport(err.to_string()),
+			(None, None) => moq_net::Error::Closed,
+		};
+		self.auth.abort(match err {
+			// A token reads `Cancel` as its peer ending the grant cleanly.
+			moq_net::Error::Cancel => moq_net::Error::Closed,
+			err => err,
+		});
 	}
 }
 
@@ -710,8 +725,8 @@ pub struct Snapshot {
 pub struct Connection {
 	task: std::sync::Arc<Task>,
 	state: kio::Consumer<State>,
-	/// The reconnect pacing, which retained tokens reuse to retry a transient refusal.
-	pacing: Pacing,
+	/// The auth handle every session of the loop is built on.
+	auth: moq_net::auth::Handle,
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
 	/// Divides `send_bandwidth`, and every session the loop dials probes for its reservations.
@@ -741,10 +756,11 @@ struct Task {
 type CloseGuard = std::sync::Arc<std::sync::Mutex<Option<moq_net::Error>>>;
 
 impl Connection {
-	pub(crate) fn new(client: Client, addrs: Addrs) -> Self {
+	pub(crate) fn new(mut client: Client, addrs: Addrs) -> Self {
 		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
-		let pacing = Pacing::new(&client.backoff);
+		let auth = moq_net::auth::Handle::new();
+		client.moq = client.moq.with_auth(auth.clone());
 
 		// The loop feeds these across every reconnect, so a consumer's handle survives session churn
 		// (unlike a session's own bandwidth consumer, which dies with the session).
@@ -757,6 +773,7 @@ impl Connection {
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
+		let task_auth = auth.clone();
 
 		let task = tokio::spawn(async move {
 			let reconnect = client.reconnect;
@@ -765,6 +782,7 @@ impl Connection {
 				send_bw,
 				recv_bw,
 				closed: task_closed,
+				auth: task_auth,
 			};
 			// Isolated inside `shared`, so a panic still records a terminal error
 			// instead of closing the channels as if the caller had stopped it.
@@ -788,7 +806,7 @@ impl Connection {
 				closed,
 			}),
 			state,
-			pacing,
+			auth,
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,
@@ -882,6 +900,11 @@ impl Connection {
 		loop {
 			if !timeout.is_zero() && retry.start.elapsed() >= timeout {
 				return Err(timeout_error(timeout, retry.last_error.as_ref()));
+			}
+			// An ended auth handle refuses every later session, so no dial can recover. A fresh
+			// watch only reports an error once its handle has ended.
+			if let Poll::Ready(Err(err)) = shared.auth.grant().poll_changed(&kio::Waiter::noop()) {
+				return Err(err.into());
 			}
 
 			match Self::dial_any(shared, &client, &addrs, &mut draining).await {
@@ -1323,13 +1346,15 @@ impl Connection {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// Present tokens that survive session replacement and observe the live grant union.
-	/// A route names a session's own `moq_net::auth::Auth` instead, re-added after a reconnect.
-	pub fn auth(&self) -> auth::Handle {
-		auth::Handle {
-			connection: self.state.clone(),
-			pacing: self.pacing,
-		}
+	/// The auth handle every session of this connection is built on: its tokens are
+	/// presented on each reconnect, so a route naming one keeps it, and its grant follows
+	/// the live session. It ends with the connection: the abort's or [`Error::MoqNet`]'s
+	/// error, [`moq_net::Error::Unauthorized`] for a rejection, [`moq_net::Error::Transport`]
+	/// for any other failure, or [`moq_net::Error::Closed`] for a stop. Never
+	/// [`moq_net::Error::Cancel`], which a token reads as its peer ending the grant cleanly.
+	/// Aborting it ends the connection at its next reconnect, with the abort's error.
+	pub fn auth(&self) -> moq_net::auth::Handle {
+		self.auth.clone()
 	}
 
 	/// Observe the connection's statistics and presence across reconnects.
@@ -2281,6 +2306,7 @@ mod tests {
 			send_bw: BandwidthProducer::new(),
 			recv_bw: BandwidthProducer::new(),
 			closed: CloseGuard::default(),
+			auth: moq_net::auth::Handle::new(),
 		}
 	}
 
@@ -2530,6 +2556,99 @@ mod tests {
 		let ended = monitor.presence_changed().await;
 		assert!(ended.is_err(), "nothing connected, so only the end moves presence");
 		assert!(monitor.failure().is_none(), "nothing is retrying");
+	}
+
+	/// The connection's auth handle presents its token on every session the loop makes,
+	/// without the application adding it again.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_token_is_presented_on_every_session() {
+		const WAIT: Duration = Duration::from_secs(10);
+		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+
+		let mut config = crate::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.version = vec![version];
+		let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
+		let addr = listener.tcp_local_addr().unwrap();
+
+		let mut config = crate::connect::Config {
+			version: vec![version],
+			..Default::default()
+		};
+		config.backoff.initial = Some(MIN_BACKOFF);
+		config.backoff.max = Some(MIN_BACKOFF);
+		let connection = config
+			.init(Default::default())
+			.unwrap()
+			.connect(url(&format!("tcp://{addr}/")));
+		let auth = connection.auth();
+		let added = tokio::spawn({
+			let auth = auth.clone();
+			async move { auth.add("token").await }
+		});
+
+		// Held past each session's abort: dropping a grant closes its stream cleanly, which
+		// is the peer's verdict ending the token.
+		let mut issued = Vec::new();
+		let mut added = Some(added);
+		let mut token = None;
+		for round in 0..2 {
+			let request = tokio::time::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+			let mut requests = request.auth().requests().unwrap();
+			let (session, _task) = request.ok().await.unwrap();
+			loop {
+				let request = tokio::time::timeout(WAIT, requests.next()).await.unwrap().unwrap();
+				if request.token().is_empty() {
+					issued.push(request.accept(moq_net::auth::Grant::default()));
+					continue;
+				}
+				assert_eq!(request.token().as_ref(), b"token", "round {round}");
+				issued.push(request.accept(moq_net::auth::Grant::all()));
+				break;
+			}
+			if let Some(added) = added.take() {
+				token = Some(added.await.unwrap().expect("granted").0);
+			}
+			let mut grant = token.as_ref().unwrap().grant();
+			while grant.peek() != Some(moq_net::auth::Grant::all()) {
+				tokio::time::timeout(WAIT, grant.changed()).await.unwrap().unwrap();
+			}
+			session.abort(moq_net::Error::Cancel);
+		}
+		drop(connection);
+		let token = token.unwrap();
+		// Not `Cancel`, which reads as the peer ending the grant cleanly.
+		let closed = tokio::time::timeout(WAIT, token.closed()).await.unwrap();
+		assert!(matches!(closed, moq_net::Error::Closed), "{closed:?}");
+	}
+
+	/// Ending the connection's auth handle ends the loop at its next reconnect, rather than
+	/// redialing sessions the handle refuses.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn an_ended_auth_handle_ends_the_loop() {
+		const WAIT: Duration = Duration::from_secs(10);
+
+		let (addr, mut accepted, _task) = serve(crate::origin::spawn()).await;
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Some(MIN_BACKOFF);
+		config.backoff.max = Some(MIN_BACKOFF);
+		let connection = config
+			.init(Default::default())
+			.unwrap()
+			.connect(url(&format!("tcp://{addr}/")));
+
+		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		connection.auth().abort(moq_net::Error::App(9));
+		session.abort(moq_net::Error::Cancel);
+		let closed = tokio::time::timeout(WAIT, connection.closed())
+			.await
+			.expect("the loop kept redialing on an ended auth handle");
+		assert!(
+			matches!(closed, Err(Error::MoqNet(moq_net::Error::App(9)))),
+			"{closed:?}"
+		);
 	}
 
 	/// A session that ends the loop reports through `closed`, not as a retry reason.
