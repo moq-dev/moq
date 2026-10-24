@@ -400,13 +400,13 @@ async fn worker_tokio_custom_route_and_quic() {
 }
 
 /// io_uring workers. Off the default feature set; `just rs uring` and nightly
-/// `--all-features` compile it. Skips below the 6.12 floor unless MOQ_STRICT.
+/// `--all-features` compile it. Skips below the 6.12 floor unless CI_STRICT.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => {}
-		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring embed test: {reason}");
 			return;
 		}

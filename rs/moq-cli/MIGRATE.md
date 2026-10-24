@@ -4,6 +4,11 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### Unknown `MOQ_*` environment variables stop startup ([#6633](https://github.com/moq-dev/moq/pull/6633))
+
+A `MOQ_*` variable `moq` does not read, such as a misspelling, a removed name, or one meant for another binary, now stops startup with the variable named instead of being ignored.
+Remove or rename what the error lists.
+
 ### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
 Enable `nvidia` instead; the old names were aliases for it.

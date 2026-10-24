@@ -34,9 +34,9 @@ VERIFIERS="rust"
 ALGORITHMS="${TOKEN_ALGORITHMS:-HS256,EdDSA,ES256,RS256}"
 
 # The Rust CLI under test, as a command prefix: the same `moq` binary smoke.sh
-# tests (MOQ_BIN, else PATH), since moq-token-cli was folded into `moq auth`
+# tests (CLI_BIN, else PATH), since moq-token-cli was folded into `moq auth`
 # (moq-dev/moq#3684). TOKEN_BIN overrides the whole prefix.
-TOKEN="${TOKEN_BIN:-${MOQ_BIN:-moq} auth}"
+TOKEN="${TOKEN_BIN:-${CLI_BIN:-moq} auth}"
 
 # The published Docker image for the `rust-docker` cell. Untagged = :latest, the
 # tag the release pipeline moves to the newest version; pulled fresh each run.

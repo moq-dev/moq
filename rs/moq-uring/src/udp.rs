@@ -2031,7 +2031,7 @@ mod tests {
 	fn a_failed_send_costs_only_its_packet() {
 		let mut worker = match crate::Worker::new(crate::Config::default()) {
 			Ok(worker) => worker,
-			Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+			Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 				eprintln!("skipping io_uring socket test: {reason}");
 				return;
 			}
@@ -2119,7 +2119,7 @@ mod tests {
 	fn a_stale_source_keeps_segmentation() {
 		let mut worker = match crate::Worker::new(crate::Config::default()) {
 			Ok(worker) => worker,
-			Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+			Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 				eprintln!("skipping io_uring socket test: {reason}");
 				return;
 			}
@@ -2182,7 +2182,7 @@ mod tests {
 
 		let mut worker = match crate::Worker::new(crate::Config::default()) {
 			Ok(worker) => worker,
-			Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+			Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 				eprintln!("skipping io_uring socket test: {reason}");
 				return;
 			}

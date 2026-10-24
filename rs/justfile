@@ -114,7 +114,7 @@ uring-changed base="":
     bash sh/rs/select.sh uring "$changed"
 
 # Compile and test the io_uring relay path, which is off the default feature set.
-# Linux-only; MOQ_STRICT requires a supported kernel instead of skipping tests.
+# Linux-only; CI_STRICT requires a supported kernel instead of skipping tests.
 [positional-arguments]
 uring *args:
     just rs uring-check "$@"
@@ -359,7 +359,7 @@ multicast:
     just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery) | test(/^mdns::tests::daemon_/)'
     just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
 
-# Run the long TS recovery arms; a failing arm keeps its export and ledgers under $MOQ_TEST_RUNS.
+# Run the long TS recovery arms; a failing arm keeps its export and ledgers under $HARNESS_RUNS.
 ts-recovery:
     just rs test -p moq-mux --lib --run-ignored only -E 'test(/^container::ts::recovery_test::long_/)'
 

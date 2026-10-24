@@ -7,14 +7,14 @@ import type { Plugin } from "vite";
  * `just web` brings up the watch, publish, and stats demos side by side.
  *
  * Pass `--open` to vite to also let it open the default page (don't; this
- * replaces it). Set MOQ_NO_OPEN=1 to skip opening entirely.
+ * replaces it). Set DEMO_NO_OPEN=1 to skip opening entirely.
  */
 export function openTabs(paths: string[]): Plugin {
 	return {
 		name: "moq-open-tabs",
 		apply: "serve",
 		configureServer(server) {
-			if (process.env.MOQ_NO_OPEN) return;
+			if (process.env.DEMO_NO_OPEN) return;
 
 			server.httpServer?.once("listening", () => {
 				const address = server.httpServer?.address();

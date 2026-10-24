@@ -218,8 +218,8 @@ impl Config {
 	}
 
 	/// Parses configuration from CLI arguments, optionally merging with a
-	/// TOML file specified via the positional `file` argument. Also initializes
-	/// the logger.
+	/// TOML file specified via the positional `file` argument, and refuses any
+	/// `MOQ_*` variable the relay does not read. Also initializes the logger.
 	pub fn load() -> anyhow::Result<Self> {
 		let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
 		// `#[usage(completion)]` installs the `__complete_word__` interception in the
@@ -231,6 +231,7 @@ impl Config {
 			std::process::exit(0);
 		}
 		let config = Self::parse_and_merge(args)?;
+		moq_tokio::cli::check_env(&[Cli::spec()], &[])?;
 		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
@@ -1133,8 +1134,8 @@ ws = false
 		assert!(drift.is_empty(), "{drift:#?}");
 	}
 
-	/// The relay ignores a `MOQ_*` variable it doesn't know, so a stale name in the
-	/// NixOS module would silently drop that setting.
+	/// The relay refuses to start on a `MOQ_*` variable it doesn't read, so a stale
+	/// name in the NixOS module would stop every NixOS relay; catch it here first.
 	#[test]
 	fn the_nixos_module_sets_only_known_variables() {
 		let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../nix/modules/moq-relay.nix");

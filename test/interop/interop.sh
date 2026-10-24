@@ -46,7 +46,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -55,7 +55,7 @@ SUBSCRIBERS="rust"
 # can't be held to them: a released client may not close cleanly, a released relay names no
 # connection when one closes, and the tail clients are built from this checkout only.
 IN_TREE=1
-if [[ -n "${RELAY_BIN:-}${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" ]]; then
+if [[ -n "${RELAY_BIN:-}${CLI_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" ]]; then
     IN_TREE=0
 fi
 TIMEOUT="${INTEROP_TIMEOUT:-20}"
@@ -82,9 +82,9 @@ IETF_VERSIONS="moq-transport-14,moq-transport-16,moq-transport-18,moq-transport-
 PROFILE="${INTEROP_PROFILE:-debug}"
 
 # Binaries under test. Built from source below unless overridden to point at a
-# prebuilt (mirrors test/smoke's RELAY_BIN/MOQ_BIN escape hatch).
+# prebuilt (mirrors test/smoke's RELAY_BIN/CLI_BIN escape hatch).
 RELAY="${RELAY_BIN:-}"
-MOQ="${MOQ_BIN:-}"
+MOQ="${CLI_BIN:-}"
 
 require_value() {
     # require_value <flag> "$@": the flag plus the rest of the argv. Ensures a
@@ -327,7 +327,7 @@ COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
 # checks audio only in its decoding media lanes, and the bindings' clients, which always check it,
 # refuse to run in the rest.
 AUDIO=1
-[[ -z "${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" || "${INTEROP_DECODE:-0}" == 1 ]] || AUDIO=0
+[[ -z "${CLI_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" || "${INTEROP_DECODE:-0}" == 1 ]] || AUDIO=0
 if [[ "$AUDIO" -eq 0 ]]; then
     for sub in "${SUB_LIST[@]}"; do
         case "$sub" in
@@ -336,7 +336,7 @@ if [[ "$AUDIO" -eq 0 ]]; then
             *) sub_needs_audio="$sub" ;;
         esac
         if [[ -n "${sub_needs_audio:-}" ]]; then
-            echo "error: the $sub subscriber always checks audio, which a run with MOQ_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off without INTEROP_DECODE" >&2
+            echo "error: the $sub subscriber always checks audio, which a run with CLI_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off without INTEROP_DECODE" >&2
             exit 2
         fi
     done
