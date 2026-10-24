@@ -3,11 +3,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Context;
+use bytes::Bytes;
 use mpeg2ts::ts::Pid;
 
 use super::demux::{Demux, Packet};
 use super::import::SectionReassembler;
-use super::{Ext, Import, catalog::SI_PIDS, psi, stats};
+use super::{Ext, Import, catalog::SI_PIDS, psi, si, stats};
 use crate::catalog;
 
 /// Imports every program the first PAT lists, each as its own broadcast on `origin`, with its
@@ -34,6 +35,10 @@ pub struct Programs {
 	waiting: HashMap<u16, Waiting>,
 	/// PMT sections dropped for a bad CRC on a PID no program read, by PID.
 	crc_errors: BTreeMap<u16, u64>,
+	/// The latest SI section in each slot while a program waits, handed to each program that
+	/// starts. Keyed by PID, table_id, sub-table and section number, it holds no more than one
+	/// program's own capture would.
+	si: BTreeMap<si::Slot, Bytes>,
 	/// Empty until a PMT starts a program.
 	programs: Vec<Program>,
 	/// The programs reading each PID they claim, indexed by PID, in program order. The PAT and
@@ -101,6 +106,7 @@ impl Programs {
 			pat: None,
 			waiting: HashMap::new(),
 			crc_errors: BTreeMap::new(),
+			si: BTreeMap::new(),
 			programs: Vec::new(),
 			readers: vec![Vec::new(); 1 << 13],
 			touched: Vec::new(),
@@ -121,6 +127,11 @@ impl Programs {
 			if let Some(pat) = &packet.pat {
 				self.wait(pat);
 			} else if !self.waiting.is_empty() {
+				if SI_PIDS.contains(&packet.pid) {
+					for section in packet.sections {
+						self.si.insert(si::slot(packet.pid, section), section.clone());
+					}
+				}
 				self.describe(&packet)?;
 			}
 			// Every program reads the PAT, and the SI sections the parser reassembled.
@@ -159,6 +170,9 @@ impl Programs {
 			}
 		}
 		demux.drain();
+		if self.waiting.is_empty() {
+			self.si = BTreeMap::new();
+		}
 		// Only a program that read something has anything to flush or announce, so a call
 		// costs what it carried rather than one pass over every program.
 		for index in self.touched.drain(..) {
@@ -222,7 +236,9 @@ impl Programs {
 			return Ok(());
 		};
 		let before = waiting.sections.clone();
-		let read = !self.readers[usize::from(packet.pid)].is_empty();
+		let read = self.readers[usize::from(packet.pid)]
+			.iter()
+			.any(|&index| self.programs[index].import.reads_pmt(packet.pid));
 		let carried = waiting.sections.assembling();
 		let began = waiting.began_read;
 		let mut sections = Vec::new();
@@ -268,6 +284,10 @@ impl Programs {
 		for pmt in latest {
 			self.start(pmt.program_number, packet.pid, before.clone())?;
 		}
+		// The programs just started read this packet, so they read any section it began.
+		if let Some(waiting) = self.waiting.get_mut(&packet.pid) {
+			waiting.began_read = true;
+		}
 		Ok(())
 	}
 
@@ -292,6 +312,9 @@ impl Programs {
 			.with_program(number)
 			.with_pmt(pmt_pid, sections);
 		import.handle_pat(pat)?;
+		for (slot, section) in &self.si {
+			import.si_section(slot.pid, section.clone())?;
+		}
 		// Each program is its own publisher instance for this run, so a restart
 		// replaces it rather than resuming into it.
 		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
@@ -675,6 +698,55 @@ mod test {
 		data.extend_from_slice(&split[188..]);
 		programs.decode(&data).unwrap();
 		assert_eq!(programs.stats().crc_error, 1);
+
+		// A corrupt section begun in the packet that starts a program sharing the PID: the new
+		// program reads that packet, so it alone counts the section.
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0100)]));
+		let mut sections = pmt(1);
+		sections.extend(corrupt(pmt_section(2, 0, &[(MP2, 0x0071, &private)])));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &sections));
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.programs.len(), 1);
+		assert_eq!(programs.stats().crc_error, 1);
+
+		// A waiting program's PMT PID that a started program reads only as media: no program
+		// reassembles PMTs there, so the scan counts the corrupt section.
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0061)]));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
+		data.extend(psi_packets(0x0061, &mut 0, &[], &corrupt(pmt(2))));
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.programs.len(), 1);
+		assert_eq!(programs.stats().crc_error, 1);
+	}
+
+	/// Service information sent while a program waits for its PMT reaches it once it starts.
+	#[test]
+	fn si_before_the_pmt_reaches_the_program() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100)]));
+		// A TDT: short-form, five bytes of UTC.
+		data.extend(psi_packets(
+			0x0014,
+			&mut 0,
+			&[],
+			&[0x70, 0x70, 0x05, 0xc0, 0x79, 0x12, 0x45, 0x00],
+		));
+		data.extend(psi_packets(
+			0x0100,
+			&mut 0,
+			&[],
+			&pmt_section(1, 0, &[(MP2, 0x0061, &[])]),
+		));
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		programs.decode(&data).unwrap();
+		let _finished = programs.finish().unwrap();
+		let si = programs.programs[0].catalog.snapshot().ext.mpegts.si.clone();
+		assert!(si.contains_key(&0x0014), "the TDT is captured: {si:?}");
 	}
 
 	/// Each program announces as its own publisher instance for the run, so a restart

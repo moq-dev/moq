@@ -83,6 +83,25 @@ pub(super) fn identity(section: &[u8]) -> Identity {
 	}
 }
 
+/// Where a section on `pid` lands in a capture: a later section in the same slot replaces it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Slot {
+	pub pid: u16,
+	table_id: u8,
+	identity: Identity,
+	number: u8,
+}
+
+/// The slot `section` on `pid` fills.
+pub(super) fn slot(pid: u16, section: &[u8]) -> Slot {
+	Slot {
+		pid,
+		table_id: section.first().copied().unwrap_or_default(),
+		identity: identity(section),
+		number: if long_form(section) { section[6] } else { 0 },
+	}
+}
+
 /// The table-specific bytes that extend the generic identity, for the two table
 /// families whose `table_id_extension` alone is ambiguous (#2842).
 ///
