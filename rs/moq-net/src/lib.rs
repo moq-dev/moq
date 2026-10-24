@@ -147,6 +147,12 @@ pub use server::Server;
 pub use session::Session;
 pub use version::*;
 
+/// This crate's product token, `moq-net-rs/<version>`, which SETUP advertises by default.
+///
+/// A wrapper prepends its own token, space-separated, outermost first:
+/// `format!("moq-ffi/{v} {}", moq_net::IMPLEMENTATION)`.
+pub const IMPLEMENTATION: &str = concat!("moq-net-rs/", env!("CARGO_PKG_VERSION"));
+
 // Re-export the bytes crate
 pub use bytes;
 

@@ -39,6 +39,11 @@ match cursor.next().await {
 }
 ```
 
+### Segment requests carry a timeline reference
+
+`export::Rendition::segment(n)` is `segment(tag, n)`. Use the tag in the playlist segment URI instead of choosing one locally.
+Media playlist segment URIs gain the tag before the number, after any generation prefix: `seg/{n}.m4s` becomes `seg/{tag}.{n}.m4s`. Route the tag and number separately to `segment`.
+
 ### HLS import unwraps fMP4 to Legacy (#6250)
 
 `import::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
@@ -76,13 +81,6 @@ match rendition.media_playlist(query) {
 	Err(err) => { /* the export failed: 5xx, no-store */ }
 }
 ```
-
-### Imports always anchor their own timebase (#5967)
-
-`import::Config::timebase` and `Error::ForeignTimebase` are removed.
-Drop the field from `Config`, and any match arm on `ForeignTimebase`.
-Each import mints its timebase from the catalog it writes, and its first fragment anchors it.
-A placed timebase only made redundant importers share timestamps; each importer now publishes its own epoch instead.
 
 ### A rendition waits for its own timeline (#6009)
 
