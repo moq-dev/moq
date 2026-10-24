@@ -35,7 +35,3 @@ than evicting the middle of a group, which moved to m3
   the [unbounded groups epic](/quest/m1/unbounded-groups/README.md).
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - changes what a frame entry holds, not how a group stores its frames

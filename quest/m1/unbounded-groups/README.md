@@ -91,7 +91,6 @@ moq-transport, with memory held near the pool size.
 
 ## Required
 
-- [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - large frames store as sealed segments, preallocate at most one, and release receive credit per segment
 - [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - groups shed whole frames from their front under pressure and refill them in place; the group caps go
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame evict and refill by `(frame, byte)` on the next lite version; the frame cap goes
 - [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - `@moq/net` drops its caps, streams huge frames, and matches front eviction
