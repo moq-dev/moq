@@ -30,5 +30,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [Native audio decode conformance](/quest/m1/audio-decode-conformance.md) - pre-skip continuity in unit tests
 - [Interop AAC](/quest/m1/interop-aac.md) - AAC priming is the same question

@@ -342,7 +342,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			{
 				if matches!(
 					e,
-					crate::Error::Mkv(Error::InvalidSubtitle(_) | Error::InvalidAspect(_))
+					crate::Error::Mkv(Error::InvalidSubtitle(_) | Error::InvalidAspect(_) | Error::ValueOutOfRange(_))
 				) {
 					return Err(e);
 				}
@@ -635,6 +635,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
+		// No input follows, so the buffer that waited for the rest of an element is done.
+		self.buffer = BytesMut::new();
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
@@ -691,11 +693,17 @@ fn build_video_config(
 		}
 	}
 
+	let coded_width = width
+		.map(|v| u32::try_from(v).map_err(|_| Error::ValueOutOfRange("PixelWidth")))
+		.transpose()?;
+	let coded_height = height
+		.map(|v| u32::try_from(v).map_err(|_| Error::ValueOutOfRange("PixelHeight")))
+		.transpose()?;
 	if config.coded_width.is_none() {
-		config.coded_width = width.map(|v| v as u32);
+		config.coded_width = coded_width;
 	}
 	if config.coded_height.is_none() {
-		config.coded_height = height.map(|v| v as u32);
+		config.coded_height = coded_height;
 	}
 	// The codec config outranks the Colour element a muxer added, which only fills its gaps.
 	let colour = video_children
@@ -866,35 +874,17 @@ fn build_audio_config(
 	codec_private: Option<&Bytes>,
 	audio_children: Option<&[MatroskaSpec]>,
 ) -> Result<AudioConfig> {
-	let mut sample_rate: u32 = 0;
-	let mut channels: u32 = 0;
-
-	if let Some(cs) = audio_children {
-		for c in cs {
-			match c {
-				MatroskaSpec::SamplingFrequency(v) => sample_rate = *v as u32,
-				MatroskaSpec::Channels(v) => channels = *v as u32,
-				_ => {}
-			}
-		}
-	}
-
-	match codec_id {
+	// Identify the codec first: unsupported tracks retain their skip behavior even with bad fields.
+	let mut config = match codec_id {
 		"A_OPUS" => {
 			// The catalog describes the decoder's output: Opus always decodes at 48 kHz, whatever the
 			// informational input rate in the OpusHead or SamplingFrequency claims.
 			let mut config = match codec_private {
-				Some(head) => {
-					let mut config = crate::codec::opus::config(head)?;
-					if config.channel_count == 0 {
-						config.channel_count = channels;
-					}
-					config
-				}
-				None => crate::codec::opus::Config::new(48_000, channels).into(),
+				Some(head) => crate::codec::opus::config(head)?,
+				None => crate::codec::opus::Config::new(48_000, 0).into(),
 			};
 			config.description = codec_private.cloned();
-			Ok(config)
+			config
 		}
 		"A_AAC" => {
 			let priv_data = codec_private.ok_or(Error::MissingCodecPrivate {
@@ -903,22 +893,9 @@ fn build_audio_config(
 			})?;
 			let mut cursor = priv_data.clone();
 			let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
-
-			let mut config = AudioConfig::new(
-				AAC { profile: cfg.profile },
-				if cfg.sample_rate > 0 {
-					cfg.sample_rate
-				} else {
-					sample_rate
-				},
-				if cfg.channel_count > 0 {
-					cfg.channel_count
-				} else {
-					channels
-				},
-			);
+			let mut config = AudioConfig::new(AAC { profile: cfg.profile }, cfg.sample_rate, cfg.channel_count);
 			config.description = Some(priv_data.clone());
-			Ok(config)
+			config
 		}
 		"A_FLAC" => {
 			// Matroska A_FLAC CodecPrivate is the FLAC header: the `fLaC` marker
@@ -931,30 +908,38 @@ fn build_audio_config(
 			})?;
 			let mut cursor = priv_data.clone();
 			let cfg = crate::codec::flac::Config::parse(&mut cursor)?;
-
-			let mut config = AudioConfig::new(
-				AudioCodec::Flac,
-				if cfg.sample_rate > 0 {
-					cfg.sample_rate
-				} else {
-					sample_rate
-				},
-				if cfg.channel_count > 0 {
-					cfg.channel_count
-				} else {
-					channels
-				},
-			);
+			let mut config = AudioConfig::new(AudioCodec::Flac, cfg.sample_rate, cfg.channel_count);
 			config.description = Some(priv_data.clone());
-			Ok(config)
+			config
 		}
-		"A_MPEG/L3" => {
-			// MP3 carries its config in band, so there's no codec private; the track
-			// header's SamplingFrequency/Channels are the only config source.
-			Ok(AudioConfig::new(AudioCodec::Mp3, sample_rate, channels))
+		// MP3 carries its config in band; the track header supplies rate and channels.
+		"A_MPEG/L3" => AudioConfig::new(AudioCodec::Mp3, 0, 0),
+		other => return Err(Error::UnsupportedAudioCodec(other.to_string()).into()),
+	};
+
+	let mut sample_rate = 0;
+	let mut channels = 0;
+	for child in audio_children.unwrap_or_default() {
+		match child {
+			MatroskaSpec::SamplingFrequency(v) => {
+				if !(0.0..=f64::from(u32::MAX)).contains(v) {
+					return Err(Error::ValueOutOfRange("SamplingFrequency").into());
+				}
+				sample_rate = *v as u32;
+			}
+			MatroskaSpec::Channels(v) => {
+				channels = u32::try_from(*v).map_err(|_| Error::ValueOutOfRange("Channels"))?;
+			}
+			_ => {}
 		}
-		other => Err(Error::UnsupportedAudioCodec(other.to_string()).into()),
 	}
+	if config.sample_rate == 0 {
+		config.sample_rate = sample_rate;
+	}
+	if config.channel_count == 0 {
+		config.channel_count = channels;
+	}
+	Ok(config)
 }
 
 fn build_h264_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
