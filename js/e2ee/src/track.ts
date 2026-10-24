@@ -179,9 +179,10 @@ export class Consumer {
 	/**
 	 * Receive the next datagram event, or `undefined` once the track ends.
 	 *
-	 * A bad tag and a duplicate are events, not track-ending errors. Rejects with
-	 * {@link Failure} `authentication` only if a grouped frame already failed, `oversize` or
-	 * `exhausted` from opening, or a net error.
+	 * A bad datagram (a forged tag, or a sequence or size no publisher could seal) and a
+	 * duplicate are events, not track-ending errors. Rejects with {@link Failure}
+	 * `authentication` only if a grouped frame already failed, `exhausted` from opening, or a
+	 * net error.
 	 */
 	recvDatagram(): Promise<Event | undefined> {
 		const result = this.#datagrams.then(() => this.#recvDatagram());
@@ -203,9 +204,9 @@ export class Consumer {
 
 		const { sequence, timestamp, payload } = datagram;
 		if (this.#window.isDuplicate(sequence)) return { kind: "duplicate", sequence };
-		const iv = this.#datagramKey.admitOpen(sequence, 0, payload.byteLength, MAX_DATAGRAM_PAYLOAD);
 		let plaintext: Uint8Array;
 		try {
+			const iv = this.#datagramKey.admitOpen(sequence, 0, payload.byteLength, MAX_DATAGRAM_PAYLOAD);
 			plaintext = await this.#reader.pump.run(() => {
 				this.#reader.terminal.check();
 				return this.#datagramKey.decrypt(iv, payload);
@@ -214,8 +215,10 @@ export class Consumer {
 			// A grouped failure during the open still ends this read.
 			this.#reader.terminal.check();
 			// A bad datagram is not grouped failure: the track, its demand, and any parked grouped
-			// read stay up. `exhausted` is this key's own limit.
-			if (err instanceof Failure && err.code === "authentication") return { kind: "authentication", sequence };
+			// read stay up. No publisher seals a sequence or payload size out of range, so one is
+			// as bad as a forged tag. `exhausted` is this key's own limit.
+			const bad = err instanceof Failure && ["authentication", "identity", "oversize"].includes(err.code);
+			if (bad) return { kind: "authentication", sequence };
 			throw err;
 		}
 		this.#reader.terminal.check();

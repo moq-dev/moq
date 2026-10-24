@@ -296,6 +296,15 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub framerate: Option<f64>,
 
+	/// The most frames that can precede a frame in decode order and follow it in presentation
+	/// order, as H.264 `max_num_reorder_frames` and HEVC `sps_max_num_reorder_pics` count them.
+	///
+	/// `0` declares that presentation order is decode order. Absent declares nothing: a consumer
+	/// that authors decode times infers them from the timestamps instead. A publisher that
+	/// declares it keeps it for the track's life, and never reorders deeper.
+	#[serde(default)]
+	pub reorder: Option<u8>,
+
 	/// If true, the decoder will optimize for latency.
 	///
 	/// Default: true
@@ -371,6 +380,7 @@ impl VideoConfig {
 			enabled: true,
 			preference: 0,
 			framerate: None,
+			reorder: None,
 			optimize_for_latency: None,
 			container: Container::default(),
 			jitter: None,
@@ -400,6 +410,19 @@ mod test {
 			assert_eq!(encoded["warmup"], millis);
 			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
 			assert_eq!(decoded.warmup, config.warmup);
+		}
+	}
+
+	#[test]
+	fn reorder_keeps_zero_distinct_from_absent() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		assert!(serde_json::to_value(&config).unwrap().get("reorder").is_none());
+		for depth in [0, 2] {
+			config.reorder = Some(depth);
+			let encoded = serde_json::to_value(&config).unwrap();
+			assert_eq!(encoded["reorder"], depth);
+			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
+			assert_eq!(decoded.reorder, Some(depth));
 		}
 	}
 

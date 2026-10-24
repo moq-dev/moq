@@ -25,6 +25,7 @@ export { SessionCode, StreamCode } from "./error.ts";
 export * as Error from "./errors.ts";
 /** Group role handles and frame helpers. */
 export * as Group from "./group.ts";
+export { IMPLEMENTATION } from "./implementation.ts";
 /** Broadcast routing tables, independent of any connection. */
 export * as Origin from "./origin.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. Path patterns are re-exported from `@moq/pattern`. */

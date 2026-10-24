@@ -8,6 +8,7 @@ import { DATAGRAM, GROUP, parse } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import type * as Generation from "./generation.ts";
 import * as Group from "./group.ts";
+import * as E2EE from "./index.ts";
 import { TrackKey, trackKey } from "./key.ts";
 import {
 	DATAGRAM_WINDOW,
@@ -517,6 +518,42 @@ test("a forged datagram does not burn the identity", async () => {
 	expect(datagramText(event)).toBe("two");
 });
 
+test("a datagram no publisher could seal is dropped as a bad datagram", async () => {
+	const p = await pair("audio");
+	const sealedAt = await sealed(p, DATAGRAM, 0, 0, "x");
+	p.net.insertDatagram(1, ms(1), new Uint8Array(MAX_DATAGRAM_PAYLOAD + 1));
+	p.net.insertDatagram(2, ms(2), sealedAt.subarray(0, 3));
+	p.net.insertDatagram(2 ** 53, ms(3), sealedAt);
+	await p.producer.insertDatagram(2 ** 53 - 1, ms(4), text("last"));
+
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 1 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 2 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 2 ** 53 });
+	expect(datagramText(await p.consumer.recvDatagram())).toBe("last");
+});
+
+test("resubscribing shares a key's budget", async () => {
+	const p = await pair("audio");
+	const admitOpen = TrackKey.prototype.admitOpen;
+	const opened: TrackKey[] = [];
+	TrackKey.prototype.admitOpen = function (this: TrackKey, ...args: Parameters<TrackKey["admitOpen"]>) {
+		opened.push(this);
+		return admitOpen.apply(this, args);
+	};
+	try {
+		await p.producer.appendDatagram(ms(1), text("one"));
+		expect(datagramText(await p.consumer.recvDatagram())).toBe("one");
+		p.consumer.close();
+		opened[0].invocations = MAX_INVOCATIONS;
+
+		const again = p.consuming.consume(subscribe(p.net));
+		await p.producer.appendDatagram(ms(2), text("two"));
+		expect(await failure(again.recvDatagram())).toBe("exhausted");
+	} finally {
+		TrackKey.prototype.admitOpen = admitOpen;
+	}
+});
+
 test("duplicate datagrams are suppressed inside a bounded window", async () => {
 	const p = await pair("audio");
 	const replay = await sealed(p, DATAGRAM, 0, 0, "once");
@@ -784,6 +821,19 @@ test("credentials mint fresh epochs and consumers bind them", async () => {
 	expect(await bound.name("video")).toBe(await first.name("video"));
 	expect(bound.credential.kid).toBe(cred.kid);
 	expect(thrown(() => cred.consume("not-an-epoch" as typeof first.epoch))).toBe("identity");
+});
+
+test("the package surface cannot mint a producer for a chosen epoch", () => {
+	expect(Object.keys(E2EE)).not.toContain("Generation");
+	const cred = credential();
+	const chosen = cred.produce().epoch;
+	// The classes stay reachable through an instance, so neither may accept a producing epoch.
+	const producer = cred.produce().constructor as new (...args: unknown[]) => Generation.Producer;
+	expect(new producer(cred, chosen).epoch).not.toBe(chosen);
+	expect(Object.getOwnPropertyNames(producer)).not.toContain("make");
+	const consumer = cred.consume(chosen).constructor as new (...args: unknown[]) => Generation.Consumer;
+	expect(Object.getOwnPropertyNames(consumer)).not.toContain("make");
+	expect(thrown(() => new consumer(cred, "not-an-epoch"))).toBe("identity");
 });
 
 test("credential bounds", async () => {

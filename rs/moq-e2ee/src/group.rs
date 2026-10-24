@@ -24,7 +24,9 @@ pub struct Frame {
 ///
 /// Dropping without [`Self::finish`] or [`Self::abort`] lets the net group close uncleanly.
 pub struct Producer {
-	inner: moq_net::group::Producer,
+	// The error that aborted the group once a write failed after encryption.
+	inner: std::result::Result<moq_net::group::Producer, Error>,
+	sequence: u64,
 	key: Arc<Mutex<TrackKey>>,
 	next_frame: u32,
 }
@@ -32,7 +34,8 @@ pub struct Producer {
 impl Producer {
 	pub(crate) fn new(inner: moq_net::group::Producer, key: Arc<Mutex<TrackKey>>) -> Self {
 		Self {
-			inner,
+			sequence: inner.sequence,
+			inner: Ok(inner),
 			key,
 			next_frame: 0,
 		}
@@ -40,7 +43,7 @@ impl Producer {
 
 	/// The group's sequence number.
 	pub fn sequence(&self) -> u64 {
-		self.inner.sequence
+		self.sequence
 	}
 
 	/// Next frame index that will be written.
@@ -52,7 +55,9 @@ impl Producer {
 	///
 	/// The identity is spent before the net write, so a failed write never repeats a
 	/// nonce with different bytes. Predictable failures, an oversize plaintext or a
-	/// timestamp the track cannot represent, are refused before encryption.
+	/// timestamp the track cannot represent, are refused before encryption. Once encrypted,
+	/// a failed net write aborts the group, since its transport index could no longer match
+	/// the nonce; every later call returns that error.
 	///
 	/// # Errors
 	///
@@ -60,12 +65,13 @@ impl Producer {
 	/// [`Error::Oversize`], or a net write error.
 	pub fn write_frame(&mut self, timestamp: impl Into<Option<moq_net::Timestamp>>, plaintext: &[u8]) -> Result<()> {
 		let timestamp = timestamp.into();
+		let inner = self.inner.as_mut().map_err(|err| err.clone())?;
 		let frame = self.next_frame;
 		if frame == u32::MAX {
 			return Err(Error::Identity);
 		}
 		// Checked before the frame identity is spent: a track is all timed or all untimed.
-		match (timestamp, self.inner.timescale()) {
+		match (timestamp, inner.timescale()) {
 			(Some(timestamp), Some(timescale)) => {
 				timestamp
 					.convert(timescale)
@@ -75,13 +81,19 @@ impl Producer {
 			_ => return Err(Error::Net(moq_net::Error::TimestampMismatch)),
 		}
 		let payload = self.key.lock().expect("track key").protect(
-			self.inner.sequence,
+			self.sequence,
 			u64::from(frame),
 			plaintext,
 			MAX_GROUPED_PAYLOAD,
 		)?;
 		self.next_frame = frame + 1;
-		self.inner.write_frame(timestamp, payload)?;
+		if let Err(err) = inner.write_frame(timestamp, payload) {
+			if let Ok(inner) = std::mem::replace(&mut self.inner, Err(Error::Net(err.clone()))) {
+				// The net group may already have ended itself, as it does when it grows too large.
+				let _ = inner.abort(err.clone());
+			}
+			return Err(Error::Net(err));
+		}
 		Ok(())
 	}
 
@@ -89,9 +101,9 @@ impl Producer {
 	///
 	/// # Errors
 	///
-	/// A net error if the group is already closed.
-	pub fn finish(mut self) -> Result<()> {
-		self.inner.finish()?;
+	/// A net error if the group is already closed, or the error a failed write aborted it with.
+	pub fn finish(self) -> Result<()> {
+		self.inner?.finish()?;
 		Ok(())
 	}
 
@@ -99,9 +111,9 @@ impl Producer {
 	///
 	/// # Errors
 	///
-	/// A net error if the group is already closed.
+	/// A net error if the group is already closed, or the error a failed write aborted it with.
 	pub fn abort(self) -> Result<()> {
-		self.inner.abort(moq_net::Error::Cancel)?;
+		self.inner?.abort(moq_net::Error::Cancel)?;
 		Ok(())
 	}
 
