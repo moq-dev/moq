@@ -53,6 +53,14 @@ test("video config accepts a signed 32-bit preference", () => {
 	expect(parse(2 ** 31).success).toBe(false);
 });
 
+test("video config keeps a zero reorder distinct from an absent one", () => {
+	const parse = (reorder?: number) =>
+		VideoConfigSchema.safeParse({ codec: "vp8", container: { kind: "legacy" }, reorder });
+	expect(parse().data?.reorder).toBeUndefined();
+	expect(parse(0).data?.reorder).toBe(Catalog.u8(0));
+	expect(parse(256).success).toBe(false);
+});
+
 test("ranked puts a known zero bitrate above an unknown one", () => {
 	const renditions = {
 		unknown: rendition({ codedWidth: 1280, codedHeight: 720 }),

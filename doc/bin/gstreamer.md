@@ -64,7 +64,7 @@ Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
 [LOC](/concept/standard#loc) instead of the legacy hang container, and
 `track-status`/`track-error` report its lifecycle. Element properties:
-`url`, `broadcast`, `connect-version`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
+`url`, `broadcast`, `linger`, `connect-version`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. The sink reconnects for as long as the pipeline runs and only
@@ -84,7 +84,10 @@ it is released, reaches EOS, or fails; a flush or new stream after that EOS
 holds it back again. Opaque data pads are not listed. Later
 catalog updates do not wait for newly requested pads.
 
-Once every pad reaches EOS, the sink closes the broadcast and posts EOS.
+Once every pad reaches EOS, the sink keeps the finished broadcast announced
+for `linger` milliseconds (default 30000), so a subscriber that arrives late
+still gets the tail, then closes it and posts EOS. `linger=0` closes it at once,
+and stopping the pipeline (`READY` or `NULL`) during the wait closes it early.
 
 All pads share one media timeline on one wall clock. The first timed buffer places
 it using UNIX or NTP reference timestamp metadata; other clock domains use the
