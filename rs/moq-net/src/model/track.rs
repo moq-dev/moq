@@ -16318,6 +16318,43 @@ mod test {
 		assert!(!fill.is_used(), "nobody waits on the stale fill");
 	}
 
+	/// Groups arriving out of order inside a stalled fill judge each stretch between them by
+	/// its own successor: a fresh late group keeps the groups below it owed while the stretches
+	/// around it go stale.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_late_fresh_group_keeps_its_stretch_of_a_stalled_fill() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let mut subscriber = producer.subscribe(replay().with_groups(0..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 0 is being filled");
+		// The handler takes the fill and never answers it.
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 10));
+		write_group(&producer, 2);
+		write_group(&producer, 8);
+		elapse(&producer, Duration::from_secs(20));
+		write_group(&producer, 5);
+		elapse(&producer, Duration::from_secs(11));
+
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("groups 0 and 1 went stale behind group 2");
+		};
+		assert_eq!(group.sequence, 2, "superseded by group 5 only 11s ago");
+		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 3 is still owed");
+		for sequence in [3, 4] {
+			assert!(fill.is_wanted(sequence), "group {sequence} is superseded by group 5");
+		}
+		for sequence in [0, 1, 6, 7, 9] {
+			assert!(!fill.is_wanted(sequence), "group {sequence} went stale");
+		}
+	}
+
 	/// A reader narrowing its ranges leaves the part of its fill it no longer reads: the
 	/// handler is not asked for it, a fetch of it in flight is cancelled, and neither a bulk
 	/// refusal nor dropping the fill names it dropped.

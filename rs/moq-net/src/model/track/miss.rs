@@ -382,31 +382,36 @@ impl Misses {
 	/// A fill answers on its handler's time, so an ordered reader would otherwise wait out
 	/// a stalled one for good.
 	pub fn expire(&mut self, state: &TrackState, drift: &Drift, given_up: &mut GivenUp, waiter: &kio::Waiter) {
-		let mut stale = RangeSet::new();
+		let (mut stale, mut arrived) = (RangeSet::new(), RangeSet::new());
 		for run in self.wanted.iter() {
-			if !state.poll_drifted(run.start, &drift.edge.servable, drift.budget, waiter) {
-				continue;
-			}
-			// Starts never rewind, so a run goes stale from its oldest group up: find where
-			// it stops, in as many checks as the run's width has bits.
-			let (mut stale_to, mut fresh) = (run.start + 1, run.end);
-			while stale_to < fresh {
-				let mid = stale_to + (fresh - stale_to) / 2;
-				match state.drifted(mid, &drift.edge, drift.budget) {
-					true => stale_to = mid + 1,
-					false => fresh = mid,
+			// Each stretch between the groups cached inside the run shares one successor, so
+			// one check judges it whole. Groups arrive out of order, so a fresh late group
+			// keeps the stretch below it owed while the ones around it go stale.
+			let mut from = run.start;
+			let cached = state.lookup.range(run.clone()).map(|(&sequence, _)| sequence);
+			for at in cached.chain(std::iter::once(run.end)) {
+				if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget, waiter) {
+					stale.insert(from..at);
 				}
+				// What arrived live is the feed's to serve, as the reader serves any cached group.
+				if at < run.end {
+					arrived.insert(at..at + 1);
+				}
+				from = at.saturating_add(1);
 			}
-			stale.insert(run.start..stale_to);
 		}
-		if stale.is_empty() {
+		if stale.is_empty() && arrived.is_empty() {
 			return;
 		}
-		for run in stale.iter() {
+		for run in stale.iter().chain(arrived.iter()) {
 			self.wanted.remove(run.clone());
 		}
+		let mut released = stale.clone();
+		for run in arrived.iter() {
+			released.insert(run.clone());
+		}
 		self.joins.retain_mut(|join| {
-			join.release(&stale);
+			join.release(&released);
 			!join.is_empty()
 		});
 		for run in stale.iter() {
