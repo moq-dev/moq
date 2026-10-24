@@ -944,7 +944,7 @@ fn bad_datagram_is_event() {
 }
 
 #[test]
-fn unsealable_datagram_is_a_bad_datagram() {
+fn unsealable_datagram_is_dropped_with_its_code() {
 	let mut pair = pair("audio");
 	let semantic = pair.semantic.as_str();
 	let sealed = datagram_ciphertext(&pair.generation, semantic, 0, b"x");
@@ -952,14 +952,20 @@ fn unsealable_datagram_is_a_bad_datagram() {
 		.insert_datagram(1, ms(1), vec![0u8; MAX_DATAGRAM_PAYLOAD + 1])
 		.unwrap();
 	pair.net.insert_datagram(2, ms(2), sealed.slice(..3)).unwrap();
-	pair.net.insert_datagram(MAX_U53 + 1, ms(3), sealed).unwrap();
+	pair.net.insert_datagram(MAX_U53 + 1, ms(3), sealed.clone()).unwrap();
+	pair.net.insert_datagram(MAX_U53 + 2, ms(3), sealed.slice(..3)).unwrap();
 	pair.producer.insert_datagram(MAX_U53, ms(4), b"last").unwrap();
 
-	assert_eq!(recv_datagram(&mut pair.consumer), Event::Authentication { sequence: 1 });
-	assert_eq!(recv_datagram(&mut pair.consumer), Event::Authentication { sequence: 2 });
+	assert_eq!(recv_datagram(&mut pair.consumer), Event::Oversize { sequence: 1 });
+	assert_eq!(recv_datagram(&mut pair.consumer), Event::Oversize { sequence: 2 });
 	assert_eq!(
 		recv_datagram(&mut pair.consumer),
-		Event::Authentication { sequence: MAX_U53 + 1 }
+		Event::Identity { sequence: MAX_U53 + 1 }
+	);
+	// Identity is checked before size, as in every core.
+	assert_eq!(
+		recv_datagram(&mut pair.consumer),
+		Event::Identity { sequence: MAX_U53 + 2 }
 	);
 	match recv_datagram(&mut pair.consumer) {
 		Event::Datagram(d) => assert_eq!(&d.plaintext[..], b"last"),

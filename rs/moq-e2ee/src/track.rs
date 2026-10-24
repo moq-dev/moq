@@ -258,8 +258,8 @@ impl kio::Task for Subscribing {
 /// Subscriber for one physical track.
 ///
 /// Grouped authentication failure ends the track and wakes pending reads with
-/// [`Error::Authentication`]. A bad datagram is an [`Event::Authentication`] until
-/// that key is exhausted.
+/// [`Error::Authentication`]. A datagram that fails to open is dropped as an
+/// [`Event::Identity`], [`Event::Oversize`], or [`Event::Authentication`] until that key is exhausted.
 pub struct Consumer {
 	name: String,
 	// Shared with every other subscription to this name under the generation.
@@ -315,8 +315,8 @@ impl Consumer {
 
 	/// Poll for the next datagram event.
 	///
-	/// A bad datagram (a forged tag, or a sequence or size no publisher could seal) and a
-	/// duplicate are events, not track-ending errors.
+	/// A datagram that fails to open (a sequence out of range, a bad size, or a forged tag) and
+	/// a duplicate are events, not track-ending errors.
 	///
 	/// # Errors
 	///
@@ -356,11 +356,10 @@ impl Consumer {
 				}))))
 			}
 			// A bad datagram is not grouped failure: the track, its demand, and any
-			// parked grouped read stay up. No publisher seals a sequence or payload size out
-			// of range, so one is as bad as a forged tag. `exhausted` is this key's own limit.
-			Err(Error::Authentication | Error::Identity | Error::Oversize) => {
-				Poll::Ready(Ok(Some(Event::Authentication { sequence })))
-			}
+			// parked grouped read stay up. `exhausted` is this key's own limit.
+			Err(Error::Authentication) => Poll::Ready(Ok(Some(Event::Authentication { sequence }))),
+			Err(Error::Identity) => Poll::Ready(Ok(Some(Event::Identity { sequence }))),
+			Err(Error::Oversize) => Poll::Ready(Ok(Some(Event::Oversize { sequence }))),
 			Err(err) => Poll::Ready(Err(err)),
 		}
 	}

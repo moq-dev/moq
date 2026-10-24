@@ -35,7 +35,7 @@ use super::{
 };
 use crate::catalog::Stream;
 use crate::container::consumer::Event;
-use crate::container::decode::DeclaredClock;
+use crate::container::declared::DeclaredClock;
 use crate::container::{ExportSource, Frame};
 
 /// Before the header, unbind every track the catalog no longer lists (removed, or disabled) or
@@ -232,7 +232,7 @@ impl FlvTrack {
 	) -> anyhow::Result<()> {
 		self.release(key, Some(arrived), shift, true, jitter)?;
 		let depth = match &self.config {
-			Some(config) if self.flavor.has_composition_time() => crate::container::decode::declared(config)?,
+			Some(config) if self.flavor.has_composition_time() => crate::container::declared::depth(config)?,
 			_ => None,
 		};
 		self.declared = depth.map(DeclaredClock::new);

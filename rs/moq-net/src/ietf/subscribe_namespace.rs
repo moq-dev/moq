@@ -240,23 +240,40 @@ impl Message for SubscribeNamespaceError<'_> {
 	}
 }
 
-/// UnsubscribeNamespace message (0x14): v14/v15 only (v16 uses stream close)
+/// UnsubscribeNamespace message (0x14): v14/v15 only (v16 uses stream close).
+/// v14 names the prefix it subscribed, v15 the request.
 #[derive(Clone, Debug)]
-pub struct UnsubscribeNamespace {
+pub struct UnsubscribeNamespace<'a> {
+	/// v14: the Track Namespace Prefix of the SUBSCRIBE_NAMESPACE it cancels.
+	pub prefix: Path<'a>,
+	/// v15: the Request ID of the SUBSCRIBE_NAMESPACE it cancels.
 	pub request_id: RequestId,
 }
 
-impl Message for UnsubscribeNamespace {
+impl Message for UnsubscribeNamespace<'_> {
 	const ID: u64 = 0x14;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		match version {
+			Version::Draft14 => encode_namespace(w, &self.prefix)?,
+			Version::Draft15 => self.request_id.encode(w, version)?,
+			_ => return Err(EncodeError::Version),
+		}
 		Ok(())
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		Ok(Self { request_id })
+		match version {
+			Version::Draft14 => Ok(Self {
+				prefix: decode_namespace(r)?,
+				request_id: RequestId(0),
+			}),
+			Version::Draft15 => Ok(Self {
+				prefix: Path::default(),
+				request_id: RequestId::decode(r, version)?,
+			}),
+			_ => Err(DecodeError::Version),
+		}
 	}
 }
 
@@ -368,6 +385,29 @@ mod tests {
 		let mut buf = bytes::Bytes::from(bytes);
 		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, negotiated))?;
 		Ok((decoded, buf.is_empty()))
+	}
+
+	/// Draft-14 names the prefix it cancels and draft-15 the request; later drafts close the
+	/// stream instead.
+	#[test]
+	fn unsubscribe_namespace_names_the_prefix_then_the_request() {
+		let msg = UnsubscribeNamespace {
+			prefix: Path::new("cam/front"),
+			request_id: RequestId(6),
+		};
+		let mut v14 = bytes::Bytes::from(body(&msg, Version::Draft14));
+		let named = crate::coding::decode_buf(&mut v14, Version::Draft14, UnsubscribeNamespace::decode_msg).unwrap();
+		assert_eq!(named.prefix.as_str(), "cam/front");
+
+		let mut v15 = bytes::Bytes::from(body(&msg, Version::Draft15));
+		let numbered = crate::coding::decode_buf(&mut v15, Version::Draft15, UnsubscribeNamespace::decode_msg).unwrap();
+		assert_eq!(numbered.request_id, RequestId(6));
+
+		let mut buf = Vec::new();
+		assert!(
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft16.into()), Version::Draft16)
+				.is_err()
+		);
 	}
 
 	fn clustered(hops: &[u64], cost: u64) -> Option<AdvertParams> {

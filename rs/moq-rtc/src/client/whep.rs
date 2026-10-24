@@ -61,10 +61,5 @@ pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcas
 	for mid in mids {
 		session.open_media(mid)?;
 	}
-	tokio::spawn(async move {
-		let result = session.run().await;
-		session::log_session_end("whep client", &result);
-	});
-
-	Ok(())
+	session::end("whep client", session.run().await)
 }

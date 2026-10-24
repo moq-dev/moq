@@ -317,7 +317,8 @@ Typed failures:
 - `duplicate`: a receiver has already opened this datagram sequence inside its retained window. Operational, not a cryptographic event.
 
 Authentication failure on a grouped track MUST end that track with `authentication`.
-Authentication failure on a datagram MUST drop that datagram and emit `authentication`; the track continues.
+A datagram that fails to open with `identity`, `oversize`, or `authentication` MUST be dropped with that code; the track continues.
+An `exhausted` open instead fails the read.
 
 Grouped frames need no duplicate window: a transport delivers each frame of a group once, in order, at its index.
 Receivers SHOULD suppress datagram sequences they still retain; the window MUST be bounded, and 1024 sequences below the greatest opened is RECOMMENDED.
@@ -388,6 +389,7 @@ This document requests no registrations.
 - Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.
 - Forbid applications from relying on group completeness, which is unauthenticated.
 - Derive physical track names by AES-128-GCM encryption of the padded semantic name under an HMAC-SHA-256 nonce, so a publisher recovers any requested name, and bind AEAD keys to the semantic name.
+- Drop a datagram that fails to open with its own `identity`, `oversize`, or `authentication` code; an `exhausted` open still fails the read.
 
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}

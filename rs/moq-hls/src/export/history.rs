@@ -34,7 +34,7 @@ pub(super) async fn read(
 	// Effectively unbounded, so no history group is skipped as late: 2^53 - 1 ms is the largest
 	// delay every implementation decodes (js/net reads it as a safe integer).
 	let subscription = moq_net::track::Subscription::default()
-		.with_groups(0..)
+		.with_range(0..)
 		.with_max_delay(Duration::from_millis((1_u64 << 53) - 1));
 	let mut live = track.subscribe(subscription).await?.ordered();
 	let mut decoder = window::Decoder::<Record>::new(window::ConsumerConfig::default().with_compression(true));
