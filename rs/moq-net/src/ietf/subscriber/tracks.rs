@@ -18,6 +18,7 @@
 //! SUBSCRIBE_TRACKS yet, and one that refuses, resets, or ignores it fails or empties only
 //! that listing, leaving the session and its SUBSCRIBEs alone.
 
+use crate::driver::Transport;
 use std::sync::Arc;
 
 use super::*;
@@ -41,9 +42,9 @@ pub(super) fn listing_end(done: &ietf::PublishDone, version: Version) -> Result<
 }
 
 /// A paused upstream subscription and the request stream that controls it.
-pub(super) struct Upstream<S: crate::transport::poll::Session> {
-	pub(super) stream: Stream<S, Version>,
-	pub(super) messages: Messages<S>,
+pub(super) struct Upstream {
+	pub(super) stream: Stream<Transport, Version>,
+	pub(super) messages: Messages,
 	pub(super) request_id: RequestId,
 	pub(super) alias: u64,
 	/// The Track Properties the PUBLISH or SUBSCRIBE_OK declared.
@@ -55,39 +56,30 @@ pub(super) struct Upstream<S: crate::transport::poll::Session> {
 }
 
 /// Hands a paused subscription from the task watching it to a subscription resuming it.
-pub(super) struct Handoff<S: crate::transport::poll::Session> {
+#[derive(Default)]
+pub(super) struct Handoff {
 	/// A subscription asked for it.
 	wanted: bool,
 	/// Handed over by the watcher.
-	upstream: Option<Upstream<S>>,
+	upstream: Option<Upstream>,
 	/// The entry was let go, so the watcher cancels the subscription.
 	gone: bool,
 }
 
-impl<S: crate::transport::poll::Session> Default for Handoff<S> {
-	fn default() -> Self {
-		Self {
-			wanted: false,
-			upstream: None,
-			gone: false,
-		}
-	}
-}
-
 /// One listed track and the upstream subscription that holds it.
-struct Entry<S: crate::transport::poll::Session> {
+struct Entry {
 	/// Its TRACK_INFO, once known: a paused SUBSCRIBE learns it from its SUBSCRIBE_OK.
 	info: Option<track::Info>,
 	/// The subscription holding it, once known.
 	request_id: Option<RequestId>,
 	/// Set while it is paused, or still opening, and a watcher owns it. `None` while a
 	/// subscription forwarding it owns it.
-	handoff: Option<kio::Shared<Handoff<S>>>,
+	handoff: Option<kio::Shared<Handoff>>,
 	/// Discovery state the peer makes us hold, as for a lite listed track.
 	_slot: crate::session::Slot,
 }
 
-impl<S: crate::transport::poll::Session> Drop for Entry<S> {
+impl Drop for Entry {
 	fn drop(&mut self) {
 		if let Some(handoff) = &self.handoff {
 			handoff.lock().gone = true;
@@ -113,22 +105,12 @@ struct Request {
 }
 
 /// The session's listings of the peer's tracks.
-pub(super) struct Listings<S: crate::transport::poll::Session> {
+#[derive(Default)]
+pub(super) struct Listings {
 	listeners: HashMap<u64, Listener>,
 	requests: HashMap<u64, Request>,
-	entries: HashMap<TrackKey, Entry<S>>,
+	entries: HashMap<TrackKey, Entry>,
 	next: u64,
-}
-
-impl<S: crate::transport::poll::Session> Default for Listings<S> {
-	fn default() -> Self {
-		Self {
-			listeners: HashMap::new(),
-			requests: HashMap::new(),
-			entries: HashMap::new(),
-			next: 0,
-		}
-	}
 }
 
 /// A SUBSCRIBE_TRACKS for its task to send.
@@ -141,7 +123,7 @@ struct Opening {
 	gone: kio::Producer<()>,
 }
 
-impl<S: crate::transport::poll::Session> Listings<S> {
+impl Listings {
 	fn key(&mut self) -> u64 {
 		self.next += 1;
 		self.next
@@ -272,7 +254,7 @@ impl<S: crate::transport::poll::Session> Listings<S> {
 		self.release();
 	}
 
-	fn insert(&mut self, key: TrackKey, entry: Entry<S>) {
+	fn insert(&mut self, key: TrackKey, entry: Entry) {
 		if let Some(info) = &entry.info {
 			for lister in self.listers(&key.0) {
 				let _ = lister.add(key.1.clone(), info.clone());
@@ -297,14 +279,14 @@ impl<S: crate::transport::poll::Session> Listings<S> {
 	}
 
 	/// The entry held by the subscription with `request_id`, if this is it.
-	fn held_by(&mut self, key: &TrackKey, request_id: RequestId) -> Option<&mut Entry<S>> {
+	fn held_by(&mut self, key: &TrackKey, request_id: RequestId) -> Option<&mut Entry> {
 		self.entries
 			.get_mut(key)
 			.filter(|entry| entry.request_id == Some(request_id))
 	}
 
 	/// The entry `handoff` belongs to, if it still stands.
-	fn watched_by(&mut self, key: &TrackKey, handoff: &kio::Shared<Handoff<S>>) -> Option<&mut Entry<S>> {
+	fn watched_by(&mut self, key: &TrackKey, handoff: &kio::Shared<Handoff>) -> Option<&mut Entry> {
 		self.entries
 			.get_mut(key)
 			.filter(|entry| entry.handoff.as_ref().is_some_and(|held| held.same_channel(handoff)))
@@ -327,13 +309,13 @@ impl<S: crate::transport::poll::Session> Listings<S> {
 }
 
 /// A broadcast's listing through this session, until dropped.
-pub(super) struct Listening<S: crate::transport::poll::Session> {
-	listings: kio::Lock<Listings<S>>,
+pub(super) struct Listening {
+	listings: kio::Lock<Listings>,
 	key: u64,
 	failed: kio::Consumer<Option<Error>>,
 }
 
-impl<S: crate::transport::poll::Session> Listening<S> {
+impl Listening {
 	/// Ready with the error that failed the listing.
 	pub(super) fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		match self.failed.poll(waiter, |failed| match &**failed {
@@ -347,29 +329,26 @@ impl<S: crate::transport::poll::Session> Listening<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> Drop for Listening<S> {
+impl Drop for Listening {
 	fn drop(&mut self) {
 		self.listings.lock().unlisten(self.key);
 	}
 }
 
 /// What to do with a PUBLISH.
-enum Offer<S: crate::transport::poll::Session> {
+enum Offer {
 	/// No listing asked for it.
 	Unsolicited,
 	/// Refused with this code and reason.
 	Refuse(u64, &'static str),
 	/// Accepted paused and held as the entry `handoff` watches.
-	Hold(kio::Shared<Handoff<S>>),
+	Hold(kio::Shared<Handoff>),
 }
 
-impl<S> Subscriber<S>
-where
-	S: crate::transport::poll::Boxable,
-{
+impl Subscriber {
 	/// List `path`'s tracks into `lister` until the returned guard drops, through a
 	/// SUBSCRIBE_TRACKS covering it.
-	pub(super) fn listen(&self, path: PathOwned, lister: Arc<broadcast::Lister>) -> Listening<S> {
+	pub(super) fn listen(&self, path: PathOwned, lister: Arc<broadcast::Lister>) -> Listening {
 		let (key, failed, opening) = self.listings.lock().listen(path, lister);
 		if let Some(opening) = opening {
 			let this = self.clone();
@@ -590,7 +569,7 @@ where
 			};
 			return listings.insert(key, entry);
 		}
-		let handoff = kio::Shared::<Handoff<S>>::default();
+		let handoff = kio::Shared::<Handoff>::default();
 		let entry = Entry {
 			info: None,
 			request_id: None,
@@ -618,11 +597,7 @@ where
 
 	/// Open a paused SUBSCRIBE for a skipped track and list it once its SUBSCRIBE_OK
 	/// arrives. `None` once its entry was let go.
-	async fn open_paused(
-		&self,
-		key: &TrackKey,
-		handoff: &kio::Shared<Handoff<S>>,
-	) -> Result<Option<Upstream<S>>, Error> {
+	async fn open_paused(&self, key: &TrackKey, handoff: &kio::Shared<Handoff>) -> Result<Option<Upstream>, Error> {
 		let gone = |waiter: &kio::Waiter| {
 			handoff
 				.poll(waiter, |handoff| match handoff.gone {
@@ -771,7 +746,7 @@ where
 	/// refuse a redundant one, and decline one no listing asked for.
 	pub(super) async fn serve_publish(
 		&mut self,
-		mut stream: Stream<S, Version>,
+		mut stream: Stream<Transport, Version>,
 		msg: ietf::Publish<'_>,
 	) -> Result<(), Error> {
 		let key: TrackKey = (msg.track_namespace.to_owned(), msg.track_name.as_ref().into());
@@ -833,7 +808,7 @@ where
 							Offer::Refuse(duplicate, "already subscribed")
 						}
 						None => {
-							let handoff = kio::Shared::<Handoff<S>>::default();
+							let handoff = kio::Shared::<Handoff>::default();
 							let entry = Entry {
 								info: Some(info),
 								request_id: Some(msg.request_id),
@@ -918,7 +893,7 @@ where
 
 	/// Watch a paused subscription until it ends, its entry is let go, or a subscription
 	/// takes it to resume.
-	async fn watch(&self, key: TrackKey, mut upstream: Upstream<S>, handoff: kio::Shared<Handoff<S>>) {
+	async fn watch(&self, key: TrackKey, mut upstream: Upstream, handoff: kio::Shared<Handoff>) {
 		let mut session = self.session.clone();
 		enum Step {
 			Closed,
@@ -1014,7 +989,7 @@ where
 	}
 
 	/// Ask for the paused subscription a listing holds for this track, to resume it.
-	pub(super) fn want(&self, key: &TrackKey) -> Option<kio::Shared<Handoff<S>>> {
+	pub(super) fn want(&self, key: &TrackKey) -> Option<kio::Shared<Handoff>> {
 		let listings = self.listings.lock();
 		let handoff = listings.entries.get(key)?.handoff.clone()?;
 		handoff.lock().wanted = true;
@@ -1022,7 +997,7 @@ where
 	}
 
 	/// Ready with the subscription `handoff` hands over, or `None` once it ended instead.
-	pub(super) fn poll_handoff(handoff: &kio::Shared<Handoff<S>>, waiter: &kio::Waiter) -> Poll<Option<Upstream<S>>> {
+	pub(super) fn poll_handoff(handoff: &kio::Shared<Handoff>, waiter: &kio::Waiter) -> Poll<Option<Upstream>> {
 		let mut handoff = ready!(
 			handoff.poll(waiter, |handoff| match handoff.gone || handoff.upstream.is_some() {
 				true => Poll::Ready(()),
@@ -1033,7 +1008,7 @@ where
 	}
 
 	/// Give up wanting `handoff`, holding again what it already handed over.
-	pub(super) fn unwant(&self, key: TrackKey, handoff: &kio::Shared<Handoff<S>>) {
+	pub(super) fn unwant(&self, key: TrackKey, handoff: &kio::Shared<Handoff>) {
 		let upstream = {
 			let mut held = handoff.lock();
 			held.wanted = false;
@@ -1083,8 +1058,8 @@ where
 
 	/// Hold a paused subscription again as its track's entry, watched until a reader
 	/// resumes it, or cancel it if the entry is gone.
-	pub(super) fn hold(&self, key: TrackKey, upstream: Upstream<S>) {
-		let handoff = kio::Shared::<Handoff<S>>::default();
+	pub(super) fn hold(&self, key: TrackKey, upstream: Upstream) {
+		let handoff = kio::Shared::<Handoff>::default();
 		let held = match self.listings.lock().held_by(&key, upstream.request_id) {
 			Some(entry) => {
 				entry.handoff = Some(handoff.clone());
@@ -1105,7 +1080,7 @@ where
 	}
 
 	/// Pause a subscription nobody reads that is its track's entry, and hold it again.
-	pub(super) async fn pause(&self, key: TrackKey, mut upstream: Upstream<S>) {
+	pub(super) async fn pause(&self, key: TrackKey, mut upstream: Upstream) {
 		self.park_subscribe(upstream.request_id);
 		let pause = Forward {
 			forward: false,
@@ -1157,7 +1132,7 @@ where
 	/// Set a held subscription's Forward State with REQUEST_UPDATE.
 	pub(super) async fn write_forward(
 		&self,
-		writer: &mut Writer<S::SendStream, Version>,
+		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		forward: &Forward,
 	) -> Result<(), Error> {
 		let request_id = self.control.next_request_id(&self.runtime).await?;
@@ -1192,8 +1167,8 @@ where
 	/// Read the answer to a SUBSCRIBE, or to the REQUEST_UPDATE resuming `held`.
 	pub(super) async fn read_answer(
 		&self,
-		stream: &mut Stream<S, Version>,
-		messages: &mut Messages<S>,
+		stream: &mut Stream<Transport, Version>,
+		messages: &mut Messages,
 		held: Option<&mut Resumed>,
 	) -> Result<Option<Accepted>, Error> {
 		let Some(held) = held else {
@@ -1269,14 +1244,14 @@ mod tests {
 
 	const TIMEOUT: Duration = Duration::from_secs(1);
 
-	type PeerStream = Stream<memory::Session, Version>;
+	type PeerStream = Stream<Transport, Version>;
 
 	/// A subscriber listing `broadcast` over a raw peer that plays the publisher.
 	struct Harness {
-		subscriber: Subscriber<memory::Session>,
+		subscriber: Subscriber,
 		peer: memory::Session,
 		tracks: crate::broadcast::Tracks,
-		listening: Listening<memory::Session>,
+		listening: Listening,
 		version: Version,
 		_broadcast: crate::broadcast::Producer,
 		_driver: moq_clock::sim::JoinHandle<()>,
@@ -1292,7 +1267,7 @@ mod tests {
 		let driver = moq_clock::sim::spawn(async move { kio::wait(|waiter| task_set.poll(waiter)).await });
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -1349,10 +1324,13 @@ mod tests {
 	impl Harness {
 		/// Accept the SUBSCRIBE_TRACKS and establish it.
 		async fn establish(&mut self) -> PeerStream {
-			let mut stream = moq_clock::timeout(TIMEOUT, Stream::accept(&mut self.peer, self.version))
-				.await
-				.expect("no SUBSCRIBE_TRACKS")
-				.unwrap();
+			let mut stream = moq_clock::timeout(
+				TIMEOUT,
+				Stream::accept(&mut crate::driver::Transport::new(self.peer.clone()), self.version),
+			)
+			.await
+			.expect("no SUBSCRIBE_TRACKS")
+			.unwrap();
 			let (id, body) = read(&mut stream).await;
 			assert_eq!(id, ietf::SubscribeTracks::ID);
 			let msg: ietf::SubscribeTracks = body.message(self.version).unwrap();
@@ -1444,7 +1422,9 @@ mod tests {
 
 		/// Send `publish`, returning the answer.
 		async fn offer(&mut self, publish: ietf::Publish<'_>) -> (PeerStream, u64, ietf::Body) {
-			let mut stream = Stream::open(&mut self.peer, self.version).await.unwrap();
+			let mut stream = Stream::open(&mut crate::driver::Transport::new(self.peer.clone()), self.version)
+				.await
+				.unwrap();
 			stream.writer.varint(ietf::Publish::ID).await.unwrap();
 			stream.writer.encode(&publish).await.unwrap();
 
@@ -1590,10 +1570,13 @@ mod tests {
 			write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
 			assert_eq!(event(&mut h.tracks), None, "{version}: listed before it answered");
 
-			let mut stream = moq_clock::timeout(TIMEOUT, Stream::accept(&mut h.peer, version))
-				.await
-				.expect("no paused SUBSCRIBE")
-				.unwrap();
+			let mut stream = moq_clock::timeout(
+				TIMEOUT,
+				Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
+			)
+			.await
+			.expect("no paused SUBSCRIBE")
+			.unwrap();
 			let (id, body) = read(&mut stream).await;
 			assert_eq!(id, ietf::Subscribe::ID, "{version}");
 			let msg: ietf::Subscribe = body.message(version).unwrap();
@@ -1630,10 +1613,13 @@ mod tests {
 			track_name: "audio".into(),
 		};
 		write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
-		let mut stream = moq_clock::timeout(TIMEOUT, Stream::accept(&mut h.peer, version))
-			.await
-			.expect("no paused SUBSCRIBE")
-			.unwrap();
+		let mut stream = moq_clock::timeout(
+			TIMEOUT,
+			Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
+		)
+		.await
+		.expect("no paused SUBSCRIBE")
+		.unwrap();
 		let _ = read(&mut stream).await;
 		let refused = ietf::RequestError {
 			request_id: None,
@@ -1730,10 +1716,13 @@ mod tests {
 			"TRACK_ENDED failed the listing"
 		);
 
-		let mut stream = moq_clock::timeout(TIMEOUT, Stream::accept(&mut h.peer, version))
-			.await
-			.expect("the copy did not SUBSCRIBE")
-			.unwrap();
+		let mut stream = moq_clock::timeout(
+			TIMEOUT,
+			Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
+		)
+		.await
+		.expect("the copy did not SUBSCRIBE")
+		.unwrap();
 		let (id, _) = read(&mut stream).await;
 		assert_eq!(id, ietf::Subscribe::ID);
 	}
@@ -1792,10 +1781,13 @@ mod tests {
 		let version = Version::Draft22;
 		for case in ["refused", "reset", "silent"] {
 			let mut h = harness(version);
-			let mut listing = moq_clock::timeout(TIMEOUT, Stream::accept(&mut h.peer, version))
-				.await
-				.expect("no SUBSCRIBE_TRACKS")
-				.unwrap();
+			let mut listing = moq_clock::timeout(
+				TIMEOUT,
+				Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
+			)
+			.await
+			.expect("no SUBSCRIBE_TRACKS")
+			.unwrap();
 			let (id, _) = read(&mut listing).await;
 			assert_eq!(id, ietf::SubscribeTracks::ID);
 			let _held = match case {
@@ -1828,10 +1820,13 @@ mod tests {
 			}
 
 			let (_track, reader, _serving) = h.read_track("video").await;
-			let mut stream = moq_clock::timeout(TIMEOUT, Stream::accept(&mut h.peer, version))
-				.await
-				.expect("no SUBSCRIBE")
-				.unwrap();
+			let mut stream = moq_clock::timeout(
+				TIMEOUT,
+				Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
+			)
+			.await
+			.expect("no SUBSCRIBE")
+			.unwrap();
 			let (id, body) = read(&mut stream).await;
 			assert_eq!(id, ietf::Subscribe::ID, "{case}");
 			let msg: ietf::Subscribe = body.message(version).unwrap();
