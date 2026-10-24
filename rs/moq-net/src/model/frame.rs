@@ -109,10 +109,15 @@ pub(crate) struct Chain {
 }
 
 impl Chain {
+	/// The bytes from `start` to the end.
+	pub fn len(&self) -> usize {
+		self.end() - self.start
+	}
+
 	/// The whole chain copied into one buffer.
 	#[cold]
 	#[inline(never)]
-	fn concat(self) -> Bytes {
+	pub fn concat(self) -> Bytes {
 		Payload::Chain(self).contiguous(0)
 	}
 
@@ -153,7 +158,7 @@ impl Payload {
 	pub fn len(&self) -> usize {
 		match self {
 			Self::Whole(bytes) => bytes.len(),
-			Self::Chain(chain) => chain.end() - chain.start,
+			Self::Chain(chain) => chain.len(),
 		}
 	}
 
@@ -233,22 +238,6 @@ pub(crate) struct Cached {
 	pub payload: Payload,
 	// When the frame's last byte landed in this node's cache; see [`Frame::arrived`].
 	pub arrived: Instant,
-}
-
-impl Cached {
-	/// The frame read whole, copying a chain of segments into one buffer.
-	// Inlined on every whole read, so the rare chain copy stays out of line.
-	#[inline]
-	pub fn into_frame(self) -> Frame {
-		Frame {
-			timestamp: self.timestamp,
-			payload: match self.payload {
-				Payload::Whole(bytes) => bytes,
-				Payload::Chain(chain) => chain.concat(),
-			},
-			arrived: self.arrived,
-		}
-	}
 }
 
 impl From<Frame> for Cached {

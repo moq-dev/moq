@@ -2256,10 +2256,16 @@ impl Demand {
 /// consumer that never reads whole frames, or drains through a higher-level buffer,
 /// pays nothing. Inline storage would triple the size of every [`Consumer`], which
 /// moves by value through each layer that hands out a group.
+///
+/// Slots hold the public [`frame::Frame`], with a segmented payload set aside in `chains`,
+/// so a whole read of a small frame moves it out of its slot as it did before segments.
 #[derive(Default)]
 struct Prefetch {
 	// Initialized, not-yet-taken frames are `frames[pos..len]`; the rest are uninitialized.
-	frames: Option<Box<[MaybeUninit<Cached>; Self::CAP]>>,
+	// A slot whose frame is in `chains` holds an empty payload.
+	frames: Option<Box<[MaybeUninit<frame::Frame>; Self::CAP]>>,
+	// Segmented payloads for `frames`, allocated by the first batch that carries one.
+	chains: Option<Box<[Option<frame::Chain>; Self::CAP]>>,
 	// Relay metadata for `frames`, allocated by the first batch that carries any.
 	fields: Option<Box<[Option<Arc<super::object::Fields>>; Self::CAP]>>,
 	// Inflated sizes for `frames`, filled only by a batch of a compressed group's stored slices.
@@ -2276,8 +2282,38 @@ impl Prefetch {
 		self.inflated.as_ref()?.get(self.pos.checked_sub(1)?).copied()
 	}
 
-	/// Take the next buffered frame, or `None` if the batch is drained.
-	fn pop(&mut self) -> Option<Cached> {
+	/// Take the next buffered frame whole, copying a segmented payload into one buffer.
+	// Every small-frame read comes through here, so the chain copy stays out of line:
+	// with it inline, this measured ~30 more instructions a frame on `group_read_frames`.
+	#[inline(always)]
+	fn pop(&mut self) -> Option<frame::Frame> {
+		let mut frame = self.take()?;
+		if self.chains.is_some() {
+			self.join_chain(&mut frame);
+		}
+		Some(frame)
+	}
+
+	#[cold]
+	#[inline(never)]
+	fn join_chain(&mut self, frame: &mut frame::Frame) {
+		if let Some(chain) = self.take_chain() {
+			frame.payload = chain.concat();
+		}
+	}
+
+	/// Take the next buffered frame as stored, keeping a segmented payload in segments.
+	fn pop_cached(&mut self) -> Option<Cached> {
+		let frame = self.take()?;
+		Some(Cached {
+			timestamp: frame.timestamp,
+			payload: self.take_chain().map_or(Payload::Whole(frame.payload), Payload::Chain),
+			arrived: frame.arrived,
+		})
+	}
+
+	#[inline]
+	fn take(&mut self) -> Option<frame::Frame> {
 		if self.pos == self.len {
 			return None;
 		}
@@ -2286,6 +2322,12 @@ impl Prefetch {
 		let frame = unsafe { frames[self.pos].assume_init_read() };
 		self.pos += 1;
 		Some(frame)
+	}
+
+	/// The segmented payload of the frame [`Self::take`] just returned.
+	#[inline]
+	fn take_chain(&mut self) -> Option<frame::Chain> {
+		self.chains.as_mut()?.get_mut(self.pos.checked_sub(1)?)?.take()
 	}
 
 	/// The relay metadata of the frame [`Self::pop`] just returned.
@@ -2308,12 +2350,26 @@ impl Prefetch {
 			Some(flate) if !raw && count > 0 => Some(state.inflate(flate, local + count - 1)?),
 			_ => None,
 		};
+		if let Some(chains) = &mut self.chains {
+			chains.fill(None);
+		}
 		if count > 0 {
 			let frames = self
 				.frames
 				.get_or_insert_with(|| Box::new([const { MaybeUninit::uninit() }; Self::CAP]));
 			for frame in state.frames.range(local..local + count) {
-				frames[self.len].write(frame.clone());
+				let payload = match &frame.payload {
+					Payload::Whole(bytes) => bytes.clone(),
+					Payload::Chain(chain) => {
+						self.chains.get_or_insert_default()[self.len] = Some(chain.clone());
+						Bytes::new()
+					}
+				};
+				frames[self.len].write(frame::Frame {
+					timestamp: frame.timestamp,
+					payload,
+					arrived: frame.arrived,
+				});
 				self.len += 1;
 			}
 		}
@@ -2347,8 +2403,13 @@ impl Prefetch {
 		};
 		for i in self.pos..self.len {
 			match job.get(local + i) {
-				// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
-				Ok(payload) => unsafe { frames[i].assume_init_mut() }.payload = payload.into(),
+				Ok(payload) => {
+					// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
+					unsafe { frames[i].assume_init_mut() }.payload = payload;
+					if let Some(chains) = &mut self.chains {
+						chains[i] = None;
+					}
+				}
 				Err(err) => {
 					for slot in &mut frames[i..self.len] {
 						// SAFETY: as above, and `len` drops below them right after.
@@ -2372,6 +2433,9 @@ impl Prefetch {
 		for slot in &frames[self.pos..self.len] {
 			// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
 			bytes += unsafe { slot.assume_init_ref() }.payload.len() as u64;
+		}
+		if let Some(chains) = &self.chains {
+			bytes += chains[self.pos..self.len].iter().flatten().map(|chain| chain.len() as u64).sum::<u64>();
 		}
 		((self.len - self.pos) as u64, bytes)
 	}
@@ -2891,18 +2955,20 @@ impl Consumer {
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
-		self.poll_read_as(waiter, Cached::into_frame)
+		self.poll_read_as(waiter, Prefetch::pop)
 	}
 
 	/// Read the next frame as stored, so a frame in segments stays in them.
 	fn poll_read_cached(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Cached>>> {
-		self.poll_read_as(waiter, std::convert::identity)
+		self.poll_read_as(waiter, Prefetch::pop_cached)
 	}
 
-	// `take` converts each frame as it leaves the prefetch slot: converting after the
-	// return instead re-copies every frame through each layer, a measured ~1.5x on
-	// `group_read_frames`.
-	fn poll_read_as<T>(&mut self, waiter: &kio::Waiter, take: fn(Cached) -> T) -> Poll<Result<Option<T>>> {
+	/// Read the next frame through the prefetch with `take`, which picks its form.
+	fn poll_read_as<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
+	) -> Poll<Result<Option<T>>> {
 		if self.recover.is_none() {
 			return self.poll_read_frame_once(waiter, take);
 		}
@@ -2921,7 +2987,11 @@ impl Consumer {
 		})))
 	}
 
-	fn poll_read_frame_once<T>(&mut self, waiter: &kio::Waiter, take: fn(Cached) -> T) -> Poll<Result<Option<T>>> {
+	fn poll_read_frame_once<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
+	) -> Poll<Result<Option<T>>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -2941,7 +3011,7 @@ impl Consumer {
 		{
 			self.cursor.refresh_if_stale();
 			self.cursor.index += 1;
-			return Ok(Some(frame.into_frame()));
+			return Ok(Some(frame));
 		}
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
@@ -3105,7 +3175,7 @@ impl Cursor {
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
 		// Their bytes were already counted at the batch fill, so the frame::Consumer
 		// carries no meter.
-		if let Some(frame) = self.prefetch.pop() {
+		if let Some(frame) = self.prefetch.pop_cached() {
 			self.refresh_if_stale();
 			self.index += 1;
 			let tail = self.index.saturating_add(self.prefetch.buffered().0 as usize)..end;
@@ -3169,17 +3239,17 @@ impl Cursor {
 		&mut self,
 		waiter: &kio::Waiter,
 		stats: &stats::Meter,
-		take: fn(Cached) -> T,
+		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
 	) -> Poll<Result<Option<T>>> {
 		if self.capped() {
 			return Poll::Ready(Ok(None));
 		}
 
 		// Fast path: serve from the prefetched batch without locking or allocating a waker.
-		if let Some(frame) = self.prefetch.pop() {
+		if let Some(frame) = take(&mut self.prefetch) {
 			self.refresh_if_stale();
 			self.index += 1;
-			return Poll::Ready(Ok(Some(take(frame))));
+			return Poll::Ready(Ok(Some(frame)));
 		}
 
 		// The batch is drained: refill it under a single lock, registering the waiter if
@@ -3228,9 +3298,8 @@ impl Cursor {
 		stats.frames(frames);
 		stats.bytes(bytes);
 
-		Poll::Ready(Ok(self.prefetch.pop().map(|frame| {
+		Poll::Ready(Ok(take(&mut self.prefetch).inspect(|_| {
 			self.index += 1;
-			take(frame)
 		})))
 	}
 }
