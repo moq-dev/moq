@@ -85,7 +85,6 @@ getrandom = { version = "0.4", default-features = false, features = ["wasm_js"] 
 ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"], optional = true }
 # only added as dependency to enforce the `web` feature for this target
 rustls-pki-types = { version = "1.7", features = ["web"] }
-web-time = "1"
 
 [dev-dependencies]
 arbitrary = { version = "1.5", features = ["derive"] }

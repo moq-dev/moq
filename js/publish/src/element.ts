@@ -35,18 +35,7 @@ function parseVersions(value: string | null): string[] | undefined {
 	return versions?.length ? versions : undefined;
 }
 
-const OBSERVED = [
-	"url",
-	"versions",
-	"name",
-	"muted",
-	"invisible",
-	"source",
-	"preview",
-	"backend",
-	"announce",
-	"linger",
-] as const;
+const OBSERVED = ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
@@ -128,8 +117,6 @@ export default class MoqPublish extends HTMLElement {
 		backend: new Signal<Preview.Backend>("auto"),
 		// When to advertise the broadcast: always, never, or only once a source is live.
 		announce: new Signal<AnnounceMode>("source"),
-		// Whether advertising stopping finishes the broadcast, serving its tail until stale.
-		linger: new Signal(false),
 	};
 
 	/**
@@ -233,7 +220,6 @@ export default class MoqPublish extends HTMLElement {
 			origin: this.connection.origin,
 			enabled: this.#enabled,
 			announce: this.#announcing,
-			linger: this.controls.linger,
 			name: this.#name,
 			display: this.#capture.out.display,
 			flip: this.#flip,
@@ -361,8 +347,6 @@ export default class MoqPublish extends HTMLElement {
 			this.controls.source.set(parseSource(newValue));
 		} else if (name === "announce") {
 			this.controls.announce.set(parseAnnounce(newValue));
-		} else if (name === "linger") {
-			this.controls.linger.set(parseBoolean(newValue, false));
 		} else if (name === "muted") {
 			this.controls.muted.set(parseBoolean(newValue, false));
 		} else if (name === "invisible") {
@@ -543,15 +527,6 @@ export default class MoqPublish extends HTMLElement {
 
 	set announce(value: AnnounceMode) {
 		this.controls.announce.set(value);
-	}
-
-	/** Whether advertising stopping finishes the broadcast, keeping it up while its media is fresh. */
-	get linger(): boolean {
-		return this.controls.linger.peek();
-	}
-
-	set linger(value: boolean) {
-		this.controls.linger.set(value);
 	}
 }
 

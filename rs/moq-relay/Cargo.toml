@@ -69,7 +69,7 @@ humantime = { workspace = true }
 humantime-serde = { workspace = true }
 hyper-util = { workspace = true }
 moq-auth = { workspace = true, features = ["client"] }
-moq-clock = { workspace = true }
+moq-clock = { workspace = true, features = ["serde"] }
 moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true, optional = true }

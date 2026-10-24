@@ -11,16 +11,16 @@ pub struct Config {
 	/// Fetch the list of peers to dial from an HTTP(S) URL or a local file,
 	/// reloading at runtime without a restart. The source returns a JSON array
 	/// of peers: bare URL strings and/or objects with `url`, `cost`, `egress`,
-	/// `token`, and `upstream`, exactly as [`super::Config::connect`] accepts, e.g.
+	/// `token`, and `upstream`, exactly as `--cluster-connect` accepts, e.g.
 	/// `["https://a.pop.example/?cost=1", {"url": "https://b.pop.example/", "cost": 2}]`.
 	/// An http(s) URL is re-checked on a fixed cadence, with caching, conditional revalidation
 	/// (`ETag` / `Last-Modified`), and stale-if-error handled by the shared HTTP
 	/// cache client, so the response's `Cache-Control` controls how often a real
 	/// fetch hits the endpoint; a local path is watched via OS filesystem
 	/// notifications (with a periodic re-check fallback). This relay's own
-	/// [`super::Config::node`] value, when set, is sent as a `?node=` query param so the
+	/// `--cluster-node` value, when set, is sent as a `?node=` query param so the
 	/// server can return this node's peers. The relay keeps the last good list if
-	/// a fetch fails. Composes with [`super::Config::connect`].
+	/// a fetch fails. Composes with `--cluster-connect`.
 
 	#[usage(long = "cluster-api-url", env = "MOQ_CLUSTER_API_URL", setting = "cluster.api.url")]
 	pub url: Option<String>,
