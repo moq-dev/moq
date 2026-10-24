@@ -34,8 +34,9 @@ Decided:
   `moq-c` (`rs/moq-c`), and the generated package takes over that name
   and `moq::c` target, so C users migrate once. Its first release is 0.8.0, a
   minor bump over the hand-written 0.7.x.
-- Docs change inline: the consumer quest rewrites `doc/lib/c`, and the
-  package's `MIGRATE.md` carries the move. No separate guide.
+- Docs change inline: the consumer quest rewrites `doc/lib/c`, and its
+  Impact bullet carries the move for the package's `MIGRATE.md`. No separate
+  guide.
 
 The line owns the pre-cut check: every `doc/lib/c` sample and the C interop
 client build and run against the built release archive, not only in-tree.
@@ -48,7 +49,7 @@ and fetch quests were abandoned for this line, and hidden is done.
 Decided in the quest audit: [claim epochs](https://github.com/moq-dev/moq/pull/5678)
 is a narrow correctness exception. Its existing claim API migrates with
 Rust and JS so C cannot retain the unsafe accept path while this line waits.
-That change owns its C tests and `MIGRATE.md` entries; other API reshaping stays here.
+That change owns its C tests and migration notes; other API reshaping stays here.
 
 Decided 2026-10-20 (maintainer): m1 quests that change the C API
 ([exact binding timestamps](/quest/m1/binding-timestamps.md)

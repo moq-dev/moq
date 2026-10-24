@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as Lite from "../lite/priority.ts";
 import { infoDefaults } from "../track.ts";
-import { ABSENT_WIRE, fromWire, toWire } from "./priority.ts";
+import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 
 test("IETF priority is lower first", () => {
 	expect(fromWire(0)).toBe(127);
@@ -27,7 +27,8 @@ test("IETF mirrors moq-lite", () => {
 	}
 });
 
-test("an unset track priority goes out as the absent byte", () => {
+// An omitted priority is the drafts' 128, one step below the unset 127, so it forwards unchanged.
+test("an unset track priority goes out as 127 and an omitted one reads as -1", () => {
 	expect(toWire(infoDefaults().priority)).toBe(127);
-	expect(fromWire(ABSENT_WIRE)).toBe(0);
+	expect(fromWire(DEFAULT_WIRE)).toBe(-1);
 });

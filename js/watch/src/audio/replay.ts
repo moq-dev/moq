@@ -6,9 +6,9 @@
  * sets. Delivered frames go into the real ring, and a new codec epoch resets it, the way the decoder
  * does. One render quantum is read every quantum's worth of that same clock, which is what the
  * AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
- * registers, measured by that same consumer from the recorded catalog config, and the ring follows
- * it the way the decoder resizes it, so a change to any of them moves what a replay hears. Decoding
- * is taken as instant and sample exact.
+ * registers, measured by that same consumer from the recorded catalog config, and the ring and the
+ * decode gate follow it the way the decoder's audio buffer moves them, so a change to any of them
+ * moves what a replay hears. Decoding is taken as instant and sample exact.
  *
  * Deterministic, so the audio quality harness grades its output with no headroom, and a unit test
  * can assert exact counts.
@@ -23,8 +23,9 @@ import { Group, Time, Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { type Arrival as Diagnostic, gap } from "../arrivals";
 import { type Delay, Sync } from "../sync";
+import { Backpressure } from "./buffer";
 import { frameDuration } from "./config";
-import { ringSamples, target } from "./latency";
+import { target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 import { Terminal } from "./terminal";
 
@@ -81,7 +82,7 @@ export interface Quantum {
 	stalled: boolean;
 	/** The playhead after this quantum, on the media clock, in ms. */
 	timestamp: number;
-	/** The delay `Sync` resolved as of this quantum, in ms: what sizes the ring. */
+	/** The delay `Sync` resolved as of this quantum, in ms: what the ring and the decode gate hold. */
 	delay: number;
 }
 
@@ -151,8 +152,19 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	await settle();
 
 	let delay = sync.out.delay.peek();
-	// The worklet's ring, sized the way `AudioBuffer` asks the worklet to size it.
-	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, ringSamples(rate, delay)) });
+	// The decode gate, and the worklet's ring on the floor it sets, the way `AudioBuffer` drives both.
+	const gate = new Backpressure(rate, false, delay);
+	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, gate.floor) });
+	const observe = () => gate.observe(ring.anchored ? ring.timestamp : undefined, ring.stalled);
+
+	// Arrived but not yet decoded media, read or still in the consumer, is what covers the part of the
+	// target held encoded, and what resumes a parked ring.
+	const read = new Signal<Micro | undefined>(undefined);
+	signals.run((effect) => {
+		let newest = effect.get(read);
+		for (const { end } of effect.get(consumer.buffered)) newest = Math.max(newest ?? 0, micros(end)) as Micro;
+		if (gate.queued(newest)) ring.setLatency(millis(rate, gate.floor));
+	});
 
 	// The decoder's read loop, with the codec taken out. A failure is rethrown at the next quantum.
 	const terminal = new Terminal();
@@ -160,23 +172,35 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const delivery = Promise.withResolvers<void>();
 	if (options.decodeAfter === undefined) delivery.resolve();
 	let failure: { error: unknown } | undefined;
+	const abort = new AbortController();
 	const decode = (async () => {
 		await delivery.promise;
 		for (;;) {
 			const next = await consumer.next();
 			if (!next) return;
-			if (terminal.update(next)) ring.reset();
+			if (terminal.update(next)) {
+				ring.reset();
+				gate.reset();
+			}
 			if (next.kind === "gap") arrivals.push(gap(next));
 			if (next.kind !== "frame") continue;
 
 			const { timestamp, arrival } = next.frame;
+			read.set(timestamp);
 			const media = Milli.fromMicro(timestamp);
 			const late = sync.received(media, arrival);
 			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
 			const entry = recorded.get(timestamp);
 			if (!entry) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);
 			frame.set(Milli(entry.duration));
-			ring.write(timestamp, [new Float32Array(Math.round((entry.duration * rate) / 1000)).fill(0.5)]);
+			await gate.wait(timestamp, abort.signal);
+			if (abort.signal.aborted) return;
+			const pcm = new Float32Array(Math.round((entry.duration * rate) / 1000)).fill(0.5);
+			ring.write(timestamp, [pcm]);
+			// The decoder reports each output to the gate the way `AudioBuffer` and `Decoder.#emit` do.
+			const end = (timestamp + micros((pcm.length / rate) * 1000)) as Micro;
+			gate.inserted(timestamp, end);
+			gate.decoded(end, end);
 		}
 	})().catch((error: unknown) => {
 		failure = { error };
@@ -236,15 +260,20 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			}
 			if (failure) throw failure.error;
 
-			// The decoder resizes the ring as the resolved delay moves, which only an arrival does.
+			// The decoder moves the ring and the gate as the resolved delay moves, which only an arrival
+			// does.
 			const resolved = sync.out.delay.peek();
 			if (resolved !== delay) {
 				delay = resolved;
-				ring.resize(millis(rate, ringSamples(rate, delay)));
+				observe();
+				const park = gate.setLatency(delay);
+				ring.setLatency(millis(rate, gate.floor));
+				if (park) ring.park();
 			}
 
 			output.fill(0);
 			ring.read([output]);
+			observe();
 			yield {
 				arrivals,
 				at: now,
@@ -256,6 +285,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		}
 	} finally {
 		delivery.resolve();
+		abort.abort();
 		consumer.close();
 		track.close();
 		await decode;

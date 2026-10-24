@@ -8,10 +8,9 @@ rs/AGENTS.md's typed-units rule.
 
 ## Plan
 
-Planned 2026-10-22 from the API audit
-([wrapper config names](/quest/m1/api-audit/wrapper-config.md) fixes the
-names in m1). Today Kotlin (`Durations.kt`), Dart (`durations.dart`), Go
-(`backoffMicros`), and Python (`timedelta`) each convert.
+Planned 2026-10-22 from the API audit. Today Kotlin (`Durations.kt`), Dart
+(`durations.dart`), Go (`backoffMicros`), and Python (`timedelta`) each
+convert.
 
 Moved to m1 on 2026-10-23 (maintainer): the wrapper config rename already
 breaks these options this release, so binding users migrate them once.

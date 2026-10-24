@@ -18,7 +18,6 @@ import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import { liteTimescale } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
@@ -78,6 +77,11 @@ interface Stamp {
 	 * one served untimed carries its send time instead, unchecked ones included.
 	 */
 	timed: boolean;
+}
+
+/** The timescale a moq-lite hop serves a track at: none for an {@link track.Info.ietf} one. */
+function liteTimescale(info: track.Info): Timescale | undefined {
+	return info.ietf === undefined ? (info.timescale ?? undefined) : undefined;
 }
 
 /** How `version` stamps a track served at `timescale` (see `liteTimescale`), or undefined when it carries none. */
@@ -332,7 +336,7 @@ class SubscriptionControls {
 }
 
 // The later of two locations, either of which may be unknown.
-function newer(a: track.Location | undefined, b: track.Location | undefined): track.Location | undefined {
+function newer(a: track.Position | undefined, b: track.Position | undefined): track.Position | undefined {
 	if (!a || !b) return a ?? b;
 	return b.group > a.group || (b.group === a.group && b.frame > a.frame) ? b : a;
 }
@@ -1149,7 +1153,7 @@ export class Publisher {
 		let startSequence: number | undefined;
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
-		let first: { group: group.Consumer; largest: track.Location | undefined } | undefined;
+		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
 		let endSent = false;
 
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
@@ -1351,7 +1355,8 @@ export class Publisher {
 						// until each group stream finished or reset. The subscriber leaving
 						// instead cancels whatever is still queued.
 						const drained = Symbol("drained");
-						const end = await Promise.race([Promise.all(groups).then(() => drained), controls.ended]);
+						// `race`, since this repeats per batch of drops against the subscription's end.
+						const end = await race([Promise.all(groups).then(() => drained), controls.ended]);
 						if (end instanceof Error) throw end;
 						if (end !== drained) return false;
 						if (pendingDrops.length > 0) continue;

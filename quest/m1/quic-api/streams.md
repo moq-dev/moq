@@ -104,7 +104,7 @@ through setters afterwards. Moved here from
 [drop web-transport-trait](/quest/m1/drop-web-transport-trait.md).
 
 Update every consumer (`quic::web` in both crates, qmux, the backends,
-moq-relay's tests). `poll_*` forms come in [poll](/quest/m1/quic-api/poll.md). MIGRATE entries in moq-quic, moq-tokio, moq-uring, and
+moq-relay's tests). `poll_*` forms come in [poll](/quest/m1/quic-api/poll.md). The Impact bullet says how to migrate in moq-quic, moq-tokio, moq-uring, and
 qmux if its public API changes.
 
 ## Required

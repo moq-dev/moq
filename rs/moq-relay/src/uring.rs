@@ -87,7 +87,13 @@ struct Serve {
 /// [`bind`](Self::bind) opens every socket, so a returned value already owns
 /// the listen address and a port conflict is an error here rather than a
 /// worker that quietly died. [`spawn`](Self::spawn) starts every thread, and
-/// nothing is served until [`serve`](Self::serve).
+/// nothing is served until [`Spawned::serve`].
+///
+/// ```compile_fail
+/// fn serve_before_spawn(mut bound: moq_relay::uring::Workers) {
+///     bound.serve();
+/// }
+/// ```
 pub struct Workers {
 	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
@@ -111,7 +117,7 @@ pub struct Workers {
 	stops: Vec<Arc<Stop>>,
 	/// Releases each spawned worker to accept; dropped unsent, it exits instead.
 	starts: Vec<std::sync::mpsc::Sender<()>>,
-	/// A worker's fatal error, reported to whoever polls [`failed`](Self::failed).
+	/// A worker's fatal error, reported to whoever polls [`Spawned::failed`].
 	failures: tokio::sync::mpsc::UnboundedReceiver<anyhow::Error>,
 	failures_tx: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
 
@@ -280,14 +286,14 @@ impl Workers {
 	/// authentication and session supervision. Returns once every worker is
 	/// set up; a worker that cannot start (an old kernel, a ring failure) is
 	/// an error here rather than a thread that quietly died. Nothing accepts
-	/// until [`serve`](Self::serve), so a failure here has served nobody.
+	/// until [`Spawned::serve`], so a failure here has served nobody.
 	pub fn spawn(
-		&mut self,
+		mut self,
 		cluster: cluster::Cluster,
 		auth: auth::Auth,
 		shutdown: shutdown::Observer,
 		sessions: crate::session::Registry,
-	) -> anyhow::Result<()> {
+	) -> anyhow::Result<Spawned> {
 		let serve = Serve {
 			cluster,
 			auth,
@@ -325,9 +331,13 @@ impl Workers {
 				start: start_rx,
 				failures: self.failures_tx.clone(),
 			};
+			// A scoped embedder subscriber belongs to these workers too; threads do
+			// not inherit their creator's tracing dispatcher.
+			let dispatch = tracing::dispatcher::get_default(Clone::clone);
+			let parent = tracing::Span::current();
 			let thread = std::thread::Builder::new()
 				.name(format!("moq-uring-{index}"))
-				.spawn(move || run_worker(spawn))
+				.spawn(move || tracing::dispatcher::with_default(&dispatch, || parent.in_scope(|| run_worker(spawn))))
 				.with_context(|| format!("failed to spawn io_uring worker {index}"))?;
 
 			// A worker that fails setup drops its sender, so a recv error and
@@ -349,11 +359,11 @@ impl Workers {
 			self.starts.push(start_tx);
 		}
 
-		Ok(())
+		Ok(Spawned { workers: self })
 	}
 
-	/// Start every [`spawn`](Self::spawn)ed worker accepting.
-	pub fn serve(&mut self) {
+	/// Start every [`Workers::spawn`]ed worker accepting.
+	fn serve(&mut self) {
 		for start in self.starts.drain(..) {
 			// A worker that died since setup is reported through `failed`.
 			let _ = start.send(());
@@ -362,7 +372,7 @@ impl Workers {
 
 	/// The first worker's fatal error. Pends until one dies, which a healthy
 	/// group never does, so this composes into a `select!` loop.
-	pub async fn failed(&mut self) -> anyhow::Error {
+	async fn failed(&mut self) -> anyhow::Error {
 		match self.failures.recv().await {
 			Some(err) => err,
 			// Senders live in `self`, so this is unreachable; pend regardless.
@@ -371,7 +381,7 @@ impl Workers {
 	}
 
 	/// Stop every worker and wait for its thread, off the caller's runtime.
-	pub async fn shutdown(mut self) {
+	async fn shutdown(mut self) {
 		let threads = self.signal();
 		if threads.is_empty() {
 			return;
@@ -386,6 +396,26 @@ impl Workers {
 			stop.stop();
 		}
 		std::mem::take(&mut self.threads)
+	}
+}
+
+/// Workers that have all initialized and can now begin accepting sessions.
+pub struct Spawned {
+	workers: Workers,
+}
+
+impl Spawned {
+	/// Release every initialized worker to accept sessions.
+	pub fn serve(&mut self) {
+		self.workers.serve();
+	}
+	/// Wait for the first worker's fatal error.
+	pub async fn failed(&mut self) -> anyhow::Error {
+		self.workers.failed().await
+	}
+	/// Stop every worker and wait until its thread has ended.
+	pub async fn shutdown(self) {
+		self.workers.shutdown().await;
 	}
 }
 
@@ -485,7 +515,7 @@ struct Spawn {
 	/// Reports setup back to [`Workers::spawn`], which blocks on it so a
 	/// worker that cannot start is an error there rather than a dead thread.
 	ready: std::sync::mpsc::Sender<anyhow::Result<()>>,
-	/// Fires on [`Workers::serve`]; closes when the group stops first.
+	/// Fires on [`Spawned::serve`]; closes when the group stops first.
 	start: std::sync::mpsc::Receiver<()>,
 	/// Where a fatal error goes once the worker is running.
 	failures: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
@@ -620,6 +650,8 @@ fn serve_worker(spawn: Spawn) -> bool {
 /// What remains of a connection's handshake deadline, and how to tell the peer
 /// it passed.
 struct Deadline {
+	/// When the handshake must be done, if ever.
+	at: Option<moq_net::time::Instant>,
 	timer: moq_uring::Timer,
 	/// Closes with the timeout code once a session exists to carry it. Until
 	/// then a timed-out handshake is just dropped, and its guard closes in the
@@ -629,9 +661,10 @@ struct Deadline {
 
 impl Deadline {
 	fn new(handle: &moq_uring::Handle, conn: &moq_uring::quic::Connection) -> Self {
+		let at = conn.handshake().deadline;
 		let mut timer = handle.timer();
-		timer.set(conn.handshake().deadline);
-		Self { timer, close: None }
+		timer.set(at);
+		Self { at, timer, close: None }
 	}
 
 	async fn bound<T, E: Into<anyhow::Error>>(
@@ -834,27 +867,35 @@ async fn serve_request(
 	if let Some(limits) = serve.cluster.quic_limits(&lease) {
 		conn.set_limits(limits)?;
 	}
-	let mut request = request
-		.with_stats(stats.clone())
-		.with_limits(serve.cluster.limits(&lease));
+	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}
 	if let Some(publisher) = publisher {
 		request = request.with_subscriber(publisher);
 	}
-	let lease = lease.preparing(request.auth(), request.role())?;
+	// moq-net enforces the handshake deadline on the reply, so one the peer never
+	// took counts in the session's stats.
+	if let Some(at) = deadline.at {
+		request = request.with_deadline(at);
+	}
+	// A grant that no longer holds is refused, so the session records why it ended.
+	let lease = match lease.preparing(request.auth(), request.requests(), request.role()) {
+		Ok(lease) => lease,
+		Err(err) => {
+			request.close(err.clone());
+			return Err(err.into());
+		}
+	};
 	let serving = serve.shutdown.serve();
 	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
 	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the
 	// shared runtime, and dropping it aborts the task.
 	let shutdown = serve.shutdown.clone();
 	let expired = std::pin::pin!(lifecycle.shared(&serve.tokio, async move { shutdown.expired().await }));
-	let reply = std::pin::pin!(deadline.bound(request.ok()));
+	let reply = std::pin::pin!(request.ok());
 	let (session, driver) = match futures::future::select(reply, expired).await {
-		futures::future::Either::Left((reply, _)) => {
-			reply.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?
-		}
+		futures::future::Either::Left((reply, _)) => reply?,
 		futures::future::Either::Right(_) => anyhow::bail!("the SETUP reply was still pending at the drain deadline"),
 	};
 	let driver_handle = handle.clone();
@@ -990,9 +1031,9 @@ mod tests {
 		let mut server = moq_tokio::server::Config::default();
 		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		server.listen.tls.generate = vec!["localhost".into()];
-		let mut workers = Workers::bind(server, moq_tokio::worker::Config::new(2)).unwrap();
+		let workers = Workers::bind(server, moq_tokio::worker::Config::new(2)).unwrap();
 		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
-		workers
+		let workers = workers
 			.spawn(
 				cluster,
 				auth::Auth::refuse("test"),

@@ -85,7 +85,7 @@ struct ctx {
 // Callbacks run on moq-c's runtime thread; main waits on the condvar. ctx lives
 // on main's stack and moq-c keeps the pointer until each registration's
 // terminal (<= 0) callback fires, so main must not return until every one of
-// them has. Closing the session ends its status registration alone;
+// them has. Closing the session ends its state registration alone;
 // moq_origin_announced_broadcast, moq_consume_catalog and moq_consume_video each
 // keep the pointer until their own terminal. See drain() at the bottom.
 static void done(ctx_t *c, int *flag) {
@@ -95,17 +95,18 @@ static void done(ctx_t *c, int *flag) {
     pthread_mutex_unlock(&c->mu);
 }
 
-static void on_status(void *ud, int32_t code) {
+static void on_state(void *ud, const moq_connection_state *state) {
     ctx_t *c = (ctx_t *)ud;
-    fprintf(stderr, "session status: %d\n", code);
-    if (c->finish.enabled && code > 0) {
+    fprintf(stderr, "session state: phase=%d connects=%llu failure=%d\n", (int)state->phase,
+            (unsigned long long)state->connects, state->failure);
+    if (c->finish.enabled && state->connects > 0) {
         pthread_mutex_lock(&c->mu);
-        c->finish.connected = code;
-        if (code > 1) c->finish.failed = 1;
+        c->finish.connected = (int)state->connects;
+        if (state->connects > 1) c->finish.failed = 1;
         pthread_cond_broadcast(&c->cv);
         pthread_mutex_unlock(&c->mu);
     }
-    if (code <= 0) done(c, &c->done_status);
+    if (state->phase == MOQ_CONNECTION_PHASE_CLOSED) done(c, &c->done_status);
 }
 
 static void on_frame(void *ud, int32_t frame) {
@@ -579,7 +580,7 @@ int main(int argc, char **argv) {
     }
 
     // origin_publish = 0 disables publishing; consume via our origin.
-    c.session = moq_session_connect(url, strlen(url), version ? &config : NULL, 0, (uint32_t)c.origin, on_status, &c);
+    c.session = moq_session_connect(url, strlen(url), version ? &config : NULL, 0, (uint32_t)c.origin, on_state, &c);
     if (c.session <= 0) {
         // A registration that fails never invokes its callback, so &c isn't held
         // yet and returning is still safe here.

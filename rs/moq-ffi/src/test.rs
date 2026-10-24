@@ -16,7 +16,7 @@ use crate::json::{
 };
 use crate::media::*;
 use crate::session::{
-	MoqBackoff, MoqCongestionControl, MoqConnectionStatus, MoqQuicConfig, MoqWebSocketConfig, moq_client_defaults,
+	MoqBackoff, MoqCongestionControl, MoqConnectionPhase, MoqQuicConfig, MoqWebSocketConfig, moq_client_defaults,
 	moq_qlog_supported, moq_versions,
 };
 
@@ -414,9 +414,17 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 
 #[test]
 fn epoch_helpers_mint_parse_and_refuse() {
+	assert_eq!(
+		moq_epoch_time_ms("ffffffff-ffff-7fff-bfff-ffffffffffff".into()).unwrap(),
+		(1_u64 << 48) - 1
+	);
 	let epoch = moq_mint_epoch();
 	let parsed: moq_net::Epoch = epoch.parse().unwrap();
-	let unix_ms = parsed.time().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+	let unix_ms = parsed
+		.time()
+		.unwrap()
+		.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
+		.as_millis();
 	assert_eq!(u128::from(moq_epoch_time_ms(epoch.clone()).unwrap()), unix_ms);
 	assert!(moq_mint_epoch() > epoch, "a later mint orders newer");
 
@@ -1098,7 +1106,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	consumer
 		.update(MoqSubscription {
 			priority: 10,
-			max_delay_us: 25_000,
+			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
 				start: MoqAnchor::Absolute { group: 0, frame: 0 },
 				end: None,
@@ -2745,8 +2753,6 @@ async fn dynamic_track_request_can_publish_media() {
 			timestamp_us: Some(20_000),
 		})
 		.unwrap();
-	media.flush(20_000).unwrap();
-	assert!(media.flush(u64::MAX).is_err(), "unrepresentable PTS must fail");
 
 	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
 		.await
@@ -4648,7 +4654,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 	consumer
 		.update(MoqSubscription {
 			priority: 10,
-			max_delay_us: 25_000,
+			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
 				start: MoqAnchor::Absolute { group: 0, frame: 0 },
 				end: None,
@@ -5284,7 +5290,8 @@ async fn server_client_roundtrip() {
 	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	cs.shutdown().await.unwrap();
+	cs.shutdown();
+	cs.closed().await.unwrap();
 	server_session.cancel(0);
 	server.cancel();
 }
@@ -5397,14 +5404,16 @@ async fn announced_broadcast_follows_an_epochless_replacement() {
 		.await
 		.expect("the replacement was never handed out")
 		.unwrap();
-	first.shutdown().await.unwrap();
+	first.shutdown();
+	first.closed().await.unwrap();
 
 	let fresh_track = subscribe_audio(&fresh).await;
 	roundtrip(&media, &fresh_track, b"after", 2_000_000).await;
 
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	second.shutdown().await.unwrap();
+	second.shutdown();
+	second.closed().await.unwrap();
 	server.cancel();
 	drop(accept.await.unwrap());
 }
@@ -5441,7 +5450,7 @@ async fn announced_broadcast_retries_a_dropped_wait() {
 /// restart that announced it must not hand it out again while the caller holds it. `dynamic_at`
 /// is where the route the wait first resolves through covers the path: above it, the takeover's
 /// restart lands while resolving; at it, the origin holds that restart for
-/// [`moq_net::origin::DEFAULT_UPDATE_HOLD`].
+/// the default [`moq_net::origin::Config::update_hold`].
 async fn announced_broadcast_hands_out_a_takeover_once(dynamic_at: &str) {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, dynamic_at);
@@ -5462,7 +5471,7 @@ async fn announced_broadcast_hands_out_a_takeover_once(dynamic_at: &str) {
 		.unwrap();
 
 	let next = tokio::spawn(async move { followed.available().await });
-	tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
+	tokio::time::sleep(moq_net::origin::Config::default().update_hold * 2).await;
 	assert!(!next.is_finished(), "the takeover was handed out twice");
 	next.abort();
 	takeover.close().unwrap();
@@ -5540,7 +5549,7 @@ async fn announced_broadcast_hands_out_a_gap_while_resolving_once() {
 		.expect("the wait never asked for the broadcast")
 		.unwrap();
 	dynamic.cancel();
-	tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
+	tokio::time::sleep(moq_net::origin::Config::default().update_hold * 2).await;
 	let arrival = create_announced(&origin, "live");
 	let _held = tokio::time::timeout(TIMEOUT, first)
 		.await
@@ -5549,7 +5558,7 @@ async fn announced_broadcast_hands_out_a_gap_while_resolving_once() {
 		.unwrap();
 
 	let next = tokio::spawn(async move { followed.available().await });
-	tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
+	tokio::time::sleep(moq_net::origin::Config::default().update_hold * 2).await;
 	assert!(!next.is_finished(), "the arrival was handed out twice");
 	next.abort();
 	arrival.close().unwrap();
@@ -5662,7 +5671,8 @@ async fn server_client_roundtrip_auto_origin() {
 
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	cs.shutdown().await.unwrap();
+	cs.shutdown();
+	cs.closed().await.unwrap();
 	server_session.cancel(0);
 	server.cancel();
 }
@@ -6226,14 +6236,22 @@ async fn request_per_session_publish_override() {
 	server.cancel();
 }
 
-/// A first dial that keeps failing never resolves `connect`, so `MoqClient::failure` is the
-/// only place its reason shows until a session connects, and the connect clears it.
-#[tokio::test]
-async fn client_failure_names_a_failing_first_dial() {
-	// Hold the port with a socket that never answers, so each dial times out.
-	let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
-	let addr = silent.local_addr().expect("local addr");
+async fn wait_phase(
+	session: &MoqSession,
+	phase: MoqConnectionPhase,
+) -> Result<crate::session::MoqConnectionState, MoqError> {
+	let mut state = session.state();
+	while state.phase != phase {
+		state = session.state_changed(state.revision).await?;
+	}
+	Ok(state)
+}
 
+/// The session exposes repeated first-dial failures even after its Client is released.
+#[tokio::test]
+async fn session_state_names_a_failing_first_dial() {
+	let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+	let addr = silent.local_addr().unwrap();
 	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
@@ -6246,29 +6264,21 @@ async fn client_failure_names_a_failing_first_dial() {
 		..Default::default()
 	})
 	.unwrap();
-	assert!(client.failure().is_none(), "nothing is dialing yet");
-
-	let dialer = client.clone();
-	let url = format!("https://{addr}");
-	let connect = tokio::spawn(async move { dialer.connect(url).await });
-
-	let failure = tokio::time::timeout(TIMEOUT, async {
-		loop {
-			if let Some(failure) = client.failure() {
-				return failure;
-			}
-			tokio::time::sleep(Duration::from_millis(10)).await;
-		}
-	})
-	.await
-	.expect("the failing dial never reported why");
-	assert!(matches!(failure, MoqError::Connect { .. }), "{failure:?}");
-	assert!(
-		!connect.is_finished(),
-		"connect resolved while the dial was still failing"
-	);
-
-	// Serve the port; the next retry lands, which resolves the connect and clears the report.
+	let session = client.connect(format!("https://{addr}")).await.unwrap();
+	let mut state = session.state();
+	assert_eq!(state.phase, MoqConnectionPhase::Connecting);
+	assert_eq!(state.connects, 0);
+	assert!(state.version.is_none());
+	drop(client);
+	for _ in 0..2 {
+		state = tokio::time::timeout(TIMEOUT, session.state_changed(state.revision))
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(state.phase, MoqConnectionPhase::Connecting);
+		assert_eq!(state.connects, 0);
+		assert!(matches!(state.failure, Some(MoqError::Connect { .. })));
+	}
 	drop(silent);
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some(addr.to_string()),
@@ -6276,27 +6286,37 @@ async fn client_failure_names_a_failing_first_dial() {
 		..Default::default()
 	})
 	.unwrap();
-	tokio::time::timeout(TIMEOUT, server.listen())
+	server.listen().await.unwrap();
+	let request = server.accept().await.unwrap().unwrap();
+	let accepted = request.accept(None, None).await.unwrap();
+	let connected = tokio::time::timeout(TIMEOUT, wait_phase(&session, MoqConnectionPhase::Connected))
 		.await
-		.expect("listen timed out")
-		.expect("listen failed");
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
-		.await
-		.expect("accept timed out")
-		.expect("accept errored")
-		.expect("accept returned None");
-	let server_session = request.accept(None, None).await.expect("handshake failed");
-	let cs = tokio::time::timeout(TIMEOUT, connect)
-		.await
-		.expect("connect timed out")
-		.expect("connect task panicked")
-		.expect("connect failed");
-	assert!(client.failure().is_none(), "the connect must clear the failure");
-	assert!(cs.failure().is_none(), "the session has not dropped");
-
-	cs.cancel(0);
-	server_session.cancel(0);
-	client.cancel();
+		.unwrap()
+		.unwrap();
+	assert_eq!(connected.connects, 1);
+	assert!(connected.failure.is_none());
+	assert!(connected.version.is_some());
+	let initial_accepted = accepted.state();
+	assert_eq!(initial_accepted.phase, MoqConnectionPhase::Connected);
+	assert_eq!(initial_accepted.connects, 1);
+	let ending = accepted.state_changed(initial_accepted.revision);
+	tokio::pin!(ending);
+	assert!(
+		std::future::poll_fn(|cx| std::task::Poll::Ready(ending.as_mut().poll(cx)))
+			.await
+			.is_pending()
+	);
+	accepted.cancel(0);
+	let terminal = tokio::time::timeout(TIMEOUT, ending).await.unwrap().unwrap();
+	assert_eq!(terminal.phase, MoqConnectionPhase::Closed);
+	assert!(terminal.version.is_none());
+	assert!(terminal.failure.is_some());
+	assert_eq!(accepted.state().revision, terminal.revision);
+	assert!(accepted.state_changed(terminal.revision).await.is_err());
+	session.cancel(0);
+	session.closed().await.unwrap();
+	assert_eq!(session.state().phase, MoqConnectionPhase::Closed);
+	accepted.cancel(0);
 	server.cancel();
 }
 
@@ -6364,15 +6384,15 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("connect timed out")
 		.expect("connect failed");
 
-	// The first status is the connect this session was built from.
-	let status = tokio::time::timeout(TIMEOUT, cs.status())
+	// Observe the first successful connect through the same state as its initial dial.
+	let status = tokio::time::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
 		.await
 		.expect("status timed out")
 		.expect("status errored");
-	assert_eq!(status, MoqConnectionStatus::Connected);
-	assert_eq!(cs.connects(), 1);
-	assert!(cs.failure().is_none(), "nothing has failed yet");
-	let version = cs.stats().version.expect("a live connection reports its version");
+	assert_eq!(status.phase, MoqConnectionPhase::Connected);
+	assert_eq!(status.connects, 1);
+	assert!(status.failure.is_none(), "nothing has failed yet");
+	let version = status.version.expect("a live connection reports its version");
 	crate::session::parse_versions(&[version]).expect("the version is spelled like the config's");
 
 	// Kill the transport under the client, simulating a relay restart.
@@ -6383,34 +6403,28 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("accept task gone");
 	first.cancel(0);
 
-	let status = tokio::time::timeout(TIMEOUT, cs.status())
+	let status = tokio::time::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Disconnected))
 		.await
 		.expect("disconnect status timed out")
 		.expect("disconnect status errored");
-	assert_eq!(status, MoqConnectionStatus::Disconnected);
+	assert_eq!(status.phase, MoqConnectionPhase::Disconnected);
 	// Recorded before the status moved, so the watcher woken by the drop finds why.
-	assert!(cs.failure().is_some(), "the drop must report its reason");
+	assert!(status.failure.is_some(), "the drop must report its reason");
+	assert!(status.version.is_none());
 	assert!(cs.stats().version.is_none(), "nothing is live to report a version");
 
 	// Open the gate; the redial completes.
 	regate_tx.send(()).expect("accept task gone");
-	let status = tokio::time::timeout(TIMEOUT, cs.status())
+	let status = tokio::time::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
 		.await
 		.expect("reconnect status timed out")
 		.expect("reconnect status errored");
-	assert_eq!(status, MoqConnectionStatus::Connected);
-	assert!(cs.failure().is_none(), "the reconnect must clear the failure");
+	assert_eq!(status.phase, MoqConnectionPhase::Connected);
+	assert!(status.failure.is_none(), "the reconnect must clear the failure");
+	assert!(status.version.is_some());
 	assert!(cs.stats().version.is_some(), "the reconnect reports its version");
 
-	// The reconnect advances the count. The watcher may land just after the status
-	// edge it watched, so poll rather than assume ordering.
-	tokio::time::timeout(TIMEOUT, async {
-		while cs.connects() < 2 {
-			tokio::time::sleep(Duration::from_millis(10)).await;
-		}
-	})
-	.await
-	.expect("the connect count did not advance on reconnect");
+	assert_eq!(status.connects, 2, "phase and count come from one observation");
 
 	let server_session = tokio::time::timeout(TIMEOUT, accept)
 		.await
@@ -6568,7 +6582,7 @@ async fn cancel_before_connect_fails_fast() {
 /// edge. Every repeatable read on the bindings (`status`, `next`, `read_frame`,
 /// `recv_datagram`) sits on that path; `status` is just the easiest to drive.
 #[tokio::test]
-async fn cancelled_status_does_not_swallow_the_next_transition() {
+async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
 		tls: localhost_tls(),
@@ -6612,17 +6626,17 @@ async fn cancelled_status_does_not_swallow_the_next_transition() {
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
 
-	let status = tokio::time::timeout(TIMEOUT, cs.status())
+	let status = tokio::time::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
 		.await
 		.expect("status timed out")
 		.expect("status errored");
-	assert_eq!(status, MoqConnectionStatus::Connected);
+	assert_eq!(status.phase, MoqConnectionPhase::Connected);
 
 	// Give up on a status that isn't coming. The window is generous on purpose:
 	// the abandoned call has to actually reach its await for this to prove
 	// anything, and a spawn that never got there would pass either way.
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), cs.status())
+		tokio::time::timeout(Duration::from_millis(200), cs.state_changed(status.revision))
 			.await
 			.is_err(),
 		"no transition was pending, so this must be the caller giving up",
@@ -6631,11 +6645,11 @@ async fn cancelled_status_does_not_swallow_the_next_transition() {
 	// The transition the abandoned call would have eaten.
 	server_session.cancel(0);
 
-	let status = tokio::time::timeout(TIMEOUT, cs.status())
+	let status = tokio::time::timeout(TIMEOUT, cs.state_changed(status.revision))
 		.await
 		.expect("the cancelled waiter swallowed the disconnect")
 		.expect("status errored");
-	assert_eq!(status, MoqConnectionStatus::Disconnected);
+	assert_eq!(status.phase, MoqConnectionPhase::Disconnected);
 
 	cs.cancel(0);
 	server.cancel();
@@ -6883,12 +6897,9 @@ async fn session_protocol_codes_cross_the_ffi() {
 	}
 }
 #[tokio::test]
-async fn client_cancel_aborts_a_pending_connect() {
-	// A bound socket that never answers, so the QUIC handshake can't finish before cancel.
-	// A real server would not do: the dial establishes without the server accepting.
+async fn cancelling_a_session_aborts_its_first_dial() {
 	let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
 	let addr = silent.local_addr().unwrap();
-
 	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
@@ -6900,24 +6911,18 @@ async fn client_cancel_aborts_a_pending_connect() {
 		..Default::default()
 	})
 	.unwrap();
-
-	// Poll in place rather than spawning, so cancel lands before the next poll.
-	let mut connect = std::pin::pin!(client.connect(format!("https://{addr}")));
-	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(connect.as_mut().poll(cx))).await;
-	assert!(
-		first.is_pending(),
-		"connect resolved before cancel: {:?}",
-		first.map(|result| result.map(|_| "session")),
-	);
-
+	let session = client.connect(format!("https://{addr}")).await.unwrap();
+	let revision = session.state().revision;
 	client.cancel();
-
-	let connect_err = tokio::time::timeout(TIMEOUT, connect).await.expect("connect timed out");
-	assert!(
-		matches!(connect_err, Err(MoqError::Cancelled)),
-		"connect returned {:?}",
-		connect_err.map(|_| "session"),
-	);
+	session.cancel(0);
+	tokio::time::timeout(TIMEOUT, session.closed()).await.unwrap().unwrap();
+	let state = session.state_changed(revision).await.unwrap();
+	assert_eq!(state.phase, MoqConnectionPhase::Closed);
+	assert_eq!(state.connects, 0);
+	assert!(matches!(
+		session.state_changed(state.revision).await,
+		Err(MoqError::Closed)
+	));
 }
 
 #[tokio::test]
@@ -7379,6 +7384,108 @@ async fn data_track_names_cannot_collide() {
 	first.finish().unwrap();
 }
 
+/// In-memory sessions whose protocol and origin drivers use the paused test clock.
+async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
+	async fn drive(driver: impl moq_net::time::Driver) -> moq_tokio::Result<()> {
+		match moq_net::time::run(driver).await {
+			moq_net::Error::Closed
+			| moq_net::Error::Cancel
+			| moq_net::Error::Session(moq_net::SessionError::Cancel) => Ok(()),
+			error => Err(error.into()),
+		}
+	}
+
+	fn origin() -> crate::origin::Origin {
+		let mut config = moq_net::origin::Config::default();
+		config.pool = moq_net::cache::Pool::unbounded();
+		let (inner, driver) = moq_net::origin::Producer::new(config);
+		tokio::spawn(moq_net::time::run(driver));
+		crate::origin::Origin {
+			inner,
+			driver: Default::default(),
+		}
+	}
+	let a = origin();
+	let b = origin();
+	let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+	let mut transport = moq_net::transport::memory::Config::default();
+	transport.protocol = Some(version.alpn().into());
+	transport.stream_buffer = 1024;
+	let (client, server) = moq_net::transport::memory::pair(transport);
+	let connect = async {
+		let (session, driver) = moq_net::Client::new()
+			.with_origin(a.inner.clone())
+			.with_versions(version.into())
+			.connect(moq_clock::Instant::now(), client)
+			.await
+			.unwrap();
+		let driver = tokio::spawn(drive(driver));
+		Arc::new(MoqSession::accepted(session, a.clone(), a, driver))
+	};
+	let accept = async {
+		let (session, driver) = moq_net::Server::new()
+			.with_origin(b.inner.clone())
+			.with_versions(version.into())
+			.accept(moq_clock::Instant::now(), server)
+			.await
+			.unwrap();
+		let driver = tokio::spawn(drive(driver));
+		Arc::new(MoqSession::accepted(session, b.clone(), b, driver))
+	};
+	tokio::join!(connect, accept)
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_without_waiter_survives_session_disposal() {
+	let (publisher, subscriber) = memory_shutdown_pair().await;
+	let broadcast = create_announced(&publisher.publish(), "tail");
+	let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
+	let remote = await_announced(&subscriber.consume(), "tail").await;
+	let reader = remote.subscribe_track("data".into(), None).await.unwrap();
+	shutdown_ready(&track, &reader).await;
+	let group = track.append_group().unwrap();
+	group
+		.write_frame(MoqFrame {
+			timestamp_us: Some(1),
+			payload: vec![42; 64 * 1024],
+		})
+		.unwrap();
+	group.finish().unwrap();
+	track.finish().unwrap();
+	// The foreign caller neither polls the result nor retains the session handle.
+	publisher.shutdown();
+	drop(publisher);
+	let frame = reader.read_frame().await.expect("finished tail").expect("last frame");
+	assert_eq!(frame.payload, vec![42; 64 * 1024]);
+	assert!(reader.read_frame().await.expect("clean end").is_none());
+	subscriber.cancel(0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_failure_survives_a_discarded_waiter() {
+	let (publisher, subscriber) = memory_shutdown_pair().await;
+	let broadcast = create_announced(&publisher.publish(), "live");
+	let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
+	let remote = await_announced(&subscriber.consume(), "live").await;
+	let reader = remote.subscribe_track("data".into(), None).await.unwrap();
+	shutdown_ready(&track, &reader).await;
+	publisher.shutdown();
+	publisher.shutdown();
+	let mut waiter = Box::pin(publisher.closed());
+	assert!(
+		waiter
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+			.is_pending()
+	);
+	drop(waiter);
+	for _ in 0..2 {
+		let error = publisher.closed().await.expect_err("unfinished track must time out");
+		assert!(matches!(error, MoqError::Protocol { details } if details.kind == MoqProtocolKind::DeliveryTimeout));
+	}
+	subscriber.cancel(0);
+}
+
 /// Real sockets exercise the FFI runtime and both accepted/client session handles.
 /// Only lite-07 acknowledges the received tail; default lite-06 closes after transport ACKs.
 async fn shutdown_pair() -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
@@ -7469,7 +7576,8 @@ async fn shutdown_delivers_the_finished_track() {
 				})?;
 				group.finish()?;
 				track.finish()?;
-				closing.shutdown().await?;
+				closing.shutdown();
+				closing.closed().await?;
 				Ok::<(), MoqError>(())
 			}),
 		)
@@ -7508,7 +7616,15 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 		shutdown_ready(&track, &reader).await;
 		let receiving = tokio::spawn(async move { reader.read_frame().await });
 		let start = moq_clock::Instant::now();
-		let err = tokio::time::timeout(TIMEOUT, publisher.shutdown())
+		let mut closed = Box::pin(publisher.closed());
+		assert!(
+			closed
+				.as_mut()
+				.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+				.is_pending()
+		);
+		publisher.shutdown();
+		let err = tokio::time::timeout(TIMEOUT, closed)
 			.await
 			.expect("shutdown")
 			.expect_err("unfinished track must time out");
@@ -7548,7 +7664,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 
 	let subscription = MoqSubscription {
 		priority: 0,
-		max_delay_us: 10_000_000,
+		max_delay_us: Some(10_000_000),
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Relative { groups: 2 },
 			end: None,
@@ -7677,8 +7793,8 @@ async fn auth_tokens_join_and_leave_the_union() {
 		..Default::default()
 	};
 	let serving = tokio::spawn(async move {
-		let request = listener.accept().await.expect("accept");
-		let mut requests = request.auth().requests().unwrap();
+		let mut request = listener.accept().await.expect("accept");
+		let mut requests = request.requests();
 		let (session, driver) = request.ok().await.unwrap();
 		let mut issued = Vec::new();
 		while let Some(request) = requests.next().await {
@@ -7787,7 +7903,7 @@ async fn time_anchors_start_at_the_containing_group() {
 
 	let since = |timestamp_us| MoqSubscription {
 		priority: 0,
-		max_delay_us: 10_000_000,
+		max_delay_us: Some(10_000_000),
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Time { timestamp_us },
 			end: None,
