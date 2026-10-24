@@ -1677,9 +1677,9 @@ pub unsafe extern "C" fn moq_session_request_query(request: u32, dst: *mut moq_s
 ///
 /// `on_state` reports the lifecycle like [moq_session_connect]'s: one connected snapshot
 /// once the handshake completes, since an accepted session is a single connection that
-/// never reconnects, then the terminal closed snapshot. Its `failure` is zero after
-/// [moq_session_close], or the handshake's or the peer's close; read [moq_error_protocol]
-/// during the callback for the peer's close code.
+/// never reconnects, then the terminal closed snapshot. Its `failure` is zero only after
+/// [moq_session_close], and otherwise the negative code of a failed handshake or the
+/// peer's close; read [moq_error_protocol] during the callback for the peer's close code.
 ///
 /// # Safety
 /// - The caller must keep `user_data` valid until the terminal `on_state` callback.

@@ -63,7 +63,7 @@ class Client:
     The session automatically reconnects with backoff when the transport drops, and
     broadcasts consumed through it ride out the gap. Pass ``reconnect=False`` for a
     one-shot dial, or a :class:`Backoff` to tune the retry pacing; watch
-    :meth:`Session.status` for the connect/disconnect transitions.
+    :meth:`Session.state_changed` for the connect/disconnect transitions.
 
     ``versions`` restricts the protocol versions offered, most preferred first, spelled
     like ``"moq-lite-03"``; empty offers every supported version, which :func:`versions` lists.

@@ -578,20 +578,10 @@ impl Shared {
 
 	fn offline(&self, failure: Option<&Error>) {
 		if let Ok(mut state) = self.state.write() {
-			// Count one close per live session; a second call without an
-			// intervening connect (e.g. Drop after the loop already reported
-			// the close) must not move the counter again.
-			if state.session.is_some() {
-				state.presence.sessions_ended += 1;
-			}
-			state.revision += 1;
+			state.offline();
 			if let Some(failure) = failure {
 				state.failure = Some(failure.clone());
 			}
-			state.status = Some(Status::Disconnected);
-			state.version = None;
-			state.transport = None;
-			state.session = None;
 		}
 		let _ = self.send_bw.set(None);
 		let _ = self.recv_bw.set(None);
@@ -624,13 +614,15 @@ impl Drop for Shared {
 		// keep the session clone parked here alive and the transport open with
 		// nothing left able to reach it. Releasing it drops the last clone, which
 		// is what closes the transport.
-		self.disconnected();
-		// Nothing retries anymore, however the loop ended.
+		// One write, so a watcher never sees a `Disconnected` the loop will not redial from.
 		if let Ok(mut state) = self.state.write() {
-			state.revision += 1;
+			state.offline();
 			state.ended = true;
+			// Nothing retries anymore, however the loop ended.
 			state.failure = None;
 		}
+		let _ = self.send_bw.set(None);
+		let _ = self.recv_bw.set(None);
 	}
 }
 
@@ -675,6 +667,21 @@ pub struct Observation {
 }
 
 impl State {
+	/// Nothing is live: one lifecycle revision that drops the session and its version.
+	fn offline(&mut self) {
+		// Count one close per live session; a second call without an intervening
+		// connect (e.g. Drop after the loop already reported the close) must not
+		// move the counter again.
+		if self.session.is_some() {
+			self.presence.sessions_ended += 1;
+		}
+		self.revision += 1;
+		self.status = Some(Status::Disconnected);
+		self.version = None;
+		self.transport = None;
+		self.session = None;
+	}
+
 	fn observation(&self) -> Observation {
 		Observation {
 			revision: self.revision,
@@ -2447,6 +2454,32 @@ mod tests {
 		let first = monitor.state_changed(revision).await.unwrap();
 		let second = monitor.state_changed(revision).await.unwrap();
 		assert_eq!(first.revision, second.revision);
+	}
+
+	#[test]
+	fn ending_the_loop_never_shows_a_redialing_phase() {
+		use std::sync::{Arc, Mutex};
+		use std::task::{Wake, Waker};
+		// Reads the state the moment it is woken, as a watcher on another thread could.
+		struct Record(Monitor, Mutex<Vec<Phase>>);
+		impl Wake for Record {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				self.1.lock().unwrap().push(self.0.state().phase);
+			}
+		}
+		let shared = shared();
+		let monitor = Monitor {
+			state: shared.state.consume(),
+			last_presence: Default::default(),
+		};
+		let record = Arc::new(Record(monitor.clone(), Mutex::default()));
+		let waiter = kio::Waiter::new(Waker::from(record.clone()));
+		assert!(monitor.poll_state(&waiter, monitor.state().revision).is_pending());
+		drop(shared);
+		assert_eq!(*record.1.lock().unwrap(), [Phase::Closed]);
 	}
 
 	#[cfg(feature = "tcp")]
