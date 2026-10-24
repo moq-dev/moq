@@ -24,13 +24,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkout", action="append", type=Path, required=True)
     parser.add_argument("--workers", nargs="+", type=int, required=True)
+    parser.add_argument("--jobs", nargs="+", type=int, help="MOQ_CHECK_JOBS lane counts to sweep")
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--cache", required=True, help="Describe the prepared cache state")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
-    if not command or args.samples < 1 or any(n < 1 for n in args.workers):
-        parser.error("a command, positive samples and positive worker counts are required")
+    if not command or args.samples < 1 or any(n < 1 for n in args.workers + (args.jobs or [])):
+        parser.error("a command, positive samples and positive worker and job counts are required")
     if os.name != "posix":
         parser.error("CPU accounting requires a POSIX host")
     checkouts = [checkout.resolve() for checkout in args.checkout]
@@ -45,7 +46,7 @@ def main():
     # Alternating the order spreads drift in host load or thermals over solo and concurrent runs.
     for sample in range(args.samples):
         for group in groups if sample % 2 == 0 else reversed(groups):
-            for workers in args.workers:
+            for workers, jobs in ((w, j) for w in args.workers for j in args.jobs or [None]):
                 processes = []
                 load = os.getloadavg()
                 try:
@@ -56,6 +57,8 @@ def main():
                         stamp = stem.with_suffix(".started")
                         with stem.with_suffix(".log").open("w") as log:
                             env = dict(os.environ, NEXTEST_TEST_THREADS=str(workers))
+                            if jobs:
+                                env["MOQ_CHECK_JOBS"] = str(jobs)
                             env.pop("QUEST_GATE_ADMITTED", None)
                             env.pop("MOQ_LOCAL_SUPERVISED", None)
                             env.pop("GITHUB_ACTIONS", None)
@@ -80,7 +83,7 @@ def main():
                             process.terminate()
                             process.wait()
                 print(json.dumps({"copies": len(group), "checkouts": [str(checkout) for checkout in group],
-                                  "nextest_workers": workers, "sample": sample,
+                                  "nextest_workers": workers, "check_jobs": jobs, "sample": sample,
                                   "cache": args.cache, "host_load": load, "command": command,
                                   "runs": results}), flush=True)
 

@@ -503,9 +503,11 @@ just bench-local --checkout "$PWD" --checkout /path/to/another/checkout \
   cargo nextest run --locked -p moq-net --lib
 ```
 
-Each JSON record retains host load, configured workers, admission delay, work
-wall time, total wall time, and child CPU time. Logs stay under each checkout's
-`.scratch/local-bench/`. To compare Bun workspace fanout, repeat with the same
-`bun run --filter=... test` command, then add `--sequential`. Admission remains
-outside the suite's timeout clocks. Use separate checkouts to avoid measuring
-Cargo's artifact lock instead of competing work.
+Each JSON record retains host load, configured workers and lanes, admission
+delay, work wall time, total wall time, and child CPU time. Logs stay under each
+checkout's `.scratch/local-bench/`. To compare Bun workspace fanout, repeat with
+the same `bun run --filter=... test` command, then add `--sequential`. To compare
+the module lanes `just check` runs at once, sweep `--jobs 1 3` over
+`bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.
+Admission remains outside the suite's timeout clocks. Use separate checkouts to
+avoid measuring Cargo's artifact lock instead of competing work.
