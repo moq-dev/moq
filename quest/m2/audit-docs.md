@@ -60,10 +60,10 @@ freshest. Baselines:
   `gst-inspect-1.0` of a debug `moq-gst` build lists every element and pad
   property `doc/bin/gstreamer.md` names.
 - Cross-Package Sync: walked from `9b90cdd569` through `7d2a91fe66`. Walk the
-  next run from there. Go has no `Client` failure accessor because `Dial`
-  returns only once connected. The newer 2026-10-21 maintainer decision
-  plans that gap in [Go first-dial failure](/quest/m2/go-first-dial-failure.md);
-  verify its accessor and the Kotlin/Dart wording when that quest lands.
+  next run from there. At that baseline, Go could not observe first-dial
+  failures because `Dial` returned only once connected. Every binding now
+  returns a connecting session with one coherent `state()` snapshot; verify
+  first-dial failure observation and Kotlin/Dart wording against that API.
 
 ## Required
 

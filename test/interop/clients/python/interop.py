@@ -165,7 +165,7 @@ async def publish(
                         raise RuntimeError("expected finish completion acknowledgement")
 
             await loop.run_in_executor(None, acknowledge)
-            if client.session is None or client.session.connects() != 1:
+            if client.session is None or client.session.state().connects != 1:
                 raise RuntimeError("publisher reconnected during finish")
             print("finish acknowledged", flush=True)
 
@@ -235,7 +235,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                         seen = True
             if not seen:
                 raise RuntimeError("missing session health payload")
-    if client.session is None or client.session.connects() != 1:
+    if client.session is None or client.session.state().connects != 1:
         raise RuntimeError("subscriber reconnected during finish")
     print(f"finish clean frames={frames} catalog=eof announce=end health=ok", flush=True)
 
