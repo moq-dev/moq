@@ -203,7 +203,7 @@ A largest past the cap or below the floor reports nothing; the cache never stand
 A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
 Every `largest()`, `track::Producer` and `track::Consumer` included, now waits while a relay's copy is idle and reports once its new upstream subscription is live, rather than the largest an ended feed left.
 Cached groups are still served meanwhile.
-To read the track's edge from a capped reader, lift the cap with `with_range(..)` first.
+To read the track's edge from a capped reader, lift the cap first with `with_range(floor..)`, passing the floor you want to keep.
 
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
 

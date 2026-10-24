@@ -336,7 +336,7 @@ impl Subscription {
 
 	/// Replace the ranges with one from `start` (or [`Range::oldest`]'s) up to [`Self::end`],
 	/// returning `self` for chaining: the form a wire without ranges carries.
-	#[cfg(feature = "async")]
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn with_start(self, start: impl Into<Option<Position>>) -> Self {
 		let end = self.end();
 		self.with_span(start.into(), end)

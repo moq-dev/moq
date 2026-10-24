@@ -72,7 +72,7 @@ Close the claim and claim again to change it, and close an answer's producer to 
 A largest past the cap or below the floor reports nothing; the cache never stands in for it.
 A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
 Unbounded readers are unchanged.
-To read the track's edge from a capped reader, lift the cap with `withRange({})` first.
+To read the track's edge from a capped reader, lift the cap first with `withRange({ start: { included: floor } })`, passing the floor you want to keep.
 
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
 
