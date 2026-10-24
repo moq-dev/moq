@@ -5890,8 +5890,7 @@ impl kio::Task for Routing {
 /// Derive a read view from a handle.
 ///
 /// Lets APIs accept either a producer or a consumer (e.g.
-/// `Client::with_publisher`,
-/// [`Request::accept`]). The blanket `&T` impl means you can
+/// `Client::with_publisher`). The blanket `&T` impl means you can
 /// pass by value (`foo(x)`) to hand off ownership, or by reference (`foo(&x)`)
 /// to keep it, without spelling out `.consume()`.
 pub trait Consume<T> {
