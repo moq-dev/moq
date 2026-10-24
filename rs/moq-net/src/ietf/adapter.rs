@@ -41,12 +41,18 @@ impl<T> Queue<T> {
 	/// Enqueue a message. Returns false once the queue is closed (the message is
 	/// dropped), matching a write to a stream whose reader is gone.
 	fn push(&self, item: T) -> bool {
+		self.offer(item).is_none()
+	}
+
+	/// Enqueue a message, handing it back once the queue is closed, for a caller that
+	/// must not drop it where it is.
+	fn offer(&self, item: T) -> Option<T> {
 		let mut state = self.0.lock();
 		if state.closed {
-			return false;
+			return Some(item);
 		}
 		state.messages.push_back(item);
-		true
+		None
 	}
 
 	/// Dequeue the next message, waiting while the queue is open and empty.
@@ -933,6 +939,9 @@ impl Shared {
 	/// withdrawals is still being handled, hand over what was held behind them, up to and
 	/// including the next one withdrawn.
 	fn handled(&self, request_id: RequestId) {
+		// What a closed session refused, dropped only once the lock is released, since
+		// dropping a stream lands back here.
+		let mut refused = Vec::new();
 		let mut readvertised = self.readvertised.lock().unwrap();
 		let Some(namespace) = readvertised.withdrawn.remove(&request_id) else {
 			return;
@@ -945,15 +954,22 @@ impl Shared {
 		while withdrawing.handling.is_empty() {
 			let Some(held) = withdrawing.held.pop_front() else {
 				namespaces.remove(&namespace);
-				return;
+				break;
 			};
+			if let Some(stream) = self.incoming.offer(held.stream) {
+				// The session is gone, so nothing held behind this one is accepted either.
+				refused.push(stream);
+				refused.extend(withdrawing.held.drain(..).map(|held| held.stream));
+				namespaces.remove(&namespace);
+				break;
+			}
 			if held.withdrawn {
 				withdrawing.handling.insert(held.request_id);
 				withdrawn.insert(held.request_id, namespace.clone());
 			}
-			// A closed queue means the session is gone, and the stream with it.
-			let _ = self.incoming.push(held.stream);
 		}
+		drop(readvertised);
+		drop(refused);
 	}
 }
 
@@ -2265,6 +2281,25 @@ mod tests {
 			assert!(matches!(accepted(&shared), Some((RequestId(9), _))), "{version:?}");
 			assert!(shared.readvertised.lock().unwrap().namespaces.is_empty(), "{version:?}");
 		}
+	}
+
+	#[moq_clock::test]
+	async fn a_session_closed_behind_a_withdrawal_drops_what_it_held() {
+		// Dropping a refused stream re-enters the release, which must not still hold its lock.
+		let version = Version::Draft14;
+		let shared = Arc::new(Shared::default());
+		let first = receive(&shared, "live/media", version, RequestId(3)).await;
+		withdraw(&shared, "live/media", version, RequestId(3));
+		readvertise(&shared, "live/media", version, RequestId(7));
+		withdraw(&shared, "live/media", version, RequestId(7));
+		readvertise(&shared, "live/media", version, RequestId(9));
+		shared.incoming.close();
+
+		drop(first);
+		let readvertised = shared.readvertised.lock().unwrap();
+		assert!(readvertised.namespaces.is_empty() && readvertised.withdrawn.is_empty());
+		drop(readvertised);
+		assert!(shared.streams.lock().unwrap().is_empty());
 	}
 
 	#[moq_clock::test]
