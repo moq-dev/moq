@@ -49,6 +49,8 @@ pub(crate) struct PeerSetup {
 	slot: kio::Shared<Option<Peer>>,
 	/// What we offered, which an extension negotiated by both sides needs as well.
 	declined_epoch: bool,
+	/// Where the peer's advertised implementation is published for the session handle.
+	implementation: crate::setup::PeerImplementation,
 }
 
 impl PeerSetup {
@@ -65,7 +67,19 @@ impl PeerSetup {
 		Self {
 			slot: Default::default(),
 			declined_epoch: !offered.epoch,
+			implementation: Default::default(),
 		}
+	}
+
+	/// Publish the peer's advertised implementation to `slot` once its SETUP is read.
+	pub fn with_implementation(mut self, slot: crate::setup::PeerImplementation) -> Self {
+		self.implementation = slot;
+		self
+	}
+
+	/// Record the implementation the peer's SETUP advertised.
+	pub fn set_implementation(&self, value: Option<String>) {
+		self.implementation.set(value);
 	}
 
 	/// Record what the peer declared. A SETUP carrying no options records the default

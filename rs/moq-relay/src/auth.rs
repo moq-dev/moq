@@ -1053,11 +1053,12 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	out.server_name = request.server_name().map(str::to_owned);
 	out.alpn = request.alpn().map(str::to_owned);
 	out.role = request.role().and_then(role);
+	out.implementation = request.peer_implementation().map(str::to_owned);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
 	out
 }
 
-/// Build an auth request from the path, credential, and role carried in SETUP.
+/// Build an auth request from the path, credential, role, and implementation carried in SETUP.
 #[cfg(any(feature = "test-support", all(target_os = "linux", feature = "_uring")))]
 pub(crate) fn request_for_setup(
 	auth: &Auth,
@@ -1075,6 +1076,7 @@ pub(crate) fn request_for_setup(
 		value: token.value.clone(),
 	});
 	request.role = setup.role().and_then(role);
+	request.implementation = setup.peer_implementation().map(str::to_owned);
 	request
 }
 

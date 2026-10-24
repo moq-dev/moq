@@ -23,6 +23,7 @@ pub struct Client {
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
 	bandwidth: Option<crate::bandwidth::Allocator>,
+	implementation: Option<String>,
 }
 
 impl Client {
@@ -119,6 +120,19 @@ impl Client {
 	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
 		self.extensions = extensions;
 		self
+	}
+
+	/// Set the implementation to advertise in SETUP, as space-separated `name/version`
+	/// product tokens, outermost first. Defaults to [`IMPLEMENTATION`](crate::IMPLEMENTATION);
+	/// an empty string advertises nothing.
+	pub fn with_implementation(mut self, implementation: impl Into<String>) -> Self {
+		self.implementation = Some(implementation.into());
+		self
+	}
+
+	/// The Implementation our SETUP carries, or `None` to omit it.
+	fn implementation(&self) -> Option<String> {
+		setup::implementation(self.implementation.as_deref().unwrap_or(crate::IMPLEMENTATION))
 	}
 
 	/// Price this link, in the units the rest of the mesh uses (moq-lite-06+, and
@@ -218,6 +232,7 @@ impl Client {
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
+				implementation: self.implementation(),
 			}
 		} else {
 			lite::Setup::default()
@@ -251,6 +266,7 @@ impl Client {
 				auth: start.auth,
 				estimate: Some(start.estimate),
 				bandwidth: self.bandwidth(),
+				peer_implementation: start.peer_implementation,
 			},
 		))
 	}
@@ -292,6 +308,7 @@ impl Client {
 				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
 				// offer it keeps the option out of our SETUP and presents no credential.
 				let auth = crate::auth::Handle::ietf(self.extensions.auth);
+				let peer_implementation = setup::PeerImplementation::default();
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					stats: self.stats.clone(),
@@ -312,6 +329,8 @@ impl Client {
 					auth: auth.clone(),
 					early_unis: Vec::new(),
 					extensions: self.extensions,
+					implementation: self.implementation(),
+					peer_implementation: peer_implementation.clone(),
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -327,6 +346,7 @@ impl Client {
 						auth,
 						estimate: None,
 						bandwidth: self.bandwidth(),
+						peer_implementation,
 					},
 				));
 			}
@@ -390,7 +410,9 @@ impl Client {
 			ietf::ParameterVarInt::MaxRequestId,
 			ietf::initial_max_request_id(self.limits.window(), false),
 		);
-		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+		if let Some(implementation) = self.implementation() {
+			parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
+		}
 		// Advertise the request path in-band (draft 14-16), same as the lite-05 SETUP.
 		if let Some(path) = &self.setup_path {
 			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
@@ -422,7 +444,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, goaway, auth, estimate) = match version {
+		let (recv_bw, protocol, goaway, auth, estimate, peer_implementation) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -450,6 +472,7 @@ impl Client {
 					start.goaway,
 					start.auth,
 					Some(start.estimate),
+					start.peer_implementation,
 				)
 			}
 			Version::Ietf(v) => {
@@ -467,6 +490,9 @@ impl Client {
 					flate: ietf::flate::from_setup(&parameters, v)?,
 					..Default::default()
 				};
+				let peer_implementation = setup::PeerImplementation::known(setup::decode_implementation(
+					parameters.get_bytes(ietf::ParameterBytes::Implementation),
+				)?);
 
 				let stream = stream.with_version(v);
 				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
@@ -492,8 +518,18 @@ impl Client {
 					auth: auth.clone(),
 					early_unis: Vec::new(),
 					extensions: self.extensions,
+					// Already sent on the bidi SETUP above.
+					implementation: None,
+					peer_implementation: peer_implementation.clone(),
 				})?;
-				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, None)
+				(
+					None,
+					crate::driver::Protocol::Ietf(protocol),
+					goaway,
+					auth,
+					None,
+					peer_implementation,
+				)
 			}
 		};
 
@@ -509,6 +545,7 @@ impl Client {
 				auth,
 				estimate,
 				bandwidth: self.bandwidth(),
+				peer_implementation,
 			},
 		))
 	}

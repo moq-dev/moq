@@ -1,4 +1,6 @@
+import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { decodeUtf8 } from "../util/utf8.ts";
 import { AUTHORIZATION_TOKEN } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -215,5 +217,29 @@ export class SetupOptions {
 		}
 
 		return params;
+	}
+}
+
+/**
+ * Advertise our implementation in the IMPLEMENTATION option, or nothing when `value` is empty.
+ *
+ * @internal
+ */
+export function implementationIntoSetup(params: SetupOptions, value: string) {
+	if (value) params.setBytes(SetupOption.Implementation, new TextEncoder().encode(value));
+}
+
+/**
+ * The implementation the peer advertised, if any. Malformed UTF-8 is a protocol violation.
+ *
+ * @internal
+ */
+export function implementationFromSetup(params: SetupOptions): string | undefined {
+	const bytes = params.getBytes(SetupOption.Implementation);
+	if (bytes === undefined) return undefined;
+	try {
+		return decodeUtf8(bytes);
+	} catch (cause) {
+		throw new ProtocolViolation("malformed IMPLEMENTATION", { cause });
 	}
 }
