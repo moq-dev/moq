@@ -155,6 +155,7 @@ async fn serve(
 impl ServerState {
 	fn new(config: MoqServerConfig) -> Result<Self, MoqError> {
 		let mut listen = moq_tokio::listen::Config::default();
+		listen.implementation = Some(crate::session::implementation());
 		if let Some(bind) = config.bind {
 			let parsed = bind.parse().map_err(|_| MoqError::Config {
 				reason: format!("invalid bind address: {bind}"),

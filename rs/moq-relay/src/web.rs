@@ -191,12 +191,18 @@ pub struct Addrs {
 	pub https: Option<net::SocketAddr>,
 }
 
+/// The implementation WebSocket sessions advertise in SETUP, or `None` for the library's.
+#[derive(Clone, Default)]
+#[cfg_attr(not(feature = "websocket"), allow(dead_code, reason = "websocket-only"))]
+pub(crate) struct Implementation(pub Option<String>);
+
 /// Run a HTTP server using Axum
 pub struct Web {
 	state: Arc<WebState>,
 	config: Config,
 	versions: moq_net::Versions,
 	extensions: moq_net::setup::Extensions,
+	implementation: Implementation,
 	health: moq_tokio::accept::Health,
 	http_listener: Option<net::TcpListener>,
 	https_listener: Option<net::TcpListener>,
@@ -229,6 +235,7 @@ impl Web {
 			config,
 			versions: moq_net::Versions::all(),
 			extensions: Default::default(),
+			implementation: Default::default(),
 			health: moq_tokio::accept::Health::new("web"),
 			http_listener: None,
 			https_listener: None,
@@ -311,6 +318,12 @@ impl Web {
 	/// Choose which moq-transport extensions WebSocket sessions offer in SETUP.
 	pub(crate) fn with_extensions(mut self, extensions: moq_net::setup::Extensions) -> Self {
 		self.extensions = extensions;
+		self
+	}
+
+	/// Set the implementation WebSocket sessions advertise in SETUP; empty advertises nothing.
+	pub fn with_implementation(mut self, implementation: impl Into<String>) -> Self {
+		self.implementation = Implementation(Some(implementation.into()));
 		self
 	}
 
@@ -405,6 +418,7 @@ impl Web {
 
 		app.layer(Extension(self.versions.clone()))
 			.layer(Extension(self.extensions))
+			.layer(Extension(self.implementation.clone()))
 			.with_state(self.state.clone())
 	}
 

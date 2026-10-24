@@ -15,8 +15,8 @@ use crate::BloomTokenLog;
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use crate::crypto::rustls::{QuicServerConfig, configured_provider};
 use crate::{
-    DEFAULT_SUPPORTED_VERSIONS, Duration, MAX_CID_SIZE, RandomConnectionIdGenerator, SystemTime,
-    TokenLog, TokenMemoryCache, TokenStore, VarInt, VarIntBoundsExceeded,
+    DEFAULT_SUPPORTED_VERSIONS, Duration, MAX_CID_SIZE, RandomConnectionIdGenerator, TokenLog,
+    TokenMemoryCache, TokenStore, VarInt, VarIntBoundsExceeded, Wall,
     cid_generator::{ConnectionIdGenerator, HashedConnectionIdGenerator},
     crypto::{self, HandshakeTokenKey, HmacKey},
     shared::ConnectionId,
@@ -398,7 +398,7 @@ impl ServerConfig {
         self
     }
 
-    /// Object to get current [`SystemTime`]
+    /// Object to get current [`Wall`]
     ///
     /// This exists to allow system time to be mocked in tests, or wherever else desired.
     ///
@@ -697,12 +697,12 @@ impl From<VarIntBoundsExceeded> for ConfigError {
     }
 }
 
-/// Object to get current [`SystemTime`]
+/// Object to get current [`Wall`]
 ///
 /// This exists to allow system time to be mocked in tests, or wherever else desired.
 pub trait TimeSource: Send + Sync {
-    /// Get [`SystemTime::now()`](SystemTime::now) or the mocked equivalent
-    fn now(&self) -> SystemTime;
+    /// Get [`Wall::now()`](Wall::now) or the mocked equivalent
+    fn now(&self) -> Wall;
 }
 
 /// Default implementation of [`TimeSource`]
@@ -711,7 +711,7 @@ pub trait TimeSource: Send + Sync {
 pub struct StdSystemTime;
 
 impl TimeSource for StdSystemTime {
-    fn now(&self) -> SystemTime {
-        moq_clock::wall().into()
+    fn now(&self) -> Wall {
+        moq_clock::wall()
     }
 }

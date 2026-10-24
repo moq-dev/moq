@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -142,7 +142,7 @@ fn all() -> Patterns {
 /// Everything under the dialed path, re-checked every second, good for `expires_in`.
 fn grant(expires_in: Duration) -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(SystemTime::now() + expires_in);
+	grant.expires = Some(moq_clock::wall() + expires_in);
 	grant.revalidate = Some(Duration::from_secs(1));
 	grant
 }
@@ -1420,7 +1420,7 @@ fn manual() -> moq_clock::Installed {
 /// Everything under the dialed path, until [`EXPIRES`] from now on the ambient clock.
 fn expiring() -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(SystemTime::from(moq_clock::wall()) + EXPIRES);
+	grant.expires = Some(moq_clock::wall() + EXPIRES);
 	grant
 }
 
@@ -1636,7 +1636,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
 		let mut initial = Grant::new(all(), "a/**".parse::<moq_auth::Pattern>().unwrap());
-		initial.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		initial.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 		let script = Script::new(initial);
 		let auth = build_auth(script.spawn().await);
 		let (port, relay) = if scheme == "tcp" {
@@ -1685,7 +1685,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
-		replacement.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		replacement.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
 		let token = tokio::time::timeout(TIMEOUT, subscriber.auth().add("replacement"))
 			.await

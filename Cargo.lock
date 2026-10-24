@@ -4814,6 +4814,9 @@ dependencies = [
  "kio 0.6.2",
  "moq-clock",
  "moq-clock-macros",
+ "serde",
+ "serde_json",
+ "serde_with",
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-test",
@@ -5125,7 +5128,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wasm-bindgen-test",
- "web-time",
 ]
 
 [[package]]
@@ -5435,6 +5437,7 @@ dependencies = [
  "bytes",
  "hang",
  "kio 0.6.2",
+ "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-tokio",

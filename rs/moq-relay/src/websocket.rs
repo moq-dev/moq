@@ -31,6 +31,7 @@ pub(crate) async fn serve_ws(
 	admission: Option<Extension<crate::listener::Admission>>,
 	Extension(versions): Extension<moq_net::Versions>,
 	Extension(extensions): Extension<moq_net::setup::Extensions>,
+	Extension(crate::web::Implementation(implementation)): Extension<crate::web::Implementation>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
@@ -60,9 +61,12 @@ pub(crate) async fn serve_ws(
 		uri.path_and_query().map_or("/", |value| value.as_str())
 	))
 	.map_err(|_| StatusCode::BAD_REQUEST)?;
-	let server = moq_net::Server::new()
+	let mut server = moq_net::Server::new()
 		.with_versions(versions)
 		.with_extensions(extensions);
+	if let Some(implementation) = implementation {
+		server = server.with_implementation(implementation);
+	}
 	let mut options = moq_tokio::websocket::Options::new(url, server, active);
 	options.link.remote = Some(remote);
 	options.link.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);

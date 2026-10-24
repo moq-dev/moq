@@ -420,12 +420,6 @@ impl Track {
 		Ok(())
 	}
 
-	/// Record a locally encoded frame's transport handoff. Call this only for an original
-	/// encoder; file, pipe, and network imports must leave the clock out of the estimate.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> Result<()> {
-		import!(&mut self.kind, import => import.flush(timestamp, now))
-	}
-
 	/// Finish the importer, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
 		// Each decode flushed its whole frame, so a splitter holds only input storage, which ends
@@ -983,29 +977,21 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn discontinuity_resets_audio_measurement_and_separates_groups() {
+	async fn discontinuity_separates_audio_groups() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
 		let mut import: Track = import.into();
-		let anchor = moq_clock::Instant::now();
-		for (pts, arrival) in [(0, 0), (20, 120)] {
-			let timestamp = Timestamp::from_micros(pts * 1_000).unwrap();
-			import.decode(b"a", Some(timestamp)).unwrap();
+		for pts in [0, 20] {
 			import
-				.flush(timestamp, anchor + Duration::from_millis(arrival))
+				.decode(b"a", Some(Timestamp::from_micros(pts * 1_000).unwrap()))
 				.unwrap();
 		}
-		let before = catalog.snapshot().audio.renditions["audio"].jitter;
-		assert_eq!(before, Some(Duration::from_millis(100)));
 		import.discontinuity().unwrap();
-		for (pts, arrival) in [(100, 6_000), (120, 6_020)] {
-			let timestamp = Timestamp::from_micros(pts * 1_000).unwrap();
-			import.decode(b"b", Some(timestamp)).unwrap();
+		for pts in [100, 120] {
 			import
-				.flush(timestamp, anchor + Duration::from_millis(arrival))
+				.decode(b"b", Some(Timestamp::from_micros(pts * 1_000).unwrap()))
 				.unwrap();
 		}
-		assert_eq!(catalog.snapshot().audio.renditions["audio"].jitter, before);
 		import.finish().unwrap();
 		// The middle group is the established empty-payload discontinuity marker.
 		assert_eq!(collect_groups(subscriber).await, vec![2, 1, 2]);

@@ -25,6 +25,8 @@ doc = false
 [features]
 # A programmatic relay fixture with generated TLS and ephemeral ports.
 test-support = []
+# The optional public STUN Binding listener (`--stun-bind`).
+stun = ["dep:stun-types"]
 default = ["acme", "cluster-lan", "quic", "websocket", "uds"]
 acme = ["dep:rustls-acme"]
 iroh = ["moq-tokio/iroh"]
@@ -68,7 +70,7 @@ http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "r
 humantime = { workspace = true }
 hyper-util = { workspace = true }
 moq-auth = { workspace = true, features = ["client"] }
-moq-clock = { workspace = true }
+moq-clock = { workspace = true, features = ["serde"] }
 moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true, optional = true }
@@ -83,7 +85,7 @@ rustls-acme = { version = "0.15.4", optional = true, default-features = false, f
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
-stun-types = { workspace = true }
+stun-types = { workspace = true, optional = true }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -113,6 +115,7 @@ moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
+stun-types = { workspace = true }
 tempfile = { workspace = true }
 # Runs the tests that need a variable set or unset in a child process given it.
 test-env = { path = "../test-env" }

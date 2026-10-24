@@ -1450,8 +1450,8 @@ impl Cluster {
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
-	/// marked [`origin::Producer::peer`] when the grant names a cluster peer and
-	/// [`origin::Producer::upstream`] when that peer is upstream.
+	/// linked as [`origin::Link::Peer`] when the grant names a cluster peer and
+	/// [`origin::Link::Upstream`] when that peer is upstream.
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
 		self.mounted(token)?.scope(&token.root, &token.publish).ok()
@@ -1462,8 +1462,8 @@ impl Cluster {
 	/// (overlapping another) admits nothing.
 	fn mounted(&self, token: &auth::Token) -> Option<origin::Producer> {
 		let mut origin = match (token.upstream, token.peer) {
-			(true, _) => self.origin.clone().upstream(),
-			(false, true) => self.origin.clone().peer(),
+			(true, _) => self.origin.clone().with_link(origin::Link::Upstream),
+			(false, true) => self.origin.clone().with_link(origin::Link::Peer),
 			(false, false) => self.origin.clone(),
 		};
 		for (at, target) in &token.mounts {
@@ -2027,14 +2027,16 @@ impl Cluster {
 		// never offered another upstream's. A peer that predates the hidden opt-in
 		// still discovers our hidden routes; see `Cluster::scope`.
 		let origin = match target.upstream {
-			true => self.origin.clone().upstream(),
-			false => self.origin.clone().peer(),
+			true => self.origin.clone().with_link(origin::Link::Upstream),
+			false => self.origin.clone().with_link(origin::Link::Peer),
 		};
+		// The link is one presence across reconnects: each session it dials records how it
+		// ended, and the last one to end decides whether the link failed.
 		let stats = self.stats.tier(self.cluster_tier()).session("");
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
-			.with_stats(stats.clone())
+			.with_stats(stats)
 			.with_limits(self.peer_limits);
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
@@ -2062,9 +2064,8 @@ impl Cluster {
 			.with_restart(moq_tokio::Restart::Wait)
 			.connect(addrs.clone());
 		let mut connection = None;
-		let mut established = false;
 		loop {
-			match remote_status(&stats, &mut established, reconnect.status().await)? {
+			match reconnect.status().await? {
 				moq_tokio::Status::Connected if connection.is_none() => {
 					connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
 				}
@@ -2119,7 +2120,7 @@ impl Cluster {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 		let mut client = self
 			.peer_client(true, target.fingerprint.as_deref())?
-			.with_origin(self.origin.clone().peer());
+			.with_origin(self.origin.clone().with_link(origin::Link::Peer));
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
@@ -2316,30 +2317,6 @@ impl Default for Redial {
 	}
 }
 
-/// A reconnecting peer keeps one logical presence until its loop actually ends.
-fn remote_status(
-	stats: &moq_net::stats::Session,
-	established: &mut bool,
-	status: moq_tokio::Result<moq_tokio::Status>,
-) -> moq_tokio::Result<moq_tokio::Status> {
-	match &status {
-		Ok(moq_tokio::Status::Connected) => *established = true,
-		Err(moq_tokio::Error::MoqNet(error)) if *established => {
-			if let Some(kind) = crate::connection::failure(error) {
-				stats.fail(kind);
-			}
-		}
-		// The retry window ran out after the link was lost, so the link failed to recover.
-		Err(moq_tokio::Error::Reconnect(_)) if *established => stats.fail(moq_net::stats::Failure::Transport),
-		// The peer sent GOAWAY and is draining; not following its redirect is no failure.
-		Err(moq_tokio::Error::RefusedRedirect(_) | moq_tokio::Error::PinnedRedirect) => {}
-		// Any other terminal error, such as a reconnect the peer refused, ends a live link.
-		Err(_) if *established => stats.fail(moq_net::stats::Failure::Application),
-		_ => {}
-	}
-	status
-}
-
 #[cfg(test)]
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
@@ -2528,91 +2505,6 @@ mod tests {
 			 the publish task stopped while the cluster kept serving"
 		);
 		drop(broadcast);
-	}
-
-	#[test]
-	fn remote_logical_outcome_ignores_retries_and_counts_one_terminal_close() {
-		use moq_net::stats::Registry;
-		let registry = Registry::new(Default::default());
-		let stats = registry.tier(Tier::default()).session("");
-		let mut established = false;
-		let _ = remote_status(
-			&stats,
-			&mut established,
-			Err(moq_tokio::Error::MoqNet(moq_net::Error::ProtocolViolation)),
-		);
-		for status in [
-			moq_tokio::Status::Connected,
-			moq_tokio::Status::Disconnected,
-			moq_tokio::Status::Connected,
-			moq_tokio::Status::Migrating,
-		] {
-			remote_status(&stats, &mut established, Ok(status)).unwrap();
-		}
-		assert_eq!(
-			registry.snapshot().sessions()[0].1.sessions_failed,
-			moq_net::stats::Failures::default()
-		);
-		let _ = remote_status(
-			&stats,
-			&mut established,
-			Err(moq_tokio::Error::MoqNet(moq_net::Error::IdleTimeout)),
-		);
-		let _ = remote_status(
-			&stats,
-			&mut established,
-			Err(moq_tokio::Error::MoqNet(moq_net::Error::Session(
-				moq_net::SessionError::App(42),
-			))),
-		);
-		drop(stats);
-		let presence = registry.snapshot().sessions()[0].1;
-		assert_eq!(presence.sessions_started, 1);
-		assert_eq!(presence.sessions_ended, 1);
-		assert_eq!(presence.sessions_failed.idle_timeout, 1);
-		assert_eq!(presence.sessions_failed.application, 0);
-	}
-
-	#[test]
-	fn remote_reconnect_exhaustion_fails_only_an_established_link() {
-		use moq_net::stats::{Failure, Registry};
-		let exhausted = |established: bool| {
-			let registry = Registry::new(Default::default());
-			let stats = registry.tier(Tier::default()).session("");
-			let mut connected = false;
-			if established {
-				remote_status(&stats, &mut connected, Ok(moq_tokio::Status::Connected)).unwrap();
-			}
-			let gave_up = Err(moq_tokio::Error::Reconnect("gave up".into()));
-			let _ = remote_status(&stats, &mut connected, gave_up);
-			drop(stats);
-			registry.snapshot().sessions()[0]
-				.1
-				.sessions_failed
-				.count(Failure::Transport)
-		};
-		assert_eq!(exhausted(false), 0);
-		assert_eq!(exhausted(true), 1);
-	}
-
-	#[test]
-	fn remote_terminal_errors_fail_an_established_link_except_a_refused_redirect() {
-		use moq_net::stats::{Failures, Registry};
-		let ended = |err: moq_tokio::Error| {
-			let registry = Registry::new(Default::default());
-			let stats = registry.tier(Tier::default()).session("");
-			let mut connected = false;
-			remote_status(&stats, &mut connected, Ok(moq_tokio::Status::Connected)).unwrap();
-			let _ = remote_status(&stats, &mut connected, Err(err));
-			drop(stats);
-			registry.snapshot().sessions()[0].1.sessions_failed
-		};
-		assert_eq!(ended(moq_tokio::Error::ConnectFailed).application, 1);
-		assert_eq!(ended(moq_tokio::Error::PinnedRedirect), Failures::default());
-		assert_eq!(
-			ended(moq_tokio::Error::RefusedRedirect("policy".into())),
-			Failures::default()
-		);
 	}
 
 	/// Each wait is drawn across the whole range below a ceiling that doubles to the

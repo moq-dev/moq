@@ -878,7 +878,7 @@ impl fmt::Display for Tier {
 /// side statically, so this only surfaces on the aggregate read side.
 ///
 /// This is the direction traffic flowed, not the session role a client advertises
-/// in its SETUP ([`crate::Role`]): one session records on both sides.
+/// in its SETUP ([`crate::setup::Role`]): one session records on both sides.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
 	/// Egress: bytes this node published to a peer.
@@ -1441,13 +1441,10 @@ impl Handle {
 	}
 
 	/// Count one admitted request under `label` and meter its traffic without session presence.
+	///
+	/// A request has no session end to classify, so it never records a failure.
 	pub fn request(&self, label: impl AsPath) -> Session {
 		self.context(label, Context::Request)
-	}
-
-	/// Count an external connection's wire counters under `label` without counting an admission.
-	pub fn wire(&self, label: impl AsPath, counters: crate::transport::Wire) -> Wire {
-		self.context(label, Context::Wire).wire(counters)
 	}
 
 	fn context(&self, label: impl AsPath, context: Context) -> Session {
@@ -1461,7 +1458,6 @@ impl Handle {
 				Context::Request => {
 					presence.requests.fetch_add(1, Ordering::Relaxed);
 				}
-				Context::Wire => {}
 			}
 		}
 		let traffic = Arc::new(SessionTraffic::default());
@@ -1498,7 +1494,6 @@ impl Default for Handle {
 enum Context {
 	Session,
 	Request,
-	Wire,
 }
 
 /// Registered wire counters; dropping this adds their final reading and unregisters them.
@@ -1702,16 +1697,18 @@ impl Session {
 		Wire { inner: Some(source) }
 	}
 
-	/// Record the first abnormal end on this connected session, shared across clones.
-	pub fn fail(&self, kind: Failure) {
+	/// Record how a transport session under this connected context ended, shared across
+	/// clones. A reconnect's later end replaces an earlier one, so the context fails only
+	/// if its last session did.
+	///
+	/// Only a context from [`Handle::session`] has an end to classify: on one from
+	/// [`Handle::request`] this records nothing.
+	pub(crate) fn end(&self, err: &crate::Error) {
 		let Some(inner) = &self.inner else { return };
 		if !inner.connected {
 			return;
 		}
-		let mut current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
-		if current.failure.is_none() {
-			current.failure = Some(kind);
-		}
+		inner.current.lock().unwrap_or_else(PoisonError::into_inner).failure = Failure::of(err);
 	}
 
 	/// Record later traffic and session presence under `(tier, label)`; a request stays counted where admitted.
@@ -2206,37 +2203,10 @@ mod tests {
 	}
 
 	#[test]
-	fn dropping_a_wire_guard_records_once_and_unregisters_without_an_admission() {
-		let registry = test_stats();
-		let bytes = counters(10, 3);
-		let wire = registry.tier(Tier::default()).wire("room", bytes.clone());
-		assert_eq!(drain(&registry).sessions[0].presence.wire_tx, 10);
-		bytes.set_sent_bytes(17);
-		drop(wire);
-		let final_row = drain(&registry).sessions.pop().unwrap();
-		assert!(final_row.closed);
-		assert_eq!((final_row.presence.wire_tx, final_row.presence.wire_rx), (17, 3));
-		assert_eq!(
-			(
-				final_row.presence.requests,
-				final_row.presence.sessions_started,
-				final_row.presence.sessions_ended
-			),
-			(0, 0, 0)
-		);
-		bytes.set_sent_bytes(40);
-		assert!(drain(&registry).sessions.is_empty());
-		assert_eq!(
-			registry.snapshot().sessions()[0].1.wire_tx,
-			17,
-			"a dropped guard is never read again"
-		);
-	}
-
-	#[test]
 	fn disabled_wire_collection_reports_nothing() {
 		let registry = Registry::disabled();
-		let wire = registry.tier(Tier::default()).wire("root", counters(5, 7));
+		let session = registry.tier(Tier::default()).session("root");
+		let wire = session.wire(counters(5, 7));
 		assert!(drain(&registry).sessions.is_empty());
 		drop(wire);
 		assert!(drain(&registry).sessions.is_empty());
@@ -2275,8 +2245,9 @@ mod tests {
 		let session = handle.session("root");
 		let clone = session.clone();
 		session.retag(Tier::new("next"), "root");
-		clone.fail(Failure::IdleTimeout);
-		session.fail(Failure::Application);
+		// A reconnect's later end replaces an earlier one.
+		clone.end(&crate::Error::Transport("lost".into()));
+		session.end(&crate::Error::IdleTimeout);
 		drop(clone);
 		drop(session);
 		let before = stats.snapshot();
@@ -2295,14 +2266,17 @@ mod tests {
 			.unwrap()
 			.1;
 		assert_eq!(next.sessions_failed.idle_timeout, 1);
-		assert_eq!(next.sessions_failed.application, 0);
+		assert_eq!(next.sessions_failed.transport, 0);
 		assert_eq!(next.active(), 0);
 		drain(&stats);
 		let after = stats.snapshot();
 		assert_eq!(before.sessions(), after.sessions(), "retirement keeps outcomes once");
 		let disabled = Registry::disabled();
 		disabled.tier(Tier::default()).refuse("root", RefusalKind::Refused);
-		disabled.tier(Tier::default()).session("root").fail(Failure::Expired);
+		disabled
+			.tier(Tier::default())
+			.session("root")
+			.end(&crate::Error::Expired);
 		assert!(disabled.snapshot().sessions().is_empty());
 	}
 

@@ -38,10 +38,6 @@ mod entropy;
 pub mod fuzz;
 mod range_set;
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "tests read the host clock directly"
-)]
 mod tests;
 pub mod transport_parameters;
 mod varint;
@@ -117,11 +113,9 @@ pub use token_memory_cache::TokenMemoryCache;
 
 // Deal with time
 // MoQ's clock, so a caller-driven clock (a test's or the simulator's) reaches the state machine.
-pub(crate) use moq_clock::Instant;
-#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
-pub(crate) use std::time::{Duration, SystemTime, UNIX_EPOCH};
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-pub(crate) use web_time::{Duration, SystemTime, UNIX_EPOCH};
+pub(crate) use moq_clock::{Instant, Wall};
+pub(crate) use std::time::Duration;
+pub(crate) const UNIX_EPOCH: Wall = Wall::UNIX_EPOCH;
 
 /// The QUIC protocol version implemented.
 pub const DEFAULT_SUPPORTED_VERSIONS: &[u32] = &[

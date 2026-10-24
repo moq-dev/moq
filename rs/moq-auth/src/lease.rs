@@ -458,7 +458,6 @@ mod tests {
 	use std::future::Future;
 	use std::pin::pin;
 	use std::task::{Context, Waker};
-	use std::time::SystemTime;
 
 	fn grant(publish: &str) -> Grant {
 		Grant::new(
@@ -595,7 +594,7 @@ mod tests {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(10));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(60));
+		grant.expires = Some(moq_clock::wall() + Duration::from_secs(60));
 		let (producer, consumer) = Producer::new(grant.clone());
 		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
 		tokio::time::advance(Duration::from_secs(10)).await;
@@ -620,7 +619,7 @@ mod tests {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(30));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		grant.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 		let (producer, _consumer) = Producer::new(grant.clone());
 		let producer = std::sync::Arc::new(producer);
 		let waiter = tokio::spawn({
@@ -640,7 +639,7 @@ mod tests {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(30));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		grant.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 		let (producer, _consumer) = Producer::new(grant);
 		let first = producer.failed();
 		assert!(first >= Duration::from_millis(750) && first <= Duration::from_millis(1250));
@@ -667,7 +666,7 @@ mod tests {
 	async fn due_expires_even_without_a_recheck() {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
-		grant.expires = Some(SystemTime::now() - Duration::from_secs(4));
+		grant.expires = Some(moq_clock::wall() - Duration::from_secs(4));
 		let (producer, _consumer) = Producer::new(grant);
 		let task = tokio::spawn(async move { producer.due().await });
 		tokio::task::yield_now().await;

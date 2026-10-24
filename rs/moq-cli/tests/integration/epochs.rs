@@ -13,7 +13,12 @@ const ROUND_TRIP: Duration = Duration::from_millis(1);
 /// How long an announcement-following reader may take to see a replacement or a fallback: the
 /// relay's and the reader's origins may each hold the route change for their update hold, and
 /// the announcement crosses both links in one round trip. The idle timeout never enters it.
-const ROUTING: Duration = origin::DEFAULT_UPDATE_HOLD.saturating_mul(2).saturating_add(ROUND_TRIP);
+fn routing() -> Duration {
+	origin::Config::default()
+		.update_hold
+		.saturating_mul(2)
+		.saturating_add(ROUND_TRIP)
+}
 
 struct Relay {
 	url: url::Url,
@@ -103,12 +108,12 @@ fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 	}
 }
 
-/// Finish a route change within [`ROUTING`] of `started`.
+/// Finish a route change within [`routing`] of `started`.
 async fn within<T>(started: Instant, change: impl Future<Output = T>) -> T {
-	let deadline = tokio::time::Instant::from_std(started + ROUTING);
+	let deadline = tokio::time::Instant::from_std(started + routing());
 	tokio::time::timeout_at(deadline, change)
 		.await
-		.unwrap_or_else(|_| panic!("route change took longer than {ROUTING:?}"))
+		.unwrap_or_else(|_| panic!("route change took longer than {:?}", routing()))
 }
 
 /// Ignore same-instance metadata updates, but keep the actual replacement representation.
@@ -202,8 +207,9 @@ async fn replacement(version: &str) {
 	);
 	assert_eq!(media_restart, catalog_restart);
 	println!(
-		"{version}: relay replacement observed in {:?} of {ROUTING:?} (publisher already connected)",
-		started.elapsed()
+		"{version}: relay replacement observed in {:?} of {:?} (publisher already connected)",
+		started.elapsed(),
+		routing()
 	);
 
 	// Later catalog snapshots stay on A and resolving again keeps A's sibling pin.
@@ -283,8 +289,9 @@ async fn replacement(version: &str) {
 	assert!(returned_frame.starts_with("A:"), "fallback read {returned_frame}");
 	assert_eq!(read(&mut subscription).await, "A:3");
 	println!(
-		"{version}: relay fallback observed in {:?} of {ROUTING:?}",
-		started.elapsed()
+		"{version}: relay fallback observed in {:?} of {:?}",
+		started.elapsed(),
+		routing()
 	);
 }
 

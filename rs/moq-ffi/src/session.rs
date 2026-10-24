@@ -219,6 +219,11 @@ pub struct MoqBackoff {
 	pub timeout_us: Option<u64>,
 }
 
+/// What sessions opened through this crate advertise in SETUP: moq-ffi ahead of its core.
+pub(crate) fn implementation() -> String {
+	format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION)
+}
+
 /// The settings a default [`MoqClientConfig`] dials with, for a settings UI to show.
 ///
 /// Dialing with it behaves the same as the default. Knobs whose default depends on the backend
@@ -307,6 +312,7 @@ impl Client {
 		let _guard = crate::ffi::enter();
 
 		let mut connect = moq_tokio::connect::Config::default();
+		connect.implementation = Some(implementation());
 		if let Some(bind) = config.bind {
 			let bind = bind.parse().map_err(|err| MoqError::Config {
 				reason: format!("invalid bind address {bind}: {err}"),
@@ -653,6 +659,7 @@ impl Client {
 		};
 		let client = moq_net::Client::new()
 			.with_versions(self.versions.clone())
+			.with_implementation(implementation())
 			.with_publisher(&publish.inner)
 			.with_subscriber(subscribe.inner.clone());
 

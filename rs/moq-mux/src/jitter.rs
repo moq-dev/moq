@@ -10,6 +10,31 @@ use std::time::Duration;
 use moq_clock::{Instant, Sleep};
 use moq_net::Timestamp;
 
+/// An authored decode instant in signed nanoseconds, including times before PTS zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Decode(i128);
+
+impl Decode {
+	pub(crate) fn from_nanos(nanos: i128) -> Self {
+		Self(nanos)
+	}
+
+	/// The instant `ticks` of a 90 kHz clock, rounded down.
+	pub(crate) fn from_ticks(ticks: i128) -> Self {
+		Self((ticks * 1_000_000_000).div_euclid(90_000))
+	}
+
+	fn as_nanos(self) -> i128 {
+		self.0
+	}
+}
+
+impl From<Timestamp> for Decode {
+	fn from(timestamp: Timestamp) -> Self {
+		Self::from_nanos(timestamp.as_nanos() as i128)
+	}
+}
+
 /// A frame handed to [`Buffer::push`].
 pub(crate) struct Arrival<T> {
 	/// When the frame reached the reader: when it landed in the cache, or when the reader
@@ -20,7 +45,7 @@ pub(crate) struct Arrival<T> {
 	/// so frames read together do not look fresher than they are.
 	pub read: Instant,
 	/// When the frame decodes, nondecreasing within a track.
-	pub decode: Timestamp,
+	pub decode: Decode,
 	/// How many times the source had restarted its timeline when the frame was read.
 	pub restart: u64,
 	/// How many times the source's playhead had jumped (a skipped group, or a restart)
@@ -200,7 +225,7 @@ const FIT: f64 = 1e-9;
 struct Clock {
 	generation: u64,
 	anchor: Instant,
-	base: Timestamp,
+	base: Decode,
 	/// As a fraction of the decode timeline.
 	drift: f64,
 }
@@ -226,7 +251,7 @@ impl<K: Ord, T> Acquire<K, T> {
 	/// decode time) is that track's slack less its queueing, and of those, the one with the least
 	/// slack, so the track sent latest against its decode time still has the delay.
 	fn fresh(&self) -> (&K, &Arrival<T>) {
-		let behind = |frame: &Arrival<T>| since(self.since, frame.read) - frame.decode.as_nanos() as i128;
+		let behind = |frame: &Arrival<T>| since(self.since, frame.read) - frame.decode.as_nanos();
 		let mut freshest: BTreeMap<&K, &Arrival<T>> = BTreeMap::new();
 		for (key, frame) in &self.frames {
 			let best = freshest.entry(key).or_insert(frame);
@@ -246,7 +271,7 @@ impl<K: Ord, T> Acquire<K, T> {
 	fn end(&self, delay: Duration) -> Instant {
 		let (_, fresh) = self.fresh();
 		let due = |frame: &Arrival<T>| {
-			let ahead = frame.decode.as_nanos() as i128 - fresh.decode.as_nanos() as i128;
+			let ahead = frame.decode.as_nanos() - fresh.decode.as_nanos();
 			offset(fresh.read + delay, ahead)
 		};
 		self.frames
@@ -343,7 +368,7 @@ struct Floor<K> {
 
 struct Track<T> {
 	/// Frames in arrival order, each with its generation, decode time and deadline.
-	queue: VecDeque<(u64, Timestamp, Instant, T)>,
+	queue: VecDeque<(u64, Decode, Instant, T)>,
 	/// The source's restart, skip and cut counters at the last frame.
 	restart: u64,
 	skip: u64,
@@ -814,18 +839,18 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// When a frame of `generation` decoding at `decode` goes out: on the current clock, or on the
 	/// previous one while that generation's tail is still going out.
-	pub fn at(&self, generation: u64, decode: Timestamp) -> Option<Instant> {
+	pub fn at(&self, generation: u64, decode: impl Into<Decode>) -> Option<Instant> {
 		let clock = [self.clock, self.previous]
 			.into_iter()
 			.flatten()
 			.find(|clock| clock.generation == generation)?;
-		self.deadline(&clock, decode)
+		self.deadline(&clock, decode.into())
 	}
 
 	/// When a frame decoding at `decode` goes out on `clock`, if any instant holds it.
-	fn deadline(&self, clock: &Clock, decode: Timestamp) -> Option<Instant> {
+	fn deadline(&self, clock: &Clock, decode: Decode) -> Option<Instant> {
 		// Signed, since a frame can decode before the one that anchored the clock.
-		let since = decode.as_nanos() as i128 - clock.base.as_nanos() as i128;
+		let since = decode.as_nanos() - clock.base.as_nanos();
 		offset(
 			clock.anchor,
 			since + (since as f64 * clock.drift) as i128 + self.delay.as_nanos() as i128,
@@ -1144,6 +1169,61 @@ mod tests {
 
 	const DELAY: Duration = Duration::from_millis(100);
 
+	#[moq_clock::test]
+	async fn decode_before_zero_keeps_its_deadline_and_media_order() {
+		let start = moq_clock::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		buffer.push(2, arrival(start, 0, "audio")).unwrap();
+		let before_zero = Decode::from_nanos(-22_223);
+		buffer
+			.push(
+				1,
+				Arrival {
+					decode: before_zero,
+					..arrival(start, 0, "video")
+				},
+			)
+			.unwrap();
+		assert_eq!(
+			buffer.at(0, before_zero),
+			Some(start + DELAY - Duration::from_nanos(22_223))
+		);
+		assert_eq!(buffer.at(0, ms(0)), Some(start + DELAY));
+		moq_clock::sleep(DELAY).await;
+		assert_eq!(due(&mut buffer), ["video", "audio"]);
+	}
+
+	#[moq_clock::test]
+	async fn moving_media_zero_preserves_acquisition_and_deadlines() {
+		let start = moq_clock::now();
+		let mut negative = Buffer::new(DELAY);
+		let mut positive = Buffer::new(DELAY);
+		for buffer in [&mut negative, &mut positive] {
+			buffer.expect([1, 2]);
+		}
+		for (key, nanos, item) in [(1, -22_223, "video"), (2, 0, "audio"), (1, -11_112, "next")] {
+			for (buffer, offset) in [(&mut negative, 0), (&mut positive, 1_000_000_000)] {
+				buffer
+					.push(
+						key,
+						Arrival {
+							decode: Decode::from_nanos(nanos + offset),
+							..arrival(start, 0, item)
+						},
+					)
+					.unwrap();
+			}
+		}
+		moq_clock::sleep(DELAY).await;
+		assert_eq!(due(&mut negative), due(&mut positive));
+		for nanos in [-22_223, -11_112, 0, 11_111] {
+			assert_eq!(
+				negative.at(0, Decode::from_nanos(nanos)),
+				positive.at(0, Decode::from_nanos(nanos + 1_000_000_000)),
+			);
+		}
+	}
+
 	/// Two floors from the recovery arm's exact audio clock and wandering video lead.
 	/// Both envelopes interpolate their two samples, so rounding in their equal depths
 	/// must not make the changing send-ahead look like source clock drift.
@@ -1168,7 +1248,7 @@ mod tests {
 		Arrival {
 			arrived,
 			read: arrived,
-			decode: ms(decode),
+			decode: ms(decode).into(),
 			restart: 0,
 			skip: 0,
 			cut: 0,
@@ -1782,7 +1862,7 @@ mod tests {
 			margin: None,
 			offset: None,
 		};
-		let mut last: Option<(f64, Timestamp)> = None;
+		let mut last: Option<(f64, Decode)> = None;
 		let mut stepped = false;
 		for k in 0..(hours * 3_600.0 * 2.0) as u64 {
 			let decode = Duration::from_millis(k * 500);
@@ -1799,7 +1879,7 @@ mod tests {
 			let frame = Arrival {
 				arrived,
 				read: arrived,
-				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
+				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
 				restart: 0,
 				skip: 0,
 				cut: 0,
@@ -1985,7 +2065,7 @@ mod tests {
 			let frame = Arrival {
 				arrived,
 				read: arrived,
-				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
+				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
 				restart: 0,
 				skip: 0,
 				cut: 0,

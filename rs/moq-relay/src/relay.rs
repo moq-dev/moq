@@ -83,6 +83,7 @@ pub struct Relay {
 	/// The ACME client, issuing before [`Self::run`] serves and renewing after.
 	#[cfg(feature = "acme")]
 	acme: Option<crate::acme::Acme>,
+	#[cfg(feature = "stun")]
 	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
 	shutdown: shutdown::Observer,
@@ -128,6 +129,14 @@ impl Relay {
 		// another relay. Only negotiated when both sides offer it, so other peers never see it.
 		config.listen.extensions.ietf = true;
 		config.connect.extensions.ietf = true;
+		// Name the relay ahead of its core unless the operator overrides it (empty omits it),
+		// and dial cluster peers under the same name.
+		let implementation = config
+			.listen
+			.implementation
+			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
+			.clone();
+		config.connect.implementation = Some(implementation.clone());
 		// Every TLS listener serves the ACME certificate, so install it before any is built.
 		#[cfg(feature = "acme")]
 		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
@@ -318,6 +327,7 @@ impl Relay {
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions)
 			.with_extensions(server_extensions)
+			.with_implementation(implementation)
 			.with_timeout(handshake_timeout)
 			.with_sessions(sessions.clone());
 		#[cfg(feature = "acme")]
@@ -328,6 +338,7 @@ impl Relay {
 		// starts them on its first accept.
 		let server = server.bind().await.context("failed to bind listeners")?;
 
+		#[cfg(feature = "stun")]
 		let stun = crate::stun::Server::bind(config.stun).await?;
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
@@ -343,6 +354,7 @@ impl Relay {
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health())
 			.bind()?;
+		#[cfg(feature = "stun")]
 		let internal = internal.with_stun(stun.as_ref().map(|stun| stun.counters.clone()));
 		// Bound but not yet serving: registering here (rather than after the
 		// threads start) is what gives every worker a series from the first
@@ -372,6 +384,7 @@ impl Relay {
 			web,
 			#[cfg(feature = "acme")]
 			acme,
+			#[cfg(feature = "stun")]
 			stun,
 			addr,
 			shutdown,
@@ -549,6 +562,7 @@ impl Relay {
 			web,
 			#[cfg(feature = "acme")]
 			acme,
+			#[cfg(feature = "stun")]
 			stun,
 			shutdown,
 			shutdown_trigger,
@@ -736,10 +750,13 @@ impl Relay {
 		};
 
 		let stun = async move {
+			#[cfg(feature = "stun")]
 			match stun {
 				Some(stun) => stun.run().await,
 				None => std::future::pending().await,
 			}
+			#[cfg(not(feature = "stun"))]
+			std::future::pending::<anyhow::Result<()>>().await
 		};
 		let result = tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
@@ -853,6 +870,7 @@ async fn serve_listening(
 #[cfg(test)]
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
+	#[cfg(feature = "stun")]
 	#[tokio::test]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
 		use stun_types::message::{BINDING, Message, MessageWriteVec};
