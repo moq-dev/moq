@@ -20,7 +20,7 @@ use moq_net::Timestamp;
 
 use crate::Error;
 #[cfg(feature = "capture")]
-use crate::Rate;
+use crate::FrameRate;
 #[cfg(feature = "capture")]
 use crate::capture;
 
@@ -36,7 +36,7 @@ use super::encoder::Codec;
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 #[cfg(feature = "capture")]
-const DEFAULT_FRAMERATE: Rate = Rate::integer(30);
+const DEFAULT_FRAMERATE: FrameRate = FrameRate::integer(30);
 
 /// The [`track::Info::refresh`](moq_net::track::Info::refresh) ratio a capture advertises: a
 /// joiner forces a keyframe once a group's deltas outweigh twice its keyframe, so later joiners
@@ -863,7 +863,7 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
-		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.codec = codec;
 		config.kind = kind;
 
@@ -938,7 +938,7 @@ mod tests {
 			.unwrap();
 		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_delay(replay));
 
-		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;
 		let mut producer = Producer::with_track(
 			track,
@@ -970,7 +970,7 @@ mod tests {
 	async fn source_resize_updates_the_published_rendition() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut initial = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut initial = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		initial.kind = encoder::Kind::Software;
 		let mut producer = Producer::new(
 			broadcast,
@@ -983,7 +983,7 @@ mod tests {
 
 		for (timestamp, config) in [
 			(0, initial),
-			(33_333, Config::new(640, 360, crate::Rate::new(30, 1).unwrap())),
+			(33_333, Config::new(640, 360, crate::FrameRate::new(30, 1).unwrap())),
 		] {
 			let mut config = config;
 			config.kind = encoder::Kind::Software;
@@ -1013,7 +1013,7 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
-		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		// Software (openh264) so the test is deterministic and never touches a hardware backend.
 		config.kind = encoder::Kind::Software;
 		let mut selected = config.probe().await.unwrap();
@@ -1041,7 +1041,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
-		let mut config = Config::new(1920, 1080, crate::Rate::new(30, 1).unwrap());
+		let mut config = Config::new(1920, 1080, crate::FrameRate::new(30, 1).unwrap());
 		config.bitrate = Some(moq_net::bandwidth::Rate::from_mbps(6));
 		// Software (openh264) so the test is deterministic and never touches a hardware backend.
 		config.kind = encoder::Kind::Software;
@@ -1087,7 +1087,7 @@ mod tests {
 	async fn abort_after_finish() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;
 		let track = broadcast
 			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
@@ -1200,7 +1200,7 @@ mod tests {
 					)
 					.unwrap();
 
-				let mut probe = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+				let mut probe = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 				probe.kind = encoder::Kind::Software;
 				let mut producer = Producer::with_track(
 					track,
@@ -1269,7 +1269,8 @@ mod tests {
 
 			/// Plug in the camera the loop opens next.
 			fn camera(&self) -> Synthetic {
-				let (camera, stream) = Synthetic::open(crate::Size::new(320, 240), crate::Rate::new(30, 1).unwrap());
+				let (camera, stream) =
+					Synthetic::open(crate::Size::new(320, 240), crate::FrameRate::new(30, 1).unwrap());
 				self.opens.send(stream).unwrap();
 				camera
 			}
@@ -1557,7 +1558,7 @@ mod tests {
 		}
 
 		fn camera() -> (Synthetic, capture::Stream) {
-			Synthetic::open(crate::Size::new(320, 240), crate::Rate::new(30, 1).unwrap())
+			Synthetic::open(crate::Size::new(320, 240), crate::FrameRate::new(30, 1).unwrap())
 		}
 
 		async fn until(done: impl Fn() -> bool) {
@@ -1622,7 +1623,7 @@ mod tests {
 
 					// Ten nominal fps makes the default two-second GOP twenty frames, which every
 					// script below stays inside.
-					let rate = crate::Rate::new(10, 1).unwrap();
+					let rate = crate::FrameRate::new(10, 1).unwrap();
 					let (_probe, probe) = Synthetic::open(crate::Size::new(320, 240), rate);
 					let (camera, stream) = Synthetic::open(crate::Size::new(320, 240), rate);
 					let run = tokio::task::spawn_local(driver.run_with(Streams::new([probe, stream])));
@@ -1839,7 +1840,7 @@ mod tests {
 				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
 				.unwrap();
 			let _subscriber = track.subscribe(None);
-			let mut rendition = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+			let mut rendition = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 			rendition.kind = encoder::Kind::Software;
 			let mut producer = Producer::with_track(
 				track,
@@ -1914,7 +1915,7 @@ mod tests {
 		async fn a_quiet_grant_still_recovers_the_ceiling() {
 			let _probe = probe::exclusive();
 			let ceiling = Rate::from_mbps(4);
-			let mut config = encoder::Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+			let mut config = encoder::Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 			config.kind = encoder::Kind::Named(probe::NAME.into());
 			config.bitrate = Some(ceiling);
 			let mut sink = Sink::open(&config).await.unwrap();

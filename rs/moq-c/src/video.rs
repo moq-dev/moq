@@ -739,7 +739,7 @@ pub unsafe extern "C" fn moq_encode_video(
 
 		let format = pixel_format_from_u32(raw_input.format)?;
 
-		let framerate = moq_video::Rate::new(raw_input.framerate.numerator, raw_input.framerate.denominator)
+		let framerate = moq_video::FrameRate::new(raw_input.framerate.numerator, raw_input.framerate.denominator)
 			.map_err(|err| Error::InvalidConfig(format!("invalid framerate: {err}")))?;
 		let mut config = moq_video::encode::Config::new(raw_input.width, raw_input.height, framerate);
 		config.codec = codec_from_u32(raw_output.codec)?;
@@ -1043,7 +1043,7 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 		let consumer = broadcast.consume();
 		// Probed rather than hand-built, so the test track carries what a real one would.
-		let encode = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+		let encode = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 		let rendition = encode.probe().await.unwrap();
 		let reserved = catalog
 			.reserve()
@@ -1087,7 +1087,7 @@ mod tests {
 	#[tokio::test]
 	async fn finish_ends_the_track_after_a_rate_follower_panic() {
 		let (producer, mut track) = track_under_test().await;
-		let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+		let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 		let encoder = moq_video::encode::Sink::open(&config).await.unwrap();
 		let followed = crate::ffi::Background::new(async { panic!("injected rate follower panic") });

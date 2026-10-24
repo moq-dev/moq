@@ -124,7 +124,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 	let chan = FrameChannel::new();
 	let framerate = config
 		.framerate
-		.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE))
+		.unwrap_or(crate::FrameRate::integer(DEFAULT_FRAMERATE))
 		.rounded();
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
 	let (quit_tx, quit_rx) = pw::channel::channel::<()>();
@@ -975,7 +975,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					// The compositor reports 0/1 for a variable rate; only a real
 					// rate is worth forwarding to the encoder.
 					let fr = state.format.framerate();
-					let framerate = crate::Rate::new(fr.num, fr.denom).ok();
+					let framerate = crate::FrameRate::new(fr.num, fr.denom).ok();
 					let _ = tx.send(Ok(Geometry {
 						width,
 						height,

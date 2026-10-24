@@ -391,7 +391,7 @@ mod tests {
 	}
 
 	fn probe_config() -> Config {
-		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.codec = Codec::H264;
 		config.kind = Kind::Named(probe::NAME.into());
 		config
@@ -451,7 +451,7 @@ mod tests {
 	#[cfg(feature = "openh264")]
 	#[test]
 	fn the_applied_preset_crosses_the_thread() {
-		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = Kind::Software;
 		config.preset = super::super::Preset::Quality;
 		let sink = pollster::block_on(Sink::open(&config)).unwrap();

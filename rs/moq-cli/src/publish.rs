@@ -748,7 +748,7 @@ impl CaptureArgs {
 		config.height = self.height;
 		config.framerate = self
 			.fps
-			.map(|fps| moq_video::Rate::new(fps, 1))
+			.map(|fps| moq_video::FrameRate::new(fps, 1))
 			.transpose()
 			.map_err(anyhow::Error::from)?;
 		config.cursor = !self.no_cursor;
