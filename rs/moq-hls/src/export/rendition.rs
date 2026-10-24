@@ -457,6 +457,11 @@ impl Rendition {
 			.resolve(self.kind == Kind::Video, Duration::from(row.pts)..row.end)
 	}
 
+	/// Whether the rendition declares no media for this row.
+	pub(crate) fn is_gap(&self, row: &segments::Row) -> bool {
+		self.resolve(row) == Content::Gap
+	}
+
 	/// Poll until `row` resolves on this rendition.
 	pub(crate) fn poll_resolved(&self, waiter: &kio::Waiter, row: &segments::Row) -> Poll<()> {
 		if self.is(&row.reference) {

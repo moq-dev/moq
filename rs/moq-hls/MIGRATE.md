@@ -4,19 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A failed timeline fails the segment cursor
+### Recording cursors confirm complete recordings
 
-`export::segments::Consumer::next` returns `Err(Error::TimelineFailed { .. })` once a failed timeline's covered segments drain, instead of `Ok(None)`.
-`Ok(None)` now means only a clean end, so finalize a recording there, and mark it truncated on the error.
+`export::renditions::Consumer::next` now returns `Result<Option<Event>>`.
+Use `while let Some(event) = cursor.next().await?` and finalize only after both the rendition cursor and every segment cursor return `Ok(None)`.
+The rendition cursor waits for a clean catalog and reference timeline end; closing or dropping an unfinished broadcaster returns `Error::IncompleteRecording` instead of reporting success.
+Catalog and timeline failures propagate their errors after pending events or covered segments drain.
 
-```rust
-match cursor.next().await {
-	Ok(Some(segment)) => { /* store it */ }
-	Ok(None) => { /* complete: finalize the recording */ }
-	Err(Error::TimelineFailed { .. }) => { /* truncated: every later call fails the same */ }
-	Err(err) => { /* a fetch failed: call next() again to retry it */ }
-}
-```
+`export::segments::Consumer::next` returns `Error::IncompleteRecording` when its window closes without a confirmed end, `Error::RecordingLagged` when unread rows are evicted or the window resets, and `Error::SegmentUnavailable { segment }` when a listed segment's media cannot be fetched whole.
+It previously skipped lost media silently.
+A declared gap for a rendition remains a skip, and removing or reconfiguring a rendition drains and ends its old segment cursor cleanly, with `Event::Removed` on the rendition cursor.
+
+Mark the recording truncated on these errors, including `Error::TimelineFailed { .. }`.
+Fetch/transmux errors leave the cursor on the same segment so callers can retry.
+A new segment cursor starts at the oldest row still retained when it is created.
 
 ### HLS import unwraps fMP4 to Legacy (#6250)
 
