@@ -1,6 +1,10 @@
 import { Session, SessionCode } from "../error.ts";
 
-/** How many live requests a peer may hold on one session, as moq-net's `session::Limits`. @internal */
+/**
+ * How many live requests a peer may hold on one session. Unlike moq-net's `session::Limits`, it
+ * still caps subscriptions and FETCHes: `@moq/qmux` returns stream credit on accept, not on close,
+ * so credit alone does not bound them here. @internal
+ */
 export interface Limits {
 	/** Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us. */
 	announces: number;
@@ -10,7 +14,7 @@ export interface Limits {
 	fetches: number;
 }
 
-/** moq-net's default limits. @internal */
+/** The default limits, matching moq-net's announces. @internal */
 export const LIMITS: Readonly<Limits> = Object.freeze({ announces: 100_000, subscriptions: 10_000, fetches: 10_000 });
 
 /** A session's count of live peer requests, which closes the session past its cap. @internal */

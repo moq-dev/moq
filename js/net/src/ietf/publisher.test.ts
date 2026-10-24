@@ -60,7 +60,8 @@ const STREAM_WAIT = 1000;
 /** A manual clock, installed until disposed. */
 function manual(): Manual & Disposable {
 	const clock = new Manual();
-	return Object.assign(clock, { [Symbol.dispose]: clock.install() });
+	const installed = clock.install();
+	return Object.assign(clock, { [Symbol.dispose]: () => installed.close() });
 }
 
 /**
@@ -728,7 +729,7 @@ test("a blocked group header is reset when the group expires", async () => {
 // does not end the wait: PUBLISH_DONE waits on the stream, so the budget still judges it.
 test("a group stream whose FIN never completes is reset when the group expires", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 
 	let closing!: () => void;
@@ -801,7 +802,7 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		client.close();
 		broadcast.close();
 		origin.close();
-		restore();
+		installed.close();
 	}
 });
 

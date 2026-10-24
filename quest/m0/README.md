@@ -50,4 +50,3 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [HLS admission backport](/quest/m0/hls-admission-backport.md) - `release` refuses the hostile HLS playlists `main` does, without breaking `import::Config::client`
 - [Adopt quest resolve](/quest/m0/quest-resolve.md) - local merges resolve concurrent quest link-list edits once kixelated/quest ships its merge driver
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
-- [MIGRATE.md at the cut](/quest/m0/migrate-at-cut.md) - PRs stop conflicting on `MIGRATE.md`: breaking PRs carry their migration note in the PR, and the breaking cut writes the guides
