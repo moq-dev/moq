@@ -399,6 +399,25 @@ impl<K: Copy, D> Schedule<K, D> {
         self.activate(slot.group);
     }
 
+    /// Move a queued stream to `priority`, behind its group's queued streams there.
+    ///
+    /// A stream its group resumes first keeps that place, taking the new priority the next
+    /// time it is pushed.
+    pub(super) fn set_stream_priority(&mut self, slot: &mut Slot, priority: i64) {
+        let Some(Queued::At(key)) = slot.queued else {
+            return;
+        };
+        if key.0 == priority {
+            return;
+        }
+        self.recency -= 1;
+        let moved = (priority, false, self.recency);
+        let queue = self.queue(slot.group);
+        let item = queue.items.remove(&key).expect("queued stream is in its queue");
+        queue.items.insert(moved, item);
+        slot.queued = Some(Queued::At(moved));
+    }
+
     /// Queue a stream ahead of every other stream of its group, to finish what it started.
     pub(super) fn reinsert(&mut self, id: K, slot: &mut Slot) {
         debug_assert!(slot.queued.is_none(), "stream queued twice");

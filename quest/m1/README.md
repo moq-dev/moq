@@ -96,7 +96,6 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Receive pinning](/quest/m1/quic-receive-pinning.md) - tiny DATAGRAM or STREAM frames cannot pin moq-quic receive batches past the receive budgets
-- [Priority requeue](/quest/m1/quic-priority-requeue.md) - raising a queued QUIC stream's priority moves it at once instead of after it next sends
 - [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - receive leases and the connection window keep exact books, and eviction stops scanning every stream
 - [io_uring listen extensions](/quest/m1/uring-listen-extensions.md) - ring listeners offer the configured `[listen] extensions`
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
