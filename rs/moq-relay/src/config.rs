@@ -89,7 +89,8 @@ pub struct Config {
 	#[serde(default)]
 	pub acme: crate::acme::Config,
 
-	/// Optional public STUN Binding listener for application-selected ICE servers.
+	/// Optional public STUN Binding listener, available with the `stun` feature.
+	#[cfg(feature = "stun")]
 	#[usage(flatten)]
 	#[serde(default)]
 	pub stun: crate::stun::Config,
@@ -164,6 +165,7 @@ impl Default for Config {
 			auth: Default::default(),
 			web: Default::default(),
 			acme: Default::default(),
+			#[cfg(feature = "stun")]
 			stun: Default::default(),
 			stats: Default::default(),
 			cache: Default::default(),
@@ -310,6 +312,12 @@ impl Config {
 		env: &usage_rs::config::EnvLayer,
 		file: Option<moq_tokio::cli::FileSource<'_>>,
 	) -> anyhow::Result<()> {
+		#[cfg(not(feature = "stun"))]
+		anyhow::ensure!(
+			env.get("MOQ_STUN_BIND").is_none(),
+			"MOQ_STUN_BIND requires a moq-relay build with the stun feature"
+		);
+
 		#[cfg(not(feature = "iroh"))]
 		for name in [
 			"MOQ_IROH_ENABLED",
@@ -513,6 +521,7 @@ mod tests {
 		assert!(config.connect.extensions.auth);
 	}
 
+	#[cfg(feature = "stun")]
 	#[test]
 	fn stun_binding_merges_file_and_cli() {
 		if !test_env::Env::without(&["MOQ_STUN_BIND"]).isolate() {
@@ -533,6 +542,18 @@ mod tests {
 		assert!(toml::from_str::<Config>("[stun]\nrate = 10").is_err());
 	}
 
+	#[cfg(not(feature = "stun"))]
+	#[test]
+	fn a_stun_listener_requires_the_feature() {
+		assert!(toml::from_str::<Config>("[stun]\nbind = \"127.0.0.1:3478\"").is_err());
+		assert!(Config::parse_and_merge(["moq-relay", "--stun-bind=127.0.0.1:3478"]).is_err());
+		let cli = usage_rs::config::CliLayer::new(std::iter::empty::<(String, String)>());
+		let env = usage_rs::config::EnvLayer::new([("MOQ_STUN_BIND".to_string(), "127.0.0.1:3478".to_string())]);
+		let error = Config::default().merge_into(&cli, &env, None).unwrap_err();
+		assert!(error.to_string().contains("MOQ_STUN_BIND requires"), "{error}");
+	}
+
+	#[cfg(feature = "stun")]
 	#[test]
 	fn stun_binding_merges_the_environment() {
 		if !test_env::Env::default().set("MOQ_STUN_BIND", "[::1]:3478").isolate() {

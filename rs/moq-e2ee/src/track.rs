@@ -18,25 +18,29 @@ use crate::window::DatagramWindow;
 /// Sequences are allocated monotonically; reuse and exhaustion are refused before encryption.
 pub struct Producer {
 	inner: moq_net::track::Producer,
-	group_key: Arc<Mutex<TrackKey>>,
-	datagram_key: TrackKey,
+	keys: Keys,
 	next: u64,
 }
 
-/// The grouped-frame and datagram keys a claimed physical name protects with.
+/// A physical name's grouped-frame and datagram keys; clones share their accounting.
+#[derive(Clone, Debug)]
 pub(crate) struct Keys {
-	pub group: TrackKey,
-	pub datagram: TrackKey,
+	pub group: Arc<Mutex<TrackKey>>,
+	pub datagram: Arc<Mutex<TrackKey>>,
+}
+
+impl Keys {
+	pub(crate) fn new(group: TrackKey, datagram: TrackKey) -> Self {
+		Self {
+			group: Arc::new(Mutex::new(group)),
+			datagram: Arc::new(Mutex::new(datagram)),
+		}
+	}
 }
 
 impl Producer {
 	pub(crate) fn new(inner: moq_net::track::Producer, keys: Keys) -> Self {
-		Self {
-			inner,
-			group_key: Arc::new(Mutex::new(keys.group)),
-			datagram_key: keys.datagram,
-			next: 0,
-		}
+		Self { inner, keys, next: 0 }
 	}
 
 	/// The physical track name.
@@ -63,7 +67,7 @@ impl Producer {
 	pub fn create_group(&mut self, sequence: u64) -> Result<group::Producer> {
 		self.allocate(sequence)?;
 		let inner = self.inner.create_group(moq_net::group::Info { sequence })?;
-		Ok(group::Producer::new(inner, self.group_key.clone()))
+		Ok(group::Producer::new(inner, Arc::clone(&self.keys.group)))
 	}
 
 	/// Encrypt `plaintext` at the next sequence and insert the datagram, returning that sequence.
@@ -98,9 +102,12 @@ impl Producer {
 		plaintext: &[u8],
 	) -> Result<()> {
 		self.reserve(sequence)?;
-		let payload = self
-			.datagram_key
-			.protect(sequence, 0, plaintext, MAX_DATAGRAM_PAYLOAD)?;
+		let payload =
+			self.keys
+				.datagram
+				.lock()
+				.expect("track key")
+				.protect(sequence, 0, plaintext, MAX_DATAGRAM_PAYLOAD)?;
 		self.next = sequence + 1;
 		self.inner.insert_datagram(sequence, timestamp, payload)?;
 		Ok(())
@@ -142,7 +149,7 @@ impl Producer {
 
 	#[cfg(test)]
 	pub(crate) fn datagram_invocations(&self) -> u64 {
-		self.datagram_key.invocations()
+		self.keys.datagram.lock().expect("track key").invocations()
 	}
 }
 
@@ -248,19 +255,18 @@ impl kio::Task for Subscribing {
 /// that key is exhausted.
 pub struct Consumer {
 	name: String,
-	group_key: Arc<Mutex<TrackKey>>,
-	datagram_key: TrackKey,
+	// Shared with every other subscription to this name under the generation.
+	keys: Keys,
 	window: DatagramWindow,
 	terminal: Arc<Terminal>,
 }
 
 impl Consumer {
-	pub(crate) fn new(inner: moq_net::track::Subscriber, group_key: TrackKey, datagram_key: TrackKey) -> Self {
+	pub(crate) fn new(inner: moq_net::track::Subscriber, keys: Keys) -> Self {
 		let name = inner.name().to_string();
 		Self {
 			name,
-			group_key: Arc::new(Mutex::new(group_key)),
-			datagram_key,
+			keys,
 			window: DatagramWindow::default(),
 			terminal: Terminal::new(Some(inner)),
 		}
@@ -278,7 +284,7 @@ impl Consumer {
 	/// [`Error::Authentication`] once a grouped frame has failed to open, or a net error.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let terminal = Arc::clone(&self.terminal);
-		let group_key = Arc::clone(&self.group_key);
+		let group_key = Arc::clone(&self.keys.group);
 		terminal.poll_subscription(waiter, |inner, waiter| {
 			let Some(inner) = ready!(inner.poll_recv_group(waiter)?) else {
 				return Poll::Ready(Ok(None));
@@ -302,18 +308,19 @@ impl Consumer {
 
 	/// Poll for the next datagram event.
 	///
-	/// A bad tag and a duplicate are events, not track-ending errors.
+	/// A bad datagram (a forged tag, or a sequence or size no publisher could seal) and a
+	/// duplicate are events, not track-ending errors.
 	///
 	/// # Errors
 	///
 	/// [`Error::Authentication`] only if a grouped frame already failed,
-	/// [`Error::Oversize`] or [`Error::Exhausted`] from opening, or a net error.
+	/// [`Error::Exhausted`] from opening, or a net error.
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>>> {
 		let terminal = Arc::clone(&self.terminal);
 		terminal.poll_subscription(waiter, |inner, waiter| self.open_datagram(inner, waiter))
 	}
 
-	/// Open one datagram. A bad tag stays an event; exhausting the datagram key does not.
+	/// Open one datagram. A bad datagram stays an event; exhausting the datagram key does not.
 	fn open_datagram(
 		&mut self,
 		inner: &mut moq_net::track::Subscriber,
@@ -326,10 +333,13 @@ impl Consumer {
 		if self.window.is_duplicate(sequence) {
 			return Poll::Ready(Ok(Some(Event::Duplicate { sequence })));
 		}
-		match self
-			.datagram_key
-			.open(sequence, 0, &datagram.payload, MAX_DATAGRAM_PAYLOAD)
-		{
+		let opened =
+			self.keys
+				.datagram
+				.lock()
+				.expect("track key")
+				.open(sequence, 0, &datagram.payload, MAX_DATAGRAM_PAYLOAD);
+		match opened {
 			Ok(plaintext) => {
 				self.window.mark(sequence);
 				Poll::Ready(Ok(Some(Event::Datagram(Datagram {
@@ -339,8 +349,11 @@ impl Consumer {
 				}))))
 			}
 			// A bad datagram is not grouped failure: the track, its demand, and any
-			// parked grouped read stay up. `exhausted` is this key's own limit.
-			Err(Error::Authentication) => Poll::Ready(Ok(Some(Event::Authentication { sequence }))),
+			// parked grouped read stay up. No publisher seals a sequence or payload size out
+			// of range, so one is as bad as a forged tag. `exhausted` is this key's own limit.
+			Err(Error::Authentication | Error::Identity | Error::Oversize) => {
+				Poll::Ready(Ok(Some(Event::Authentication { sequence })))
+			}
 			Err(err) => Poll::Ready(Err(err)),
 		}
 	}

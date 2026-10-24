@@ -26,9 +26,9 @@
 //! MoQ Auth extension. Older versions, and peers that do not negotiate it, carry no
 //! AUTH exchange: there the grant stays `None`. On moq-transport `add` still succeeds,
 //! with a grant that stays unknown, since a request that names the auth carries its
-//! token; on moq-lite without AUTH it fails with [`Error::Unsupported`]. moq-lite carries a grant's patterns as they are;
-//! moq-transport carries namespace prefixes, so it refuses a grant that is not a
-//! union of subtrees rather than widen it.
+//! token; on moq-lite without AUTH it fails with [`Error::Unsupported`]. Both wires carry
+//! a grant's patterns as they are, and refuse one too large for a single AUTH_OK rather
+//! than trim it.
 
 use std::{
 	collections::{BTreeMap, VecDeque},
