@@ -37,7 +37,3 @@ Decided with the maintainer on 2026-10-23; see the epic for why.
 
 Public API: breaking in moq-net, `@moq/net`, moq-ffi, moq-c, and every
 binding. Wire: none.
-
-## Required
-
-- [Publisher retention in moq-mux](/quest/m1/broadcast-lifecycle/retention.md) - Rust publishers stop using `Finish` first, so none loses its tail in between

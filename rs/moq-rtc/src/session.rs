@@ -50,8 +50,9 @@ pub trait MediaSink: Send {
 	fn abort(&mut self, err: moq_net::Error);
 
 	/// Called once when the peer ends the session cleanly after its final media: finish
-	/// every track and return the finished broadcast, which stays up until it drops.
-	fn finish(&mut self) -> Result<moq_net::broadcast::Finish>;
+	/// every track and return the broadcast. The finished tracks stay servable while the sink
+	/// is held.
+	fn finish(&mut self) -> Result<moq_net::broadcast::Producer>;
 }
 
 /// What the session does with the negotiated media stream.
@@ -137,11 +138,14 @@ impl Session {
 		self.handle_media(mid)
 	}
 
-	/// End an ingest cleanly after its final media: finish the sink's tracks and return the
-	/// finished broadcast to linger on. `None` for an egress session, which publishes nothing.
-	pub fn finish(self) -> Result<Option<moq_net::broadcast::Finish>> {
+	/// End an ingest cleanly after its final media: finish the sink's tracks and keep the
+	/// finished broadcast up for `linger`. `None` for an egress session, which publishes nothing.
+	pub fn finish(self, linger: std::time::Duration) -> Result<Option<moq_mux::Linger<Box<dyn MediaSink>>>> {
 		match self.role {
-			MediaRole::Ingest(mut sink) => sink.finish().map(Some),
+			MediaRole::Ingest(mut sink) => {
+				let broadcast = sink.finish()?;
+				Ok(Some(moq_mux::Linger::new([broadcast], sink, linger)))
+			}
 			MediaRole::Egress(_) => Ok(None),
 		}
 	}

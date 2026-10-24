@@ -260,25 +260,18 @@ mod tests {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		// The DELETE ended the ingest cleanly, so it serves the finished broadcast until its
-		// media is stale; a newer publish at the path ends that linger at once.
+		// The DELETE ended the ingest cleanly, so it serves the finished broadcast for the
+		// linger; dropping the session, as an interrupt does, ends that at once.
 		let ingested = server_origin
 			.consume()
 			.request_broadcast("ingested", None)
 			.await
 			.unwrap();
 		assert!(!ingested.is_closed(), "the finished ingest lingers");
-		let _replacement = server_origin
-			.publish(
-				"ingested",
-				moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
-			)
-			.unwrap();
-		tokio::time::timeout(TIMEOUT, whip_task)
-			.await
-			.unwrap()
-			.unwrap()
-			.unwrap();
+		whip_task.abort();
+		let stopped = tokio::time::timeout(TIMEOUT, whip_task).await.unwrap();
+		assert!(stopped.unwrap_err().is_cancelled());
+		assert!(ingested.is_closed(), "the interrupt closes the finished ingest");
 		let final_whip = whip_server_wire.stats();
 		let final_whep = whep_server_wire.stats();
 		assert!(!server.terminate(&whip_id));

@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Import::finish` borrows the importer
+
+`Import::finish(self) -> Result<broadcast::Finish>` is now `Import::finish(&mut self) -> Result<()>`.
+Keep the importer, which owns the finished tracks, and hold it with `moq_mux::Linger` for as long as the broadcast should stay up:
+
+```rust
+import.finish()?;
+moq_mux::Linger::new([broadcast], import, moq_mux::Linger::DEFAULT).wait().await;
+```
+
 ### Denied broadcast references report authorization failure
 
 A rendition whose referenced broadcast is outside the source origin's scope now

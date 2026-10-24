@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `with_linger` keeps an ingest up; `with_follow` follows an egress
+
+| Before | After |
+| --- | --- |
+| `Subscribe::with_linger` | `Subscribe::with_follow` |
+| `Client::with_linger` (export) | `Client::with_follow` |
+
+`Publish::with_linger` and `Client::with_linger` now set how long a cleanly ended ingest stays up, counted from its end (default 30 s, zero closes it at once), instead of its tracks' max age.
+
 ### `run` and `Config` are removed
 
 `run`, `Config`, and `Error::ListenerClosed` are gone.
