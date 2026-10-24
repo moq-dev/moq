@@ -4172,11 +4172,15 @@ impl TrackRun {
 			return;
 		}
 		let sequence = datagram.sequence;
-		// A Frame Start inside the start group excludes its datagram, the group's only frame.
-		// The model bounds whole groups, so the frame bound is applied here.
+		// The model bounds whole groups, so the peer's frame bounds are applied here, against
+		// the Object ID a relayed moq-transport datagram keeps (a public one is frame 0).
+		let object = datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0);
 		if self
 			.start_frame
-			.is_some_and(|(group, frame)| group == sequence && frame > 0)
+			.is_some_and(|(group, frame)| group == sequence && object < frame)
+			|| self
+				.end_frame
+				.is_some_and(|(group, frame)| group == sequence && object > frame)
 		{
 			return;
 		}
@@ -5721,48 +5725,68 @@ mod serve_group_test {
 		assert!(order > 1);
 	}
 
-	/// A Frame Start inside the start group excludes that group's datagram, its only frame,
-	/// while a later group's datagram is served.
+	/// The peer's frame bounds cut datagrams by Object ID: a public datagram is frame 0, a
+	/// relayed moq-transport one keeps its own, and both ends are inclusive.
 	#[moq_clock::test]
-	async fn a_frame_start_drops_the_start_groups_datagram() {
-		let mut track = track::Producer::new(
-			Arc::new(broadcast::Info::default()),
-			"test",
-			crate::track::Info::timed(),
-		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
-		let session = SinkSession::new(Log::default()).with_groups().with_datagrams(1200);
-		let log = session.log.clone();
-		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
-		run.ctx.group = crate::transport::poll::Session::send_group(&mut run.ctx.session, 3);
-		run.update(lite::SubscribeUpdate {
-			wanted_group: None,
-			order: Order::Descending,
-			priority: 0,
-			max_delay: Duration::from_secs(3600),
-			start_group: Some(5),
-			end_group: None,
-			start_frame: 1,
-			end_frame: None,
-		});
+	async fn frame_bounds_cut_datagrams_by_object_id() {
+		for (sequence, object_id, served) in [
+			(5, None, false),
+			(5, Some(1), false),
+			(5, Some(2), true),
+			(6, None, true),
+			(7, Some(3), true),
+			(7, Some(4), false),
+		] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+			let session = SinkSession::new(Log::default()).with_groups().with_datagrams(1200);
+			let log = session.log.clone();
+			let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
+			run.ctx.group = crate::transport::poll::Session::send_group(&mut run.ctx.session, 3);
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				order: Order::Descending,
+				priority: 0,
+				max_delay: Duration::from_secs(3600),
+				start_group: Some(5),
+				end_group: Some(7),
+				start_frame: 2,
+				end_frame: Some(3),
+			});
 
-		for sequence in [5, 6] {
 			track
-				.insert_datagram(
-					sequence,
-					Timestamp::from_millis(sequence).unwrap(),
-					bytes::Bytes::from_static(b"d"),
-				)
+				.insert_wire_datagram(crate::model::datagram::Stored {
+					datagram: crate::model::datagram::Datagram {
+						sequence,
+						timestamp: Some(Timestamp::from_millis(sequence).unwrap()),
+						payload: bytes::Bytes::from_static(b"d"),
+					},
+					wire: object_id.map(|object_id| {
+						Arc::new(crate::model::datagram::Wire {
+							object_id: Some(object_id),
+							priority: None,
+							end_of_group: false,
+							status: None,
+							properties: Default::default(),
+						})
+					}),
+					deflated: None,
+				})
 				.unwrap();
+			{
+				let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+				assert!(futures::poll!(poll.as_mut()).is_pending());
+			}
+			assert_eq!(
+				log.datagram_ranks().len(),
+				usize::from(served),
+				"group {sequence} object {object_id:?}"
+			);
 		}
-		{
-			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
-			assert!(futures::poll!(poll.as_mut()).is_pending());
-		}
-		assert_eq!(
-			log.datagram_ranks(),
-			[(Some(0), crate::priority::in_group(6, 0, Order::Descending))]
-		);
 	}
 
 	/// A SUBSCRIBE_UPDATE that flips the group order reranks the next datagram, even with no
