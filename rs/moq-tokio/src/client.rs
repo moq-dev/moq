@@ -206,7 +206,7 @@ impl Client {
 		self
 	}
 
-	/// Cap the announcements and subscriptions this peer can hold on a session.
+	/// Bound what this peer can make a session hold beyond flow control.
 	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
 		self.moq = self.moq.with_limits(limits);
 		self

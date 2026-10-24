@@ -11,7 +11,8 @@ use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
 use crate::flate::{MoqFlateConfig, MoqFlateSnapshotProducer, MoqFlateStreamProducer};
 use crate::json::{
 	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConfig,
-	MoqJsonStreamConsumer, MoqJsonStreamProducer,
+	MoqJsonStreamConsumer, MoqJsonStreamProducer, MoqJsonWindowConfig, MoqJsonWindowConsumer, MoqJsonWindowEvent,
+	MoqJsonWindowProducer, MoqJsonWindowTimed,
 };
 use crate::media::*;
 use crate::session::{
@@ -1453,6 +1454,235 @@ async fn json_demand() {
 	assert!(matches!(stream.demand(), Err(MoqError::Closed)));
 	assert!(matches!(snapshot_demand.until_wanted().await, Err(MoqError::Closed)));
 	assert!(matches!(stream_demand.until_wanted().await, Err(MoqError::Closed)));
+}
+
+/// Read the next window event, failing the test if none arrives.
+async fn next_window(consumer: &MoqJsonWindowConsumer) -> Option<MoqJsonWindowTimed> {
+	tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.expect("timed out waiting for a json window event")
+		.unwrap()
+}
+
+fn window_push(index: u64, n: u64) -> MoqJsonWindowEvent {
+	MoqJsonWindowEvent::Push {
+		index,
+		value: format!(r#"{{"n":{n}}}"#),
+	}
+}
+
+/// A live reader sees each push and pop in order, with its timestamp.
+#[tokio::test]
+async fn json_window_roundtrip() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: true,
+		checkpoint_records: None,
+	};
+	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	assert!(
+		matches!(track.demand(), Err(MoqError::Closed)),
+		"the producer takes over the track"
+	);
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await, config).unwrap();
+
+	for n in 0..3 {
+		producer.push(format!(r#"{{"n":{n}}}"#), Some(n * 1000)).unwrap();
+	}
+	producer.pop(2, Some(3000)).unwrap();
+
+	for n in 0..3 {
+		let event = next_window(&consumer).await.expect("expected a push");
+		assert_eq!(
+			event,
+			MoqJsonWindowTimed {
+				event: window_push(n, n),
+				timestamp_us: Some(n * 1000),
+			}
+		);
+	}
+	assert_eq!(
+		next_window(&consumer).await,
+		Some(MoqJsonWindowTimed {
+			event: MoqJsonWindowEvent::Pop { start: 0, end: 2 },
+			timestamp_us: Some(3000),
+		})
+	);
+
+	producer.finish().unwrap();
+	assert!(matches!(
+		producer.push(r#"{"n":3}"#.into(), Some(4000)),
+		Err(MoqError::Closed)
+	));
+	assert!(matches!(producer.pop(1, Some(4000)), Err(MoqError::Closed)));
+	assert_eq!(next_window(&consumer).await, None);
+}
+
+/// A cut closes the open group, so the next push opens a new group whose header restates the
+/// retained window, while a live reader sees only the new record.
+#[tokio::test]
+async fn json_window_cut_restates_the_window() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: false,
+		checkpoint_records: None,
+	};
+	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	let raw = subscribe(&broadcast, "log").await;
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await, config).unwrap();
+
+	for n in 0..3 {
+		producer.push(format!(r#"{{"n":{n}}}"#), None).unwrap();
+	}
+	producer.pop(1, None).unwrap();
+	let events = [
+		window_push(0, 0),
+		window_push(1, 1),
+		window_push(2, 2),
+		MoqJsonWindowEvent::Pop { start: 0, end: 1 },
+	];
+	for event in events {
+		assert_eq!(
+			next_window(&consumer).await,
+			Some(MoqJsonWindowTimed {
+				event,
+				timestamp_us: None,
+			})
+		);
+	}
+
+	producer.cut().unwrap();
+	producer.cut().unwrap();
+	producer.push(r#"{"n":3}"#.into(), None).unwrap();
+
+	let group = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let group = raw.recv_group().await.unwrap().expect("expected a group");
+			if group.sequence() > 0 {
+				return group;
+			}
+		}
+	})
+	.await
+	.expect("timed out waiting for the cut's group");
+	assert_eq!(group.sequence(), 1, "a repeated cut opens no extra group");
+	let header = group.read_frame().await.unwrap().expect("expected the header");
+	assert_eq!(
+		serde_json::from_slice::<serde_json::Value>(&header.payload).unwrap(),
+		serde_json::json!({ "offset": 1, "records": [{ "n": 1 }, { "n": 2 }, { "n": 3 }] })
+	);
+
+	// The restated records are already delivered, so the live reader sees only the new one.
+	assert_eq!(
+		next_window(&consumer).await,
+		Some(MoqJsonWindowTimed {
+			event: window_push(3, 3),
+			timestamp_us: None,
+		})
+	);
+
+	producer.finish().unwrap();
+	assert!(matches!(producer.cut(), Err(MoqError::Closed)));
+}
+
+/// A joiner past the refresh ratio gets the window restated in a fresh group, holding only the
+/// checkpoint's records, so it learns of the older ones as a skip.
+#[tokio::test]
+async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast
+		.publish_track(
+			"log".into(),
+			Some(MoqTrackInfo {
+				priority: 127,
+				max_age_us: None,
+				refresh: Some(1),
+				timescale: None,
+				compress: false,
+			}),
+		)
+		.unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: false,
+		checkpoint_records: Some(2),
+	};
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	for n in 0..5 {
+		producer.push(format!(r#"{{"n":{n}}}"#), None).unwrap();
+	}
+
+	// The join crosses the ratio, so the producer restates the window without another edit.
+	let joiner = subscribe(&broadcast, "log").await;
+	tokio::time::timeout(TIMEOUT, async {
+		while joiner.recv_group().await.unwrap().expect("expected a group").sequence() == 0 {}
+	})
+	.await
+	.expect("timed out waiting for the refresh");
+
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await, config).unwrap();
+	let events = [
+		MoqJsonWindowEvent::Skip { start: 0, end: 3 },
+		window_push(3, 3),
+		window_push(4, 4),
+	];
+	for event in events {
+		assert_eq!(
+			next_window(&consumer).await,
+			Some(MoqJsonWindowTimed {
+				event,
+				timestamp_us: None,
+			})
+		);
+	}
+
+	producer.finish().unwrap();
+}
+
+#[test]
+fn json_window_refuses_zero_checkpoint_records() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: false,
+		checkpoint_records: Some(0),
+	};
+	assert!(matches!(
+		MoqJsonWindowProducer::new(&track, config),
+		Err(MoqError::JsonTrack { .. })
+	));
+	assert!(track.demand().is_ok(), "a refused config leaves the track open");
+}
+
+/// The window producer reports subscriber demand, and drops it once finished.
+#[tokio::test]
+async fn json_window_demand() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let config = MoqJsonWindowConfig {
+		compression: false,
+		checkpoint_records: None,
+	};
+	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
+	let demand = producer.demand().unwrap();
+	assert_eq!(demand.name(), "log");
+	assert!(demand.wanted().is_none());
+
+	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await, config).unwrap();
+	tokio::time::timeout(TIMEOUT, demand.until_wanted())
+		.await
+		.expect("timed out waiting for the json window to become used")
+		.unwrap();
+	drop(consumer);
+	tokio::time::timeout(TIMEOUT, demand.until_unwanted())
+		.await
+		.expect("timed out waiting for the json window to become unused")
+		.unwrap();
+
+	producer.finish().unwrap();
+	assert!(matches!(producer.demand(), Err(MoqError::Closed)));
+	assert!(matches!(demand.until_wanted().await, Err(MoqError::Closed)));
 }
 
 /// A demand handle waits without the producer, and fails once the track is gone.
@@ -7374,15 +7604,20 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	assert_eq!(sequences, vec![0, 1, 2]);
 }
 
-/// Wait until `auth` reports `want`, following its changes.
-async fn await_grant(auth: &crate::auth::MoqAuth, want: crate::auth::MoqGrant) {
+/// Wait until `session` grants `want`, following its changes.
+async fn await_grant(session: &MoqSession, want: crate::auth::MoqGrant) {
+	// `grant_changed` waits for a grant other than the one its handle last returned, which a
+	// read through `grant` does not move. A fresh handle starts from the grant as it is now,
+	// so it is taken before the read, and the loop follows what `grant_changed` returns.
+	let auth = session.auth();
+	let mut current = auth.grant();
 	tokio::time::timeout(TIMEOUT, async {
-		while auth.grant().as_ref() != Some(&want) {
-			auth.grant_changed().await.expect("grant watch ended");
+		while current.as_ref() != Some(&want) {
+			current = auth.grant_changed().await.expect("grant watch ended");
 		}
 	})
 	.await
-	.unwrap_or_else(|_| panic!("timed out waiting for {want:?}, last {:?}", auth.grant()));
+	.unwrap_or_else(|_| panic!("timed out waiting for {want:?}, last {current:?}"));
 }
 
 fn grant(publish: &[&str], subscribe: &[&str]) -> crate::auth::MoqGrant {
@@ -7410,8 +7645,8 @@ async fn auth_reads_the_peer_grant_on(version: &str) {
 		.expect("pair");
 
 	// Each side's origins span the root, so its peer grants it everything.
-	await_grant(&client.auth(), grant(&["**"], &["**"])).await;
-	await_grant(&accepted.auth(), grant(&["**"], &["**"])).await;
+	await_grant(&client, grant(&["**"], &["**"])).await;
+	await_grant(&accepted, grant(&["**"], &["**"])).await;
 
 	let err = tokio::time::timeout(TIMEOUT, client.auth().add("extra".into()))
 		.await
@@ -7499,7 +7734,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.expect("connect timed out")
 		.unwrap();
 	let auth = session.auth();
-	await_grant(&auth, grant(&["setup/**"], &[])).await;
+	await_grant(&session, grant(&["setup/**"], &[])).await;
 	// A second handle watches on its own and starts from the grant it was made with.
 	let watcher = session.auth();
 
@@ -7509,7 +7744,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.unwrap();
 	assert_eq!(extra.grant(), Some(grant(&["extra/**"], &[])));
 	// Patterns are kept sorted.
-	await_grant(&auth, grant(&["extra/**", "setup/**"], &[])).await;
+	await_grant(&session, grant(&["extra/**", "setup/**"], &[])).await;
 	let seen = tokio::time::timeout(TIMEOUT, watcher.grant_changed())
 		.await
 		.expect("the second handle sees the change the first took")
@@ -7517,7 +7752,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 	assert_eq!(seen, Some(grant(&["extra/**", "setup/**"], &[])));
 
 	extra.cancel();
-	await_grant(&auth, grant(&["setup/**"], &[])).await;
+	await_grant(&session, grant(&["setup/**"], &[])).await;
 	assert!(matches!(extra.closed().await, Err(MoqError::Cancelled)));
 
 	let refused = tokio::time::timeout(TIMEOUT, auth.add("bogus".into()))

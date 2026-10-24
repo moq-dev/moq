@@ -68,14 +68,12 @@ Rejected in planning:
 
 - [MIGRATE matches release](/quest/m1/api-audit/migrate.md) - every break already on main has a correct entry measured against release, and entries for unreleased packages are gone
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [JS prepared answers](/quest/m1/api-audit/js-prepared.md) - a leaked or abandoned `Prepared` refuses its request instead of blocking the path
 - [The origin announces](/quest/m1/api-audit/announce-owner.md) - a broadcast producer cannot announce; the origin hands out the announcement, so `Prepared` and standalone broadcasts lose methods that always fail
 - [Unpublish what nothing uses](/quest/m1/api-audit/unpublish.md) - packages, features, and listeners with no consumer stop shipping or stop being on by default
 - [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone
 - [Binding connection state](/quest/m1/api-audit/binding-state.md) - one `state()` snapshot and `state_changed()` replace `status`, `connects`, and both `failure` polls
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - Rust and JS model exports without a consumer go private, wrong ones are deleted, and JS names mirror Rust
 - [One clean close](/quest/m1/api-audit/clean-close.md) - a clean session close has one spelling and failures are recorded inside moq-net
-- [Session limits only where needed](/quest/m1/api-audit/session-limits.md) - `session::Limits` keeps only bounds that nothing else enforces, and its documented example compiles
 - [Ranges refuse what the wire drops](/quest/m1/api-audit/ranges-wire.md) - relative and time anchors fail loud where a wire cannot carry them, `floor()` honors the subscription, and bindings take an optional max delay
 - [Derived origins borrow](/quest/m1/api-audit/derived-origin-close.md) - closing a JS `scope()` or `withPreference()` handle releases only that handle
 - [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - Python, Go, and Dart client options use the FFI's names and nesting
