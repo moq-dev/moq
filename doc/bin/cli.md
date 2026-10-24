@@ -466,11 +466,15 @@ what each rendition has written, about once a second while someone subscribes,
 with the connection's RTT, estimated send rate, and loss. It covers the stdin imports;
 capture, the gateways, `archive`, and `ts --program all` refuse it.
 
-`export --echo <name>` answers a publisher that solicits feedback: under the
-catalog's `echo` path it publishes `<name>.echo`, reporting what each rendition
-the export reads has received and its newest arrival, until the export ends.
-It covers the stdout container exports and needs a hang catalog, so MSF
-refuses it.
+`import --echo-path <path>` solicits feedback from the same imports: it sets
+the catalog's `echo` path, resolved against the broadcast like a relative URL,
+so `viewers` from `room/event` is `room/viewers`. A path above the connection
+root is refused, since readers would refuse the catalog, and so is one no
+viewer could publish beneath: a segment holding `*`, or past 32 segments.
+`export --echo <name>` answers: under the catalog's `echo` path it publishes
+`<name>.echo`, reporting what each rendition the export reads has received and
+its newest arrival, until the export ends. It covers the stdout container
+exports and needs a hang catalog, so MSF refuses it.
 
 The `report` and `echo` sinks print reports as JSON lines. `export report`
 follows one broadcast's report track until the broadcast ends; `export echo`
@@ -479,7 +483,7 @@ prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
 final report. Either sink stops reading a report that grows past 1 MiB.
 
 ```bash
-moq ... --broadcast event import --report ts < feed.ts
+moq ... --broadcast event import --report --echo-path viewers ts < feed.ts
 moq ... --broadcast event export report
 moq ... --broadcast event export --echo alice ts > out.ts
 moq ... --broadcast viewers export echo

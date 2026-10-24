@@ -594,12 +594,17 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 						claim("stdin", &mut stdin, &name)?;
 					}
 					let report = import.report;
+					let echo = import.echo_path.clone().map(hang::catalog::Echo::new);
 					if let Some(mut publish) =
 						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
 					{
-						// Before `run` declares a track, so the `stats` section rides the first catalog.
+						// Before `run` declares a track, so the `stats` and `echo` sections ride the
+						// first catalog.
 						if report {
 							publish = publish.with_report(connection.as_ref().map(moq_tokio::Connection::monitor))?;
+						}
+						if let Some(echo) = echo {
+							publish = publish.with_echo(echo)?;
 						}
 						locals.push(publish);
 					}

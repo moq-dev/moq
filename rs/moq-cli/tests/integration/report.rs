@@ -1,5 +1,6 @@
-//! `moq import --report` and `moq export --echo` over a real relay, read back through the
-//! `export report` and `export echo` sinks: each report counts what its side carried.
+//! `moq import --report`, and `moq export --echo` answering `import --echo-path`, over a real
+//! relay, read back through the `export report` and `export echo` sinks: each report counts what
+//! its side carried.
 #![cfg(unix)]
 
 use std::collections::BTreeMap;
@@ -33,20 +34,17 @@ async fn feed(clip: &[u8], mut write: impl AsyncFnMut(&[u8])) {
 struct Relay {
 	url: String,
 	fingerprint: String,
-	origin: moq_net::origin::Producer,
 }
 
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
 	let fixture = moq_relay::test_relay().await.expect("test relay");
-	let origin = fixture.relay.cluster().origin.clone();
 	let ready = fixture.relay.ready();
 	tokio::spawn(fixture.relay.run());
 	ready.wait().await.expect("relay ready");
 	Relay {
 		url: fixture.url.to_string(),
 		fingerprint: fixture.fingerprint,
-		origin,
 	}
 }
 
@@ -379,26 +377,24 @@ struct Feedback {
 	feedback: hang::echo::Snapshot<ts::stats::Report>,
 }
 
-/// An export asked for feedback publishes it where the catalog solicits it, counting what it
-/// reads as it reads it, with a TS export's per-PID rows and release clock, and `export echo`
-/// finds it under that prefix.
+/// An import soliciting feedback gets it from an export asked for it, published where the
+/// catalog solicits it and counting what the export reads as it reads it, with a TS export's
+/// per-PID rows and release clock, and `export echo` finds it under that prefix.
 #[tokio::test]
-async fn export_echo_reports_what_the_export_reads() {
+async fn export_echo_reports_where_the_import_solicits() {
 	let relay = relay().await;
 	let (expected, _) = written(CLIP);
 
-	// A publisher soliciting feedback under `viewers`, a sibling of its broadcast.
-	let mut broadcast = relay.origin.create_broadcast("demo").expect("create the broadcast");
-	let config = moq_mux::catalog::Config::default()
-		.with_max_age(Some(Duration::from_secs(1)))
-		.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
-	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
-	let mut solicit = catalog.modify().unwrap();
-	solicit.echo = Some(hang::catalog::Echo::new("viewers".to_string()));
-	solicit.commit().unwrap();
-	broadcast.announce(moq_net::origin::Route::default()).unwrap();
-
+	// Solicited under `viewers`, a sibling of the broadcast.
+	let mut import = moq(
+		&relay,
+		"demo",
+		&["import", "--echo-path", "viewers", "--max-age", "1s", "ts"],
+	)
+	.stdin(Stdio::piped())
+	.spawn()
+	.expect("spawn the import");
+	let mut stdin = import.stdin.take().expect("stdin");
 	let (mut sink, mut lines) = sink(&relay, "viewers", "echo");
 	// Held longer than the feed pauses for the first feedback line, so the pause is no stall.
 	let mut export = moq(&relay, "demo", &["export", "--echo", "alice", "ts", "--delay", "4s"])
@@ -409,11 +405,16 @@ async fn export_echo_reports_what_the_export_reads() {
 	let draining = tokio::spawn(async move { tokio::io::copy(&mut output, &mut tokio::io::sink()).await });
 
 	// Half the clip, then feedback before the rest, so the export reports while it reads.
-	feed(&CLIP[..HALF], async |chunk| import.decode(chunk).unwrap()).await;
+	feed(&CLIP[..HALF], async |chunk| {
+		stdin.write_all(chunk).await.expect("write stdin")
+	})
+	.await;
 	let mut feedback: Vec<Feedback> = vec![next(&mut lines).await.expect("feedback mid-export")];
-	feed(&CLIP[HALF..], async |chunk| import.decode(chunk).unwrap()).await;
-	import.finish().unwrap();
-	catalog.finish().unwrap();
+	feed(&CLIP[HALF..], async |chunk| {
+		stdin.write_all(chunk).await.expect("write stdin")
+	})
+	.await;
+	drop(stdin);
 
 	let status = loop {
 		tokio::select! {
@@ -428,7 +429,7 @@ async fn export_echo_reports_what_the_export_reads() {
 	}
 	draining.await.unwrap().expect("drain the export");
 	sink.kill().await.unwrap();
-	drop(broadcast);
+	assert!(wait(&mut import).await.success());
 
 	assert!(
 		feedback.iter().all(|line| line.broadcast == "viewers/alice.echo"),

@@ -498,6 +498,23 @@ impl Publish {
 		Ok(self)
 	}
 
+	/// Solicit viewer feedback under `echo` in the catalog.
+	///
+	/// Call it before the importer declares its tracks, so the section rides the first catalog.
+	pub fn with_echo(mut self, echo: hang::catalog::Echo) -> anyhow::Result<Self> {
+		let catalog = match &mut self.source {
+			Source::Stream { catalog, .. } => catalog,
+			#[cfg(feature = "capture")]
+			Source::Capture { .. } => anyhow::bail!("--echo-path solicits feedback in a stdin import's one catalog"),
+		};
+		match catalog {
+			PublishCatalog::Media(catalog) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+			PublishCatalog::Ts(catalog) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+			PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
+		}
+		Ok(self)
+	}
+
 	/// Advertise the broadcast's path under `epoch`.
 	///
 	/// A capture announces now. A stdin import announces from [`run`](Self::run), once the input
@@ -1449,6 +1466,44 @@ pub(crate) mod tests {
 			before - skew <= wall && wall <= after + skew,
 			"the first frame is live on arrival"
 		);
+	}
+
+	/// A solicitation waits for the input's tracks rather than publishing a catalog, which
+	/// would announce a stdin import before it can serve anything.
+	#[tokio::test]
+	async fn echo_rides_the_first_catalog() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let echo = hang::catalog::Echo::new("viewers".to_string());
+		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default())
+			.unwrap()
+			.with_echo(echo.clone())
+			.unwrap();
+		let mut track = consumer.track(Catalog::DEFAULT_NAME).unwrap();
+		let mut published = || {
+			matches!(
+				track.poll_largest(&moq_net::kio::Waiter::noop()),
+				std::task::Poll::Ready(Some(_))
+			)
+		};
+		assert!(!published(), "a catalog went out before the input declared a track");
+
+		#[allow(irrefutable_let_patterns)]
+		let Source::Stream { decoder, .. } = &mut publish.source else {
+			panic!("expected a stream source");
+		};
+		decoder.decode_chunk(BBB).unwrap();
+		decoder.finish().unwrap();
+		assert!(published(), "the input's tracks release the catalog");
+		let catalog = Catalog::<()>::subscribe(&consumer)
+			.await
+			.unwrap()
+			.next()
+			.await
+			.unwrap()
+			.expect("a catalog");
+		assert_eq!(catalog.echo, Some(echo));
+		assert!(!catalog.video.renditions.is_empty(), "beside the tracks");
 	}
 
 	/// A ready TS packet is consumed in one read, without splitting it into blocking
