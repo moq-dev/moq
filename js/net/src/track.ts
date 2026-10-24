@@ -79,11 +79,11 @@ const HOLES: ReadonlySet<number> = new Set([
 // not a failed one. Mirrors Rust's cache-policy aborts in `group::Handle::commit_abort`.
 const EVICTED = new WeakSet<Error>();
 
-// Whether `group`'s copy failed: closed with an error other than its eviction from this cache.
-// Read from the copy, since a reader's own verdict (an eviction's gap, a stale group) says
-// nothing about whether the group arrived.
-function failed(group: GroupConsumer): boolean {
-	const abort = hooks.groupAbort(group);
+// Whether `successor`'s copy failed: closed with an error other than its eviction from this
+// cache. Read from the copy, since a reader's own verdict (an eviction's gap, a stale group)
+// says nothing about whether the group arrived.
+function failed(successor: Successor): boolean {
+	const abort = successor.fate();
 	return abort !== undefined && !EVICTED.has(abort);
 }
 
@@ -1793,7 +1793,12 @@ type Drift = {
 
 // The successor a handed-out group was last judged by, so the group stays judgeable once the
 // cache evicts both. Each reader keeps its own, so the memory is bounded by the groups held.
-type Superseded = { successor?: GroupConsumer };
+type Superseded = { successor?: Successor };
+
+// A successor, when it arrived, and its copy's fate (see `hooks.groupFate`). Not the consumer:
+// a handed-out successor's own record would retain the next one, chaining every later group to
+// the oldest held.
+type Successor = { sequence: number; arrived: Instant; fate: () => Error | undefined };
 
 /**
  * The read side of a live track subscription, mirroring the Rust `Subscriber`.
@@ -1927,17 +1932,17 @@ export class Subscriber {
 	// budget ago, so a peer whose timestamps stop advancing, an untimed track, or an empty
 	// successor that never presents cannot pin a superseded group. The successor is re-read,
 	// not latched, like the reach, except by a reader holding the group: it passes `held`, so
-	// the wall clock outlives the successor's eviction (see {@link #supersededBy}). The newest
+	// the wall clock outlives the successor's eviction (see {@link #supersededAt}). The newest
 	// group has no successor, so neither clock ever convicts it. `wake` arms a timer for the
 	// wall deadline, for a held read that waits on it.
 	//
 	// Judged by its successor alone, so the group need not be in this track: evicted, or held
 	// from another copy.
 	#staleAt(sequence: number, drift: Drift, wake = false, held?: Superseded): boolean {
-		const arrival = this.#supersededBy(this.#arrival(sequence, drift.end), drift, held);
-		if (!arrival) return false;
+		const arrived = this.#supersededAt(this.#arrival(sequence, drift.end), drift, held);
+		if (arrived === undefined) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
-		const deadline = hooks.groupArrived(arrival) + drift.budget * 1_000_000;
+		const deadline = arrived + drift.budget * 1_000_000;
 		if (now() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
 
@@ -1952,14 +1957,15 @@ export class Subscriber {
 		);
 	}
 
-	// The successor whose arrival starts the wall clock: the cached `arrival`, or the one `held`
+	// When the wall clock starts: the cached `arrival`'s arrival, or that of the one `held`
 	// recorded, unless a group landed between them since. The record outlives the successor's
 	// eviction: otherwise an evicted successor restarts the clock at whichever newer group the
 	// cache still holds, which a budget past the cache window never reaches. A recorded
 	// successor that failed hands the clock on, as a re-read does, whether or not the cache
 	// has evicted it yet.
-	#supersededBy(arrival: GroupConsumer | undefined, drift: Drift, held?: Superseded): GroupConsumer | undefined {
-		if (!held) return arrival;
+	#supersededAt(arrival: GroupConsumer | undefined, drift: Drift, held?: Superseded): Instant | undefined {
+		const arrived = arrival && hooks.groupArrived(arrival);
+		if (!held) return arrived;
 		const recorded = held.successor;
 		if (
 			recorded &&
@@ -1967,10 +1973,15 @@ export class Subscriber {
 			(drift.end === undefined || recorded.sequence < drift.end) &&
 			(!arrival || arrival.sequence > recorded.sequence)
 		) {
-			return recorded;
+			return recorded.arrived;
 		}
-		held.successor = arrival;
-		return arrival;
+		if (!arrival || arrived === undefined) {
+			held.successor = undefined;
+		} else if (recorded?.sequence !== arrival.sequence || recorded.arrived !== arrived || failed(recorded)) {
+			// Re-recorded only on a change, so judging the same successor again allocates nothing.
+			held.successor = { sequence: arrival.sequence, arrived, fate: hooks.groupFate(arrival) };
+		}
+		return arrived;
 	}
 
 	// Bump {@link #wall} at `at`, unless a wakeup is already armed sooner. Each held read
