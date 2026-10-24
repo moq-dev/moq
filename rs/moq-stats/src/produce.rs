@@ -882,7 +882,7 @@ impl<V: Serialize> TrackFamily<V> {
 struct GroupPublisher {
 	/// The group's key: the leading segments every member path and label shares.
 	key: PathOwned,
-	broadcast: broadcast::Producer,
+	broadcast: origin::Publication,
 	/// Holds the broadcast's request queue open, so a subscriber asking for a
 	/// tier track no drain has created yet parks (served next tick) instead of
 	/// being rejected `NotFound` on the spot.
@@ -1953,7 +1953,7 @@ mod tests {
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
 		announced: announce::Consumer,
-		source: broadcast::Producer,
+		source: origin::Publication,
 		consumer: broadcast::Consumer,
 		sub: Option<track::Subscriber>,
 	}

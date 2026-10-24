@@ -406,7 +406,16 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 			epoch: route.epoch.clone(),
 		})
 		.unwrap();
-	let current = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.route();
+	let current = broadcast
+		.state
+		.lock()
+		.unwrap()
+		.as_ref()
+		.unwrap()
+		.publication
+		.as_ref()
+		.unwrap()
+		.route();
 	assert_eq!(current.map(MoqRoute::from), Some(route));
 
 	broadcast.close().unwrap();
@@ -4265,7 +4274,8 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
-	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let epoch = moq_net::Epoch::mint().to_string();
+	let prepared = request.prepare(epoch.clone()).unwrap();
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only publish announces the answer, under its epoch and after admission.
@@ -4274,6 +4284,12 @@ async fn dynamic_broadcast_request() {
 		Err(MoqError::Closed)
 	));
 	prepared.publish().unwrap();
+	served
+		.announce(MoqAnnounceRoute {
+			epoch: Some(epoch),
+			cost: 7,
+		})
+		.unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
 	let broadcast = tokio::time::timeout(TIMEOUT, request_broadcast)
@@ -4301,6 +4317,33 @@ async fn dynamic_broadcast_request() {
 
 	track.finish().unwrap();
 	served.close().unwrap();
+}
+
+/// A finished prepared answer remains publishable through its retained tail.
+#[tokio::test(start_paused = true)]
+async fn a_finished_prepared_fill_can_still_be_published() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let dynamic = serve(&origin, "");
+	let consumer = origin.consume();
+	let pending = tokio::spawn(async move { consumer.request_broadcast("finished/answer".into()).await });
+	let request = dynamic.requested_broadcast().await.unwrap();
+	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let fill = prepared.broadcast();
+	let track = fill.publish_track("tail".into(), Some(timed_info())).unwrap();
+	track
+		.write_frame(MoqFrame {
+			payload: b"tail".to_vec(),
+			timestamp_us: Some(0),
+		})
+		.unwrap();
+	track.finish().unwrap();
+	drop(track);
+	let finished = fill.finish().unwrap();
+	prepared.publish().unwrap();
+	let resolved = pending.await.unwrap().unwrap();
+	let track = resolved.subscribe_track("tail".into(), None).await.unwrap();
+	assert_eq!(track.read_frame().await.unwrap().unwrap().payload, b"tail");
+	finished.close();
 }
 
 /// A prefix serves requests beneath it; cancelling the handle

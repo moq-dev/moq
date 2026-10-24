@@ -51,7 +51,7 @@ pub mod origin {
 	pub use super::follow::AnnouncedBroadcast;
 	pub use super::origin_impl::{
 		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, HopLimit, Preference, Prepared, Producer,
-		Request, Requesting, Route, Routing, Source,
+		Publication, Request, Requesting, Route, Routing, Source,
 	};
 }
 

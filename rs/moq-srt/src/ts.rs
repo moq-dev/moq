@@ -53,9 +53,8 @@ enum Importer {
 		import: Box<ts::Import<ts::Ext>>,
 		// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 		catalog: Box<moq_mux::catalog::Producer<ts::Ext>>,
-		// A clone of the importer's producer, so an end can finish or close the broadcast
-		// even though the importer owns it.
-		broadcast: moq_net::broadcast::Producer,
+		// Controls publication while the importer fills it, including finish or close at EOF.
+		broadcast: moq_net::origin::Publication,
 	},
 	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
 	/// declares its tracks.
@@ -83,10 +82,10 @@ impl Publisher {
 			Some(Program::All) => Importer::All(Box::new(ts::Programs::new(origin.clone(), path, config))),
 			Some(Program::One(_)) | None => {
 				let route = moq_net::origin::Route::default().with_epoch(epoch.insert(moq_net::Epoch::mint()).clone());
-				let mut broadcast = origin.publish(path, route)?;
+				let broadcast = origin.publish(path, route)?;
 				let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
-				let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
+				let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
+				let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
 				if let Some(Program::One(program)) = program {
 					import = import.with_program(program);
 				}

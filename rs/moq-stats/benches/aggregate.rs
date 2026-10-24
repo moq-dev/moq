@@ -30,7 +30,7 @@ const GRACE: Duration = Duration::from_secs(1);
 
 /// A hand-published node stats broadcast with a default-tier publisher traffic track.
 struct Node {
-	source: moq_net::broadcast::Producer,
+	source: moq_net::origin::Publication,
 	epoch: Epoch,
 	known: bool,
 	traffic: moq_json::snapshot::Producer<TrafficFrame>,

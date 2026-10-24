@@ -56,7 +56,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 /// Live state for one READY to PAUSED run.
 struct State {
 	session: Session,
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
 	/// Whether this publication's single EOS message already went out. One per publication, not per

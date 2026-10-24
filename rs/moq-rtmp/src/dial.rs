@@ -545,9 +545,8 @@ struct Publisher {
 	importer: FlvImport,
 	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 	catalog: moq_mux::catalog::Producer,
-	// A clone of the importer's producer, so an end can close the broadcast
-	// (prompt unannounce) even though the importer owns it.
-	broadcast: moq_net::broadcast::Producer,
+	// Controls publication so an end can retract before the importer's fill clone drops.
+	broadcast: moq_net::origin::Publication,
 	// This pull's publisher instance, so pulling again replaces it rather than resuming into it.
 	epoch: moq_net::Epoch,
 }
@@ -555,12 +554,12 @@ struct Publisher {
 impl Publisher {
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
 		let epoch = moq_net::Epoch::mint();
-		let mut broadcast = origin
+		let broadcast = origin
 			.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let handle = broadcast.clone();
-		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 
 		// Feed the FLV file header once up front; media tags follow per message.
 		importer.decode(&flv::file_header())?;
@@ -674,17 +673,19 @@ mod tests {
 
 	/// A broadcast with one AVC keyframe at `live/cam0` and its tracks finished, with the
 	/// importer that keeps them listed and the catalog to finish it with.
-	fn source(origin: &origin::Producer) -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer, FlvImport) {
+	fn source(origin: &origin::Producer) -> (moq_net::origin::Publication, moq_mux::catalog::Producer, FlvImport) {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
 		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00];
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
-		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		let broadcast = origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
@@ -774,10 +775,12 @@ mod tests {
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let server_origin = moq_tokio::origin::spawn();
-		let mut broadcast = server_origin.create_broadcast("live/cam0").unwrap();
+		let broadcast = server_origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();

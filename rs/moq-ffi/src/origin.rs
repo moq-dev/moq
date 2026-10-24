@@ -430,7 +430,7 @@ impl MoqOriginProducer {
 		let result = self.inner.create_broadcast(path.as_str());
 		self.inner.driver.check()?;
 		let broadcast = result?;
-		Ok(Arc::new(MoqBroadcastProducer::from_inner(
+		Ok(Arc::new(MoqBroadcastProducer::from_publication(
 			broadcast,
 			self.inner.driver.clone(),
 		)?))
@@ -599,9 +599,14 @@ impl MoqBroadcastPrepared {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
 		let prepared = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let mut state = self.broadcast.state.lock().unwrap();
 		let result = prepared.publish();
 		self.driver.check()?;
-		result?;
+		let publication = result?;
+		if let Some(state) = state.as_mut() {
+			state.publication = Some(publication);
+		}
+		// A finished fill has released this state; its Finish retains the publication.
 		Ok(self.broadcast.clone())
 	}
 }

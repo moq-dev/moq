@@ -105,7 +105,7 @@ impl Forwarder {
 }
 
 /// A relay with a plaintext TCP listener and an open auth policy, publishing `name`.
-async fn relay(name: &str) -> (Relay, SocketAddr, moq_net::broadcast::Producer) {
+async fn relay(name: &str) -> (Relay, SocketAddr, moq_net::origin::Publication) {
 	let mut config = moq_relay::Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.auth.public = vec![moq_auth::Pattern::all()];
@@ -118,7 +118,7 @@ async fn relay(name: &str) -> (Relay, SocketAddr, moq_net::broadcast::Producer) 
 }
 
 /// A peer relay publishing `name` and dialing B through `forwarder`.
-async fn peer(name: &str, forwarder: &Forwarder) -> (cluster::Cluster, moq_net::broadcast::Producer) {
+async fn peer(name: &str, forwarder: &Forwarder) -> (cluster::Cluster, moq_net::origin::Publication) {
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{}/", forwarder.port))];
 	let cluster = cluster::Cluster::new(cluster::Options::new(config))

@@ -2786,6 +2786,40 @@ fn dynamic_serves_a_request_under_a_prefix() {
 }
 
 #[test]
+fn a_finished_prepared_fill_can_still_be_published() {
+	let origin = id(moq_origin_create());
+	let cb = Callback::new();
+	let dynamic = id(unsafe { moq_origin_dynamic(origin, std::ptr::null(), 0, Some(channel_callback), cb.ptr) });
+	let path = b"finished/answer";
+	let pending = Callback::new();
+	id(unsafe {
+		moq_origin_request(
+			origin,
+			path.as_ptr().cast(),
+			path.len(),
+			Some(channel_callback),
+			pending.ptr,
+		)
+	});
+	let request = id(cb.recv());
+	let epoch = moq_net::Epoch::mint().to_string();
+	let mut fill = 0;
+	let prepared = id(unsafe { moq_broadcast_request_prepare(request, epoch.as_ptr().cast(), epoch.len(), &mut fill) });
+	let mut linger = 0;
+	let finished = id(unsafe { moq_publish_finish(fill, &mut linger) });
+	assert_eq!(moq_broadcast_prepared_publish(prepared), 0);
+	let current = id(pending.recv());
+	assert_eq!(pending.recv_terminal(), 0);
+	let late = id(request_once(origin, path));
+	assert_eq!(moq_consume_close(current), 0);
+	assert_eq!(moq_consume_close(late), 0);
+	assert_eq!(moq_publish_finish_close(finished), 0);
+	assert_eq!(moq_origin_dynamic_cancel(dynamic), 0);
+	assert_eq!(cb.recv_terminal(), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn dynamic_refuses_a_missing_callback() {
 	let origin = id(moq_origin_create());
 	let prefix = b"live";
@@ -3707,14 +3741,14 @@ fn consume_announced_close_cancels() {
 }
 
 /// Publish `path` on `origin` through `route`, which the C ABI cannot set.
-fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::broadcast::Producer {
+fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::origin::Publication {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
 	State::lock().origin.get(origin).unwrap().publish(path, route).unwrap()
 }
 
 /// Publish `path` on `origin` under a fresh epoch, as each run of a publisher does.
-fn publish_run(origin: u32, path: &str) -> moq_net::broadcast::Producer {
+fn publish_run(origin: u32, path: &str) -> moq_net::origin::Publication {
 	publish(
 		origin,
 		path,

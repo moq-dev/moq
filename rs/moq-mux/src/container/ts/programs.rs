@@ -37,8 +37,8 @@ pub struct Programs {
 struct Program {
 	/// The PAT's program number.
 	number: u16,
-	/// Keeps the origin-created broadcast alive; the importer's clone doesn't.
-	broadcast: moq_net::broadcast::Producer,
+	/// Owns announcement control while the importer holds a fill clone.
+	broadcast: moq_net::origin::Publication,
 	import: Import<Ext>,
 	catalog: catalog::Producer<Ext>,
 	/// The route and catalog track until the catalog first names a servable track: announced any
@@ -152,7 +152,7 @@ impl Programs {
 	fn start(&mut self, pat: &psi::Pat) -> anyhow::Result<()> {
 		for program in pat.program_numbers() {
 			let name = program_broadcast(self.name.as_str(), program);
-			let mut broadcast = self
+			let broadcast = self
 				.origin
 				.create_broadcast(&name)
 				.with_context(|| format!("failed to create broadcast {name}"))?;
@@ -162,8 +162,8 @@ impl Programs {
 				.config
 				.clone()
 				.with_catalog(catalog::hang::Catalog::<Ext>::default());
-			let catalog = catalog::Producer::new(&mut broadcast, config)?;
-			let import = Import::new(broadcast.clone(), catalog.reserve()).with_program(program);
+			let catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
+			let import = Import::new(broadcast.broadcast().clone(), catalog.reserve()).with_program(program);
 			// Each program is its own publisher instance for this run, so a restart
 			// replaces it rather than resuming into it.
 			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());

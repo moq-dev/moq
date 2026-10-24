@@ -108,7 +108,7 @@ pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoc
 	config.max_age = target.max_age;
 	config.bandwidth = target.bandwidth;
 	let client = moq_rtc::Client::new(config);
-	client.subscribe(url, producer).await?;
+	client.subscribe(url, producer.broadcast().clone()).await?;
 	Ok(())
 }
 

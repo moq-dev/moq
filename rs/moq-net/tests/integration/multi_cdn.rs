@@ -16,7 +16,7 @@ use crate::support;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Error, Hop, Timestamp, Version, announce, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -142,7 +142,7 @@ struct Topology {
 	cdn_b: origin::Producer,
 	subscriber: origin::Producer,
 	track: track::Producer,
-	_broadcast: broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_pushes: Vec<MockPair>,
 	s_to_a: Option<MockPair>,
 	s_to_b: MockPair,

@@ -68,7 +68,8 @@ Rejected in planning:
 
 - [MIGRATE matches release](/quest/m1/api-audit/migrate.md) - every break already on main has a correct entry measured against release, and entries for unreleased packages are gone
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [The origin announces](/quest/m1/api-audit/announce-owner.md) - a broadcast producer cannot announce; the origin hands out the announcement, so `Prepared` and standalone broadcasts lose methods that always fail
+- [JS origin publications](/quest/m1/api-audit/js-publication.md) - `@moq/net` origins hand out a `Publication` that announces, so `Prepared` and standalone broadcasts lose methods that always throw
+- [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
 - [Unpublish what nothing uses](/quest/m1/api-audit/unpublish.md) - packages, features, and listeners with no consumer stop shipping or stop being on by default
 - [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - Rust and JS model exports without a consumer go private, wrong ones are deleted, and JS names mirror Rust
@@ -90,7 +91,7 @@ Rejected in planning:
 
 ## Related
 
-- [Claim request type](/quest/m1/api-audit/claim-request-type.md) - removes `accept` from application requests; [the origin announces](/quest/m1/api-audit/announce-owner.md) narrows `Prepared` beside it
+- [Claim request type](/quest/m1/api-audit/claim-request-type.md) - removes `accept` from application requests; [JS origin publications](/quest/m1/api-audit/js-publication.md) narrows `Prepared` beside it
 - [Readers follow restarts](/quest/m1/sink-restart-follow.md) - moves readers onto the follow operation that [two broadcast resolutions](/quest/m1/api-audit/resolve.md) names
 - [API-diff check on release PRs](/quest/m1/api-diff.md) - the backstop that catches breaks this epic misses
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - the other release-readiness check

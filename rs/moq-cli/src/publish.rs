@@ -303,10 +303,10 @@ enum Source {
 /// a broadcast that the MoQ side announces.
 pub struct Publish {
 	source: Source,
-	// Keeps the origin-created broadcast alive for the publisher's lifetime;
-	// tracks and importers don't. `None` for `import ts --program all`, whose
-	// programs each keep and announce their own.
+	// Keeps the fill surface until finish. `None` for `import ts --program all`,
+	// whose programs each own their fill and publication control.
 	broadcast: Option<moq_net::broadcast::Producer>,
+	publication: Option<moq_net::origin::Publication>,
 	// A stdin import's route, announced once its catalog lists the tracks; see [`Self::announce`].
 	route: Option<moq_net::origin::Route>,
 	// The `--report` track, written beside the decode loop; see [`Self::with_report`].
@@ -319,13 +319,13 @@ pub struct Publish {
 /// relay queries a broadcast's tracks the moment it is announced, so a standby
 /// announced any sooner can receive requests for tracks it cannot serve yet.
 struct Pending {
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	catalog: moq_net::track::Consumer,
 	route: moq_net::origin::Route,
 }
 
 impl Pending {
-	fn new(broadcast: moq_net::broadcast::Producer, route: moq_net::origin::Route) -> anyhow::Result<Self> {
+	fn new(broadcast: moq_net::origin::Publication, route: moq_net::origin::Route) -> anyhow::Result<Self> {
 		let catalog = broadcast.consume().track(hang::Catalog::DEFAULT_NAME)?;
 		Ok(Self {
 			broadcast,
@@ -370,6 +370,7 @@ impl Publish {
 					catalog: PublishCatalog::Ts(catalog),
 				},
 				broadcast: Some(broadcast),
+				publication: None,
 				route: None,
 				report: None,
 			});
@@ -417,9 +418,21 @@ impl Publish {
 				catalog: PublishCatalog::Media(catalog),
 			},
 			broadcast: Some(broadcast),
+			publication: None,
 			route: None,
 			report: None,
 		})
+	}
+
+	/// Retain origin announcement control alongside the stdin decoder's fill handle.
+	pub(super) fn from_publication(
+		publication: moq_net::origin::Publication,
+		format: &PublishFormat,
+		config: moq_mux::catalog::Config,
+	) -> anyhow::Result<Self> {
+		let mut result = Self::new(publication.broadcast().clone(), format, config)?;
+		result.publication = Some(publication);
+		Ok(result)
 	}
 
 	/// Build a publisher decoding a multi-program TS from stdin into one broadcast per program,
@@ -435,6 +448,7 @@ impl Publish {
 				catalog: PublishCatalog::TsPrograms,
 			},
 			broadcast: None,
+			publication: None,
 			route: None,
 			report: None,
 		}
@@ -451,11 +465,12 @@ impl Publish {
 	/// left after audio's reservation rather than the whole uplink.
 	#[cfg(feature = "capture")]
 	pub fn capture(
-		mut broadcast: moq_net::broadcast::Producer,
+		publication: moq_net::origin::Publication,
 		args: &CaptureArgs,
 		bandwidth: moq_net::bandwidth::Allocator,
 		max_age: Option<std::time::Duration>,
 	) -> anyhow::Result<Self> {
+		let mut broadcast = publication.broadcast().clone();
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 
@@ -475,6 +490,7 @@ impl Publish {
 				audio,
 			},
 			broadcast: Some(broadcast),
+			publication: Some(publication),
 			route: None,
 			report: None,
 		})
@@ -504,7 +520,7 @@ impl Publish {
 	/// has declared its tracks: see [`Pending`].
 	pub fn announce(&mut self, epoch: moq_net::Epoch) -> anyhow::Result<()> {
 		let route = moq_net::origin::Route::default().with_epoch(epoch);
-		match (&self.source, &self.broadcast) {
+		match (&self.source, &self.publication) {
 			(_, None) => {}
 			(Source::Stream { .. }, Some(_)) => self.route = Some(route),
 			#[cfg(feature = "capture")]
@@ -517,7 +533,7 @@ impl Publish {
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.source {
 			Source::Stream { decoder, catalog } => {
-				let pending = match (&self.broadcast, self.route) {
+				let pending = match (&self.publication, self.route) {
 					(Some(broadcast), Some(route)) => Some(Pending::new(broadcast.clone(), route)?),
 					_ => None,
 				};
@@ -939,11 +955,11 @@ pub(crate) mod tests {
 	async fn manufacture_input() -> Vec<u8> {
 		// Create the broadcast on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("cli").unwrap();
+		let broadcast = origin.create_broadcast("cli").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		settle().await;
 		let config = moq_mux::catalog::Config::default().with_catalog(Catalog::<tscat::Ext>::default());
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 		// Reserve before the hand-written tracks below, so their catalog edits are withheld and
 		// the import still places the clock, keeping bbb's PTS those tracks are stamped against.
 		let reserved = catalog.reserve();
@@ -1002,7 +1018,7 @@ pub(crate) mod tests {
 		pes_producer.finish().unwrap();
 
 		// Add the real video/audio (moves `broadcast` into the importer).
-		let mut import = Import::new(broadcast, reserved);
+		let mut import = Import::new(broadcast.broadcast().clone(), reserved);
 		import.decode(&BytesMut::from(BBB)).unwrap();
 		import.finish().unwrap();
 
@@ -1055,7 +1071,8 @@ pub(crate) mod tests {
 		let broadcast = origin.create_broadcast("cli").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		settle().await;
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let mut publish =
+			Publish::from_publication(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
 		#[cfg_attr(
 			not(feature = "capture"),
 			expect(
@@ -1249,7 +1266,7 @@ pub(crate) mod tests {
 			let origin = moq_tokio::origin::spawn();
 			let broadcast = origin.create_broadcast("pt.hang").unwrap();
 			broadcast.announce(Default::default()).unwrap();
-			let mut publish = Publish::new(
+			let mut publish = Publish::from_publication(
 				broadcast,
 				&PublishFormat::TsPassthrough { pcr_pid: None },
 				Default::default(),
@@ -1643,7 +1660,7 @@ pub(crate) mod tests {
 			let consumer = origin.consume();
 			let mut announced = consumer.announced();
 			let broadcast = origin.create_broadcast("demo").unwrap();
-			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
+			let publish = Publish::from_publication(broadcast.clone(), &format, Default::default()).unwrap();
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(
@@ -1751,7 +1768,7 @@ pub(crate) mod tests {
 			let origin = moq_tokio::origin::spawn();
 			let mut announced = origin.consume().announced();
 			let broadcast = origin.create_broadcast("demo").unwrap();
-			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
+			let publish = Publish::from_publication(broadcast.clone(), &format, Default::default()).unwrap();
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(

@@ -988,7 +988,7 @@ async fn older_versions_have_no_grant(version: &'static str) {
 /// Connect on `version` and wait for a client announcement to reach the server. Each
 /// driver presents its setup token before it handles any other stream, so by then a
 /// version with AUTH has opened its Auth Stream on both sides.
-async fn connect_announced(version: &'static str) -> (Pair, moq_net::broadcast::Producer) {
+async fn connect_announced(version: &'static str) -> (Pair, moq_net::origin::Publication) {
 	let client_origin = produce_origin(2);
 	let broadcast = client_origin.create_broadcast("room/x").unwrap();
 	broadcast.announce(Default::default()).unwrap();

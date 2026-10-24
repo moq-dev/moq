@@ -1468,7 +1468,7 @@ async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::R
 }
 
 /// An active publish: the moq-mux FLV importer, which owns the origin-created
-/// [`BroadcastProducer`](moq_net::broadcast::Producer) it publishes into.
+/// [`BroadcastProducer`](moq_net::origin::Publication) it publishes into.
 /// [`Self::close`] or dropping it closes the broadcast and unannounces the path;
 /// [`Self::finish`] hands back the finished broadcast to linger on.
 struct Publisher {
@@ -1476,9 +1476,8 @@ struct Publisher {
 	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 	catalog: moq_mux::catalog::Producer,
 	metadata: crate::metadata::Dropped,
-	// A clone of the importer's producer, so an end can close the broadcast
-	// (prompt unannounce) even though the importer owns it.
-	broadcast: moq_net::broadcast::Producer,
+	// Controls publication so an end can retract before the importer's fill clone drops.
+	broadcast: moq_net::origin::Publication,
 	// This connection's publisher instance, so an encoder reconnecting under the
 	// same key replaces this broadcast at once instead of resuming into it.
 	epoch: moq_net::Epoch,
@@ -1489,10 +1488,10 @@ impl Publisher {
 	/// the FLV file header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
 		let epoch = moq_net::Epoch::mint();
-		let mut broadcast = origin.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let handle = broadcast.clone();
-		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 
 		// Feed the FLV file header once up front; media tags follow per message.
 		importer.decode(&flv::file_header())?;
@@ -2061,10 +2060,12 @@ mod tests {
 
 		// Publish the broadcast at `live/cam0` by feeding synthetic FLV to the importer.
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		let broadcast = origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
@@ -2109,10 +2110,12 @@ mod tests {
 		const VP9_KEYFRAME_320X240: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
 
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		let broadcast = origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 
 		// Enhanced video CodedFrames keyframe: ex-header, keyframe, packet type 1.
@@ -2386,10 +2389,12 @@ mod tests {
 		let frames = multitrack_body(CODED_FRAMES, &[(0, nalu(0x88)), (1, nalu(0x99))]);
 
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		let broadcast = origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &seq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &frames)).unwrap();

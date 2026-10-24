@@ -32,8 +32,9 @@ Decided with the maintainer on 2026-10-23; see the epic for why.
 - Update `doc/concept` with one paragraph on the model (online = announced,
   end of content = track FIN, retention = app policy), plus `doc/lib/*`, and
   the Impact bullet says how to migrate every affected package.
-- Coordinate with [publication owner](/quest/m1/api-audit/announce-owner.md),
-  which touches the same handles.
+- Coordinate with [JS origin publications](/quest/m1/api-audit/js-publication.md)
+  and [binding publications](/quest/m1/api-audit/binding-publication.md),
+  which touch the same handles.
 
 Public API: breaking in moq-net, `@moq/net`, moq-ffi, moq-c, and every
 binding. Wire: none.
