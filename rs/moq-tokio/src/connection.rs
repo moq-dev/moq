@@ -2987,7 +2987,7 @@ mod tests {
 			qmux::Session::accept(stream(server), config())
 		)
 		.unwrap();
-		let now = moq_net::time::now();
+		let now = moq_net::time::Instant::now();
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions(versions.clone())
