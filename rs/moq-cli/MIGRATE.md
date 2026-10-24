@@ -8,21 +8,10 @@ How to update your invocation and config for each breaking change, newest first.
 
 Enable `nvidia` instead; the old names were aliases for it.
 
-### Connection retry flags have the `connect-` prefix
-
-Rename `--backoff-*` to `--connect-backoff-*` and `--goaway-*` to `--connect-goaway-*`.
-Rename their `MOQ_BACKOFF_*` and `MOQ_GOAWAY_*` variables to `MOQ_CONNECT_BACKOFF_*` and `MOQ_CONNECT_GOAWAY_*`.
-Old spellings stop startup and name their replacements; TOML stays `[connect.backoff]` and `[connect.goaway]`.
-
-### HLS HTTP TLS has its own environment
-
-For `moq export hls`, move `MOQ_LISTEN_TLS_CERT`, `MOQ_LISTEN_TLS_KEY`, `MOQ_LISTEN_TLS_GENERATE`, and `MOQ_LISTEN_TLS_ROOT` to `MOQ_HLS_TLS_CERT`, `MOQ_HLS_TLS_KEY`, `MOQ_HLS_TLS_GENERATE`, and `MOQ_HLS_TLS_ROOT`.
-The old variables now configure only the MoQ listener. HLS subcommand `--listen-tls-*` flags keep their spelling.
-
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 
 Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.
-Add `--cmaf` to keep publishing CMAF.
+Add `--passthrough` to keep publishing CMAF.
 
 ### `export archive` records a prefix (#6160)
 
@@ -69,12 +58,11 @@ The output trails a TS source by the delay instead of twice it.
 With a multiplex rate, video whose HRD declares a longer buffer delay than `--delay` stops the export, naming the delay it needs.
 Double an explicit `--delay` to keep the same trail, such as `500ms` to `1s`.
 
-### Export retention flags name the subscriber policy
+### `--max-age` on fMP4, H.264, H.265, and RTMP exports is `--max-delay`
 
 `moq export fmp4`, `h264`, `h265`, and `rtmp` refuse `--max-age`.
 `moq import --max-age` is unchanged: it is the publisher's retention.
-Rename `--max-age` to `--max-delay` on fMP4, H.264 and H.265 exports, or
-`--delay` on RTMP exports, matching paced FLV output.
+Rename `--max-age` to `--max-delay` on those exports.
 
 ### `moq export ts`, `flv`, and `mkv` take `--delay` (#4645)
 

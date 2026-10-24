@@ -4,12 +4,6 @@ How to update your pipelines for each breaking change, newest first.
 
 ## Unreleased
 
-### Both elements use `connect-version`
-
-Replace `moqsrc versions="moq-lite-06"` with `moqsrc connect-version="moq-lite-06"`.
-`moqsink` accepts the same comma-separated property, and `moqsrc` now also accepts
-`quic-idle-timeout` and `quic-keep-alive` in milliseconds, matching `moqsink`.
-
 ### `moqsrc` audio caps are the standard ones
 
 `moqsrc` audio pads now carry `rate` and `channels` as `int`, and Opus pads the mapping fields (`channel-mapping-family`, `stream-count`, `coupled-count`, plus `channel-mapping` beyond stereo) with the OpusHead and an empty OpusTags as `streamheader`, so `decodebin` and `opusdec` accept them and `opusdec` applies the output gain.

@@ -1185,7 +1185,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	relay.abort();
 }
 
-/// A relay dialing in with a certificate, admitted by `moq auth serve --mtls-peer`,
+/// A relay dialing in with a certificate, admitted by `moq auth serve --mtls-link peer`,
 /// is a cluster peer: what it announces entered the cluster elsewhere.
 #[tokio::test]
 async fn an_mtls_peer_is_a_cluster_peer() {
@@ -1196,14 +1196,14 @@ async fn an_mtls_peer_is_a_cluster_peer() {
 	);
 }
 
-/// Without `--mtls-peer`, a certificate identifies a client ingesting here.
+/// Without `--mtls-link peer`, a certificate identifies a client ingesting here.
 #[tokio::test]
 async fn an_mtls_client_ingests_here() {
 	assert_eq!(mtls_route_source(false).await, moq_net::origin::Source::Local);
 }
 
 /// The source the relay records for a broadcast announced over a certificate
-/// session, admitted by `moq auth serve` with `mtls_peer` set as given.
+/// session, admitted by `moq auth serve` with the peer link role when requested.
 async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -1211,7 +1211,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 
 	let mut policy = moq_auth::serve::Policy::default();
 	policy.mtls = moq_auth::Permissions::new(all(), all());
-	policy.mtls_peer = mtls_peer;
+	policy.mtls_link = mtls_peer.then_some(moq_auth::serve::Link::Peer);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 	let server = moq_auth::serve::Server::new(policy).unwrap();
@@ -1371,7 +1371,7 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	config.protocol = Some(crate::memory::newest().alpn().to_string());
 	let (client, server) = moq_net::transport::memory::pair(config);
 
-	let now = moq_net::time::now();
+	let now = moq_net::time::Instant::now();
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
 			.connect(now, client)

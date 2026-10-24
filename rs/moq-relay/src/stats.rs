@@ -48,13 +48,13 @@ pub struct Config {
 	/// How often a snapshot is published, e.g. "1s" or "500ms". Defaults to 1
 	/// second.
 	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_duration")]
+	#[serde(with = "humantime_serde")]
 	pub interval: Duration,
 
 	/// How often stats snapshots are published. Defaults to 1s.
 	#[usage(long = "stats-interval", env = "MOQ_STATS_INTERVAL", setting = "stats.interval")]
 	#[serde(default, rename = "__cli_interval", skip_serializing_if = "Option::is_none")]
-	pub(crate) interval_arg: Option<crate::duration::Duration>,
+	pub(crate) interval_arg: Option<moq_tokio::cli::Duration>,
 
 	/// Node identifier appended to the advertised stats path to disambiguate
 	/// broadcasts when multiple relays share a cluster origin. Without this,
@@ -88,13 +88,13 @@ pub struct Config {
 	/// returns after it announces under a new epoch. Only applies at `depth` 1
 	/// or more. See [`moq_stats::produce::Config::linger`].
 	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_option")]
+	#[serde(with = "humantime_serde")]
 	pub linger: Option<Duration>,
 
 	/// How long an empty group's stats broadcast stays announced. Defaults to 5m.
 	#[usage(long = "stats-linger", env = "MOQ_STATS_LINGER", setting = "stats.linger")]
 	#[serde(default, rename = "__cli_linger", skip_serializing_if = "Option::is_none")]
-	pub(crate) linger_arg: Option<crate::duration::Duration>,
+	pub(crate) linger_arg: Option<moq_tokio::cli::Duration>,
 }
 
 impl Default for Config {
@@ -115,14 +115,12 @@ impl Default for Config {
 impl Config {
 	/// The interval after command-line overrides.
 	pub(crate) fn interval(&self) -> Duration {
-		self.interval_arg
-			.map(crate::duration::Duration::into_std)
-			.unwrap_or(self.interval)
+		self.interval_arg.map(Into::into).unwrap_or(self.interval)
 	}
 
 	/// The linger after command-line overrides; `None` keeps the producer's default.
 	pub(crate) fn linger(&self) -> Option<Duration> {
-		self.linger_arg.map(crate::duration::Duration::into_std).or(self.linger)
+		self.linger_arg.map(Into::into).or(self.linger)
 	}
 
 	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.

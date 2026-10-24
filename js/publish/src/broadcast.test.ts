@@ -392,7 +392,7 @@ test("changing maxAge publishes a new network broadcast", async () => {
 
 test("keeps the current catalog snapshot for a reconnecting viewer", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 
 	try {
 		const broadcast = new Broadcast({
@@ -419,7 +419,7 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 
 		broadcast.close();
 	} finally {
-		restore();
+		installed.close();
 	}
 });
 

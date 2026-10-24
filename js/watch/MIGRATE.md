@@ -4,6 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Player inputs and `<moq-watch>` controls nest by media kind
+
+Move each per-media input under `video`, `audio`, or `text`, on `new Player({...})`, on `player.in`, and on the element's `controls`:
+
+| Before | After |
+| --- | --- |
+| `target` | `video.target` |
+| `canvas` | `video.canvas` (Player only) |
+| `visible`, `backend` | `video.visible`, `video.backend` |
+| `volume`, `muted` | `audio.volume`, `audio.muted` |
+| `captions` | `text.target` |
+| `container` | `text.container` (Player only) |
+
+For example, `new Player({ canvas, muted })` becomes `new Player({ video: { canvas }, audio: { muted } })`, and `el.controls.volume` becomes `el.controls.audio.volume`.
+`paused`, `delay`, and `buffer` stay flat, as do the element's attributes and their properties (`el.muted`, `el.captions`, ...).
+Pin an audio rendition the new way, with `controls.audio.target` or `new Player({ audio: { target: { name } } })`.
+
 ### `Sync` drops its duplicate and decoder-only surface
 
 Read `Sync.out.delay` instead of `Sync.out.jitter`, and the element's `sync.out.delay` instead of its `jitter` getter; they always held the same value.

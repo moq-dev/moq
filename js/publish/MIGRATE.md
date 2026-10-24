@@ -19,6 +19,11 @@ Read it with `get` or `peek` as before; the broadcast alone replaces the produce
 `Support.Audio.aac` is `"full" | "none"` like `opus`, instead of a boolean.
 Replace `aac === true` with `aac === "full"`.
 
+### `BroadcastInput` has a `linger` input
+
+Code that builds a complete `BroadcastInput` adds `linger`, such as `new Signal(false)` to keep turning `announce` off unannouncing at once.
+`new Broadcast({ ... })` defaults it to `false`, so constructor calls need no change.
+
 ### `Encoder.cut()` is not rate limited, and video tracks advertise refresh (#6048)
 
 `Encoder.cut()` no longer spaces keyframes 500 ms apart: every call forces one on the next frame, so frequent calls produce all-keyframe video.

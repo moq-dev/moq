@@ -21,12 +21,6 @@ Have the auth server mark cluster peers as `peer` (`moq auth serve --mtls-peer`)
 Write `interval = 5` as `interval = "5s"`.
 In Rust, `stats::Config::interval` is a `Duration`, and `stats::Config::build` returns a `Result`.
 
-### Connection retry flags have the `connect-` prefix
-
-Rename `--backoff-*` to `--connect-backoff-*` and `--goaway-*` to `--connect-goaway-*`.
-Rename `MOQ_BACKOFF_*` and `MOQ_GOAWAY_*` to `MOQ_CONNECT_BACKOFF_*` and `MOQ_CONNECT_GOAWAY_*`.
-Old spellings are hidden and stop startup with their replacements; `[connect.backoff]` and `[connect.goaway]` are unchanged.
-
 ### `receive_window` has a floor (#5878)
 
 The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.

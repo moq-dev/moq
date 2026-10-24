@@ -42,7 +42,7 @@ pub struct ExportArgs {
 	/// Keep it within the relay's group-cache retention, since segments are fetched from
 	/// there on request.
 	#[usage(long, default = "16s")]
-	pub window: crate::duration::Duration,
+	pub window: moq_tokio::cli::Duration,
 
 	/// Browser CORS policy for the HLS listener.
 	#[usage(flatten)]
@@ -255,7 +255,7 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 
 	let mut config = moq_hls::export::Config::default();
-	config.window = args.window.into_std();
+	config.window = args.window.into();
 	let server = moq_hls::Server::new(scoped, config);
 	let app = server.router().layer(args.cors.layer([Method::GET])?);
 

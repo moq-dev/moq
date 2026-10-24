@@ -40,15 +40,15 @@ pub struct ExportArgs {
 	/// FLV frame release delay and stalled-group budget. Late video resumes at
 	/// its next keyframe; zero releases available frames without deadline drops.
 	#[usage(long, default = "500ms")]
-	pub delay: crate::duration::Duration,
+	pub delay: moq_tokio::cli::Duration,
 
 	/// The released spelling of `--delay`.
 	#[usage(long = "max-age", hide = true)]
-	max_age: Option<crate::duration::Duration>,
+	max_age: Option<moq_tokio::cli::Duration>,
 
 	/// The released spelling of `--delay`, before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<moq_tokio::cli::Duration>,
 }
 
 impl ExportArgs {

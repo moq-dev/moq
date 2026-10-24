@@ -9,6 +9,7 @@ export type DecoderConfig = Pick<
 	"codec" | "container" | "description" | "displayAspectWidth" | "displayAspectHeight"
 > & {
 	optimizeForLatency: boolean;
+	interlaced: boolean;
 };
 
 /** The routing and decoder state whose changes require a new playback pipeline. */
@@ -32,6 +33,7 @@ export function playbackIdentity(config: Catalog.VideoConfig): PlaybackIdentity 
 			displayAspectWidth: config.displayAspectWidth,
 			displayAspectHeight: config.displayAspectHeight,
 			optimizeForLatency: config.optimizeForLatency ?? true,
+			interlaced: config.interlaced ?? false,
 		},
 	};
 }

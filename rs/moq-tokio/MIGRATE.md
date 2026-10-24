@@ -4,12 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Connection retry flags have the `connect-` prefix
-
-Rename `--backoff-*` to `--connect-backoff-*` and `--goaway-*` to `--connect-goaway-*`.
-Rename `MOQ_BACKOFF_*` and `MOQ_GOAWAY_*` to `MOQ_CONNECT_BACKOFF_*` and `MOQ_CONNECT_GOAWAY_*`.
-Old spellings are hidden and stop startup with their replacements; `[connect.backoff]` and `[connect.goaway]` are unchanged.
-
 ### The connection receive window is 128 MiB, and has a floor (#5878)
 
 `quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.

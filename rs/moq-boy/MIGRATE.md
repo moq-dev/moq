@@ -4,12 +4,6 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
-### Connection retry flags have the `connect-` prefix
-
-Rename `--backoff-*` to `--connect-backoff-*` and `--goaway-*` to `--connect-goaway-*`.
-Rename `MOQ_BACKOFF_*` and `MOQ_GOAWAY_*` to `MOQ_CONNECT_BACKOFF_*` and `MOQ_CONNECT_GOAWAY_*`.
-Old spellings stop startup and name their replacements.
-
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

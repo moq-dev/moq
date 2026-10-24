@@ -6,7 +6,7 @@
 //! `moq <MoQ side> fetch <track>` to read one group.
 //!
 //! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
-//!   and `--cluster-connect` / `--cluster-connect-api`; all optional, at least
+//!   and `--cluster-connect` / `--cluster-api-url`; all optional, at least
 //!   one) attaches the shared Origin to the MoQ network, and comes before the
 //!   first stage. They compose: dial a relay, accept incoming sessions, mesh
 //!   with the LAN, and join a cluster all at once.
@@ -480,7 +480,7 @@ pub struct MoqSide {
 
 	/// Drain accepted sessions for up to this long after SIGINT or SIGTERM; defaults to 10s.
 	#[usage(long, env = "MOQ_DRAIN_TIMEOUT", help_heading = "MoQ")]
-	pub drain_timeout: Option<crate::duration::Duration>,
+	pub drain_timeout: Option<moq_tokio::cli::Duration>,
 }
 
 impl MoqSide {
@@ -537,9 +537,9 @@ impl MoqSide {
 	}
 
 	/// Whether a WAN cluster dial is configured (`--cluster-connect` or
-	/// `--cluster-connect-api`).
+	/// `--cluster-api-url`).
 	fn cluster_dials(&self) -> bool {
-		!self.cluster.connect.is_empty() || self.cluster.connect_api.is_some()
+		!self.cluster.connect.is_empty() || self.cluster.api.url.is_some()
 	}
 
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
@@ -557,7 +557,7 @@ impl MoqSide {
 			!(self.client.url.is_some()
 				&& self.cluster_dials()
 				&& self.client.bind.is_some_and(|bind| bind.port() != 0)),
-			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-connect-api, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
+			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-api-url, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
 		);
 		#[cfg(feature = "cluster-lan")]
 		{
@@ -748,11 +748,11 @@ pub struct Import {
 	/// which is retained unconditionally. A stdin import also stays up this long after EOF, so
 	/// a subscriber still catching up can drain the finished broadcast.
 	#[usage(long)]
-	pub max_age: Option<crate::duration::Duration>,
+	pub max_age: Option<moq_tokio::cli::Duration>,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<moq_tokio::cli::Duration>,
 
 	/// Name a media report track in the catalog's `stats` section and fill it with what each
 	/// track has written, about once a second while subscribed. The stdin imports only.
@@ -1052,8 +1052,8 @@ impl ExportSink {
 	pub fn stdout(&self) -> Option<Stdout> {
 		let container = |format, container: &Container| Stdout {
 			format,
-			max_delay: container.max_delay.into_std(),
-			linger: container.linger.into_std(),
+			max_delay: container.max_delay.into(),
+			linger: container.linger.into(),
 			stitch: false,
 			fragment_duration: None,
 			mux_rate: None,
@@ -1061,8 +1061,8 @@ impl ExportSink {
 		};
 		let buffered = |format, args: &Buffered| Stdout {
 			format,
-			max_delay: args.delay.into_std(),
-			linger: args.linger.into_std(),
+			max_delay: args.delay.into(),
+			linger: args.linger.into(),
 			stitch: false,
 			fragment_duration: None,
 			mux_rate: None,
@@ -1070,17 +1070,17 @@ impl ExportSink {
 		};
 		Some(match self {
 			Self::Fmp4(args) => Stdout {
-				fragment_duration: args.fragment_duration.map(crate::duration::Duration::into_std),
+				fragment_duration: args.fragment_duration.map(Into::into),
 				..container(SubscribeFormat::Fmp4, &args.container)
 			},
 			Self::Mkv(args) => Stdout {
-				fragment_duration: args.fragment_duration.map(crate::duration::Duration::into_std),
+				fragment_duration: args.fragment_duration.map(Into::into),
 				..buffered(SubscribeFormat::Mkv, &args.container)
 			},
 			Self::Ts(args) => Stdout {
 				format: SubscribeFormat::Ts,
-				max_delay: args.delay.into_std(),
-				linger: args.linger.into_std(),
+				max_delay: args.delay.into(),
+				linger: args.linger.into(),
 				stitch: args.stitch,
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
@@ -1115,20 +1115,20 @@ pub struct Stdout {
 pub struct Container {
 	/// How far a group may fall behind the live edge before it is skipped (e.g. `500ms`, `1s`).
 	#[usage(long, default = "500ms")]
-	pub max_delay: crate::duration::Duration,
+	pub max_delay: moq_tokio::cli::Duration,
 
 	/// Accepted only to refuse a nonzero value with a pointer to `ts`, the one format
 	/// that can mark where a returned broadcast restarts.
 	#[usage(long, default = "0s", hide = true)]
-	pub linger: crate::duration::Duration,
+	pub linger: moq_tokio::cli::Duration,
 
 	/// The released spelling of [`Self::max_delay`].
 	#[usage(long = "max-age", hide = true)]
-	max_age: Option<crate::duration::Duration>,
+	max_age: Option<moq_tokio::cli::Duration>,
 
 	/// The released spelling of [`Self::max_delay`], before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<moq_tokio::cli::Duration>,
 }
 
 impl Container {
@@ -1152,16 +1152,16 @@ pub struct Buffered {
 	/// The same delay bounds source staleness. Zero writes each frame as soon as it is read and
 	/// drops none as late, but still skips a stalled group once a newer one is ready.
 	#[usage(long, default = "500ms")]
-	pub delay: crate::duration::Duration,
+	pub delay: moq_tokio::cli::Duration,
 	/// Accepted only to refuse a nonzero value: only TS can mark a broadcast restart.
 	#[usage(long, default = "0s", hide = true)]
-	pub linger: crate::duration::Duration,
+	pub linger: moq_tokio::cli::Duration,
 	/// An older spelling of the staleness setting.
 	#[usage(long = "max-age", hide = true)]
-	max_age: Option<crate::duration::Duration>,
+	max_age: Option<moq_tokio::cli::Duration>,
 	/// An older spelling of the staleness setting.
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<moq_tokio::cli::Duration>,
 }
 
 impl Buffered {
@@ -1187,7 +1187,7 @@ pub struct BufferedFragmented {
 	pub container: Buffered,
 	/// Cap the output cluster duration (e.g. `2s`); defaults to video GOPs.
 	#[usage(long)]
-	pub fragment_duration: Option<crate::duration::Duration>,
+	pub fragment_duration: Option<moq_tokio::cli::Duration>,
 }
 
 /// The MPEG-TS stdout container.
@@ -1199,14 +1199,14 @@ pub struct Transport {
 	/// later than this is dropped, and a stalled group is skipped once it falls half this
 	/// behind the newest content.
 	#[usage(long, default = "1s")]
-	pub delay: crate::duration::Duration,
+	pub delay: moq_tokio::cli::Duration,
 
 	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
 	/// then carry on with the same stream. A replacement exits 1 unless `--stitch` is passed.
 	/// An export that fails while the broadcast is still up exits without waiting.
 	/// Also bounds a stitched replacement through its first catalog; zero requires it already available.
 	#[usage(long, default = "0s")]
-	pub linger: crate::duration::Duration,
+	pub linger: moq_tokio::cli::Duration,
 
 	/// Follow another publisher instance that replaces the broadcast, as a full program switch:
 	/// a new PMT from its catalog, flagged as a break on every PID.
@@ -1227,11 +1227,11 @@ pub struct Transport {
 
 	/// The released spelling of [`Self::delay`].
 	#[usage(long = "max-age", hide = true)]
-	max_age: Option<crate::duration::Duration>,
+	max_age: Option<moq_tokio::cli::Duration>,
 
 	/// The released spelling of [`Self::delay`], before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<moq_tokio::cli::Duration>,
 }
 
 impl Transport {
@@ -1258,7 +1258,7 @@ pub struct Fragmented {
 	/// Cap the output fragment/cluster duration (e.g. `2s`).
 	/// Defaults to publisher groups.
 	#[usage(long)]
-	pub fragment_duration: Option<crate::duration::Duration>,
+	pub fragment_duration: Option<moq_tokio::cli::Duration>,
 }
 
 #[cfg(test)]
@@ -1760,7 +1760,7 @@ mod tests {
 		let ExportSink::Srt(args) = &export.sink else {
 			panic!("an export srt stage");
 		};
-		assert_eq!(args.linger.into_std(), Duration::from_secs(10));
+		assert_eq!(Duration::from(args.linger), Duration::from_secs(10));
 		assert!(args.stitch);
 		assert!(
 			Invocation::try_parse_from(["moq", "import", "srt", "--listen", "[::]:9000", "--stitch"]).is_err(),
@@ -1939,7 +1939,10 @@ mod tests {
 		.unwrap();
 		cli.validate().unwrap();
 		cli.unserved().unwrap();
-		assert_eq!(cli.moq.drain_timeout.unwrap().into_std(), Duration::from_millis(500));
+		assert_eq!(
+			Duration::from(cli.moq.drain_timeout.unwrap()),
+			Duration::from_millis(500)
+		);
 		let cli = Invocation::try_parse_from([
 			"moq",
 			"--connect",
@@ -2336,7 +2339,7 @@ mod tests {
 		let ExportSink::Rtmp(args) = &export_rtmp.sink else {
 			panic!("expected rtmp")
 		};
-		assert_eq!(args.delay.into_std(), Duration::from_secs(2));
+		assert_eq!(Duration::from(args.delay), Duration::from_secs(2));
 		let Err(err) = rtmp("--max-age") else {
 			panic!("rtmp: --max-age must not start a run");
 		};
@@ -2403,11 +2406,7 @@ mod tests {
 			("--listen-tcp-bind", "127.0.0.1:0", "--listen-tcp-bind"),
 			("--broadcast", "room", "--broadcast"),
 			("--cluster-connect", "https://relay.example", "--cluster-connect"),
-			(
-				"--cluster-connect-api",
-				"https://api.example/peers",
-				"--cluster-connect-api",
-			),
+			("--cluster-api-url", "https://api.example/peers", "--cluster-api-url"),
 			("--cluster-node", "https://self.example", "--cluster-node"),
 			("--cluster-token", "cluster.jwt", "--cluster-token"),
 			("--cluster-id", "1", "--cluster-id"),
@@ -2557,7 +2556,7 @@ mod tests {
 		};
 		for peer in [
 			["--cluster-connect", "https://relay.example"],
-			["--cluster-connect-api", "https://api.example/peers"],
+			["--cluster-api-url", "https://api.example/peers"],
 		] {
 			let both = [
 				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:4443"][..],
@@ -2591,7 +2590,7 @@ mod tests {
 			.expect("--connect alone owns a fixed bind");
 	}
 
-	/// `--cluster-connect` / `--cluster-connect-api` attach the process as a
+	/// `--cluster-connect` / `--cluster-api-url` attach the process as a
 	/// cluster peer, so they are a MoQ side on their own. `--cluster-node` is
 	/// identity, not an attachment.
 	#[test]
@@ -2600,14 +2599,8 @@ mod tests {
 			.expect("parse");
 		assert!(cli.moq.validate().is_ok(), "a cluster dial is a MoQ side on its own");
 
-		let cli = Invocation::try_parse_from([
-			"moq",
-			"--cluster-connect-api",
-			"https://api.example/peers",
-			"import",
-			"ts",
-		])
-		.expect("parse");
+		let cli = Invocation::try_parse_from(["moq", "--cluster-api-url", "https://api.example/peers", "import", "ts"])
+			.expect("parse");
 		assert!(cli.moq.validate().is_ok(), "a cluster API is a MoQ side on its own");
 
 		let cli = Invocation::try_parse_from(["moq", "--cluster-node", "https://self.example", "import", "ts"])

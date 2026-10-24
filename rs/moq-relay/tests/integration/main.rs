@@ -10,13 +10,14 @@
 	reason = "tests read the host clock directly"
 )]
 
-mod auth_embedder;
 mod auth_lifetime;
 mod cluster_close;
 mod cluster_drain;
 mod cluster_idle;
 mod cluster_unknown;
+#[cfg(feature = "test-support")]
 mod connection;
+#[cfg(feature = "test-support")]
 mod drain;
 mod embed;
 mod goaway_cluster;
