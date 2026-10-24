@@ -13742,7 +13742,7 @@ mod serve_tests {
 	async fn a_cancelled_subscribe_keeps_its_stream_until_the_application_answers() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Handle::new(false);
-		let mut requests = auth.requests().unwrap();
+		let mut requests = auth.requests();
 		let h = serve_with_auth(VERSION, auth, Vec::new());
 		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), VERSION)
 			.await
