@@ -591,6 +591,8 @@ pub struct moq_subscription {
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
 	/// It caps every range.
 	pub max_delay_us: u64,
+	/// Whether `max_delay_us` is set. When false, moq-net's default applies: zero.
+	pub max_delay_present: bool,
 
 	/// The spans of the track to deliver, or NULL for everything `max_delay_us` still
 	/// considers fresh. A non-NULL pointer with `ranges_len` 0 asks for nothing.
@@ -687,8 +689,10 @@ pub(crate) unsafe fn parse_subscription(
 	};
 	let mut out = moq_net::track::Subscription::default()
 		.with_priority(subscription.priority)
-		.with_max_delay(std::time::Duration::from_micros(subscription.max_delay_us))
 		.with_order(order);
+	if subscription.max_delay_present {
+		out = out.with_max_delay(std::time::Duration::from_micros(subscription.max_delay_us));
+	}
 	if !subscription.ranges.is_null() {
 		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
 		let ranges = ranges
@@ -2512,23 +2516,7 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 	})
 }
 
-/// Record the transport handoff of one locally encoded frame for catalog jitter.
-///
-/// `timestamp_us` is the frame's presentation time on the broadcast media clock. Call this
-/// after [moq_publish_media_frame] only for local encoder output; file, pipe, and network imports
-/// must remain clock-free. The monotonic handoff time is sampled inside this process.
-///
-/// Returns zero on success, or a negative code for an invalid handle or timestamp.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_media_flush(media: u32, timestamp_us: u64) -> i32 {
-	ffi::enter(move || {
-		let media = ffi::parse_id(media)?;
-		let timestamp = hang::container::Timestamp::from_micros(timestamp_us)?;
-		State::lock().publish.media_flush(media, timestamp)
-	})
-}
-
-/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
+/// Mark a timeline break without lowering the advertised jitter or delay.
 ///
 /// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock,
 /// and video must resume on a keyframe.

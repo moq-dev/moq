@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -54,6 +54,35 @@ pub struct Limits {
 	pub remote: Option<usize>,
 }
 
+/// A verified certificate's cluster-link role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+	/// A cluster peer that may exchange routes in either direction.
+	Peer,
+	/// A peer that is never offered routes learned from another upstream.
+	Upstream,
+}
+
+impl std::str::FromStr for Link {
+	type Err = &'static str;
+	fn from_str(value: &str) -> Result<Self, Self::Err> {
+		match value {
+			"peer" => Ok(Self::Peer),
+			"upstream" => Ok(Self::Upstream),
+			_ => Err("expected peer or upstream"),
+		}
+	}
+}
+
+impl std::fmt::Display for Link {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(match self {
+			Self::Peer => "peer",
+			Self::Upstream => "upstream",
+		})
+	}
+}
+
 /// The decisions the server answers with, evaluated in order and stopping at the
 /// first that applies: a JWT, then a verified certificate, then the anonymous rules.
 /// A malformed or expired token is a refusal, never a fall through.
@@ -81,12 +110,9 @@ pub struct Policy {
 	/// What a session presenting a verified certificate is granted, rooted at `/`;
 	/// empty refuses it.
 	pub mtls: Permissions,
-	/// Mark every session presenting a verified certificate as a cluster
-	/// [peer](Grant::peer), for a mesh whose relays dial each other with mTLS.
-	pub mtls_peer: bool,
-	/// Mark every certificate's peer as [upstream](Grant::upstream) too. Requires
-	/// [`mtls_peer`](Self::mtls_peer).
-	pub mtls_upstream: bool,
+	/// The cluster-link role granted only to sessions presenting a verified certificate.
+	pub mtls_link: Option<Link>,
+
 	/// The tier stamped on every grant.
 	pub tier: Option<String>,
 	/// How often the relay re-checks each grant; `None` never re-checks. The contract
@@ -232,17 +258,13 @@ impl Policy {
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
 		grant.expires = match (expires, self.expires) {
 			(Some(expires), _) => Some(expires),
-			(None, Some(bound)) => Some(
-				SystemTime::from(moq_clock::wall())
-					.checked_add(bound)
-					.ok_or(Denial::ExpiresOutOfRange)?,
-			),
+			(None, Some(bound)) => Some(moq_clock::wall().checked_add(bound).ok_or(Denial::ExpiresOutOfRange)?),
 			(None, None) => None,
 		};
 		grant.revalidate = self.revalidate;
 		grant.tier = self.tier.clone();
-		grant.peer = certificate && self.mtls_peer;
-		grant.upstream = certificate && self.mtls_upstream;
+		grant.peer = certificate && self.mtls_link.is_some();
+		grant.upstream = certificate && self.mtls_link == Some(Link::Upstream);
 		Ok((grant, root))
 	}
 
@@ -275,7 +297,7 @@ impl Policy {
 			crate::Error::Key(crate::KeyError::KeyNotFound(_)) => Denial::UnknownKey,
 			other => Denial::InvalidToken(other.to_string()),
 		})?;
-		crate::key::validate_times(&claims, SystemTime::from(moq_clock::wall())).map_err(|err| match err {
+		crate::key::validate_times(&claims, moq_clock::wall()).map_err(|err| match err {
 			crate::Error::TokenExpired => Denial::Expired {
 				root: claims.root.clone(),
 			},
@@ -432,17 +454,14 @@ pub struct Server {
 impl Server {
 	/// A server answering with `policy`, refusing one that asks for a re-check without
 	/// a bound, bounds grants past the clock's range, caps sessions without the
-	/// re-check that ages out a dead relay's, or marks an upstream that is not a peer.
+	/// re-check that ages out a dead relay's,.
 	pub fn new(policy: Policy) -> crate::Result<Self> {
-		if policy.mtls_upstream && !policy.mtls_peer {
-			return Err(crate::Error::UpstreamWithoutPeer);
-		}
 		if policy.revalidate.is_some() && policy.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
 		}
 		if policy
 			.expires
-			.is_some_and(|bound| SystemTime::from(moq_clock::wall()).checked_add(bound).is_none())
+			.is_some_and(|bound| moq_clock::wall().checked_add(bound).is_none())
 		{
 			return Err(crate::Error::ExpiresOutOfRange);
 		}
@@ -523,7 +542,6 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::{Algorithm, Bytes, Claims, Client, Error, Peer, Transport, lease::Reason};
@@ -551,10 +569,7 @@ mod tests {
 			..Default::default()
 		};
 		let grant = policy.decide(&request("/demo")).await.unwrap();
-		assert_eq!(
-			grant.expires,
-			Some((moq_clock::wall() + Duration::from_secs(30)).into())
-		);
+		assert_eq!(grant.expires, Some(moq_clock::wall() + Duration::from_secs(30)));
 	}
 
 	fn with_token(mut request: Request, jwt: &str) -> Request {
@@ -562,7 +577,7 @@ mod tests {
 		request
 	}
 
-	fn with_peer(mut request: Request, expires: Option<SystemTime>) -> Request {
+	fn with_peer(mut request: Request, expires: Option<moq_clock::Wall>) -> Request {
 		request.tls = Some(Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
@@ -580,7 +595,7 @@ mod tests {
 		(dir, key)
 	}
 
-	fn sign(key: &Key, root: &str, publish: &[&str], subscribe: &[&str], expires: Option<SystemTime>) -> String {
+	fn sign(key: &Key, root: &str, publish: &[&str], subscribe: &[&str], expires: Option<moq_clock::Wall>) -> String {
 		let claims = Claims::default()
 			.with_root(root)
 			.with_publish(patterns(publish))
@@ -624,12 +639,12 @@ mod tests {
 			..Default::default()
 		};
 		// `exp` is whole seconds on the wire.
-		let secs = SystemTime::now()
-			.duration_since(SystemTime::UNIX_EPOCH)
+		let secs = moq_clock::wall()
+			.checked_duration_since(moq_clock::Wall::UNIX_EPOCH)
 			.unwrap()
 			.as_secs()
 			+ 600;
-		let exp = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+		let exp = moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(secs);
 		let jwt = sign(&key, "demo/room", &["alice/**"], &["**"], Some(exp));
 
 		let grant = policy.decide(&with_token(request("/demo/room/"), &jwt)).await.unwrap();
@@ -650,11 +665,11 @@ mod tests {
 			..Default::default()
 		};
 		let jwt = sign(&key, "demo", &["**"], &[], None);
-		let before = SystemTime::now();
+		let before = moq_clock::wall();
 		let grant = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap();
 		let expires = grant.expires.unwrap();
 		assert!(expires >= before + Duration::from_secs(3600));
-		assert!(expires <= SystemTime::now() + Duration::from_secs(3600));
+		assert!(expires <= moq_clock::wall() + Duration::from_secs(3600));
 	}
 
 	#[tokio::test]
@@ -692,7 +707,7 @@ mod tests {
 			"demo",
 			&["**"],
 			&[],
-			Some(SystemTime::now() - Duration::from_secs(1)),
+			Some(moq_clock::wall() - Duration::from_secs(1)),
 		);
 		let err = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Denial::Expired { .. }), "{err}");
@@ -950,7 +965,7 @@ mod tests {
 			mtls: rules(&["**"], &["**"]),
 			..Default::default()
 		};
-		let not_after = SystemTime::now() + Duration::from_secs(86400 * 30);
+		let not_after = moq_clock::wall() + Duration::from_secs(86400 * 30);
 		let grant = policy.decide(&with_peer(request("/"), Some(not_after))).await.unwrap();
 		assert_eq!(grant.publish, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(not_after));
@@ -965,7 +980,7 @@ mod tests {
 		assert_eq!(policy.decide(&request("/")).await.unwrap_err(), Denial::NoPublicGrant);
 	}
 
-	/// `mtls_peer` and `mtls_upstream` mark a certificate's grant, and only a certificate's.
+	/// The link role marks only a certificate's grant, never an anonymous session or JWT.
 	#[tokio::test]
 	async fn mtls_peer_marks_only_certificates() {
 		let (dir, key) = key_dir();
@@ -973,14 +988,14 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			public: rules(&["**"], &["**"]),
 			mtls: rules(&["**"], &["**"]),
-			mtls_peer: true,
+			mtls_link: Some(Link::Peer),
 			..Default::default()
 		};
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
 		assert!(grant.peer && !grant.upstream);
 
 		let policy = Policy {
-			mtls_upstream: true,
+			mtls_link: Some(Link::Upstream),
 			..policy
 		};
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
@@ -993,15 +1008,23 @@ mod tests {
 		assert!(!grant.peer && !grant.upstream);
 	}
 
-	/// An upstream that is not a peer would answer grants every relay refuses.
-	#[test]
-	fn a_server_refuses_an_upstream_that_is_not_a_peer() {
-		let policy = Policy {
-			mtls: rules(&["**"], &["**"]),
-			mtls_upstream: true,
-			..Default::default()
-		};
-		assert!(matches!(Server::new(policy), Err(Error::UpstreamWithoutPeer)));
+	/// Every representable mTLS link role produces a valid wire grant.
+	#[tokio::test]
+	async fn mtls_link_roles_preserve_the_grant_contract() {
+		for (link, peer, upstream) in [
+			(None, false, false),
+			(Some(Link::Peer), true, false),
+			(Some(Link::Upstream), true, true),
+		] {
+			let policy = Policy {
+				mtls: rules(&["**"], &["**"]),
+				mtls_link: link,
+				..Default::default()
+			};
+			let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
+			assert_eq!((grant.peer, grant.upstream), (peer, upstream));
+			grant.validate().unwrap();
+		}
 	}
 
 	/// A certificate would override a JWT meant to narrow it, and a JWT would narrow or
@@ -1252,7 +1275,7 @@ mod tests {
 			"demo",
 			&["**"],
 			&[],
-			Some(SystemTime::now() + Duration::from_secs(60)),
+			Some(moq_clock::wall() + Duration::from_secs(60)),
 		);
 		let mut same_host = with_token(request("/demo"), &other);
 		same_host.remote = Some("[::ffff:203.0.113.9]:9".parse().unwrap());
@@ -1278,7 +1301,7 @@ mod tests {
 			..limited()
 		})
 		.unwrap();
-		let exp = Some(SystemTime::now() + Duration::from_secs(60));
+		let exp = Some(moq_clock::wall() + Duration::from_secs(60));
 		let a = sign(&key, "demo", &["**"], &[], None);
 		let b = sign(&key, "demo", &["**"], &[], exp);
 		let c = sign(
@@ -1286,7 +1309,7 @@ mod tests {
 			"demo",
 			&["**"],
 			&[],
-			Some(SystemTime::now() + Duration::from_secs(61)),
+			Some(moq_clock::wall() + Duration::from_secs(61)),
 		);
 
 		let mut first = with_token(request("/demo"), &a);
@@ -1342,7 +1365,7 @@ mod tests {
 		use crate::refusal::Reason;
 		let (dir, key) = key_dir();
 		let stranger = Key::generate(Algorithm::HS256, key.kid.clone()).unwrap();
-		let expired = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+		let expired = Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
 		for tier in [None, Some("edge")] {
 			let (client, _) = serve(Policy {
 				keys: Some(Keys::Dir(dir.path().into())),
@@ -1411,7 +1434,7 @@ mod tests {
 			"attacker",
 			&["**"],
 			&[],
-			Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+			Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1)),
 		);
 		let Error::Refused(refusal) = client
 			.connect(with_token(request("/attacker"), &token))

@@ -18,8 +18,9 @@ class ToneTest(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.prefix = Path(temp.name) / 'audio'
 
-    def write(self, tones, *, rate=48000, generated_at=None, frame=960, frames=40, gap_after=None, start=123_456):
-        """Decode output as a subscriber writes it: `frames` frames of `frame` samples per channel."""
+    def write(self, tones, *, rate=48000, generated_at=None, frame=960, frames=40, gap_after=None, start=123_456, late=0):
+        """Decode output as a subscriber writes it: `frames` frames of `frame` samples per channel,
+        each tone `sin(2πft)` at its timestamp, or `late` samples behind it."""
         generated_at = generated_at or rate
         log = [f'{rate} {len(tones)}']
         pcm = bytearray()
@@ -27,7 +28,7 @@ class ToneTest(unittest.TestCase):
         for index in range(frames):
             log.append(f'{ts} {frame}')
             for n in range(index * frame, (index + 1) * frame):
-                pcm += struct.pack(f'<{len(tones)}f', *(0.5 * math.sin(2 * math.pi * hz * n / generated_at) for hz in tones))
+                pcm += struct.pack(f'<{len(tones)}f', *(0.5 * math.sin(2 * math.pi * hz * (start / 1_000_000 + (n - late) / generated_at)) for hz in tones))
             ts += frame * 1_000_000 // rate
             if index == gap_after:
                 ts += 20_000
@@ -36,16 +37,16 @@ class ToneTest(unittest.TestCase):
 
     def assertFails(self, tones, reason):
         with self.assertRaises(tone.Failure) as caught:
-            tone.check(self.prefix, tones)
+            tone.check(self.prefix, tones, phase=True)
         self.assertIn(reason, str(caught.exception))
 
     def test_a_clean_stereo_decode_passes(self):
         self.write([440, 660])
-        self.assertIn('2 ch @ 48000 Hz', tone.check(self.prefix, [440, 660]))
+        self.assertIn('2 ch @ 48000 Hz', tone.check(self.prefix, [440, 660], phase=True))
 
     def test_a_clean_mono_decode_passes(self):
         self.write([440], frame=120, frames=320)
-        self.assertIn('1 ch', tone.check(self.prefix, [440]))
+        self.assertIn('1 ch', tone.check(self.prefix, [440], phase=True))
 
     def test_swapped_channels_fail(self):
         self.write([660, 440])
@@ -70,6 +71,20 @@ class ToneTest(unittest.TestCase):
     def test_a_timestamp_gap_fails(self):
         self.write([440], gap_after=10)
         self.assertFails([440], 'timestamp gap')
+
+    # Negative controls for --phase: a decoder that keeps Opus's usual 312 samples of pre-skip, or
+    # trims them twice, decodes a clean tone that only its timestamps can show is misplaced.
+    def test_a_kept_pre_skip_fails(self):
+        self.write([440, 660], late=312)
+        self.assertFails([440, 660], "tone off its timestamps: channel 0's 440 Hz is +318us")
+
+    def test_a_pre_skip_trimmed_twice_fails(self):
+        self.write([440], frame=120, frames=320, late=-312)
+        self.assertFails([440], 'is -318us')
+
+    def test_a_kept_pre_skip_passes_without_phase(self):
+        self.write([440, 660], late=312)
+        self.assertIn('2 ch', tone.check(self.prefix, [440, 660]))
 
     def test_too_little_audio_fails(self):
         self.write([440], frames=10)

@@ -513,6 +513,26 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 	Ok(conn)
 }
 
+impl Connection {
+	pub(crate) fn open_request(&self) -> Result<Option<(super::SendStream, super::RecvStream)>, Error> {
+		if let Some(err) = self.shared.closed() {
+			return Err(err);
+		}
+		let id = self
+			.shared
+			.conn
+			.borrow_mut()
+			.streams()
+			.open(Dir::Bi, Default::default());
+		Ok(id.map(|id| {
+			(
+				super::SendStream::new(self.shared.clone(), id),
+				super::RecvStream::new(self.shared.clone(), id),
+			)
+		}))
+	}
+}
+
 impl web_transport_trait::poll::Session for Connection {
 	type SendStream = super::SendStream;
 	type RecvStream = super::RecvStream;

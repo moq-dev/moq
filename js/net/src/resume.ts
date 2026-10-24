@@ -288,9 +288,9 @@ class Reader implements ResumeSource {
 	/** The logical track ended cleanly: the reader drains what its copies hold and follows no route. */
 	#ended = false;
 	/** The serving copy's largest when the track ended, kept once that copy goes. */
-	#last?: { largest?: track.Location; ended: true };
+	#last?: { largest?: track.Position; ended: true };
 	/** The first end any copy declared: the logical track's, whichever copy serves. */
-	#declared?: track.Location;
+	#declared?: track.Position;
 	/** The subscriber's record of groups handed out, as the last read passed it. */
 	#delivered = new Delivered();
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
@@ -882,7 +882,7 @@ class Reader implements ResumeSource {
 	// The logical track's end, learning it from any copy that declared one. A group or datagram
 	// at or past it, on any copy or already handed out, claims other content: a direct track
 	// refuses an end below what it received.
-	#learnEnd(): track.Location | undefined {
+	#learnEnd(): track.Position | undefined {
 		for (const copy of this.#copies) {
 			const end = copy.sub.end();
 			if (end) this.#declare(end);
@@ -907,7 +907,7 @@ class Reader implements ResumeSource {
 	// Record `end` as the logical track's end. One logical track has one end, as it has one set
 	// of properties: a copy declaring another is refused. A mid-group end refines the group
 	// boundary it falls just before, as a wire end may.
-	#declare(end: track.Location): void {
+	#declare(end: track.Position): void {
 		if (this.#closed) return;
 		const declared = this.#declared;
 		if (!declared) {
@@ -936,12 +936,12 @@ class Reader implements ResumeSource {
 		return serving && hooks.sourceStart(serving.sub);
 	}
 
-	end(): track.Location | undefined {
+	end(): track.Position | undefined {
 		this.sync();
 		return this.#learnEnd();
 	}
 
-	async finished(): Promise<track.Location> {
+	async finished(): Promise<track.Position> {
 		for (;;) {
 			this.sync();
 			const end = this.#learnEnd();
@@ -968,19 +968,19 @@ class Reader implements ResumeSource {
 		}
 	}
 
-	bufferedLargest(): track.Location | undefined {
+	bufferedLargest(): track.Position | undefined {
 		this.sync();
 		const serving = this.#serving();
 		return serving && hooks.bufferedLargest(serving.sub);
 	}
 
-	peekLargest(): { largest?: track.Location; ended: boolean } {
+	peekLargest(): { largest?: track.Position; ended: boolean } {
 		this.sync();
 		const serving = this.#serving();
 		return serving ? hooks.peekLargest(serving.sub) : (this.#last ?? { ended: false });
 	}
 
-	async largest(seen: track.Location | undefined): Promise<track.Location | undefined> {
+	async largest(seen: track.Position | undefined): Promise<track.Position | undefined> {
 		for (;;) {
 			this.sync();
 			const serving = this.#serving();
@@ -1643,7 +1643,7 @@ export class Front {
 		}
 	}
 
-	largest(name: string): track.Location | undefined {
+	largest(name: string): track.Position | undefined {
 		return this.#source?.wire.largest(name);
 	}
 

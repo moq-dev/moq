@@ -40,6 +40,13 @@ impl Version {
 		)
 	}
 
+	/// Whether a copy received over this version resolves relative and time range anchors
+	/// as its publisher would: the start resolves from the budget, the answer reports the
+	/// largest, and frames carry media time. Added in lite-07; an earlier copy refuses them.
+	pub(crate) fn resolves_anchors(self) -> bool {
+		self.resolves_start() && self.has_largest() && self.has_media_time()
+	}
+
 	/// Whether the version has lite-05's dedicated TRACK stream and related stream
 	/// layout changes.
 	///
