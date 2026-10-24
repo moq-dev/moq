@@ -767,12 +767,12 @@ class FfiConverterMoqRange {
 
 class MoqSubscription {
   final int priority;
-  final int maxDelayUs;
+  final int? maxDelayUs;
   final List<MoqRange>? ranges;
   final MoqOrder? order;
   MoqSubscription({
     this.priority = 0,
-    this.maxDelayUs = 0,
+    this.maxDelayUs = null,
     this.ranges = null,
     this.order = null,
   });
@@ -790,7 +790,7 @@ class FfiConverterMoqSubscription {
     );
     final priority = priority_lifted.value;
     new_offset += priority_lifted.bytesRead;
-    final maxDelayUs_lifted = FfiConverterUInt64.read(
+    final maxDelayUs_lifted = FfiConverterOptionalUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final maxDelayUs = maxDelayUs_lifted.value;
@@ -819,7 +819,7 @@ class FfiConverterMoqSubscription {
   static RustBuffer lower(MoqSubscription value) {
     final total_length =
         FfiConverterInt8.allocationSize(value.priority) +
-        FfiConverterUInt64.allocationSize(value.maxDelayUs) +
+        FfiConverterOptionalUInt64.allocationSize(value.maxDelayUs) +
         FfiConverterOptionalSequenceMoqRange.allocationSize(value.ranges) +
         FfiConverterOptionalMoqOrder.allocationSize(value.order) +
         0;
@@ -834,7 +834,7 @@ class FfiConverterMoqSubscription {
       value.priority,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterUInt64.write(
+    new_offset += FfiConverterOptionalUInt64.write(
       value.maxDelayUs,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -851,7 +851,7 @@ class FfiConverterMoqSubscription {
 
   static int allocationSize(MoqSubscription value) {
     return FfiConverterInt8.allocationSize(value.priority) +
-        FfiConverterUInt64.allocationSize(value.maxDelayUs) +
+        FfiConverterOptionalUInt64.allocationSize(value.maxDelayUs) +
         FfiConverterOptionalSequenceMoqRange.allocationSize(value.ranges) +
         FfiConverterOptionalMoqOrder.allocationSize(value.order) +
         0;

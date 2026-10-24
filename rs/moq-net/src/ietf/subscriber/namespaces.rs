@@ -160,8 +160,8 @@ impl Subscriber {
 			live,
 			gone,
 		} = pending;
-		// The open waits on stream credit the peer grants, so it races `live` too: a request
-		// ended before it went out holds nothing, nor the broader one it blocks.
+		// The open races `live` too: a request ended before it went out holds nothing, nor
+		// the broader one it blocks. Without stream credit it is refused, not parked.
 		let mut opening = std::pin::pin!(opening);
 		let opened = kio::wait(|waiter| {
 			if live.poll_closed(waiter).is_ready() {

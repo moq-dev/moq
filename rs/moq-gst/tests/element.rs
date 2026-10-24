@@ -226,38 +226,18 @@ fn play_one_frame(sink: &gst::Element) -> gst::Pad {
 	pad
 }
 
-// Lingering is opt-in: by default the end of stream closes the broadcast and posts EOS at once, even
-// with media a late subscriber could still have drained.
+// The end of stream closes the broadcast and posts EOS at once, even with media a late subscriber
+// could still have drained.
 #[test]
-fn published_media_posts_the_eos_at_once_by_default() {
+fn published_media_posts_the_eos_at_once() {
 	init();
 	let sink = publisher();
-	assert!(!sink.property::<bool>("linger"));
 	let seen = recording_bus(&sink);
 	let pad = play_one_frame(&sink);
 
 	assert!(pad.send_event(gst::event::Eos::new()));
 	assert_eq!(posted_eos(&seen), 1);
 	let _ = sink.set_state(gst::State::Null);
-}
-
-// With `linger`, published media is served until it is stale, so the EOS that ends `gst-launch` waits
-// for it. Stopping the pipeline is the interrupt: it closes the broadcast at once, and the run it ended
-// owes no EOS.
-#[test]
-fn a_lingering_sink_holds_the_eos_until_the_pipeline_stops() {
-	init();
-	let sink = publisher();
-	sink.set_property("linger", true);
-	let seen = recording_bus(&sink);
-	let pad = play_one_frame(&sink);
-
-	assert!(pad.send_event(gst::event::Eos::new()));
-	assert_eq!(status_of(&sink, "sink_0"), "ended");
-	assert_eq!(posted_eos(&seen), 0, "the finished broadcast is still serving its tail");
-
-	assert_eq!(sink.set_state(gst::State::Null), Ok(gst::StateChangeSuccess::Success));
-	assert_eq!(posted_eos(&seen), 0, "the stopped run owes no EOS");
 }
 
 // After the publication ends, a buffer that got past the pad's own EOS flag (a flush clears it) must
@@ -1567,4 +1547,19 @@ fn connect_failure_retries_without_erroring() {
 	assert_eq!(status, gstmoq::ConnectionStatus::Disconnected);
 	assert_eq!(send_bitrate, 0);
 	assert_eq!(recv_bitrate, 0);
+}
+
+// Both element factories expose the same connection syntax, and refuse unknown versions
+// before opening a transport rather than silently offering the defaults.
+#[test]
+fn parsed_connection_properties_are_shared_and_validated() {
+	init();
+	for factory in ["moqsink", "moqsrc"] {
+		let element = gst::parse::launch(&format!("{factory} url=https://127.0.0.1:1 broadcast=test connect-version=moq-lite-99 quic-idle-timeout=15000 quic-keep-alive=0"))
+			.expect("parse the shared property syntax");
+		assert_eq!(element.property::<u64>("quic-idle-timeout"), 15_000);
+		assert_eq!(element.property::<u64>("quic-keep-alive"), 0);
+		assert_eq!(element.set_state(gst::State::Paused), Err(gst::StateChangeError));
+		element.set_state(gst::State::Null).unwrap();
+	}
 }
