@@ -72,6 +72,8 @@ struct Serve {
 	alpns: Arc<Vec<String>>,
 	/// The negotiated-version restriction, when the operator set one.
 	versions: moq_net::Versions,
+	/// `listen.implementation`, the value this listener advertises in SETUP.
+	implementation: Option<String>,
 	/// The address every worker socket shares, reported as a session's `local`.
 	local: SocketAddr,
 	/// `listen.timeout`, which each worker's endpoint starts at a connection's
@@ -110,6 +112,7 @@ pub struct Workers {
 	pin: bool,
 	alpns: Arc<Vec<String>>,
 	versions: moq_net::Versions,
+	implementation: Option<String>,
 	timeout: Option<std::time::Duration>,
 	reset_secret: Option<[u8; 32]>,
 
@@ -248,6 +251,7 @@ impl Workers {
 			pin: config.pin,
 			alpns: Arc::new(alpns),
 			versions,
+			implementation: listen.implementation.clone(),
 			timeout: listen.resolved_timeout(),
 			reset_secret,
 			threads: Vec::new(),
@@ -302,6 +306,7 @@ impl Workers {
 			tokio: tokio::runtime::Handle::current(),
 			alpns: self.alpns.clone(),
 			versions: self.versions.clone(),
+			implementation: self.implementation.clone(),
 			local: self.addr,
 			timeout: self.timeout,
 			reset_secret: self.reset_secret,
@@ -650,6 +655,8 @@ fn serve_worker(spawn: Spawn) -> bool {
 /// What remains of a connection's handshake deadline, and how to tell the peer
 /// it passed.
 struct Deadline {
+	/// When the handshake must be done, if ever.
+	at: Option<moq_net::time::Instant>,
 	timer: moq_uring::Timer,
 	/// Closes with the timeout code once a session exists to carry it. Until
 	/// then a timed-out handshake is just dropped, and its guard closes in the
@@ -659,9 +666,10 @@ struct Deadline {
 
 impl Deadline {
 	fn new(handle: &moq_uring::Handle, conn: &moq_uring::quic::Connection) -> Self {
+		let at = conn.handshake().deadline;
 		let mut timer = handle.timer();
-		timer.set(conn.handshake().deadline);
-		Self { timer, close: None }
+		timer.set(at);
+		Self { at, timer, close: None }
 	}
 
 	async fn bound<T, E: Into<anyhow::Error>>(
@@ -745,7 +753,10 @@ async fn serve_connection(
 
 	deadline.close = Some(transport.clone());
 	let conn = transport.clone();
-	let server = moq_net::Server::new().with_versions(serve.versions.clone());
+	let mut server = moq_net::Server::new().with_versions(serve.versions.clone());
+	if let Some(implementation) = &serve.implementation {
+		server = server.with_implementation(implementation);
+	}
 	let binding = match url {
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,
@@ -864,27 +875,35 @@ async fn serve_request(
 	if let Some(limits) = serve.cluster.quic_limits(&lease) {
 		conn.set_limits(limits)?;
 	}
-	let mut request = request
-		.with_stats(stats.clone())
-		.with_limits(serve.cluster.limits(&lease));
+	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}
 	if let Some(publisher) = publisher {
 		request = request.with_subscriber(publisher);
 	}
-	let lease = lease.preparing(request.auth(), request.role())?;
+	// moq-net enforces the handshake deadline on the reply, so one the peer never
+	// took counts in the session's stats.
+	if let Some(at) = deadline.at {
+		request = request.with_deadline(at);
+	}
+	// A grant that no longer holds is refused, so the session records why it ended.
+	let lease = match lease.preparing(request.auth(), request.requests(), request.role()) {
+		Ok(lease) => lease,
+		Err(err) => {
+			request.close(err.clone());
+			return Err(err.into());
+		}
+	};
 	let serving = serve.shutdown.serve();
 	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
 	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the
 	// shared runtime, and dropping it aborts the task.
 	let shutdown = serve.shutdown.clone();
 	let expired = std::pin::pin!(lifecycle.shared(&serve.tokio, async move { shutdown.expired().await }));
-	let reply = std::pin::pin!(deadline.bound(request.ok()));
+	let reply = std::pin::pin!(request.ok());
 	let (session, driver) = match futures::future::select(reply, expired).await {
-		futures::future::Either::Left((reply, _)) => {
-			reply.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?
-		}
+		futures::future::Either::Left((reply, _)) => reply?,
 		futures::future::Either::Right(_) => anyhow::bail!("the SETUP reply was still pending at the drain deadline"),
 	};
 	let driver_handle = handle.clone();

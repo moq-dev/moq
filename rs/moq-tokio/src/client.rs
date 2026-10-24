@@ -135,10 +135,15 @@ impl Client {
 		let tls_host_name = config.tls.host_name.clone();
 		let timeout = resolved.timeout;
 
+		let mut moq = moq_net::Client::new()
+			.with_versions(versions.clone())
+			.with_extensions(config.extensions);
+		if let Some(implementation) = &config.implementation {
+			moq = moq.with_implementation(implementation);
+		}
+
 		Ok(Self {
-			moq: moq_net::Client::new()
-				.with_versions(versions.clone())
-				.with_extensions(config.extensions),
+			moq,
 			versions,
 			connect: config.url,
 			timeout,

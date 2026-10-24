@@ -22,6 +22,9 @@
 //! The `sim` feature adds the `sim` module, a deterministic executor whose clock
 //! starts at [`Instant::ZERO`], and the `#[moq_clock::test]` attribute that runs an
 //! `async fn` test on it. Enable it for dev-dependencies only.
+//!
+//! The `serde` feature adds `serde::UnixSeconds`, matching existing integer
+//! Unix-second JSON encodings for wall times.
 
 #![warn(missing_docs)]
 
@@ -33,6 +36,8 @@ mod instant;
 compile_error!("the `manual` feature installs on a tokio runtime, which the browser has none of");
 mod manual;
 mod runtime;
+#[cfg(feature = "serde")]
+pub mod serde;
 #[cfg(feature = "sim")]
 pub mod sim;
 mod timer;

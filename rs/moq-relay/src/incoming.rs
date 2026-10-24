@@ -65,14 +65,14 @@ pub trait Sealed: Sized {
 	}
 
 	fn auth(&self) -> moq_net::auth::Handle;
-	fn role(&self) -> Option<moq_net::Role>;
+	fn requests(&mut self) -> moq_net::auth::Requests;
+	fn role(&self) -> Option<moq_net::setup::Role>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self;
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self;
 	fn with_subscriber(self, subscribe: moq_net::origin::Producer) -> Self;
 
-	/// Answer the SETUP. A MoQ failure comes back as a bare [`moq_net::Error`], so
-	/// its cause classifies the failure.
+	/// Answer the SETUP. A MoQ failure comes back as a bare [`moq_net::Error`].
 	async fn ok(self) -> anyhow::Result<(moq_net::Session, Self::Driver)>;
 
 	/// Run the session's protocol until it ends, alongside its supervision.
@@ -117,7 +117,11 @@ impl Sealed for moq_tokio::server::Request {
 		moq_tokio::server::Request::auth(self)
 	}
 
-	fn role(&self) -> Option<moq_net::Role> {
+	fn requests(&mut self) -> moq_net::auth::Requests {
+		moq_tokio::server::Request::requests(self)
+	}
+
+	fn role(&self) -> Option<moq_net::setup::Role> {
 		moq_tokio::server::Request::role(self)
 	}
 
@@ -183,7 +187,11 @@ impl Sealed for Accepted {
 		self.handshake.auth()
 	}
 
-	fn role(&self) -> Option<moq_net::Role> {
+	fn requests(&mut self) -> moq_net::auth::Requests {
+		self.handshake.requests()
+	}
+
+	fn role(&self) -> Option<moq_net::setup::Role> {
 		self.handshake.role()
 	}
 

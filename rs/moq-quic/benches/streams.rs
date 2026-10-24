@@ -3,7 +3,8 @@
 //! Throughput cases open fresh unidirectional streams on a long-lived connection, write and
 //! finish them, then exchange packets until the server has read them and the path is idle.
 //! The zero-credit case isolates blocked writes and resets across live-writer counts, with
-//! connection setup and dropping the remaining state outside the CPU measurement.
+//! connection setup and dropping the remaining state outside the CPU measurement. The
+//! reprioritize case moves streams that stay queued, never sending them.
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_quic::Dir;
@@ -64,6 +65,38 @@ fn bench_priority(c: &mut Criterion<ThreadCpu>) {
                 },
             );
         }
+    }
+    group.finish();
+}
+
+/// Reprioritize every stream of a queue that is never drained, so each call moves a queued stream.
+fn bench_reprioritize(c: &mut Criterion<ThreadCpu>) {
+    let mut group = c.benchmark_group("set_priority");
+    for queued in [16, 256, 4096] {
+        let mut pair = Pair::new(Setup::default());
+        let conn = pair.client();
+        let ids: Vec<_> = (0..queued)
+            .map(|_| {
+                let id = conn
+                    .streams()
+                    .open(Dir::Uni, Default::default())
+                    .expect("stream limit");
+                assert_eq!(conn.send_stream(id).write(b"x").unwrap(), 1);
+                id
+            })
+            .collect();
+        let mut round = 0;
+        group.throughput(Throughput::Elements(queued as u64));
+        group.bench_function(BenchmarkId::new("queued", queued), |b| {
+            b.iter(|| {
+                round += 1;
+                for (index, &id) in ids.iter().enumerate() {
+                    // A priority differing from the last round's, so no call is a no-op.
+                    let priority = ((index + round) % 64) as _;
+                    conn.send_stream(id).set_priority(priority).unwrap();
+                }
+            })
+        });
     }
     group.finish();
 }
@@ -201,6 +234,6 @@ fn bench_connection_blocked(c: &mut Criterion<ThreadCpu>) {
 criterion_group! {
     name = benches;
     config = common::config();
-    targets = bench_priority, bench_write_size, bench_connection_blocked
+    targets = bench_priority, bench_reprioritize, bench_write_size, bench_connection_blocked
 }
 criterion_main!(benches);

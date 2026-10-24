@@ -512,7 +512,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"MID-A connects to TOP",
 		connect_once(
 			// An upstream link: MID-A relays for BOTTOM, so it asks TOP for everything.
-			mid_a_client.with_subscriber(mid_a_origin.clone().upstream()),
+			mid_a_client.with_subscriber(mid_a_origin.clone().with_link(moq_net::origin::Link::Upstream)),
 			top_url.parse().expect("parse top url"),
 		),
 	)

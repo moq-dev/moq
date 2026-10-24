@@ -557,6 +557,8 @@ pub struct Publish<S = Conn> {
 	/// Connection allocator each passthrough track claims its peak-hold bitrate on.
 	/// Override with [`with_bandwidth`](Self::with_bandwidth).
 	bandwidth: moq_net::bandwidth::Allocator,
+	/// How long an unpublished broadcast stays up. Override with [`with_linger`](Self::with_linger).
+	linger: Duration,
 }
 
 impl<S: Stream> Publish<S> {
@@ -608,6 +610,14 @@ impl<S: Stream> Publish<S> {
 		self
 	}
 
+	/// Keep the broadcast up for `linger` after the client unpublishes, so a subscriber that
+	/// arrives after the end still gets the tail. Defaults to [`moq_mux::Linger::DEFAULT`];
+	/// zero closes it at once.
+	pub fn with_linger(mut self, linger: Duration) -> Self {
+		self.linger = linger;
+		self
+	}
+
 	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
 	/// RTMP media into it until the client disconnects.
 	///
@@ -617,10 +627,9 @@ impl<S: Stream> Publish<S> {
 	/// run it on its own task.
 	///
 	/// A client that unpublishes (`deleteStream`) ends cleanly: the finished broadcast
-	/// stays up until its media is stale, so subscribers still catching up drain the tail,
-	/// and the future resolves after that. Dropping the future ends the linger early, as
-	/// does a newer publish at `path`. A connection that drops without unpublishing
-	/// closes the broadcast at once.
+	/// stays up for the [linger](Self::with_linger), and the future resolves after that.
+	/// Dropping the future ends the linger early. A connection that drops without
+	/// unpublishing closes the broadcast at once.
 	pub async fn accept(mut self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
 		// Reserve the broadcast path before telling the client the publish succeeded:
@@ -665,14 +674,14 @@ impl<S: Stream> Publish<S> {
 
 		let peer = self.peer;
 		match result {
-			// A clean end: serve the finished broadcast until its media is stale, so subscribers
-			// still catching up drain the tail. The encoder is done, so hang up on it first.
+			// A clean end: serve the finished broadcast for the linger, so a subscriber that
+			// arrives after the end still gets the tail. The encoder is done, so hang up first.
 			Ok(End::Unpublished) => {
 				drop(self.stream);
-				match publisher.finish() {
-					Ok(finish) => {
-						tracing::info!(%peer, %path, linger = ?finish.linger(), "rtmp publish ended, serving the finished broadcast until its media is stale");
-						finish.wait().await;
+				match publisher.finish(self.linger) {
+					Ok(linger) => {
+						tracing::info!(%peer, %path, linger = ?self.linger, "rtmp publish ended, serving the finished broadcast");
+						linger.wait().await;
 					}
 					Err(err) => tracing::debug!(%peer, %err, "error finishing RTMP publish"),
 				}
@@ -1163,6 +1172,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							peer,
 							max_age: None,
 							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+							linger: moq_mux::Linger::DEFAULT,
 						})));
 					}
 					// The client wants to play: hand control back to the caller.
@@ -1518,13 +1528,12 @@ impl Publisher {
 		Ok(self.importer.decode(&flv::tag(tag_type, timestamp, body))?)
 	}
 
-	/// Flush any buffered media and finish every track, the catalog included, returning
-	/// the finished broadcast, which stays announced until it is dropped.
-	fn finish(mut self) -> anyhow::Result<moq_net::broadcast::Finish> {
+	/// Flush any buffered media and finish every track, the catalog included, keeping the
+	/// finished broadcast up for `linger`.
+	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
 		self.importer.finish()?;
 		self.catalog.finish()?;
-		// Taken while the importer is alive, so it holds the tracks just finished.
-		Ok(self.broadcast.finish())
+		Ok(moq_mux::Linger::new([self.broadcast.clone()], self, linger))
 	}
 
 	/// Flush any buffered media, close out the broadcast's open groups, and end
@@ -1586,7 +1595,7 @@ mod tests {
 		.await
 		.unwrap();
 		assert_eq!(publisher.metadata.count, 2);
-		drop(publisher.finish().unwrap());
+		drop(publisher.finish(Duration::ZERO).unwrap());
 		logs_assert(|lines| {
 			let warnings = lines
 				.iter()
@@ -1724,21 +1733,17 @@ mod tests {
 		}
 	}
 
-	/// Accept the publish arriving on `stream` into `origin` at `live/cam0`, declaring `max_age`.
-	async fn accept_publish(stream: tokio::io::DuplexStream, origin: origin::Producer, max_age: Duration) {
+	/// Accept the publish arriving on `stream` into `origin` at `live/cam0`, lingering for `linger`.
+	async fn accept_publish(stream: tokio::io::DuplexStream, origin: origin::Producer, linger: Duration) {
 		let peer = "127.0.0.1:1935".parse().unwrap();
 		let Some(Request::Publish(publish)) = accept_stream(stream, peer).await.unwrap() else {
 			panic!("expected a publish request");
 		};
-		publish
-			.with_max_age(Some(max_age))
-			.accept(&origin, "live/cam0")
-			.await
-			.unwrap();
+		publish.with_linger(linger).accept(&origin, "live/cam0").await.unwrap();
 	}
 
-	/// An unpublish is a clean end: the finished broadcast keeps serving a late subscriber
-	/// until its media is stale, then closes. A hangup without one closes at once.
+	/// An unpublish is a clean end: the finished broadcast stays up for the linger, then
+	/// closes. A hangup without one closes at once.
 	#[tokio::test(start_paused = true)]
 	async fn an_unpublish_lingers_and_a_hangup_does_not() {
 		for (leave, linger) in [
@@ -1763,9 +1768,9 @@ mod tests {
 	}
 
 	/// A late subscriber still reads the finished media during the linger, and an encoder
-	/// reconnecting under the same key ends the linger at once.
+	/// reconnecting under the same key takes the path without ending it.
 	#[tokio::test(start_paused = true)]
-	async fn a_reconnect_ends_the_linger() {
+	async fn a_reconnect_leaves_the_linger_running() {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
 		let (client, server) = tokio::io::duplex(64 * 1024);
@@ -1781,12 +1786,16 @@ mod tests {
 		);
 		assert!(!accept.is_finished());
 
-		let start = tokio::time::Instant::now();
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let _reconnect = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 		let _encoder = tokio::spawn(publish_one_keyframe(client, Leave::Hangup));
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		assert!(!accept.is_finished(), "the newer publisher leaves the linger running");
+		assert!(!finished.is_closed());
+
+		let start = tokio::time::Instant::now();
 		accept.await.unwrap();
-		assert_eq!(start.elapsed(), Duration::ZERO);
+		assert_eq!(start.elapsed(), Duration::from_secs(4));
 		assert!(finished.is_closed());
 	}
 

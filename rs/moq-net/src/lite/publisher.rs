@@ -891,11 +891,11 @@ impl AnnounceServe {
 					// announce stream; lite-06+ reads the session-wide SETUP Hop
 					// parameter, the same identity the subscribe path excludes. A peer that
 					// declares nothing falls back to the identity the session assigned it.
-					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
+					let assigned = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
 					if self.shared.version.has_exclude_hop() {
 						let exclude_hop = match interest.exclude_hop {
-							0 => assigned,
-							id => id,
+							Hop::UNKNOWN => assigned,
+							hop => hop,
 						};
 						self.start(prefix, exclude_hop, hidden);
 					} else if self.shared.version.has_setup_stream() {
@@ -905,10 +905,8 @@ impl AnnounceServe {
 					}
 				}
 				AnnounceState::ExcludeHop { prefix, hidden } => {
-					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
-					let exclude_hop = ready!(self.shared.peer_setup.poll_hop(waiter))
-						.map(|origin| origin.id())
-						.unwrap_or(assigned);
+					let assigned = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
+					let exclude_hop = ready!(self.shared.peer_setup.poll_hop(waiter)).unwrap_or(assigned);
 					let (prefix, hidden) = (prefix.clone(), *hidden);
 					self.start(prefix, exclude_hop, hidden);
 				}
@@ -939,7 +937,7 @@ impl AnnounceServe {
 		}
 	}
 
-	fn start(&mut self, prefix: crate::PathOwned, exclude_hop: u64, hidden: bool) {
+	fn start(&mut self, prefix: crate::PathOwned, exclude_hop: Hop, hidden: bool) {
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
@@ -960,7 +958,7 @@ impl AnnounceServe {
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
-		let origin = origin.excluding(Hop::new(exclude_hop).unwrap_or(Hop::UNKNOWN));
+		let origin = origin.excluding(exclude_hop);
 		// Lite03 and later carry the hop path, so only routes with room for our hop
 		// under the origin's cap are advertised; Lite01/02 hide the depth entirely.
 		let origin = match self.shared.version {
@@ -2888,7 +2886,7 @@ mod announce_test {
 		let origin = Hop::new(1).unwrap().produce();
 		let _route = origin.announce("cam", crate::origin::Route::default()).unwrap();
 		// An upstream that never answers its announce request.
-		let _silent = origin.clone().upstream().snapshot("");
+		let _silent = origin.clone().with_link(crate::origin::Link::Upstream).snapshot("");
 
 		let log = Log::default();
 		let writes = log.writes.clone();
@@ -3003,7 +3001,7 @@ mod announce_test {
 		h.announcement
 			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
 			.unwrap();
-		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
@@ -3037,7 +3035,7 @@ mod announce_test {
 			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
 			let newer = h.origin.announce("cam", route.clone()).unwrap();
 			// A restart waits out the update hold like an update.
-			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 			settle().await;
 			let restarted = |msgs: Vec<lite::AnnounceBroadcast<'static>>| match (version, msgs.as_slice()) {
 				(
@@ -3067,7 +3065,7 @@ mod announce_test {
 			restarted(h.wire.take_announces());
 
 			drop(newer);
-			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 			settle().await;
 			restarted(h.wire.take_announces());
 			h.assert_idle();
@@ -3089,7 +3087,7 @@ mod announce_test {
 					.with_cost(7),
 			)
 			.unwrap();
-		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[
@@ -3132,7 +3130,7 @@ mod announce_test {
 			};
 			let _newer = h.origin.announce("cam", route).unwrap();
 			auth.authorize(&grant(&["cam", "other"]));
-			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 			settle().await;
 			match h.wire.take_announces().as_slice() {
 				[lite::AnnounceBroadcast::Restart { id: 0, epoch: sent, .. }] => {
@@ -3151,12 +3149,12 @@ mod announce_test {
 		let mut h = harness().await;
 		let route = |cost| crate::origin::Route::default().with_hops(pub_hops()).with_cost(cost);
 		h.announcement.update(route(u64::MAX)).unwrap();
-		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		assert_eq!(h.wire.take_announces().len(), 1, "expected the clamped restart");
 
 		h.announcement.update(route(u64::MAX - 1)).unwrap();
-		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		h.assert_idle();
 	}
@@ -3230,7 +3228,7 @@ mod announce_test {
 					.with_cost(u64::MAX),
 			)
 			.unwrap();
-		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Update { cost, .. }] => {

@@ -459,7 +459,7 @@ mod test {
 		out
 	}
 
-	/// A track whose payloads reach the transport later than another's captures advertises the gap
+	/// A track whose captures are written after later captures on another track advertises the gap
 	/// as `delay`, while one written without capture times advertises neither `delay` nor `jitter`.
 	#[test]
 	fn a_late_capture_is_delay() {
@@ -474,14 +474,15 @@ mod test {
 			.binary_stream(timed_track(&mut broadcast, "bare"), Config::default())
 			.unwrap();
 
-		let anchor = moq_clock::Instant::now();
-		for i in 0..20u64 {
+		for i in 2..20u64 {
 			let now = moq_net::Timestamp::from_micros(i * 100_000).unwrap();
-			let at = |late: u64| anchor + std::time::Duration::from_millis(i * 100 + late);
-			let fast = fast.listing.as_mut().unwrap();
-			fast.record_at(now, 100, Some((now, at(0)))).unwrap();
-			let slow = slow.listing.as_mut().unwrap();
-			slow.record_at(now, 100, Some((now, at(200)))).unwrap();
+			let captured = moq_net::Timestamp::from_micros(i * 100_000 - 200_000).unwrap();
+			fast.listing.as_mut().unwrap().record_at(now, 100, Some(now)).unwrap();
+			slow.listing
+				.as_mut()
+				.unwrap()
+				.record_at(now, 100, Some(captured))
+				.unwrap();
 			bare.listing.as_mut().unwrap().record_at(now, 100, None).unwrap();
 		}
 
@@ -497,29 +498,6 @@ mod test {
 		);
 		let bare = entry(&catalog, "bare");
 		assert_eq!((bare.delay, bare.jitter), (None, None));
-	}
-
-	/// A captured payload measures through the real clock: written right after capture, it
-	/// advertises no delay beyond the scheduling noise of the test itself.
-	#[moq_clock::test]
-	async fn a_capture_measures_through_the_clock() {
-		moq_clock::sleep(std::time::Duration::from_secs(1)).await;
-		let (mut broadcast, catalog) = catalog();
-		let mut telemetry = catalog
-			.binary_stream(timed_track(&mut broadcast, "telemetry"), Config::default())
-			.unwrap();
-
-		let captured = moq_clock::Instant::now();
-		let at = catalog.clock().capture(captured).unwrap();
-		telemetry.append(Timed::from(&b"now"[..]).at(at)).unwrap();
-		let late = catalog
-			.clock()
-			.capture(captured - std::time::Duration::from_secs(1))
-			.unwrap();
-		telemetry.append(Timed::from(&b"late"[..]).at(late)).unwrap();
-
-		let jitter = entry(&catalog, "telemetry").jitter.expect("a late capture is jitter");
-		assert!(jitter >= std::time::Duration::from_secs(1), "{jitter:?}");
 	}
 
 	/// A source's own timestamp, on a catalog clock anchored to that source, is the frame's
@@ -543,8 +521,8 @@ mod test {
 	}
 
 	/// A timestamp ahead of now counts as on time: its track advertises no delay, and another track
-	/// is measured against it as against any on-time track. Measured as given, it would undercut
-	/// every real flush and inflate the other track's delay by the hour it runs fast.
+	/// is measured against it as against any on-time track. Ordered as given, it would put the other
+	/// track behind by the hour it runs fast.
 	#[test]
 	fn an_ahead_timestamp_counts_as_on_time() {
 		let (mut broadcast, catalog) = catalog();
@@ -555,19 +533,16 @@ mod test {
 			.binary_stream(timed_track(&mut broadcast, "ahead"), Config::default())
 			.unwrap();
 
-		let anchor = moq_clock::Instant::now();
-		for i in 0..20u64 {
+		for i in 2..20u64 {
 			let now = moq_net::Timestamp::from_micros(i * 100_000).unwrap();
-			let at = |late: u64| anchor + std::time::Duration::from_millis(i * 100 + late);
-			let slow = slow.listing.as_mut().unwrap();
-			slow.record_at(now, 100, Some((now, at(200)))).unwrap();
-			// An hour fast, flushed the moment it was written.
+			// An hour fast.
 			let fast = moq_net::Timestamp::from_micros(i * 100_000 + 3_600_000_000).unwrap();
-			ahead
-				.listing
+			ahead.listing.as_mut().unwrap().record_at(now, 100, Some(fast)).unwrap();
+			let captured = moq_net::Timestamp::from_micros(i * 100_000 - 200_000).unwrap();
+			slow.listing
 				.as_mut()
 				.unwrap()
-				.record_at(now, 100, Some((fast, at(0))))
+				.record_at(now, 100, Some(captured))
 				.unwrap();
 		}
 
@@ -640,9 +615,10 @@ mod test {
 	/// payload would read as a near-zero bitrate.
 	#[test]
 	fn an_unset_host_clock_still_marks_a_reanchor() {
-		use std::time::{Duration, SystemTime};
+		use moq_clock::Wall;
+		use std::time::Duration;
 
-		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		crate::clock::fake_host_wall(Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 		let (mut broadcast, catalog) = catalog();
 		let reserved = catalog.reserve();
 		let mut stream = catalog
@@ -948,10 +924,10 @@ mod test {
 
 			let entry = &catalog.snapshot().ext.mavlink["telemetry"];
 			assert_eq!(entry.config.bitrate, Some(1_000_000));
-			assert_eq!(entry.config.jitter, None, "write spacing is not a flush delay");
+			assert_eq!(entry.config.jitter, None, "write spacing is not jitter");
 		}
 
-		/// A supplied bitrate is authoritative, while a capture time still measures jitter and delay.
+		/// A supplied bitrate is authoritative, however much is written.
 		#[test]
 		fn a_supplied_bitrate_is_kept() {
 			let (mut broadcast, catalog) = catalog();
@@ -962,17 +938,11 @@ mod test {
 				.unwrap();
 
 			let listing = telemetry.listing.as_mut().unwrap();
-			let anchor = moq_clock::Instant::now();
 			for i in 0..60u64 {
 				let now = moq_net::Timestamp::from_micros(i * 40_000).unwrap();
-				// Every other payload reaches the transport 10ms later than the rest.
-				let written = anchor + std::time::Duration::from_micros(i * 40_000 + (i % 2) * 10_000);
-				listing.record_at(now, 5_000, Some((now, written))).unwrap();
+				listing.record_at(now, 5_000, Some(now)).unwrap();
 			}
 
-			let entry = &catalog.snapshot().ext.mavlink["telemetry"];
-			assert_eq!(entry.config.bitrate, Some(64_000));
-			assert_eq!(entry.config.jitter, Some(std::time::Duration::from_millis(10)));
 			assert_eq!(catalog.snapshot().ext.mavlink["telemetry"].config.bitrate, Some(64_000));
 		}
 	}

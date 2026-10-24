@@ -1,4 +1,4 @@
-# Resolve the release audit findings
+# [S] Resolve the release audit findings
 
 ## Goal
 
@@ -84,15 +84,6 @@ The 2026-10-22 binding and OBS audit at main
 [1f5caa7026](https://github.com/moq-dev/moq/commit/1f5caa7026) added the
 rate recovery child. Its two OBS findings went to m2 next to the other OBS
 work, because obs-moq ships on its own schedule.
-
-## Required
-
-The entries comprise reproduced or source-confirmed findings
-and contract/lifetime investigations. Each
-child records whether its behavior is new on main or inherited from release.
-
-- [Decode order](/quest/m1/ts-reliability/decode-order.md) - the exporters' decode clock holds at most the declared reorder depth, so flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
-- [Finish bitrate recovery](/quest/m1/release-audit/rate-recovery.md) - a quiet bandwidth grant no longer strands moq-video, moq-ffi, and moq-c encoders partway up the ramp
 
 ## Related
 

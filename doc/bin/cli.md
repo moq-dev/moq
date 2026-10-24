@@ -209,7 +209,8 @@ closes. Playback starts when the name is announced. A
 [restarted publisher](#publisher-runs) starts it over on the new run, with a
 fresh catalog, decoders, and clock. When the announcement ends, what is playing
 finishes and the player waits for the name to return. The log names each run's
-epoch. A catalog with nothing this build can play still ends the player.
+epoch. A refused broadcast request or a catalog with nothing this build can
+play ends the player.
 
 Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
@@ -269,6 +270,10 @@ from H.264 rather than a larger H.265 or AV1 one. When the source changes
 resolution, rungs are resolved again: one that no longer fits finishes, and
 one whose size changed comes back under a new name (`video/360p.2`). Requires
 the `transcode` feature, plus `openh264` on a host without a hardware encoder.
+A restarted source retires the old ladder and publishes a fresh derivative
+instance at the same output path. A clean end waits for the source to return;
+stop the command to finish following. A refused source request or an encoding
+failure ends the command.
 
 ## Announced
 
@@ -410,13 +415,18 @@ fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export 
 and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.
-At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
-subscriber still catching up can drain it; Ctrl-C ends that early. A gateway
+At stdin EOF, `import` keeps the finished broadcast announced for
+`--linger` (default 30 s) from the end, so a subscriber that arrives late, such
+as a player that read the final catalog after the end, still gets the tail;
+`--linger 0s` closes it at once, and Ctrl-C ends the wait early. A gateway
 import does the same at a clean end: an RTMP unpublish (`deleteStream`) or
 completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS playlist
 ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
-broadcast at once, and a reconnect, which publishes a newer
-[epoch](/concept/moq-lite#publisher-epochs) at the same path, ends the wait.
+broadcast at once. A reconnect publishes a newer
+[epoch](/concept/moq-lite#publisher-epochs) at the same path, which takes over
+the path while the old broadcast finishes its linger. `import rtsp` redials
+after every session, so it closes each run at once and refuses `--linger`, as
+do `import archive`, `import capture`, and a WHEP pull (`import rtc --connect`).
 
 `export ts`, `export flv`, `export rtmp`, and `export mkv` take `--delay` instead, like an SRT
 receiver's latency, all tracks in decode order, so two exporters of one broadcast
