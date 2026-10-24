@@ -218,7 +218,7 @@ A discontinuity marker is a delivery event, not a new epoch, and a system-clock 
 
 ## Track Identity {#identity}
 A track name always means the same content, so a catalog update never redefines an audio or video track.
-A track's identity is the fields a consumer cannot change without reinitializing its decoder or demuxer: `codec`, `description`, and `container`, plus `displayAspectWidth` and `displayAspectHeight` for video and `sampleRate` and `numberOfChannels` for audio.
+A track's identity is the fields a consumer cannot change without reinitializing its decoder or demuxer: `codec`, `description`, and `container`, plus `displayAspectWidth`, `displayAspectHeight`, and `interlaced` for video and `sampleRate` and `numberOfChannels` for audio.
 A publisher MUST NOT change them for a track once a catalog lists it.
 
 Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`.
@@ -262,6 +262,7 @@ type VideoDecoderConfigExtensions = {
   "color": Color | undefined,
   "projection": Projection | undefined,
   "stereo": string | undefined,
+  "interlaced": boolean | undefined,
 }
 ~~~
 
@@ -335,6 +336,10 @@ Its `fov` is the degrees of longitude the picture spans, centred straight ahead:
 
 A consumer MUST treat an unrecognized `projection` kind or `stereo` value as absent, and MUST reject a recognized `projection` kind with a malformed field, such as a `fov` out of range.
 Neither field is part of the track's identity.
+
+`interlaced` is true when each decoded picture weaves two fields, as an H.264 stream with `frame_mbs_only_flag` 0 decodes.
+If absent, it defaults to false; a publisher SHOULD only write it when true.
+A renderer SHOULD deinterlace such a picture, and a consumer MAY choose its decoder by it, since some hardware decoders refuse interlaced streams.
 
 For example:
 
@@ -1242,6 +1247,7 @@ This document has no IANA actions.
 - Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.
 - Added the optional video `color` field: H.273 primaries, transfer, matrix, and range, plus the SMPTE ST 2086 mastering display and CTA-861.3 content light levels.
 - Added the optional video `projection` (rectilinear, or equirectangular with a longitude `fov`) and `stereo` (mono, left-right, or top-bottom) fields and the optional audio `layout` field (ambisonic).
+- Added the optional video `interlaced` field, true when each decoded picture weaves two fields, and made it part of the track's identity ({{identity}}).
 
 ## moq-hang-03
 {:numbered="false"}

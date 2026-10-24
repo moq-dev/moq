@@ -63,7 +63,7 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
   only settles the tail), or it would FETCH what upstream already gave up.
 - **Fetch budget.** `Subscription::max_delay` becomes `Option<Duration>`:
   `None` means publisher max-age alone, the FETCH default above. This breaks
-  `Subscription` in every binding, with a `MIGRATE.md` entry in each affected
+  `Subscription` in every binding, and the Impact bullet says how to migrate each affected
   package. Rejected (recommended, but overruled): a `Duration::MAX` sentinel
   that the wire saturates, which avoids the break but encodes the meaning in a
   magic value.
@@ -85,7 +85,7 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
   rather than blocking on those quests.
 - **moq-c.** Whichever lands first decides it. If the generated C package
   ([moq-dev/moq#6052](https://github.com/moq-dev/moq/pull/6052)) has landed,
-  `poll_requested_group` leaves the hand-written ABI with a `MIGRATE.md` entry
+  `poll_requested_group` leaves the hand-written ABI with a migration note
   and the fill reaches C through the generated API. Otherwise the frozen crate
   splits each fill into its per-group requests internally, keeping its ABI
   unchanged, and maps `moq_subscription.max_delay_us` to `Some`: a frozen C

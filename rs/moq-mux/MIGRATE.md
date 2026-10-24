@@ -4,13 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Exports clock a declared `reorder` per group (#6453)
+### TS service information expires on the program clock
 
-The H.264 and H.265 importers now declare the catalog's video `reorder` from the SPS (`max_num_reorder_frames` on a frame-only H.264 SPS, `sps_max_num_reorder_pics` on H.265), and keep the first declaration for the track: a later SPS that reorders deeper fails the import.
-For a rendition that declares `reorder`, the MPEG-TS, Matroska, and FLV exports derive each group's decode times from that group's frames alone, ignoring `jitter` and `framerate`.
-A group's first `reorder` frames decode just before its earliest presentation time, so a DTS can precede zero: MPEG-TS wraps it in the 33-bit field, and FLV shifts every timestamp by the deepest declared `reorder` in milliseconds.
-A frame reordered deeper than declared, or a `reorder` the codec level cannot reach, now ends the export instead of moving its timestamps.
-Correct the source, or leave `reorder` unset to keep inferring decode times from timestamps as before.
+TS import retracts SI sub-tables and incomplete generations that stop repeating within their table's maximum interval (30 seconds for unknown tables).
+Repeat current tables within that interval; stale tables no longer remain advertised indefinitely.
+Host time and stalled PCR do not age SI, and existing readers can finish snapshots they already hold.
 
 ### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
 

@@ -268,6 +268,12 @@ pub struct VideoConfig {
 	#[serde_as(as = "Option<DisplayFromStr>")]
 	pub stereo: Option<Stereo>,
 
+	/// Each picture weaves two fields, so a renderer deinterlaces it. Only written when true.
+	///
+	/// Decides decoder configuration, since some hardware decoders refuse interlaced streams.
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub interlaced: bool,
+
 	/// The maximum bitrate of the video track, if known.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
@@ -369,6 +375,7 @@ impl VideoConfig {
 			color: None,
 			projection: None,
 			stereo: None,
+			interlaced: false,
 			bitrate: None,
 			enabled: true,
 			preference: 0,
@@ -525,6 +532,20 @@ mod test {
 
 		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
 		assert!(!decoded.enabled);
+	}
+
+	#[test]
+	fn interlaced_is_written_only_when_true() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		let encoded = serde_json::to_value(&config).expect("failed to encode");
+		assert!(encoded.get("interlaced").is_none());
+
+		config.interlaced = true;
+		let encoded = serde_json::to_value(&config).expect("failed to encode");
+		assert_eq!(encoded["interlaced"], true);
+
+		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
+		assert!(decoded.interlaced);
 	}
 
 	#[test]

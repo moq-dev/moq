@@ -187,7 +187,7 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 				if (tones.length) toneCheck = new ToneCheck(current, tones);
 			}
 		}
-		const audioRendition = Object.values(el.catalog?.audio?.renditions ?? {})[0];
+		const audioRendition = el.audio.source.out.config.peek();
 
 		const ui = document.querySelector("moq-watch-ui")?.shadowRoot;
 		const control = ui?.querySelector<HTMLButtonElement>("button.control[aria-label]");
@@ -195,6 +195,7 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 		const state: Sample = {
 			seq: seq++,
 			broadcastActive: el.broadcast.out.active.peek() !== undefined,
+			broadcastEpoch: el.broadcast.out.active.peek()?.epoch,
 			broadcastStatus: el.broadcast.out.status.peek(),
 			userActivated: navigator.userActivation.hasBeenActive,
 			at: performance.now(),
@@ -212,6 +213,7 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 			audioStalled: el.audio.out.stalled.peek(),
 			delay: el.sync.out.delay.peek(),
 			...(analyser ? analyze(analyser, spectrum, wave) : {}),
+			audioCodec: audioRendition?.codec,
 			audioChannels: audioRendition?.numberOfChannels,
 			tones: toneCheck?.read(),
 			controlLabel: control?.getAttribute("aria-label") ?? undefined,

@@ -133,6 +133,9 @@ export const VideoConfigSchema = z.object({
 	// so an unrecognized packing survives a republish; a consumer treats one as absent.
 	stereo: z.optional(z.string()),
 
+	// Each picture weaves two fields, so a renderer deinterlaces it. Absent means progressive.
+	interlaced: z.optional(z.boolean()),
+
 	// The maximum frame rate of the video in frames per second.
 	framerate: z.optional(z.number()),
 

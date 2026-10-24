@@ -696,6 +696,7 @@ mod test {
 				color: None,
 				projection: None,
 				stereo: None,
+				interlaced: false,
 				bitrate: None,
 				enabled: true,
 				preference: 0,

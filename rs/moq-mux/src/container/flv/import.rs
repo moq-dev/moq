@@ -221,7 +221,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let data = &body[5..];
 
 		match avc_packet_type {
-			AVC_SEQUENCE_HEADER => self.init_video(DEFAULT_TRACK_ID, crate::codec::h264::config_from_avcc(data)?),
+			AVC_SEQUENCE_HEADER => self.init_video(DEFAULT_TRACK_ID, crate::codec::h264::config(data)?),
 			AVC_NALU => self.write_video(
 				DEFAULT_TRACK_ID,
 				data,
@@ -291,7 +291,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		match packet_type {
 			VIDEO_PACKET_SEQUENCE_START => {
 				let config = match fourcc {
-					b"avc1" => crate::codec::h264::config_from_avcc(payload)?,
+					b"avc1" => crate::codec::h264::config(payload)?,
 					b"hvc1" => crate::codec::h265::config_from_hvcc(payload)?,
 					b"av01" => crate::codec::av1::config_from_av1c(payload)?,
 					// VP9 carries its config in band; the SequenceStart vpcC is
@@ -725,7 +725,6 @@ fn take_fourcc(cursor: &mut &[u8]) -> Option<[u8; 4]> {
 	Some(fourcc)
 }
 
-/// Build a video config for the `avc1` shape from an `AVCDecoderConfigurationRecord`.
 /// Build an audio config for AAC from an `AudioSpecificConfig`.
 fn config_from_asc(asc_bytes: &[u8]) -> anyhow::Result<AudioConfig> {
 	let mut cursor = asc_bytes;

@@ -192,6 +192,16 @@ pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
 	sps_vui(nal)?.hrd
 }
 
+/// Whether an SPS NAL unit codes field pictures or field macroblock pairs (`frame_mbs_only_flag` 0).
+pub(crate) fn sps_interlaced(nal: &[u8]) -> Option<bool> {
+	if nal.len() < 4 {
+		return None;
+	}
+	let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
+	let sps = h264_parser::Sps::parse(&rbsp).ok()?;
+	Some(!sps.frame_mbs_only_flag)
+}
+
 /// What an SPS VUI declares about picture timing, sample shape, and colour.
 struct Vui {
 	/// The sample aspect, when the VUI specifies one.
