@@ -373,6 +373,34 @@ describe("Session integration (scripted peer)", () => {
 		session.close();
 	});
 
+	test("aborting a close queued behind a wedged socket resets the stream", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await waitFor(() => peer.has("transport_parameters"));
+		const writer = (await session.createUnidirectionalStream()).getWriter();
+		await writer.write(new Uint8Array(3));
+		await waitFor(() => peer.has("stream"));
+
+		// The ping response sticks in the socket; the FIN queues behind it.
+		peer.blockWrites();
+		peer.send({ type: "ping_request", sequence: 1n });
+		await settle();
+		const closed = settleTo(writer.close());
+		await settle();
+
+		await writer.abort(new StreamError(7, "RESET_STREAM"));
+		expect(await closed).toBeUndefined();
+
+		peer.unblockWrites();
+		await waitFor(() => peer.has("reset_stream"));
+		const reset = peer.received().find((f) => f.type === "reset_stream") as Frame.ResetStream;
+		expect(reset.code.value).toBe(7n);
+		expect(reset.finalSize).toBe(3n);
+		expect(peer.received().some((f) => f.type === "stream" && f.fin)).toBe(false);
+		session.close();
+	});
+
 	test("aborting mid-write sends no more of that write", async () => {
 		const { session, peer } = connect();
 		await session.ready;

@@ -1820,8 +1820,22 @@ export default class Session implements WebTransport {
 	/** The writable for a stream's send half. */
 	#sendWritable(id: Stream.Id, sendOrder: number): WritableStream<Uint8Array> {
 		const streamId = id.value.value;
+		let signal!: AbortSignal;
+		const reset = (e: unknown) => {
+			this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
+			this.#sendPriorityFrame({
+				type: "reset_stream",
+				id,
+				code: VarInt.from(resetCode(e)),
+				finalSize: this.#sendFinalSize(streamId),
+			});
+
+			this.#sendStreams.delete(streamId);
+			this.#maybeDeleteStreamFlow(streamId);
+		};
 		const writable = new WritableStream<Uint8Array>({
 			start: (controller) => {
+				signal = controller.signal;
 				this.#sendStreams.set(streamId, controller);
 				// An abort fires the signal at once but runs `abort` below only after the
 				// in-flight write settles, so the signal has to end that write: here if
@@ -1842,20 +1856,17 @@ export default class Session implements WebTransport {
 			write: async (chunk, controller) => {
 				await this.#sendStreamData(id, chunk, controller.signal);
 			},
-			abort: (e) => {
-				this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
-				this.#sendPriorityFrame({
-					type: "reset_stream",
-					id,
-					code: VarInt.from(resetCode(e)),
-					finalSize: this.#sendFinalSize(streamId),
-				});
-
-				this.#sendStreams.delete(streamId);
-				this.#maybeDeleteStreamFlow(streamId);
-			},
+			abort: reset,
 			close: async () => {
-				await this.#sendStreamFin(id);
+				try {
+					await this.#sendStreamFin(id);
+				} catch (e) {
+					// An abort during close drops the queued FIN, and WritableStream never
+					// runs `abort` once an in-flight close fails, so reset here instead.
+					if (!signal.aborted) throw e;
+					reset(signal.reason);
+					return;
+				}
 
 				this.#sendStreams.delete(streamId);
 				this.#scheduler?.forget(streamId);
