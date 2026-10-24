@@ -56,6 +56,20 @@ test("caller thresholds override the defaults", () => {
 	expect(Health.defaultThresholds().transport.rtt.degraded).toBe(300);
 });
 
+test("a rendition named __proto__ is graded like any other", () => {
+	const snapshot = (frames: number, skipped: number) =>
+		JSON.parse(`{"renditions":{"__proto__":{"frames":${frames},"skipped":${skipped}}}}`) as Stats.Snapshot;
+	const observer = cases[0].current.observer;
+	const health = Health.publisher({
+		previous: { observer, snapshot: snapshot(100, 0) },
+		current: { observer, snapshot: snapshot(200, 10) },
+		interval: 1000,
+		age: 0,
+	});
+	expect(Object.keys(health.renditions)).toEqual(["__proto__"]);
+	expect(health.verdict).toBe("unhealthy");
+});
+
 test("a negative interval or age is refused", () => {
 	const c = cases[0];
 	expect(() => grade({ ...c, interval: -1 })).toThrow();

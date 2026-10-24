@@ -115,11 +115,18 @@ pub struct Limits<T> {
 
 /// Grading limits, nested by the report section they apply to.
 ///
-/// [Default] holds the documented defaults; override a field to change one.
+/// [Default] holds the documented defaults; override a field to change one. The transport limits
+/// come from a paced 9.2 Mb/s TS feed through a shaped link, graded over five-second intervals:
+/// unimpaired and 80 ms round-trip links kept RTT at most 107 ms and headroom above 4.6; a 12 Mb/s
+/// link kept headroom at 1.67 or more and lost at most 0.23% of media bytes with delivery intact;
+/// a 10 Mb/s link fell to 1.35. The RTT limits double ITU-T G.114's one-way delays for interactive
+/// use. No CLI reporter emits the rendition counters, so their shares are not measured; a 1% rise
+/// in time spent buffering cost viewers of a 90-minute live event over three minutes of watching
+/// (Dobrian et al., SIGCOMM 2011).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Thresholds {
-	/// A report, or a transport sample by its `age`, older than this grades unknown.
+	/// A report older than this grades unknown, as does a transport sample whose age plus the report's exceeds it.
 	pub stale: Duration,
 	/// Limits for the reporting connection.
 	pub transport: TransportThresholds,
@@ -145,7 +152,7 @@ pub struct TransportThresholds {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct PublisherThresholds {
-	/// Frames skipped before sending, as a share of frames written.
+	/// Frames skipped before sending, as a share of frames sent or skipped.
 	pub skipped: Limits<f64>,
 }
 
@@ -213,7 +220,7 @@ pub enum Input {
 	Loss,
 	/// Estimated rate over the media bitrate sent over the interval; lower is worse.
 	Headroom,
-	/// Frames skipped before sending, as a share of frames written over the interval.
+	/// Frames skipped before sending, as a share of frames sent or skipped over the interval.
 	Skipped,
 	/// Frames received too late for playout, per frame received over the interval.
 	Late,
@@ -245,7 +252,7 @@ pub struct Connection {
 	pub verdict: Verdict,
 	/// Every input graded for the role, in a fixed order.
 	pub evidence: Vec<Evidence>,
-	/// The transport sample is older than [Thresholds::stale], so its evidence grades unknown.
+	/// The transport sample plus the report's age exceeds [Thresholds::stale], so its evidence grades unknown.
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	pub stale: bool,
 	/// Bytes lost over the interval.
@@ -303,6 +310,9 @@ pub struct Health {
 }
 
 /// Grade a publisher's self-report.
+///
+/// Loss and headroom divide the connection's transport counters by this broadcast's media, so
+/// they hold when the broadcast is the only one its connection publishes.
 pub fn publisher<E>(sample: &Sample<'_, stats::Snapshot<E>>, thresholds: &Thresholds) -> Health {
 	assess(sample, thresholds)
 }
@@ -362,7 +372,7 @@ impl<E> Kind for stats::Snapshot<E> {
 	fn evidence(delta: Option<Delta<'_, stats::Rendition>>, thresholds: &Thresholds) -> Vec<Evidence> {
 		let skipped = delta.and_then(|d| {
 			let skipped = d.count(|r| r.skipped);
-			ratio(skipped, d.count(|r| r.frames) + skipped)
+			ratio(skipped, d.count(|r| r.frames).saturating_add(skipped))
 		});
 		vec![above(Input::Skipped, skipped, &thresholds.publisher.skipped)]
 	}
@@ -425,7 +435,7 @@ fn assess<S: Kind>(sample: &Sample<'_, S>, thresholds: &Thresholds) -> Health {
 	let interval = previous.map(|_| sample.interval);
 
 	let zero = S::Rendition::default();
-	let mut sent = 0;
+	let mut sent: u64 = 0;
 	let mut renditions = BTreeMap::new();
 	for (id, rendition) in current.renditions() {
 		let delta = previous.map(|previous| Delta {
@@ -434,7 +444,7 @@ fn assess<S: Kind>(sample: &Sample<'_, S>, thresholds: &Thresholds) -> Health {
 			interval: sample.interval,
 		});
 		let bytes = delta.as_ref().map(|d| d.count(S::bytes));
-		sent += bytes.unwrap_or(0);
+		sent = sent.saturating_add(bytes.unwrap_or(0));
 		let frames = delta.as_ref().map(|d| d.count(S::frames));
 		let evidence = S::evidence(delta, thresholds);
 		renditions.insert(
@@ -452,6 +462,7 @@ fn assess<S: Kind>(sample: &Sample<'_, S>, thresholds: &Thresholds) -> Health {
 	let link = Link {
 		current: current.transport(),
 		previous: previous.map(S::transport),
+		age: sample.age,
 		sent,
 		media: interval.map(|interval| bitrate(sent, interval)),
 	};
@@ -482,10 +493,11 @@ fn assess<S: Kind>(sample: &Sample<'_, S>, thresholds: &Thresholds) -> Health {
 	health
 }
 
-/// The reporting connection's two samples and the media sent between them.
+/// The reporting connection's two samples, the current report's age, and the media sent between them.
 struct Link<'a> {
 	current: &'a stats::Transport,
 	previous: Option<&'a stats::Transport>,
+	age: Duration,
 	sent: u64,
 	media: Option<u64>,
 }
@@ -521,7 +533,10 @@ fn connection(link: &Link<'_>, role: Role, thresholds: &Thresholds) -> Connectio
 		evidence.push(below(Input::Headroom, headroom, &limits.headroom));
 	}
 
-	let stale = link.current.age.is_some_and(|age| age > thresholds.stale);
+	let stale = link
+		.current
+		.age
+		.is_some_and(|age| age.saturating_add(link.age) > thresholds.stale);
 	if stale {
 		forget(&mut evidence);
 	}
@@ -678,5 +693,37 @@ mod tests {
 		let health = health(&case, &thresholds);
 		assert_eq!(health.transport.verdict, Verdict::Degraded);
 		assert_eq!(health.verdict, Verdict::Degraded);
+	}
+
+	#[test]
+	fn counters_near_the_limit_saturate() {
+		let snapshot = |frames: u64, bytes| {
+			let rendition = stats::Rendition {
+				frames,
+				bytes,
+				skipped: frames.min(1),
+				..Default::default()
+			};
+			stats::Snapshot::<()> {
+				transport: stats::Transport {
+					rate: Some(1_000_000),
+					lost_bytes: Some(0),
+					..Default::default()
+				},
+				renditions: BTreeMap::from([
+					("0.avc3".to_string(), rendition.clone()),
+					("1.mp4a".to_string(), rendition),
+				]),
+				..Default::default()
+			}
+		};
+		let observer = Observer::new(moq_net::Path::new("room/live").to_owned(), None);
+		let previous = Report::new(observer.clone(), snapshot(0, 0));
+		let current = Report::new(observer, snapshot(u64::MAX, u64::MAX));
+		let sample = Sample::new(&current, Duration::ZERO).with_previous(&previous, Duration::from_secs(1));
+		let health = publisher(&sample, &Thresholds::default());
+		assert_eq!(health.renditions["0.avc3"].bytes, Some(u64::MAX));
+		assert_eq!(health.transport.evidence[2].input, Input::Headroom);
+		assert_eq!(health.transport.evidence[2].verdict, Verdict::Unhealthy);
 	}
 }

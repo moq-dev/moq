@@ -1265,5 +1265,68 @@
 			},
 			"verdict": "healthy"
 		}
+	},
+	{
+		"name": "transport reading stale once the report delay is added",
+		"role": "publisher",
+		"current": {
+			"observer": {
+				"path": "room/cam",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"rtt": 45,
+					"age": 3000
+				},
+				"renditions": {
+					"video": {
+						"frames": 120,
+						"bytes": 310000,
+						"keyframes": 2
+					}
+				}
+			}
+		},
+		"interval": 1000,
+		"age": 3000,
+		"health": {
+			"observer": {
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"path": "room/cam"
+			},
+			"renditions": {
+				"video": {
+					"evidence": [
+						{
+							"input": "skipped",
+							"verdict": "unknown"
+						}
+					],
+					"verdict": "unknown"
+				}
+			},
+			"role": "publisher",
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 45,
+						"verdict": "unknown"
+					},
+					{
+						"input": "loss",
+						"verdict": "unknown"
+					},
+					{
+						"input": "headroom",
+						"verdict": "unknown"
+					}
+				],
+				"stale": true,
+				"verdict": "unknown"
+			},
+			"verdict": "unknown"
+		}
 	}
 ]

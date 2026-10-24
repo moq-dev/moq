@@ -53,7 +53,7 @@ export interface Limits {
 
 /** Grading limits, nested by the report section they apply to. */
 export interface Thresholds {
-	/** A report, or a transport sample by its `age`, older than this many milliseconds grades unknown. */
+	/** Milliseconds past which a report grades unknown, as does a transport sample by its age plus the report's. */
 	stale: number;
 	/** Limits for the reporting connection: RTT in milliseconds, then loss and headroom (publisher only). */
 	transport: { rtt: Limits; loss: Limits; headroom: Limits };
@@ -63,7 +63,10 @@ export interface Thresholds {
 	viewer: { late: Limits; errors: Limits; stalled: Limits };
 }
 
-/** A fresh copy of the documented default thresholds; override a field to change one. */
+/**
+ * A fresh copy of the documented default thresholds; override a field to change one.
+ * The transport limits are measured on a paced TS feed through a shaped link, as `hang::health::Thresholds` records.
+ */
 export function defaultThresholds(): Thresholds {
 	const share = () => ({ degraded: 0.01, unhealthy: 0.05 });
 	return {
@@ -100,7 +103,7 @@ export interface Connection {
 	verdict: Verdict;
 	/** Every input graded for the role, in a fixed order. */
 	evidence: Evidence[];
-	/** The transport sample is older than `stale`, so its evidence grades unknown. */
+	/** The transport sample plus the report's age exceeds `stale`, so its evidence grades unknown. */
 	stale?: true;
 	/** Bytes lost over the interval. */
 	lostBytes?: number;
@@ -142,7 +145,11 @@ export interface Health {
 	renditions: Record<string, Rendition>;
 }
 
-/** Grade a publisher's self-report. */
+/**
+ * Grade a publisher's self-report.
+ * Loss and headroom divide the connection's transport counters by this broadcast's media, so they
+ * hold when the broadcast is the only one its connection publishes.
+ */
 export function publisher(sample: Sample<Stats.Snapshot>, thresholds: Thresholds = defaultThresholds()): Health {
 	return assess(sample, PUBLISHER, thresholds);
 }
@@ -252,10 +259,10 @@ function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thres
 	const interval = previous ? sample.interval : undefined;
 
 	let sent = 0;
-	const renditions: Record<string, Rendition> = {};
+	const entries: [string, Rendition][] = [];
 	for (const [id, rendition] of Object.entries(current.renditions ?? {})) {
 		const delta = previous && {
-			previous: previous.renditions?.[id] ?? ({} as R),
+			previous: own(previous.renditions, id) ?? ({} as R),
 			current: rendition,
 			interval: sample.interval,
 		};
@@ -268,13 +275,16 @@ function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thres
 			entry.bytes = bytes;
 			entry.bitrate = bitrate(bytes, interval);
 		}
-		renditions[id] = entry;
+		entries.push([id, entry]);
 	}
+	// fromEntries defines own properties, so an ID such as `__proto__` stays a key.
+	const renditions: Record<string, Rendition> = Object.fromEntries(entries);
 
 	const transport = connection(
 		{
 			current: current.transport ?? {},
 			previous: previous && (previous.transport ?? {}),
+			age: sample.age,
 			sent,
 			media: interval === undefined ? undefined : bitrate(sent, interval),
 		},
@@ -305,6 +315,7 @@ function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thres
 interface Link {
 	current: Stats.Transport;
 	previous?: Stats.Transport;
+	age: number;
 	sent: number;
 	media?: number;
 }
@@ -330,7 +341,7 @@ function connection(link: Link, role: Role, thresholds: Thresholds): Connection 
 
 	const result: Connection = { verdict: "unknown", evidence };
 	const age = link.current.age;
-	if (age !== undefined && age > thresholds.stale) {
+	if (age !== undefined && age + link.age > thresholds.stale) {
 		result.stale = true;
 		for (const e of evidence) e.verdict = "unknown";
 	}
@@ -352,9 +363,13 @@ function decreased<R>(previous: Snapshot<R>, current: Snapshot<R>, kind: Kind<R>
 	};
 	if (lost((t) => t.lostBytes) || lost((t) => t.lostPackets)) return true;
 	return Object.entries(current.renditions ?? {}).some(([id, rendition]) => {
-		const before = previous.renditions?.[id];
+		const before = own(previous.renditions, id);
 		return before !== undefined && kind.decreased(before, rendition);
 	});
+}
+
+function own<R>(renditions: Record<string, R> | undefined, id: string): R | undefined {
+	return renditions && Object.hasOwn(renditions, id) ? renditions[id] : undefined;
 }
 
 function ratio(count: number, of: number): number | undefined {
