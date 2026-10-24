@@ -6406,7 +6406,7 @@ impl TrackServe {
 				if let Sub::Active(active) = sub {
 					self.subscriber.remove_subscribe(active.id);
 					let _ = active.stream.writer.finish();
-					tracing::info!(track = %self.name, "subscribe canceled (idle)");
+					tracing::debug!(track = %self.name, "subscribe canceled (idle)");
 					*sub = Sub::None;
 					// The copy is still held: what it cached goes stale from here.
 					producer.set_idle();
@@ -6442,7 +6442,7 @@ impl TrackServe {
 			false => producer.start_at(floor),
 		};
 
-		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
+		tracing::debug!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
 		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.max_delay)));
 		self.subscriber.subscribes.lock().insert(
@@ -7493,7 +7493,7 @@ impl ServeLoop {
 								if serve.subscriber.version.has_track_stream() && active.end.is_none() {
 									return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
 								}
-								tracing::info!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe complete");
+								tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe complete");
 								// Upstream FIN'd the subscription: the publisher only FINs
 								// once the track's final sequence is known and every group
 								// stream finished, so the logical track is over for good
@@ -7705,7 +7705,7 @@ impl kio::Task for FetchServeRun {
 
 					// Only once the stream opens: its header can wait for send capacity and
 					// re-polls this state, so logging before it repeats per poll.
-					tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
+					tracing::debug!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
 
 					let request = request.take().expect("request pending");
 
