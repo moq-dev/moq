@@ -18,8 +18,7 @@ class TestLints(unittest.TestCase):
             (root / "rs").mkdir()
             (root / "sh" / "rs").mkdir(parents=True)
             (root / "src").mkdir()
-            for script in ("local.sh", "local.ts"):
-                shutil.copy(ROOT / "sh" / script, root / "sh" / script)
+            shutil.copy(ROOT / "sh" / "local.sh", root / "sh" / "local.sh")
             (root / "justfile").write_text("mod rs\n")
             shutil.copy(ROOT / "rs" / "justfile", root / "rs" / "justfile")
             shutil.copy(ROOT / "sh" / "rs" / "nextest.sh", root / "sh" / "rs" / "nextest.sh")
@@ -31,7 +30,7 @@ class TestLints(unittest.TestCase):
                 '#[test]\nfn runs() { assert!(empty(&[])); }\n'
             )
             toolchain = Path(shutil.which("clippy-driver")).parent
-            env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"),
+            env = dict(os.environ, MOQ_LOCAL_SUPERVISED="1", CARGO_TARGET_DIR=str(root / "target"),
                        PATH=f"{toolchain}:{os.environ['PATH']}",
                        NEXTEST_PROFILE="default")
             subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=root,

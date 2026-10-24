@@ -104,7 +104,7 @@ class RecipeTest(unittest.TestCase):
                 (scratch / "benches/unexecuted.rs").write_text(
                     'compile_error!("nextest must not compile a benchmark it never runs");\nfn main() {}\n'
                 )
-                env = dict(os.environ, BASH_ENV=os.devnull, TMPDIR="/tmp",
+                env = dict(os.environ, MOQ_LOCAL_SUPERVISED="1", BASH_ENV=os.devnull, TMPDIR="/tmp",
                            NEXTEST_PROFILE="default")
                 result = subprocess.run(
                     ["just", "rs", "test", "--manifest-path", str(scratch / "Cargo.toml")],
