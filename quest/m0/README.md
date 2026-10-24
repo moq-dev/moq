@@ -37,7 +37,6 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 ## Required
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
-- [web-transport-proto 0.6.3](/quest/m0/web-transport-proto-0.6.3.md) - `main` and `release` lock the upstream release that bounds decoded CONNECT headers, so a peer can't make a relay hold megabytes per session before auth
 - [64-bit Hop IDs](/quest/m0/hop-id-64.md) - a moq-transport peer with any non-zero 64-bit Hop ID keeps its session, and Hop IDs are `u64` in Rust and JS
 - [MALFORMED_AUTH_TOKEN session code](/quest/m0/malformed-auth-token-code.md) - a 0x16 close reports a malformed token instead of `unknown code=22`, and moq-net sends it for an unparseable token
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit

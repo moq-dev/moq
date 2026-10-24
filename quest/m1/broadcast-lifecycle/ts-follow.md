@@ -27,8 +27,12 @@ Decided with the maintainer on 2026-10-23:
 - The hidden `--linger` on the other container exports
   (`rs/moq-cli/src/args.rs`) keeps refusing; point its message at `--follow`
   only where following applies.
-- Coordinate the name with [readers follow restarts](/quest/m1/sink-restart-follow.md),
-  which owns `moq_mux::follow::Instances`.
+- Move the follower onto `moq_mux::follow::Instances` here (decided
+  2026-10-24), as [readers follow restarts](/quest/m1/sink-restart-follow.md)
+  did for `moq play`, `moqsrc`, and `transcode`. `with_linger` waits from the
+  announcement through resolution and the first catalog, but `Instances`
+  yields `Start` only after resolution, so settle what `--follow` bounds
+  before moving the timer onto it. Coordinate the name with that quest.
 - Docs: `doc/bin/cli.md`, plus a migration note for moq-cli, moq-mux, and
   moq-srt in the Impact bullet.
 

@@ -1,4 +1,4 @@
-# Resolve the release audit findings
+# [S] Resolve the release audit findings
 
 ## Goal
 
@@ -76,8 +76,7 @@ indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
 reordered-frame timestamps and missing EOF output. Each owning quest records
 the reproduction's limits. JS reader and publisher datagram paths now enforce
 subscription bounds; the OBS defects moved to an m1 child (2026-10-22, maintainer).
-Go reservation disposal remains an investigation, and
-the security-sensitive HLS admission item is deliberately a public pointer.
+Go reservation disposal remains an investigation.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
 
@@ -88,21 +87,17 @@ work, because obs-moq ships on its own schedule.
 
 ## Required
 
-The entries comprise reproduced or source-confirmed findings,
-contract/lifetime investigations, and one security-review pointer. Each
+The entries comprise reproduced or source-confirmed findings
+and contract/lifetime investigations. Each
 child records whether its behavior is new on main or inherited from release.
 
-- [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
 - [OBS decode timing](/quest/m1/release-audit/obs-decode-timing.md) - the shipping OBS source stamps each reordered picture with its own timestamp and drains at clean EOF
 - [Decode order](/quest/m1/ts-reliability/decode-order.md) - the exporters' decode clock holds at most the declared reorder depth, so flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
-- [Release AUTH wake listeners](/quest/m1/release-audit/auth-listeners.md) - session churn does not retain one terminal promise reaction per change
-- [Finish bitrate recovery](/quest/m1/release-audit/rate-recovery.md) - a quiet bandwidth grant no longer strands moq-video, moq-ffi, and moq-c encoders partway up the ramp
 
 ## Related
 
 - [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - range lists and frame offsets build on the bounds fixed here
 - [OBS video source](/quest/m2/obs-moq-video/source.md) - the decoder replacement keeps the timing and EOF behavior fixed here
-- [QPACK dependency fix](/quest/m0/web-transport-proto-0.6.3.md) - decoded header expansion is already tracked
 - [Compressed tracks](/quest/m1/compress/README.md) - mid-group widening and application migration have existing owners
 - [Archive consumer](/quest/m1/archive/consumer.md) - current producer and CLI reader still need the new-format roundtrip
 - [Measured release performance](/quest/m1/release-perf/README.md) - existing paired benchmark regressions and their confirmation runs

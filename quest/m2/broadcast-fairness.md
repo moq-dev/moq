@@ -44,7 +44,7 @@ Direction carried over from 2026-09-19, not re-confirmed:
   relay-to-relay connection; no carrier is needed on the wire.
 - Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
   order, receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)), then
-  [Rust request credit](/quest/m1/rs-request-credit.md), then the send domain.
+  [native request admission](https://github.com/moq-dev/moq/pull/6409), then the send domain.
 
 Receive ranks, folded in from
 [moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)'s follow-ups by
@@ -97,10 +97,6 @@ high priority in one broadcast never makes a stuck window evict another
 broadcast's partial groups first, a broadcast that filled the window before
 another began receiving yields down to its even share, and a priority or order
 update moves an already-ranked stream.
-
-## Required
-
-- [Rust request credit](/quest/m1/rs-request-credit.md) - the previous `transport::poll` break; the send domain goes on top
 
 ## Related
 

@@ -25,4 +25,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - the TS import contract this belongs to
-- [Shared TS parser](/quest/m1/ts-reliability/shared-parser.md) - one parser for every program, so per-chunk cost does not grow with the programs this quest admits
