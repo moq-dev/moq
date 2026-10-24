@@ -4787,11 +4787,7 @@ enum IngestPhase {
 }
 
 impl GroupIngest {
-	fn new(
-		subscriber: &Subscriber,
-		group: &ietf::GroupHeader,
-		timescale: Option<Timescale>,
-	) -> Self {
+	fn new(subscriber: &Subscriber, group: &ietf::GroupHeader, timescale: Option<Timescale>) -> Self {
 		Self {
 			has_extensions: group.flags.has_extensions,
 			timescale,
