@@ -18,7 +18,3 @@ mid-playback for each.
 restarts, not track moves inside one broadcast.
 
 Public API: none expected. Wire: none.
-
-## Related
-
-- [One Annex-B exporter](/quest/m1/annexb-export.md) - its shared lifecycle also follows a rebound rendition
