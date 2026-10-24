@@ -91,6 +91,7 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 	listener: Option<net::TcpListener>,
@@ -105,6 +106,7 @@ struct InternalState {
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 }
@@ -133,6 +135,7 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 			listener: None,
@@ -140,6 +143,7 @@ impl Internal {
 		}
 	}
 
+	#[cfg(feature = "stun")]
 	pub(crate) fn with_stun(mut self, counters: Option<crate::stun::Counters>) -> Self {
 		self.stun = counters;
 		self
@@ -259,6 +263,7 @@ impl Internal {
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
+				#[cfg(any(feature = "stun", test))]
 				stun: self.stun.clone(),
 				shutdown: self.shutdown.clone(),
 			})
@@ -334,6 +339,7 @@ async fn serve_health() -> Response {
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
+	#[cfg(any(feature = "stun", test))]
 	if let Some(stun) = &state.stun {
 		stun.render(&mut body);
 	}
@@ -1147,6 +1153,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 		};
@@ -1166,6 +1173,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 		};
