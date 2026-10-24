@@ -71,9 +71,14 @@ export function packetDuration(codec: string, frame: Container.Frame): Milli | u
 }
 
 function frameSamples(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): number | undefined {
-	// HE-AAC (v1 and v2) doubles the output rate of its AAC-LC core.
-	if (config.codec === "mp4a.40.5" || config.codec === "mp4a.40.29") return AAC_HE_FRAME_SAMPLES;
-	if (config.codec.startsWith("mp4a")) return AAC_LC_FRAME_SAMPLES;
+	switch (Util.Aac.objectType(config.codec)) {
+		case 2:
+			return AAC_LC_FRAME_SAMPLES;
+		// HE-AAC (v1 and v2) doubles the output rate of its AAC-LC core.
+		case 5:
+		case 29:
+			return AAC_HE_FRAME_SAMPLES;
+	}
 	if (config.codec === "mp3") {
 		// MPEG-1 Layer III has 1152 samples per frame; MPEG-2/2.5 have 576.
 		return config.sampleRate >= MP3_MPEG1_MIN_SAMPLE_RATE ? MP3_MPEG1_FRAME_SAMPLES : MP3_MPEG2_FRAME_SAMPLES;

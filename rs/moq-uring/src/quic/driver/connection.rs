@@ -10,7 +10,7 @@ use bytes::Bytes;
 use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
 use rustc_hash::FxHashMap;
 
-use super::super::{Error, SEGMENT};
+use super::super::Error;
 use super::endpoint;
 use crate::udp;
 use crate::worker::Owner;
@@ -901,16 +901,19 @@ impl Driver {
 			Poll::Pending => return Poll::Pending,
 		};
 
-		let segments = (tx.capacity() / SEGMENT).min(TRAIN_SEGMENTS);
-		if segments == 0 {
-			return Poll::Ready(Err(Error::Io(format!(
-				"transmit buffer of {} bytes holds no {SEGMENT} byte segment",
-				tx.capacity()
-			))));
-		}
-
 		let (transmit, closing) = {
 			let mut conn = self.shared.conn.borrow_mut();
+			// moq-quic packs every full datagram at the current MTU, which
+			// discovery can raise, so a train sized for any smaller one would
+			// outgrow the buffer.
+			let mtu = usize::from(conn.current_mtu());
+			let segments = (tx.capacity() / mtu).min(TRAIN_SEGMENTS);
+			if segments == 0 {
+				return Poll::Ready(Err(Error::Io(format!(
+					"transmit buffer of {} bytes holds no {mtu} byte datagram",
+					tx.capacity()
+				))));
+			}
 			// moq-quic encrypts the train straight into the socket's buffer.
 			// Nothing to send, or paced; the buffer returns to the pool on drop.
 			let Some(transmit) = conn.poll_transmit(self.shared.owner.now(), segments, &mut tx) else {
