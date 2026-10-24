@@ -571,13 +571,13 @@ impl<E: CatalogExt> Producer<E> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	async fn decoded_frame(consumer: &mut crate::decode::Consumer) -> Result<Option<Frame>, Error> {
 		loop {
 			match consumer.read().await? {
-				Some(crate::decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
-				Some(crate::decode::Read::End { .. }) => {}
+				Some(crate::decode::Read::Frame(frame)) => return Ok(Some(frame)),
+				Some(crate::decode::Read::Gap { .. } | crate::decode::Read::End { .. }) => {}
 				None => return Ok(None),
 			}
 		}

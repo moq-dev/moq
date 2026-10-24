@@ -23,8 +23,6 @@ mod rtmp;
 mod rtsp;
 mod srt;
 mod subscribe;
-#[cfg(test)]
-mod test_env;
 #[cfg(feature = "transcode")]
 mod transcode;
 mod web;
@@ -169,7 +167,7 @@ fn attach_lan(
 	Ok(cluster.with_advertise(advertise))
 }
 
-/// The admission, accounting and shutdown context shared by one listener.
+/// The admission and shutdown context shared by one listener.
 #[derive(Clone)]
 struct Serving {
 	cluster: moq_relay::cluster::Cluster,
@@ -186,7 +184,7 @@ struct Serving {
 /// stage's directions prune the side it does not use, so a subscribe-only export
 /// never announces what a viewer could not have had anyway.
 impl Serving {
-	async fn serve_client(&self, request: moq_tokio::server::Request) -> anyhow::Result<()> {
+	async fn serve_client(&self, mut request: moq_tokio::server::Request) -> anyhow::Result<()> {
 		let origin = &self.cluster.origin;
 		let directions = self.directions;
 		let auth_request = moq_relay::auth::request_for(&self.auth, &request);
@@ -222,9 +220,6 @@ impl Serving {
 			anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
 		}
 
-		let stats = self.cluster.stats.tier(token.tier.clone()).session(&token.label);
-		let lease = lease.with_stats(stats.clone());
-		let mut request = request.with_stats(stats);
 		if let Some(publish) = publish {
 			request = request.with_publisher(publish.consume());
 		}
@@ -599,13 +594,13 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if import.source.stdin_format().is_some() {
 						claim("stdin", &mut stdin, &name)?;
 					}
-					let stats = import.stats;
+					let report = import.report;
 					if let Some(mut publish) =
 						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
 					{
-						// Before `run` declares a track, so the stats section rides the first catalog.
-						if stats {
-							publish = publish.with_stats(connection.as_ref().map(moq_tokio::Connection::monitor))?;
+						// Before `run` declares a track, so the `stats` section rides the first catalog.
+						if report {
+							publish = publish.with_report(connection.as_ref().map(moq_tokio::Connection::monitor))?;
 						}
 						locals.push(publish);
 					}
@@ -831,7 +826,6 @@ fn spawn_export(
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
 			passthrough: stdout.passthrough,
-			sync: stdout.sync,
 			catalog: export.catalog_format,
 			select: export.select,
 		};
@@ -885,8 +879,8 @@ fn spawn_export(
 			ExportSink::Archive(args) => {
 				tasks.spawn(archive::export(origin.consume(), name, args));
 			}
-			ExportSink::Stats => {
-				tasks.spawn(report::print_stats(origin.consume(), name));
+			ExportSink::Report => {
+				tasks.spawn(report::print_report(origin.consume(), name));
 			}
 			ExportSink::Echo => {
 				tasks.spawn(report::print_echo(origin.consume(), name));
@@ -987,7 +981,7 @@ fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Resu
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::future::Future;
@@ -1516,11 +1510,11 @@ mod tests {
 	}
 
 	/// A `--connect` URL can name the broadcast itself, leaving the stage's broadcast empty: the
-	/// connection root, which `export stats` reads like the other point exports.
+	/// connection root, which `export report` reads like the other point exports.
 	#[tokio::test]
-	async fn export_stats_reads_the_connection_root() {
+	async fn export_report_reads_the_connection_root() {
 		let invocation =
-			Invocation::try_parse_from(["moq", "--connect", "http://relay/event", "export", "stats"]).unwrap();
+			Invocation::try_parse_from(["moq", "--connect", "http://relay/event", "export", "report"]).unwrap();
 		let Some(Command::Export(export)) = invocation.stages.into_iter().next() else {
 			panic!("parsed as something other than an export");
 		};

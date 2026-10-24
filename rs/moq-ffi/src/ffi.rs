@@ -80,7 +80,13 @@ pub(crate) fn test_clock() -> Option<&'static moq_clock::Installed> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Runtime {
-	fn new(#[cfg_attr(not(feature = "testing"), allow(unused_variables))] test_clock: bool) -> Self {
+	fn new(
+		#[cfg_attr(
+			not(feature = "testing"),
+			allow(unused_variables, reason = "only the `testing` feature uses it")
+		)]
+		test_clock: bool,
+	) -> Self {
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.thread_name("moq-ffi-worker")
 			.enable_all()

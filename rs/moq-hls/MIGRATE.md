@@ -26,12 +26,19 @@ Set `import::Config::passthrough` to keep publishing CMAF.
 ### An ended playlist ends the import
 
 `import::Import::run` returns `Ok(())` once every rendition's playlist carries `EXT-X-ENDLIST` and its last segment is imported, instead of polling forever.
+A playlist that has already ended (`EXT-X-ENDLIST`) when a rendition first sees it is refused with the new `Error::PlaylistEnded`, from `init` and `run` alike, instead of importing its last three segments.
 Call `Import::finish` then, and keep the returned `broadcast::Finish` (or await `Finish::wait`) so subscribers still catching up drain the tail.
 
 ```rust
 import.run().await?;
 import.finish()?.wait().await;
 ```
+
+### A timestamp rewind ends the import (#6426)
+
+`import::Import::init` and `run` fail with the new `Error::Rewind` when a rendition's timestamps go backwards, such as a reset at an `EXT-X-DISCONTINUITY` under the same `EXT-X-MAP`.
+`run` used to retry it, then evict the rendition and rejoin it as fresh tracks.
+Treat the error as final and import the restarted source as a new broadcast.
 
 ### A failed timeline fails its listings
 

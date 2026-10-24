@@ -73,3 +73,6 @@ harness = false
 [[bench]]
 name = "ts_video"
 harness = false
+
+[lints]
+workspace = true

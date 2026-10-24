@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/a73fb295a3679ff54205af68a1a7bb8ec5bdc7af";
+      url = "github:kixelated/quest/cbd939adf5043f083e24e0302d40f7618c09f427";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -375,8 +375,11 @@
           # The upstream repository ignores Cargo.lock so cargo installs test
           # the unlocked resolver. Nix still consumes committed lock data.
           cargoLock.lockFile = ./nix/uniffi-dart-Cargo.lock;
-          # Enum fields must use the record's converter name without renaming it.
-          patches = [ ./nix/uniffi-dart-record-error.patch ];
+          # Carry record converter and per-operation cancellation fixes at the source.
+          patches = [
+            ./nix/uniffi-dart-record-error.patch
+            ./nix/uniffi-dart-cancellation.patch
+          ];
           postPatch = ''
             cp ${./nix/uniffi-dart-Cargo.lock} Cargo.lock
           '';
@@ -573,6 +576,10 @@
         # are disallowed in the flake `packages` schema.
         legacyPackages = {
           inherit (pkgs) gst_all_1;
+
+          # Nightly conformance needs both pinned Moxygen endpoints. Keep this
+          # C++ dependency build out of the default shell and flake checks.
+          moxygen = pkgs.callPackage ./nix/moxygen.nix { };
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 

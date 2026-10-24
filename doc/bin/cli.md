@@ -17,7 +17,7 @@ Docker; see [Install](/setup/install).
 | --- | --- | --- |
 | `import` | `ts`, `fmp4`, `flv`, `avc3` | Read a container from stdin (usually FFmpeg). |
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
-| `import` | `hls <url>` | Pull a remote HLS playlist. |
+| `import` | `hls <url>` | Follow a remote live HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
@@ -58,13 +58,6 @@ Pending handshakes and admission requests share the same drain window, and an
 open stdin pipe does not keep the process alive afterward. Admission is part of
 the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission without
 a deadline.
-
-Add `--stats-enabled` before the first stage to publish accepted-session and
-traffic counters with the relay's `--stats-*` settings. An export-only listener
-publishes nothing to its sessions, so they cannot read these stats. These
-listener settings require a MoQ listener. Grants still scope which broadcasts
-each session can publish or subscribe to, including stats; see the relay's
-[statistics configuration](/bin/relay/config#stats).
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
 one; every flag is documented there. Flags renamed between releases are listed in
@@ -249,12 +242,13 @@ ceiling that backends with live bitrate control lower to fit the connection.
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.
 
-On Wayland, bare `--window` asks the system portal to choose one window;
-there is no window id to look up or supply. An explicit `--window <id>` still
-selects a native window, including XWayland windows through their X11 ids.
-The portal may reuse its grant when capture reopens within the same process;
-a new process shows the picker again. Bare `--window` requires a Linux build
-with `pipewire`; other builds require an explicit window id.
+On Wayland, bare `--window` and bare `--display` ask the system portal to
+choose one window or screen; there is no id to look up or supply. An explicit
+`--window <id>` or `--display <id>` still selects a native source, including
+XWayland's through their `x11:` ids, and any other id fails rather than opening
+the picker. The portal may reuse its grant when capture reopens within the same
+process; a new process shows the picker again. Bare `--window` requires a Linux
+build with `pipewire`; other builds require an explicit window id.
 
 Requires the `capture` feature, plus `openh264` on a host without a hardware
 encoder. On Linux the microphone needs the ALSA
@@ -453,24 +447,6 @@ continuity error, and the rest carry on. It takes neither `--linger`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-`export ts --sync` renders every packet from the broadcast alone, so two exports
-of it, joined at different moments and fed with different skew, emit identical
-TS for the content both receive, continuity counters included, as the legs of a
-1+1 pair must; an SMPTE ST 2022-7 pair also needs identical RTP framing around
-it, which this command does not write. Each PID gets a fixed lane of the constant rate, sized
-for its codec's most, with video taking the rest; content one leg lacks leaves
-its packets as stuffing there. The PCR rides a PID of its own, and each PID's
-continuity counter restarts at every group with the break flagged. It needs a
-constant rate, the same on every leg since the lanes follow from it
-(`--mux-rate`, or the catalog's), costing headroom over the
-source's (a 10 Mb/s channel needs about 12), and takes neither `--stitch` nor
-`--passthrough`. A group that starts behind the one before it, on a lane too
-narrow to absorb that one, is logged and counted in `overruns`: the legs can
-differ there. So can reordered video whose SPS declares no reorder depth
-(`max_num_reorder_frames`), which is logged, and SI while one leg holds an older
-revision than the other or around an SI table the catalog adds or drops, which
-each leg takes up when its catalog update arrives.
-
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
 stream. A return that cannot be read yet, such as one still routed through a
@@ -487,11 +463,11 @@ default version every return is a replacement. An export that fails while the br
 a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
 so the other formats refuse `--linger`.
 
-## Stats and feedback
+## Reports and feedback
 
-`import --stats` names a stats track in the catalog and reports what each
-rendition has written, about once a second while someone subscribes, with the
-connection's RTT, estimated send rate, and loss. It covers the stdin imports;
+`import --report` names a track in the catalog's `stats` section and reports
+what each rendition has written, about once a second while someone subscribes,
+with the connection's RTT, estimated send rate, and loss. It covers the stdin imports;
 capture, the gateways, `archive`, and `ts --program all` refuse it.
 
 `export --echo <name>` answers a publisher that solicits feedback: under the
@@ -500,15 +476,15 @@ the export reads has received and its newest arrival, until the export ends.
 It covers the stdout container exports and needs a hang catalog, so MSF
 refuses it.
 
-The `stats` and `echo` sinks print reports as JSON lines. `export stats`
-follows one broadcast's stats track until the broadcast ends; `export echo`
+The `report` and `echo` sinks print reports as JSON lines. `export report`
+follows one broadcast's report track until the broadcast ends; `export echo`
 prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
 `--broadcast` as they come and go, reading one that ends for 5 s more for its
 final report. Either sink stops reading a report that grows past 1 MiB.
 
 ```bash
-moq ... --broadcast event import --stats ts < feed.ts
-moq ... --broadcast event export stats
+moq ... --broadcast event import --report ts < feed.ts
+moq ... --broadcast event export report
 moq ... --broadcast event export --echo alice ts > out.ts
 moq ... --broadcast viewers export echo
 ```

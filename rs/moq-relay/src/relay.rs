@@ -241,7 +241,6 @@ impl Relay {
 		#[cfg(feature = "iroh")]
 		let iroh = config.iroh.bind(&config.quic).await?;
 
-		#[allow(unused_mut)]
 		let mut server_config = moq_tokio::server::Config::default();
 		server_config.listen = listen;
 		server_config.tls = served;
@@ -300,7 +299,7 @@ impl Relay {
 			Some(iroh) => cluster.with_iroh(iroh),
 			None => cluster,
 		};
-		let stats = config.stats.build(cluster.origin.clone());
+		let stats = config.stats.build(cluster.origin.clone())?;
 		// The cluster takes over keeping the publish task alive, so an embedder that
 		// drops the producer keeps publishing for as long as it serves.
 		let cluster = cluster.with_stats(stats.clone());
@@ -840,7 +839,11 @@ async fn serve_listening(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	#[tokio::test]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {

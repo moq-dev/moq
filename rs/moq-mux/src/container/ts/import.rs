@@ -1656,6 +1656,8 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Flush any buffered PES and finish every track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
+		// No input follows, so the bytes that waited for the rest of a packet are done.
+		self.scratch = Vec::new();
 		for pid in self.headers.keys().copied().collect::<Vec<_>>() {
 			self.damage(pid, &anyhow::anyhow!("PES header truncated at end of input"))?;
 		}
@@ -3043,13 +3045,16 @@ impl<E: catalog::Catalog> Stream<E> {
 			// Only the self-describing audio holds a frame back for a successor to confirm.
 			Stream::Aac(stream) => return stream.finish(),
 			Stream::Legacy(stream) => return stream.finish(),
+			// No input follows: drain the clean tail, then release the splitter and
+			// assembler outright, including the parameter caches a loss reset keeps.
 			Stream::H264 {
 				split,
 				assembly,
 				import,
 			} => {
 				let published = video::avc(split, import, assembly, true)?;
-				assembly.reset();
+				*split = Default::default();
+				*assembly = video::Assembly::new(video::Codec::Avc);
 				import.finish()?;
 				return Ok(published);
 			}
@@ -3059,7 +3064,8 @@ impl<E: catalog::Catalog> Stream<E> {
 				import,
 			} => {
 				let published = video::hevc(split, import, assembly, true)?;
-				assembly.reset();
+				*split = Default::default();
+				*assembly = video::Assembly::new(video::Codec::Hevc);
 				import.finish()?;
 				return Ok(published);
 			}
@@ -8410,7 +8416,6 @@ pub(super) mod test {
 
 	/// Import `data` with an `mpegts` catalog, failing on any import error. The importer is
 	/// returned to keep its renditions in the catalog.
-	#[allow(clippy::type_complexity)]
 	fn import_all(
 		data: &[u8],
 	) -> anyhow::Result<(

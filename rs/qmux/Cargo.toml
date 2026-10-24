@@ -54,3 +54,6 @@ required-features = ["tcp", "ws"]
 [[example]]
 name = "interop-server"
 required-features = ["tcp", "ws"]
+
+[lints]
+workspace = true

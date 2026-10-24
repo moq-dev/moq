@@ -18,12 +18,12 @@ six times ([moq-dev/moq#1843](https://github.com/moq-dev/moq/pull/1843),
 [#4500](https://github.com/moq-dev/moq/pull/4500),
 [#4574](https://github.com/moq-dev/moq/pull/4574),
 [#4645](https://github.com/moq-dev/moq/pull/4645),
-[#5949](https://github.com/moq-dev/moq/pull/5949)). Today there are three
-authors: `DecodeClock::pop` (`rs/moq-mux/src/container/decode.rs`, TS without
-`--sync` and MKV) settles a slot by the highest PTS read and a delay that only
-grows; `pop_counted` (TS `--sync`) depends on the held frames alone; FLV
+[#5949](https://github.com/moq-dev/moq/pull/5949)). Today there are two
+authors: `DecodeClock::pop` (`rs/moq-mux/src/container/decode.rs`, TS and
+MKV) settles a slot by the highest PTS read and a delay that only grows; FLV
 export authors `PTS - jitter` bumped past the last DTS, which passes the PTS
-on B-frames. fMP4 export already anchors its decode timeline at each group's
+on B-frames. #5949's `pop_counted`, which depended on the held frames alone,
+left with `export ts --sync`. fMP4 export already anchors its decode timeline at each group's
 first frame and needs no change.
 
 Decided 2026-10-22 by the maintainer, after the TS root-cause audit:
@@ -35,9 +35,8 @@ Decided 2026-10-22 by the maintainer, after the TS root-cause audit:
 - Rejected: carrying decode time in the frame (CMAF composition offsets, a
   LOC property, Legacy inference). It adds a wire field to every container
   to preserve spacing no consumer needs.
-- One clock serves TS, MKV and FLV. The counted path becomes the only one,
-  and it is not called `pop_counted`: the depth is fixed for the
-  rendition's life, so it moves into the constructor
+- One clock serves TS, MKV and FLV, counting frames against the depth. The
+  depth is fixed for the rendition's life, so it goes into the constructor
   (`DecodeClock::new(reorder)`) and the release is a plain `pop(flush)`.
   A new rendition gets a new clock. Delete the timestamp-settled `pop`, its
   growing delay, `reach`, FLV's `author_dts`/`dts_reserve`, and the catalog
@@ -50,7 +49,7 @@ Decided 2026-10-22 by the maintainer, after the TS root-cause audit:
   group's (n - `reorder`)th presentation slot, which no frame still to come
   can precede. The group's first `reorder` frames step one 90 kHz tick apart
   up to the keyframe's slot: the clock cannot know the group's spacing until
-  frames it may not hold have arrived (`references_far_apart_keep_their_slots`),
+  frames it may not hold have arrived (`references_far_apart_keep_their_slots` in #5949),
   and one tick needs no spacing, keeps DTS increasing within a group and
   across groups without history, holds no frame past `reorder`, and only
   relaxes those frames' delivery deadlines (found in review). Rejected: a delay of
@@ -111,7 +110,3 @@ reordering publishes a new rendition; flat and backward PTS through MKV and
 TS export retain at most `reorder` frames, swept over item count and payload
 size; each importer sets `reorder` from the SPS and from source offsets.
 Keep the T-STD controls passing.
-
-## Related
-
-- [Deterministic TS legs for H.265](/quest/m2/ts-hitless-h265.md) - the `--sync` group anchor this path shares

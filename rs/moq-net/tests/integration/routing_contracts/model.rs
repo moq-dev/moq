@@ -2020,7 +2020,10 @@ impl Net {
 		out
 	}
 
-	#[allow(clippy::type_complexity)]
+	#[expect(
+		clippy::type_complexity,
+		reason = "a test model's sort key; an alias would only move the type"
+	)]
 	fn rank(
 		&self,
 		node: Node,
