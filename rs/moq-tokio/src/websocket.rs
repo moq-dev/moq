@@ -1047,6 +1047,7 @@ mod timeout_tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn unset_timeout_uses_the_default_and_zero_disables_it() {
+		const ALPN: &str = "qmux-01.moq-lite-06";
 		for (timeout, expires) in [(None, true), (Some(time::Duration::ZERO), false)] {
 			let activity = moq_net::server::Activity::default();
 			let mut options = Options::new(
@@ -1054,7 +1055,7 @@ mod timeout_tests {
 				Default::default(),
 				activity.enter().unwrap(),
 			);
-			options.link.alpn = Some(qmux::ALPNS[0].into());
+			options.link.alpn = Some(ALPN.into());
 			options.timeout = timeout;
 			// Complete QMux over an in-memory WebSocket, then withhold MoQ SETUP.
 			// A silent transport would expire QMux's own parameter deadline first.
@@ -1065,7 +1066,7 @@ mod timeout_tests {
 			let peer =
 				tokio_tungstenite::WebSocketStream::from_raw_socket(peer, tungstenite::protocol::Role::Client, None)
 					.await;
-			let mut peer = qmux::ws::Upgraded::new(peer, qmux::ALPNS[0]).connect().unwrap();
+			let mut peer = qmux::ws::Upgraded::new(peer, ALPN).connect().unwrap();
 			let mut accept = Box::pin(accept(server, options));
 			assert!(accept.as_mut().now_or_never().is_none());
 			let _stream = futures::future::poll_fn(|cx| peer.poll_open_bi(cx, Default::default()))
