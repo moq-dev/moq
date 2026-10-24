@@ -1,4 +1,4 @@
-# Broadcast epochs
+# [L] Broadcast epochs
 
 ## Goal
 
@@ -15,10 +15,11 @@ forwards the `Restart`. A restart is a new epoch at the same
 path: the newest epoch wins new requests and announce consumers see that
 `Restart`, so viewers re-request rather than stall on a replaced
 broadcast. Subscriptions already on the old one stay until the
-application drops them or its route goes. Without an epoch, a restarted
-publisher on the same hop chain as its lingering old session wins at once
-(the newest announcement breaks the tie), but one on a different chain of
-the same length and cost that loses the routing hash is reached only once
+application drops them or its route goes. Without an epoch, a publisher
+that restarts on a relay while its old session lingers there wins at once,
+whatever its new hop: the relay ranks its own sessions' routes newest first
+and hashes only peer routes. Through a peer, a restart on a different chain
+of the same length and cost that loses the routing hash is reached only once
 the old session closes and its route is withdrawn.
 
 The epoch rides moq-lite 07 announcements and requests as metadata, so the
@@ -73,7 +74,7 @@ Decided:
   resolution on epoch-aware transports and remain best effort on epochless
   transports. Following never turns a replacement into seamless resume. The
   schemas, shared resolution, compatibility documentation, and `moq_mux::follow`
-  landed; `moqsrc` following siblings with it remains.
+  (which `moqsrc` follows siblings with) landed.
 - Every first-party publisher that can restart mints its own: the apps,
   moq-boy, the ingest gateways, moqsink, OBS, and the bindings. Players
   (`moq play`, `@moq/watch`, demo/web) follow the announce `Restart`. moq-stats mints one per
@@ -122,7 +123,3 @@ restarts that sibling while preserving the catalog's explicit epoch
 constraints; it never mixes instances through an old handle. Check
 exact and covering routes, matching/different/absent epochs, and legacy
 End+Start. The child quests own their focused regressions.
-
-## Required
-
-- [moqsrc sibling follow](/quest/m0/broadcast-epoch/moqsrc-sibling-follow.md) - moqsrc restarts a referenced sibling's rendition on each instance its announcements hand out, never past a named epoch

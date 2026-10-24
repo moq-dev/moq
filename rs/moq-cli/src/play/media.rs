@@ -478,7 +478,8 @@ async fn play_audio<O: Output>(
 	// timeline can declare its end before its first PCM, so ends queue until a
 	// frame crosses them.
 	let receive = async {
-		let mut current = None;
+		// Media went missing since the last frame, so the next one does not continue it.
+		let mut lost = false;
 		let mut ends = VecDeque::new();
 		loop {
 			// Stop reading while play is held behind a resume with more than the age
@@ -499,21 +500,23 @@ async fn play_audio<O: Output>(
 			let ended = matches!(event, Ok(None));
 			let delay = consumer.delay();
 			let crossing = match &event {
-				Ok(Some(moq_audio::decode::Read::End { discontinuity, .. })) => {
-					ends.push_back((*discontinuity, role.declare()));
+				Ok(Some(moq_audio::decode::Read::End { end })) => {
+					ends.push_back((Duration::from(*end), role.declare()));
 					None
 				}
-				Ok(Some(moq_audio::decode::Read::Frame { discontinuity, frame }))
-					if current != Some(*discontinuity) =>
-				{
-					// The first frame continues nothing, unless a track joined while paused
-					// declared an end before it.
-					let first = current.replace(*discontinuity).is_none();
-					// Every end before this timeline was crossed. Only the last one has
+				// Playback restarts at the frame after it, so that is what carries it.
+				Ok(Some(moq_audio::decode::Read::Gap { .. })) => {
+					lost = true;
+					continue;
+				}
+				Ok(Some(moq_audio::decode::Read::Frame(frame))) => {
+					let lost = std::mem::take(&mut lost);
+					// A frame at or past an end comes from the encoder that replaced it; one
+					// before it is the stopped encoder's drain. Only the last end crossed has
 					// replacement media; the ones before it ended empty timelines.
 					let mut crossed = None;
-					while let Some(&(ended, transition)) = ends.front()
-						&& ended < *discontinuity
+					while let Some(&(end, transition)) = ends.front()
+						&& Duration::from(frame.timestamp) >= end
 					{
 						ends.pop_front();
 						if let Some(skipped) = crossed.replace(transition) {
@@ -525,8 +528,8 @@ async fn play_audio<O: Output>(
 							role.plan(transition, frame.timestamp, Some(lead(delay, frame)));
 							Some(Crossing::Resume(transition))
 						}
-						None if first => None,
-						None => Some(Crossing::Loss),
+						None if lost => Some(Crossing::Loss),
+						None => None,
 					}
 				}
 				_ => None,
@@ -542,9 +545,11 @@ async fn play_audio<O: Output>(
 		}
 	};
 	let play = async {
-		// The timeline the role's mapping serves, and an end declared for a later
-		// one, which can only be mapped once that timeline resumes.
-		let mut mapped = None;
+		// Whether a timeline is playing and its end is already declared, and an end
+		// declared past that one, for a later timeline that can only be mapped once it
+		// resumes.
+		let mut playing = false;
+		let mut ended = false;
 		let mut deferred = None;
 		let mut sequential = false;
 		loop {
@@ -556,11 +561,12 @@ async fn play_audio<O: Output>(
 				arrived.notified().await;
 			};
 			let frame = match event {
-				Ok(Some(moq_audio::decode::Read::Frame { discontinuity, frame })) => {
-					mapped = Some(discontinuity);
+				Ok(Some(moq_audio::decode::Read::Frame(frame))) => {
+					playing = true;
 					match crossing {
 						Some(Crossing::Loss) => {
 							deferred = None;
+							ended = false;
 							role.gap();
 							sequential = false;
 						}
@@ -578,10 +584,13 @@ async fn play_audio<O: Output>(
 							if let Some(at) = at {
 								moq_clock::sleep_until(at).await;
 							}
-							if let Some((ended, end)) = deferred.take()
-								&& ended == discontinuity
+							ended = false;
+							// An end this frame did not cross ends the timeline it resumes.
+							if let Some(end) = deferred.take()
+								&& Duration::from(frame.timestamp) < Duration::from(end)
 							{
 								role.end(end)?;
+								ended = true;
 							}
 							sequential = true;
 							timeline = AudioTimeline::default();
@@ -592,14 +601,17 @@ async fn play_audio<O: Output>(
 					}
 					frame
 				}
-				Ok(Some(moq_audio::decode::Read::End { discontinuity, end })) => {
-					if mapped.is_none_or(|mapped| mapped == discontinuity) {
-						role.end(end)?;
+				Ok(Some(moq_audio::decode::Read::End { end })) => {
+					if playing && ended {
+						deferred = Some(end);
 					} else {
-						deferred = Some((discontinuity, end));
+						role.end(end)?;
+						ended = true;
 					}
 					continue;
 				}
+				// Never queued: receive folds it into the next frame's crossing.
+				Ok(Some(moq_audio::decode::Read::Gap { .. })) => continue,
 				Ok(None) => break,
 				// One bad packet is that packet's problem: the decoder stays usable, so
 				// skip it rather than ending playback and taking the video window down
@@ -705,7 +717,7 @@ async fn drain(sink: impl Sink) {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use bytes::Bytes;
 	use hang::catalog::{AudioCodec, AudioConfig};

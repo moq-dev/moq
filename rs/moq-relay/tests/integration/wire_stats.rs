@@ -17,7 +17,8 @@ fn presence(registry: &Registry) -> Presence {
 }
 
 async fn wire_sources(io_uring: bool) {
-	moq_tokio::crypto::install_default().unwrap();
+	// Process-wide: another test in this binary may have installed it first.
+	let _ = moq_tokio::crypto::install_default();
 	let dir = tempfile::tempdir().unwrap();
 	let key = rcgen::KeyPair::generate().unwrap();
 	let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
@@ -35,7 +36,7 @@ async fn wire_sources(io_uring: bool) {
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config.stats.enabled = true;
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	config.stats.interval = 3600;
+	config.stats.interval = Duration::from_secs(3600);
 	config.drain_timeout = Duration::ZERO;
 	if io_uring {
 		config.runtime.workers = Some(1);

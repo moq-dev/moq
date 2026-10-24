@@ -972,7 +972,8 @@ export class Subscriber {
 		} catch (err) {
 			stream.abort(err);
 			const e = await sessionCause(this.#quic, err);
-			producer.close(this.#localClose ? undefined : e);
+			if (this.#localClose) hooks.releaseTrack(producer);
+			else producer.close(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);

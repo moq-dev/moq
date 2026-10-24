@@ -13,6 +13,10 @@ your script previously relied on a finite source ending it. `play` now exits
 with an error when the selected broadcast handler refuses its request instead
 of silently waiting for another announcement.
 
+### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
+
+Enable `nvidia` instead; the old names were aliases for it.
+
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 
 Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.

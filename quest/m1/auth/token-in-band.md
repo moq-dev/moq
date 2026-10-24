@@ -12,10 +12,9 @@ session's first requests wait on no AUTH.
 
 ## Plan
 
-IETF AUTH initially carries only prefix-representable grants. Propagate its
-`Unsupported` result for an unrepresentable pattern union; do not retry the
-token through the URL, widen it, or leave token admission pending. Lite AUTH
-already carries the full pattern grant.
+IETF AUTH can refuse a grant too large for one AUTH_OK. Propagate its
+`Unsupported` result; do not retry the token through the URL, trim it, or
+leave token admission pending.
 
 - Client configuration separates the credential from the address: `moq_tokio::connect::Config` gains `tokens`, repeatable as
   `--connect-token` and `MOQ_CONNECT_TOKEN`, the default set for every dial

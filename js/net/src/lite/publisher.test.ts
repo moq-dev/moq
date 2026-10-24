@@ -15,6 +15,7 @@ import { sendOrder } from "../priority.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
+import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
@@ -638,6 +639,7 @@ function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
 async function servedSubscription(
 	options: {
 		startGroup?: number;
+		startFrame?: number;
 		endGroup?: number;
 		endFrame?: number;
 		gated?: boolean;
@@ -674,6 +676,7 @@ async function servedSubscription(
 		track: "video",
 		priority: 0,
 		startGroup: options.startGroup,
+		startFrame: options.startFrame,
 		endGroup: options.endGroup,
 		endFrame: options.endFrame,
 	});
@@ -686,6 +689,7 @@ async function servedSubscription(
 
 	return {
 		client,
+		datagrams: pair.client.datagrams.readable,
 		track,
 		serving,
 		parked: gate.parked,
@@ -866,6 +870,54 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 }
+
+test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group and frame bounds", async (version) => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const sub = await servedSubscription({ version, startGroup: 0, startFrame: 1, endGroup: 1, endFrame: 0 });
+	const reader = sub.datagrams.getReader();
+	// Datagrams go out in arrival order, so each batch inserts its out-of-range ones ahead of
+	// the last in-range one: reading exactly the in-range ones proves the rest were dropped.
+	const send = (sequences: number[]) => {
+		for (const sequence of sequences)
+			sub.track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+	};
+	const recv = async () => {
+		const next = await reader.read();
+		if (next.done) throw new Error("datagrams ended early");
+		return (await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence;
+	};
+	// The publisher applies an update's datagram bounds before forwarding its group range, and
+	// each update here moves the range's end.
+	const applied = async (end: number) => {
+		let groups = sub.track.subscription.peek()?.groups;
+		while (groups?.end?.excluded !== end) groups = (await sub.track.subscription.changed())?.groups;
+	};
+	try {
+		send([0, 2, 1]);
+		expect(await recv()).toBe(1);
+		// Widen both boundaries, then narrow to one datagram.
+		await replayUpdate({ priority: 0, startGroup: 0, startFrame: 0, endGroup: 4, endFrame: 0 }).encode(
+			sub.client.writer,
+			version,
+		);
+		await applied(5);
+		send([2, 3, 5, 4]);
+		expect([await recv(), await recv(), await recv()]).toEqual([2, 3, 4]);
+		await replayUpdate({ priority: 0, startGroup: 6, startFrame: 1, endGroup: 7, endFrame: 0 }).encode(
+			sub.client.writer,
+			version,
+		);
+		await applied(8);
+		send([6, 8, 7]);
+		expect(await recv()).toBe(7);
+	} finally {
+		await reader.cancel();
+		await sub.close();
+		await sub.serving;
+		restore();
+	}
+});
 
 // A sent datagram is accounted for, so the end sweep does not drop it, as the Rust publisher does.
 test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
