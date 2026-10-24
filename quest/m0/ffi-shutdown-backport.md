@@ -47,7 +47,3 @@ qmux credit fix is out of scope: main has it from the in-tree qmux
 
 Public API: additive (`MoqSession.drain()` and its binding wrappers). Wire:
 none.
-
-## Required
-
-- [qmux 0.5.3](/quest/m0/qmux-0.5.3.md) - crates.io publishes qmux 0.5.3 with the builder session config #5609 needs

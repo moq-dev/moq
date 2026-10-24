@@ -93,13 +93,9 @@ contract/lifetime investigations, and one security-review pointer. Each
 child records whether its behavior is new on main or inherited from release.
 
 - [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
-- [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
 - [Decode order](/quest/m1/ts-reliability/decode-order.md) - the exporters' decode clock holds at most the declared reorder depth, so flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
-- [Refuse partial lite groups in JS](/quest/m1/release-audit/js-partial-group.md) - a nonzero `frameStart` closes the session as a protocol violation, not a renumbered complete group
-- [Parse QMux records without copying suffixes](/quest/m1/release-audit/qmux-copy.md) - many small frames do not cause quadratic copying
 - [Release AUTH wake listeners](/quest/m1/release-audit/auth-listeners.md) - session churn does not retain one terminal promise reaction per change
 - [Finish bitrate recovery](/quest/m1/release-audit/rate-recovery.md) - a quiet bandwidth grant no longer strands moq-video, moq-ffi, and moq-c encoders partway up the ramp
-- [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets
 
 ## Related
 

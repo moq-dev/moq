@@ -23,7 +23,7 @@ options argument (`json_snapshot(track, entry, json::Options)`, recommended
 in the interview), or a builder on the returned handle before the first
 update. Whichever lands, `json::Config` becomes a catalog entry builder
 only, and moq-c's `json_snapshot`, the one in-repo caller that sets
-`deltas`, follows. Add `MIGRATE.md` entries for moq-mux (and moq-c if its
+`deltas`, follows. The Impact bullet says how to migrate in moq-mux (and moq-c if its
 API changes).
 
 Public API: breaking Rust (moq-mux `json_snapshot` signature, `json::Config`

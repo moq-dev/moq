@@ -254,8 +254,9 @@ impl Audio {
 				biased;
 				_ = &mut close => return Ok(()),
 				frame = consumer.read() => match frame {
-					Ok(Some(moq_audio::decode::Read::Frame { frame, .. })) => frame,
-					Ok(Some(moq_audio::decode::Read::End { .. })) => continue,
+					Ok(Some(moq_audio::decode::Read::Frame(frame))) => frame,
+					// The C ABI hands over PCM only.
+					Ok(Some(moq_audio::decode::Read::Gap { .. } | moq_audio::decode::Read::End { .. })) => continue,
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather

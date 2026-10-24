@@ -245,11 +245,7 @@ pub struct Config {
 	/// race. Defaults to 200ms, and drops to zero for a server WebSocket already won.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub delay: Option<time::Duration>,
 
 	/// Head start given to the QUIC dial before the WebSocket fallback joins the race. Defaults to 200ms.
@@ -452,6 +448,7 @@ pub(crate) async fn connect(
 				let url = &url;
 				async move {
 					let stream = tokio::net::TcpStream::connect(addr).await?;
+					stream.set_nodelay(true)?;
 					connect_tls_override(tls, name, url, stream, alpns).await
 				}
 			})
@@ -754,9 +751,15 @@ impl Listener {
 	async fn accept_socket(&self) -> (tokio::net::TcpStream, net::SocketAddr) {
 		loop {
 			match self.listener.accept().await {
-				Ok(accepted) => {
+				Ok((stream, addr)) => {
+					// qmux already batches records, so Nagle would only hold a batch's
+					// tail for the peer's delayed ACK. Only a reset socket refuses it.
+					if let Err(err) = stream.set_nodelay(true) {
+						tracing::debug!(%addr, %err, "dropped a connection that refused TCP_NODELAY");
+						continue;
+					}
 					self.health.accepted();
-					return accepted;
+					return (stream, addr);
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
@@ -813,7 +816,7 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 				.map(|version| format!("{}{alpn}", version.prefix())),
 		);
 	}
-	protocols.extend(qmux::ALPNS.iter().map(|protocol| (*protocol).to_string()));
+	protocols.extend(qmux::Version::ALL.iter().map(|version| version.alpn().to_string()));
 	protocols
 }
 
@@ -850,6 +853,15 @@ mod tests {
 			"got {err:?}"
 		);
 		assert!(accepted.await.unwrap().is_err());
+	}
+
+	#[tokio::test]
+	async fn listener_disables_nagle() {
+		let listener = Listener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+		let (stream, _) = listener.accept_socket().await;
+		assert!(stream.nodelay().unwrap());
 	}
 
 	#[tokio::test]

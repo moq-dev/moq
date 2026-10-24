@@ -4,10 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `json` and `binary` producers have no catalog type parameter (#6398)
+### TS service information expires on the program clock
 
-`json::Snapshot<T, E>` and `json::Stream<T, E>` are `json::Snapshot<T>` and `json::Stream<T>`, and `binary::Snapshot<E>` and `binary::Stream<E>` are `binary::Snapshot` and `binary::Stream`: the catalog entry they keep is type-erased.
-The catalog `Producer<E>` methods that create them are unchanged, so callers only drop the type argument from the names.
+TS import retracts SI sub-tables and incomplete generations that stop repeating within their table's maximum interval (30 seconds for unknown tables).
+Repeat current tables within that interval; stale tables no longer remain advertised indefinitely.
+Host time and stalled PCR do not age SI, and existing readers can finish snapshots they already hold.
 
 ### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
 

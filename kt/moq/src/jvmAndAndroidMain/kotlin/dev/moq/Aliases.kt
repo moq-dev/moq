@@ -145,7 +145,7 @@ typealias VideoCodec = uniffi.moq.MoqVideoCodec
 typealias VideoPixelFormat = uniffi.moq.MoqVideoPixelFormat
 /** The pixel layout, resolution, and framerate the caller feeds a video producer. */
 typealias VideoEncoderInput = uniffi.moq.MoqVideoEncoderInput
-/** The video track name, codec, bitrate, keyframe interval, and backend preference. */
+/** The video codec, bitrate, keyframe interval, and backend preference. */
 typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 /** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
@@ -163,8 +163,11 @@ typealias Auth = uniffi.moq.MoqAuth
 typealias AuthToken = uniffi.moq.MoqAuthToken
 /** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
 typealias Grant = uniffi.moq.MoqGrant
-/** A connection lifecycle transition reported by [Session.status]. */
-typealias ConnectionStatus = uniffi.moq.MoqConnectionStatus
+/** A connection lifecycle transition reported by [Session.state]. */
+typealias ConnectionPhase = uniffi.moq.MoqConnectionPhase
+
+/** One coherent connection lifecycle snapshot. */
+typealias ConnectionState = uniffi.moq.MoqConnectionState
 /** Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window. */
 typealias Backoff = uniffi.moq.MoqBackoff
 /** Whether a protocol code is from the session or stream registry. */

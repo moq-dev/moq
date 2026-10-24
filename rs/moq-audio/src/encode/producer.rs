@@ -442,7 +442,7 @@ impl Producer {
 		if self.grouped >= self.group_samples {
 			self.track.cut(None)?;
 		}
-		self.track.flush(timestamp, moq_net::time::now())?;
+		self.track.flush(timestamp, moq_net::time::Instant::now())?;
 		Ok(())
 	}
 
@@ -468,7 +468,7 @@ impl Producer {
 				keyframe: false,
 				duration: None,
 			})?;
-			track.flush(timestamp, moq_net::time::now())?;
+			track.flush(timestamp, moq_net::time::Instant::now())?;
 		}
 
 		track.cut(Some(terminal.end))?;
@@ -570,8 +570,8 @@ mod tests {
 	async fn decoded_frame(consumer: &mut crate::decode::Consumer) -> Result<Option<Frame>, Error> {
 		loop {
 			match consumer.read().await? {
-				Some(crate::decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
-				Some(crate::decode::Read::End { .. }) => {}
+				Some(crate::decode::Read::Frame(frame)) => return Ok(Some(frame)),
+				Some(crate::decode::Read::Gap { .. } | crate::decode::Read::End { .. }) => {}
 				None => return Ok(None),
 			}
 		}
