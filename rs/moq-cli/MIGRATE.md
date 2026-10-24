@@ -8,6 +8,10 @@ How to update your invocation and config for each breaking change, newest first.
 
 Enable `nvidia` instead; the old names were aliases for it.
 
+### Iroh is opt-in
+
+The default source-build features no longer include `iroh`. Add `--features iroh` when building a binary that must use Iroh endpoints.
+
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 
 Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.

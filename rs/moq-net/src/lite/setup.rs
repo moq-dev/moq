@@ -15,6 +15,8 @@ const PARAM_ROLE: u64 = 0x3;
 const PARAM_COST: u64 = 0x4;
 /// Setup Parameter id for the endpoint's Hop ID.
 const PARAM_HOP: u64 = 0x5;
+/// Setup Parameter id for the sender's implementation, as `name/version` product tokens.
+const PARAM_IMPLEMENTATION: u64 = 0x6;
 /// Setup Parameter id offering the `ietf` extension (draft-lcurley-moq-ietf): "IETF" in ASCII.
 const PARAM_IETF: u64 = 0x4945_5446;
 
@@ -189,6 +191,9 @@ pub struct Setup {
 	/// Whether this endpoint offers the `ietf` extension (lite-07+). Negotiated only when
 	/// both endpoints offer it.
 	pub ietf: bool,
+	/// The sender's implementation, as space-separated `name/version` product tokens
+	/// (`moq-net-rs/0.3.10`). Opaque; `None` omits the parameter.
+	pub implementation: Option<String>,
 }
 
 impl Message for Setup {
@@ -222,6 +227,9 @@ impl Message for Setup {
 		}
 		if let Some(hop) = self.hop {
 			params.set_varint(PARAM_HOP, hop.wire_id(version.into()), version)?;
+		}
+		if let Some(implementation) = &self.implementation {
+			params.set_bytes(PARAM_IMPLEMENTATION, implementation.as_bytes().to_vec());
 		}
 		if self.ietf {
 			// The framing it changes is unpublished, so a published version cannot offer it.
@@ -272,6 +280,7 @@ impl Message for ReceivedSetup {
 		let hop = params
 			.get_varint(PARAM_HOP, version)?
 			.and_then(|id| crate::Hop::new(id).ok());
+		let implementation = crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?;
 		// An older version does not know the parameter, so it ignores it like any other.
 		let ietf = match params.get_bytes(PARAM_IETF) {
 			Some(value) if version.has_ietf() => match value.is_empty() {
@@ -290,6 +299,7 @@ impl Message for ReceivedSetup {
 				cost,
 				hop,
 				ietf,
+				implementation,
 			},
 		})
 	}
@@ -314,6 +324,8 @@ struct PeerSetupState {
 	ietf: bool,
 	seen: bool,
 	setup: Option<Setup>,
+	/// Where the peer's advertised implementation is published for the session handle.
+	implementation: crate::setup::PeerImplementation,
 }
 
 impl PeerSetup {
@@ -324,7 +336,14 @@ impl PeerSetup {
 			ietf: false,
 			seen: false,
 			setup: None,
+			implementation: Default::default(),
 		}))
+	}
+
+	/// Publish the peer's advertised implementation to `slot` once its SETUP arrives.
+	pub fn with_implementation(self, slot: crate::setup::PeerImplementation) -> Self {
+		self.0.lock().implementation = slot;
+		self
 	}
 
 	pub(super) fn receive(&self, received: ReceivedSetup) -> Result<(), crate::Error> {
@@ -335,6 +354,7 @@ impl PeerSetup {
 			return Err(crate::Error::ProtocolViolation);
 		}
 		state.seen = true;
+		state.implementation.set(received.setup.implementation.clone());
 		state.setup = Some(received.setup);
 		Ok(())
 	}
@@ -368,6 +388,7 @@ impl PeerSetup {
 	pub fn set(&self, setup: Setup) {
 		let mut state = self.0.lock();
 		state.seen = true;
+		state.implementation.set(setup.implementation.clone());
 		state.setup = Some(setup);
 	}
 
@@ -590,6 +611,33 @@ mod tests {
 			..Default::default()
 		};
 		assert_eq!(round_trip(&msg), msg);
+	}
+
+	#[test]
+	fn implementation_round_trip() {
+		for implementation in [None, Some("moq-ffi/0.4.12 moq-net-rs/0.3.10".to_string())] {
+			let msg = Setup {
+				implementation,
+				..Default::default()
+			};
+			assert_eq!(round_trip(&msg), msg);
+		}
+	}
+
+	/// The value is UTF-8, so bytes that are not refuse the whole SETUP.
+	#[test]
+	fn implementation_must_be_utf8() {
+		let msg = Setup {
+			implementation: Some("ab".to_string()),
+			..Default::default()
+		};
+		let mut buf = msg.encode_bytes(Version::Lite07).unwrap().to_vec();
+		let last = buf.len() - 1;
+		buf[last] = 0xff;
+		assert!(matches!(
+			Setup::decode_slice(&buf, Version::Lite07),
+			Err(DecodeError::InvalidValue)
+		));
 	}
 
 	#[test]
