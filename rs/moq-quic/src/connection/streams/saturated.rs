@@ -718,7 +718,7 @@ fn a_datagram_that_does_not_fit_leads_the_next_packet() {
 }
 
 /// A packet clamped below a queued datagram, such as a loss probe, still carries what fits
-/// behind it, and the datagram keeps its place.
+/// behind it, even behind its own control frames, and the datagram keeps its place.
 #[test]
 fn a_clamped_packet_sends_what_fits() {
     let mut sender = Sender::new();
@@ -728,7 +728,7 @@ fn a_clamped_packet_sends_what_fits() {
     let stream = sender.open(Some(&group), 0, 2_000);
     assert!(sender.state.can_send_frames(500));
 
-    sender.packet_of(500);
+    sender.packet_after(&[PING], 500);
     assert_eq!(sender.order, [Sent::Stream(stream)]);
     assert_eq!(sender.drain_frames(1)[0], Sent::Datagram(large));
 }

@@ -457,6 +457,8 @@ export class Broadcast {
 	 * `epoch` is the rendition's `epoch` field, the publisher instance the reference names.
 	 * Returns `undefined` while the followed broadcast is proven to be another instance, rather
 	 * than reading it. A route without an epoch cannot prove one, so there it is best effort.
+	 *
+	 * @internal
 	 */
 	relativeBroadcast(
 		effect: Effect,

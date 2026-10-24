@@ -3,88 +3,52 @@
 ## Goal
 
 A TS import's retained state is bounded by what its source repeats, not by
-how long it runs or by a constant that refuses. Incomplete SI generations
-and SI sub-tables the source stopped sending retire, and a stream revision
-costs O(1) state once its route has ended, so a feed revising its PMT
-indefinitely runs indefinitely.
+how long it runs or by a constant that refuses. SI arriving without program
+clock progress is bounded too, and a stream revision costs O(1) state once
+its route has ended, so a feed revising its PMT indefinitely runs
+indefinitely.
 
 ## Plan
 
-The program-clock SI retirement portion is implemented in this checkpoint:
+SI already retires when not repeated within its table's maximum interval on
+the accepted program clock (`si::Entry::expire`, 30 s for unknown tables), so
+an input stall retires nothing. Two owners remain unbounded.
 
-- Active and pending generations renew their own deadline on repetition.
-  The table's `catalog::si_interval` supplies the maximum; unknown tables use
-  the approved 30 s maximum. Retirement uses accepted PCR intervals already
-  accumulated by `Import::liveness`, not media PTS or host time. Clock wrap,
-  reset and rejected jumps do not invent elapsed time.
-- A deadline index holds one entry per retained generation, replacing the old
-  deadline on renewal. Expiry visits due entries rather than scanning every
-  identity on every packet. A commit clears only its identity's five-bit
-  versions. Pending tree nodes follow live generations rather than retaining a
-  hash table's peak bucket allocation; expiry releases section-byte ownership,
-  without an allocator/RSS reclamation claim. Active expiry publishes a reduced
-  or empty snapshot immediately,
-  bypassing ordinary host-clock debounce and retracting empty catalog entries.
-  Readers holding earlier snapshots remain valid.
-- Tests cover 4,096 incomplete EIT and unknown identities, per-version renewal,
-  active renewal/retraction/reappearance, input stalls, and clock boundaries.
-  SI benchmarks sweep active and pending identities against touched identities
-  while accepted PCR progresses and deadlines move. A separate sweep measures
-  historical table keys against touched entries after their generations expire.
-- `Capture::entries` preserves each published `(PID, table_id)` track for
-  reappearance and existing readers, and `flush` visits these slots. The actual
-  importer admits only four `SI_PIDS`, so this is a fixed protocol-space cost of
-  at most 1,024 keys, not arbitrary PID or per-revision growth. The table-history
-  benchmark covers this real domain; no track-continuity policy is changed.
+Decided 2026-10-22 by the maintainer:
 
-The full Goal remains unfinished. Preserve the maintainer's 2026-10-22 choices:
+- Replace `Import::MAX_REVISIONS` by making an ended route cost O(1): mint
+  fresh names from a counter so reserving them is a high-water mark, and
+  drop the retired route's entries. Keep the guard until every owner is
+  bounded.
+- Rejected: one byte budget shared by SI, PES and staged media, wall-clock
+  expiry, or any constant that only refuses the source.
 
-- Retire pending or active SI not repeated within its table maximum on the
-  program clock. An input stall retires nothing. Unknown tables use 30 s,
-  the longest DVB SI maximum.
-- Replace `MAX_REVISIONS` with retired-route ownership bounded independently
-  of lifetime revisions, using fresh-name high-water allocation and releasing
-  retired entries. Do not remove the guard before proving every owner bounded.
-- Rejected: a shared SI/PES/staged-media byte budget, wall-clock expiry, or
-  an arbitrary constant that only refuses the source.
+Open, for the maintainer:
 
-### Remaining contract choices
+- **SI without clock progress.** Standalone SI is accepted before any PCR and
+  while PCR stalls, and its sections are not charged to the PES staging
+  owner, so a source sending fresh EIT identities with a frozen clock grows
+  `Entry::pending` forever. Choose an admission or ownership contract for it,
+  or narrow the Goal to sources with clock progress.
+- **Retired route names and archives.** `BroadcastState::unique`
+  (`rs/moq-net/src/model/broadcast.rs`) already is a high-water counter and its track lookup prunes dead entries, but
+  `BroadcastState::sequences` keeps every written name's sequence and
+  timestamp bounds to enforce explicit same-name continuation. MKV, fMP4,
+  C/FFI and GStreamer callers keep `unique_name` strings for a later
+  create/reserve, so a missing name below the counter may be a delayed first
+  creation rather than a retired one. `moq-mux`'s `timeline::Registry::tracks` likewise
+  keeps finished recorders' outputs, numbering and `archive.timelines`
+  discovery after `Recorder` drops. Decide when each may retire while held
+  readers and same-name re-enrollment stay valid; inferring ownership from a
+  name prefix is not enough.
 
-Continued new SI identities without accepted PCR progress are not bounded by
-repetition age. Standalone SI can arrive before the program clock exists, and
-its retained sections are not charged to the PES staging owner. The test with
-1,023 new incomplete identities during a frozen clock deliberately preserves
-all of them. Establish the admission/ownership contract for this input before
-claiming a full SI bound; do not silently age it on host time or count packets.
+Already bounded, so not per-revision growth: catalog rendition reservations
+(released on drop), `retired_stats`, damage and liveness (keyed by PID), and
+`si::Capture::entries` (four SI PIDs by 256 table IDs, kept for track
+reappearance).
 
-The retired-route inventory also found lifetime owners that cannot simply be
-forgotten privately under current contracts:
+Tests: a fixture revising its PMT past 65,536 times keeps running with flat
+sequence, timeline, catalog and route state, with name continuation and
+delayed creation still covered; the chosen no-clock SI contract.
 
-- `BroadcastState::unique` already is one high-water counter, and its track
-  lookup already prunes dead weak entries. `sequences` intentionally retains
-  every written name's sequence and timestamp bounds. `unique_name` returns
-  a `String` that real MKV/fMP4, C/FFI and GStreamer consumers later pass to
-  create/reserve, and explicit same-name continuation remains supported.
-  Treating every missing name below the counter as retired would reject a
-  delayed first creation; forgetting its bounds would permit content reuse.
-- `timeline::Registry::tracks` retains finished recorders' timeline outputs,
-  numbering and discovery. `Recorder::drop` only flushes and marks recording
-  inactive; catalog `archive.timelines` continues advertising them. Define when
-  that archive ownership may retire while preserving existing readers and
-  same-name re-enrollment before removing those entries.
-- Catalog rendition reservations already leave on their owner's drop.
-  `retired_stats`, damage counters and liveness aggregate by finite PID, not
-  by revision. They are not per-revision growth.
-
-Recommend explicit ownership for fresh-name reservations together with an
-archive retirement policy that keeps readers' current snapshots valid.
-Keeping arbitrary explicit-name continuation still requires its history.
-The alternative is a reviewed change to name reuse/archive availability;
-string-prefix inference is insufficient. No public shape is chosen here.
-
-Remaining validation: indefinite PMT revision churn past 65,536 with measured
-flat sequence/timeline/catalog/route ownership, plus the selected no-PCR SI
-admission contract. Existing name continuation and delayed creation consumers
-must remain covered. `MAX_REVISIONS` stays until these conditions are met.
-
-Public API: none in this checkpoint. Wire: none.
+Public API: none expected. Wire: none.

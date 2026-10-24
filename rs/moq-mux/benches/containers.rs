@@ -183,6 +183,117 @@ impl Annexb {
 	}
 }
 
+// Collect only timed import work, excluding the output validation in setup.
+#[inline(never)]
+fn profiled_import(mut import: Annexb, payload: &Bytes, frames: usize) -> Annexb {
+	import.decode(payload, frames);
+	import
+}
+
+/// `fragments` moofs whose `tracks` trafs each split their samples into `runs` one-sample runs,
+/// interleaved in the mdat run by run, after the init of an exported `tracks`-track broadcast.
+fn interleaved(init: &[u8], tracks: usize, runs: usize, fragments: usize, payload: &Bytes) -> Bytes {
+	use mp4_atom::{Decode, Encode};
+	let mut cursor = std::io::Cursor::new(init);
+	mp4_atom::Ftyp::decode(&mut cursor).unwrap();
+	let moov = mp4_atom::Moov::decode(&mut cursor).unwrap();
+	let mut out = BytesMut::from(&init[..cursor.position() as usize]);
+	for fragment in 0..fragments {
+		let mut moof = mp4_atom::Moof {
+			mfhd: mp4_atom::Mfhd {
+				sequence_number: fragment as u32 + 1,
+			},
+			traf: moov.trak[..tracks]
+				.iter()
+				.map(|trak| mp4_atom::Traf {
+					tfhd: mp4_atom::Tfhd {
+						track_id: trak.tkhd.track_id,
+						..Default::default()
+					},
+					tfdt: Some(mp4_atom::Tfdt {
+						base_media_decode_time: (fragment * runs * 20) as u64 * trak.mdia.mdhd.timescale as u64 / 1000,
+					}),
+					trun: (0..runs)
+						.map(|run| mp4_atom::Trun {
+							data_offset: Some(0),
+							entries: vec![mp4_atom::TrunEntry {
+								duration: Some(trak.mdia.mdhd.timescale / 50),
+								size: Some(payload.len() as u32),
+								flags: Some(if run == 0 { 0 } else { 0x0001_0000 }),
+								cts: None,
+							}],
+						})
+						.collect(),
+					..Default::default()
+				})
+				.collect(),
+		};
+		let mut buf = Vec::new();
+		moof.encode(&mut buf).unwrap();
+		let data = buf.len() + 8;
+		for (track, traf) in moof.traf.iter_mut().enumerate() {
+			for (run, trun) in traf.trun.iter_mut().enumerate() {
+				trun.data_offset = Some((data + (run * tracks + track) * payload.len()) as i32);
+			}
+		}
+		buf.clear();
+		moof.encode(&mut buf).unwrap();
+		mp4_atom::Mdat {
+			data: payload.repeat(tracks * runs),
+		}
+		.encode(&mut buf)
+		.unwrap();
+		out.extend_from_slice(&buf);
+	}
+	out.freeze()
+}
+
+/// fMP4 passthrough and unwrapping of fragments whose tracks interleave their runs in one mdat,
+/// across track and run count: each track copies only its own samples.
+fn interleaved_runs(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let payload = payload(4096);
+	let frames = 16;
+	for tracks in [1, 4] {
+		let (source, stream, fixture) = runtime.block_on(prepare(
+			Video {
+				tracks,
+				frames: 1,
+				frames_per_group: 1,
+			},
+			&payload,
+		));
+		let init = runtime.block_on(export("cmaf", source, stream, true));
+		drop(fixture);
+		for runs in [1, 16] {
+			let data = interleaved(&init, tracks, runs, frames, &payload);
+			for passthrough in [false, true] {
+				let (catalog, import) = import_cmaf(cmaf_import(passthrough), &data);
+				assert_eq!(catalog.snapshot().video.renditions.len(), tracks);
+				drop(import);
+			}
+			for (direction, passthrough) in [("import", true), ("unwrap", false)] {
+				let mut group = c.benchmark_group(format!("cmaf-interleaved-{direction}"));
+				group.throughput(Throughput::Bytes(data.len() as u64));
+				group.bench_function(
+					BenchmarkId::new(format!("{tracks}tracks"), format!("{runs}runs")),
+					|b| {
+						b.iter_batched(
+							|| cmaf_import(passthrough),
+							|import| import_cmaf(import, std::hint::black_box(&data)),
+							BatchSize::PerIteration,
+						);
+					},
+				);
+				group.finish();
+			}
+		}
+	}
+}
+
 fn containers(c: &mut Criterion) {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
@@ -256,9 +367,8 @@ fn containers(c: &mut Criterion) {
 										} else {
 											b.iter_batched(
 												Annexb::new,
-												|mut import| {
-													import.decode(std::hint::black_box(&payload), frames);
-													import
+												|import| {
+													profiled_import(import, std::hint::black_box(&payload), frames)
 												},
 												BatchSize::PerIteration,
 											);
@@ -470,96 +580,77 @@ impl SiImport {
 	}
 }
 
-/// SI renewal across retained sub-table count and touched identities. Accepted
-/// PCR advances the deadlines during timing without expiring the retained set.
-fn ts_si_renewal(c: &mut Criterion) {
-	let mut group = c.benchmark_group("ts_si_renewal_pcr");
+/// Time one accepted PCR interval plus `touches` SI arrivals against `retained` state,
+/// swept over both axes so a cost that grows with the retained set shows up as a slope.
+fn ts_si_sweep(
+	c: &mut Criterion,
+	name: &str,
+	retained: [u16; 3],
+	setup: impl Fn(u16, u16) -> SiImport,
+	touch: impl Fn(u16, u16) -> (usize, u8, u16),
+) {
+	let mut group = c.benchmark_group(name);
 	group.measurement_time(Duration::from_secs(1));
 	group.warm_up_time(Duration::from_millis(200));
 	group.sample_size(10);
-	for identities in [1, 64, 4096] {
+	for retained in retained {
 		for touches in [1, 16, 64] {
 			group.throughput(Throughput::Elements(u64::from(touches)));
-			group.bench_with_input(
-				BenchmarkId::new(identities.to_string(), touches),
-				&touches,
-				|b, touches| {
-					b.iter_batched_ref(
-						|| SiImport::identities(identities),
-						|import| {
-							import.tick();
-							import.repeat((0..*touches).map(|id| (2, 0x80, id % identities)));
-						},
-						BatchSize::SmallInput,
-					);
-				},
-			);
+			group.bench_with_input(BenchmarkId::new(retained.to_string(), touches), &touches, |b, &touches| {
+				b.iter_batched_ref(
+					|| setup(retained, touches),
+					|import| {
+						import.tick();
+						import.repeat((0..touches).map(|key| touch(retained, key)));
+					},
+					BatchSize::SmallInput,
+				);
+			});
 		}
 	}
 	group.finish();
+}
+
+/// SI renewal across retained sub-table count and touched identities. Accepted
+/// PCR advances the deadlines during timing without expiring the retained set.
+fn ts_si_renewal(c: &mut Criterion) {
+	ts_si_sweep(
+		c,
+		"ts_si_renewal_pcr",
+		[1, 64, 4096],
+		|identities, _| SiImport::identities(identities),
+		|identities, id| (2, 0x80, id % identities),
+	);
 }
 
 /// Pending SDT generations retain only their first section; the selected service
 /// prevents a repeated partial set from committing as a sparse complete cycle.
 fn ts_si_pending(c: &mut Criterion) {
-	let mut group = c.benchmark_group("ts_si_pending_pcr");
-	group.measurement_time(Duration::from_secs(1));
-	group.warm_up_time(Duration::from_millis(200));
-	group.sample_size(10);
-	for identities in [1, 64, 4096] {
-		for touches in [1, 16, 64] {
-			group.throughput(Throughput::Elements(u64::from(touches)));
-			group.bench_with_input(
-				BenchmarkId::new(identities.to_string(), touches),
-				&touches,
-				|b, touches| {
-					b.iter_batched_ref(
-						|| SiImport::pending(identities),
-						|import| {
-							import.tick();
-							import.repeat((0..*touches).map(|id| (1, 0x42, id % identities)));
-						},
-						BatchSize::SmallInput,
-					);
-				},
-			);
-		}
-	}
-	group.finish();
+	ts_si_sweep(
+		c,
+		"ts_si_pending_pcr",
+		[1, 64, 4096],
+		|identities, _| SiImport::pending(identities),
+		|identities, id| (1, 0x42, id % identities),
+	);
 }
 
 /// Distinct expired PID/table-key history versus current touched entries, using
 /// only the four SI PIDs the importer actually captures and the full table-ID space.
 fn ts_si_table_history(c: &mut Criterion) {
-	let mut group = c.benchmark_group("ts_si_table_history_pcr");
-	group.measurement_time(Duration::from_secs(1));
-	group.warm_up_time(Duration::from_millis(200));
-	group.sample_size(10);
-	for history in [1, 64, 1024] {
-		for touches in [1, 16, 64] {
-			group.throughput(Throughput::Elements(u64::from(touches)));
-			group.bench_with_input(
-				BenchmarkId::new(history.to_string(), touches),
-				&touches,
-				|b, touches| {
-					b.iter_batched_ref(
-						|| SiImport::history(history, *touches),
-						|import| {
-							import.tick();
-							import.repeat((0..*touches).map(|key| SiImport::table_key(key % history)));
-						},
-						BatchSize::SmallInput,
-					);
-				},
-			);
-		}
-	}
-	group.finish();
+	ts_si_sweep(
+		c,
+		"ts_si_table_history_pcr",
+		[1, 64, 1024],
+		SiImport::history,
+		|history, key| SiImport::table_key(key % history),
+	);
 }
 
 criterion_group!(
 	benches,
 	containers,
+	interleaved_runs,
 	queued_groups,
 	ts_si_renewal,
 	ts_si_pending,

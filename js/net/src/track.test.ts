@@ -114,7 +114,8 @@ test("the first subscriber of a track with no group wants group 0", () => {
 	subscriber.close();
 });
 
-test("a join over the refresh ratio wants the group after the newest", () => {
+// The cached group is served either way: refresh is a request, not a hold.
+test("a join over the refresh ratio wants the group after the newest", async () => {
 	for (const [delta, wanted] of [
 		[0, 0],
 		[3, 0],
@@ -124,6 +125,7 @@ test("a join over the refresh ratio wants the group after the newest", () => {
 		refreshGroup(producer, delta);
 		const subscriber = producer.subscribe();
 		expect(producer.demand().wanted.peek()).toBe(wanted);
+		expect((await subscriber.recvGroup())?.sequence).toBe(0);
 		subscriber.close();
 	}
 });

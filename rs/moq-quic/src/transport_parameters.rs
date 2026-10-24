@@ -871,7 +871,10 @@ mod test {
 
     #[test]
     fn read_semantic_validation() {
-        #[allow(clippy::type_complexity)]
+        #[expect(
+            clippy::type_complexity,
+            reason = "a one-off test table; an alias would only move the type"
+        )]
         let illegal_params_builders: Vec<Box<dyn FnMut(&mut TransportParameters)>> = vec![
             Box::new(|t| {
                 // This min_ack_delay is bigger than max_ack_delay!

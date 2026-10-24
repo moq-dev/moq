@@ -1,16 +1,14 @@
-import { Micro, Milli, Nano, type Second } from "@moq/clock";
+import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type { Data, InitPost, InitShared, Latency, Reset, State, Truncate } from "./render";
-import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
+import type { Data, Init, Latency, Reset, State, Truncate } from "./render";
 
 /**
  * Timestamp-based backpressure for buffered playback. The decoded PCM ring only holds the latency
  * floor; everything above it (the buffered lookahead, up to the ceiling) stays upstream as encoded
  * Opus. `wait(timestamp)` stays pending until decoding `timestamp` would land within `headroom` (the
  * floor) of the playhead, so the decode loop holds a frame as Opus instead of overflowing the
- * floor-sized ring, which drops the oldest unplayed audio. Both transports share this; they differ
- * only in how they observe the ring (Atomics poll vs worklet state messages). A no-op when not
- * buffered (the ring bounds itself).
+ * floor-sized ring, which drops the oldest unplayed audio. The playhead comes from the worklet's
+ * state messages. A no-op when not buffered (the ring bounds itself).
  */
 class Backpressure {
 	#enabled: boolean;
@@ -121,197 +119,24 @@ function samplesToMicro(samples: number, rate: number): Micro {
 }
 
 /**
- * Unified interface for the audio buffer between the main thread and the AudioWorklet.
- *
- * Two implementations exist:
- *   - `SharedAudioBuffer`: backed by SharedArrayBuffer, lock-free writes via Atomics.
- *   - `PostAudioBuffer`: backed by postMessage transfer (the fallback when SAB is unavailable).
- *
- * Use `createAudioBuffer()` to pick the right implementation automatically.
+ * The decoder's side of the audio ring. Decoded PCM is transferred to the render worklet over its
+ * port, and the worklet reports its playhead back in periodic state messages.
  */
-export interface AudioBuffer {
+export class AudioBuffer {
 	readonly rate: number;
 	readonly channels: number;
+	#worklet: AudioWorkletNode;
 
-	/** Insert audio samples at the given timestamp. Handles out-of-order writes. */
-	insert(timestamp: Micro, data: Float32Array[]): void;
+	readonly #timestamp = new Signal<Micro>(0 as Micro);
+	/** Current playback timestamp, as the worklet last reported it. */
+	readonly timestamp: Getter<Micro> = this.#timestamp;
 
-	/** Update the target latency in samples. */
-	setLatency(samples: number): void;
+	readonly #stalled = new Signal<boolean>(true);
+	/** Whether the ring is stalled (waiting to fill). */
+	readonly stalled: Getter<boolean> = this.#stalled;
 
-	/** Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode). */
-	reset(): void;
-
-	/**
-	 * Drop buffered samples at or after `timestamp`, keeping what is already due.
-	 *
-	 * Used when a new track takes over the timeline: its samples overwrite the slots they land on,
-	 * but the previous track's write-ahead tail would otherwise play once the new audio runs out.
-	 * Unlike `reset()` this keeps playing, so there's no gap at the handover.
-	 */
-	truncate(timestamp: Micro): void;
-
-	/**
-	 * Resolve once the playhead is near enough to decode a frame at `timestamp`. In buffered mode this
-	 * applies backpressure: it stays pending while decoding `timestamp` would run more than the latency
-	 * floor ahead of the playhead, so the caller holds the (encoded) frame instead of decoding it too
-	 * far ahead of the floor-sized ring. Resolves immediately when not buffered (the ring bounds itself).
-	 * Resolves early, releasing the wait, once `signal` aborts.
-	 */
-	wait(timestamp: Micro, signal: AbortSignal): Promise<void>;
-
-	/** Current playback timestamp (derived from reader position). */
-	readonly timestamp: Getter<Micro>;
-
-	/** Whether the buffer is stalled (waiting to fill). */
-	readonly stalled: Getter<boolean>;
-
+	readonly #underruns = new Signal<number>(0);
 	/** How many times the ring has run dry mid-playback, cumulative. */
-	readonly underruns: Getter<number>;
-
-	/** Release any resources (event listeners, intervals, etc.). */
-	close(): void;
-}
-
-/** Returns true when SharedArrayBuffer is available and usable in the current context. */
-function supportsSharedArrayBuffer(): boolean {
-	if (typeof SharedArrayBuffer === "undefined") return false;
-	// In browsers, SharedArrayBuffer requires cross-origin isolation (COOP/COEP).
-	// crossOriginIsolated is a browser global; in Node/Bun it's undefined.
-	if (typeof crossOriginIsolated !== "undefined" && !crossOriginIsolated) return false;
-	return true;
-}
-
-/**
- * Create the best audio buffer implementation for the current environment.
- * Picks `SharedAudioBuffer` when possible, falling back to `PostAudioBuffer`.
- */
-export function createAudioBuffer(
-	worklet: AudioWorkletNode,
-	channels: number,
-	rate: number,
-	latencySamples: number,
-	buffered = false,
-): AudioBuffer {
-	if (supportsSharedArrayBuffer()) {
-		console.log("[audio] using SharedArrayBuffer audio buffer");
-		return new SharedAudioBuffer(worklet, channels, rate, latencySamples, buffered);
-	}
-	console.warn(
-		"[audio] SharedArrayBuffer unavailable, falling back to the higher latency postMessage audio buffer. " +
-			"Serve the page cross-origin isolated (Cross-Origin-Opener-Policy: same-origin, Cross-Origin-Embedder-Policy: require-corp) to avoid this.",
-	);
-	return new PostAudioBuffer(worklet, channels, rate, latencySamples, buffered);
-}
-
-/** SharedArrayBuffer-backed implementation. Writes go directly into shared memory. */
-class SharedAudioBuffer implements AudioBuffer {
-	readonly rate: number;
-	readonly channels: number;
-	#worklet: AudioWorkletNode;
-	#ring: SharedRingBuffer;
-
-	readonly #timestamp = new Signal<Micro>(0 as Micro);
-	readonly timestamp: Getter<Micro> = this.#timestamp;
-
-	readonly #stalled = new Signal<boolean>(true);
-	readonly stalled: Getter<boolean> = this.#stalled;
-
-	readonly #underruns = new Signal<number>(0);
-	readonly underruns: Getter<number> = this.#underruns;
-
-	#backpressure: Backpressure;
-
-	#signals = new Effect();
-
-	constructor(worklet: AudioWorkletNode, channels: number, rate: number, latencySamples: number, buffered: boolean) {
-		this.#worklet = worklet;
-		this.channels = channels;
-		this.rate = rate;
-
-		// The ring holds the latency floor as decoded PCM (headroom above it for overflow). In
-		// buffered mode the lookahead above the floor stays encoded upstream, held back by `wait()`.
-		const capacity = Math.max(rate, latencySamples * 2);
-		this.#backpressure = new Backpressure(buffered, samplesToMicro(latencySamples, rate));
-
-		const init = allocSharedRingBuffer(channels, capacity, rate, buffered);
-		this.#ring = new SharedRingBuffer(init);
-		this.#ring.setLatency(latencySamples);
-
-		const msg: InitShared = { type: "init-shared", ...init };
-		worklet.port.postMessage(msg);
-
-		// Poll the shared control array and reflect it into signals.
-		this.#signals.interval(
-			() => {
-				this.#timestamp.set(this.#ring.timestamp);
-				this.#stalled.set(this.#ring.stalled);
-				this.#underruns.set(this.#ring.underruns);
-				this.#observe();
-			},
-			Nano.fromMilli(Milli(50)),
-		);
-	}
-
-	// Until the next insert anchors a reset ring, its playhead is still the old timeline's.
-	#observe(): void {
-		this.#backpressure.observe(this.#ring.anchored ? this.#ring.timestamp : undefined, this.#ring.stalled);
-	}
-
-	insert(timestamp: Micro, data: Float32Array[]): void {
-		this.#ring.insert(timestamp, data);
-	}
-
-	setLatency(samples: number): void {
-		this.#backpressure.setHeadroom(samplesToMicro(samples, this.rate));
-
-		// Park the current ring before any resize: the worklet keeps reading it until `init-shared`
-		// lands, and `resize` carries the floor and the park over to the copy.
-		this.#ring.setLatency(samples);
-
-		// Grow the ring (preserving the unread window) if it's too small for the new latency.
-		if (this.#ring.capacity < samples * 1.5) {
-			const newCapacity = Math.max(this.rate, samples * 2);
-			this.#ring = this.#ring.resize(newCapacity);
-
-			const msg: InitShared = { type: "init-shared", ...this.#ring.init };
-			this.#worklet.port.postMessage(msg);
-		}
-	}
-
-	truncate(timestamp: Micro): void {
-		this.#ring.truncate(timestamp);
-	}
-
-	reset(): void {
-		this.#ring.reset();
-		this.#backpressure.reset();
-	}
-
-	wait(timestamp: Micro, signal: AbortSignal): Promise<void> {
-		this.#observe();
-		return this.#backpressure.wait(timestamp, signal);
-	}
-
-	close(): void {
-		this.#backpressure.close(); // never leave a decode loop awaiting a closed buffer
-		this.#signals.close();
-	}
-}
-
-/** postMessage-backed fallback implementation. Samples are transferred, not shared. */
-class PostAudioBuffer implements AudioBuffer {
-	readonly rate: number;
-	readonly channels: number;
-	#worklet: AudioWorkletNode;
-
-	readonly #timestamp = new Signal<Micro>(0 as Micro);
-	readonly timestamp: Getter<Micro> = this.#timestamp;
-
-	readonly #stalled = new Signal<boolean>(true);
-	readonly stalled: Getter<boolean> = this.#stalled;
-
-	readonly #underruns = new Signal<number>(0);
 	readonly underruns: Getter<number> = this.#underruns;
 
 	// Backpressure runs off the playhead the worklet reports in its state messages.
@@ -322,41 +147,54 @@ class PostAudioBuffer implements AudioBuffer {
 
 	#signals = new Effect();
 
-	constructor(worklet: AudioWorkletNode, channels: number, rate: number, latencySamples: number, buffered: boolean) {
+	constructor(
+		worklet: AudioWorkletNode,
+		props: {
+			channels: number;
+			rate: number;
+			/** The latency floor, in samples. */
+			latency: number;
+			/** Anchor to the first frame and play through, holding the lookahead upstream. */
+			buffered: boolean;
+		},
+	) {
+		const { channels, rate, buffered } = props;
 		this.#worklet = worklet;
 		this.channels = channels;
 		this.rate = rate;
 
-		this.#backpressure = new Backpressure(buffered, samplesToMicro(latencySamples, rate));
+		this.#backpressure = new Backpressure(buffered, samplesToMicro(props.latency, rate));
 
-		const latency = Milli.fromSecond((latencySamples / rate) as Second);
-		const msg: InitPost = { type: "init-post", channels, rate, latency, buffered };
+		const latency = Milli.fromSecond((props.latency / rate) as Second);
+		const msg: Init = { type: "init", channels, rate, latency, buffered };
 		worklet.port.postMessage(msg);
 
-		// Listen for state updates from the worklet.
 		this.#signals.event(worklet.port, "message", (ev: Event) => {
 			const data = (ev as MessageEvent<State>).data;
 			if (data?.type === "state") {
 				this.#timestamp.set(data.timestamp);
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
-				if (data.epoch === this.#epoch) this.#backpressure.observe(data.timestamp, data.stalled);
+				if (data.epoch === this.#epoch) {
+					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
+				}
 			}
 		});
 		// addEventListener on a MessagePort requires start() to begin delivery.
 		worklet.port.start();
 	}
 
+	/** Insert audio samples at the given timestamp, transferring their buffers. Handles out-of-order writes. */
 	insert(timestamp: Micro, data: Float32Array[]): void {
 		const msg: Data = { type: "data", data, timestamp };
-		// Transfer the ArrayBuffers to avoid a copy. This is why samples can be dropped
-		// under load: the main thread loses access until the worklet drains the message queue.
+		// Transfer the ArrayBuffers to avoid a copy: the caller loses access to them.
 		this.#worklet.port.postMessage(
 			msg,
 			data.map((d) => d.buffer),
 		);
 	}
 
+	/** Update the latency floor, in samples. */
 	setLatency(samples: number): void {
 		this.#backpressure.setHeadroom(samplesToMicro(samples, this.rate));
 
@@ -365,11 +203,19 @@ class PostAudioBuffer implements AudioBuffer {
 		this.#worklet.port.postMessage(msg);
 	}
 
+	/**
+	 * Drop buffered samples at or after `timestamp`, keeping what is already due.
+	 *
+	 * Used when a new track takes over the timeline: its samples overwrite the slots they land on,
+	 * but the previous track's write-ahead tail would otherwise play once the new audio runs out.
+	 * Unlike `reset()` this keeps playing, so there's no gap at the handover.
+	 */
 	truncate(timestamp: Micro): void {
 		const msg: Truncate = { type: "truncate", timestamp };
 		this.#worklet.port.postMessage(msg);
 	}
 
+	/** Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode). */
 	reset(): void {
 		this.#epoch++;
 		const msg: Reset = { type: "reset", epoch: this.#epoch };
@@ -377,11 +223,19 @@ class PostAudioBuffer implements AudioBuffer {
 		this.#backpressure.reset();
 	}
 
+	/**
+	 * Resolve once the playhead is near enough to decode a frame at `timestamp`. In buffered mode this
+	 * applies backpressure: it stays pending while decoding `timestamp` would run more than the latency
+	 * floor ahead of the playhead, so the caller holds the (encoded) frame instead of decoding it too
+	 * far ahead of the floor-sized ring. Resolves immediately when not buffered (the ring bounds itself).
+	 * Resolves early, releasing the wait, once `signal` aborts.
+	 */
 	wait(timestamp: Micro, signal: AbortSignal): Promise<void> {
 		// The worklet-reported playhead lags by a state-message interval, which only holds frames longer.
 		return this.#backpressure.wait(timestamp, signal);
 	}
 
+	/** Stop observing the worklet and release every pending wait. */
 	close(): void {
 		this.#backpressure.close(); // never leave a decode loop awaiting a closed buffer
 		this.#signals.close();
