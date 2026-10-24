@@ -5,8 +5,9 @@ publish:   read raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feed
            it, encode a tone per channel (--tone) through libopus so the matrix
            exercises the FFI audio path, not only the video one.
 subscribe: connect, wait for a catalog with video and audio, and exit 0 once a
-           non-empty video frame has arrived and --audio-ms of audio has been
-           decoded to --audio-out for tone.py to judge (exit 1 on timeout / no data).
+           non-empty video frame has arrived and --audio-ms of every audio rendition
+           has been decoded to --audio-out.<codec> for tone.py to judge (exit 1 on
+           timeout / no data).
 
 --finish verifies a finite tail, natural media/catalog EOF, announcement END, and
 same-session health; --frames sets its exact size. --finish-ack selects publisher
@@ -70,7 +71,7 @@ async def _publish_tone(audio: moq.audio.Producer, tones: list[int]) -> None:
 
 
 def _client(url: str, version: str | None) -> moq.Client:
-    return moq.Client(url, tls_verify=False, versions=[] if version is None else [version])
+    return moq.Client(url, tls=moq.ClientTls(insecure=True), versions=[] if version is None else [version])
 
 
 async def _print_grant(client: moq.Client, timeout: float) -> None:
@@ -114,9 +115,9 @@ async def publish(
             moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=AUDIO_RATE, channels=len(tones)),
             moq.audio.EncoderOutput(
                 codec=moq.audio.Codec.opus(),
-                track=AUDIO_TRACK,
                 frame_duration=timedelta(microseconds=AUDIO_FRAME_DURATION_US),
             ),
+            track=AUDIO_TRACK,
         )
         producer.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {tones} Hz tone) to {url}")
@@ -164,7 +165,7 @@ async def publish(
                         raise RuntimeError("expected finish completion acknowledgement")
 
             await loop.run_in_executor(None, acknowledge)
-            if client.session is None or client.session.connects() != 1:
+            if client.session is None or client.session.state().connects != 1:
                 raise RuntimeError("publisher reconnected during finish")
             print("finish acknowledged", flush=True)
 
@@ -234,7 +235,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                         seen = True
             if not seen:
                 raise RuntimeError("missing session health payload")
-    if client.session is None or client.session.connects() != 1:
+    if client.session is None or client.session.state().connects != 1:
         raise RuntimeError("subscriber reconnected during finish")
     print(f"finish clean frames={frames} catalog=eof announce=end health=ok", flush=True)
 
@@ -242,13 +243,18 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
 async def _decode_audio(
     consumer: moq.BroadcastConsumer, id: str, audio: moq.media.Audio, out: str, audio_ms: int
 ) -> None:
-    """Decode the first `audio_ms` of the rendition to `out`.{txt,pcm}, the layout tone.py reads."""
+    """Decode the first `audio_ms` of the rendition to `out`.<codec>.{txt,pcm}, the layout tone.py reads.
+
+    The codec is the catalog's up to its first `.` (`opus`, `mp4a`). The files are created
+    exclusively, so two renditions of one codec fail rather than overwrite each other.
+    """
+    out = f"{out}.{audio.codec.split('.')[0]}"
     decoder = await moq.audio.Consumer.subscribe(
         consumer, id, audio, moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, max_delay=MAX_DELAY)
     )
     frame_bytes = 4 * audio.channel_count
     decoded = 0
-    with open(f"{out}.txt", "w") as log, open(f"{out}.pcm", "wb") as pcm:
+    with open(f"{out}.txt", "x") as log, open(f"{out}.pcm", "xb") as pcm:
         log.write(f"{audio.sample_rate} {audio.channel_count}\n")
         async for frame in decoder:
             samples = len(frame.data) // frame_bytes
@@ -301,10 +307,8 @@ async def subscribe(
                 if total > 0:
                     return
 
-        audio_id, audio = next(iter(catalog.audio.items()))
-        await asyncio.wait_for(
-            asyncio.gather(drain(), _decode_audio(consumer, audio_id, audio, audio_out, audio_ms)), timeout
-        )
+        decodes = (_decode_audio(consumer, id, audio, audio_out, audio_ms) for id, audio in catalog.audio.items())
+        await asyncio.wait_for(asyncio.gather(drain(), *decodes), timeout)
 
     if total <= 0:
         raise RuntimeError("no frame data received")
@@ -320,7 +324,7 @@ def main() -> None:
     parser.add_argument("--version")
     parser.add_argument("--grant", action="store_true")
     parser.add_argument("--tone", help="publish: comma-separated frequency of each channel, in Hz")
-    parser.add_argument("--audio-out", help="subscribe: decode audio to this prefix's .txt and .pcm")
+    parser.add_argument("--audio-out", help="subscribe: decode each audio rendition to PREFIX.<codec>.{txt,pcm}")
     parser.add_argument("--audio-ms", type=int, help="subscribe: how much audio to decode")
     parser.add_argument("--finish-ack", help="publisher completion FIFO; enables clean finish")
     parser.add_argument("--finish", action="store_true", help="verify a late tail and clean broadcast end")

@@ -95,7 +95,7 @@ catalog, `js/publish`. Draft: `drafts/draft-lcurley-moq-hang.md` (the field
 and its absent meaning), `drafts/draft-lcurley-moq-mpegts.md` (how export
 authors DTS). Public API and wire: an optional catalog field whose absence
 now means "never reorders", a breaking change for any producer that reorders
-without it; add a `MIGRATE.md` entry for `hang`, `@moq/hang` and `moq-mux`, whose
+without it; the Impact bullet says how to migrate in `hang`, `@moq/hang` and `moq-mux`, whose
 direct users must now set it.
 
 Tests: two exporters joining one B-frame source at different groups, and one

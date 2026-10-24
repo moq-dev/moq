@@ -22,7 +22,7 @@ typedef Consumer = MoqVideoConsumer;
 /// The pixel layout, resolution, and framerate written to a [Producer].
 typedef EncoderInput = MoqVideoEncoderInput;
 
-/// The track name, codec, bitrate, group mode, and backend preference.
+/// The codec, bitrate, group mode, and backend preference.
 typedef EncoderOutput = MoqVideoEncoderOutput;
 
 /// What a [Consumer] delivers: an optional resize, a max delay, and whether to keep the decoder's surface (macOS and iOS).
@@ -88,3 +88,9 @@ extension VideoDecoderOutputDuration on MoqVideoDecoderOutput {
   Duration? get maxDelay =>
       maxDelayUs == null ? null : Duration(microseconds: maxDelayUs!);
 }
+
+/// Input, codec settings, and publication ownership for a producer.
+typedef ProducerOptions = MoqVideoProducerOptions;
+
+/// An exact video frame rate in frames per second.
+typedef FrameRate = MoqVideoFrameRate;

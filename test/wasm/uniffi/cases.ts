@@ -12,6 +12,8 @@ import {
 	MoqClient,
 	MoqClientConfig,
 	MoqClientTls,
+	MoqConnectionPhase,
+	type MoqConnectionState,
 	type MoqGroupConsumer,
 	type MoqGroupConsumerLike,
 	type MoqSessionLike,
@@ -110,19 +112,40 @@ async function pending(promise: Promise<unknown>): Promise<boolean> {
 	return !settled;
 }
 
-async function connect(relay: Relay): Promise<MoqSessionLike> {
-	const response = await fetch(new URL("/certificate.sha256", relay.url));
-	if (!response.ok) throw new Error(`certificate HTTP ${response.status}`);
+/** Start a dial to `relay`, trusting `fingerprint` (the relay's own by default). */
+async function dial(relay: Relay, fingerprint?: string): Promise<MoqSessionLike> {
+	if (fingerprint === undefined) {
+		const response = await fetch(new URL("/certificate.sha256", relay.url));
+		if (!response.ok) throw new Error(`certificate HTTP ${response.status}`);
+		fingerprint = (await response.text()).trim();
+	}
 	const url = new URL(relay.url);
 	url.protocol = "https:";
 	const client = new MoqClient(
 		MoqClientConfig.create({
-			// moq-ffi exposes no negotiated version, so offering only the expected one is the check.
+			// Offering only the expected version makes connecting the check.
 			versions: [relay.version],
-			tls: MoqClientTls.create({ fingerprints: [(await response.text()).trim()] }),
+			tls: MoqClientTls.create({ fingerprints: [fingerprint] }),
 		}),
 	);
 	return client.connect(url.toString());
+}
+
+/** Wait for the dial to settle, returning its state. */
+async function settled(session: MoqSessionLike): Promise<MoqConnectionState> {
+	let state = session.state();
+	while (state.phase === MoqConnectionPhase.Connecting) {
+		state = await within(session.stateChanged(state.revision), 10000, "dial");
+	}
+	return state;
+}
+
+/** Connect to `relay`, failing unless the session establishes. */
+async function connect(relay: Relay): Promise<MoqSessionLike> {
+	const session = await dial(relay);
+	const state = await settled(session);
+	if (state.phase !== MoqConnectionPhase.Connected) throw new Error(`dial ended: ${state.failure}`);
+	return session;
 }
 
 /** A standalone group with a consumer, no session. */
@@ -272,7 +295,38 @@ const local: Record<string, () => Promise<string | undefined>> = {
 const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 	"negotiates the relay's version": async (relay) => {
 		const session = await connect(relay);
+		const state = session.state();
 		session.cancel(0);
+		if (state.version !== relay.version) throw new Error(`negotiated ${state.version}`);
+		if (state.connects !== 1n) throw new Error(`connects ${state.connects}`);
+		return undefined;
+	},
+
+	"connect returns before a refused dial and reports it": async (relay) => {
+		// A certificate hash nothing matches, so the browser refuses the handshake.
+		const session = await dial(relay, "00".repeat(32));
+		const first = session.state();
+		if (first.phase !== MoqConnectionPhase.Connecting) throw new Error(`returned ${first.phase}`);
+		const state = await settled(session);
+		if (state.phase !== MoqConnectionPhase.Closed) throw new Error(`settled ${state.phase}`);
+		if (!state.failure) throw new Error("no failure reported");
+		const closed = await settle(
+			session.closed(),
+			5000,
+			"closed",
+			() => "resolved",
+			(err: unknown) => (err as Error).message,
+		);
+		if (closed === "resolved") throw new Error("closed resolved after a refused dial");
+		return closed;
+	},
+
+	"cancelling a dial closes it": async (relay) => {
+		const session = await dial(relay);
+		session.cancel(0);
+		const state = await settled(session);
+		if (state.phase !== MoqConnectionPhase.Closed) throw new Error(`settled ${state.phase}`);
+		await within(session.closed(), 5000, "closed");
 		return undefined;
 	},
 

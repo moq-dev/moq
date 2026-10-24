@@ -26,7 +26,7 @@ iteration:
   atomics; the tokio runtime gets one budget. The cache `Pool` splits the same way,
   so each worker's cache and receive credit draw on one number. This reverses the
   relay's single process-wide cache pool, which this quest must migrate (config,
-  `MIGRATE.md`, `doc/bin/relay/`).
+  a migration note, `doc/bin/relay/`).
 - **Under pressure, stop granting.** Credit already advertised is never revoked.
   New `MAX_DATA` comes from the budget by fair share, so a peer over its share
   stalls rather than evicting anyone else. Eviction stays within one connection, as

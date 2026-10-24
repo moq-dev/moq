@@ -25,8 +25,8 @@ A CI `cargo check` for wasm32 keeps them building.
   arrive, and flushes with backpressure.
 - **Runtime:** browser objects are not `Send`, so these backends run on the
   browser runtime.
-- **API changes:** any change to a published entry point gets a
-  `MIGRATE.md` entry.
+- **API changes:** any change to a published entry point says how to
+  migrate in the PR's Impact bullet.
 - **Codec support** is probed at runtime. An unsupported codec fails loudly
   rather than silently picking another.
 - **Out of scope:** replacing js/publish's or js/watch's internals with these
