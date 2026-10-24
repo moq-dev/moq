@@ -16,8 +16,10 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 	defer cancel()
 	relay := startRelay(t, ctx, "127.0.0.1:0")
 	defer relay.server.Close()
-	client, err := moq.Dial(ctx, "https://"+relay.addr,
-		moq.WithTLSVerify(false), moq.WithReconnect(false))
+	client, err := moq.Dial(ctx, "https://"+relay.addr, moq.ClientConfig{
+		TLS:  moq.ClientTLS{Insecure: true},
+		Once: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
