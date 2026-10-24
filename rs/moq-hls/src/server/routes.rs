@@ -1131,13 +1131,13 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn denied_sibling_media_answers_403_without_poisoning_allowed_siblings() {
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("room/live").unwrap();
+		let broadcast = origin.create_broadcast("room/live").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let source = origin.create_broadcast("room/source").unwrap();
 		source.announce(Default::default()).unwrap();
 		let secret = origin.create_broadcast("room/secret").unwrap();
 		secret.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
