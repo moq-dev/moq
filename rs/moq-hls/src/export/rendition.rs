@@ -702,7 +702,7 @@ impl Rendition {
 	}
 
 	/// Return bound media or its authorization refusal, leaving timeline state alone.
-	fn authorize(&self) -> Result<Arc<moq_mux::Binding>> {
+	pub(crate) fn authorize(&self) -> Result<Arc<moq_mux::Binding>> {
 		let binding = self.media.sync(&self.live);
 		match self.media.refusal() {
 			Some(err) => Err(err),
@@ -1453,14 +1453,14 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_pending_segment_preserves_a_later_authorization_refusal() {
+	async fn pending_reads_preserve_a_later_authorization_refusal() {
 		let origin = moq_tokio::origin::spawn();
 		let broadcast = origin.create_broadcast("room/live").unwrap();
 		let dynamic = origin.dynamic_route("room/secret", Default::default()).unwrap();
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
-		let rendition = Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap();
+		let rendition = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
 		let request = dynamic.requested_broadcast().await.unwrap();
 		let row = segments::Row {
 			index: 0,
@@ -1476,14 +1476,23 @@ mod tests {
 		};
 		let segment = rendition.fetch(&row);
 		tokio::pin!(segment);
+		// The cursor waits on a window with no rows, which the refusal neither fills nor ends.
+		let mut cursor = rendition.segments();
+		let next = cursor.next();
+		tokio::pin!(next);
 		tokio::select! {
 			biased;
 			_ = &mut segment => panic!("the reference request has not been answered"),
+			_ = &mut next => panic!("the reference request has not been answered"),
 			_ = std::future::ready(()) => {}
 		}
 		request.reject(moq_net::Error::Unauthorized);
 		assert!(matches!(
 			segment.await,
+			Err(crate::Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)))
+		));
+		assert!(matches!(
+			next.await,
 			Err(crate::Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)))
 		));
 	}
