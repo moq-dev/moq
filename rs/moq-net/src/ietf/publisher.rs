@@ -1208,9 +1208,14 @@ impl Publisher {
 				Some(token) => {
 					let verdict = gate.verify(token, Some(slot.clone()));
 					// The subscriber cancelling or the session closing withdraws the token.
-					let verified = self
-						.until_withdrawn(&mut stream, kio::wait(|waiter| verdict.poll_grant(waiter)))
-						.await;
+					let mut session = self.session.clone();
+					let verified = kio::wait(|waiter| {
+						if self.poll_withdrawn(&mut session, &mut stream, waiter).is_ready() {
+							return Poll::Ready(None);
+						}
+						verdict.poll_grant(waiter).map(Some)
+					})
+					.await;
 					let Some(verified) = verified else {
 						drop((verdict, slot));
 						self.released(&credit).await;
@@ -1514,8 +1519,25 @@ impl Publisher {
 		}
 	}
 
-	/// Run `step` of a request's setup, or `None` once the requester withdraws the request or
-	/// the session closes, without reading anything it sent meanwhile.
+	/// Ready once the requester withdraws the request on `stream` or `session` closes, without
+	/// reading anything it sent meanwhile.
+	fn poll_withdrawn(
+		&self,
+		session: &mut Transport,
+		stream: &mut Stream<Transport, Version>,
+		waiter: &kio::Waiter,
+	) -> Poll<()> {
+		let mut cx = waiter.context();
+		if session.poll_closed(&mut cx).is_ready() {
+			return Poll::Ready(());
+		}
+		super::request_stream::poll_withdrawn(stream, self.version, &mut cx)
+	}
+
+	/// Run `step` of a request's setup, or `None` once [`Self::poll_withdrawn`] is ready.
+	///
+	/// The setup's steps (the peer's routes, a broadcast's resolution, a track's subscription)
+	/// are async, so this races a future rather than a poll.
 	async fn until_withdrawn<T>(
 		&self,
 		stream: &mut Stream<Transport, Version>,
@@ -1524,10 +1546,7 @@ impl Publisher {
 		let mut step = std::pin::pin!(step);
 		let mut session = self.session.clone();
 		kio::wait(|waiter| {
-			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready()
-				|| super::request_stream::poll_withdrawn(stream, self.version, &mut cx).is_ready()
-			{
+			if self.poll_withdrawn(&mut session, stream, waiter).is_ready() {
 				return Poll::Ready(None);
 			}
 			waiter.poll_future(step.as_mut()).map(Some)
