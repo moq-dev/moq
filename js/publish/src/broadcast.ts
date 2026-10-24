@@ -7,7 +7,7 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from
 import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { errors } from "./internal";
-import { Baseline } from "./jitter";
+import { Order } from "./order";
 import { type Kind, Rendition } from "./rendition";
 
 // The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
@@ -103,10 +103,10 @@ export class Broadcast {
 	readonly net: Getter<Moq.Broadcast.Producer | undefined> = this.#net;
 
 	/**
-	 * @internal The recent minimum flush lateness across every rendition, which each encoder
-	 * measures its catalog `delay` against. Per broadcast, so a swapped one starts fresh.
+	 * @internal The highest timestamp each rendition has written, which each encoder measures its
+	 * catalog `delay` against. Per broadcast, so a swapped one starts fresh.
 	 */
-	readonly baseline = new Baseline();
+	readonly order = new Order();
 
 	// The registered renditions keyed by full track name. A plain object so deep-equality detects a
 	// key add/remove; the Rendition values compare by identity, which is stable.

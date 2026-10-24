@@ -242,13 +242,6 @@ where
 		Ok(())
 	}
 
-	/// Record when a locally encoded frame reached the transport. Imported media must leave
-	/// this clock observation out and rely on its container batch and reorder measurements.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
-		self.estimator.flush(timestamp, now);
-		self.publish_estimate()
-	}
-
 	/// The catalog key owned by this producer.
 	pub fn name(&self) -> &str {
 		self.rendition
@@ -310,7 +303,7 @@ where
 		self.bandwidth.as_ref().and_then(|claim| claim.ceiling())
 	}
 
-	/// The jitter and bitrate measured from the frames written so far.
+	/// The jitter, bitrate, delay, and framerate measured from the frames written so far.
 	///
 	/// A catalog-owned producer publishes this automatically. See
 	/// [`Estimator`](crate::catalog::Estimator).
@@ -863,12 +856,12 @@ mod tests {
 		producer.finish().unwrap();
 
 		let estimate = producer.estimate();
-		assert_eq!(estimate.jitter, None, "PTS spacing alone is not flush delay");
+		assert_eq!(estimate.jitter, None, "PTS spacing alone is not jitter");
 		assert_eq!(estimate.bitrate, Some(1_600_000));
 	}
 
 	#[test]
-	fn catalog_flush_measures_delay_across_renditions_and_jitter_within_each() {
+	fn catalog_write_order_measures_delay_across_renditions() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut tracks = Vec::new();
@@ -884,20 +877,20 @@ mod tests {
 			tracks.push(track);
 		}
 
-		let anchor = moq_clock::Instant::now();
-		let ms = std::time::Duration::from_millis;
-		let pts = |millis: u64| Timestamp::from_micros(millis * 1_000).unwrap();
-		tracks[0].flush(pts(0), anchor).unwrap();
-		// A constant 200ms offset behind the other rendition is delay, not jitter.
-		tracks[1].flush(pts(0), anchor + ms(200)).unwrap();
-		assert_eq!(catalog.snapshot().video.renditions["slow"].jitter, None);
-		assert_eq!(catalog.snapshot().video.renditions["slow"].delay, Some(ms(200)));
-		assert_eq!(catalog.snapshot().video.renditions["fast"].delay, None);
+		// The slow rendition writes each frame after the fast one has written 200ms past it.
+		for i in 1..10u64 {
+			tracks[0].write(frame(i * 40_000 + 200_000, true)).unwrap();
+			tracks[1].write(frame(i * 40_000, true)).unwrap();
+		}
+		for track in &mut tracks {
+			track.cut(None).unwrap();
+		}
 
-		// A frame flushed 60ms later than the slow rendition's own minimum is.
-		tracks[1].flush(pts(40), anchor + ms(300)).unwrap();
-		assert_eq!(catalog.snapshot().video.renditions["fast"].jitter, None);
-		assert_eq!(catalog.snapshot().video.renditions["slow"].jitter, Some(ms(60)));
+		let ms = std::time::Duration::from_millis;
+		let renditions = catalog.snapshot().video.renditions;
+		assert_eq!(renditions["slow"].delay, Some(ms(200)));
+		assert_eq!(renditions["fast"].delay, None);
+		assert_eq!(renditions["slow"].jitter, None, "a constant trail is not jitter");
 	}
 
 	/// A passthrough producer claims nothing until the first window closes, then

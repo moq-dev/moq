@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Media.TrackProducer.flush(timestampUs:)` is gone
+
+The catalog no longer measures jitter from when a frame was written, so there is nothing to report after writing one.
+Delete the call; `delay` is measured from the order of the timestamps you write.
+
 ### Video rendition preference
 
 `Media.Video` gains `preference: Int32`, defaulting to `0`. Rebuild with the matching MoqFFI package. Higher values are preferred; compatibility transcodes use `-1`.

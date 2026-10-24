@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `media.TrackProducer.Flush` is gone
+
+The catalog no longer measures jitter from when a frame was written, so there is nothing to report after writing one.
+Delete the call; `delay` is measured from the order of the timestamps you write.
+
 ### Video rendition preference
 
 `media.Video` gains `Preference int32`. Update unkeyed struct literals or use keyed fields, leaving `Preference: 0` for the default ranking. Upgrade the matching FFI module too. Higher values are preferred; compatibility transcodes use `-1`.

@@ -208,7 +208,7 @@ client = moq.Client(
   as it lands.
 
 `media.TrackProducer.write_frame(payload, timestamp)` requires the caller's capture time as
-`timedelta`; `.flush(timestamp)` and returned `media.MediaFrame.timestamp` use it too. `demand()` owns the track name and
+`timedelta`; returned `media.MediaFrame.timestamp` uses it too. `demand()` owns the track name and
 subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()` ends the import.
 
 ### Data

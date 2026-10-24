@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `media.TrackProducer.flush` is gone
+
+The catalog no longer measures jitter from when a frame was written, so there is nothing to report after writing one.
+Delete the call; `delay` is measured from the order of the timestamps you write.
+
 ### Video rendition preference
 
 `moq.media.Video` gains `preference`, defaulting to `0`. Prefer keyword construction and upgrade `moq-ffi` alongside the wrapper. Higher values are preferred; compatibility transcodes use `-1`.

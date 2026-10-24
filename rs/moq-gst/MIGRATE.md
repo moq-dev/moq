@@ -4,6 +4,11 @@ How to update your pipelines for each breaking change, newest first.
 
 ## Unreleased
 
+### The `encoder` pad property is gone
+
+`moqsink` no longer measures when buffers arrive, so a pad needs no hint that a local encoder feeds it.
+Drop `sink_%u::encoder=true` from pipeline descriptions; every pad now advertises `delay` from the order of its buffer timestamps against the other pads.
+
 ### `moqsrc` audio caps are the standard ones
 
 `moqsrc` audio pads now carry `rate` and `channels` as `int`, and Opus pads the mapping fields (`channel-mapping-family`, `stream-count`, `coupled-count`, plus `channel-mapping` beyond stereo) with the OpusHead and an empty OpusTags as `streamheader`, so `decodebin` and `opusdec` accept them and `opusdec` applies the output gain.

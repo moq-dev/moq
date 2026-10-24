@@ -4,7 +4,6 @@
 //! that pad's own streaming thread, so this type is touched from one thread and needs no generation
 //! tagging or cross-thread failure map.
 
-use moq_net::time::Instant;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -51,10 +50,6 @@ struct Media {
 	audio: bool,
 	/// The media time of the first packet in the current audio group.
 	group_start: Option<Duration>,
-	/// Records each frame's handoff against the wall clock, raising the catalog jitter by how
-	/// irregularly a local encoder delivers. Imports leave it off: their arrival times describe the
-	/// file or network, not the encoder.
-	encoder: bool,
 	/// Apply a timeline break before the next valid frame, using the normal write error path.
 	discontinuity: bool,
 	/// Video can start or resume mid-GOP, so deltas drop until a keyframe opens a group. Stays set:
@@ -64,9 +59,9 @@ struct Media {
 }
 
 impl Media {
-	/// Publish one frame at `micros` on the media clock, handed over at `now`. Returns false when a
-	/// frame is dropped while waiting for a keyframe at or beyond the live edge.
-	fn write(&mut self, data: &Bytes, micros: u64, now: Instant) -> Result<bool> {
+	/// Publish one frame at `micros` on the media clock. Returns false when a frame is dropped while
+	/// waiting for a keyframe at or beyond the live edge.
+	fn write(&mut self, data: &Bytes, micros: u64) -> Result<bool> {
 		if std::mem::take(&mut self.discontinuity) {
 			self.track.discontinuity()?;
 			self.keyframe = !self.audio;
@@ -96,11 +91,6 @@ impl Media {
 		if self.audio {
 			self.group_start.get_or_insert(timestamp);
 		}
-		if self.encoder {
-			// Skipping the observation would publish a frame the jitter never saw.
-			let ts = ts.context("encoder frame timestamp out of range")?;
-			self.track.flush(ts, now)?;
-		}
 		Ok(true)
 	}
 }
@@ -110,7 +100,6 @@ pub(super) struct ProducerOptions<'a> {
 	container: hang::catalog::Container,
 	caps: &'a gst::Caps,
 	requested: Option<&'a str>,
-	encoder: bool,
 }
 
 impl<'a> ProducerOptions<'a> {
@@ -119,7 +108,6 @@ impl<'a> ProducerOptions<'a> {
 			container: hang::catalog::Container::default(),
 			caps,
 			requested: None,
-			encoder: false,
 		}
 	}
 
@@ -130,11 +118,6 @@ impl<'a> ProducerOptions<'a> {
 
 	pub(super) fn with_track(mut self, track: &'a str) -> Self {
 		self.requested = Some(track);
-		self
-	}
-
-	pub(super) fn with_encoder(mut self, encoder: bool) -> Self {
-		self.encoder = encoder;
 		self
 	}
 }
@@ -361,15 +344,8 @@ impl Pad {
 			container,
 			caps,
 			requested,
-			encoder,
 		} = options;
 		let structure = caps.structure(0).context("empty caps")?;
-		// Only a codec rendition carries the jitter a local encoder's clock would raise.
-		ensure!(
-			!encoder || !matches!(structure.name().as_str(), "application/octet-stream" | "text/x-raw"),
-			"encoder is only supported on audio and video pads, not {}",
-			structure.name()
-		);
 		// Renegotiation: finalize the previous producer before replacing it (closed once, not abandoned).
 		self.finalize()?;
 		// Opaque data has no codec importer and no catalog entry, so it never reaches the codec match.
@@ -531,7 +507,6 @@ impl Pad {
 			track,
 			audio,
 			group_start: None,
-			encoder,
 			discontinuity: false,
 			keyframe: !audio,
 		})));
@@ -746,9 +721,8 @@ impl Pad {
 
 	/// Import one buffer into the producer. A failed or producer-less pad drops the buffer; a timeline
 	/// drop is logged. Unstamped opaque data on an active timeline uses the element's current running
-	/// time. An encoder pad records `now` as the frame's handoff once it is published. A bad bitstream
-	/// (or an oversized frame, rejected by moq-net) invalidates only this pad and says so in the
-	/// returned outcome. Returns an error when an unstamped opaque buffer has no current
+	/// time. A bad bitstream (or an oversized frame, rejected by moq-net) invalidates only this pad
+	/// and says so in the returned outcome. Returns an error when an unstamped opaque buffer has no current
 	/// running time, so the caller fails the flow instead of silently dropping data.
 	pub fn push_buffer(
 		&mut self,
@@ -756,7 +730,6 @@ impl Pad {
 		pts: Option<gst::ClockTime>,
 		duration: Option<gst::ClockTime>,
 		current_running_time: Option<gst::ClockTime>,
-		now: Instant,
 	) -> std::result::Result<PushOutcome, &'static str> {
 		if self.failed {
 			return Ok(PushOutcome::Dropped);
@@ -776,7 +749,7 @@ impl Pad {
 		match timestamp {
 			Ok(micros) => {
 				let result: Result<()> = match self.track.as_mut().expect("track present") {
-					Sink::Media(media) => match media.write(&data, micros, now) {
+					Sink::Media(media) => match media.write(&data, micros) {
 						Ok(false) => {
 							gst::debug!(
 								CAT,
@@ -1187,14 +1160,8 @@ mod tests {
 			"the reserved name is the requested one"
 		);
 		pad.observe_segment(time_segment());
-		pad.push_buffer(
-			h264_keyframe_au(),
-			Some(gst::ClockTime::ZERO),
-			None,
-			None,
-			moq_net::time::now(),
-		)
-		.unwrap();
+		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
+			.unwrap();
 
 		let snapshot = catalog.snapshot();
 		let renditions: Vec<String> = snapshot.video.renditions.keys().map(|name| name.to_string()).collect();
@@ -1330,15 +1297,13 @@ mod tests {
 			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 			.await
 			.unwrap();
-		let anchor = moq_net::time::now();
 		for index in 0..17 {
 			assert_eq!(
 				pad.push_buffer(
 					Bytes::from_static(&[0x80, 0xff, 0xfe]),
 					Some(gst::ClockTime::from_useconds(100_000 + index * 2_500)),
 					None,
-					None,
-					anchor
+					None
 				)
 				.unwrap(),
 				PushOutcome::Published
@@ -1548,7 +1513,6 @@ mod tests {
 					Some(gst::ClockTime::from_mseconds(20 * index as u64)),
 					None,
 					None,
-					moq_net::time::now(),
 				)
 				.unwrap(),
 				PushOutcome::Published
@@ -1576,26 +1540,14 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), None));
 		// No observe_segment: the pad stays in NoSegment.
 		assert_eq!(
-			pad.push_buffer(
-				h264_keyframe_au(),
-				Some(gst::ClockTime::ZERO),
-				None,
-				None,
-				moq_net::time::now()
-			)
-			.unwrap(),
+			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
+				.unwrap(),
 			PushOutcome::NoSegment,
 			"first no-segment buffer is reported"
 		);
 		assert_eq!(
-			pad.push_buffer(
-				h264_keyframe_au(),
-				Some(gst::ClockTime::ZERO),
-				None,
-				None,
-				moq_net::time::now()
-			)
-			.unwrap(),
+			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
+				.unwrap(),
 			PushOutcome::Dropped,
 			"subsequent no-segment buffers are not re-reported"
 		);
@@ -1636,13 +1588,7 @@ mod tests {
 		assert!(!data.is_failed());
 		video.observe_segment(time_segment());
 		video
-			.push_buffer(
-				h264_keyframe_au(),
-				Some(gst::ClockTime::ZERO),
-				None,
-				None,
-				moq_net::time::now(),
-			)
+			.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
 			.unwrap();
 
 		let snapshot = catalog.snapshot();
@@ -1675,7 +1621,6 @@ mod tests {
 			Some(gst::ClockTime::from_mseconds(40)),
 			None,
 			None,
-			moq_net::time::now(),
 		)
 		.unwrap();
 		pad.push_buffer(
@@ -1683,7 +1628,6 @@ mod tests {
 			Some(gst::ClockTime::from_mseconds(80)),
 			None,
 			None,
-			moq_net::time::now(),
 		)
 		.unwrap();
 
@@ -1738,14 +1682,8 @@ mod tests {
 			CapsOutcome::Active("camera".to_string())
 		);
 		pad.observe_segment(time_segment());
-		pad.push_buffer(
-			h264_keyframe_au(),
-			Some(gst::ClockTime::ZERO),
-			None,
-			None,
-			moq_net::time::now(),
-		)
-		.unwrap();
+		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
+			.unwrap();
 
 		let config = catalog.snapshot().video.renditions.get("camera").cloned().unwrap();
 		assert_eq!(config.container, hang::catalog::Container::Loc);
@@ -1813,7 +1751,6 @@ mod tests {
 			None,
 			None,
 			Some(gst::ClockTime::from_mseconds(25)),
-			moq_net::time::now(),
 		)
 		.unwrap();
 		assert!(!pad.is_failed(), "a missing PTS uses the supplied running time");
@@ -1848,14 +1785,8 @@ mod tests {
 		pad.observe_segment(time_segment());
 
 		assert!(
-			pad.push_buffer(
-				Bytes::from_static(b"no timestamp"),
-				None,
-				None,
-				None,
-				moq_net::time::now()
-			)
-			.is_err(),
+			pad.push_buffer(Bytes::from_static(b"no timestamp"), None, None, None)
+				.is_err(),
 			"the caller gets a hard error instead of a silent drop"
 		);
 	}
@@ -1874,14 +1805,8 @@ mod tests {
 		);
 		assert!(pad.is_failed());
 		pad.observe_segment(time_segment());
-		pad.push_buffer(
-			Bytes::from_static(b"x"),
-			Some(gst::ClockTime::ZERO),
-			None,
-			None,
-			moq_net::time::now(),
-		)
-		.unwrap();
+		pad.push_buffer(Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO), None, None)
+			.unwrap();
 	}
 
 	// An H.265 camera whose SPS VUI zeroes the colour fields on 4:2:0 (`matrix_coeffs` 0, which
@@ -1915,13 +1840,7 @@ mod tests {
 			au.extend_from_slice(nal);
 		}
 		let outcome = pad
-			.push_buffer(
-				Bytes::from(au),
-				Some(gst::ClockTime::ZERO),
-				None,
-				None,
-				moq_net::time::now(),
-			)
+			.push_buffer(Bytes::from(au), Some(gst::ClockTime::ZERO), None, None)
 			.unwrap();
 		assert_eq!(outcome, PushOutcome::Published);
 		assert!(!pad.is_failed());
@@ -1937,14 +1856,8 @@ mod tests {
 		let mut pad = Pad::new();
 		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), None));
 		pad.observe_segment(time_segment());
-		pad.push_buffer(
-			h264_keyframe_au(),
-			Some(gst::ClockTime::ZERO),
-			None,
-			None,
-			moq_net::time::now(),
-		)
-		.unwrap();
+		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None, None)
+			.unwrap();
 
 		let snapshot = catalog.snapshot();
 		let track = snapshot.video.renditions.keys().next().expect("a video rendition");
@@ -2131,7 +2044,6 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			Some(gst::ClockTime::from_seconds(1)),
 			None,
-			moq_net::time::now(),
 		)
 		.unwrap();
 		assert!(pad.is_failed());
@@ -2158,7 +2070,6 @@ mod tests {
 				Some(gst::ClockTime::from_mseconds(start_ms)),
 				Some(gst::ClockTime::from_mseconds(dur_ms)),
 				None,
-				moq_net::time::now(),
 			)
 			.unwrap();
 		}
@@ -2177,14 +2088,8 @@ mod tests {
 		let mut pad = Pad::new();
 		pad.observe_caps(&broadcast, &catalog, producer_options(&text_caps(), None));
 		pad.observe_segment(time_segment());
-		pad.push_buffer(
-			Bytes::from_static(b"hello"),
-			Some(gst::ClockTime::ZERO),
-			None,
-			None,
-			moq_net::time::now(),
-		)
-		.unwrap();
+		pad.push_buffer(Bytes::from_static(b"hello"), Some(gst::ClockTime::ZERO), None, None)
+			.unwrap();
 		assert!(!pad.is_failed(), "a durationless cue drops the buffer, not the pad");
 	}
 
@@ -2224,107 +2129,6 @@ mod tests {
 		assert_eq!(emitted, 5, "all five decode-order frames must emit (got {emitted})");
 	}
 
-	// `multifilesrc ! parsebin` and a live encoder deliver identical segments and PTS, so the opt-in is
-	// the only thing that tells them apart. The same late frame raises only the encoder pad's jitter.
-	#[test]
-	fn only_an_encoder_pad_measures_its_handoff() {
-		gst::init().unwrap();
-		let (broadcast, catalog) = producers();
-		let mut encoder = Pad::new();
-		let mut import = Pad::new();
-		encoder.observe_caps(
-			&broadcast,
-			&catalog,
-			producer_options(&h264_caps(), Some("encoder")).with_encoder(true),
-		);
-		import.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("import")));
-
-		// The third frame reaches the sink 100ms later than its running time says it should.
-		let anchor = moq_net::time::now();
-		for (pts, arrival) in [(0, 0), (33, 33), (66, 166)] {
-			for pad in [&mut encoder, &mut import] {
-				pad.observe_segment(time_segment());
-				let outcome = pad
-					.push_buffer(
-						h264_keyframe_au(),
-						Some(gst::ClockTime::from_mseconds(pts)),
-						None,
-						None,
-						anchor + std::time::Duration::from_millis(arrival),
-					)
-					.unwrap();
-				assert_eq!(outcome, PushOutcome::Published);
-			}
-		}
-
-		let snapshot = catalog.snapshot();
-		let jitter = |name: &str| snapshot.video.renditions[name].jitter;
-		assert_eq!(jitter("encoder"), Some(std::time::Duration::from_millis(100)));
-		assert_eq!(jitter("import"), None, "an import's arrival never reaches the catalog");
-	}
-
-	#[test]
-	fn encoder_seek_does_not_measure_the_pause_as_jitter() {
-		gst::init().unwrap();
-		for boundary in ["segment", "flush", "pause"] {
-			let (broadcast, catalog) = producers();
-			let mut pad = Pad::new();
-			pad.observe_caps(
-				&broadcast,
-				&catalog,
-				producer_options(&h264_caps(), Some("encoder")).with_encoder(true),
-			);
-			let anchor = moq_net::time::now();
-			for (pts, arrival) in [(0, 0), (33, 33), (66, 166)] {
-				pad.observe_segment(time_segment());
-				assert_eq!(
-					pad.push_buffer(
-						h264_keyframe_au(),
-						Some(gst::ClockTime::from_mseconds(pts)),
-						None,
-						None,
-						anchor + std::time::Duration::from_millis(arrival)
-					)
-					.unwrap(),
-					PushOutcome::Published
-				);
-			}
-			let before = catalog.snapshot().video.renditions["encoder"].jitter;
-			assert_eq!(before, Some(std::time::Duration::from_millis(100)));
-			match boundary {
-				"flush" => pad.flush(),
-				"pause" => pad.discontinuity(),
-				_ => {}
-			}
-			// Seek in the source while keeping the broadcast media clock moving forward.
-			for (pts, arrival) in [(30_000, 6_000), (30_033, 6_033)] {
-				let pts = if boundary == "pause" {
-					// Pausing preserves the segment while the running clock stops.
-					pts - 29_000
-				} else {
-					pad.observe_segment(time_segment_at(30_000, 1_000));
-					pts
-				};
-				assert_eq!(
-					pad.push_buffer(
-						h264_keyframe_au(),
-						Some(gst::ClockTime::from_mseconds(pts)),
-						None,
-						None,
-						anchor + std::time::Duration::from_millis(arrival)
-					)
-					.unwrap(),
-					PushOutcome::Published
-				);
-			}
-			assert_eq!(
-				catalog.snapshot().video.renditions["encoder"].jitter,
-				before,
-				"boundary={boundary}"
-			);
-		}
-	}
-
 	#[test]
 	fn video_start_drops_deltas_until_the_first_keyframe() {
 		gst::init().unwrap();
@@ -2333,9 +2137,8 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
 		pad.observe_segment(time_segment());
 		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
-		let now = moq_net::time::now();
 		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
-			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
+			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None)
 				.unwrap()
 		};
 		assert_eq!(push(&mut pad, delta.clone(), 0), PushOutcome::Dropped);
@@ -2354,9 +2157,8 @@ mod tests {
 			let mut pad = Pad::new();
 			pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
 			pad.observe_segment(time_segment());
-			let now = moq_net::time::now();
 			let push = |pad: &mut Pad, data: Bytes, pts: u64| {
-				pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
+				pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None)
 					.unwrap()
 			};
 			assert_eq!(push(&mut pad, h264_keyframe_au(), 1000), PushOutcome::Published);
@@ -2383,9 +2185,8 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
 		pad.observe_segment(time_segment());
 		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
-		let now = moq_net::time::now();
 		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
-			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
+			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None)
 				.unwrap()
 		};
 		assert_eq!(push(&mut pad, h264_keyframe_au(), 0), PushOutcome::Published);
@@ -2410,9 +2211,8 @@ mod tests {
 		let keyframe = h264_keyframe_au();
 		let headers = keyframe.slice(..keyframe.len() - 9);
 		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
-		let now = moq_net::time::now();
 		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
-			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
+			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None)
 				.unwrap()
 		};
 		assert_eq!(push(&mut pad, keyframe.clone(), 0), PushOutcome::Published);
@@ -2421,26 +2221,5 @@ mod tests {
 		assert_eq!(push(&mut pad, delta.clone(), 66), PushOutcome::Dropped);
 		assert_eq!(push(&mut pad, keyframe, 100), PushOutcome::Published);
 		assert_eq!(push(&mut pad, delta, 133), PushOutcome::Published);
-	}
-
-	// Text and opaque tracks carry no codec jitter, so asking them to measure one is a mistake to report
-	// rather than a setting to ignore.
-	#[test]
-	fn an_encoder_pad_must_carry_audio_or_video() {
-		gst::init().unwrap();
-		let (broadcast, catalog) = producers();
-		for caps in [text_caps(), opaque_caps()] {
-			let mut pad = Pad::new();
-			let outcome = pad.observe_caps(
-				&broadcast,
-				&catalog,
-				producer_options(&caps, Some("data")).with_encoder(true),
-			);
-			assert!(
-				matches!(outcome, CapsOutcome::Failed(ref reason) if reason.starts_with("encoder is only supported")),
-				"{outcome:?}"
-			);
-			assert!(pad.is_failed());
-		}
 	}
 }

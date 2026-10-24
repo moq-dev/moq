@@ -95,7 +95,7 @@ one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
-- **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs:)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** Release each frame from a `Video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `try await session.shutdown()` drains for up to one second and throws on failure. `session.cancel(code:)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `try broadcast.finish()`. The returned `BroadcastFinish` keeps the broadcast announced and serving the finished tracks for `lingerUs`, their longest max age, so a subscriber still catching up can drain them. `try await finish.wait()` returns once the linger passes; cancelling its task, or `finish.close()`, closes the broadcast at once. `broadcast.close()` stays the abrupt end.

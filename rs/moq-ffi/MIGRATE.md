@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### `MoqMediaTrackProducer::flush` is gone
+
+The catalog no longer measures jitter from when a frame was written, so there is nothing to report after writing one.
+Delete the call and regenerate bindings; `delay` is measured from the order of the timestamps you write.
+
 ### Video rendition preference
 
 `MoqVideo` gains `preference: i32`. Set it to `0` in record literals to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Regenerate bindings and rebuild them with the matching native library.

@@ -21,7 +21,7 @@ nix shell github:moq-dev/moq/release#moq-gst --command gst-launch-1.0 -e \
 # Publish a test pattern
 gst-launch-1.0 -e videotestsrc is-live=true ! x264enc tune=zerolatency ! h264parse \
   ! video/x-h264,stream-format=byte-stream,alignment=au ! mux.sink_0 \
-  moqsink name=mux url=https://cdn.moq.dev/anon broadcast=<your-name>.hang sink_0::encoder=true
+  moqsink name=mux url=https://cdn.moq.dev/anon broadcast=<your-name>.hang
 ```
 
 Install via `apt install gstreamer1.0-moq` or `dnf install gstreamer1-moq`
@@ -58,8 +58,7 @@ directly. A cue with no duration is dropped rather than left on screen.
 Audio packets share groups of at least 20 ms while forwarding as they arrive.
 Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
-[LOC](/concept/standard#loc) instead of the legacy hang container,
-`encoder=true` marks it as fed by a local encoder, and
+[LOC](/concept/standard#loc) instead of the legacy hang container, and
 `track-status`/`track-error` report its lifecycle. Element properties:
 `url`, `broadcast`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, `linger`, and read-only `status`, `connected`, `moq-version`, and
@@ -100,19 +99,14 @@ in the same shape as the relay's sessions track. One read returns both from
 the same instant, so their difference is 1 while connected. Unlike `status`, a
 drop you did not poll still moves both counters.
 
-Set `encoder=true` on audio and video pads a local encoder feeds
-(`x264enc`, `opusenc`, ...). The pad then measures how late each frame reaches
-the sink behind its running time and raises the catalog `jitter` by the spread,
-and `delay` by how far it trails the earliest such pad, so players buffer for an
-encoder that delivers irregularly or behind the others. Leave it off, the
-default, for file, demuxed, and network media: their arrival reflects the disk
-or the network, not the original encoder, and a GStreamer segment cannot tell
-the two apart. Text and opaque pads refuse it.
+The catalog `delay` of each pad is how far its buffers' timestamps trail ones
+the other pads already pushed, so players buffer for an encoder that delivers
+behind the others. Arrival time is never measured, so file, demuxed, and network
+media advertise the same values as a live encoder.
 
-After a pause, flush, or changed TIME segment, the next media buffer resets
-the handoff measurement baseline. The pause does not inflate
-advertised jitter, and previously measured maxima remain. Resumed timestamps
-must continue forward on the broadcast media clock.
+After a pause, flush, or changed TIME segment, the pad stops holding the others
+back until its next buffer, and previously measured maxima remain. Resumed
+timestamps must continue forward on the broadcast media clock.
 
 A video pad joining mid-GOP drops delta frames until its first keyframe. If a
 source rewinds below the producer's live edge without signalling a break, the

@@ -474,7 +474,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			start: None,
 			recorder: Some(recorder),
 			pending_sequence: None,
-			estimator: Estimator::new(),
+			estimator: self.catalog.estimator(),
 			claim: crate::catalog::Claim::new(self.catalog.bandwidth()),
 		})
 	}

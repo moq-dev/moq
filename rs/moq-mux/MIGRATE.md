@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `flush` is gone; `jitter` and `delay` come from timestamps
+
+`catalog::Estimator::flush`, `container::Producer::flush`, `import::Track::flush`, and every codec importer's `flush` are removed: nothing reads the wall clock to measure jitter any more.
+Delete the calls.
+`jitter` now covers only reorder delay and batch spans, and `delay` is how far a frame's timestamp trails those another track of the same catalog already wrote, so importers advertise it too.
+
 ### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
 
 A passthrough `container::fmp4::Import` refuses a group that starts below the previous one with `Error::TimestampRewind` before opening it, as an unwrapped track does, instead of `Error::Moq(moq_net::Error::TimestampMismatch)` from a group it already opened.
