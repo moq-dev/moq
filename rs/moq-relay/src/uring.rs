@@ -202,10 +202,7 @@ impl Workers {
 		// Every configured version's ALPN, as the tokio listener advertises.
 		// `h3` rides along for browsers, which negotiate the moq version as a
 		// WebTransport subprotocol instead.
-		let versions: moq_net::Versions = match listen.version.is_empty() {
-			true => Default::default(),
-			false => listen.version.clone().into(),
-		};
+		let versions = listen.versions();
 		let alpns: Vec<String> = versions.alpns().into_iter().map(str::to_owned).collect();
 
 		let alpn = alpns
