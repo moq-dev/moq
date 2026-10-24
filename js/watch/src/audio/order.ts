@@ -48,6 +48,15 @@ export class Order<T extends { group: number; frame: { timestamp: number } }> {
 		return [];
 	}
 
+	/** The newest timestamp among the held head and `released`, the frames still to decode. */
+	newest(released: T[]): number | undefined {
+		let newest = this.#held.length > 0 ? this.#span?.newest : undefined;
+		for (const { frame } of released) {
+			if (newest === undefined || frame.timestamp > newest) newest = frame.timestamp;
+		}
+		return newest;
+	}
+
 	/** Release the head as it stands, ending the hold: the track ended, or a gap or end cut it short. */
 	flush(): T[] {
 		this.#hold = undefined;

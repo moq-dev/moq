@@ -988,7 +988,7 @@ impl<E: CatalogExt> Producer<E> {
 		&self,
 		track: moq_net::track::Producer,
 		config: impl super::IntoRendition<E, hang::catalog::JsonConfig> + 'static,
-	) -> crate::Result<crate::json::Snapshot<T, E>> {
+	) -> crate::Result<crate::json::Snapshot<T>> {
 		let rendition = self.data_entry(track.name())?;
 		crate::json::Snapshot::new(track, rendition, config)
 	}
@@ -1001,7 +1001,7 @@ impl<E: CatalogExt> Producer<E> {
 		&self,
 		track: moq_net::track::Producer,
 		config: impl super::IntoRendition<E, hang::catalog::JsonConfig>,
-	) -> crate::Result<crate::json::Stream<T, E>> {
+	) -> crate::Result<crate::json::Stream<T>> {
 		let rendition = self.data_entry(track.name())?;
 		crate::json::Stream::new(track, rendition, config.into_rendition())
 	}
@@ -1015,7 +1015,7 @@ impl<E: CatalogExt> Producer<E> {
 		&self,
 		track: moq_net::track::Producer,
 		config: impl super::IntoRendition<E, hang::catalog::BinaryConfig>,
-	) -> crate::Result<crate::binary::Snapshot<E>> {
+	) -> crate::Result<crate::binary::Snapshot> {
 		let rendition = self.data_entry(track.name())?;
 		crate::binary::Snapshot::new(track, rendition, config.into_rendition())
 	}
@@ -1028,7 +1028,7 @@ impl<E: CatalogExt> Producer<E> {
 		&self,
 		track: moq_net::track::Producer,
 		config: impl super::IntoRendition<E, hang::catalog::BinaryConfig>,
-	) -> crate::Result<crate::binary::Stream<E>> {
+	) -> crate::Result<crate::binary::Stream> {
 		let rendition = self.data_entry(track.name())?;
 		crate::binary::Stream::new(track, rendition, config.into_rendition())
 	}

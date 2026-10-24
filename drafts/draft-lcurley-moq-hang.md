@@ -417,6 +417,8 @@ type AudioDecoderConfigExtensions = {
 A consumer MUST reject `ambisonic` with fewer than 4 channels or a count that is not a square, and MUST treat an unrecognized `layout` as absent.
 `layout` is not part of the track's identity.
 
+An Opus frame timestamp counts the samples the OpusHead pre-skip trims: a consumer presents each decoded sample the pre-skip, at 48 kHz, earlier than its frame timestamp places it, so the first sample kept plays at the first decoded frame's timestamp.
+
 ### PCM {#audio-pcm}
 
 Hang defines the `"pcm"` audio codec for uncompressed samples.
@@ -1206,6 +1208,7 @@ This document has no IANA actions.
 - Added an optional `epoch` beside every rendition and data track `broadcast` reference, and `replayEpoch` beside the archive's `replay` ({{field-epoch}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `epoch` fails a rendition proven to resolve another instance, and is best effort over a route without an Epoch.
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
+- An Opus frame timestamp counts the OpusHead pre-skip: a consumer presents each decoded sample the pre-skip earlier than its frame timestamp places it.
 
 - Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new Epoch.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.

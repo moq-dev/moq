@@ -213,7 +213,7 @@ On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport
 
 ## Shutdown
 
-`session->shutdown().get()` drains for up to one second and reports any error.
+`session->shutdown()` requests a drain immediately; `session->closed().get()` waits up to one second and reports its result.
 Application delivery requires explicitly selecting `moq-lite-07-wip` on both
 peers; older Lite versions (including default lite-06) and IETF wait only for
 transport ACKs. Finish or abort live tracks first.
