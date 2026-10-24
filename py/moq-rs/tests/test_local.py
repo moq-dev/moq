@@ -593,8 +593,11 @@ async def test_json_window_skips_records_outside_the_checkpoint():
 
     # The join crosses the refresh ratio, so the producer restates the bounded checkpoint.
     joiner = await broadcast.consume().subscribe_track("log")
-    while (await asyncio.wait_for(joiner.recv_group(), timeout=5.0)).sequence == 0:
-        pass
+    while True:
+        group = await asyncio.wait_for(joiner.recv_group(), timeout=5.0)
+        assert group is not None
+        if group.sequence > 0:
+            break
 
     consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
     events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(3)]
