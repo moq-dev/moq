@@ -2,23 +2,23 @@
 
 ## Goal
 
-- `moq import capture --stats` announces a stats track in the catalog and
+- `moq import capture --report` announces a stats track in the catalog and
   fills it with what its encoders send, `skipped` and `bitrate` included.
 - `moq play`, given `--echo <name>`, publishes an `.echo` broadcast under each
   watched catalog's echo path and fills its feedback track with what it
   received, decoded, and played.
 - The gateway imports (`hls`, `rtmp`, `srt`, `rtsp`, `rtc`) and `archive` take
-  `--stats`.
+  `--report`.
 - `moq import --echo-path <path>` solicits feedback: it sets the catalog's
   `echo` section, named apart from the viewer's `--echo <name>`.
 
 ## Plan
 
-- `moq import --stats` for the stdin imports, `moq export --echo`, and the
-  `export stats` and `export echo` sinks already report what the `moq-mux`
+- `moq import --report` for the stdin imports, `moq export --echo`, and the
+  `export report` and `export echo` sinks already report what the `moq-mux`
   importers write and exporters read (`rs/moq-mux/src/stats.rs`,
   `rs/moq-cli/src/report.rs`). This quest adds the counters they lack and
-  reuses the rest; `import --stats` refuses capture and the gateways until it
+  reuses the rest; `import --report` refuses capture and the gateways until it
   lands.
 - Counters come from the source, per track, as cumulative `stats()`
   snapshots: no callback, no per-frame lock.
@@ -33,11 +33,11 @@
 - `moq play --echo` reconciles each watched catalog's `echo` section as
   `export --echo` does, and refuses `--catalog-format msf` the same way: the
   MSF catalog does not carry an `echo` solicitation.
-- The media test captures with `--stats` and plays with `--echo` against a
+- The media test captures with `--report` and plays with `--echo` against a
   publisher that solicits feedback. It asserts the encoder's frame count and
   that the player's newest arrival advances.
 - Decided 2026-10-08: no E2EE refusal here. The CLI has no encrypted
-  broadcast yet, so [Encrypted native CLI](/quest/m2/e2ee/cli.md) refuses `--stats` and
+  broadcast yet, so [Encrypted native CLI](/quest/m2/e2ee/cli.md) refuses `--report` and
   `--echo` when it adds one: they would publish rendition IDs and per-track
   counters in plaintext beside it.
 

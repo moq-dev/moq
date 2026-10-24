@@ -2,7 +2,7 @@
 
 ## Goal
 
-`--stats` and `--echo` work under `--catalog-format msf`: a soliciting
+`--report` and `--echo` work under `--catalog-format msf`: a soliciting
 catalog's `echo` maps onto an MSF `publishTracks` entry (draft-ietf-moq-msf
 §5.1.5), and a viewer publishes the hang `.echo` snapshot there. Start once a
 consumer asks.

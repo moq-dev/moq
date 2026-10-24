@@ -2,6 +2,7 @@ import { Milli, Nano, sleep } from "@moq/clock";
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
 import { error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
+import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
@@ -261,7 +262,19 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 	}
 }
 
-async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: Promise<void>): Promise<Established> {
+/**
+ * The URL a browser transport dials. A raw QUIC `moqt:` or `moql:` URL is reached over
+ * WebTransport with its scheme swapped for https (draft-ietf-moq-transport-18 §3.1.3); the
+ * CONNECT carries the scheme, so a server refuses the raw one. Rebuilt rather than assigned,
+ * since the URL setter refuses a change from a non-special scheme to a special one.
+ */
+function dialable(url: URL): URL {
+	if (url.protocol !== "moqt:" && url.protocol !== "moql:") return url;
+	return new URL(`https:${url.href.slice(url.protocol.length)}`);
+}
+
+async function connectInner(raw: URL, props: Omit<ConnectProps, "url">, abort: Promise<void>): Promise<Established> {
+	const url = dialable(raw);
 	const wiring: SessionProps = {
 		publish: props.publish,
 		client: true,
@@ -306,7 +319,12 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 				? [websocket, webtransport]
 				: [webtransport]
 			: [websocket],
-	);
+	).catch((err: unknown) => {
+		// Promise.any rejects with an empty message; name each transport's failure instead.
+		if (!(err instanceof AggregateError)) throw err;
+		const reasons = err.errors.map((e: unknown) => (e instanceof Error ? e.message : String(e)));
+		throw new Error(`no transport connected: ${reasons.join("; ")}`, { cause: err });
+	});
 	done();
 
 	if (!session) throw new Error("no transport available");
@@ -422,7 +440,6 @@ async function negotiate(
 	}
 
 	const stream = await Stream.open(session, { version: setupVersion });
-	await stream.writer.u53(Lite.StreamId.ClientCompat);
 
 	const encoder = new TextEncoder();
 
@@ -443,7 +460,7 @@ async function negotiate(
 					: setup,
 		parameters: params,
 	});
-	await client.encode(stream.writer, setupVersion);
+	await Message.write(stream.writer, Lite.StreamId.ClientCompat, client, setupVersion);
 
 	const serverCompat = await stream.reader.u53();
 	if (serverCompat !== Lite.StreamId.ServerCompat) {

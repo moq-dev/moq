@@ -44,7 +44,3 @@ Public API: additive, a `mtu_discovery: bool` field on the
 `moq_tokio::quic::Resolved::mtu_discovery`. Wire: none. Config:
 `quic.mtu_discovery` works under `--runtime-io-uring`; update
 `doc/bin/relay/` if it mentions the refusal.
-
-## Related
-
-- [A failed send never fails the socket](/quest/m1/uring-send-errors.md) - sets `PMTUDISC_PROBE` and `IPV6_DONTFRAG`, which `allow_mtud` relies on

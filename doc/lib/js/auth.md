@@ -15,11 +15,9 @@ checks a connection path against a token's claims exactly as `moq auth serve`
 does. A grant can label its session's stats independently of its authorization
 root. Tokens are interchangeable with the Rust side. Grants and claims are
 [`Pattern`](https://www.npmjs.com/package/@moq/pattern) unions: `foo` is one
-broadcast, `foo/**` is a subtree, `**` is everything. Parsed roles are `Access`
-values with path patterns and an optional bitrate cap; authorization preserves
-both. The relay currently refuses capped grants. An auth server may mint them,
-but a gateway must enforce them or refuse them; see
-[relay authentication](/bin/relay/auth#claims) before using them.
+broadcast, `foo/**` is a subtree, `**` is everything. Parsed claim and grant roles are
+pattern string arrays; `authorize` returns reduced `Patterns` for each role.
+Object roles, including bitrate caps, are refused during parsing.
 
 ```bash
 bun add @moq/auth
