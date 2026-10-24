@@ -1,4 +1,4 @@
-"""Python runner of the binding benchmark (`just bench-ffi`, see bench/README.md).
+"""Python runner of the binding benchmark (rust2's `just bench-ffi`, see bench/README.md).
 
 The same in-process rounds as every wrapper, so dividing by the Rust baselines
 isolates what Python adds: the FFI boundary, asyncio bridging, and the wrapper.

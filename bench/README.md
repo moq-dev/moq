@@ -238,43 +238,24 @@ hide a relay improvement behind generator saturation. CPU efficiency remains
 withheld until offered load and delivery/loss are comparable. Zero-baseline
 metrics retain absolute deltas when their percentage ratio is undefined.
 
-Measure what each binding adds over Rust:
+Each wrapper carries a runner of the binding benchmark, which measures what the
+binding adds over Rust: `just go bench`, `just py bench`, `just kt bench`,
+`just cpp bench`, `just dart bench`, and `just swift bench` (macOS), beside the
+Rust baselines in `rs/moq-ffi/src/bench.rs`. Every runner runs the same
+in-process rounds with no network: each publisher writes one group from the
+driving thread while every subscriber reads it on its own task, and a round
+waits for every subscriber. It sweeps frame sizes from 100 B to 1 MiB at one
+publisher and subscriber, then 1/4 publishers by 1/4 subscribers at 1 KiB, and
+times two sync calls (`sequence`, `info`). Each case reports delivered MB/s and
+process CPU (user + system, every thread) per MB into
+`$MOQ_BENCH_DIR/<runner>.json`. `MOQ_BENCH_SECONDS` sets each case's time
+budget (default 1); every received frame is checked byte for byte.
 
-```bash
-nix develop --command just bench-ffi
-```
-
-Every runner (Rust, Go, Python, Kotlin, C++, Dart, Swift) runs the same in-process rounds with no
-network: each publisher writes one group from the driving thread while every
-subscriber reads it on its own task, and a round waits for every subscriber. It
-sweeps frame sizes from 100 B to 1 MiB at one publisher and subscriber, then
-1/4 publishers by 1/4 subscribers at 1 KiB, and times two sync calls
-(`sequence`, `info`). Each case reports delivered MB/s and process CPU (user +
-system, every thread) per MB. `MOQ_BENCH_SECONDS` sets each case's time budget
-(default 1); every received frame is checked byte for byte.
-
-Each runner writes `target/bench/ffi/<runner>.json`; `bench/ffi.py` combines
-them into a table and `report.json`. Ratios are against `rust-ffi`, moq-ffi's
-API called from Rust without crossing the FFI, so a wrapper's ratio is what its
-boundary and wrapper cost. `rust-net` runs the same rounds on moq-net, so its
-ratio is what moq-ffi's handles and runtime cost. Ratios hold only within one
-machine. The nightly runs it, prints the table in the job summary, and keeps the
-results as the `bench-ffi` artifact. Each language also has its own recipe
-(`just go bench`, `just py bench`, `just kt bench`, `just cpp bench`,
-`just dart bench`, `just swift bench`). C++ uses C++20 reader coroutines;
-Swift uses structured tasks; Dart uses futures on its event loop.
-The payload checks and scheduling costs are included in each measurement.
-
-Linux runs every wrapper except Swift. The nightly macOS platform job, or a
-manual Platform run with `benchmarks` set, runs `just bench-ffi swift`,
-measuring fresh Rust baselines on that same machine, and uploads
-`bench-ffi-swift` separately. Never compare its absolute values
-against the Linux job's baselines. A local run can select runners explicitly,
-for example `just bench-ffi cpp dart`. Each invocation clears its output
-directory and refuses a runner that produces no report. Dart's native asset
-hook builds its usual minimal-feature release library; C++ and Swift use
-their default-feature release libraries. No codec work is timed here.
-C++ and Dart process CPU measurement supports Linux and macOS.
+The binding benchmark itself lives in
+[rust2](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md), with
+the UniFFI fork whose changes it measures: its `just bench-ffi` runs these
+runners nightly at a pinned moq revision, against the fork, and reports each
+wrapper's ratio to Rust.
 
 ## Browser
 
@@ -403,9 +384,6 @@ that artifact first or wait for the next Nightly.
 
 The table includes these measurements:
 
-- Binding delivery in MB/s, process CPU in ms/MB, sync calls in ns, and each
-  wrapper's ratio to `rust-ffi`. Ratios above 1 mean more cost than Rust on the
-  same host, including for throughput, where the ratio is Rust/wrapper.
 - Rust Criterion mean ns per iteration; the history also keeps the confidence interval.
   The `net-cpu` source and the moq-quic targets time thread CPU; the others
   time elapsed time. The Rust bench target jobs measure them with a short warmup
@@ -416,7 +394,7 @@ The table includes these measurements:
   dimension in each series name.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
-comparison rather than proving a regression. Binding ratios compare languages within one run.
+comparison rather than proving a regression.
 Malformed, empty, nonfinite, or duplicate measurements fail validation. The
 nightly artifacts retain the reports, raw JS output, and each Criterion run's
 metadata and estimates for 45 days. Relay load, audio quality, and the Rust
@@ -434,12 +412,11 @@ Then open `.scratch/pages/bench/index.html`. Without `--commit`, the newest
 recorded commit counts as tonight's. Reproduce the measurements locally:
 
 ```bash
-nix develop --command just bench-ffi
 nix develop --command just gh nightly rust-bench
 nix develop --command just gh nightly js
 ```
 
-The latter two write `target/bench/nightly/{rust-bench,js}/report.json`. For a focused
+These write `target/bench/nightly/{rust-bench,js}/report.json`. For a focused
 measured Rust run using the same evidence lifecycle:
 
 ```bash
