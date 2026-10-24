@@ -89,7 +89,6 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [SUBSCRIBE_TRACKS follows credit](/quest/m1/listing-credit.md) - a listing holds state in proportion to what the peer reads, not to the catalog
 - [Cancelled moq-transport requests stop](/quest/m1/ietf-request-cancel.md) - a cancelled request releases its state even when the peer withholds credit
 - [SUBSCRIBE setup sees a cancel](/quest/m1/ietf-setup-cancel.md) - a subscriber that cancels mid-setup releases upstream demand and its slot at once
-- [JS qmux stream credit](/quest/m1/js-qmux-credit.md) - credit returns when both halves close, so `@moq/net` drops its caps
 - [Empty segments refused](/quest/m1/empty-segments.md) - `room//cam` fails loud instead of naming `room/cam`
 - [Readers follow restarts](/quest/m1/sink-restart-follow.md) - every moq-cli and moq-gst reader, moqsrc and `moq play` included, follows instances through `announced_broadcast` and an epochless `Restart` where its output can mark it; otherwise it stays on the old instance and fails once that route dies
 - [Readers follow a moved rendition](/quest/m1/rendition-move-follow.md) - moq-rtc, moq-ffi, moq-gst and `moq play` follow a rendition the catalog moves to a new track

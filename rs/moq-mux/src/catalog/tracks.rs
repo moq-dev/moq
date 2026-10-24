@@ -200,6 +200,8 @@ pub struct VideoHint {
 	pub bitrate: Option<u64>,
 	/// The frame rate in frames per second.
 	pub framerate: Option<f64>,
+	/// The rendition's [`reorder`](hang::catalog::VideoConfig::reorder) depth.
+	pub reorder: Option<u8>,
 	/// If true, the decoder optimizes for latency.
 	pub optimize_for_latency: Option<bool>,
 	/// The maximum jitter before the next frame is emitted.
@@ -243,6 +245,7 @@ impl From<hang::catalog::VideoConfig> for VideoHint {
 			color: config.color,
 			bitrate: config.bitrate,
 			framerate: config.framerate,
+			reorder: config.reorder,
 			optimize_for_latency: config.optimize_for_latency,
 			jitter: config.jitter,
 			delay: config.delay,
@@ -269,6 +272,7 @@ impl VideoHint {
 		crate::codec::color::fill(&mut config.color, self.color.as_ref(), "hint");
 		fill(&mut config.bitrate, self.bitrate);
 		fill(&mut config.framerate, self.framerate);
+		fill(&mut config.reorder, self.reorder);
 		fill(&mut config.optimize_for_latency, self.optimize_for_latency);
 		fill(&mut config.jitter, self.jitter);
 		fill(&mut config.delay, self.delay);
