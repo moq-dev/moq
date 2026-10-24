@@ -142,9 +142,9 @@ on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A refused
 connection, refused path or catalog, or malformed protocol input or catalog posts
 an error. Properties: `url`,
-`broadcast`, `versions` (comma-separated protocol versions to offer, most
+`broadcast`, `connect-version` (comma-separated protocol versions to offer, most
 preferred first; every stable version by default), `tls-disable-verify`,
-`quic-keylog`.
+`quic-idle-timeout`, `quic-keep-alive`, and `quic-keylog`.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
 To decrypt a capture, set `quic-keylog=true` on either element along with
