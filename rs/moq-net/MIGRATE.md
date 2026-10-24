@@ -16,6 +16,13 @@ To count a SETUP reply the peer never takes, bound it with `Handshake::with_dead
 When the transport reports only that this side closed it, the error is this side's reason, such as the `abort` error, the protocol failure, or `GoawayTimeout`, where it was always a clean close.
 Match `Error::Cancel` alone for a clean end.
 
+### Published names refuse navigation segments
+
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Rust reports `Error::NavigationSegment`; the existing protocol error codes carry the refusal to a peer.
+Path normalization, relative references, and subscription paths retain their semantics.
+
 ### A listing says whether a removed track finished (#6399)
 
 `broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
