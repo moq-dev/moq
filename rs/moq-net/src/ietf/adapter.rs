@@ -1,7 +1,7 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
 use std::{
-	collections::{HashMap, VecDeque},
+	collections::{HashMap, HashSet, VecDeque},
 	sync::{Arc, Mutex, Weak},
 	task::{Context, Poll},
 };
@@ -710,6 +710,13 @@ impl Namespaces {
 		);
 	}
 
+	/// The namespace the peer's request `request_id` advertises, if it is a PUBLISH_NAMESPACE.
+	fn incoming(&self, request_id: RequestId) -> Option<PathOwned> {
+		let state = self.state.lock().unwrap();
+		let registration = state.by_request.get(&request_id)?;
+		(registration.direction == Direction::Incoming).then(|| registration.namespace.clone())
+	}
+
 	fn get(&self, direction: Direction, namespace: &PathOwned) -> Option<RequestId> {
 		self.state
 			.lock()
@@ -768,6 +775,39 @@ struct Shared {
 
 	/// Namespace → request_id reverse lookup (for v14/v15 namespace-keyed messages).
 	namespaces: Namespaces,
+
+	/// The peer's advertisements held back behind a withdrawal still being handled.
+	readvertised: Mutex<Readvertised>,
+}
+
+/// Keeps the peer's withdrawal and re-advertisement of a namespace in wire order.
+///
+/// Each request is served by its own handler, so a PUBLISH_NAMESPACE that follows a
+/// PUBLISH_NAMESPACE_DONE for the same namespace could otherwise be handled first. It
+/// would then read as a second advertisement of a namespace still advertised, and the
+/// withdrawal as the end of the first, so the route never ends and starts again. The
+/// re-advertisement reaches `accept_bi` only once the withdrawn request's handler drops
+/// its stream, which it does after releasing the route. Bounded by the peer's requests.
+#[derive(Default)]
+struct Readvertised {
+	namespaces: HashMap<PathOwned, Withdrawing>,
+	/// Each withdrawn request a handler still holds, to the namespace it advertised.
+	withdrawn: HashMap<RequestId, PathOwned>,
+}
+
+#[derive(Default)]
+struct Withdrawing {
+	/// Withdrawn requests whose handlers still hold their streams.
+	handling: HashSet<RequestId>,
+	/// The advertisements behind them, in wire order.
+	held: VecDeque<HeldRequest>,
+}
+
+struct HeldRequest {
+	request_id: RequestId,
+	stream: (VirtualSendStream, VirtualRecvStream),
+	/// Withdrawn while held, so the advertisements behind it wait for its handler too.
+	withdrawn: bool,
 }
 
 impl Shared {
@@ -807,6 +847,17 @@ impl Shared {
 		recv._permit = permit;
 		let send = VirtualSendStream::new(self.control.clone());
 		self.streams.lock().unwrap().insert(request_id, follow.writer());
+		if let Some(namespace) = self.namespaces.incoming(request_id) {
+			let mut readvertised = self.readvertised.lock().unwrap();
+			if let Some(withdrawing) = readvertised.namespaces.get_mut(&namespace) {
+				withdrawing.held.push_back(HeldRequest {
+					request_id,
+					stream: (send, recv),
+					withdrawn: false,
+				});
+				return Ok(());
+			}
+		}
 		if !self.incoming.push((send, recv)) {
 			return Err(Error::Closed);
 		}
@@ -833,9 +884,27 @@ impl Shared {
 			return;
 		}
 		let tx = self.streams.lock().unwrap().remove(&request_id);
+		let namespace = self.namespaces.incoming(request_id);
 		self.namespaces.forget(request_id);
-		if let Some(tx) = tx {
+		let Some(tx) = tx else { return };
+		let Some(namespace) = namespace else {
 			tx.push(raw);
+			return;
+		};
+
+		// Under the lock, so a handler dropping its stream either refuses the push or
+		// finds the withdrawal recorded.
+		let mut readvertised = self.readvertised.lock().unwrap();
+		if !tx.push(raw) {
+			return;
+		}
+		let withdrawing = readvertised.namespaces.entry(namespace.clone()).or_default();
+		match withdrawing.held.iter_mut().find(|held| held.request_id == request_id) {
+			Some(held) => held.withdrawn = true,
+			None => {
+				withdrawing.handling.insert(request_id);
+				readvertised.withdrawn.insert(request_id, namespace);
+			}
 		}
 	}
 
@@ -857,6 +926,34 @@ impl Shared {
 		}
 		drop((updates, streams));
 		self.namespaces.forget(request_id);
+		self.handled(request_id);
+	}
+
+	/// A withdrawn request's handler is done with it: once none of the namespace's
+	/// withdrawals is still being handled, hand over what was held behind them, up to and
+	/// including the next one withdrawn.
+	fn handled(&self, request_id: RequestId) {
+		let mut readvertised = self.readvertised.lock().unwrap();
+		let Some(namespace) = readvertised.withdrawn.remove(&request_id) else {
+			return;
+		};
+		let Readvertised { namespaces, withdrawn } = &mut *readvertised;
+		let Some(withdrawing) = namespaces.get_mut(&namespace) else {
+			return;
+		};
+		withdrawing.handling.remove(&request_id);
+		while withdrawing.handling.is_empty() {
+			let Some(held) = withdrawing.held.pop_front() else {
+				namespaces.remove(&namespace);
+				return;
+			};
+			if held.withdrawn {
+				withdrawing.handling.insert(held.request_id);
+				withdrawn.insert(held.request_id, namespace.clone());
+			}
+			// A closed queue means the session is gone, and the stream with it.
+			let _ = self.incoming.push(held.stream);
+		}
 	}
 }
 
@@ -2088,12 +2185,86 @@ mod tests {
 		shared.close(RequestId(7), encode_msg(&msg, version));
 		assert!(drained(&mut theirs, 4).await);
 		assert!(!shared.streams.lock().unwrap().contains_key(&RequestId(7)));
+		drop(theirs);
 
 		let _again = receive(&shared, "cluster/ns", version, RequestId(11)).await;
 		assert!(matches!(
 			done(&shared, "cluster/ns", version),
 			Route::CloseStream(RequestId(11))
 		));
+	}
+
+	/// The peer's next request on `namespace`, advertising it, as the read loop routes it.
+	fn readvertise(shared: &Arc<Shared>, namespace: &str, version: Version, request_id: RequestId) {
+		let msg = publish_namespace(request_id, namespace);
+		let route = classify(
+			ietf::PublishNamespace::ID,
+			&encode_body(&msg, version),
+			version,
+			&shared.namespaces,
+		)
+		.unwrap();
+		assert!(matches!(route, Route::NewRequest(id) if id == request_id));
+		shared
+			.open_incoming(request_id, encode_msg(&msg, version), None)
+			.unwrap();
+	}
+
+	/// The peer withdrawing `namespace` on `request_id`, as the read loop routes it.
+	fn withdraw(shared: &Arc<Shared>, namespace: &str, version: Version, request_id: RequestId) {
+		let msg = ietf::PublishNamespaceDone {
+			track_namespace: crate::Path::new(namespace),
+			request_id,
+		};
+		let route = classify(
+			ietf::PublishNamespaceDone::ID,
+			&encode_body(&msg, version),
+			version,
+			&shared.namespaces,
+		)
+		.unwrap();
+		assert!(matches!(route, Route::CloseStream(id) if id == request_id));
+		shared.close(request_id, encode_msg(&msg, version));
+	}
+
+	/// The request of the next stream `accept_bi` would hand out, if one is ready.
+	fn accepted(shared: &Arc<Shared>) -> Option<(RequestId, VirtualRecvStream)> {
+		let (_, recv) = shared.incoming.pop().now_or_never()??;
+		let request_id = recv.request_id.lock().unwrap().unwrap();
+		Some((request_id, recv))
+	}
+
+	#[moq_clock::test]
+	async fn a_readvertisement_waits_for_the_withdrawal_to_be_handled() {
+		// Each request has its own handler, so a re-advertisement handed out beside the
+		// withdrawal before it could be handled first and read as a second advertisement.
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let shared = Arc::new(Shared::default());
+			let first = receive(&shared, "live/media", version, RequestId(3)).await;
+			let other = receive(&shared, "live/other", version, RequestId(5)).await;
+
+			withdraw(&shared, "live/media", version, RequestId(3));
+			readvertise(&shared, "live/media", version, RequestId(7));
+			withdraw(&shared, "live/media", version, RequestId(7));
+			readvertise(&shared, "live/media", version, RequestId(9));
+			// Another namespace is not held up.
+			withdraw(&shared, "live/other", version, RequestId(5));
+			drop(other);
+			readvertise(&shared, "live/other", version, RequestId(11));
+			assert!(matches!(accepted(&shared), Some((RequestId(11), _))), "{version:?}");
+			assert!(accepted(&shared).is_none(), "{version:?}");
+
+			// Handling the first withdrawal hands over the next advertisement, which was
+			// withdrawn too, so the one after it waits for that withdrawal in turn.
+			drop(first);
+			let (id, mut second) = accepted(&shared).expect("released");
+			assert_eq!(id, RequestId(7), "{version:?}");
+			assert!(accepted(&shared).is_none(), "{version:?}");
+			assert!(drained(&mut second, 4).await, "{version:?}");
+			drop(second);
+			assert!(matches!(accepted(&shared), Some((RequestId(9), _))), "{version:?}");
+			assert!(shared.readvertised.lock().unwrap().namespaces.is_empty(), "{version:?}");
+		}
 	}
 
 	#[moq_clock::test]
