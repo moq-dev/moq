@@ -237,8 +237,8 @@ export class Listing {
 
 	/** A reader left, so it reads nothing more. A replaced or ended one already did. */
 	release(queue: Queue, owner?: object) {
-		if (queue.detached) return;
 		queue.pending.clear();
+		if (queue.detached) return;
 		queue.finish(null);
 		this.#readers.delete(queue);
 		if (owner && this.#owners.get(owner) === queue) this.#owners.delete(owner);
