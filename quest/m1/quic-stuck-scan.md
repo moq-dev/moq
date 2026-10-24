@@ -18,8 +18,8 @@ What may remain: a packet of many RESET_STREAM frames into shrink debt still
 runs one check per frame. Benchmark that first; if the cost stays flat as
 streams grow, delete this quest instead of batching.
 
-Decided 2026-10-22 (maintainer): m2, because it bounds CPU rather than fixing
-a correctness bug.
+Moved to m1 on 2026-10-23 (maintainer), so the cut that first publishes
+moq-quic ships without this peer-driven scan.
 
 - Benchmark first: a RESET_STREAM storm under a shrunk window with N streams
   holding data, swept over N, to show the per-frame slope before and the

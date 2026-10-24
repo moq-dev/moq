@@ -891,11 +891,11 @@ impl AnnounceServe {
 					// announce stream; lite-06+ reads the session-wide SETUP Hop
 					// parameter, the same identity the subscribe path excludes. A peer that
 					// declares nothing falls back to the identity the session assigned it.
-					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
+					let assigned = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
 					if self.shared.version.has_exclude_hop() {
 						let exclude_hop = match interest.exclude_hop {
-							0 => assigned,
-							id => id,
+							Hop::UNKNOWN => assigned,
+							hop => hop,
 						};
 						self.start(prefix, exclude_hop, hidden);
 					} else if self.shared.version.has_setup_stream() {
@@ -905,10 +905,8 @@ impl AnnounceServe {
 					}
 				}
 				AnnounceState::ExcludeHop { prefix, hidden } => {
-					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
-					let exclude_hop = ready!(self.shared.peer_setup.poll_hop(waiter))
-						.map(|origin| origin.id())
-						.unwrap_or(assigned);
+					let assigned = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
+					let exclude_hop = ready!(self.shared.peer_setup.poll_hop(waiter)).unwrap_or(assigned);
 					let (prefix, hidden) = (prefix.clone(), *hidden);
 					self.start(prefix, exclude_hop, hidden);
 				}
@@ -939,7 +937,7 @@ impl AnnounceServe {
 		}
 	}
 
-	fn start(&mut self, prefix: crate::PathOwned, exclude_hop: u64, hidden: bool) {
+	fn start(&mut self, prefix: crate::PathOwned, exclude_hop: Hop, hidden: bool) {
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
@@ -960,7 +958,7 @@ impl AnnounceServe {
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
-		let origin = origin.excluding(Hop::new(exclude_hop).unwrap_or(Hop::UNKNOWN));
+		let origin = origin.excluding(exclude_hop);
 		// Lite03 and later carry the hop path, so only routes with room for our hop
 		// under the origin's cap are advertised; Lite01/02 hide the depth entirely.
 		let origin = match self.shared.version {

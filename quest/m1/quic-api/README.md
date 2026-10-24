@@ -12,7 +12,7 @@ workarounds quinn's shape forced on them.
 Non-goals: the congestion controller API (redesigned in another quest), a
 buffer pool ([QUIC I/O boundary](/quest/m2/quic-io-boundary.md)), and the
 non-QUIC backends' move off `web_transport_trait`
-([drop web-transport-trait](/quest/m2/drop-web-transport-trait.md)).
+([drop web-transport-trait](/quest/m1/drop-web-transport-trait.md)).
 
 ## Plan
 
