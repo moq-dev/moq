@@ -37,6 +37,15 @@ export interface Established {
 	readonly auth: Auth.Handle;
 
 	/**
+	 * The implementation the peer advertised in its SETUP, such as `moq-net-rs/0.3.10`.
+	 *
+	 * Resolves once the peer's SETUP is read: `undefined` when it advertised none, its version
+	 * carries none (moq-lite 01 to 04), or the session closed first. Never rejects.
+	 * Peer-controlled: use it for logs and rollout counts, never to authorize.
+	 */
+	readonly peerImplementation: Promise<string | undefined>;
+
+	/**
 	 * Subscribe to broadcast announcements matching `scope`, any pattern (`foo/**`
 	 * for a subtree, `room/* /chat` for each room's chat, default `**`). Paths are
 	 * relative to the session; captures report what the scope's wildcards stood for.

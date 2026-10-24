@@ -634,6 +634,13 @@ pub struct Config {
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,
 
+	/// The implementation to advertise in SETUP, as space-separated `name/version`
+	/// product tokens. `None` advertises [`moq_net::IMPLEMENTATION`]; empty advertises
+	/// nothing. Set by the embedding binary, not configured.
+	#[usage(skip)]
+	#[serde(skip)]
+	pub implementation: Option<String>,
+
 	/// TLS trust and client-certificate settings (`--connect-tls-*`).
 	#[usage(flatten)]
 	#[serde(default)]
@@ -713,6 +720,7 @@ impl Default for Config {
 			timeout_arg: None,
 			version: Vec::new(),
 			extensions: Default::default(),
+			implementation: None,
 			tls: Default::default(),
 			once: None,
 			reconnect: None,
