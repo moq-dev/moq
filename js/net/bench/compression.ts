@@ -65,7 +65,8 @@ async function datagrams(count: number, queued: number): Promise<[number, number
 	const started = performance.now();
 	for (let sequence = 0; sequence < queued; sequence++) {
 		for (const [index, track] of tracks.entries()) {
-			hooks.writeDatagram(track, { sequence, payload: slice }, zeros.length);
+			// Its own copy, as each received datagram carries its own wire bytes.
+			hooks.writeDatagram(track, { sequence, payload: slice.slice() }, zeros.length);
 			const datagram = await fast[index].recvDatagram();
 			if (datagram?.payload.length !== zeros.length) throw new Error("missing payload");
 		}

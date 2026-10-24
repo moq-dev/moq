@@ -1001,10 +1001,17 @@ impl TrackState {
 	/// resumes at the oldest still-buffered datagram, skipping the lost ones.
 	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(super::datagram::Stored, usize)>>> {
 		let start = index.saturating_sub(self.datagram_offset);
-		if self.readable()
-			&& let Some(datagram) = self.datagrams.get(start)
+		// An ended track's expiry releases its oldest in place, which a reader skips like a drop.
+		for (i, datagram) in self
+			.datagrams
+			.iter()
+			.enumerate()
+			.skip(start)
+			.filter(|_| self.readable())
 		{
-			return Poll::Ready(Ok(Some((datagram.stored.clone(), self.datagram_offset + start))));
+			if let Some(stored) = datagram.stored() {
+				return Poll::Ready(Ok(Some((stored, self.datagram_offset + i))));
+			}
 		}
 
 		// Nothing buffered at the cursor: the track ending terminates the datagram stream too.
@@ -1519,9 +1526,10 @@ impl TrackState {
 			|| self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK
 	}
 
-	/// Expire an ended track's idle groups, whose closed channel refuses the write
-	/// [`Self::evict_expired_scan`] takes: abort them in place, releasing their frames,
-	/// and retire expired cuts, leaving slots that every read path skips.
+	/// Expire an ended track's idle groups and datagrams, whose closed channel refuses the
+	/// write [`Self::evict_expired_scan`] takes: abort the groups in place, releasing their
+	/// frames, retire expired cuts, and release the datagrams, leaving entries that every
+	/// read path skips.
 	pub(super) fn expire_closed(&self, scan: ExpiryScan) {
 		for (sequence, stamp) in &self.evict {
 			let Some(slot) = self.lookup.get(sequence) else {
@@ -1534,6 +1542,12 @@ impl TrackState {
 				slot.retired.store(true, Ordering::Relaxed);
 			} else {
 				slot.abort(Error::Old);
+			}
+		}
+		// Released oldest first, so the expired ones stay a prefix that readers skip.
+		for datagram in &self.datagrams {
+			if !datagram.release_expired() {
+				break;
 			}
 		}
 	}
@@ -15422,7 +15436,10 @@ mod test {
 				state
 					.datagrams
 					.iter()
-					.map(|datagram| (datagram.payload.len() + datagram.deflated.as_ref().unwrap().len()) as u64)
+					.map(|datagram| {
+						let stored = datagram.stored().unwrap();
+						(stored.payload.len() + stored.deflated.as_ref().unwrap().len()) as u64
+					})
 					.collect::<Vec<_>>()
 			})
 			.sum();
@@ -15483,6 +15500,36 @@ mod test {
 			"the sweep reclaimed idle datagrams"
 		);
 		assert_eq!(pool.used(), 0);
+	}
+
+	/// An ended track's closed state refuses the write that pops a datagram, so a stale
+	/// reader would pin its buffer: the sweep releases each idle one in place instead,
+	/// and the reader skips it like a dropped one.
+	#[test]
+	#[cfg(feature = "async")]
+	fn pool_sweep_expires_an_ended_tracks_datagrams() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		let mut stale = producer.subscribe(None);
+		producer.append_datagram(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		pool.step(Duration::from_secs(6));
+		producer.append_datagram(Timestamp::ZERO, b"new".as_slice()).unwrap();
+		producer.finish().unwrap();
+		drop(producer);
+
+		// Only the oldest is idle for the whole window.
+		pool.step(Duration::from_secs(6));
+		pool.sweep();
+		assert!(pool.used() > 0, "the newest is still within the window");
+		assert_eq!(
+			recv_datagram(&mut stale).payload,
+			b"new".as_slice(),
+			"the reader skips the released one"
+		);
+
+		pool.step(Duration::from_secs(6));
+		pool.sweep();
+		assert_eq!(pool.used(), 0, "the sweep released every idle datagram");
 	}
 
 	/// An aborted group releases its access sample along with its bytes, from any

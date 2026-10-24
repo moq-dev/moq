@@ -955,7 +955,7 @@ impl Track {
 		// its teardown on its own clone count rather than the state's.
 		let Some(state) = self.state.upgrade() else {
 			// An ended track's channel is closed, but a stale consumer can still hold its
-			// groups: the sweep expires them in place, or they would never go.
+			// groups and datagrams: the sweep expires them in place, or they would never go.
 			if full && scan_expiry {
 				self.state.read(|state| state.expire_closed(state.expiry_scan_drain()));
 			}

@@ -21,6 +21,7 @@ use bytes::Bytes;
 
 use crate::Timestamp;
 use crate::cache;
+use crate::sync::Mutex;
 
 /// Hard ceiling on a datagram payload, matching the QUIC DATAGRAM frame limit.
 ///
@@ -98,32 +99,52 @@ const SLOT_OVERHEAD: usize = 2 * size_of::<Buffered>();
 /// Readers take clones of [`Self::stored`], which alias its payloads rather than copy them,
 /// so only the buffer is billed.
 pub(super) struct Buffered {
-	pub stored: Stored,
-	bill: cache::Bill,
+	pub sequence: u64,
+	pub timestamp: Option<Timestamp>,
+	// Released in place once an ended track's datagram expires: the closed track state
+	// refuses the write that would pop it, and a stale reader would otherwise pin it.
+	held: Mutex<Option<(Stored, cache::Bill)>>,
 }
 
 impl Buffered {
 	/// Bill `stored` to `cache`, accruing eviction debt like a group's frames.
 	pub fn new(stored: Stored, cache: &std::sync::Arc<cache::Track>) -> Self {
 		let bill = cache.bill(stored.cache_size());
-		Self { stored, bill }
+		Self {
+			sequence: stored.sequence,
+			timestamp: stored.timestamp,
+			held: Mutex::new(Some((stored, bill))),
+		}
 	}
 
-	/// What it bills the pool.
+	/// A reader's alias of it, `None` once released.
+	pub fn stored(&self) -> Option<Stored> {
+		self.held.lock().unwrap().as_ref().map(|(stored, _)| stored.clone())
+	}
+
+	/// What it bills the pool, zero once released.
 	pub fn bytes(&self) -> u64 {
-		self.bill.bytes()
+		self.held.lock().unwrap().as_ref().map_or(0, |(_, bill)| bill.bytes())
 	}
 
-	/// Whether nobody has written it for the pool's idle window.
+	/// Whether nobody has written it for the pool's idle window, or it was released.
 	pub fn expired(&self) -> bool {
-		self.bill.expired()
+		self.held
+			.lock()
+			.unwrap()
+			.as_ref()
+			.is_none_or(|(_, bill)| bill.expired())
 	}
-}
 
-impl std::ops::Deref for Buffered {
-	type Target = Stored;
-	fn deref(&self) -> &Stored {
-		&self.stored
+	/// Release its payloads and bill once expired, for an ended track that cannot pop it.
+	/// Returns whether it is released.
+	pub fn release_expired(&self) -> bool {
+		let mut held = self.held.lock().unwrap();
+		if held.as_ref().is_some_and(|(_, bill)| !bill.expired()) {
+			return false;
+		}
+		*held = None;
+		true
 	}
 }
 
