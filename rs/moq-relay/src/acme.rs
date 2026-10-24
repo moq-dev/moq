@@ -64,12 +64,12 @@ pub struct Config {
 
 	/// How long the first issuance may take before startup fails, e.g. "5m". Defaults to 5 minutes.
 	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_option")]
+	#[serde(with = "humantime_serde")]
 	pub timeout: Option<Duration>,
 
 	#[usage(long = "acme-timeout", env = "MOQ_ACME_TIMEOUT", setting = "acme.timeout")]
 	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
-	timeout_arg: Option<crate::duration::Duration>,
+	timeout_arg: Option<moq_tokio::cli::Duration>,
 	#[usage(long = "acme-dir", env = "MOQ_ACME_DIR", hide = true)]
 	#[serde(skip)]
 	legacy_dir: Option<PathBuf>,
@@ -80,9 +80,7 @@ pub struct Config {
 
 impl Config {
 	fn timeout(&self) -> Option<Duration> {
-		self.timeout_arg
-			.map(crate::duration::Duration::into_std)
-			.or(self.timeout)
+		self.timeout_arg.map(Into::into).or(self.timeout)
 	}
 
 	pub(crate) fn deprecated(&self) -> moq_tokio::cli::Deprecated {

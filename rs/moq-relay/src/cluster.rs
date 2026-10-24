@@ -2351,17 +2351,11 @@ mod tests {
 	async fn request_limits_follow_the_admitted_grant() {
 		let mut options = Options::default();
 		options.session.announces = 2;
-		options.session.subscriptions = 3;
-		options.session.fetches = 4;
+		options.session.requests = 3;
 		options.peer.announces = 20;
-		options.peer.subscriptions = 30;
-		options.peer.fetches = 40;
+		options.peer.requests = 30;
 		let cluster = Cluster::new(options).unwrap();
-		for (peer, upstream, expected) in [
-			(false, false, (2, 3, 4)),
-			(true, false, (20, 30, 40)),
-			(true, true, (20, 30, 40)),
-		] {
+		for (peer, upstream, expected) in [(false, false, (2, 3)), (true, false, (20, 30)), (true, true, (20, 30))] {
 			let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Patterns::new());
 			grant.peer = peer;
 			grant.upstream = upstream;
@@ -2369,7 +2363,7 @@ mod tests {
 			// A cluster-looking path alone never selects the peer policy.
 			let lease = auth::Lease::new("/.cluster/untrusted", consumer);
 			let limits = cluster.limits(&lease);
-			assert_eq!((limits.announces, limits.subscriptions, limits.fetches), expected);
+			assert_eq!((limits.announces, limits.requests), expected);
 		}
 	}
 

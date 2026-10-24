@@ -4,12 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A certificate has one cluster-link role ([moq-dev/moq#6535](https://github.com/moq-dev/moq/pull/6535))
+### `serve::Refusal` is `serve::Denial` (#6510)
 
-Replace `serve::Policy.mtls_peer` and `.mtls_upstream` with `.mtls_link`:
-use `None` for ordinary certificate grants, `Some(serve::Link::Peer)` for peers,
-and `Some(serve::Link::Upstream)` for upstream peers. `Grant.peer` and
-`Grant.upstream` retain their existing JSON boolean contract.
+The reference server's policy failure is `serve::Denial`, so `Refusal` names only the shared 403 body, `moq_auth::Refusal`.
+Rename `serve::Refusal` to `serve::Denial`; its variants are unchanged, and `Policy::decide` and `Server::answer` return it.
 
 ### `Key` and `KeySet` parse through `FromStr` (#6471)
 

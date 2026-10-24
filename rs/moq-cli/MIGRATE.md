@@ -4,17 +4,6 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
-### Relay config and certificate roles ([moq-dev/moq#6535](https://github.com/moq-dev/moq/pull/6535))
-
-Replace `moq auth serve --mtls-peer` with `--mtls-link peer`, and the combined
-peer/upstream flags with `--mtls-link upstream`. Omit the flag for ordinary
-certificate grants. Both roles still need `--mtls-publish` or `--mtls-subscribe`.
-The removed flags are refused even when explicitly false.
-
-Cluster peer-list flags are now `--cluster-api-url` and `--cluster-api-tls-root`;
-the matching environment variables are `MOQ_CLUSTER_API_URL` and
-`MOQ_CLUSTER_API_TLS_ROOT`. TOML uses `[cluster.api] url` and `tls.root`.
-
 ### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
 Enable `nvidia` instead; the old names were aliases for it.
@@ -60,7 +49,7 @@ Add the `openh264` feature, such as `cargo install moq-cli --features transcode,
 
 ### A fixed `--connect-bind` refuses a WAN cluster (#5674)
 
-`--connect` and `--cluster-connect` or `--cluster-api-url` used to share one client; now each binds its own, so a fixed `--connect-bind` port with both stops startup.
+`--connect` and `--cluster-connect` or `--cluster-connect-api` used to share one client; now each binds its own, so a fixed `--connect-bind` port with both stops startup.
 Use port 0, or drop `--connect`.
 
 ### `moq export ts --delay` defaults to 1 s and includes the send-ahead (#5553)

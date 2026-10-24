@@ -72,6 +72,8 @@ class BroadcastState {
 	active = 0;
 	// The demand watcher of each open track, disposed when it closes or leaves the broadcast.
 	demands = new Map<track.Producer, Dispose>();
+	// Run synchronously once the broadcast closes, before `closed` notifies its observers.
+	closers = new Set<() => void>();
 }
 
 // Each track updates the aggregate on an edge, so a demand change touches only its track.
@@ -152,6 +154,8 @@ function closeState(state: BroadcastState) {
 	state.requested.mutate((requests) => {
 		requests.length = 0;
 	});
+	for (const fn of state.closers) fn();
+	state.closers.clear();
 }
 
 // The producer already serving `name`, evicting entries that can no longer serve it.
@@ -383,6 +387,11 @@ export class Producer {
 			const announcer = producer.#announcer;
 			producer.#announcer = undefined;
 			return announcer;
+		};
+		hooks.onClosed = (producer, fn) => {
+			const closers = producer.#state.closers;
+			closers.add(fn);
+			return () => closers.delete(fn);
 		};
 		stampProducer = (producer, path) => {
 			producer.#path = path;

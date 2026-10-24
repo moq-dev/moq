@@ -66,6 +66,7 @@ http-body = "1.0.1"
 # reqwest-middleware 0.4, while this line matches reqwest 0.13 below.
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 humantime = { workspace = true }
+humantime-serde = { workspace = true }
 hyper-util = { workspace = true }
 moq-auth = { workspace = true, features = ["client"] }
 moq-clock = { workspace = true }

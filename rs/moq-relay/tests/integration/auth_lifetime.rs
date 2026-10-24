@@ -1371,7 +1371,7 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	config.protocol = Some(crate::memory::newest().alpn().to_string());
 	let (client, server) = moq_net::transport::memory::pair(config);
 
-	let now = moq_net::time::now();
+	let now = moq_net::time::Instant::now();
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
 			.connect(now, client)

@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
+
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
@@ -434,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)

@@ -23,9 +23,9 @@ For each embedding consumer:
 
 1. Replace its direct TOML parsing plus `update_from` (or hand-built
    `merge_into`) setup with `config.relay.merge(&cli_layer)?`.
-2. Migrate the renamed settings and native types listed under
-   [moq-dev/moq#6535](https://github.com/moq-dev/moq/pull/6535) in
-   `rs/moq-relay/MIGRATE.md`, in its config files, environment, and code.
+2. Migrate the renamed settings and native types listed in the Impact
+   section of [moq-dev/moq#6535](https://github.com/moq-dev/moq/pull/6535),
+   in its config files, environment, and code.
 3. Verify with that consumer's own checks that an explicit obsolete file or
    environment spelling refuses startup, and that its root CLI-only fields
    survive, reading `Config::source` provenance rather than comparing against

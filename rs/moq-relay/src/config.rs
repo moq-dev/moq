@@ -118,7 +118,7 @@ pub struct Config {
 	/// immediately. Zero closes them at once, with no GOAWAY
 	/// they would have no time to act on. Defaults to 10 seconds.
 	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_duration")]
+	#[serde(with = "humantime_serde")]
 	pub drain_timeout: std::time::Duration,
 
 	#[usage(
@@ -128,7 +128,7 @@ pub struct Config {
 		setting = "drain_timeout"
 	)]
 	#[serde(default, rename = "__cli_drain_timeout", skip_serializing_if = "Option::is_none")]
-	drain_timeout_arg: Option<crate::duration::Duration>,
+	drain_timeout_arg: Option<moq_tokio::cli::Duration>,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
@@ -214,9 +214,7 @@ pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
 impl Config {
 	/// Resolve the shutdown grace period after command-line overrides.
 	pub(crate) fn drain_timeout(&self) -> std::time::Duration {
-		self.drain_timeout_arg
-			.map(crate::duration::Duration::into_std)
-			.unwrap_or(self.drain_timeout)
+		self.drain_timeout_arg.map(Into::into).unwrap_or(self.drain_timeout)
 	}
 
 	/// Parses configuration from CLI arguments, optionally merging with a
@@ -417,7 +415,12 @@ mod tests {
 			"1000",
 			"--limits-client-announces",
 		),
-		("--peer-fetches", "MOQ_PEER_FETCHES", "10000", "--limits-peer-fetches"),
+		(
+			"--peer-announces",
+			"MOQ_PEER_ANNOUNCES",
+			"100000",
+			"--limits-peer-announces",
+		),
 		("--acme-dir", "MOQ_ACME_DIR", "cache", "--acme-cache"),
 		(
 			"--cluster-connect-api",
@@ -470,7 +473,7 @@ mod tests {
 		let path = dir.path().join("obsolete.toml");
 		for (body, replacement) in [
 			("[session]\nannounces = 1000", "[limits.client]"),
-			("[peer]\nfetches = 10000", "[limits.peer]"),
+			("[peer]\nannounces = 100000", "[limits.peer]"),
 			("[acme]\ndir = 'cache'", "[acme] cache"),
 			("[cluster]\nconnect_api = 'peers.json'", "[cluster.api] url"),
 			("[cluster]\nconnect_api_tls_root = []", "[cluster.api.tls] root"),
@@ -543,11 +546,9 @@ mod tests {
 	fn session_limits_merge_without_crossing_peer_policy() {
 		if !test_env::Env::without(&[
 			"MOQ_LIMITS_CLIENT_ANNOUNCES",
-			"MOQ_LIMITS_CLIENT_SUBSCRIPTIONS",
-			"MOQ_LIMITS_CLIENT_FETCHES",
-			"MOQ_LIMITS_PEER_FETCHES",
+			"MOQ_LIMITS_CLIENT_REQUESTS",
 			"MOQ_LIMITS_PEER_ANNOUNCES",
-			"MOQ_LIMITS_PEER_SUBSCRIPTIONS",
+			"MOQ_LIMITS_PEER_REQUESTS",
 		])
 		.isolate()
 		{
@@ -557,31 +558,25 @@ mod tests {
 		let path = dir.path().join("limits.toml");
 		std::fs::write(
 			&path,
-			"[limits.client]\nannounces = 7\nsubscriptions = 8\nfetches = 9\n[limits.peer]\nannounces = 90\nsubscriptions = 91\nfetches = 92\n",
+			"[limits.client]\nannounces = 7\nrequests = 8\n[limits.peer]\nannounces = 90\nrequests = 91\n",
 		)
 		.unwrap();
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 7);
-		assert_eq!(config.limits.client.resolve().subscriptions, 8);
+		assert_eq!(config.limits.client.resolve().requests, 8);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
-		assert_eq!(config.limits.peer.resolve().subscriptions, 91);
-		assert_eq!(config.limits.client.resolve().fetches, 9);
-		assert_eq!(config.limits.peer.resolve().fetches, 92);
+		assert_eq!(config.limits.peer.resolve().requests, 91);
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-relay"),
 			path.into(),
 			"--limits-client-announces=0".into(),
-			"--limits-peer-subscriptions=1000".into(),
-			"--limits-client-fetches=0".into(),
-			"--limits-peer-fetches=2000".into(),
+			"--limits-peer-requests=1000".into(),
 		])
 		.unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 0);
-		assert_eq!(config.limits.client.resolve().subscriptions, 8);
+		assert_eq!(config.limits.client.resolve().requests, 8);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
-		assert_eq!(config.limits.peer.resolve().subscriptions, 1000);
-		assert_eq!(config.limits.client.resolve().fetches, 0);
-		assert_eq!(config.limits.peer.resolve().fetches, 2000);
+		assert_eq!(config.limits.peer.resolve().requests, 1000);
 	}
 
 	/// `[limits.peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.
