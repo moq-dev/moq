@@ -11,7 +11,7 @@
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
 };
@@ -62,6 +62,7 @@ pub struct Log {
 	/// How long the trail and the stops were at the first session close.
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
+	pub request_attempts: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<u8>>>,
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
@@ -519,6 +520,17 @@ impl poll::Session for DeadStreamSession {
 		)))
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
+	}
+
 	fn poll_open_uni(
 		&mut self,
 		_cx: &mut Context<'_>,
@@ -737,6 +749,17 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
+	}
+
 	fn poll_open_uni(
 		&mut self,
 		cx: &mut Context<'_>,
@@ -901,8 +924,9 @@ pub struct ScriptedSession {
 	/// across every stream.
 	queue: Option<Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>>,
 	/// Set by [`Self::gated_open`]: parks `poll_open_bi` until the gate opens, standing in
-	/// for a peer that has granted no more concurrent streams.
+	/// for a transport header blocked on send capacity.
 	open_gate: Option<kio::Consumer<bool>>,
+	credit: Arc<AtomicBool>,
 	/// Keeps the gate registration alive between `poll_open_bi` calls.
 	park: kio::Park,
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
@@ -911,12 +935,23 @@ pub struct ScriptedSession {
 	incoming_bidis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
+	/// Set by [`Self::with_unacked_uni_fins`]; shared, so every clone counts down one budget.
+	unacked_unis: Arc<AtomicUsize>,
 	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
 }
 
 impl ScriptedSession {
+	pub fn without_credit(self) -> Self {
+		self.credit.store(false, Ordering::Relaxed);
+		self
+	}
+
+	pub fn grant_credit(&self) {
+		self.credit.store(true, Ordering::Relaxed);
+	}
+
 	pub fn with_stats(mut self, stats: SinkStats) -> Self {
 		self.stats = stats;
 		self
@@ -935,10 +970,12 @@ impl ScriptedSession {
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
+			credit: Arc::new(AtomicBool::new(true)),
 			park: kio::Park::default(),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
+			unacked_unis: Default::default(),
 			datagram_size: 0,
 			groups: false,
 		}
@@ -953,6 +990,13 @@ impl ScriptedSession {
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
 	pub fn with_unacked_fin(mut self) -> Self {
 		self.unacked_fin = true;
+		self
+	}
+
+	/// Never acknowledge the FIN of the next `count` unidirectional streams opened, like a
+	/// peer stalled on those alone.
+	pub fn with_unacked_uni_fins(self, count: usize) -> Self {
+		self.unacked_unis.store(count, Ordering::Relaxed);
 		self
 	}
 
@@ -1023,7 +1067,7 @@ impl ScriptedSession {
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
-	/// replies normally and is simply out of stream credit until then.
+	/// replies normally after its transport header gets send capacity.
 	pub fn gated_open(scripts: Vec<Vec<u8>>, gate: kio::Consumer<bool>) -> Self {
 		Self {
 			open_gate: Some(gate),
@@ -1099,12 +1143,32 @@ impl poll::Session for ScriptedSession {
 		)))
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.log.request_attempts.fetch_add(1, Ordering::Relaxed);
+		if !self.credit.load(Ordering::Relaxed) {
+			return Poll::Ready(Ok(None));
+		}
+		self.poll_open_bi(cx, options).map_ok(Some)
+	}
+
 	fn poll_open_uni(
 		&mut self,
 		_cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<Self::SendStream, Self::Error>> {
-		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
+		let mut send = SinkSend::new(self.log.clone());
+		send.unacked_fin = self
+			.unacked_unis
+			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| count.checked_sub(1))
+			.is_ok();
+		Poll::Ready(Ok(send.opened(options)))
 	}
 
 	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {

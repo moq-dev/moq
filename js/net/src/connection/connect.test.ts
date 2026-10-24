@@ -1,5 +1,6 @@
-import { expect, jest, test } from "bun:test";
-import { SessionCode, SessionError } from "../error.ts";
+import { expect, jest, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano, sleep } from "@moq/clock";
+import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -447,4 +448,595 @@ test("the WebSocket fallback offers the same versions", async () => {
 	const asked = await websocketOffer({ versions: ["moq-lite-07-wip", "moq-lite-06"] });
 	expect(asked[0]?.endsWith(ALPN_07_WIP)).toBe(true);
 	expect(asked.some((protocol) => protocol.endsWith(ALPN_05))).toBe(false);
+});
+
+// A WebTransport whose handshake nothing ever answers, as a dial to a dead target is.
+function silentWebTransport(): { closes: () => number; restore: () => void } {
+	const original = globalThis.WebTransport;
+	let closes = 0;
+	class SilentWebTransport {
+		ready = new Promise<void>(() => {});
+		closed = new Promise<void>(() => {});
+		close() {
+			closes++;
+		}
+	}
+	globalThis.WebTransport = SilentWebTransport as unknown as typeof WebTransport;
+	return { closes: () => closes, restore: () => (globalThis.WebTransport = original) };
+}
+
+// Record how a connect settles, without awaiting it.
+function track(attempt: Promise<unknown>): { outcome: () => unknown } {
+	let outcome: unknown;
+	attempt.then(
+		() => (outcome = "connected"),
+		(err: unknown) => (outcome = err),
+	);
+	return { outcome: () => outcome };
+}
+
+test("a dial nothing answers fails with ConnectTimeout after the default timeout and closes the transport", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const silent = silentWebTransport();
+	try {
+		const attempt = track(connect(url, { websocket: { enabled: false } }));
+		await clock.advance(Nano.fromMilli(Milli(29_999)));
+		expect(attempt.outcome()).toBeUndefined();
+
+		await clock.advance(Nano.fromMilli(Milli(1)));
+		await settle();
+		expect(attempt.outcome()).toBeInstanceOf(ConnectTimeout);
+		expect((attempt.outcome() as ConnectTimeout).timeout).toBe(Milli(30_000));
+		// The dial and its hedge.
+		expect(silent.closes()).toBe(2);
+	} finally {
+		silent.restore();
+		installed.close();
+	}
+});
+
+test("a timeout of 0 waits for the caller", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const silent = silentWebTransport();
+	try {
+		const controller = new AbortController();
+		const attempt = track(
+			connect(url, { websocket: { enabled: false }, timeout: Milli(0), signal: controller.signal }),
+		);
+		await clock.advance(Nano.fromMilli(Milli(600_000)));
+		expect(attempt.outcome()).toBeUndefined();
+
+		const reason = new Error("teardown");
+		controller.abort(reason);
+		await settle();
+		expect(attempt.outcome()).toBe(reason);
+	} finally {
+		silent.restore();
+		installed.close();
+	}
+});
+
+test("the caller's abort wins over the timeout and disarms it", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const silent = silentWebTransport();
+	try {
+		const controller = new AbortController();
+		const attempt = track(connect(url, { websocket: { enabled: false }, signal: controller.signal }));
+		await clock.advance(Nano.fromMilli(Milli(10_000)));
+		const reason = new Error("teardown");
+		controller.abort(reason);
+		await settle();
+		expect(attempt.outcome()).toBe(reason);
+
+		await clock.advance(Nano.fromMilli(Milli(60_000)));
+		expect(attempt.outcome()).toBe(reason);
+		// The dial and its hedge.
+		expect(silent.closes()).toBe(2);
+	} finally {
+		silent.restore();
+		installed.close();
+	}
+});
+
+test("a handshake the peer never answers times out on a supplied transport too", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		// The `moql` ALPN negotiates in SETUP, which nothing on the other side answers.
+		const pair = createMockTransportPair(ALPN);
+		let transportClosed = false;
+		void pair.client.closed.then(
+			() => (transportClosed = true),
+			() => (transportClosed = true),
+		);
+
+		const attempt = track(connect(url, { transport: pair.client, timeout: Milli(5_000) }));
+		await clock.advance(Nano.fromMilli(Milli(4_999)));
+		expect(attempt.outcome()).toBeUndefined();
+
+		await clock.advance(Nano.fromMilli(Milli(1)));
+		await settle();
+		expect(attempt.outcome()).toBeInstanceOf(ConnectTimeout);
+		expect(transportClosed).toBe(true);
+	} finally {
+		installed.close();
+	}
+});
+
+type Dial = "hang" | "ok" | { failAfter: Milli } | { openWhen: Promise<void> };
+
+// Stub WebTransport so each dial behaves as `plan` says, recording when it was dialed (on
+// the Manual clock) and how often it was closed.
+function webTransportPlan(clock: Manual, plan: (dial: number) => Dial) {
+	const original = globalThis.WebTransport;
+	const dials: { at: number; closes: number }[] = [];
+	globalThis.WebTransport = function StubWebTransport() {
+		const index = dials.length;
+		const record = { at: Nano.toMilli(Nano(clock.now())), closes: 0 };
+		dials.push(record);
+		const dial = plan(index);
+		if (dial === "hang" || (typeof dial === "object" && "failAfter" in dial)) {
+			const ready =
+				dial === "hang"
+					? new Promise<void>(() => {})
+					: sleep(Nano.fromMilli(dial.failAfter)).then(() => {
+							throw new Error(`refused ${index}`);
+						});
+			ready.catch(() => {});
+			return {
+				ready,
+				closed: new Promise<void>(() => {}),
+				close() {
+					record.closes++;
+				},
+			};
+		}
+		const pair = createMockTransportPair(ALPN_06);
+		const close = pair.client.close.bind(pair.client);
+		pair.client.close = (info?: WebTransportCloseInfo) => {
+			record.closes++;
+			close(info);
+		};
+		if (dial !== "ok") Object.defineProperty(pair.client, "ready", { value: dial.openWhen.then(() => undefined) });
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	return { dials, restore: () => (globalThis.WebTransport = original) };
+}
+
+test("a dial still unopened after 500 ms is hedged, and the hedge wins when the first hangs", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const plan = webTransportPlan(clock, (dial) => (dial === 0 ? "hang" : "ok"));
+	try {
+		const attempt = connect(url, { websocket: { enabled: false } });
+		await clock.advance(Nano.fromMilli(Milli(499)));
+		expect(plan.dials.length).toBe(1);
+
+		await clock.advance(Nano.fromMilli(Milli(1)));
+		const connection = await attempt;
+		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 500]);
+		await settle();
+		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 0]);
+		connection.abort();
+	} finally {
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("a dial that opens within 500 ms is not hedged", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const plan = webTransportPlan(clock, () => "ok");
+	try {
+		const connection = await connect(url, { websocket: { enabled: false } });
+		await clock.advance(Nano.fromMilli(Milli(5_000)));
+		expect(plan.dials.length).toBe(1);
+		connection.abort();
+	} finally {
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("a dial that fails outright is not hedged", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const plan = webTransportPlan(clock, () => ({ failAfter: Milli(100) }));
+	try {
+		const attempt = track(connect(url, { websocket: { enabled: false } }));
+		await clock.advance(Nano.fromMilli(Milli(5_000)));
+		await settle();
+		expect(plan.dials.length).toBe(1);
+		expect((attempt.outcome() as Error).message).toBe("no transport connected: refused 0");
+	} finally {
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("when a dial and its hedge both fail, the first dial's reason is reported", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	// The hedge dials at 500 ms and fails at 600 ms; the first fails at 1.5 s.
+	const plan = webTransportPlan(clock, (dial) => ({ failAfter: Milli(dial === 0 ? 1_500 : 100) }));
+	try {
+		const attempt = track(connect(url, { websocket: { enabled: false } }));
+		await clock.advance(Nano.fromMilli(Milli(2_000)));
+		await settle();
+		expect(plan.dials.length).toBe(2);
+		expect((attempt.outcome() as Error).message).toBe("no transport connected: refused 0");
+	} finally {
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("when a dial and its hedge open in the same turn, one wins and the other is closed", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	let open = () => {};
+	const opened = new Promise<void>((resolve) => (open = resolve));
+	// The first opens the moment the hedge dials, and the hedge opens at once.
+	const plan = webTransportPlan(clock, (dial) => {
+		if (dial === 0) return { openWhen: opened };
+		open();
+		return "ok";
+	});
+	try {
+		const attempt = connect(url, { websocket: { enabled: false } });
+		await clock.advance(Nano.fromMilli(Milli(500)));
+		const connection = await attempt;
+		await settle();
+		expect(plan.dials.length).toBe(2);
+		expect(plan.dials.map((dial) => dial.closes).sort()).toEqual([0, 1]);
+		connection.abort();
+	} finally {
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("a hedge that opens after the first dial failed still wins", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	// The hedge dials at 500 ms and opens at 2 s; the first fails at 1.5 s in between.
+	const plan = webTransportPlan(clock, (dial) =>
+		dial === 0 ? { failAfter: Milli(1_500) } : { openWhen: sleep(Nano.fromMilli(Milli(1_500))) },
+	);
+	try {
+		const attempt = connect(url, { websocket: { enabled: false } });
+		await clock.advance(Nano.fromMilli(Milli(2_000)));
+		const connection = await attempt;
+		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 500]);
+		connection.abort();
+	} finally {
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("when the WebSocket wins, every WebTransport dial is closed", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const plan = webTransportPlan(clock, () => "hang");
+	// The WebSocket dials after its 500 ms head start, with the hedge, and opens 100 ms later.
+	const native = globalThis as { WebSocketStream?: unknown };
+	const originalStream = native.WebSocketStream;
+	native.WebSocketStream = class {
+		url: string;
+		opened = sleep(Nano.fromMilli(Milli(100))).then(() => ({
+			readable: new ReadableStream(),
+			writable: new WritableStream(),
+			protocol: "qmux-01",
+			extensions: "",
+		}));
+		closed = new Promise(() => {});
+		constructor(url: string) {
+			this.url = url;
+		}
+		close() {}
+	};
+	const controller = new AbortController();
+	try {
+		const pending = connect(new URL("https://example.com/websocket-wins"), { signal: controller.signal });
+		await clock.advance(Nano.fromMilli(Milli(700)));
+		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 500]);
+		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1]);
+
+		// The WebSocket's SETUP is never answered.
+		controller.abort();
+		await pending.catch(() => undefined);
+	} finally {
+		native.WebSocketStream = originalStream;
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("when WebTransport and WebSocket open in the same turn, the one not chosen is closed", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	let open = () => {};
+	const opened = new Promise<void>((resolve) => (open = resolve));
+	const plan = webTransportPlan(clock, () => ({ openWhen: opened }));
+	// A native-shaped WebSocketStream that opens on the same signal.
+	let websocketCloses = 0;
+	const native = globalThis as { WebSocketStream?: unknown };
+	const originalStream = native.WebSocketStream;
+	native.WebSocketStream = class {
+		url: string;
+		opened = opened.then(() => ({
+			readable: new ReadableStream(),
+			writable: new WritableStream(),
+			protocol: "qmux-01",
+			extensions: "",
+		}));
+		closed = new Promise(() => {});
+		constructor(url: string) {
+			this.url = url;
+		}
+		close() {
+			websocketCloses++;
+		}
+	};
+	const controller = new AbortController();
+	try {
+		// Its own URL: a WebSocket win drops WebTransport's head start for that URL afterwards.
+		const pending = connect(new URL("https://example.com/same-turn"), {
+			websocket: { delay: Milli(0) },
+			signal: controller.signal,
+		});
+		await settle();
+		open();
+		await settle();
+		await settle();
+		// Exactly one transport lost the race, and it was closed.
+		expect(plan.dials[0].closes + websocketCloses).toBe(1);
+
+		// A WebSocket winner is still in SETUP, which nothing answers; a WebTransport one connected.
+		controller.abort();
+		const connection = await pending.catch(() => undefined);
+		connection?.abort();
+	} finally {
+		native.WebSocketStream = originalStream;
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("the caller's abort wins over a timeout that fires in the same turn", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const silent = silentWebTransport();
+	try {
+		const controller = new AbortController();
+		const attempt = track(connect(url, { websocket: { enabled: false }, signal: controller.signal }));
+		await settle();
+		const reason = new Error("teardown");
+		// Fire the timeout without running any task, then abort before one runs.
+		clock.jump(Nano.fromMilli(Milli(30_000)));
+		controller.abort(reason);
+		await settle();
+		expect(attempt.outcome()).toBe(reason);
+	} finally {
+		silent.restore();
+		installed.close();
+	}
+});
+
+test("a connected session outlives its connect timeout", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const pair = createMockTransportPair(ALPN_06);
+		let closed = false;
+		void pair.client.closed.then(() => (closed = true));
+		const connection = await connect(url, { transport: pair.client, timeout: Milli(1_000) });
+		await clock.advance(Nano.fromMilli(Milli(2_000)));
+		await settle();
+		expect(closed).toBe(false);
+		connection.abort();
+	} finally {
+		installed.close();
+	}
+});
+
+test("timeout race never returns a closed connection", async () => {
+	// Sweep the microtask window between winning the transport race and returning its
+	// connection, as "abort race never returns a closed connection" does for the signal.
+	for (let hops = 0; hops < 12; hops++) {
+		const clock = new Manual();
+		const installed = clock.install();
+		try {
+			const pair = createMockTransportPair(ALPN_05);
+			let transportClosed = false;
+			void pair.client.closed.then(() => {
+				transportClosed = true;
+			});
+			const outcome = connect(url, { transport: pair.client, timeout: Milli(1) }).then(
+				(connection) => ({ connection }),
+				(err: unknown) => ({ err }),
+			);
+			void (async () => {
+				for (let i = 0; i < hops; i++) await Promise.resolve();
+				clock.jump(Nano.fromMilli(Milli(1)));
+			})();
+			const result = await outcome;
+			await settle();
+			if ("connection" in result) {
+				expect(transportClosed, `hops ${hops}`).toBe(false);
+				result.connection.abort();
+			} else {
+				expect(result.err, `hops ${hops}`).toBeInstanceOf(ConnectTimeout);
+				expect(transportClosed, `hops ${hops}`).toBe(true);
+			}
+		} finally {
+			installed.close();
+		}
+	}
+});
+
+test("an invalid timeout throws before touching the caller's signal", async () => {
+	const controller = new AbortController();
+	const added = spyOn(controller.signal, "addEventListener");
+	for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+		await expect(
+			connect(url, { websocket: { enabled: false }, timeout: timeout as Milli, signal: controller.signal }),
+		).rejects.toThrow(RangeError);
+	}
+	expect(added).not.toHaveBeenCalled();
+	// In the caller's unit, not the nanoseconds it is converted to.
+	await expect(connect(url, { timeout: -1 as Milli })).rejects.toThrow("invalid time: -1");
+});
+
+type WebSocketDial = "hang" | "open" | { failAfter: Milli } | { openAfter: Milli };
+
+// Their own URL: a WebSocket that wins drops WebTransport's head start for its URL afterwards.
+const websocketUrl = new URL("https://example.com/websocket-only");
+
+// Stub a native WebSocketStream so each dial behaves as `plan` says, recording when it was
+// dialed (on the Manual clock) and how often it was closed. WebTransport is removed, as in
+// Safari, so the WebSocket is the only transport and dials at once.
+function webSocketPlan(clock: Manual, plan: (dial: number) => WebSocketDial) {
+	const native = globalThis as { WebSocketStream?: unknown; WebTransport?: unknown };
+	const originalStream = native.WebSocketStream;
+	const originalTransport = native.WebTransport;
+	native.WebTransport = undefined;
+	const dials: { at: number; closes: number }[] = [];
+	const streams = () => ({
+		readable: new ReadableStream(),
+		writable: new WritableStream(),
+		protocol: "qmux-01",
+		extensions: "",
+	});
+	native.WebSocketStream = class {
+		url: string;
+		opened: Promise<unknown>;
+		closed = new Promise(() => {});
+		#record: { at: number; closes: number };
+		constructor(url: string) {
+			this.url = url;
+			const index = dials.length;
+			this.#record = { at: Nano.toMilli(Nano(clock.now())), closes: 0 };
+			dials.push(this.#record);
+			const dial = plan(index);
+			if (dial === "hang") this.opened = new Promise(() => {});
+			else if (dial === "open") this.opened = Promise.resolve(streams());
+			else if ("failAfter" in dial)
+				this.opened = sleep(Nano.fromMilli(dial.failAfter)).then(() => {
+					throw new Error(`refused ${index}`);
+				});
+			else this.opened = sleep(Nano.fromMilli(dial.openAfter)).then(streams);
+			this.opened.catch(() => {});
+		}
+		close() {
+			this.#record.closes++;
+		}
+	};
+	return {
+		dials,
+		restore: () => {
+			native.WebSocketStream = originalStream;
+			native.WebTransport = originalTransport;
+		},
+	};
+}
+
+test("a WebSocket dial still unopened after 10 s is closed and dialed again", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const plan = webSocketPlan(clock, (dial) => (dial === 0 ? "hang" : "open"));
+	const controller = new AbortController();
+	try {
+		const pending = connect(websocketUrl, { signal: controller.signal });
+		await clock.advance(Nano.fromMilli(Milli(9_999)));
+		expect(plan.dials.length).toBe(1);
+
+		await clock.advance(Nano.fromMilli(Milli(1)));
+		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 10_000]);
+		// The session flushes its close for 100 ms before closing the socket.
+		await clock.advance(Nano.fromMilli(Milli(100)));
+		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 0]);
+
+		// The second dial opened; its SETUP is never answered.
+		controller.abort();
+		await pending.catch(() => undefined);
+	} finally {
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("each WebSocket redial within an attempt waits twice as long", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const plan = webSocketPlan(clock, () => "hang");
+	const controller = new AbortController();
+	try {
+		const pending = connect(websocketUrl, { timeout: Milli(0), signal: controller.signal });
+		await clock.advance(Nano.fromMilli(Milli(75_000)));
+		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 10_000, 30_000, 70_000]);
+		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1, 1, 0]);
+
+		controller.abort();
+		await pending.catch(() => undefined);
+	} finally {
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("a WebSocket dial that fails outright is not redialed", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const plan = webSocketPlan(clock, () => ({ failAfter: Milli(100) }));
+	try {
+		const attempt = track(connect(websocketUrl, {}));
+		await clock.advance(Nano.fromMilli(Milli(20_000)));
+		await settle();
+		expect(plan.dials.length).toBe(1);
+		expect((attempt.outcome() as Error).message).toBe("no transport connected: refused 0");
+	} finally {
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("a WebSocket dial that opens within 10 s is not redialed", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const plan = webSocketPlan(clock, () => ({ openAfter: Milli(5_000) }));
+	const controller = new AbortController();
+	try {
+		const pending = connect(websocketUrl, { signal: controller.signal });
+		await clock.advance(Nano.fromMilli(Milli(15_000)));
+		expect(plan.dials.length).toBe(1);
+
+		controller.abort();
+		await pending.catch(() => undefined);
+	} finally {
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("with the default timeout, a silent WebSocket is redialed once and the attempt then times out", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const plan = webSocketPlan(clock, () => "hang");
+	try {
+		const attempt = track(connect(websocketUrl, {}));
+		await clock.advance(Nano.fromMilli(Milli(30_100)));
+		await settle();
+		expect(attempt.outcome()).toBeInstanceOf(ConnectTimeout);
+		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 10_000]);
+		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1]);
+	} finally {
+		plan.restore();
+		installed.close();
+	}
 });

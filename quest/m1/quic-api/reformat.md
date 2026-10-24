@@ -25,7 +25,3 @@ other moq-quic PR is open, or rerun the formatter over the conflict.
 
 - [Receive pinning](/quest/m1/quic-receive-pinning.md) - fix quests ranked ahead land before the whole-crate diff
 - [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - same
-
-## Related
-
-- [Lint audit](/quest/m1/audit-lints.md) - moves moq-quic onto `lints.workspace`; the same "stay close to quinn" reason goes

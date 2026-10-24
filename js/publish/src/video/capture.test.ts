@@ -2,7 +2,7 @@ import { expect, mock, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import { Baseline } from "../jitter";
+import { Order } from "../order";
 import type { StreamTrack } from "./types";
 
 mock.module("./capture-worker.ts?worklet", () => ({ default: async () => "blob:fake-worker" }));
@@ -437,7 +437,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture,
 	});
 
@@ -543,7 +543,7 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture,
 	});
 
