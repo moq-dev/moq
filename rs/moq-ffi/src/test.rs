@@ -7265,15 +7265,20 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	assert_eq!(sequences, vec![0, 1, 2]);
 }
 
-/// Wait until `auth` reports `want`, following its changes.
-async fn await_grant(auth: &crate::auth::MoqAuth, want: crate::auth::MoqGrant) {
+/// Wait until `session` grants `want`, following its changes.
+async fn await_grant(session: &MoqSession, want: crate::auth::MoqGrant) {
+	// `grant_changed` waits for a grant other than the one its handle last returned, which a
+	// read through `grant` does not move. A fresh handle starts from the grant as it is now,
+	// so it is taken before the read, and the loop follows what `grant_changed` returns.
+	let auth = session.auth();
+	let mut current = auth.grant();
 	tokio::time::timeout(TIMEOUT, async {
-		while auth.grant().as_ref() != Some(&want) {
-			auth.grant_changed().await.expect("grant watch ended");
+		while current.as_ref() != Some(&want) {
+			current = auth.grant_changed().await.expect("grant watch ended");
 		}
 	})
 	.await
-	.unwrap_or_else(|_| panic!("timed out waiting for {want:?}, last {:?}", auth.grant()));
+	.unwrap_or_else(|_| panic!("timed out waiting for {want:?}, last {current:?}"));
 }
 
 fn grant(publish: &[&str], subscribe: &[&str]) -> crate::auth::MoqGrant {
@@ -7301,8 +7306,8 @@ async fn auth_reads_the_peer_grant_on(version: &str) {
 		.expect("pair");
 
 	// Each side's origins span the root, so its peer grants it everything.
-	await_grant(&client.auth(), grant(&["**"], &["**"])).await;
-	await_grant(&accepted.auth(), grant(&["**"], &["**"])).await;
+	await_grant(&client, grant(&["**"], &["**"])).await;
+	await_grant(&accepted, grant(&["**"], &["**"])).await;
 
 	let err = tokio::time::timeout(TIMEOUT, client.auth().add("extra".into()))
 		.await
@@ -7390,7 +7395,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.expect("connect timed out")
 		.unwrap();
 	let auth = session.auth();
-	await_grant(&auth, grant(&["setup/**"], &[])).await;
+	await_grant(&session, grant(&["setup/**"], &[])).await;
 	// A second handle watches on its own and starts from the grant it was made with.
 	let watcher = session.auth();
 
@@ -7400,7 +7405,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.unwrap();
 	assert_eq!(extra.grant(), Some(grant(&["extra/**"], &[])));
 	// Patterns are kept sorted.
-	await_grant(&auth, grant(&["extra/**", "setup/**"], &[])).await;
+	await_grant(&session, grant(&["extra/**", "setup/**"], &[])).await;
 	let seen = tokio::time::timeout(TIMEOUT, watcher.grant_changed())
 		.await
 		.expect("the second handle sees the change the first took")
@@ -7408,7 +7413,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 	assert_eq!(seen, Some(grant(&["extra/**", "setup/**"], &[])));
 
 	extra.cancel();
-	await_grant(&auth, grant(&["setup/**"], &[])).await;
+	await_grant(&session, grant(&["setup/**"], &[])).await;
 	assert!(matches!(extra.closed().await, Err(MoqError::Cancelled)));
 
 	let refused = tokio::time::timeout(TIMEOUT, auth.add("bogus".into()))
