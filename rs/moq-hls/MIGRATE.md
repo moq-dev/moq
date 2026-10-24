@@ -4,14 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### HLS import stays on the playlist's origin
+### Denied broadcast references report authorization failure
 
-`import::Import` fetches only resources with the entry playlist's scheme, host, and port, and refuses a reference or redirect hop to any other origin with the new `Error::ResourceRefused`, which ends the import.
-Serve every playlist, init segment, and media segment from the playlist's origin, rather than referencing a separate CDN host.
-A `file://` playlist reads only local files, and other URL schemes are refused when constructing the import.
-
-`import::Config::client` is removed: the importer builds its own HTTP client so it can hold redirects to the playlist's origin.
-Drop the field; there is no replacement for a custom client.
+A rendition whose referenced broadcast is outside the source origin's scope now
+returns `Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized))` from
+playlist (ranged too), init and segment reads, and from the segment cursor,
+instead of behaving like missing media.
+`Broadcaster::ready` and `Rendition::playable` settle on that refusal. Embedders
+should answer it with an uncacheable 403; the HTTP server does so automatically.
+Allowed renditions keep serving, and missing or disconnected media remains 404.
 
 ### A failed timeline fails the segment cursor
 

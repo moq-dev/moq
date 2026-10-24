@@ -480,7 +480,7 @@ pub struct MoqSide {
 
 	/// Drain accepted sessions for up to this long after SIGINT or SIGTERM; defaults to 10s.
 	#[usage(long, env = "MOQ_DRAIN_TIMEOUT", help_heading = "MoQ")]
-	pub drain_timeout: Option<crate::duration::Duration>,
+	pub drain_timeout: Option<moq_tokio::cli::Duration>,
 }
 
 impl MoqSide {
@@ -748,11 +748,11 @@ pub struct Import {
 	/// which is retained unconditionally. A stdin import also stays up this long after EOF, so
 	/// a subscriber still catching up can drain the finished broadcast.
 	#[usage(long)]
-	pub max_age: Option<crate::duration::Duration>,
+	pub max_age: Option<moq_tokio::cli::Duration>,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<moq_tokio::cli::Duration>,
 
 	/// Name a media report track in the catalog's `stats` section and fill it with what each
 	/// track has written, about once a second while subscribed. The stdin imports only.
@@ -1052,8 +1052,8 @@ impl ExportSink {
 	pub fn stdout(&self) -> Option<Stdout> {
 		let container = |format, container: &Container| Stdout {
 			format,
-			max_delay: container.max_delay.into_std(),
-			linger: container.linger.into_std(),
+			max_delay: container.max_delay.into(),
+			linger: container.linger.into(),
 			stitch: false,
 			fragment_duration: None,
 			mux_rate: None,
@@ -1061,8 +1061,8 @@ impl ExportSink {
 		};
 		let buffered = |format, args: &Buffered| Stdout {
 			format,
-			max_delay: args.delay.into_std(),
-			linger: args.linger.into_std(),
+			max_delay: args.delay.into(),
+			linger: args.linger.into(),
 			stitch: false,
 			fragment_duration: None,
 			mux_rate: None,
@@ -1070,17 +1070,17 @@ impl ExportSink {
 		};
 		Some(match self {
 			Self::Fmp4(args) => Stdout {
-				fragment_duration: args.fragment_duration.map(crate::duration::Duration::into_std),
+				fragment_duration: args.fragment_duration.map(Into::into),
 				..container(SubscribeFormat::Fmp4, &args.container)
 			},
 			Self::Mkv(args) => Stdout {
-				fragment_duration: args.fragment_duration.map(crate::duration::Duration::into_std),
+				fragment_duration: args.fragment_duration.map(Into::into),
 				..buffered(SubscribeFormat::Mkv, &args.container)
 			},
 			Self::Ts(args) => Stdout {
 				format: SubscribeFormat::Ts,
-				max_delay: args.delay.into_std(),
-				linger: args.linger.into_std(),
+				max_delay: args.delay.into(),
+				linger: args.linger.into(),
 				stitch: args.stitch,
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
@@ -1115,20 +1115,20 @@ pub struct Stdout {
 pub struct Container {
 	/// How far a group may fall behind the live edge before it is skipped (e.g. `500ms`, `1s`).
 	#[usage(long, default = "500ms")]
-	pub max_delay: crate::duration::Duration,
+	pub max_delay: moq_tokio::cli::Duration,
 
 	/// Accepted only to refuse a nonzero value with a pointer to `ts`, the one format
 	/// that can mark where a returned broadcast restarts.
 	#[usage(long, default = "0s", hide = true)]
-	pub linger: crate::duration::Duration,
+	pub linger: moq_tokio::cli::Duration,
 
 	/// The released spelling of [`Self::max_delay`].
 	#[usage(long = "max-age", hide = true)]
-	max_age: Option<crate::duration::Duration>,
+	max_age: Option<moq_tokio::cli::Duration>,
 
 	/// The released spelling of [`Self::max_delay`], before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<moq_tokio::cli::Duration>,
 }
 
 impl Container {
@@ -1152,19 +1152,19 @@ pub struct Buffered {
 	/// The same delay bounds source staleness. Zero writes each frame as soon as it is read and
 	/// drops none as late, but still skips a stalled group once a newer one is ready.
 	#[usage(long, default = "500ms")]
-	pub delay: crate::duration::Duration,
+	pub delay: moq_tokio::cli::Duration,
 	/// Accepted only to refuse a nonzero value: only TS can mark a broadcast restart.
 	#[usage(long, default = "0s", hide = true)]
-	pub linger: crate::duration::Duration,
+	pub linger: moq_tokio::cli::Duration,
 	/// The retired staleness-only setting.
 	#[usage(long, hide = true)]
-	max_delay: Option<crate::duration::Duration>,
+	max_delay: Option<moq_tokio::cli::Duration>,
 	/// An older spelling of the staleness setting.
 	#[usage(long = "max-age", hide = true)]
-	max_age: Option<crate::duration::Duration>,
+	max_age: Option<moq_tokio::cli::Duration>,
 	/// An older spelling of the staleness setting.
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<moq_tokio::cli::Duration>,
 }
 
 impl Buffered {
@@ -1191,7 +1191,7 @@ pub struct BufferedFragmented {
 	pub container: Buffered,
 	/// Cap the output cluster duration (e.g. `2s`); defaults to video GOPs.
 	#[usage(long)]
-	pub fragment_duration: Option<crate::duration::Duration>,
+	pub fragment_duration: Option<moq_tokio::cli::Duration>,
 }
 
 /// The MPEG-TS stdout container.
@@ -1203,14 +1203,14 @@ pub struct Transport {
 	/// later than this is dropped, and a stalled group is skipped once it falls half this
 	/// behind the newest content.
 	#[usage(long, default = "1s")]
-	pub delay: crate::duration::Duration,
+	pub delay: moq_tokio::cli::Duration,
 
 	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
 	/// then carry on with the same stream. A replacement exits 1 unless `--stitch` is passed.
 	/// An export that fails while the broadcast is still up exits without waiting.
 	/// Also bounds a stitched replacement through its first catalog; zero requires it already available.
 	#[usage(long, default = "0s")]
-	pub linger: crate::duration::Duration,
+	pub linger: moq_tokio::cli::Duration,
 
 	/// Follow another publisher instance that replaces the broadcast, as a full program switch:
 	/// a new PMT from its catalog, flagged as a break on every PID.
@@ -1231,11 +1231,11 @@ pub struct Transport {
 
 	/// The released spelling of [`Self::delay`].
 	#[usage(long = "max-age", hide = true)]
-	max_age: Option<crate::duration::Duration>,
+	max_age: Option<moq_tokio::cli::Duration>,
 
 	/// The released spelling of [`Self::delay`], before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<moq_tokio::cli::Duration>,
 }
 
 impl Transport {
@@ -1262,7 +1262,7 @@ pub struct Fragmented {
 	/// Cap the output fragment/cluster duration (e.g. `2s`).
 	/// Defaults to publisher groups.
 	#[usage(long)]
-	pub fragment_duration: Option<crate::duration::Duration>,
+	pub fragment_duration: Option<moq_tokio::cli::Duration>,
 }
 
 #[cfg(test)]
@@ -1606,7 +1606,7 @@ mod tests {
 		let ExportSink::Srt(args) = &export.sink else {
 			panic!("an export srt stage");
 		};
-		assert_eq!(args.linger.into_std(), Duration::from_secs(10));
+		assert_eq!(Duration::from(args.linger), Duration::from_secs(10));
 		assert!(args.stitch);
 		assert!(
 			Invocation::try_parse_from(["moq", "import", "srt", "--listen", "[::]:9000", "--stitch"]).is_err(),
@@ -1785,7 +1785,10 @@ mod tests {
 		.unwrap();
 		cli.validate().unwrap();
 		cli.unserved().unwrap();
-		assert_eq!(cli.moq.drain_timeout.unwrap().into_std(), Duration::from_millis(500));
+		assert_eq!(
+			Duration::from(cli.moq.drain_timeout.unwrap()),
+			Duration::from_millis(500)
+		);
 		let cli = Invocation::try_parse_from([
 			"moq",
 			"--connect",
@@ -2182,7 +2185,7 @@ mod tests {
 		let ExportSink::Rtmp(args) = &export_rtmp.sink else {
 			panic!("expected rtmp")
 		};
-		assert_eq!(args.max_delay.into_std(), Duration::from_secs(2));
+		assert_eq!(Duration::from(args.max_delay), Duration::from_secs(2));
 		let Err(err) = rtmp("--max-age") else {
 			panic!("rtmp: --max-age must not start a run");
 		};

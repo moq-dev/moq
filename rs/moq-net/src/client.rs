@@ -388,7 +388,7 @@ impl Client {
 		// The server's requests, admitted up to our limits and granted back as they close.
 		parameters.set_varint(
 			ietf::ParameterVarInt::MaxRequestId,
-			ietf::initial_max_request_id(self.limits.requests(), false),
+			ietf::initial_max_request_id(self.limits.window(), false),
 		);
 		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 		// Advertise the request path in-band (draft 14-16), same as the lite-05 SETUP.

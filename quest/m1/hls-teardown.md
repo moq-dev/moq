@@ -31,7 +31,7 @@ failing returning `Ok(None)`:
   covered by moq-archive.
 - The cursors get a real consumer in
   [the CLI recorder](/quest/m1/hls-record-cli.md).
-- Update `rs/moq-hls/MIGRATE.md` for the changed end semantics.
+- The Impact bullet says how moq-hls users migrate to the changed end semantics.
 
 ## Related
 
