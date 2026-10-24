@@ -817,7 +817,7 @@ test("Consumer skips groups via PTS-span when over the max delay", async () => {
 
 test("Consumer measures arrivals as they land", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("audio"),
@@ -849,7 +849,7 @@ test("Consumer measures arrivals as they land", async () => {
 		track.close();
 		consumer.close();
 		next.close();
-		restore();
+		installed.close();
 	}
 });
 

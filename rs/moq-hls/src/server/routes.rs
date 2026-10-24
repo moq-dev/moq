@@ -169,7 +169,12 @@ fn not_found() -> Response {
 
 fn server_error(err: crate::Error) -> Response {
 	tracing::warn!(%err, "hls request failed");
-	(StatusCode::INTERNAL_SERVER_ERROR, [(header::CACHE_CONTROL, "no-store")]).into_response()
+	let status = match err {
+		crate::Error::Moq(moq_net::Error::Unauthorized)
+		| crate::Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)) => StatusCode::FORBIDDEN,
+		_ => StatusCode::INTERNAL_SERVER_ERROR,
+	};
+	(status, [(header::CACHE_CONTROL, "no-store")]).into_response()
 }
 
 #[cfg(test)]
@@ -703,6 +708,124 @@ mod tests {
 			drop((catalog, media));
 			pair.accept.abort();
 		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn denied_sibling_media_answers_403_without_poisoning_allowed_siblings() {
+		let origin = moq_tokio::origin::spawn();
+		let mut broadcast = origin.create_broadcast("room/live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let source = origin.create_broadcast("room/source").unwrap();
+		source.announce(Default::default()).unwrap();
+		let secret = origin.create_broadcast("room/secret").unwrap();
+		secret.announce(Default::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut config = video_config();
+		config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
+		let mut allowed = reserved
+			.video(
+				source.create_track("video0", timed()).unwrap(),
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+				config,
+			)
+			.unwrap();
+		let mut config = video_config();
+		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
+		let mut denied = reserved
+			.video(
+				secret.create_track("video1", timed()).unwrap(),
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+				config,
+			)
+			.unwrap();
+		drop(reserved);
+		write_three_gops(&mut allowed);
+		write_three_gops(&mut denied);
+
+		let patterns = ["room/live", "room/source"]
+			.into_iter()
+			.map(|path| path.parse::<moq_net::Pattern>().unwrap())
+			.collect();
+		let restricted = origin.consume().scope("", &patterns).unwrap();
+		let server = Server::new(restricted, Default::default());
+		let broadcaster = server.broadcaster("room/live").await.unwrap();
+		broadcaster.ready().await;
+		let allowed_uri = "/room/live/video/video0/seg/656e3d1b.0.m4s";
+		let denied_uri = "/room/live/video/video1/seg/656e3d1b.0.m4s";
+		let app = server.router();
+		assert_eq!(oneshot(app.clone(), allowed_uri).await.status(), StatusCode::OK);
+		for uri in [
+			denied_uri,
+			"/room/live/video/video1/media.m3u8",
+			"/room/live/video/video1/init.unknown.mp4",
+		] {
+			let response = oneshot(app.clone(), uri).await;
+			assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+			assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+			assert!(
+				axum::body::to_bytes(response.into_body(), usize::MAX)
+					.await
+					.unwrap()
+					.is_empty()
+			);
+		}
+		let master = oneshot(app.clone(), "/room/live/master.m3u8").await;
+		assert_eq!(master.status(), StatusCode::OK);
+		let master = axum::body::to_bytes(master.into_body(), usize::MAX).await.unwrap();
+		let master = String::from_utf8(master.to_vec()).unwrap();
+		assert!(master.contains("video/video0/"));
+		assert!(!master.contains("video/video1/"));
+		let first = |rendition: &Rendition| segments::Id {
+			generation: rendition.generation().map(|generation| generation.to_string()),
+			reference: "656e3d1b".into(),
+			at: segments::At::Sequence(0),
+		};
+		let rendition = broadcaster.rendition(Kind::Video, "video1").unwrap();
+		assert!(matches!(
+			rendition.segment(&first(&rendition)).await,
+			Err(crate::Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)))
+		));
+		// Broader authority can consume the referenced bytes, but cannot warm the
+		// restricted server's export into using them.
+		let broad = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let referenced = broad
+			.resolve(Some(&moq_net::path::Relative::new("./secret")), None)
+			.await
+			.unwrap();
+		let mut group = referenced.track("video1").unwrap().fetch_group(0, None).await.unwrap();
+		assert!(group.read_frame().await.unwrap().is_some());
+		assert_eq!(oneshot(app.clone(), denied_uri).await.status(), StatusCode::FORBIDDEN);
+		assert_eq!(oneshot(app.clone(), allowed_uri).await.status(), StatusCode::OK);
+		assert_eq!(
+			oneshot(app, "/room/live/video/video0/seg/656e3d1b.9999.m4s")
+				.await
+				.status(),
+			StatusCode::NOT_FOUND
+		);
+		// Readiness settles even when no rendition is authorized; it must not need
+		// an allowed sibling to wake the server into reporting the typed refusal.
+		let only_catalog = origin
+			.consume()
+			.scope(
+				"",
+				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
+			)
+			.unwrap();
+		let all_denied = Server::new(only_catalog, Default::default());
+		all_denied.broadcaster("room/live").await.unwrap().ready().await;
+		assert_eq!(
+			oneshot(all_denied.router(), denied_uri).await.status(),
+			StatusCode::FORBIDDEN
+		);
+
+		// A timeline failure refuses listings, but its already-retained media
+		// still drains. Authorization checks must not broaden that failure.
+		let retained = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		retained.fail(crate::Error::Moq(moq_net::Error::SessionClosed));
+		assert!(retained.media_playlist(None).is_err());
+		assert!(retained.latest_init().await.unwrap().is_some());
+		assert!(retained.segment(&first(&retained)).await.unwrap().is_some());
 	}
 
 	#[tokio::test]

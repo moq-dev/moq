@@ -4,10 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `Container.Loc.Producer` is removed
-
-`@moq/loc` dropped its producer, so the `Container.Loc` re-export has only the decoder; see the `@moq/loc` migration.
-
 ### CMAF decoding is a separate module
 
 Replace `Container.Cmaf` with `import * as Cmaf from "@moq/hang/cmaf"`.
@@ -57,7 +53,7 @@ Pass `frame.timestamp` after the payload.
 
 ### Container consumers take `maxDelay`
 
-`Container.Consumer`'s `maxAge` prop is `maxDelay`; rename it, since an untyped `maxAge` is ignored.
+`Container.Consumer`'s `maxAge` prop is `maxDelay`, and passing `maxAge` throws a `TypeError`.
 
 ### `cut` is `discontinuity` (#4141)
 

@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, now, Second } from "@moq/clock";
+import { type Installed, Manual, Milli, Nano, now, Second } from "@moq/clock";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
@@ -592,7 +592,7 @@ describe("Effect", () => {
 		let immediate: boolean | undefined;
 
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 
 		const effect = new Effect((e) => {
@@ -639,7 +639,7 @@ describe("Effect", () => {
 			expect(runs).toBe(2);
 		} finally {
 			effect.close();
-			restore();
+			installed.close();
 			warn.mockRestore();
 		}
 	});
@@ -653,7 +653,7 @@ describe("Effect", () => {
 		const never = Promise.withResolvers<void>(); // deliberately never resolved
 
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 
 		const effect = new Effect((e) => {
@@ -677,7 +677,7 @@ describe("Effect", () => {
 			expect(warned).toBe(false);
 		} finally {
 			effect.close();
-			restore();
+			installed.close();
 			warn.mockRestore();
 		}
 	});
@@ -894,7 +894,7 @@ describe("Effect", () => {
 	test("timer, timeout, and interval run on the installed clock until cleanup", async () => {
 		const ms = (value: number) => Nano.fromMilli(Milli(value));
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		const fired: string[] = [];
 		const effect = new Effect();
 		try {
@@ -918,7 +918,7 @@ describe("Effect", () => {
 			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
 		} finally {
 			effect.close();
-			restore();
+			installed.close();
 		}
 	});
 });
@@ -1455,7 +1455,7 @@ test("races from another package copy release their source listeners", async () 
 
 test("an effect interval arms its first period synchronously and steps subsequent periods", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const effect = new Effect();
 	const at: number[] = [];
 	try {
@@ -1467,7 +1467,7 @@ test("an effect interval arms its first period synchronously and steps subsequen
 		expect(at).toEqual([10, 20, 30, 40]);
 	} finally {
 		effect.close();
-		restore();
+		installed.close();
 	}
 });
 
@@ -1482,7 +1482,7 @@ test("an effect interval refuses a zero period synchronously", () => {
 
 test("an effect interval delays a full period after a stalled event loop", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const effect = new Effect();
 	const at: number[] = [];
 	try {
@@ -1496,22 +1496,22 @@ test("an effect interval delays a full period after a stalled event loop", async
 		expect(at).toEqual([35, 45]);
 	} finally {
 		effect.close();
-		restore();
+		installed.close();
 	}
 });
 
 test("an effect interval starts its next period on a newly installed clock's origin", async () => {
 	const first = new Manual();
 	first.jump(Nano(1000));
-	const restoreFirst = first.install();
+	const installedFirst = first.install();
 	const second = new Manual();
-	let restoreSecond: (() => void) | undefined;
+	let installedSecond: Installed | undefined;
 	const effect = new Effect();
 	const at: number[] = [];
 	try {
 		effect.interval(() => {
 			at.push(now());
-			if (at.length === 1) restoreSecond = second.install();
+			if (at.length === 1) installedSecond = second.install();
 		}, Nano(10));
 		await first.advance(Nano(10));
 		expect(at).toEqual([1010]);
@@ -1519,7 +1519,7 @@ test("an effect interval starts its next period on a newly installed clock's ori
 		expect(at).toEqual([1010, 10]);
 	} finally {
 		effect.close();
-		restoreSecond?.();
-		restoreFirst();
+		installedSecond?.close();
+		installedFirst.close();
 	}
 });

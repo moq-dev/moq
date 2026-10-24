@@ -262,8 +262,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.with_stats(stats.clone())
 	});
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
-	let subscriptions =
-		crate::session::Slots::new(limits.subscriptions).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
@@ -314,7 +313,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		peer_grant,
 		client,
 		subscriptions,
-		fetches: crate::session::Slots::new(limits.fetches),
 	});
 	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),

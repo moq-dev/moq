@@ -448,7 +448,7 @@ impl<E: CatalogExt> Producer<E> {
 		if self.grouped >= self.group_samples {
 			self.track.cut(None)?;
 		}
-		self.track.flush(timestamp, moq_net::time::now())?;
+		self.track.flush(timestamp, moq_net::time::Instant::now())?;
 		Ok(())
 	}
 
@@ -474,7 +474,7 @@ impl<E: CatalogExt> Producer<E> {
 				keyframe: false,
 				duration: None,
 			})?;
-			track.flush(timestamp, moq_net::time::now())?;
+			track.flush(timestamp, moq_net::time::Instant::now())?;
 		}
 
 		track.cut(Some(terminal.end))?;

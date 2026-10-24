@@ -4,11 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `catalog::Section` is private
-
-`catalog::Section` and `catalog::deserialize_section` are internal to the catalog's own sections.
-An application section decodes through its own serde impl; copy the fallback if it needs one.
-
 ### `Catalog` parses through `FromStr` (#6471)
 
 The inherent `Catalog::from_str` is replaced by `impl FromStr for Catalog`, with the same `Error`.

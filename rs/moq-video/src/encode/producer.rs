@@ -198,13 +198,13 @@ impl<E: CatalogExt> Producer<E> {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
-					import.flush(frame.timestamp, moq_net::time::now())?;
+					import.flush(frame.timestamp, moq_net::time::Instant::now())?;
 				}
 				Codecs::H265 { split, import } => {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
-					import.flush(frame.timestamp, moq_net::time::now())?;
+					import.flush(frame.timestamp, moq_net::time::Instant::now())?;
 				}
 			}
 		}
@@ -604,7 +604,7 @@ async fn apply_estimate(
 		return;
 	};
 
-	let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
+	let Some(bitrate) = control.update(estimate, moq_net::time::Instant::now()) else {
 		return;
 	};
 

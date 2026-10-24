@@ -4,12 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Store internals are private
-
-`Key`, the `segment` module (`Frame`, `Group`, `Object`), the `store` module and its `list` queries, `Error::Pagination`, and every `Store` method but `new`, `prefix`, and `timelines` are private or removed.
-`Store` is now only the handle a `Producer` records into and a `Reader` serves from: build it with `Store::new(inner, prefix)` and hand it over.
-Record objects with `Producer`, not by writing them yourself, and keep your own `ObjectStore` handle for any listing or cleanup outside the archive layout.
-
 ### Recording format version 3 stores a signed priority (#6142)
 
 `Info::priority`, `Info::new`, and `Error::Priority` use `i8`, higher first, with 0 unset.
@@ -29,6 +23,8 @@ The new layout is not readable by `Reader`, which still replays timeline recordi
 ### Untimed tracks record untimed (#5720)
 
 `Info::new` and `Info::timescale` take and return `Option<u64>`, and `Error::TimescaleMismatch` carries `Option<u64>` fields.
+`segment::Frame::timestamp` is `Option<u64>`.
+`Object::decode(buf, timed)` and `Store::get_segments(track, segment, timed)` take whether the track is timed.
 Mismatched timing is `Error::Timing`.
 Untimed recordings use the version 2 format, which an older version 2 reader refuses.
 Pass `Some(timescale)` to `Info::new`, and `info.timescale.is_some()` as `timed`.

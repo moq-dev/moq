@@ -40,7 +40,7 @@ Call `producer.demand().is_used()` instead of `producer.is_used()`.
 
 `moq_net::Timed<P>` drops its clock type parameter.
 Snapshot, stream, and window producers publish `at: None` untimed, so their track must be untimed; pass a timestamp on a timed track.
-Snapshot `modify(at)` and `mutate(f, at)` carry the caller's optional time through the edit guard, in the same order as `@moq/json`.
+Snapshot `modify(at)` and `mutate(at, f)` carry the caller's optional time through the edit guard.
 Wrap each update as `Timed::from(&value).at(timestamp)`, and pass `Some(timestamp)` to `modify`.
 
 ## 0.3 -> 0.4
