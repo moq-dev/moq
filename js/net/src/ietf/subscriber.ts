@@ -13,6 +13,7 @@ import {
 	error,
 	ProtocolViolation,
 	reason,
+	SessionCode,
 	StreamCode,
 	Stream as StreamError,
 	sessionCause,
@@ -466,11 +467,11 @@ export class Subscriber {
 		}
 	}
 
-	// The peer broke the protocol: close with the violation's code before the session's own
-	// close, which would send a clean one, as the connection does for its own violations.
-	#violated(err: ProtocolViolation) {
+	// Close with this code before the session's own close, which would send a clean one, as
+	// the connection does for its own violations.
+	#fail(code: SessionCode, reason: string) {
 		try {
-			this.#quic?.close({ closeCode: err.code, reason: err.message });
+			this.#quic?.close({ closeCode: code, reason });
 		} catch {
 			// Already closed.
 		}
@@ -1102,6 +1103,11 @@ export class Subscriber {
 				// Nothing reached the wire, but the track can no longer follow its subscribers.
 				console.warn(`subscribe update failed: id=${requestId} error=${reason(error(err))}`);
 				producer.close(error(err));
+				// Drafts 14 and 15 require the next request ID, so one spent and never sent would
+				// stall every later request: as in Rust, that ends the session.
+				if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+					this.#fail(SessionCode.Internal, "subscribe update failed to encode");
+				}
 				return;
 			}
 			// Counted before writing: the answer can be read before the write's promise resolves.
@@ -1515,7 +1521,7 @@ export class Subscriber {
 			// The control message establishing this alias can arrive after the data stream.
 			subscription = await this.#aliases.get(group.trackAlias);
 		} catch (err: unknown) {
-			if (err instanceof ProtocolViolation) this.#violated(err);
+			if (err instanceof ProtocolViolation) this.#fail(err.code, err.message);
 			const e = await sessionCause(this.#quic, err);
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			// Anything else on this alias is the publisher sending data for a track it never
@@ -1613,7 +1619,7 @@ export class Subscriber {
 			// A group with no objects still exists.
 			open().close();
 		} catch (err: unknown) {
-			if (err instanceof ProtocolViolation) this.#violated(err);
+			if (err instanceof ProtocolViolation) this.#fail(err.code, err.message);
 			const e = await sessionCause(this.#quic, err);
 			// The compact form names the subgroup by its first Object ID, so a nonzero one is
 			// subgroup N: stop the stream before any group exists for it.

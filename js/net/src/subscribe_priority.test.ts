@@ -5,6 +5,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual } from "@moq/clock";
 import { accept, connect, type Established } from "./connection/index.ts";
+import { SessionCode, type Session as SessionError } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import { SubscribeUpdate } from "./ietf/subscribe.ts";
 import * as Lite from "./lite/index.ts";
@@ -167,6 +168,7 @@ test.each(Object.values(Ietf.ALPN))("%s sends no update when the last subscriber
 
 // An update that fails to encode is a bug, not a publisher that stopped reading, so it ends the
 // track with the error rather than leaving it at a stale priority. Nothing reaches the wire.
+// Drafts 14 and 15 require the next request ID, so the one the update spent ends the session.
 test.each(Object.values(Ietf.ALPN))("%s ends the track when an update fails to encode", async (protocol) => {
 	const origin = new OriginProducer();
 	const broadcast = origin.createBroadcast(path);
@@ -191,7 +193,11 @@ test.each(Object.values(Ietf.ALPN))("%s ends the track when an update fails to e
 			expect(video.subscription.peek()?.priority).toBe(LOW);
 			await video.subscription.changed();
 		}
-		expect(closed).toBeUndefined();
+		if (protocol === Ietf.ALPN.DRAFT_14 || protocol === Ietf.ALPN.DRAFT_15) {
+			expect(((await server.closed) as SessionError | null)?.code).toBe(SessionCode.Internal);
+		} else {
+			expect(closed).toBeUndefined();
+		}
 		remote.close();
 	} finally {
 		encode.mockRestore();
