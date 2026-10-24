@@ -64,8 +64,13 @@ class FakeWorklet {
 		postMessage: (msg: Message) => {
 			if (msg.type === "init") this.ring = new AudioRingBuffer(msg);
 			else if (msg.type === "data") this.ring?.write(msg.timestamp, msg.data);
-			else if (msg.type === "latency") this.ring?.resize(msg.latency);
-			else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
+			else if (msg.type === "latency") {
+				this.ring?.setLatency(msg.latency);
+				if (msg.park !== undefined) {
+					this.ring?.park();
+					this.#epoch = msg.park;
+				}
+			} else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
 			else if (msg.type === "reset") {
 				this.ring?.reset();
 				this.#epoch = msg.epoch;
@@ -337,6 +342,8 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			consumer = producer.consume();
 			frameTimestamp = 0;
 		},
+		// The resolved playout target.
+		target: () => sync.out.delay.peek(),
 		// The rings written to, and the timestamps of every frame that reached one.
 		rings: () => worklets.filter((worklet) => worklet.ring && insert.mock.contexts.includes(worklet.ring)),
 		inserted: () => insert.mock.calls.map(([timestamp]) => timestamp as number),
@@ -394,16 +401,59 @@ for (const cmaf of [false, true]) {
 			}
 			expect(playback.inserted()).toEqual([]);
 
-			// The live edge moves on, so the head is complete and plays from its oldest frame.
+			// The live edge moves on, so the head is complete and plays from its oldest frame, refilling
+			// the 100 ms floor.
 			frameTimestamp = 140_000;
 			playback.push({ ...frame(), group: 8 });
 			await microtasks();
-			expect(playback.inserted()).toEqual([0, 20_000, 40_000, 60_000, 80_000, 100_000]);
+			expect(playback.inserted()).toEqual([0, 20_000, 40_000, 60_000, 80_000]);
 		} finally {
 			playback.close();
 			await microtasks();
 		}
 	});
+
+	// A buffered head above the decoded floor waits in the reorder buffer, not the consumer, until it
+	// runs past the target. Those frames are what cover the part of the target held encoded.
+	it(`starts a ${cmaf ? "CMAF" : "legacy"} buffered head held past a target above the floor`, async () => {
+		const playback = await play(Milli(1000), true, cmaf);
+		try {
+			const target = playback.target();
+			expect(target).toBeGreaterThan(500);
+			while (frameTimestamp <= target * 1000 + 20_000) {
+				playback.push(frame());
+				await microtasks();
+			}
+			expect(playback.inserted()[0]).toBe(20_000);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
+	// Pre-skip longer than the decoded floor discards every output the refill released toward it, so
+	// the refill has to count what reaches the ring, not what it released.
+	if (!cmaf) {
+		it("starts a buffered Opus head whose pre-skip outlasts the floor", async () => {
+			const playback = await play(Milli(1000), true);
+			try {
+				// OpusHead, version 1, stereo, a 520 ms pre-skip of 24,960 samples: past the 500 ms floor, yet
+				// within the head the harness covers, since it queues nothing behind a released batch.
+				playback.restore({ description: "4f707573486561640102" + "8061" + "80bb0000" + "0000" + "00" });
+				await microtasks();
+				const target = playback.target();
+				while (frameTimestamp <= (target + 2000) * 1000) {
+					playback.push(frame());
+					await microtasks();
+				}
+				// The first output to outlast the pre-skip lands at the start of the timeline.
+				expect(playback.inserted()[0]).toBe(20_000);
+			} finally {
+				playback.close();
+				await microtasks();
+			}
+		});
+	}
 
 	// A fresh encoder after a declared end may restart its timeline below the old one, and the decoder
 	// resets for it before anything is judged out of order.

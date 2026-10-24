@@ -69,10 +69,10 @@ impl Driver {
 }
 
 impl Protocol {
-	pub(crate) fn local_close(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+	pub(crate) fn closing(&self) -> std::sync::Arc<crate::session::Closing> {
 		match self {
-			Self::Lite(driver) => driver.local_close.clone(),
-			Self::Ietf(driver) => driver.local_close.clone(),
+			Self::Lite(driver) => driver.closing.clone(),
+			Self::Ietf(driver) => driver.closing.clone(),
 		}
 	}
 

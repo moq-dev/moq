@@ -57,7 +57,7 @@ import {
 	ObjectIdGap,
 } from "./object.ts";
 import { Parameters } from "./parameters.ts";
-import { ABSENT_WIRE, fromWire, toWire } from "./priority.ts";
+import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
 import {
 	type AdvertParams,
@@ -490,10 +490,11 @@ export class Subscriber {
 		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
 			// Nothing marks where what it tells unasked starts or ends, so there is nothing to wait for.
 			announced.synced();
-			// No request stream ends this wait, so the session's end has to.
+			// No request stream ends this wait, so the session's end has to. `race`, so a
+			// consumer that ends first leaves no reaction on the session's close behind.
 			const ends: PromiseLike<unknown>[] = [announced.closed];
-			if (this.#quic) ends.push(this.#quic.closed.catch(() => undefined));
-			await Promise.race(ends);
+			if (this.#quic) ends.push(this.#quic.closed);
+			await race(ends).catch(() => undefined);
 			return;
 		}
 
@@ -1242,7 +1243,9 @@ export class Subscriber {
 			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
 			// and the track must not claim one when served onward.
 			timescale: ok.properties.timescale,
-			priority: fromWire(ok.properties.priority ?? ABSENT_WIRE),
+			// Drafts 14 and 15 carry only per-subgroup priorities, which the model does not keep,
+			// so they get the later drafts' default too.
+			priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 			ietf: version,

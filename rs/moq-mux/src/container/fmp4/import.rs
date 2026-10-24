@@ -474,7 +474,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			start: None,
 			recorder: Some(recorder),
 			pending_sequence: None,
-			estimator: Estimator::new(),
+			estimator: self.catalog.estimator(),
 			claim: crate::catalog::Claim::new(self.catalog.bandwidth()),
 		})
 	}
@@ -1337,6 +1337,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			media!(&mut track.output, producer => producer.finish()?, passthrough => {
 				passthrough.close()?;
 				passthrough.track.finish()?;
+				// The importer may be kept around, but its media stops holding the other tracks back.
+				passthrough.estimator.discontinuity();
 				// Dropping the recorder flushes the open record, so the track is advertised.
 				passthrough.recorder = None;
 			});

@@ -2203,9 +2203,7 @@ mod tests {
         assert_eq!(high.write(&[0; 200]).unwrap(), 200);
         assert_eq!(server.pending.len(), 2);
 
-        // Requeue the high priority stream to lowest priority. The initial send
-        // still uses high priority since it's queued that way. After that it will
-        // switch to low priority
+        // Lowering the queued high priority stream moves it behind mid at once.
         let mut high = SendStream {
             id: id_high,
             state: &mut server,
@@ -2213,16 +2211,9 @@ mod tests {
             conn_state: &state,
         };
         high.set_priority(-1).unwrap();
-
-        let mut buf = Vec::with_capacity(1000);
-        let meta = server.write_frames(&mut buf, 0..40, true).streams;
-        assert_eq!(meta.len(), 1);
-        assert_eq!(meta[0].id, id_high);
-
-        // After requeuing we should end up with 2 priorities - not 3
         assert_eq!(server.pending.len(), 2);
 
-        // Send the remaining data. The initial mid priority one should go first now
+        let mut buf = Vec::with_capacity(1000);
         let meta = server.write_frames(&mut buf, 0..1000, true).streams;
         assert_eq!(meta.len(), 2);
         assert_eq!(meta[0].id, id_mid);
@@ -2230,6 +2221,63 @@ mod tests {
 
         assert!(!server.can_send_stream_data());
         assert_eq!(server.pending.len(), 0);
+    }
+
+    /// A stream starved behind higher priorities that keep requeueing sends next once raised
+    /// above them, without waiting to be popped at its old priority.
+    #[test]
+    fn raising_a_starved_stream_sends_it_next() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_bidi: 3u32.into(),
+            initial_max_data: 1000u32.into(),
+            initial_max_stream_data_bidi_remote: 1000u32.into(),
+            ..TransportParameters::default()
+        });
+
+        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+        let mut streams = Streams {
+            state: &mut server,
+            conn_state: &state,
+        };
+        let ids: Vec<_> = (0..3)
+            .map(|_| streams.open(Dir::Bi, Default::default()).unwrap())
+            .collect();
+        let (busy, starved) = (&ids[..2], ids[2]);
+
+        for (&id, priority) in ids.iter().zip([5, 5, 0]) {
+            let mut stream = SendStream {
+                id,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &state,
+            };
+            stream.set_priority(priority).unwrap();
+            stream.write(&[0; 200]).unwrap();
+        }
+
+        let mut buf = Vec::with_capacity(1000);
+        for _ in 0..4 {
+            let start = buf.len();
+            let meta = server
+                .write_frames(&mut buf, start..start + 40, true)
+                .streams;
+            assert!(busy.contains(&meta[0].id), "{meta:?}");
+        }
+
+        SendStream {
+            id: starved,
+            state: &mut server,
+            pending: &mut pending,
+            conn_state: &state,
+        }
+        .set_priority(10)
+        .unwrap();
+        let start = buf.len();
+        let meta = server
+            .write_frames(&mut buf, start..start + 40, true)
+            .streams;
+        assert_eq!(meta[0].id, starved);
     }
 
     #[test]
