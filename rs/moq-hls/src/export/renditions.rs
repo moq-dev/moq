@@ -8,10 +8,10 @@
 //! A [`Consumer`] is a cursor for a recorder that mirrors the *whole* broadcast: [`next`](Consumer::next)
 //! yields one [`Event`] at a time as renditions are added or removed, replaying the current
 //! set as [`Added`](Event::Added) when first consumed, and returning `None` once the source
-//! closes.
+//! finishes cleanly, or an error when the recording is incomplete.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
@@ -107,6 +107,8 @@ pub(crate) struct Producer {
 #[derive(Default)]
 struct State {
 	renditions: BTreeMap<Key, Arc<Rendition>>,
+	/// The catalog's confirmed end, distinct from dropping its watcher.
+	finished: Option<crate::Result<()>>,
 	// Cache catalog quality order without making any_held_externally count it as a consumer.
 	audio: Vec<Weak<Rendition>>,
 }
@@ -118,7 +120,7 @@ struct State {
 /// channel open (so `renditions()` cursors would never terminate).
 #[derive(Clone)]
 pub(crate) struct Fanout {
-	feed: Arc<Mutex<Feed>>,
+	feed: kio::Producer<Feed>,
 }
 
 impl Producer {
@@ -126,7 +128,7 @@ impl Producer {
 		Self {
 			state: kio::Producer::new(State::default()),
 			fanout: Fanout {
-				feed: Arc::new(Mutex::new(Feed {
+				feed: kio::Producer::new(Feed {
 					targets: Vec::new(),
 					history: VecDeque::new(),
 					last: None,
@@ -139,7 +141,7 @@ impl Producer {
 					anchor: None,
 					generation: None,
 					window: Some(window),
-				})),
+				}),
 			},
 		}
 	}
@@ -152,24 +154,25 @@ impl Producer {
 	/// The playlist window duration every rendition's window is trimmed to, or `None` when
 	/// only the source timeline trims them.
 	pub fn window(&self) -> Option<Duration> {
-		self.fanout.feed.lock().unwrap().window
+		self.fanout.feed.read().window
 	}
 
 	/// The estimated wall-clock time of timeline `pts` 0 (see [`Feed::anchor`]); `None` until
 	/// the first record arrives.
 	pub fn anchor(&self) -> Option<SystemTime> {
-		self.fanout.feed.lock().unwrap().anchor
+		self.fanout.feed.read().anchor
 	}
 
 	/// Why a reference timeline the playlists list failed, if one did.
 	pub fn failure(&self) -> Option<crate::Error> {
-		self.fanout.feed.lock().unwrap().failed.clone()
+		self.fanout.feed.read().failed.clone()
 	}
 
 	/// A cursor over rendition changes, replaying the current set as [`Event::Added`].
 	pub fn subscribe(&self) -> Consumer {
 		Consumer {
 			state: self.state.consume(),
+			feed: self.fanout.feed.consume(),
 			seen: BTreeMap::new(),
 		}
 	}
@@ -229,6 +232,17 @@ impl Producer {
 		}
 	}
 
+	/// Record the catalog's end before closing its change stream.
+	pub fn finish(&self, result: crate::Result<()>) {
+		if let Err(err) = &result {
+			self.fanout.fail(None, err.clone());
+		}
+		if let Ok(mut state) = self.state.write() {
+			state.finished = Some(result);
+		}
+		self.close();
+	}
+
 	/// Close the channel, signalling consumers that no more renditions will appear.
 	///
 	/// Deliberately does NOT cascade into the renditions' own segment windows: those are ended
@@ -243,19 +257,22 @@ impl Fanout {
 	/// List every record the source timeline retains, trimming only on its pops, instead of
 	/// a window. Call before the first record.
 	pub fn unbound(&self) {
-		self.feed.lock().unwrap().window = None;
+		self.feed
+			.write()
+			.unwrap_or_else(|_| unreachable!("fanout is open"))
+			.window = None;
 	}
 
 	/// Select the next reference, whose records list only past the last advertised one.
 	pub fn select(&self, reference: Option<Reference>) {
-		let mut feed = self.feed.lock().unwrap();
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
 		feed.selection = Some(reference);
 		feed.joining = true;
 	}
 
 	/// Fan one reference timeline record out to every living rendition, and into replay history.
 	pub fn push(&self, index: u64, entry: Entry, reference: &Reference) {
-		let mut feed = self.feed.lock().unwrap();
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
 		if !feed.accepts(reference) || feed.failed.is_some() {
 			return;
 		}
@@ -342,7 +359,7 @@ impl Fanout {
 
 	/// Remove records that left the source timeline window from every rendition window.
 	pub fn pop(&self, range: std::ops::Range<u64>, reference: &Reference) {
-		let mut feed = self.feed.lock().unwrap();
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
 		let Some(through) = feed
 			.history
 			.iter()
@@ -370,7 +387,7 @@ impl Fanout {
 	/// belong to the run it named. The first one only labels the run already flowing, so an embedder that supplies
 	/// it right after construction loses nothing to a race with the first records.
 	pub fn set_generation(&self, generation: Option<Arc<str>>) {
-		let mut feed = self.feed.lock().unwrap();
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
 		if feed.generation == generation {
 			return;
 		}
@@ -397,7 +414,7 @@ impl Fanout {
 
 	/// Clear stale rows after source records were skipped before this reader saw them.
 	pub fn skip(&self, reference: Option<&Reference>) {
-		let mut feed = self.feed.lock().unwrap();
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
 		if let Some(reference) = reference
 			&& (feed.joining || !feed.accepts(reference))
 		{
@@ -420,7 +437,7 @@ impl Fanout {
 	/// End every window for the selected watcher, ignoring a superseded watcher's completion.
 	/// `None` ends them when the source ended with no reference selected, so no watcher will.
 	pub fn finish(&self, reference: Option<&Reference>) -> bool {
-		let mut feed = self.feed.lock().unwrap();
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
 		let selected = match reference {
 			Some(reference) => feed.accepts(reference),
 			None => feed.selection.as_ref().is_none_or(Option::is_none),
@@ -443,11 +460,14 @@ impl Fanout {
 
 	/// Fail every window with `err` when `reference`'s timeline failed, so no playlist reads as
 	/// finished. A superseded reader counts only in history mode while rows it must pop are still
-	/// listed; a live window trims a superseded reference's rows on its own.
-	pub fn fail(&self, reference: &Reference, err: crate::Error) -> bool {
-		let mut feed = self.feed.lock().unwrap();
-		let listed = feed.accepts(reference)
-			|| (feed.window.is_none() && feed.history.iter().any(|row| row.reference == *reference));
+	/// listed; a live window trims a superseded reference's rows on its own. `None` fails the
+	/// whole source when the catalog fails.
+	pub fn fail(&self, reference: Option<&Reference>, err: crate::Error) -> bool {
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
+		let listed = reference.is_none_or(|reference| {
+			feed.accepts(reference)
+				|| (feed.window.is_none() && feed.history.iter().any(|row| row.reference == *reference))
+		});
 		if feed.failed.is_some() || !listed {
 			return false;
 		}
@@ -512,7 +532,11 @@ impl Producer {
 	/// (and the ended/failed/closed markers) so its window matches its siblings', and start following its
 	/// own timeline.
 	fn register(&self, rendition: &Arc<Rendition>) {
-		let mut feed = self.fanout.feed.lock().unwrap();
+		let mut feed = self
+			.fanout
+			.feed
+			.write()
+			.unwrap_or_else(|_| unreachable!("fanout is open"));
 		rendition.label(feed.generation.clone());
 		// An unwindowed feed is history mode: every rendition reads its timeline from the start.
 		rendition.watch(feed.window.is_none());
@@ -592,6 +616,7 @@ impl Producer {
 			.collect();
 		for key in stale {
 			if let Some(rendition) = current.renditions.remove(&key) {
+				rendition.end();
 				rendition.close();
 			}
 		}
@@ -655,15 +680,18 @@ impl Producer {
 /// a fresh consumer replays every current rendition as [`Event::Added`].
 pub struct Consumer {
 	state: kio::Consumer<State>,
+	feed: kio::Consumer<Feed>,
 	/// The renditions this cursor has already reported, by identity, so a reconfigure (a
 	/// replaced `Arc`) is seen as a remove followed by an add.
 	seen: BTreeMap<Key, Arc<Rendition>>,
 }
 
 impl Consumer {
-	/// The next rendition change; `None` once the source broadcast closes.
-	pub async fn next(&mut self) -> Option<Event> {
-		let event = kio::wait(|waiter| self.poll_next(waiter)).await?;
+	/// The next rendition change; `None` only after the catalog and reference finish cleanly.
+	pub async fn next(&mut self) -> crate::Result<Option<Event>> {
+		let Some(event) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
+			return Ok(None);
+		};
 		match &event {
 			Event::Added(rendition) => {
 				self.seen
@@ -673,17 +701,36 @@ impl Consumer {
 				self.seen.remove(&(*kind, name.clone()));
 			}
 		}
-		Some(event)
+		Ok(Some(event))
 	}
 
-	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Event>> {
-		match self
+	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
+		let finished = match self
 			.state
 			.poll(waiter, |current| next_event(&current.renditions, &self.seen))
 		{
-			Poll::Ready(Ok(event)) => Poll::Ready(Some(event)),
-			// Closed with no pending diff: no more changes.
-			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Ready(Ok(event)) => return Poll::Ready(Ok(Some(event))),
+			Poll::Ready(Err(state)) => {
+				match &state.finished {
+					Some(result) => result.clone()?,
+					None => return Poll::Ready(Err(crate::Error::IncompleteRecording)),
+				}
+				true
+			}
+			Poll::Pending => false,
+		};
+		// A failed reference cannot wait for an otherwise live catalog to close.
+		match self.feed.poll(waiter, |feed| {
+			if let Some(err) = &feed.failed {
+				Poll::Ready(Err(err.clone()))
+			} else if feed.ended && finished {
+				Poll::Ready(Ok(None))
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(result)) => Poll::Ready(result),
+			Poll::Ready(Err(_)) => Poll::Ready(Err(crate::Error::IncompleteRecording)),
 			Poll::Pending => Poll::Pending,
 		}
 	}
@@ -717,6 +764,68 @@ fn next_event(current: &BTreeMap<Key, Arc<Rendition>>, seen: &BTreeMap<Key, Arc<
 mod tests {
 	use super::*;
 
+	#[tokio::test]
+	async fn cursors_require_both_catalog_and_reference_completion() {
+		tokio::time::pause();
+		let producer = Producer::new(Duration::from_secs(30));
+		let mut cursor = producer.subscribe();
+		producer.finish(Ok(()));
+		// Catalog completion alone cannot vouch for the media timeline.
+		assert!(cursor.poll_next(&kio::Waiter::noop()).is_pending());
+		producer.fanout.finish(None);
+		assert!(cursor.next().await.unwrap().is_none());
+		assert!(cursor.next().await.unwrap().is_none());
+
+		let producer = Producer::new(Duration::from_secs(30));
+		let mut cursor = producer.subscribe();
+		producer.fanout.finish(None);
+		assert!(cursor.poll_next(&kio::Waiter::noop()).is_pending());
+		producer.finish(Ok(()));
+		assert!(cursor.next().await.unwrap().is_none());
+
+		let producer = Producer::new(Duration::from_secs(30));
+		let mut cursor = producer.subscribe();
+		producer.close();
+		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
+		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
+
+		let producer = Producer::new(Duration::from_secs(30));
+		let mut cursor = producer.subscribe();
+		drop(producer);
+		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
+	}
+
+	#[test]
+	fn a_reference_failure_is_reported_without_catalog_completion() {
+		let producer = Producer::new(Duration::from_secs(30));
+		let cursor = producer.subscribe();
+		let reference = Arc::new((Kind::Video, "video".into(), "video".into()));
+		let waiter = kio::Waiter::noop();
+		assert!(cursor.poll_next(&waiter).is_pending());
+		producer.fanout.fail(Some(&reference), crate::Error::NoVariants);
+		assert!(matches!(
+			cursor.poll_next(&waiter),
+			Poll::Ready(Err(crate::Error::NoVariants))
+		));
+	}
+
+	#[tokio::test]
+	async fn a_failed_catalog_or_reference_never_completes_a_cursor() {
+		tokio::time::pause();
+		let producer = Producer::new(Duration::from_secs(30));
+		let mut cursor = producer.subscribe();
+		producer.fanout.finish(None);
+		producer.finish(Err(crate::Error::NoVariants));
+		assert!(matches!(cursor.next().await, Err(crate::Error::NoVariants)));
+
+		let producer = Producer::new(Duration::from_secs(30));
+		let mut cursor = producer.subscribe();
+		let reference = Arc::new((Kind::Video, "video".into(), "video".into()));
+		producer.fanout.fail(Some(&reference), crate::Error::NoVariants);
+		producer.finish(Ok(()));
+		assert!(matches!(cursor.next().await, Err(crate::Error::NoVariants)));
+	}
+
 	fn entry(sequence: u64, pts: u64) -> Entry {
 		let record = hang::timeline::Record::new(
 			sequence,
@@ -739,7 +848,7 @@ mod tests {
 	}
 
 	fn rows(fanout: &Fanout) -> Vec<(u64, u64, Duration)> {
-		let feed = fanout.feed.lock().unwrap();
+		let feed = fanout.feed.read();
 		feed.history
 			.iter()
 			.map(|row| (row.segment, row.discontinuity, Duration::from(row.period)))
@@ -800,7 +909,7 @@ mod tests {
 		fanout.skip(Some(&old));
 		fanout.push(1, entry(1, 2_000), &old);
 		fanout.push(1, entry(1, 2_000), &replacement);
-		assert_eq!(fanout.feed.lock().unwrap().history.len(), 2);
+		assert_eq!(fanout.feed.read().history.len(), 2);
 	}
 
 	#[test]
@@ -808,9 +917,9 @@ mod tests {
 		let err = || crate::Error::NoVariants;
 		// Live: a superseded reader's rows trim with the window, so its failure changes nothing.
 		let (fanout, new) = handed_off(5);
-		let old = fanout.feed.lock().unwrap().history[0].reference.clone();
-		assert!(!fanout.fail(&old, err()));
-		assert!(fanout.fail(&new, err()));
+		let old = fanout.feed.read().history[0].reference.clone();
+		assert!(!fanout.fail(Some(&old), err()));
+		assert!(fanout.fail(Some(&new), err()));
 		assert!(!fanout.finish(Some(&new)), "a failed feed never finishes");
 
 		// History: a retained reader fails the feed while rows it must pop stay listed.
@@ -824,7 +933,7 @@ mod tests {
 			if popped {
 				fanout.pop(0..1, &old);
 			}
-			fanout.fail(&old, err())
+			fanout.fail(Some(&old), err())
 		};
 		assert!(history(false));
 		assert!(!history(true));
@@ -846,19 +955,19 @@ mod tests {
 		fanout.push(0, entry(0, 0), &new);
 		fanout.push(6, entry(6, 12_000), &new);
 		{
-			let feed = fanout.feed.lock().unwrap();
+			let feed = fanout.feed.read();
 			assert_eq!(feed.history.len(), 2);
 			assert_eq!(feed.history.back().unwrap().segment, 6);
 			assert!(!feed.ended);
 			assert_eq!(feed.history.back().unwrap().discontinuity, 0);
 		}
 		fanout.pop(0..6, &new);
-		assert_eq!(fanout.feed.lock().unwrap().history.len(), 2);
+		assert_eq!(fanout.feed.read().history.len(), 2);
 		fanout.pop(0..6, &old);
-		assert_eq!(fanout.feed.lock().unwrap().history.len(), 1);
+		assert_eq!(fanout.feed.read().history.len(), 1);
 		fanout.pop(6..7, &new);
-		assert!(fanout.feed.lock().unwrap().history.is_empty());
+		assert!(fanout.feed.read().history.is_empty());
 		fanout.push(7, entry(7, 14_000), &new);
-		assert_eq!(fanout.feed.lock().unwrap().history.back().unwrap().segment, 7);
+		assert_eq!(fanout.feed.read().history.back().unwrap().segment, 7);
 	}
 }
