@@ -1209,6 +1209,7 @@ This document has no IANA actions.
 - Each archive timeline declares its own fixed nominal record duration, omitted for an untimed track; removed the broadcast-wide duration bound.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
+- Added the optional video `reorder` field: the most frames that can precede one in decode order and follow it in presentation, fixed for the track once declared. A consumer that authors decode times derives them from it and the current group alone, refusing deeper reordering; without it, a consumer infers them from timestamps.
 - Added an optional `epoch` beside every rendition and data track `broadcast` reference, and `replayEpoch` beside the archive's `replay` ({{field-epoch}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `epoch` fails a rendition proven to resolve another instance, and is best effort over a route without an Epoch.
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
