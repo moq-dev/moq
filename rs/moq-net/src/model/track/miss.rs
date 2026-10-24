@@ -397,7 +397,7 @@ impl Misses {
 				.filter(|(_, slot)| slot.is_walked())
 				.map(|(&sequence, _)| sequence);
 			for at in cached.chain(std::iter::once(run.end)) {
-				if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget, waiter) {
+				if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget, None, waiter) {
 					stale.insert(from..at);
 				}
 				// What arrived live is the feed's to serve, as the reader serves any cached group.
