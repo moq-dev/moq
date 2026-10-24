@@ -22,7 +22,8 @@ types only, so nothing in the package can open a producer under a chosen epoch; 
 
 The application names tracks by their semantic names. `Broadcast.Producer` wraps the
 `@moq/net` broadcast and creates each track under its physical name, so only physical names
-reach the relays. `createTrack` resolves once the net track has committed its timescale, so
+reach the relays. A physical name is the semantic name encrypted under the generation: a relay
+learns only its length rounded up to 16 bytes. `createTrack` resolves once the net track has committed its timescale, so
 every write is checked against it. `close()` ends the wrapped broadcast.
 
 ```ts

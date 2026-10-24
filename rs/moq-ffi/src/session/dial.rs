@@ -50,6 +50,9 @@ pub(crate) struct Dial {
 	bandwidth: moq_net::bandwidth::Allocator,
 	/// The session's receive estimate, forwarded while a consumer holds it.
 	recv: moq_net::bandwidth::Weak,
+	/// Persistent from before the handshake, so a token added while dialing waits for the
+	/// session; ended with the dial.
+	auth: moq_net::auth::Handle,
 }
 
 impl Dial {
@@ -63,11 +66,13 @@ impl Dial {
 		let send = moq_net::bandwidth::Producer::new();
 		let recv = moq_net::bandwidth::Producer::new();
 		let bandwidth = moq_net::bandwidth::Allocator::new(send.consume());
-		let client = client.with_bandwidth(bandwidth.clone());
+		let auth = moq_net::auth::Handle::new();
+		let client = client.with_bandwidth(bandwidth.clone()).with_auth(auth.clone());
 		let dial = Self {
 			state: state.clone(),
 			bandwidth,
 			recv: recv.weak(),
+			auth: auth.clone(),
 		};
 
 		let handshake = async move {
@@ -77,7 +82,15 @@ impl Dial {
 				.await
 				.map_err(Failure::Handshake)
 		};
-		crate::ffi::spawn(run(state, handshake, send, recv));
+		crate::ffi::spawn(async move {
+			let err = run(state, handshake, send, recv).await;
+			// No session will present the tokens again, so they end with the dial. A token
+			// reads `Cancel` as its peer ending the grant cleanly.
+			auth.abort(match err {
+				moq_net::Error::Cancel => moq_net::Error::Closed,
+				err => err,
+			});
+		});
 		dial
 	}
 
@@ -100,11 +113,6 @@ impl Dial {
 			.session
 			.as_ref()
 			.map(|accepted| accepted.session.clone())
-	}
-
-	/// Wait for the dial to settle: the session, `None` after a local stop, or why it failed.
-	pub async fn established(&self) -> Result<Option<moq_net::Session>, MoqError> {
-		Ok(self.settled().await?.map(|accepted| accepted.session))
 	}
 
 	async fn settled(&self) -> Result<Option<Accepted>, MoqError> {
@@ -187,15 +195,20 @@ impl Dial {
 	pub fn recv_bandwidth(&self) -> moq_net::bandwidth::Consumer {
 		self.recv.consume()
 	}
+
+	/// The auth handle every session of this dial is built on.
+	pub fn auth(&self) -> moq_net::auth::Handle {
+		self.auth.clone()
+	}
 }
 
-/// Dial, publish the outcome, then drive the session until it closes.
+/// Dial, publish the outcome, then drive the session until it closes, returning why it ended.
 async fn run(
 	state: kio::Producer<State>,
 	handshake: impl Future<Output = Result<(moq_net::Session, moq_net::Driver), Failure>>,
 	send: moq_net::bandwidth::Producer,
 	recv: moq_net::bandwidth::Producer,
-) {
+) -> moq_net::Error {
 	let stopped = state.consume();
 	let stopped = stopped.wait(|state| match state.stop {
 		Some(_) => Poll::Ready(()),
@@ -207,18 +220,26 @@ async fn run(
 		result = handshake => result,
 	};
 
-	let Ok(mut published) = state.write() else { return };
+	let Ok(mut published) = state.write() else {
+		return moq_net::Error::Closed;
+	};
 	let (session, driver) = match result {
 		Ok(established) if published.stop.is_none() => established,
 		Ok((session, _)) => {
 			// The stop arrived during the handshake's last step.
-			session.abort(published.stop.clone().unwrap_or(moq_net::Error::Cancel));
+			let err = published.stop.clone().unwrap_or(moq_net::Error::Cancel);
+			session.abort(err.clone());
 			published.failed = Some(Failure::Stopped);
-			return;
+			return err;
 		}
 		Err(failure) => {
+			let err = match &failure {
+				Failure::Stopped => published.stop.clone().unwrap_or(moq_net::Error::Cancel),
+				Failure::Transport(reason) => moq_net::Error::Transport(reason.clone()),
+				Failure::Handshake(err) => err.clone(),
+			};
 			published.failed = Some(failure);
-			return;
+			return err;
 		}
 	};
 	published.session = Some(Accepted {
@@ -240,6 +261,7 @@ async fn run(
 	}
 	let _ = send.set(None);
 	let _ = recv.set(None);
+	session.closed().await
 }
 
 async fn forward_send(source: Option<moq_net::bandwidth::Consumer>, out: &moq_net::bandwidth::Producer) {

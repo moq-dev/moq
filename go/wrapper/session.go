@@ -93,8 +93,8 @@ func (a *Auth) Grant() *Grant {
 }
 
 // GrantChanged blocks until the grant differs from the one this handle last
-// reported, or held when it was made, and returns it. It errors once the session
-// ends.
+// reported, or held when it was made, and returns it. It errors once a client's
+// connection or a server's session ends; a reconnect is not an end.
 func (a *Auth) GrantChanged(ctx context.Context) (*Grant, error) {
 	grant, err := bridge.Call(ctx, nil, a.inner.GrantChanged)
 	return grantFromFFI(grant), err
@@ -125,8 +125,9 @@ func (t *AuthToken) Grant() *Grant {
 	return grantFromFFI(t.inner.Grant())
 }
 
-// Closed blocks until the token ends, returning the peer's revocation or the
-// session's close, or nil when the peer closed it without an error.
+// Closed blocks until the token ends, returning the peer's revocation or the end
+// of a client's connection or a server's session, or nil when the peer closed it
+// without an error. A reconnect does not end it.
 func (t *AuthToken) Closed(ctx context.Context) error {
 	return bridge.CallErr(ctx, nil, t.inner.Closed)
 }

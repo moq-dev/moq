@@ -20212,13 +20212,13 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqauth_grant() != 14588) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqauth_grant_changed() != 5195) {
+  if (uniffi_moq_ffi_checksum_method_moqauth_grant_changed() != 38858) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqauthtoken_cancel() != 59324) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqauthtoken_closed() != 31020) {
+  if (uniffi_moq_ffi_checksum_method_moqauthtoken_closed() != 40912) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqauthtoken_grant() != 31654) {

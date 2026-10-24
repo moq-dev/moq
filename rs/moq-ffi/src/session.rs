@@ -1203,14 +1203,11 @@ impl MoqSession {
 	pub fn auth(&self) -> Arc<MoqAuth> {
 		Arc::new(MoqAuth::new(match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => crate::auth::Handle::Connection(connection.auth()),
+			Inner::Connection(connection) => connection.auth(),
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Session(session) => crate::auth::Handle::Session(session.auth()),
+			Inner::Session(session) => session.auth(),
 			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(dial) => match dial.session() {
-				Some(session) => crate::auth::Handle::Session(session.auth()),
-				None => crate::auth::Handle::Dial(dial.clone()),
-			},
+			Inner::Dial(dial) => dial.auth(),
 		}))
 	}
 
