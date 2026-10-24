@@ -16330,7 +16330,10 @@ mod test {
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
-		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 0 is being filled");
+		assert!(
+			subscriber.poll_next_group(&waiter).is_pending(),
+			"group 0 is being filled"
+		);
 		// The handler takes the fill and never answers it.
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
@@ -16346,7 +16349,10 @@ mod test {
 			panic!("groups 0 and 1 went stale behind group 2");
 		};
 		assert_eq!(group.sequence, 2, "superseded by group 5 only 11s ago");
-		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 3 is still owed");
+		assert!(
+			subscriber.poll_next_group(&waiter).is_pending(),
+			"group 3 is still owed"
+		);
 		for sequence in [3, 4] {
 			assert!(fill.is_wanted(sequence), "group {sequence} is superseded by group 5");
 		}
