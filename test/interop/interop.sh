@@ -1001,7 +1001,7 @@ run_publisher() {
     client_flags "$lang"
     case "$lang" in
         rust)
-            # A finished import stays up for its max-age; `stop_publisher` allows 10 s to close.
+            # A finished import lingers for late readers; `stop_publisher` interrupts it and allows 10 s to close.
             # The wire-compat FETCH lanes keep the video-only Annex-B input.
             if [[ "$AUDIO" -eq 1 ]]; then
                 ffmpeg_fmp4 "$tone" "$(publisher_codecs rust)" | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \

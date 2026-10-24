@@ -14,7 +14,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.yield
 import dev.moq.json.SnapshotConfig
 import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
@@ -40,7 +39,6 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration
@@ -244,19 +242,14 @@ class SmokeTest {
     }
 
     @Test
-    fun `finishing a broadcast lingers until the wait is cancelled`() = runTest {
-        val broadcast = BroadcastProducer()
-        val track = broadcast.publishTrack("status", TrackInfo(maxAgeUs = 3_600_000_000uL))
-        track.finish()
-        broadcast.finish().use { finish ->
-            assertEquals(1.hours, finish.linger)
-            assertFailsWith<MoqException> { broadcast.consume() }
-            // Cancelling the wait is the interrupt: it ends instead of lingering for an hour.
-            val wait = async { finish.wait() }
-            yield()
-            wait.cancel()
-            wait.join()
-            finish.end()
+    fun `a finished broadcast stays up until it ends`() {
+        BroadcastProducer().use { broadcast ->
+            broadcast.publishTrack("status", null).finish()
+            broadcast.finish()
+            // Finishing the content leaves the broadcast up until it ends.
+            broadcast.consume().close()
+            broadcast.end()
+            assertFailsWith<MoqException> { broadcast.finish() }
         }
     }
 

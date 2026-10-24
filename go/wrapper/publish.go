@@ -3,8 +3,6 @@ package moq
 import (
 	"context"
 	"iter"
-	"math"
-	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
 	"moq.dev/moq/internal/bridge"
@@ -81,51 +79,13 @@ func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
 }
 
-// Finish ends the broadcast cleanly, keeping it servable until its media goes stale.
+// Finish ends the broadcast's content by finishing its catalog.
 //
-// Finish every track first: the returned handle holds the tracks finished by now
-// and keeps the broadcast announced, so a subscriber still catching up can drain
-// them. A track still live is not held. Every later call on this producer fails,
-// as after [BroadcastProducer.Close].
-func (b *BroadcastProducer) Finish() (*BroadcastFinish, error) {
-	inner, err := b.inner.Finish()
-	if err != nil {
-		return nil, err
-	}
-	return &BroadcastFinish{inner: inner}, nil
-}
-
-// BroadcastFinish is a cleanly ended broadcast, still announced and serving its
-// finished tracks. Closing it, or cancelling a [BroadcastFinish.Wait], closes
-// the broadcast at once. An unreferenced one closes the broadcast only when the
-// garbage collector reclaims it, possibly long after, so wait on or close it.
-type BroadcastFinish struct {
-	inner *ffi.MoqBroadcastFinish
-}
-
-// Linger is how long to keep the broadcast: the longest max age of the held tracks.
-func (f *BroadcastFinish) Linger() time.Duration {
-	us := f.inner.LingerUs()
-	if us > math.MaxInt64/uint64(time.Microsecond) {
-		return math.MaxInt64
-	}
-	return time.Duration(us) * time.Microsecond
-}
-
-// Wait keeps the broadcast up for its linger, or until [BroadcastFinish.Close],
-// then closes it. Cancelling ctx closes the broadcast at once.
-func (f *BroadcastFinish) Wait(ctx context.Context) error {
-	// The bridge starts no call on a done ctx, so it would never reach the close.
-	if err := ctx.Err(); err != nil {
-		f.inner.Close()
-		return err
-	}
-	return bridge.CallErr(ctx, f.inner.Close, f.inner.Wait)
-}
-
-// Close closes the broadcast now, ending the linger and any wait. Closing again is a no-op.
-func (f *BroadcastFinish) Close() {
-	f.inner.Close()
+// Finish every track first. The broadcast stays announced and keeps serving its
+// finished tracks to late subscribers until [BroadcastProducer.Close] takes it
+// offline; how long to keep it up is yours to decide.
+func (b *BroadcastProducer) Finish() error {
+	return b.inner.Finish()
 }
 
 // BroadcastDynamic is a stream of subscriber-requested tracks.

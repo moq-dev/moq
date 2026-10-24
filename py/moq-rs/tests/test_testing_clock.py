@@ -60,53 +60,6 @@ def test_a_pending_timer_waits_for_advance() -> None:
     )
 
 
-def test_a_finished_broadcast_lingers_for_its_max_age() -> None:
-    _run(
-        """
-        import asyncio
-        from datetime import timedelta
-
-        import moq
-        from moq.testing import Clock
-
-        clock = Clock()
-
-        async def main():
-            origin = moq.OriginProducer()
-            consumer = origin.consume()
-            announced = consumer.announced()
-            broadcast = origin.create_broadcast("linger")
-            broadcast.announce()
-            start = await asyncio.wait_for(anext(announced), timeout=5)
-            assert isinstance(start, moq.AnnounceEventStart)
-            track = broadcast.publish_track("track", moq.TrackInfo(max_age=timedelta(seconds=2)))
-            track.write_frame(b"tail")
-            track.finish()
-
-            finish = broadcast.finish()
-            assert finish.linger == timedelta(seconds=2)
-            done = asyncio.ensure_future(finish.wait())
-
-            # A late subscriber within the max age still drains the finished track.
-            clock.advance(1.999)
-            late = await consumer.request_broadcast("linger")
-            reader = await late.subscribe_track("track")
-            frame = await asyncio.wait_for(reader.read_frame(), timeout=5)
-            assert frame is not None and frame.payload == b"tail"
-            await asyncio.sleep(0.05)
-            assert not done.done()
-
-            # Once the max age passes, the broadcast closes.
-            clock.advance(0.001)
-            await asyncio.wait_for(done, timeout=5)
-            end = await asyncio.wait_for(anext(announced), timeout=5)
-            assert isinstance(end, moq.AnnounceEventEnd)
-
-        asyncio.run(main())
-        """
-    )
-
-
 def test_clock_refuses_invalid_advances() -> None:
     _run(
         """

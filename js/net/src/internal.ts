@@ -423,11 +423,6 @@ export const hooks: {
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
-	/**
-	 * How long a broadcast finishing now keeps this track servable: its max-age capped by the
-	 * cache window once it closed cleanly, else zero; assigned by `track.ts`.
-	 */
-	linger: (producer: Producer) => Milli;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
 	demandPriority: (demand: Demand) => number;
 	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
@@ -594,9 +589,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedLargest: () => {
-		throw new Error("track.ts not loaded");
-	},
-	linger: () => {
 		throw new Error("track.ts not loaded");
 	},
 	demandPriority: () => {

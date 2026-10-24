@@ -27,13 +27,13 @@ import json
 import math
 import struct
 import sys
-import time
 from datetime import timedelta
 
 import moq
 
 READ_CHUNK = 64 * 1024
 MAX_DELAY = timedelta(seconds=1)  # container consumer congestion-control / lookahead window
+LINGER = timedelta(seconds=10)  # how long a finished publisher stays up for the late readers
 
 # Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 AUDIO_TRACK = "tone"
@@ -143,16 +143,12 @@ async def publish(
         audio.finish()
         media.finish()
         if finish_ack is not None:
-            # finish() also finalizes the catalog. ACK never controls the real linger.
-            started = time.monotonic_ns()
-            finished = producer.finish()
-            linger_us = finished.linger // timedelta(microseconds=1)
-            if linger_us <= 0:
-                raise RuntimeError("finished media has no linger")
-            print(f"finish ready linger_us={linger_us}", flush=True)
-            await finished.wait()
-            if time.monotonic_ns() - started < linger_us * 1000:
-                raise RuntimeError("finish wait ended before its linger")
+            # finish() finalizes the catalog; the broadcast stays up for the late readers until
+            # close() takes it offline. ACK never controls the linger.
+            producer.finish()
+            print(f"finish ready linger_us={LINGER // timedelta(microseconds=1)}", flush=True)
+            await asyncio.sleep(LINGER.total_seconds())
+            producer.close()
             health = client.create_broadcast(f"{broadcast}.health")
             live = health.publish_track("live")
             live.write_frame(b"session-alive")

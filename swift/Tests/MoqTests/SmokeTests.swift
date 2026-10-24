@@ -263,19 +263,15 @@ final class SmokeTests: XCTestCase {
         XCTAssertThrowsError(try broadcast.publishTrack(name: "events"))
     }
 
-    func testFinishedBroadcastLingersUntilTheWaitIsCancelled() async throws {
+    func testFinishedBroadcastStaysUpUntilClosed() throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "status", info: TrackInfo(maxAgeUs: 3_600_000_000))
+        let track = try broadcast.publishTrack(name: "status")
         try track.finish()
-        let finish = try broadcast.finish()
-        XCTAssertEqual(finish.lingerUs, 3_600_000_000)
-        XCTAssertThrowsError(try broadcast.publishTrack(name: "events"))
-        // Cancelling the wait is the interrupt: it ends instead of lingering for an hour.
-        let wait = Task { try await finish.wait() }
-        await Task.yield()
-        wait.cancel()
-        _ = await wait.result
-        finish.close()
+        try broadcast.finish()
+        // Finishing the content leaves the broadcast up until it closes.
+        _ = try broadcast.consume()
+        try broadcast.close()
+        XCTAssertThrowsError(try broadcast.finish())
     }
 
     func testVideoHintsReachMediaPublishApi() throws {

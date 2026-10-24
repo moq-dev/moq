@@ -411,54 +411,26 @@ async def test_announced_epoch_restarts():
     broadcast.close()
 
 
-async def test_finish_lingers_until_closed():
+async def test_finish_serves_until_closed():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
     broadcast = create_announced(origin, "finish")
     assert isinstance(await next_route(announced), moq.AnnounceEventStart)
 
-    track = broadcast.publish_track("status", moq.TrackInfo(max_age=timedelta(hours=1)))
+    track = broadcast.publish_track("status")
     track.write_frame(b"tail")
     track.finish()
-    finish = broadcast.finish()
-    assert finish.linger == timedelta(hours=1)
-    with pytest.raises(moq.Error.Closed):
-        broadcast.consume()
+    broadcast.finish()
 
-    # Cancelling the wait is the interrupt: the broadcast closes at once.
-    wait = asyncio.ensure_future(finish.wait())
-    await asyncio.sleep(0)
-    wait.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await wait
+    # A late subscriber still drains the finished track while the broadcast is up.
+    late = await consumer.request_broadcast("finish")
+    reader = await late.subscribe_track("status")
+    frame = await asyncio.wait_for(reader.read_frame(), timeout=5)
+    assert frame is not None and frame.payload == b"tail"
+
+    broadcast.close()
     assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
-    finish.close()
-
-
-async def test_finish_wait_cancelled_before_it_starts_closes():
-    origin = moq.OriginProducer()
-    consumer = origin.consume()
-    announced = consumer.announced()
-    broadcast = create_announced(origin, "finish")
-    assert isinstance(await next_route(announced), moq.AnnounceEventStart)
-
-    broadcast.publish_track("status", moq.TrackInfo(max_age=timedelta(hours=1))).finish()
-    finish = broadcast.finish()
-    # Cancelled before the loop first steps it, so the wait's body never runs.
-    wait = asyncio.create_task(finish.wait())
-    wait.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await wait
-    assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
-
-
-async def test_finish_without_a_max_age_closes_on_wait():
-    broadcast = moq.BroadcastProducer()
-    broadcast.publish_track("status").finish()
-    finish = broadcast.finish()
-    assert finish.linger == timedelta(0)
-    await asyncio.wait_for(finish.wait(), timeout=5.0)
 
 
 def test_publish_lifecycle():

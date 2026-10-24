@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Coroutine, Generator
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from moq_ffi import (
     MoqBroadcastDynamic,
-    MoqBroadcastFinish,
     MoqBroadcastProducer,
     MoqGroupProducer,
     MoqGroupRequest,
@@ -19,7 +16,7 @@ from moq_ffi import (
     MoqTrackRequest,
 )
 
-from ._records import _from_us, _subscription, _track_info
+from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
     AnnounceRoute,
@@ -312,73 +309,11 @@ class BroadcastProducer:
         """
         self._inner.close()
 
-    def finish(self) -> BroadcastFinish:
-        """End the broadcast cleanly, keeping it servable until its media goes stale.
+    def finish(self) -> None:
+        """End the broadcast's content by finishing its catalog.
 
-        Finish every track first: the returned handle holds the tracks finished by now and
-        keeps the broadcast announced, so a subscriber still catching up can drain them. A
-        track still live is not held. Every later call on this producer fails, as after
-        :meth:`close`.
+        Finish every track first. The broadcast stays announced and keeps serving its
+        finished tracks to late subscribers until :meth:`close` takes it offline; how long
+        to keep it up is yours to decide.
         """
-        return BroadcastFinish(self._inner.finish())
-
-
-class BroadcastFinish:
-    """A cleanly ended broadcast, still announced and serving its finished tracks.
-
-    Await :meth:`wait` to keep it up for its :attr:`linger`. Cancelling the wait, or
-    :meth:`close`, closes the broadcast at once.
-    """
-
-    def __init__(self, inner: MoqBroadcastFinish) -> None:
-        self._inner = inner
-
-    @property
-    def linger(self) -> timedelta:
-        """How long to keep the broadcast: the longest max age of the held tracks."""
-        return _from_us(self._inner.linger_us())
-
-    def wait(self) -> Coroutine[Any, Any, None]:
-        """Keep the broadcast up for its linger, or until :meth:`close`, then close it."""
-        return _FinishWait(self._inner)
-
-    def close(self) -> None:
-        """Close the broadcast now, ending the linger and any wait. Closing again is a no-op."""
-        self._inner.close()
-
-
-class _FinishWait(Coroutine[Any, Any, None]):
-    """A finish's wait that closes the broadcast when cancelled.
-
-    A coroutine body never runs when its task is cancelled before the first step, so the
-    close hooks the cancellation thrown in rather than an ``except`` inside the body.
-    """
-
-    def __init__(self, inner: MoqBroadcastFinish) -> None:
-        self._inner = inner
-        self._wait = inner.wait()
-
-    def __await__(self) -> Generator[Any, None, None]:
-        return self
-
-    def __iter__(self) -> Generator[Any, None, None]:
-        return self
-
-    def __next__(self) -> Any:
-        return self.send(None)
-
-    def send(self, value: Any) -> Any:
-        return self._wait.send(value)
-
-    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
-        error = typ if val is None else val
-        if isinstance(error, asyncio.CancelledError) or (
-            isinstance(error, type) and issubclass(error, asyncio.CancelledError)
-        ):
-            self._inner.close()
-        if val is None and tb is None:
-            return self._wait.throw(typ)
-        return self._wait.throw(typ, val, tb)
-
-    def close(self) -> None:
-        self._wait.close()
+        self._inner.finish()

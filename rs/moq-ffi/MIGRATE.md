@@ -48,7 +48,7 @@ Pass that name through `MoqMediaTarget::Named { name }` when constructing `MoqMe
 
 ### Broadcast `finish` no longer closes
 
-`MoqBroadcastProducer::finish()` was a deprecated alias for `close()`; it no longer ends the broadcast at once.
+`MoqBroadcastProducer::finish()` was a deprecated alias for `close()`; it now finishes only the catalog, and the broadcast stays up until `close()`.
 Call `MoqBroadcastProducer::close()` where you called `finish()`.
 
 ### JSON snapshot `delta_ratio` is `deltas`
@@ -89,7 +89,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer::finish` lets go, instead of unlisting when its producer finishes or is released.
+A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes, instead of unlisting when its producer finishes or is released.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
 ### A claim answers by publishing (#5678)
