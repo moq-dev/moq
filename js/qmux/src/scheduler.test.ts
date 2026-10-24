@@ -246,7 +246,7 @@ describe("SendScheduler", () => {
 		);
 		sched.enqueueControl(frame(98));
 		let flushed = false;
-		void sched.close(new Error("closing"), frame(99)).then(() => {
+		const closed = sched.close(new Error("closing"), frame(99)).then(() => {
 			flushed = true;
 		});
 
@@ -254,7 +254,7 @@ describe("SendScheduler", () => {
 		expect(flushed).toBe(false); // the sink hasn't taken it yet
 
 		sink.release(5);
-		await until(() => flushed, 50);
+		await closed;
 
 		expect(await settled).toBe("rejected");
 		expect(sink.written).toEqual([99]); // only the final frame

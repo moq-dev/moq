@@ -27,7 +27,8 @@ export class Credit {
 	#released = 0n;
 	#closed = false;
 	#closeReason?: Error;
-	#waiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+	// A Set, so an aborted claim unlinks itself in O(1).
+	#waiters = new Set<{ resolve: () => void; reject: (err: Error) => void }>();
 
 	constructor(max: bigint) {
 		this.#used = 0n;
@@ -72,11 +73,11 @@ export class Credit {
 					},
 				};
 				const abort = () => {
-					this.#waiters = this.#waiters.filter((w) => w !== waiter);
+					this.#waiters.delete(waiter);
 					reject(signal?.reason);
 				};
 				signal?.addEventListener("abort", abort, { once: true });
-				this.#waiters.push(waiter);
+				this.#waiters.add(waiter);
 			});
 		}
 	}
@@ -102,7 +103,7 @@ export class Credit {
 		this.#closed = true;
 		this.#closeReason ??= reason ?? new Error("closed");
 		const waiters = this.#waiters;
-		this.#waiters = [];
+		this.#waiters = new Set();
 		for (const { reject } of waiters) reject(this.#closeReason);
 	}
 
@@ -147,7 +148,7 @@ export class Credit {
 
 	#wake(): void {
 		const waiters = this.#waiters;
-		this.#waiters = [];
+		this.#waiters = new Set();
 		for (const { resolve } of waiters) resolve();
 	}
 }
