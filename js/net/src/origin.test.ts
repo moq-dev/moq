@@ -2162,6 +2162,43 @@ test("a broadcast a derived handle released cannot announce again", async () => 
 	origin.close();
 });
 
+test("closing a derived handle withdraws the sessions and answers attached through it", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const path = Path.from("blind");
+
+	const request = consumer.request(path);
+	const detach = wireOf(scoped).attach(false);
+	const upstream = new BroadcastProducer();
+	const withdraw = wireOf(scoped).answer(path, upstream.consume());
+	expect(withdraw).toBeDefined();
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(request.unroutable.peek()).toBe(false);
+
+	scoped.close();
+	await settle();
+
+	// The answer went with the handle, and nothing is left that could answer instead.
+	expect(request.active.peek()).toBeUndefined();
+	const retry = consumer.request(path);
+	expect(retry.unroutable.peek()).toBe(true);
+
+	// A session still using the released handle cannot answer or count as an answerer.
+	expect(wireOf(scoped).answer(path, new BroadcastProducer().consume())).toBeUndefined();
+	wireOf(scoped).attach(false);
+	await settle();
+	expect(retry.unroutable.peek()).toBe(true);
+
+	// The session's own teardown afterwards is a no-op.
+	withdraw?.();
+	detach();
+	retry.close();
+	request.close();
+	origin.close();
+});
+
 test("a scoped dynamic only serves allowed paths and presents relative requests", async () => {
 	const origin = new Producer();
 	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));

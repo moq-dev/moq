@@ -1271,20 +1271,15 @@ export class Producer implements Table {
 			previous.close();
 		}
 
-		// Drop it, unless a recreate already replaced it: a stale broadcast closing must not
-		// unpublish the live one. Clearing `created` also stops a later announce.
-		const drop = () => {
-			this.#borrowed?.releases.delete(release);
+		// Drop it when the broadcast closes, unless a recreate already replaced it: a stale
+		// broadcast closing must not unpublish the live one. Clearing `created` also stops a
+		// later announce, since a consumer clone can keep the broadcast open past this close.
+		const release = this.#hold(() => {
 			this.#retractExact(path, front);
 			if (this.#state.created?.get(path) === front) this.#state.created.delete(path);
-		};
-		// A consumer clone can keep the broadcast open past `front.close()`, so drop it first.
-		const release = () => {
-			drop();
 			front.close();
-		};
-		this.#borrowed?.releases.add(release);
-		void front.closed.then(drop);
+		});
+		void front.closed.then(release);
 
 		return producer;
 	}
@@ -1400,8 +1395,7 @@ export class Producer implements Table {
 		this.#state.rebuildOriginated();
 		this.#state.refreshPrefix(prefix);
 
-		const retract = () => {
-			this.#borrowed?.releases.delete(retract);
+		const retract = this.#hold(() => {
 			this.#state.routes.mutate((routes) => {
 				const entries = routes?.get(prefix);
 				if (!entries) return;
@@ -1413,9 +1407,8 @@ export class Producer implements Table {
 			server.close();
 			this.#state.rebuildOriginated();
 			this.#state.refreshPrefix(prefix);
-		};
+		});
 
-		this.#borrowed?.releases.add(retract);
 		return makeDynamic(prefix, entry, this.#state, retract, publishes ? this : undefined);
 	}
 
@@ -1426,15 +1419,13 @@ export class Producer implements Table {
 	 * @internal
 	 */
 	#attach(discovery: boolean): Dispose {
+		if (this.#borrowed?.closed) return () => {};
 		this.#sessions(1, discovery);
 		const release = this.#expect();
-		let detached = false;
-		return () => {
-			if (detached) return;
-			detached = true;
+		return this.#hold(() => {
 			this.#sessions(-1, discovery);
 			release();
-		};
+		});
 	}
 
 	#sessions(delta: number, discovery: boolean): void {
@@ -1457,15 +1448,26 @@ export class Producer implements Table {
 	 * @internal
 	 */
 	#expect(): Dispose {
+		if (this.#borrowed?.closed) return () => {};
 		this.#state.answerers.update((count) => count + 1);
-		let released = false;
-		return () => {
-			if (released) return;
-			released = true;
-			// Clamped because closing the origin zeroes the count, and the sessions attached at
-			// the time still release afterwards.
-			this.#state.answerers.update((count) => Math.max(0, count - 1));
+		// Clamped because closing the origin zeroes the count, and the sessions attached at
+		// the time still release afterwards.
+		return this.#hold(() => this.#state.answerers.update((count) => Math.max(0, count - 1)));
+	}
+
+	// Run `release` once, at the first of its own call or this derived handle's close, so a
+	// borrower's close withdraws what it registered. The owner's close tears down everything.
+	#hold(release: Dispose): Dispose {
+		const borrowed = this.#borrowed;
+		let done = false;
+		const held = () => {
+			if (done) return;
+			done = true;
+			borrowed?.releases.delete(held);
+			release();
 		};
+		borrowed?.releases.add(held);
+		return held;
 	}
 
 	/**
@@ -1497,14 +1499,14 @@ export class Producer implements Table {
 	 */
 	#answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined {
 		const slot = this.#state.requests.peek()?.get(path);
-		if (!slot || slot.answer !== undefined) {
+		if (!slot || slot.answer !== undefined || this.#borrowed?.closed) {
 			front.close();
 			return undefined;
 		}
 		slot.answer = front;
 		this.#state.refresh(path);
 
-		return () => {
+		return this.#hold(() => {
 			if (slot.answer === front) {
 				// A request the answer resolved ends with its session: the next session is another
 				// publisher instance, since nothing (no epoch) says it serves the same bytes.
@@ -1519,7 +1521,7 @@ export class Producer implements Table {
 				}
 			}
 			front.close();
-		};
+		});
 	}
 
 	/** A read handle for this origin, the side a connection's `publish` option borrows. */
@@ -1546,8 +1548,8 @@ export class Producer implements Table {
 	 * Close the origin, every broadcast it still routes, and its announcement streams. Idempotent.
 	 *
 	 * A handle from {@link scope} or {@link withPreference} borrows the origin: closing it
-	 * withdraws only the broadcasts and routes registered through it and refuses new ones,
-	 * ignoring `abort`. Only the handle made with `new Producer()` closes the origin.
+	 * withdraws only the broadcasts, routes, and sessions (with their answers) registered
+	 * through it and refuses new ones, ignoring `abort`. Only the handle made with `new Producer()` closes the origin.
 	 */
 	close(abort?: Error) {
 		const borrowed = this.#borrowed;
