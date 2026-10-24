@@ -4,14 +4,6 @@ How to update your pipelines for each breaking change, newest first.
 
 ## Unreleased
 
-### Clean EOS serves the finished tail
-
-Remove the unreleased `moqsink linger` property. Every clean EOS now serves the
-finished broadcast until its media is stale, then posts EOS, so `gst-launch -e`
-can remain running for the media retention window (30 seconds for audio/video).
-Move the pipeline to NULL to interrupt immediately. A publication with no media
-to drain still posts EOS immediately; subscriber `linger` options are unchanged.
-
 ### Both elements use `connect-version`
 
 Replace `moqsrc versions="moq-lite-06"` with `moqsrc connect-version="moq-lite-06"`.

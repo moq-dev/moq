@@ -73,10 +73,6 @@ The simplest way to publish a stream:
 | `backend`   | string  | `"auto"` | Graphics API for a `<canvas>` preview: `"auto"`, `"webgpu"`, `"2d"` |
 | `announce`  | string  | `"source"` | When to advertise: `"always"`, `"never"`, `"source"` (once media is captured). A camera source waits for every enabled track, and `"source"` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. The broadcast is created while connected either way. |
 
-When advertising stops, the finished broadcast stays available until its media
-is stale, so a late viewer can drain the tail. Advertising again publishes a new
-broadcast and publisher epoch. Removing the element ends it immediately.
-
 A nested `<video>` shows the raw capture; a `<canvas>` is drawn by the element.
 Camera and microphone failures are observable through `el.sources.video`
 and `el.sources.audio`. When those signals hold a `Source.Camera` or

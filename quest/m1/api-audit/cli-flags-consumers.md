@@ -18,8 +18,8 @@ only understand the released retry spellings, so renaming first breaks the
 binary they run. Upstream keeps no compatibility aliases; released spellings
 fail at startup and name their replacement.
 
-The `## Unreleased` entries in the `MIGRATE.md` of moq-cli, moq-gst, and
-`@moq/publish` are the full list. Search each consumer for:
+The `## Unreleased` entries in the `MIGRATE.md` of moq-cli and moq-gst are the
+full list, plus the two unreleased `linger` opt-ins below. Search each consumer for:
 
 - `--backoff-*`, `--goaway-*`, `MOQ_BACKOFF_*`, `MOQ_GOAWAY_*`: add the
   `connect-` / `CONNECT_` prefix.
@@ -27,6 +27,6 @@ The `## Unreleased` entries in the `MIGRATE.md` of moq-cli, moq-gst, and
 - `--passthrough` on `import fmp4` or `import hls`: `--cmaf`. TS keeps
   `--passthrough`.
 - `--max-delay` on `export rtmp`: `--delay`.
-- `moqsrc versions=`: `connect-version=`. `moqsink linger` and the
-  `<moq-publish>` `linger` attribute are gone; clean completion always serves
-  the finished tail.
+- `moqsrc versions=`: `connect-version=`.
+- `moqsink linger` and the `<moq-publish>` `linger` attribute: remove them;
+  both close at the end, as they did without the opt-in.

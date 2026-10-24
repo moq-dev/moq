@@ -226,38 +226,18 @@ fn play_one_frame(sink: &gst::Element) -> gst::Pad {
 	pad
 }
 
-// Finishing in PAUSED keeps the media alive; returning to PLAYING cannot bypass its drain.
+// The end of stream closes the broadcast and posts EOS at once, even with media a late subscriber
+// could still have drained.
 #[test]
-fn paused_finished_media_still_waits_when_playing_again() {
+fn published_media_posts_the_eos_at_once() {
 	init();
 	let sink = publisher();
 	let seen = recording_bus(&sink);
 	let pad = play_one_frame(&sink);
 
-	sink.set_state(gst::State::Paused).expect("pause before EOS");
 	assert!(pad.send_event(gst::event::Eos::new()));
-	assert_eq!(posted_eos(&seen), 0);
-	sink.set_state(gst::State::Playing).expect("resume the finished tail");
-	assert_eq!(posted_eos(&seen), 0);
+	assert_eq!(posted_eos(&seen), 1);
 	let _ = sink.set_state(gst::State::Null);
-}
-
-// Published media is served until it is stale, so the EOS that ends `gst-launch` waits
-// for it. Stopping the pipeline is the interrupt: it closes the broadcast at once, and the run it ended
-// owes no EOS.
-#[test]
-fn finished_media_holds_the_eos_until_the_pipeline_stops_by_default() {
-	init();
-	let sink = publisher();
-	let seen = recording_bus(&sink);
-	let pad = play_one_frame(&sink);
-
-	assert!(pad.send_event(gst::event::Eos::new()));
-	assert_eq!(status_of(&sink, "sink_0"), "ended");
-	assert_eq!(posted_eos(&seen), 0, "the finished broadcast is still serving its tail");
-
-	assert_eq!(sink.set_state(gst::State::Null), Ok(gst::StateChangeSuccess::Success));
-	assert_eq!(posted_eos(&seen), 0, "the stopped run owes no EOS");
 }
 
 // After the publication ends, a buffer that got past the pad's own EOS flag (a flush clears it) must

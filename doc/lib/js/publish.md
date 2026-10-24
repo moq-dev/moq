@@ -35,10 +35,6 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), `always`, or `never`. Nobody can see or subscribe to the broadcast until it is announced. |
 
-When advertising stops, the finished broadcast serves its tail until the media
-is stale. Advertising again publishes a new broadcast and publisher epoch.
-Removing the element ends it immediately.
-
 Every attribute is also a reactive property. The
 [README](https://www.npmjs.com/package/@moq/publish) lists types and defaults.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the

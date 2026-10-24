@@ -4,8 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Clean completion always serves the finished tail
-
 ### Time units come from `Clock`
 
 `Net.Time.Milli` and the other duration units moved to `@moq/clock`, which `@moq/publish` re-exports as `Clock`.
@@ -20,18 +18,6 @@ Read it with `get` or `peek` as before; the broadcast alone replaces the produce
 
 `Support.Audio.aac` is `"full" | "none"` like `opus`, instead of a boolean.
 Replace `aac === true` with `aac === "full"`.
-
-### `BroadcastInput` has a `linger` input
-
-Turning `BroadcastInput.announce` off after announcing now finishes the broadcast
-and serves its tail until the media is stale. Turning it back on publishes a new
-broadcast and publisher epoch; reacquire `broadcast.net` rather than reuse its
-previous producer or track handles. Use `enabled: false` or `close()` for an
-immediate end.
-
-Remove the unreleased `BroadcastInput.linger`, `<moq-publish linger>` attribute,
-`element.linger` property, and `element.controls.linger` input. Clean completion
-is unconditional. Removing the element still ends its broadcast immediately.
 
 ### `Encoder.cut()` is not rate limited, and video tracks advertise refresh (#6048)
 
