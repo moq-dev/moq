@@ -1188,9 +1188,13 @@ impl Publisher {
 				)
 				.await;
 			}
-			// Held for the life of the subscription, and while the application verifies its
-			// token. The request window or stream credit already bounds how many the peer opens.
-			let slot: crate::auth::Hold = std::sync::Arc::new(self.subscriptions.hold());
+			// Held for the life of the subscription, and by every token verification the
+			// application takes for it, initial or renewal, even past a cancel. The request keeps
+			// its stream, and so its stream credit or request window slot, until all of them let
+			// go, so a peer cancelling and resubscribing cannot leave more verifications in flight
+			// than its credit admits.
+			let credit = kio::Producer::<()>::default();
+			let slot: crate::auth::Hold = std::sync::Arc::new((self.subscriptions.hold(), credit.consume()));
 
 			let mut request_finished = false;
 			let mut goaways = super::request_stream::Messages::new(self.session.clone(), self.control.client());
@@ -1214,17 +1218,8 @@ impl Publisher {
 					})
 					.await;
 					let Some(verified) = verified else {
-						// The request keeps its stream, and so its credit, until the application
-						// lets go of the token, so a peer cancelling and resubscribing cannot leave
-						// more verifications in flight than its credit admits.
-						verdict.withdraw();
-						kio::wait(|waiter| {
-							if session.poll_closed(&mut waiter.context()).is_ready() {
-								return Poll::Ready(());
-							}
-							verdict.poll_released(waiter)
-						})
-						.await;
+						drop((verdict, slot));
+						self.released(&credit).await;
 						return Ok(());
 					};
 					let admitted = crate::auth::RequestGrant::new(
@@ -1501,6 +1496,8 @@ impl Publisher {
 			};
 			// A FETCH joining this subscription ends with it, before the peer reads a word.
 			drop(_join);
+			// The subscription's demand is gone; only its credit may still wait on a verification.
+			drop((request_grant, _slot));
 
 			let (served, streams) = match subscribed {
 				Ok(Ok(Subscribed::Served(served, streams))) => (served, streams),
@@ -1517,8 +1514,21 @@ impl Publisher {
 					}
 				},
 			};
-			self.write_publish_done(stream, request_id, served, streams).await
+			self.write_publish_done(stream, request_id, served, streams, Some(&credit))
+				.await
 		}
+	}
+
+	/// Wait until no token verification holds `credit`'s request any more, or the session closes.
+	async fn released(&self, credit: &kio::Producer<()>) {
+		let mut session = self.session.clone();
+		kio::wait(|waiter| {
+			if session.poll_closed(&mut waiter.context()).is_ready() || credit.poll_unused(waiter).is_ready() {
+				return Poll::Ready(());
+			}
+			Poll::Pending
+		})
+		.await
 	}
 
 	/// Send the END_OF_TRACK a subscription that ran to the track's end still owes: draft-14
@@ -1558,13 +1568,15 @@ impl Publisher {
 	}
 
 	/// End a subscription on the wire with the PUBLISH_DONE `served` reports, after `streams`
-	/// group streams, returning how serving ended.
+	/// group streams, returning how serving ended. The stream closes only once no verification
+	/// holds `credit`'s request, if it has one.
 	async fn write_publish_done(
 		&self,
 		mut stream: Stream<Transport, Version>,
 		request_id: RequestId,
 		served: Served,
 		streams: u64,
+		credit: Option<&kio::Producer<()>>,
 	) -> Result<(), Error> {
 		let (status, reason) = served.status(self.version);
 		let res = match served {
@@ -1587,6 +1599,11 @@ impl Publisher {
 			})
 			.await;
 
+		// The peer learns the subscription ended at once, but the stream holds its credit until
+		// the application lets go of every token it took for it.
+		if let Some(credit) = credit {
+			self.released(credit).await;
+		}
 		// PUBLISH_DONE is the last thing on this stream, so it needs the acknowledgement too.
 		let _ = stream.writer.close().await;
 
@@ -13016,54 +13033,92 @@ mod serve_tests {
 	}
 
 	/// A peer that ends the subscription while a renewal is still being verified ends it here
-	/// too: with a grant that never expires and an acceptor that never answers the renewal,
-	/// only the stream closing can end the request, and it must.
+	/// too: with a grant that never expires and an acceptor sitting on the renewal, the stream
+	/// closing drops the subscription's demand at once. The request keeps its stream, and so its
+	/// credit, until the acceptor lets go of the renewal.
 	#[moq_clock::test]
 	async fn a_closed_subscription_ends_while_a_renewal_is_pending() {
 		const VERSION: Version = Version::Draft18;
 
-		let (auth, mut requests, _cred) = auth_covering_other();
-		let session = ScriptedSession::per_stream_eof(vec![subscribe_update_with_token(VERSION, true).await]);
-		let h = serve_on(VERSION, auth, session);
+		let (auth, requests, _cred) = auth_covering_other();
+		let session = ScriptedSession::new(subscribe_update_with_token(VERSION, true).await);
+		let h = serve_on(VERSION, auth, session.clone());
+		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), VERSION)
+			.await
+			.unwrap();
+		let cancel = || session.close(crate::lite::test_transport::Close::Fin);
+		ends_while_a_renewal_is_pending(&h, requests, stream, cancel, "draft-18").await;
+	}
+
+	/// Serve a token-authorized SUBSCRIBE, and `cancel` it once the acceptor holds a renewal. Its
+	/// demand ends at once; the request ends only once the renewal is dropped.
+	async fn ends_while_a_renewal_is_pending(
+		h: &Serve,
+		mut requests: crate::auth::Requests,
+		stream: Stream<Transport, Version>,
+		cancel: impl FnOnce(),
+		label: &str,
+	) {
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
 		group.write_frame(timestamp(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
 
-		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), VERSION)
-			.await
-			.unwrap();
-		let popped = std::sync::Arc::new(AtomicU64::new(0));
+		let renewal = std::sync::Arc::new(std::sync::Mutex::new(None));
 		let acceptor = {
-			let popped = popped.clone();
+			let renewal = renewal.clone();
 			async move {
 				let first = requests.next().await.expect("a request");
 				let _issued = first.accept(crate::auth::Grant::all());
-				popped.fetch_add(1, Ordering::Relaxed);
-				let _never_answered = requests.next().await.expect("a renewal");
-				popped.fetch_add(1, Ordering::Relaxed);
+				*renewal.lock().unwrap() = Some(requests.next().await.expect("a renewal"));
 				std::future::pending::<()>().await
 			}
 		};
 		let mut acceptor = std::pin::pin!(acceptor);
 		let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
-		let mut ended = false;
 		for _ in 0..500 {
 			let _ = futures::poll!(acceptor.as_mut());
+			assert!(
+				futures::poll!(serving.as_mut()).is_pending(),
+				"{label}: ended before the cancel"
+			);
+			if renewal.lock().unwrap().is_some() {
+				break;
+			}
+			settle().await;
+		}
+		assert!(
+			renewal.lock().unwrap().is_some(),
+			"{label}: the acceptor never saw the renewal"
+		);
+		assert!(
+			h.track.subscription().is_some(),
+			"{label}: the subscription is not serving"
+		);
+
+		cancel();
+		for _ in 0..10 {
+			assert!(
+				futures::poll!(serving.as_mut()).is_pending(),
+				"{label}: the request let go of its stream while the acceptor held the renewal"
+			);
+			settle().await;
+		}
+		assert!(
+			h.track.subscription().is_none(),
+			"{label}: the cancel did not end the subscription's demand"
+		);
+
+		drop(renewal.lock().unwrap().take());
+		let mut ended = false;
+		for _ in 0..10 {
 			if futures::poll!(serving.as_mut()).is_ready() {
 				ended = true;
 				break;
 			}
 			settle().await;
 		}
-		assert!(
-			popped.load(Ordering::Relaxed) >= 1,
-			"the subscription was token-authorized"
-		);
-		assert!(
-			ended,
-			"closing the stream ends the subscription despite the pending renewal"
-		);
+		assert!(ended, "{label}: dropping the renewal ends the request");
 	}
 
 	/// One UNSUBSCRIBE keyed to the subscription, the draft-14/15/16 cancellation message.
@@ -13084,49 +13139,22 @@ mod serve_tests {
 	}
 
 	/// Before draft-17 a cancellation is an UNSUBSCRIBE message, not a FIN. It must end the
-	/// request even while a renewal verdict is pending: with a non-expiring grant and an
-	/// acceptor that never answers the renewal, the UNSUBSCRIBE is the only thing that can.
+	/// subscription even while a renewal verdict is pending: with a non-expiring grant and an
+	/// acceptor sitting on the renewal, the UNSUBSCRIBE is the only thing that can.
 	#[moq_clock::test]
 	async fn a_pending_renewal_ends_on_an_unsubscribe_before_draft_17() {
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-			let (auth, mut requests, _cred) = auth_covering_other();
-			// The stream carries the renewal then the UNSUBSCRIBE and never FINs, so only the
+			let (auth, requests, _cred) = auth_covering_other();
+			// The stream carries the renewal, then the UNSUBSCRIBE, and never FINs, so only the
 			// message can end the request.
-			let script = [
-				subscribe_update_with_token(version, true).await,
-				unsubscribe_bytes(version).await,
-			]
-			.concat();
-			let h = serve_with_auth(version, auth, script);
-			let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
-			group.write_frame(timestamp(), b"frame".as_slice()).unwrap();
-			group.finish().unwrap();
-			settle().await;
-
+			let session = ScriptedSession::new(subscribe_update_with_token(version, true).await);
+			let h = serve_on(version, auth, session.clone());
 			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
 				.await
 				.unwrap();
-			let acceptor = async move {
-				let first = requests.next().await.expect("a request");
-				let _issued = first.accept(crate::auth::Grant::all());
-				let _never_answered = requests.next().await.expect("a renewal");
-				std::future::pending::<()>().await
-			};
-			let mut acceptor = std::pin::pin!(acceptor);
-			let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
-			let mut ended = false;
-			for _ in 0..500 {
-				let _ = futures::poll!(acceptor.as_mut());
-				if futures::poll!(serving.as_mut()).is_ready() {
-					ended = true;
-					break;
-				}
-				settle().await;
-			}
-			assert!(
-				ended,
-				"{version:?}: an UNSUBSCRIBE ends the subscription despite the pending renewal"
-			);
+			let unsubscribe = unsubscribe_bytes(version).await;
+			let cancel = || session.push(&unsubscribe);
+			ends_while_a_renewal_is_pending(&h, requests, stream, cancel, &format!("{version:?}")).await;
 		}
 	}
 
@@ -13210,7 +13238,8 @@ mod serve_tests {
 	}
 
 	/// A slow acceptor answering a renewal must not stall serving nor let the request outlive
-	/// its grant: the renewal verify is raced against the old deadline, which still fires.
+	/// its grant: the renewal verify is raced against the old deadline, which still fires and
+	/// sends PUBLISH_DONE. The stream keeps its credit until the acceptor lets go of the renewal.
 	#[moq_clock::test]
 	async fn a_slow_renewal_does_not_stall_serving() {
 		const VERSION: Version = Version::Draft18;
@@ -13242,7 +13271,7 @@ mod serve_tests {
 				std::future::pending::<()>().await
 			}
 		};
-		let mut acceptor = std::pin::pin!(acceptor);
+		let mut acceptor = Box::pin(acceptor);
 		let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
 
 		// Let the loop read the REQUEST_UPDATE and the acceptor pop both requests.
@@ -13262,16 +13291,46 @@ mod serve_tests {
 		// The acceptor is stuck. Past the old 60s expiry the deadline must still fire and end
 		// the request EXPIRED, rather than the pending renewal stalling serving.
 		moq_clock::sim::advance(Duration::from_secs(120)).await;
-		let mut ended = None;
+		let done = {
+			let log = Log::default();
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			);
+			writer.varint(ietf::PublishDone::ID).await.unwrap();
+			log.writes.lock().unwrap().clone()
+		};
+		let request = |sent: &crate::lite::test_transport::Sent| h.log.trail().contains(&(0, sent.clone()));
 		for _ in 0..50 {
 			let _ = futures::poll!(acceptor.as_mut());
+			assert!(
+				futures::poll!(serving.as_mut()).is_pending(),
+				"the request let go of its stream while the acceptor held the renewal"
+			);
+			if request(&crate::lite::test_transport::Sent::Write(done.clone())) {
+				break;
+			}
+			settle().await;
+		}
+		assert!(
+			request(&crate::lite::test_transport::Sent::Write(done.clone())),
+			"serving must end at the old deadline, not stall on the slow renewal"
+		);
+		assert!(
+			!request(&crate::lite::test_transport::Sent::Finish),
+			"the stream closed while the acceptor held the renewal"
+		);
+
+		drop(acceptor);
+		let mut ended = None;
+		for _ in 0..10 {
 			if let Poll::Ready(res) = futures::poll!(serving.as_mut()) {
 				ended = Some(res);
 				break;
 			}
 			settle().await;
 		}
-		let res = ended.expect("serving must end at the old deadline, not stall on the slow renewal");
+		let res = ended.expect("dropping the renewal ends the request");
 		assert!(matches!(res, Err(Error::Expired)), "{res:?}");
 	}
 
