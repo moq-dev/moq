@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
 import * as Epoch from "./epoch";
 import { Route } from "./hop";
-import { Producer } from "./origin";
+import { hooks } from "./internal.ts";
+import { Producer, type Request } from "./origin";
 import * as Path from "./path";
 import { wireOf } from "./wire";
 
@@ -142,7 +143,7 @@ test("announced requests follow the serving prefix, ignoring descendants and re-
 	const keeper = source.consume();
 	const prefix = origin.dynamicRoute(Path.from("pool"));
 	const serving = (async () => {
-		for await (const request of prefix.requested()) request.accept(source.consume());
+		for await (const request of prefix.requested()) hooks.acceptRequest(request, source.consume());
 	})();
 	const request = origin.request(Path.from("pool/job"), { announced: true });
 	await settle();
@@ -195,7 +196,7 @@ test("an announced request follows an epochless route replaced by an identical o
 	const serve = (source: BroadcastProducer) => {
 		const route = origin.dynamicRoute(path);
 		void (async () => {
-			for await (const request of route.requested()) request.accept(source.consume());
+			for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
 		})();
 		return route;
 	};
@@ -226,7 +227,7 @@ test("an origin closing settles an announced request a served route resolved", a
 	const source = new BroadcastProducer();
 	const route = origin.dynamicRoute(path);
 	void (async () => {
-		for await (const request of route.requested()) request.accept(source.consume());
+		for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
 	})();
 	const request = origin.request(path, { announced: true });
 	await settle();
@@ -276,7 +277,7 @@ for (const received of [false, true]) {
 		const source = new BroadcastProducer();
 		const route = received ? wireOf(origin).receive(path, Route.default) : origin.dynamicRoute(path);
 		void (async () => {
-			for await (const request of route.requested()) request.accept(source.consume());
+			for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
 		})();
 
 		const request = origin.request(path);
@@ -341,14 +342,15 @@ test("a prepared answer cannot announce itself before publish", async () => {
 	origin.close();
 });
 
-test("an application claim refuses an arbitrary broadcast", async () => {
+test("an application claim cannot accept an arbitrary broadcast", async () => {
 	const origin = new Producer();
 	const claim = origin.dynamic(Path.from("room"));
 	const requests = claim.requested();
 	const request = origin.request(Path.from("room/alice"));
-	const pending = (await requests.next()).value;
+	const pending: Request | undefined = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
-	expect(() => pending.accept(new BroadcastProducer())).toThrow("prepared and published");
+	// @ts-expect-error Only sessions accept a request; an application prepares and publishes.
+	expect(pending.accept).toBeUndefined();
 	request.close();
 	claim.close();
 	origin.close();

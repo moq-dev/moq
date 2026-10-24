@@ -44,7 +44,7 @@ Treat a rejected group read as the loss of that group and keep reading the track
 Answer each `Origin.Request` with `request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
 Only `publish` announces it: `prepared.broadcast.announce()` throws.
 Call `prepared.reject(err)` to refuse instead; JS has no destructor, so an abandoned `Prepared` holds its request open.
-`Dynamic.update` and `Request.accept` are no longer part of the public API, and `accept` throws on a request from `dynamic`.
+`Dynamic.update` and `Request.accept` are gone: only the built-in sessions serve a broadcast they already hold, and an application answers through `prepare`.
 Close the claim and claim again to change it, and close an answer's producer to end that output.
 
 ### `largest()` reports within a reader's `setGroups` bounds
