@@ -4019,10 +4019,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&front, Duration::from_secs(30));
 		sub.update(sub.subscription().with_ranges(ranges)).unwrap();
-		assert!(matches!(
-			sub.recv_group().now_or_never(),
-			Some(Err(Error::Unsupported))
-		));
+		assert!(matches!(sub.recv_group().now_or_never(), Some(Err(Error::Unsupported))));
 	}
 
 	/// Capping a replaced copy never replaces a time end it has not settled: the copy keeps
