@@ -2064,6 +2064,7 @@ impl Bbr3Config {
     }
 
     /// Seed the probe phases for deterministic transport tests.
+    #[cfg(any(test, feature = "testing"))]
     pub fn probe_rng_seed(&mut self, seed: [u8; 16]) -> &mut Self {
         self.probe_rng_seed = Some(seed);
         self

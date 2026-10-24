@@ -7,6 +7,10 @@ rust-version.workspace = true
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
+[features]
+# Test-only `Bbr3Config::probe_rng_seed`, for moq-quic's deterministic transport tests.
+testing = []
+
 [dependencies]
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 rand = { workspace = true }
