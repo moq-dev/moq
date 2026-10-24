@@ -1356,10 +1356,9 @@ impl Publisher {
 					// Buffered whole before its first await, so however the subscription is
 					// dropped from here, the request can still end on the wire.
 					acked = Some(track_serve.opened.clone());
-					stream.writer.buffer_varint(ietf::SubscribeOk::ID)?;
 					stream
 						.writer
-						.encode(&ietf::SubscribeOk {
+						.encode_message(&ietf::SubscribeOk {
 							request_id: match self.version {
 								Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(request_id),
 								_ => None,
@@ -1585,10 +1584,9 @@ impl Publisher {
 			Served::Paused(_) => Ok(()),
 		};
 
-		let _ = stream.writer.varint(ietf::PublishDone::ID).await;
 		let _ = stream
 			.writer
-			.encode(&ietf::PublishDone {
+			.encode_message(&ietf::PublishDone {
 				request_id: match self.version {
 					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(request_id),
 					_ => None,
@@ -2091,9 +2089,8 @@ impl Publisher {
 		request_id: RequestId,
 		largest: Option<Location>,
 	) -> Result<(), Error> {
-		writer.buffer_varint(ietf::RequestOk::ID)?;
 		writer
-			.encode(&ietf::RequestOk {
+			.encode_message(&ietf::RequestOk {
 				largest,
 				request_id: matches!(self.version, Version::Draft15 | Version::Draft16).then_some(request_id),
 				active: None,
@@ -2890,10 +2887,9 @@ impl Publisher {
 			// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
 			// REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the other
 			// requests it answers without ever naming this one.
-			stream.writer.varint(ietf::FetchOk::ID).await?;
 			stream
 				.writer
-				.encode(&ietf::FetchOk {
+				.encode_message(&ietf::FetchOk {
 					request_id: match self.version {
 						Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(msg.request_id),
 						_ => None,
@@ -3176,8 +3172,10 @@ impl Publisher {
 				largest: live_edge(&track).largest,
 				properties,
 			};
-			stream.writer.varint(ietf::TrackStatusOk::id(self.version)).await?;
-			stream.writer.encode(&ok).await?;
+			stream
+				.writer
+				.buffer_message(ietf::TrackStatusOk::id(self.version), &ok)?;
+			std::future::poll_fn(|cx| stream.writer.poll_flush(cx)).await?;
 			Ok::<(), Error>(())
 		};
 		let res = {
@@ -3388,19 +3386,17 @@ impl Publisher {
 						// A repeat under another epoch replaces the instance in place.
 						if renamed && !replaced {
 							tracing::debug!(broadcast = %absolute, "namespace_done for an epoch gained or lost");
-							stream.writer.varint(ietf::NamespaceDone::ID).await?;
 							stream
 								.writer
-								.encode(&ietf::NamespaceDone {
+								.encode_message(&ietf::NamespaceDone {
 									suffix: suffix.as_path(),
 								})
 								.await?;
 						}
 						tracing::debug!(broadcast = %absolute, "namespace");
-						stream.writer.varint(ietf::Namespace::ID).await?;
 						stream
 							.writer
-							.encode(&ietf::Namespace {
+							.encode_message(&ietf::Namespace {
 								suffix: suffix.as_path(),
 								params: negotiated.extended().then(|| advert.params()),
 							})
@@ -3408,10 +3404,9 @@ impl Publisher {
 					}
 					(false, true) => {
 						tracing::debug!(broadcast = %absolute, "namespace_done");
-						stream.writer.varint(ietf::NamespaceDone::ID).await?;
 						stream
 							.writer
-							.encode(&ietf::NamespaceDone {
+							.encode_message(&ietf::NamespaceDone {
 								suffix: suffix.as_path(),
 							})
 							.await?;
@@ -3463,19 +3458,15 @@ impl Publisher {
 		};
 
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
-		let sent = async {
-			request.writer.varint(ietf::PublishNamespace::ID).await?;
-			request
-				.writer
-				.encode(&ietf::PublishNamespace {
-					request_id,
-					track_namespace: path.as_path(),
-					params,
-					authorization_token: auth.as_ref().and_then(|auth| self.request_token(auth)),
-				})
-				.await
-		}
-		.await;
+		let sent = request
+			.writer
+			.encode_message(&ietf::PublishNamespace {
+				request_id,
+				track_namespace: path.as_path(),
+				params,
+				authorization_token: auth.as_ref().and_then(|auth| self.request_token(auth)),
+			})
+			.await;
 		let answer = match sent {
 			Ok(()) => self.read_response(&mut request, &mut messages).await,
 			// A sequential-ID peer cannot accept any later request when this header failed
@@ -3660,11 +3651,7 @@ impl Publisher {
 			update.authorization_token = auth.as_ref().and_then(|auth| self.request_token(auth));
 		}
 		tracing::debug!(broadcast = %self.origin.absolute(&request.path), "publish_namespace update");
-		let written = async {
-			request.stream.writer.varint(ietf::PublishNamespaceUpdate::ID).await?;
-			request.stream.writer.encode(&update).await
-		}
-		.await;
+		let written = request.stream.writer.encode_message(&update).await;
 		if let Err(err) = written {
 			// The peer ended the request before the update reached it, which ends only this
 			// advertisement: closing our side completes the withdrawal, and the retry
@@ -3951,10 +3938,9 @@ impl Publisher {
 				}
 			}
 			Target::Inline(stream) => {
-				stream.writer.varint(ietf::NamespaceDone::ID).await?;
 				stream
 					.writer
-					.encode(&ietf::NamespaceDone {
+					.encode_message(&ietf::NamespaceDone {
 						suffix: suffix.as_path(),
 					})
 					.await?;
@@ -4137,19 +4123,17 @@ impl Publisher {
 		// Send OK response
 		match self.version {
 			Version::Draft14 => {
-				stream.writer.varint(ietf::SubscribeNamespaceOk::ID).await?;
 				stream
 					.writer
-					.encode(&ietf::SubscribeNamespaceOk {
+					.encode_message(&ietf::SubscribeNamespaceOk {
 						request_id: msg.request_id,
 					})
 					.await?;
 			}
 			Version::Draft15 | Version::Draft16 => {
-				stream.writer.varint(ietf::RequestOk::ID).await?;
 				stream
 					.writer
-					.encode(&ietf::RequestOk {
+					.encode_message(&ietf::RequestOk {
 						largest: None,
 						request_id: Some(msg.request_id),
 						active,
@@ -4157,10 +4141,9 @@ impl Publisher {
 					.await?;
 			}
 			_ => {
-				stream.writer.varint(ietf::RequestOk::ID).await?;
 				stream
 					.writer
-					.encode(&ietf::RequestOk {
+					.encode_message(&ietf::RequestOk {
 						largest: None,
 						request_id: None,
 						active,
@@ -4366,8 +4349,7 @@ impl Publisher {
 						});
 					if let Some(error) = refusal {
 						let stream = ns.target.stream().expect("update has a stream");
-						stream.writer.varint(ietf::RequestError::ID).await?;
-						stream.writer.encode(&error).await?;
+						stream.writer.encode_message(&error).await?;
 						// Dropping a finished writer resets it, which could discard the refusal.
 						stream.writer.finish()?;
 						break stream.writer.closed().await;
@@ -4399,10 +4381,9 @@ impl Publisher {
 						retry_delay = RETRY_BASE;
 					}
 					let stream = ns.target.stream().expect("update has a stream");
-					stream.writer.varint(ietf::RequestOk::ID).await?;
 					stream
 						.writer
-						.encode(&ietf::RequestOk {
+						.encode_message(&ietf::RequestOk {
 							largest: None,
 							request_id: None,
 							active: None,
@@ -13388,19 +13369,26 @@ mod serve_tests {
 			log.writes.lock().unwrap().clone()
 		};
 		let request = |sent: &crate::lite::test_transport::Sent| h.log.trail().contains(&(0, sent.clone()));
+		// PUBLISH_DONE goes out whole, so its write leads with the type.
+		let sent_done = || {
+			h.log.trail().iter().any(|(stream, sent)| {
+				*stream == 0
+					&& matches!(sent, crate::lite::test_transport::Sent::Write(bytes) if bytes.starts_with(&done))
+			})
+		};
 		for _ in 0..50 {
 			let _ = futures::poll!(acceptor.as_mut());
 			assert!(
 				futures::poll!(serving.as_mut()).is_pending(),
 				"the request let go of its stream while the acceptor held the renewal"
 			);
-			if request(&crate::lite::test_transport::Sent::Write(done.clone())) {
+			if sent_done() {
 				break;
 			}
 			settle().await;
 		}
 		assert!(
-			request(&crate::lite::test_transport::Sent::Write(done.clone())),
+			sent_done(),
 			"serving must end at the old deadline, not stall on the slow renewal"
 		);
 		assert!(
@@ -16119,14 +16107,17 @@ mod tests {
 
 		for version in [Version::Draft14, Version::Draft15, Version::Draft19] {
 			let origin = unheld_origin();
-			let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+			// A token too big for the header's u16 length, so the header fails after its stream
+			// opened and its request ID was spent. A message goes out whole, so this is the one
+			// failure a fresh in-memory stream can be made to show.
+			let auth = crate::auth::Handle::ietf(false);
+			let token = auth.present(bytes::Bytes::from(vec![0; 70_000]), false).unwrap();
+			let _cam = origin
+				.announce("cam", crate::origin::Route::default().with_auth(token))
+				.unwrap();
 			settle().await;
 
-			// One message at a time, so the header's body waits behind its type.
-			let (session, mut peer) = memory::pair(memory::Config {
-				stream_buffer: 0,
-				..Default::default()
-			});
+			let (session, mut peer) = memory::pair(memory::Config::default());
 			let publisher = Publisher::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
@@ -16135,17 +16126,17 @@ mod tests {
 				None,
 				declared(Some(false)),
 				version,
-			);
+			)
+			.with_auth(auth.clone());
 			let run = moq_clock::sim::spawn(publisher.run_publish_namespaces());
 
-			let mut stream = moq_clock::timeout(
+			moq_clock::timeout(
 				Duration::from_secs(10),
 				Stream::accept(&mut crate::driver::Transport::new(peer.clone()), version),
 			)
 			.await
 			.expect("no advertisement")
 			.unwrap();
-			stream.reader.abort(&Error::Cancel);
 
 			match version {
 				Version::Draft14 | Version::Draft15 => {
