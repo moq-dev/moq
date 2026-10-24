@@ -16843,6 +16843,39 @@ mod test {
 		assert!(fill.is_wanted(3), "the aborted group never arrived");
 	}
 
+	/// Refusing an evicted group the feed already passed fails the readers waiting on it
+	/// without naming it dropped, so a later reader of the whole group still gets a fill.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_group_is_asked_again_by_a_later_reader() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		for sequence in 0..5 {
+			write_group(&producer, sequence);
+		}
+		evict(&producer, 3);
+		let waiter = kio::Waiter::noop();
+		let tail = producer
+			.consume()
+			.fetch_group(3, group::Fetch::default().with_frame_start(2));
+		let Poll::Ready(Ok(first)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("an evicted group is a miss");
+		};
+		first.refuse_groups(3..4, Error::Unsupported);
+		assert!(matches!(tail.now_or_never(), Some(Err(Error::Unsupported))));
+		drop(first);
+
+		let mut subscriber = producer.subscribe(replay().with_groups(3..4));
+		assert!(
+			subscriber.poll_next_group(&waiter).is_pending(),
+			"group 3 is being filled"
+		);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the source may still have group 3");
+		};
+		assert!(fill.is_wanted(3));
+	}
+
 	/// A backfill cached before its fill publishes the answer is not a live arrival: the reader
 	/// keeps it owed, so the answer still reaches it.
 	#[test]

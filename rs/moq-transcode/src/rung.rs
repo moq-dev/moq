@@ -515,27 +515,32 @@ fn spawn_fill(
 
 /// Transcode group `sequence` of a fill, fetching it from the source.
 ///
-/// A failure while someone still wants the group drops it. Once nobody wants the
-/// group, it is left unanswered instead, releasing the permit for the groups the
-/// fill still owes: its last reader already left it, and accepting afterwards would
-/// cache the group a fresh fill is about to serve.
+/// The group is dropped only once the source says it no longer has it. Any other
+/// failure while someone still wants the group refuses it for those readers alone,
+/// so a later reader asks again. Once nobody wants the group, it is left unanswered
+/// instead, releasing the permit for the groups the fill still owes: its last reader
+/// already left it, and accepting afterwards would cache the group a fresh fill is
+/// about to serve.
 async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Result<(), Error> {
-	let reject = || fill.drop_groups(sequence..sequence + 1);
+	let groups = sequence..sequence + 1;
+	let refuse = |err: moq_net::Error| fill.refuse_groups(groups.clone(), err);
+	let failed = || refuse(moq_net::Error::Stream(moq_net::StreamError::Internal));
 	// A fresh encode of this group need not match the bytes the reader's head
 	// came from (the live encoder, or an earlier fetch), so its tail cannot
 	// continue that head. Refuse it so the reader moves on to the next group
-	// boundary instead of decoding a splice.
+	// boundary instead of decoding a splice; a reader of the whole group still
+	// gets it.
 	let frame = fill.frame_start(sequence);
 	if frame != 0 {
 		tracing::debug!(sequence, frame, "refusing a fetch that starts mid-group");
-		reject();
+		refuse(moq_net::Error::Unsupported);
 		return Ok(());
 	}
 
 	let track = match rung.broadcast.track(&rung.source) {
 		Ok(track) => track,
 		Err(err) => {
-			reject();
+			refuse(err.clone());
 			return Err(err.into());
 		}
 	};
@@ -545,8 +550,12 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 		_ = fill.unwanted(sequence) => return abandon(sequence),
 		source = track.fetch_group(sequence, options) => match source {
 			Ok(source) => source,
+			Err(moq_net::Error::NotFound) => {
+				fill.drop_groups(groups);
+				return Err(moq_net::Error::NotFound.into());
+			}
 			Err(err) => {
-				reject();
+				refuse(err.clone());
 				return Err(err.into());
 			}
 		},
@@ -561,7 +570,7 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 	let pipeline = match rung.pipeline().await {
 		Ok(pipeline) => pipeline,
 		Err(err) => {
-			reject();
+			failed();
 			return Err(err);
 		}
 	};
@@ -569,7 +578,7 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 	let container = match rung.container() {
 		Ok(container) => container,
 		Err(err) => {
-			reject();
+			failed();
 			return Err(err);
 		}
 	};

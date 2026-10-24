@@ -606,6 +606,15 @@ impl Fill {
 		self.inner.drop_groups(groups, Error::NotFound);
 	}
 
+	/// Refuse `groups` with `err` without saying the source lost them, as when serving them
+	/// failed for now or this request asks what the source can't serve. The readers waiting
+	/// now stop waiting, and a later reader asks again. Only the groups a reader still reads
+	/// count, as with [`Self::drop_groups`].
+	pub fn refuse_groups(&self, groups: ops::Range<u64>, err: Error) {
+		let owed = self.inner.owed(groups);
+		self.inner.refuse(&owed, err);
+	}
+
 	/// Whether a reader still waits on this fill.
 	pub fn is_used(&self) -> bool {
 		self.inner.result.is_used()
@@ -764,24 +773,7 @@ impl Inner {
 	/// longer has them, which binds every reader. Only what a reader still reads: a handler
 	/// refusing the whole fill never checked the rest.
 	fn drop_groups(&self, groups: ops::Range<u64>, err: Error) {
-		let groups = groups.start.max(self.start.group)..groups.end.min(self.end);
-		if groups.is_empty() {
-			return;
-		}
-		let wanted = self.wanted();
-		let unresolved: RangeSet<u64> = {
-			let outcome = self.result.read();
-			let mut unresolved = RangeSet::new();
-			for run in wanted.overlapping(&groups) {
-				for gap in outcome
-					.resolved
-					.gaps(&(run.start.max(groups.start)..run.end.min(groups.end)))
-				{
-					unresolved.insert(gap);
-				}
-			}
-			unresolved
-		};
+		let unresolved = self.owed(groups);
 		if unresolved.is_empty() {
 			return;
 		}
@@ -791,6 +783,26 @@ impl Inner {
 			}
 		}
 		self.refuse(&unresolved, err);
+	}
+
+	/// The part of `groups` inside the fill that a reader still reads and nothing answered yet.
+	fn owed(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+		let groups = groups.start.max(self.start.group)..groups.end.min(self.end);
+		let mut owed = RangeSet::new();
+		if groups.is_empty() {
+			return owed;
+		}
+		let wanted = self.wanted();
+		let outcome = self.result.read();
+		for run in wanted.overlapping(&groups) {
+			for gap in outcome
+				.resolved
+				.gaps(&(run.start.max(groups.start)..run.end.min(groups.end)))
+			{
+				owed.insert(gap);
+			}
+		}
+		owed
 	}
 
 	/// The part of `groups` nothing answered yet.

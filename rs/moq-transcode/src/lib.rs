@@ -1452,8 +1452,8 @@ mod tests {
 			.fetch_group(7, moq_net::group::Fetch::default().with_frame_start(2))
 			.await;
 		match partial {
-			Err(moq_net::Error::NotFound) => {}
-			Err(err) => panic!("expected a NotFound refusal, got {err}"),
+			Err(moq_net::Error::Unsupported) => {}
+			Err(err) => panic!("expected an Unsupported refusal, got {err}"),
 			Ok(_) => panic!("served a fetch that starts mid-group"),
 		}
 

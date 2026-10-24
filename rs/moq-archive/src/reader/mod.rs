@@ -379,6 +379,16 @@ async fn serve_timeline<T: ObjectStore>(shared: Arc<Shared<T>>, requests: Timeli
 	.await;
 }
 
+/// Answer group `sequence`, which the archive failed to load. A store failure may pass, so
+/// only the readers waiting now are refused; anything else means the archive can't serve it.
+fn unavailable(fill: &track::Fill, sequence: u64, err: &Error) {
+	let groups = sequence..sequence + 1;
+	match err {
+		Error::Store(_) => fill.refuse_groups(groups, moq_net::Error::Stream(moq_net::StreamError::Internal)),
+		_ => fill.drop_groups(groups),
+	}
+}
+
 async fn serve_timeline_group<T: ObjectStore>(
 	shared: &Shared<T>,
 	name: &str,
@@ -421,7 +431,7 @@ async fn serve_timeline_group<T: ObjectStore>(
 		Ok(object) => object,
 		Err(err) => {
 			tracing::warn!(track = name, sequence, %err, "archived timeline group is unavailable");
-			reject();
+			unavailable(fill, sequence, &err);
 			return;
 		}
 	};
@@ -555,7 +565,7 @@ async fn serve_group<T: ObjectStore>(
 		Ok(object) => Some((spans[0].sequence, object)),
 		Err(err) => {
 			tracing::warn!(track, sequence, %err, "archived group is unavailable");
-			fill.drop_groups(sequence..sequence + 1);
+			unavailable(fill, sequence, &err);
 			return;
 		}
 	};
