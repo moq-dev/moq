@@ -61,9 +61,12 @@ pub struct Client {
 	/// The programs of a multi-program remote [`pull`] publishes, or `None` to refuse one.
 	program: Option<Program>,
 
+	/// How long a broadcast [`pull`] finished stays up. [`pull`] only.
+	linger: Duration,
+
 	/// How long [`publish`] waits for the same publisher instance to come back once its
 	/// broadcast ends. [`publish`] only.
-	linger: Duration,
+	follow: Duration,
 
 	/// Whether [`publish`] follows another instance replacing its broadcast, as a program
 	/// switch on the same connection. [`publish`] only.
@@ -81,7 +84,8 @@ impl Client {
 			max_age: None,
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			program: None,
-			linger: Duration::ZERO,
+			linger: moq_mux::Linger::DEFAULT,
+			follow: Duration::ZERO,
 			stitch: false,
 		}
 	}
@@ -120,12 +124,22 @@ impl Client {
 		self
 	}
 
-	/// Wait up to `linger` for the same publisher instance to come back once the broadcast
+	/// Keep the broadcast [`pull`](Self::pull) publishes up for `linger` after the remote
+	/// stream ends, so a subscriber that arrives after the end still gets the tail. Defaults to
+	/// [`moq_mux::Linger::DEFAULT`]; zero closes it at once.
+	///
+	/// The pull (ingest) direction only.
+	pub fn with_linger(mut self, linger: Duration) -> Self {
+		self.linger = linger;
+		self
+	}
+
+	/// Wait up to `follow` for the same publisher instance to come back once the broadcast
 	/// [`publish`](Self::publish) reads ends, carrying on with the same stream. Zero (the
 	/// default) ends the push at the broadcast's end.
 	/// A stitched replacement must also supply its first catalog within this bound.
-	pub fn with_linger(mut self, linger: Duration) -> Self {
-		self.linger = linger;
+	pub fn with_follow(mut self, follow: Duration) -> Self {
+		self.follow = follow;
 		self
 	}
 
@@ -143,7 +157,7 @@ impl Client {
 		let socket = self.call(Mode::Publish).await?;
 		let options = crate::ts::Options {
 			latency: self.max_delay,
-			linger: self.linger,
+			follow: self.follow,
 			stitch: self.stitch,
 		};
 		serve_subscribe(origin, path.as_str(), socket, options).await
@@ -151,15 +165,19 @@ impl Client {
 
 	/// Pull a remote MPEG-TS stream into `origin` at `path` until the remote ends.
 	///
-	/// The finished broadcast then stays up until its media is stale, as
+	/// The finished broadcast then stays up for the [linger](Self::with_linger), as
 	/// [`Publish::accept`](crate::Publish::accept) describes, and the future resolves after that.
 	pub async fn pull(&self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
 		let socket = self.call(Mode::Request).await?;
-		let catalog = moq_mux::catalog::Config::default()
-			.with_max_age(self.max_age)
-			.with_bandwidth(self.bandwidth.clone());
-		serve_publish(origin, path.as_str(), socket, catalog, self.program).await
+		let ingest = crate::server::Ingest {
+			config: moq_mux::catalog::Config::default()
+				.with_max_age(self.max_age)
+				.with_bandwidth(self.bandwidth.clone()),
+			program: self.program,
+			linger: self.linger,
+		};
+		serve_publish(origin, path.as_str(), socket, ingest).await
 	}
 
 	async fn call(&self, mode: Mode) -> Result<SrtSocket> {
@@ -245,8 +263,12 @@ mod tests {
 			let resource = request.resource().to_string();
 			let is_publish = matches!(request, Request::Publish(_));
 			if let Request::Publish(publish) = request {
-				// Runs until the caller disconnects; the test aborts it.
-				publish.accept(&origin, "ingested/cam0").await.ok();
+				// Runs until the caller disconnects, then closes at once.
+				publish
+					.with_linger(Duration::ZERO)
+					.accept(&origin, "ingested/cam0")
+					.await
+					.ok();
 			}
 			(resource, is_publish)
 		});

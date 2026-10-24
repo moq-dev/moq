@@ -18,10 +18,11 @@
 //! every reload. A new reference lists its records under its own tag, continuing past the last
 //! advertised number rather than reusing the old one's URIs.
 
+use moq_clock::Wall;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::task::{Poll, ready};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -475,7 +476,7 @@ pub struct Segment {
 	/// Presentation duration.
 	pub duration: Duration,
 	/// Wall-clock start time, when the timeline advertises an anchor.
-	pub program_date_time: Option<SystemTime>,
+	pub program_date_time: Option<Wall>,
 	/// The absolute timeline discontinuity sequence within this broadcaster.
 	///
 	/// Use the first retained segment's value as `EXT-X-DISCONTINUITY-SEQUENCE`, then write

@@ -1,9 +1,14 @@
 /**
  * Producing generations mint an epoch; consuming generations bind a discovered one.
  *
+ * The package exports these as types only: {@link Credential.produce} and
+ * {@link Credential.consume} are the only way to obtain one, and nothing accepts an epoch for
+ * production. Two producers under one epoch would repeat every nonce; see the draft's
+ * [epoch rules](https://doc.moq.dev/draft/draft-lcurley-moq-e2ee#epoch).
+ *
  * @module
  */
-import type { Epoch, Track as NetTrack } from "@moq/net";
+import { Epoch, type Track as NetTrack } from "@moq/net";
 import type { Credential } from "./credential.ts";
 import { DATAGRAM, encode, GROUP, type Name, nameInfo, parse } from "./derive.ts";
 import { Failure } from "./failure.ts";
@@ -19,21 +24,32 @@ function keys(credential: Credential, epoch: Epoch.Valid, name: Name): Keys {
 	};
 }
 
-/** A consume-only generation bound to a discovered epoch. */
+/**
+ * A consume-only generation bound to a discovered epoch.
+ *
+ * Every subscription through it shares each key's AEAD budget, so resubscribing cannot reset
+ * it. The budget lives as long as the generation; binding the epoch again with
+ * {@link Credential.consume} starts another.
+ */
 export class Consumer {
 	/** The credential this generation derives from. */
 	readonly credential: Credential;
 	/** The epoch this generation is scoped to. */
 	readonly epoch: Epoch.Valid;
 
-	private constructor(credential: Credential, epoch: Epoch.Valid) {
+	// Never evicted: re-deriving a key would reset its budget. Bounded by the semantic names
+	// the application subscribes to, for as long as it holds the generation.
+	#keys = new Map<Name, Keys>();
+
+	/** @internal Throws {@link Failure} `identity` if `epoch` is not canonical. */
+	constructor(credential: Credential, epoch: Epoch.Valid) {
+		try {
+			Epoch.parse(epoch);
+		} catch {
+			throw new Failure("identity");
+		}
 		this.credential = credential;
 		this.epoch = epoch;
-	}
-
-	/** @internal */
-	static make(credential: Credential, epoch: Epoch.Valid): Consumer {
-		return new Consumer(credential, epoch);
 	}
 
 	/** The opaque physical track name for a semantic track name; rejects with {@link Failure} `identity` past 65535 bytes. */
@@ -48,7 +64,13 @@ export class Consumer {
 	 * @internal Applications subscribe through `Broadcast.Consumer`.
 	 */
 	consume(track: NetTrack.Subscriber): Track.Consumer {
-		return Track.Consumer.make(track, keys(this.credential, this.epoch, parse(track.name)));
+		const name = parse(track.name);
+		let shared = this.#keys.get(name);
+		if (!shared) {
+			shared = keys(this.credential, this.epoch, name);
+			this.#keys.set(name, shared);
+		}
+		return Track.Consumer.make(track, shared);
 	}
 }
 
@@ -65,15 +87,11 @@ export class Producer {
 	#consumer: Consumer;
 	#claims = new Set<Name>();
 
-	private constructor(credential: Credential, epoch: Epoch.Valid) {
+	/** @internal Mints the epoch itself, so no caller can choose one. */
+	constructor(credential: Credential) {
 		this.credential = credential;
-		this.epoch = epoch;
-		this.#consumer = Consumer.make(credential, epoch);
-	}
-
-	/** @internal */
-	static make(credential: Credential, epoch: Epoch.Valid): Producer {
-		return new Producer(credential, epoch);
+		this.epoch = Epoch.mint();
+		this.#consumer = new Consumer(credential, this.epoch);
 	}
 
 	/** The opaque physical track name for a semantic track name; rejects with {@link Failure} `identity` past 65535 bytes. */

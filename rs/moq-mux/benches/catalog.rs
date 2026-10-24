@@ -1,4 +1,4 @@
-//! Catalog churn from a rising flush estimate, swept over tracks x subscribers.
+//! Catalog churn from a rising estimate, swept over tracks x subscribers.
 //!
 //! Every track's jitter rises 1 ms per frame for [`RISES`] frames inside one rate window, then one
 //! more frame lands after the window. Each catalog a subscriber receives makes a player update its
@@ -13,6 +13,9 @@
 //! The teardown case drops a reserved importer whose declared tracks never got a config, as at the
 //! end of malformed input. Each drop releases one reservation, so a per-release scan of the
 //! remaining tracks would show up as a quadratic slope over the track count.
+//!
+//! The write order case interleaves frames across every track of one catalog, each measuring its
+//! `delay` against the others, so a per-frame scan of the tracks would show up as a slope.
 //!
 //! Run with `cargo bench -p moq-mux --bench catalog`.
 
@@ -41,7 +44,6 @@ struct Fanout {
 	tracks: Vec<moq_mux::container::Producer<Container, hang::catalog::VideoConfig>>,
 	subscribers: Vec<moq_mux::catalog::Consumer>,
 	waiter: kio::Waiter,
-	anchor: moq_clock::Instant,
 }
 
 impl Fanout {
@@ -78,19 +80,19 @@ impl Fanout {
 			_catalog: catalog,
 			tracks,
 			waiter: kio::Waiter::noop(),
-			anchor: moq_clock::now(),
 		};
 		// The initial track set is configuration, not estimate traffic.
 		fanout.receive();
 		fanout
 	}
 
-	/// Every frame lands `frame` ms late, after an on-time first frame, so jitter rises 1 ms each.
-	fn flush(&mut self, frame: u64) {
-		let timestamp = Timestamp::from_millis(frame).unwrap();
-		let now = self.anchor + Duration::from_millis(2 * frame);
+	/// Every frame is reordered by `frame` ms, after an in-order first frame, so jitter rises 1 ms
+	/// each. The cut publishes it.
+	fn rise(&mut self, frame: u64) {
+		let delay = Timestamp::from_millis(frame).unwrap();
 		for track in &mut self.tracks {
-			track.flush(timestamp, now).unwrap();
+			track.reorder(delay);
+			track.cut(None).unwrap();
 		}
 	}
 
@@ -130,11 +132,11 @@ impl Fanout {
 			updates += u;
 		};
 		for frame in 0..=RISES {
-			self.flush(frame);
+			self.rise(frame);
 			tally(self.receive());
 		}
 		tokio::time::advance(Duration::from_secs(1)).await;
-		self.flush(RISES);
+		self.rise(RISES);
 		tally(self.receive());
 
 		let shape = self.tracks.len() * self.subscribers.len();
@@ -220,5 +222,59 @@ fn bench_unresolved_teardown(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_estimate_fanout, bench_unresolved_teardown);
+/// Tracks interleaving frames on one catalog.
+const ORDERED: [usize; 3] = [1, 16, 256];
+
+/// Frames each track writes per iteration.
+const FRAMES: u64 = 100;
+
+fn bench_write_order(c: &mut Criterion) {
+	let mut group = c.benchmark_group("catalog_write_order");
+	for tracks in ORDERED {
+		group.throughput(Throughput::Elements(FRAMES * tracks as u64));
+		group.bench_with_input(BenchmarkId::from_parameter(tracks), &tracks, |b, &tracks| {
+			b.iter_batched(
+				|| {
+					let mut broadcast = moq_net::broadcast::Info::new().produce();
+					let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+					let producers: Vec<_> = (0..tracks)
+						.map(|index| {
+							let info = catalog.track_info(hang::catalog::PRIORITY.video);
+							let track = broadcast.create_track(format!("v{index}"), info).unwrap();
+							let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+							catalog.video(track, Container::Legacy(Kind::Video), config).unwrap()
+						})
+						.collect();
+					(broadcast, catalog, producers)
+				},
+				|(_broadcast, _catalog, mut producers)| {
+					for frame in 0..FRAMES {
+						// Each track trails the one before it by a millisecond, so every write measures.
+						for (index, producer) in producers.iter_mut().enumerate() {
+							let timestamp = Duration::from_millis(frame * 40 + 1_000)
+								.saturating_sub(Duration::from_millis(index as u64));
+							producer
+								.write(moq_mux::container::Frame {
+									timestamp: Timestamp::from_micros(timestamp.as_micros() as u64).unwrap(),
+									payload: bytes::Bytes::from_static(&[0; 64]),
+									keyframe: frame == 0,
+									duration: None,
+								})
+								.unwrap();
+						}
+					}
+				},
+				BatchSize::SmallInput,
+			);
+		});
+	}
+	group.finish();
+}
+
+criterion_group!(
+	benches,
+	bench_estimate_fanout,
+	bench_unresolved_teardown,
+	bench_write_order
+);
 criterion_main!(benches);

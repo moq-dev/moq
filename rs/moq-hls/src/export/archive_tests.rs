@@ -809,11 +809,11 @@ impl Expired {
 		};
 		// Expire the publisher cache before any HLS consumer can retain a copy.
 		let now = moq_net::time::Instant::now();
-		broadcast.info().pool.gc(now, &kio::Waiter::noop());
+		broadcast.info().pool.poll(now, &kio::Waiter::noop());
 		broadcast
 			.info()
 			.pool
-			.gc(now + Duration::from_secs(31), &kio::Waiter::noop());
+			.poll(now + Duration::from_secs(31), &kio::Waiter::noop());
 		let subscription = moq_net::track::Subscription::default()
 			.with_range(0..)
 			.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));

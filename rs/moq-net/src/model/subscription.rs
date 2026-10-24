@@ -66,7 +66,7 @@ pub struct Subscription {
 	/// (pre-Lite05 moq-lite, or moq-transport without TIMESCALE), which is judged by the
 	/// wall clock alone. A read waiting in a superseded group wakes at that deadline only
 	/// when something collects the track's cache pool: an origin's driver does, and a
-	/// standalone track needs [`Pool::gc`](crate::cache::Pool::gc) called, as its idle
+	/// standalone track needs [`Pool::poll`](crate::cache::Pool::poll) called, as its idle
 	/// expiry already does. Otherwise it is judged only when something else wakes the read.
 	pub max_delay: Duration,
 	/// The spans of the track to deliver; see [`Range`].
