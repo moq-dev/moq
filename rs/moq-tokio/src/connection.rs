@@ -595,14 +595,22 @@ impl Shared {
 		}
 	}
 
-	/// Record the error the loop gave up with, for [`Connection::closed`]. Nothing is
+	/// The loop is over: drop the session and publish the terminal snapshot in one
+	/// revision, so a watcher never sees a `Disconnected` the loop will not redial
+	/// from. `err` is what it gave up with, for [`Connection::closed`]. Nothing is
 	/// retrying anymore, so [`Monitor::failure`] stops reporting.
-	fn failed(&self, err: Error) {
+	fn end(&self, err: Option<Error>) {
 		if let Ok(mut state) = self.state.write() {
-			state.revision += 1;
-			state.error = Some(err);
+			if state.ended {
+				return;
+			}
+			state.offline();
+			state.ended = true;
 			state.failure = None;
+			state.error = err;
 		}
+		let _ = self.send_bw.set(None);
+		let _ = self.recv_bw.set(None);
 	}
 }
 
@@ -614,15 +622,7 @@ impl Drop for Shared {
 		// keep the session clone parked here alive and the transport open with
 		// nothing left able to reach it. Releasing it drops the last clone, which
 		// is what closes the transport.
-		// One write, so a watcher never sees a `Disconnected` the loop will not redial from.
-		if let Ok(mut state) = self.state.write() {
-			state.offline();
-			state.ended = true;
-			// Nothing retries anymore, however the loop ended.
-			state.failure = None;
-		}
-		let _ = self.send_bw.set(None);
-		let _ = self.recv_bw.set(None);
+		self.end(None);
 	}
 }
 
@@ -882,7 +882,7 @@ impl Connection {
 					true => tracing::error!(%err, "connection loop exited"),
 					false => tracing::info!(%err, "connection closed"),
 				}
-				shared.failed(err);
+				shared.end(Some(err));
 			}
 			// Dropping the producers here closes the channels, signaling consumers.
 		});
@@ -1026,7 +1026,6 @@ impl Connection {
 					// sides end up waiting on each other forever. Checked before the
 					// migration branch below, which would otherwise loop back to redial.
 					if !client.reconnect && matches!(ended, Ended::Goaway(_)) {
-						shared.disconnected();
 						return Ok(());
 					}
 
@@ -1126,20 +1125,15 @@ impl Connection {
 						continue;
 					}
 
-					let failure = match &ended {
-						Ended::Closed(Err(err)) if client.reconnect && !err.is_terminal() => Some(err),
-						_ => None,
-					};
-					// Publish the lost transport and its cause in one lifecycle observation.
-					shared.offline(failure);
-
+					// Both returns below leave the offline bookkeeping to the terminal
+					// snapshot, so they never publish a `Disconnected` first.
+					//
 					// Refusals and malformed protocol input are settled failures, however long
 					// the session lived. A new connection cannot repair either one.
-					if let Ended::Closed(Err(err)) = &ended {
-						let err = err.clone();
-						if err.is_terminal() {
-							return Err(err);
-						}
+					if let Ended::Closed(Err(err)) = &ended
+						&& err.is_terminal()
+					{
+						return Err(err.clone());
 					}
 
 					// One-shot mode: the session ending ends the connection. Its close
@@ -1151,6 +1145,13 @@ impl Connection {
 							Ended::Goaway(_) => unreachable!("handled before the migration branch"),
 						};
 					}
+
+					// Publish the lost transport and why, in one lifecycle observation.
+					let failure = match &ended {
+						Ended::Closed(Err(err)) => Some(err),
+						_ => None,
+					};
+					shared.offline(failure);
 
 					if healthy {
 						// The backoff window was reset, so a one-off drop reconnects promptly.
@@ -2424,7 +2425,7 @@ mod tests {
 			panic!("identical failed attempt was hidden")
 		};
 		assert_ne!(repeated.revision, next.revision);
-		shared.failed(failure);
+		shared.end(Some(failure));
 		drop(shared);
 		let final_state = first.state();
 		assert_eq!(final_state.phase, Phase::Closed);
@@ -2456,30 +2457,42 @@ mod tests {
 		assert_eq!(first.revision, second.revision);
 	}
 
+	/// Records the phase a watcher reads the moment it is woken, as one on another thread could.
+	struct Woken(Monitor, std::sync::Mutex<Vec<Phase>>);
+
+	impl std::task::Wake for Woken {
+		fn wake(self: std::sync::Arc<Self>) {
+			self.wake_by_ref();
+		}
+		fn wake_by_ref(self: &std::sync::Arc<Self>) {
+			self.1.lock().unwrap().push(self.0.state().phase);
+		}
+	}
+
+	impl Woken {
+		/// Park on the monitor's current revision, for as long as the returned waiter lives.
+		fn watch(monitor: &Monitor) -> (std::sync::Arc<Self>, kio::Waiter) {
+			let woken = std::sync::Arc::new(Self(monitor.clone(), Default::default()));
+			let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
+			assert!(monitor.poll_state(&waiter, monitor.state().revision).is_pending());
+			(woken, waiter)
+		}
+
+		fn phases(&self) -> Vec<Phase> {
+			self.1.lock().unwrap().clone()
+		}
+	}
+
 	#[test]
 	fn ending_the_loop_never_shows_a_redialing_phase() {
-		use std::sync::{Arc, Mutex};
-		use std::task::{Wake, Waker};
-		// Reads the state the moment it is woken, as a watcher on another thread could.
-		struct Record(Monitor, Mutex<Vec<Phase>>);
-		impl Wake for Record {
-			fn wake(self: Arc<Self>) {
-				self.wake_by_ref();
-			}
-			fn wake_by_ref(self: &Arc<Self>) {
-				self.1.lock().unwrap().push(self.0.state().phase);
-			}
-		}
 		let shared = shared();
 		let monitor = Monitor {
 			state: shared.state.consume(),
 			last_presence: Default::default(),
 		};
-		let record = Arc::new(Record(monitor.clone(), Mutex::default()));
-		let waiter = kio::Waiter::new(Waker::from(record.clone()));
-		assert!(monitor.poll_state(&waiter, monitor.state().revision).is_pending());
+		let (woken, _waiter) = Woken::watch(&monitor);
 		drop(shared);
-		assert_eq!(*record.1.lock().unwrap(), [Phase::Closed]);
+		assert_eq!(woken.phases(), [Phase::Closed]);
 	}
 
 	#[cfg(feature = "tcp")]
@@ -2772,12 +2785,21 @@ mod tests {
 		let monitor = connection.monitor();
 
 		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let mut state = monitor.state();
+		while state.phase != Phase::Connected {
+			state = tokio::time::timeout(WAIT, monitor.state_changed(state.revision))
+				.await
+				.unwrap()
+				.unwrap();
+		}
+		let (woken, _waiter) = Woken::watch(&monitor);
 		session.abort(moq_net::Error::App(7));
 		let closed = tokio::time::timeout(WAIT, connection.closed())
 			.await
 			.expect("the connection did not close");
 		assert!(closed.is_err(), "the abort ends the loop with an error");
 		assert!(monitor.failure().is_none(), "nothing is retrying");
+		assert_eq!(woken.phases(), [Phase::Closed], "the loop is not redialing");
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.
