@@ -73,7 +73,8 @@ if (dryRun) {
 	}
 }
 const registry = new Map<string, boolean>();
-if (dryRun || !npmDone) {
+// A dry run never sets npmDone, so this covers every pack and publish.
+if (!npmDone) {
 	const manifest = JSON.parse(await Bun.file("dist/package.json").text()) as {
 		dependencies?: Record<string, string>;
 		peerDependencies?: Record<string, string>;
