@@ -86,8 +86,8 @@ MoQOutput::~MoQOutput()
 	// stop on an output that is going away.
 	Stop();
 
-	// Let the sessions finish draining, so the relay sees the tracks end rather than a
-	// cancel. moq-ffi bounds each drain to about a second.
+	// Wait out the drains: OBS unloads the module, stopping the runtime, right
+	// after destroying its outputs on exit. moq-ffi bounds each drain to about a second.
 	std::vector<moq::Future<void>> drains;
 	{
 		std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
@@ -401,18 +401,20 @@ void MoQOutput::Reset()
 	broadcast.reset();
 	origin.reset();
 
-	// Drain once tracks finish. Default lite-06 waits for transport ACKs, not
-	// confirmation that the peer received the tail. Keep the future past this
-	// attempt because dropping it aborts the drain.
+	// The session owns the drain after this request, even if the output dies now.
+	// Keep a waiter only so the destructor can hold off module unload, which
+	// stops the runtime and would cancel the drain.
 	if (retired) {
+		retired->shutdown();
 		draining.erase(std::remove_if(draining.begin(), draining.end(),
 					      [](const moq::Future<void> &drain) {
 						      return drain.wait_for(std::chrono::seconds(0)) ==
 							     std::future_status::ready;
 					      }),
 			       draining.end());
-		draining.push_back(retired->shutdown());
+		draining.push_back(retired->closed());
 	}
+
 	lock.unlock();
 
 	for (auto &[encoder, bitrate] : restore)

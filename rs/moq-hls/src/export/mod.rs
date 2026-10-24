@@ -4545,7 +4545,9 @@ mod tests {
 	/// The timeline's publisher loses its session: the track and its open group fail.
 	fn cut(track: moq_net::track::Producer, timeline: moq_mux::timeline::Producer) {
 		drop(timeline);
-		track.abort(moq_net::Error::SessionClosed).unwrap();
+		track
+			.abort(moq_net::Error::Transport("connection lost".into()))
+			.unwrap();
 	}
 
 	/// Wait until `rendition`'s playlist fails, returning the error it answers.
