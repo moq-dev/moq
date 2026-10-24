@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Connection state
+
+`Moq.connect` returns a connecting native session. Replace status, connect-count, and failure polls with `session.state()` and `session.stateChanged(after: state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate(numerator: 30000, denominator: 1001)` and pass `options: ProducerOptions(input: input, output: output, track: track, bandwidth: bandwidth)` to the matching audio/video producer.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
 ### Video rendition preference
 
 `media.Video` gains `preference`, defaulting to `0`. Upgrade the matching moq\_ffi package too. Higher values are preferred; compatibility transcodes use `-1`.
@@ -47,8 +58,7 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 ### `ContainerFormat.fmp4` unwraps to Legacy (#6250)
 
 A container import with `ContainerFormat.fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
-A reader that follows the catalog's container needs no change.
-Republishing each fragment whole as CMAF is Rust-only, through `moq_mux::container::fmp4::Import::with_passthrough`.
+Pass the new `ContainerFormat.cmaf` to keep publishing CMAF.
 
 ### Catalog references carry their epoch
 

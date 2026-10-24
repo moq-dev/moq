@@ -700,21 +700,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	) -> Result<VideoConfig> {
 		let mut description = BytesMut::new();
 		avcc.encode_body(&mut description)?;
-		let metadata = crate::codec::h264::config(&description)?;
+		let description = description.freeze();
 
-		let mut config = VideoConfig::new(H264 {
+		// Start from everything the avcC's SPS signals, so no field is dropped by a copy list.
+		let mut config = crate::codec::h264::config(&description)?;
+		config.codec = H264 {
 			profile: avcc.avc_profile_indication,
 			constraints: avcc.profile_compatibility,
 			level: avcc.avc_level_indication,
 			inline,
-		});
+		}
+		.into();
 		config.coded_width = Some(visual.width as _);
 		config.coded_height = Some(visual.height as _);
-		config.framerate = metadata.framerate;
-		config.display_aspect_width = metadata.display_aspect_width;
-		config.display_aspect_height = metadata.display_aspect_height;
-		config.color = metadata.color;
-		config.description = Some(description.freeze());
+		config.description = Some(description);
 		config.container = container;
 		Ok(config)
 	}

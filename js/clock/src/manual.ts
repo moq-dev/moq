@@ -1,4 +1,4 @@
-import { install } from "./ambient.ts";
+import { type Installed, install } from "./ambient.ts";
 import type { Backend } from "./backend.ts";
 import { drain } from "./host.ts";
 import { Instant, Nano, Wall } from "./types.ts";
@@ -40,8 +40,8 @@ export class Manual {
 		},
 	};
 
-	/** Install this clock in the current realm and return an idempotent restore function. */
-	install(): () => void {
+	/** Install this clock in the current realm until the returned handle closes. */
+	install(): Installed {
 		return install(this.#backend);
 	}
 

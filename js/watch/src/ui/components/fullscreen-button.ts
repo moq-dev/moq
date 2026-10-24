@@ -1,7 +1,7 @@
 import type { Effect } from "@moq/signals";
+import { controlButton } from "@moq/ui";
 import { createFullscreen } from "../fullscreen";
 import { fullscreenEnter, fullscreenExit, icon } from "../icons";
-import { controlButton } from "./button";
 
 /** Fullscreen toggle button wired to the shared cross-browser fullscreen controller. */
 export function fullscreenButton(parent: Effect, player: HTMLElement): HTMLElement {

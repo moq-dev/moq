@@ -37,8 +37,8 @@ hot path, and must write into the driver's buffers, so qmux owns it.
 
 Public API: the `tokio_tungstenite` and `tungstenite` re-exports and the
 `tungstenite` types in `Client::with_config`, `Client::with_connector`,
-`Upgraded`, and `Error::WebSocket` go away. Add `MIGRATE.md` entries for
-`qmux` and `moq-tokio`. The existing qmux interop tests (the `qmux06`
+`Upgraded`, and `Error::WebSocket` go away. The Impact bullet says how to
+migrate in `qmux` and `moq-tokio`. The existing qmux interop tests (the `qmux06`
 dev-dependency) and the browser path in `js/qmux` must keep passing
 unchanged.
 

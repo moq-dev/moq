@@ -57,7 +57,7 @@ async function generateAsymmetricKeyPair(
 test("verify refuses unsafe signed payloads without dropping their restrictions", async () => {
 	const clock = new Manual();
 	clock.stepWall(Wall(1_000_000));
-	const restore = clock.install();
+	const installed = clock.install();
 	try {
 		const key = Key.parse(encodeJwk(testKey));
 		const secret = new TextEncoder().encode("test-secret-that-is-long-enough-for-hmac-sha256");
@@ -84,7 +84,7 @@ test("verify refuses unsafe signed payloads without dropping their restrictions"
 			Key.verify(key, await signed({ publish: ["**"] }, { alg: "HS384", kid: testKey.kid })),
 		).rejects.toThrow();
 	} finally {
-		restore();
+		installed.close();
 	}
 });
 
