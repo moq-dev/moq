@@ -21,7 +21,7 @@ Share `media.Timebase(broadcast)` through `ContainerInit` when several imports u
 source timeline; omitting it keeps an independent offset. A timebase belongs to its
 broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
 so a raw byte stream needs no other importer.
-`ContainerFormat.FMP4` splits each fragment into one frame per sample; `ContainerFormat.CMAF` republishes it whole.
+`ContainerFormat.FMP4` splits each fragment into one frame per sample.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,

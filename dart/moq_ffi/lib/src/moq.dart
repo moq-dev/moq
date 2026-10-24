@@ -7022,7 +7022,7 @@ class LocMoqContainer extends MoqContainer {
   }
 }
 
-enum MoqContainerFormat { fmp4, mkv, ts, flv, cmaf }
+enum MoqContainerFormat { fmp4, mkv, ts, flv }
 
 class FfiConverterMoqContainerFormat {
   static LiftRetVal<MoqContainerFormat> read(Uint8List buf) {
@@ -7036,8 +7036,6 @@ class FfiConverterMoqContainerFormat {
         return LiftRetVal(MoqContainerFormat.ts, 4);
       case 4:
         return LiftRetVal(MoqContainerFormat.flv, 4);
-      case 5:
-        return LiftRetVal(MoqContainerFormat.cmaf, 4);
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,

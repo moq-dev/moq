@@ -155,8 +155,6 @@ pub enum moq_container_format {
 	MOQ_CONTAINER_FORMAT_TS = 2,
 	/// Flash Video, as used by RTMP.
 	MOQ_CONTAINER_FORMAT_FLV = 3,
-	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	MOQ_CONTAINER_FORMAT_CMAF = 4,
 }
 
 /// Configuration for [moq_publish_audio].
@@ -309,7 +307,6 @@ fn container_format_from_u32(value: u32) -> Result<moq_mux::import::ContainerFor
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_MKV as u32 => ContainerFormat::Mkv,
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_TS as u32 => ContainerFormat::Ts,
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_FLV as u32 => ContainerFormat::Flv,
-		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_CMAF as u32 => ContainerFormat::Cmaf,
 		_ => return Err(Error::InvalidCode),
 	})
 }

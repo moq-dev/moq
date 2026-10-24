@@ -460,8 +460,9 @@ impl Publish {
 	pub fn container_cut(&mut self, container: Id) -> Result<(), Error> {
 		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
 		container.driver.check()?;
-		container.inner.cut();
-		container.driver.check()
+		let result = container.inner.cut();
+		container.driver.check()?;
+		Ok(result?)
 	}
 
 	/// Start a new segment and number its groups `sequence`.
