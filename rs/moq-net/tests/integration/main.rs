@@ -71,5 +71,6 @@ mod tracks;
 mod tracks_ietf;
 mod unannounce_release;
 mod untimed;
+mod wide_hop;
 mod wide_sequence;
 mod zero_copy;
