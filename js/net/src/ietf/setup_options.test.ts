@@ -16,7 +16,7 @@ test("setup option keys match the registries", () => {
 		Solicit: 0x40b5an,
 		Hidden: 0x40b5cn,
 		MaxAge: 0x915c4n,
-		Auth: 0x40b60n,
+		Auth: 0x40b70n,
 		ActiveCount: 0x40b64n,
 		Epoch: 0x40b68n,
 	});

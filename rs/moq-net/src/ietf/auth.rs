@@ -1,12 +1,9 @@
-//! The MoQ Auth extension (draft-lcurley-moq-auth-00).
+//! The MoQ Auth extension (draft-lcurley-moq-auth-01).
 //!
 //! The moq-transport binding of the lite Auth Stream (see [`crate::auth`]): each
-//! token rides a request stream of its own, answered with the namespace prefixes it
-//! grants. Negotiated with the AUTH Setup Option on draft-17+ only, where SETUP is a
-//! Key-Value-Pair block.
-//!
-//! The wire carries prefixes, so a grant is told only when it is a union of subtrees.
-//! Anything narrower is refused with NOT_SUPPORTED rather than widened.
+//! token rides a request stream of its own, answered with the patterns it grants,
+//! encoded as lite's AUTH_OK encodes them. Negotiated with the AUTH Setup Option on
+//! draft-17+ only, where SETUP is a Key-Value-Pair block.
 
 #[cfg(feature = "async")]
 use crate::driver::Transport;
@@ -17,18 +14,18 @@ use bytes::Bytes;
 
 use crate::auth::{Grant, Handle, Issue, Reply, Request, Serving};
 use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
-use crate::{Error, Path, Pattern, Patterns, SessionError};
+use crate::{Error, Patterns, SessionError};
 
 #[cfg(feature = "async")]
 use super::Control;
-use super::namespace::{decode_namespace, encode_namespace};
 use super::{Message, RequestId, Version, cluster, peer};
 #[cfg(feature = "async")]
 use crate::coding::Stream;
 
 /// AUTH Setup Option: the sender speaks this extension. Even, so the value is a bare
-/// varint.
-pub const AUTH: u64 = 0x40B60;
+/// varint. Draft-01's code point, so a draft-00 peer, which read prefixes, never
+/// negotiates it.
+pub const AUTH: u64 = 0x40B70;
 
 /// Whether a version negotiates this extension: draft-17+, like MoQ Cluster.
 pub fn supported(version: Version) -> bool {
@@ -99,38 +96,13 @@ pub struct AuthOk {
 /// Largest millisecond count every implementation carries losslessly.
 const MAX_EXPIRES_MS: u64 = (1 << 53) - 1;
 
-/// Encode patterns as namespace prefix tuples, refusing any that is not a subtree:
-/// sending `room` for a grant of the literal `room/alice` would hand out more than was
-/// granted.
-fn encode_prefixes(patterns: &Patterns, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
-	w.varint(patterns.len() as u64)?;
-	for pattern in patterns {
-		let prefix = pattern.as_prefix().ok_or(EncodeError::Unsupported)?;
-		encode_namespace(w, &Path::new(prefix))?;
-	}
-	Ok(())
-}
-
-fn decode_prefixes(r: &mut Decoder<'_>) -> Result<Patterns, DecodeError> {
-	let count = r.varint()?;
-	// No preallocation: the count is peer-controlled, and the message size limit bounds
-	// how many prefixes actually fit.
-	let mut patterns = Vec::new();
-	for _ in 0..count {
-		let prefix = decode_namespace(r)?;
-		patterns.push(Pattern::subtree(prefix.as_str()).map_err(|_| DecodeError::InvalidValue)?);
-	}
-	// Reduce once, so a peer's count never turns into quadratic work.
-	Ok(patterns.into_iter().collect())
-}
-
 impl Message for AuthOk {
 	const ID: u64 = 0x40B62;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		check_version(version).map_err(|_| EncodeError::Version)?;
-		encode_prefixes(&self.publish, w)?;
-		encode_prefixes(&self.subscribe, w)?;
+		self.publish.encode(w, version)?;
+		self.subscribe.encode(w, version)?;
 		// 0 means never, so a grant that has already lapsed rounds up to the smallest
 		// value that still reads as an expiry.
 		let expires = match self.expires {
@@ -142,8 +114,8 @@ impl Message for AuthOk {
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		check_version(version)?;
-		let publish = decode_prefixes(r)?;
-		let subscribe = decode_prefixes(r)?;
+		let publish = Patterns::decode(r, version)?;
+		let subscribe = Patterns::decode(r, version)?;
 		let expires = match r.varint()? {
 			0 => None,
 			ms if ms <= MAX_EXPIRES_MS => Some(Duration::from_millis(ms)),
@@ -579,9 +551,8 @@ async fn serve_issue(
 					subscribe: grant.subscribe,
 					expires: grant.expires.map(|at| at.saturating_duration_since(now)),
 				};
-				// Sized as the full message before anything is written, so a grant that cannot
-				// be encoded for any reason (not a prefix subtree, over the u16 message size)
-				// never leaves half a message on the wire. Never widen or trim it: refuse,
+				// Sized as the full message before anything is written, so a grant over the u16
+				// message size never leaves half a message on the wire. Never trim it: refuse,
 				// which revokes whatever this stream granted before.
 				if let Err(err) = ok.encode(&mut Encoder::new(&mut Vec::new(), version.into()), version) {
 					tracing::debug!(%err, "auth grant cannot be encoded as one AUTH_OK; refusing the token");
@@ -614,11 +585,12 @@ async fn serve_issue(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::Pattern;
 
 	const VERSION: Version = Version::Draft17;
 
-	fn patterns(prefixes: &[&str]) -> Patterns {
-		prefixes.iter().map(|p| Pattern::subtree(p).unwrap()).collect()
+	fn patterns(texts: &[&str]) -> Patterns {
+		texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
 	}
 
 	fn encode_msg<T: Message>(msg: &T, version: Version) -> Result<Vec<u8>, EncodeError> {
@@ -680,15 +652,16 @@ mod tests {
 		}
 	}
 
-	/// The root grant and a union of prefixes survive the trip, as distinct from the
-	/// empty grant.
+	/// `**` grants everything, the empty pattern only the root, and the empty list
+	/// nothing; literals and wildcards travel exactly, never widened to a prefix.
 	#[test]
 	fn auth_ok_round_trips() {
 		for (publish, subscribe, expires) in [
-			(patterns(&[""]), patterns(&[]), None),
+			(patterns(&["**"]), patterns(&[]), None),
+			(patterns(&[""]), patterns(&["room/**"]), None),
 			(
-				patterns(&["room/alice", "room/bob"]),
-				patterns(&["room"]),
+				patterns(&["ch1", "room/*/cam", "**/demo.hang"]),
+				patterns(&["live/*", "lobby/cam-*.hang"]),
 				Some(Duration::from_secs(60)),
 			),
 		] {
@@ -701,16 +674,17 @@ mod tests {
 		}
 	}
 
-	/// A prefix is a namespace tuple, the way SUBSCRIBE_NAMESPACE spells one.
+	/// Each pattern is its canonical text, in canonical order, as lite's AUTH_OK spells it.
+	/// The exact bytes, shared with `js/net/src/ietf/auth.test.ts` so both encoders agree.
 	#[test]
-	fn prefixes_are_namespace_tuples() {
+	fn auth_ok_golden() {
 		let msg = AuthOk {
-			publish: patterns(&["room/alice"]),
-			subscribe: Patterns::new(),
+			publish: patterns(&["room/*/cam", "ch1"]),
+			subscribe: patterns(&[""]),
 			expires: None,
 		};
 		let buf = encode_msg(&msg, VERSION).unwrap();
-		assert_eq!(&buf[..], b"\x01\x02\x04room\x05alice\x00\x00");
+		assert_eq!(&buf[..], b"\x02\x03ch1\x0aroom/*/cam\x01\x00\x00");
 	}
 
 	#[test]
@@ -731,23 +705,6 @@ mod tests {
 		w.varint(MAX_REASON as u64 + 1).unwrap();
 		let err = AuthError::decode_msg(&mut Decoder::new(&buf, VERSION.into()), VERSION).unwrap_err();
 		assert!(matches!(err, DecodeError::InvalidValue), "{err:?}");
-	}
-
-	/// Only subtrees fit the prefix encoding, alone or in a union; anything narrower is
-	/// refused, never widened to its head.
-	#[test]
-	fn unrepresentable_grants_are_refused() {
-		for union in [&["room/alice"][..], &["room/*/cam"], &["**/cam"], &["room/**", "lobby"]] {
-			let msg = AuthOk {
-				publish: union.iter().map(|p| Pattern::try_from(*p).unwrap()).collect(),
-				subscribe: Patterns::new(),
-				expires: None,
-			};
-			assert!(
-				matches!(encode_msg(&msg, VERSION), Err(EncodeError::Unsupported)),
-				"{union:?} encoded"
-			);
-		}
 	}
 
 	#[test]

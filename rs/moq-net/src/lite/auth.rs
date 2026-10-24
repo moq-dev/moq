@@ -3,7 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::coding::*;
-use crate::{Pattern, Patterns};
+use crate::Patterns;
 
 use super::{Message, Version};
 
@@ -49,41 +49,14 @@ pub struct AuthOk {
 /// Largest millisecond count every implementation carries losslessly.
 const MAX_EXPIRES_MS: u64 = (1 << 53) - 1;
 
-/// Encode a grant's patterns as their canonical text.
-fn encode_patterns(patterns: &Patterns, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
-	w.varint(patterns.len() as u64)?;
-	for pattern in patterns {
-		w.string(pattern.as_str())?;
-	}
-	Ok(())
-}
-
-fn decode_patterns(r: &mut Decoder<'_>) -> Result<Patterns, DecodeError> {
-	let count = r.varint()?;
-	// No preallocation: the count is peer-controlled, and the message size limit
-	// is what bounds how many patterns actually fit.
-	let mut patterns = Vec::new();
-	for _ in 0..count {
-		let text = r.string()?;
-		let pattern = Pattern::try_from(text.as_str()).map_err(|_| DecodeError::InvalidValue)?;
-		// Only the canonical spelling is valid, so each pattern has one encoding.
-		if pattern.as_str() != text {
-			return Err(DecodeError::InvalidValue);
-		}
-		patterns.push(pattern);
-	}
-	// Reduce once, so a peer's count never turns into quadratic work.
-	Ok(patterns.into_iter().collect())
-}
-
 impl Message for AuthOk {
 	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Auth);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
-		let publish = decode_patterns(r)?;
-		let subscribe = decode_patterns(r)?;
+		let publish = Patterns::decode(r, version)?;
+		let subscribe = Patterns::decode(r, version)?;
 		let expires = match r.varint()? {
 			0 => None,
 			ms if ms <= MAX_EXPIRES_MS => Some(Duration::from_millis(ms)),
@@ -100,8 +73,8 @@ impl Message for AuthOk {
 		if !version.has_auth() {
 			return Err(EncodeError::Version);
 		}
-		encode_patterns(&self.publish, w)?;
-		encode_patterns(&self.subscribe, w)?;
+		self.publish.encode(w, version)?;
+		self.subscribe.encode(w, version)?;
 		// 0 means never, so a grant that has already lapsed rounds up to the
 		// smallest value that still reads as an expiry.
 		let expires = match self.expires {
@@ -190,6 +163,7 @@ impl Decode<Version> for AuthReply {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::Pattern;
 
 	fn patterns(texts: &[&str]) -> Patterns {
 		texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()

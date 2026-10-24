@@ -525,61 +525,6 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 	});
 });
 
-// moq-transport carries namespace prefixes, so a grant that is not a union of subtrees
-// is refused there rather than widened.
-describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
-	test("a grant namespace prefixes cannot carry is unsupported and leaves the rest alone", async () => {
-		const { client, server, transport } = await connect({ publish: new OriginProducer(), protocol });
-		const requests = server.auth.requests();
-		const issued: Issued[] = [];
-		void (async () => {
-			for (;;) {
-				const request = await requests.next();
-				if (!request) break;
-				const token = new TextDecoder().decode(request.token);
-				const unions: Record<string, string[]> = {
-					exact: ["room/alice"],
-					mixed: ["room/**", "lobby"],
-					wildcard: ["room/*/cam"],
-				};
-				const union = unions[token];
-				const granted = union
-					? { publish: new Path.Patterns(union.map((p) => Path.Pattern.parse(p))), subscribe: patterns() }
-					: token === "t1"
-						? grant(["b"], [])
-						: grant(["a"], []);
-				issued.push(request.accept(granted));
-			}
-		})();
-
-		await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
-		for (const token of ["exact", "mixed", "wildcard"]) {
-			await expect(client.auth.add(token)).rejects.toBeInstanceOf(Unsupported);
-		}
-		expect(client.auth.grant.peek()?.publish.equals(patterns("a"))).toBe(true);
-
-		// An update namespace prefixes cannot carry revokes that token's grant, and only that one.
-		const t1 = await client.auth.add("t1");
-		await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a", "b")) === true);
-		issued[issued.length - 1]?.update({
-			publish: new Path.Patterns([Path.Pattern.literal("b/exact")]),
-			subscribe: patterns(),
-		});
-		await t1.closed;
-		await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
-
-		let closed = false;
-		void transport.closed.then(() => {
-			closed = true;
-		});
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(closed).toBe(false);
-		client.abort();
-		server.abort();
-	});
-});
-
-// moq-lite carries patterns, so every grant arrives exactly as issued.
 test("a fetch abandoned while its token waits never reaches the wire", async () => {
 	const logged = spyOn(console, "debug");
 	const origin = new OriginProducer();
@@ -702,8 +647,12 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 	},
 );
 
-test("lite-07 carries literal and wildcard grants exactly", async () => {
-	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
+test.each([
+	Lite.ALPN_07_WIP,
+	Ietf.ALPN.DRAFT_17,
+	Ietf.ALPN.DRAFT_22,
+])("%s carries literal and wildcard grants exactly", async (protocol) => {
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 	const requests = server.auth.requests();
 	const unions: Record<string, [string[], string[]]> = {
 		"": [["a/**"], []],
