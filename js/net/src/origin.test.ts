@@ -2000,16 +2000,32 @@ test("an equal-cost pool spreads its paths the same way on every node", async ()
 	}
 });
 
-test("an equal-cost pool advertises the same member whatever order it arrived in", async () => {
-	const prefix = Path.from("pool");
-	const workers = [10n, 11n].map((id) => HopSchema.parse(id));
-	const expected = spreadHash(prefix, [workers[0]]) < spreadHash(prefix, [workers[1]]) ? workers[0] : workers[1];
-
-	for (const order of [workers, [...workers].reverse()]) {
+// A publisher that reconnects under a new hop while its old session lingers takes over at once,
+// whichever hop hashes lower: only a prefix's paths are spread by the hash.
+test("an equal-cost replacement at its own path wins whatever its hop", async () => {
+	const path = Path.from("pool/job-0");
+	for (const order of [
+		[11n, 10n],
+		[10n, 11n],
+	].map((hops) => hops.map((id) => HopSchema.parse(id)))) {
 		const origin = new Producer();
-		const handles = order.map((hop) => wireOf(origin).receive(prefix, { hops: [hop], cost: 3n }));
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		expect((await announcedView(origin.consume())).peek().get(prefix)?.hops).toEqual([expected]);
+		const served: bigint[] = [];
+		const handles = order.map((hop) => {
+			const handle = wireOf(origin).receive(path, { hops: [hop], cost: 3n });
+			void (async () => {
+				for await (const request of handle.requested()) {
+					served.push(hop);
+					request.accept(new BroadcastProducer());
+				}
+			})();
+			return handle;
+		});
+		await settle();
+		expect((await announcedView(origin.consume())).peek().get(path)?.hops).toEqual([order[1]]);
+		const request = origin.request(path);
+		await settle();
+		expect(served).toEqual([order[1]]);
+		request.close();
 		for (const handle of handles) handle.close();
 		origin.close();
 	}
@@ -2721,4 +2737,23 @@ test("public announcements saturate static costs and refuse invalid cost shapes"
 	expect(() => broadcast.announce({ cost: { warm: 1n, cold: 2n } } as unknown as Route)).toThrow(RangeError);
 	broadcast.close();
 	origin.close();
+});
+
+test("published names refuse navigation segments", () => {
+	const origin = new Producer();
+	try {
+		for (const name of ["room/./cam", "room/../cam", ".", ".."]) {
+			const path = Path.from(name);
+			expect(() => origin.createBroadcast(path)).toThrow();
+			expect(() => origin.dynamic(path)).toThrow();
+			expect(() => wireOf(origin).receive(path, Route.default)).toThrow();
+		}
+		const scoped = origin.scope(Path.from("room/.."), new Path.Patterns([Path.Pattern.all()]));
+		expect(() => scoped.createBroadcast(Path.from("cam"))).toThrow();
+		for (const path of ["room/.pro/cam", "room/a..b", "room/cam"]) {
+			origin.createBroadcast(Path.from(path)).close();
+		}
+	} finally {
+		origin.close();
+	}
 });

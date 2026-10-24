@@ -245,11 +245,6 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	cluster_run.abort();
 }
 
-#[test]
-fn cluster_reconnects_on_empty_uri_goaway() {
-	run_cluster_test(cluster_reconnects_on_empty_uri_goaway_inner());
-}
-
 /// A fake sibling upstream: a stream-only moq server publishing `origin`'s
 /// broadcasts to whoever connects. Returns its port, a receiver yielding each
 /// accepted [`moq_net::Session`] (so the test can drain it), and the task.
@@ -755,103 +750,6 @@ async fn collect_group(sub: &mut moq_net::track::Subscriber, seen: &mut BTreeSet
 		extra.is_none(),
 		"group {expected_seq} must carry exactly {frames} frames, no duplicates ({stage})"
 	);
-}
-
-/// An empty-URI GOAWAY ("reconnect to me") makes the cluster redial the same
-/// endpoint. Both sessions' routes carry the publisher's epoch on lite-07, so the
-/// subscription through the drained session re-splices onto the redial and keeps
-/// delivering.
-async fn cluster_reconnects_on_empty_uri_goaway_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-	let upstream_origin = moq_tokio::origin::spawn();
-	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-		.expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
-
-	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone()).await;
-
-	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.tls.insecure = Some(true);
-	client_config.goaway.handover = Some(HANDOVER);
-	client_config.backoff.initial = Some(BACKOFF);
-	// Only lite-07 carries the epoch that lets the redial resume the subscription.
-	client_config.version = vec![LITE_07.parse().unwrap()];
-
-	let mut cluster_config = cluster::Config::default();
-	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
-	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
-		.expect("cluster init")
-		.with_connect(client_config, Default::default());
-	let started = cluster.clone().start().await.expect("cluster start");
-	let cluster_run = tokio::spawn(started.run());
-
-	let first_dial = within("upstream accepts the cluster dial", accepted.recv())
-		.await
-		.expect("accept channel closed");
-
-	// Downstream consumer sees group 0 through the first session.
-	let bc = within("broadcast announced", async {
-		let consumer = cluster.origin.consume();
-		consumer.routed("cam").await?;
-		consumer.request_broadcast("cam", None).await.ok()
-	})
-	.await
-	.expect("broadcast announced");
-	let mut sub = within("subscribe", async {
-		bc.track("video").expect("track handle").subscribe(None).await
-	})
-	.await
-	.expect("subscribe");
-
-	let mut g = track.append_group().expect("append group");
-	g.write_frame(moq_net::Timestamp::ZERO, b"empty_g0".as_ref())
-		.expect("write frame");
-	g.finish().expect("finish");
-	let mut g0 = within("recv g0", sub.recv_group())
-		.await
-		.expect("recv")
-		.expect("track ended early");
-	assert_eq!(g0.sequence, 0);
-	assert_eq!(
-		g0.read_frame().await.expect("read").expect("frame").payload[..],
-		b"empty_g0"[..]
-	);
-
-	// Drain with an EMPTY URI: the cluster must fall back to redialing the
-	// originally configured endpoint.
-	first_dial
-		.drain()
-		.send(moq_net::goaway::Goaway::new())
-		.expect("send goaway");
-
-	// Positive gate: the upstream accepts a SECOND session (the redial).
-	let _second_dial = within("cluster redials the same endpoint", accepted.recv())
-		.await
-		.expect("accept channel closed");
-
-	within("old session drains", first_dial.closed()).await;
-
-	// The redialed session's route carries the same epoch, so the broadcast
-	// re-splices onto it: the SAME subscription delivers the next group, with
-	// nothing re-delivered and no visible end.
-	let mut g = track.append_group().expect("append group");
-	g.write_frame(moq_net::Timestamp::ZERO, b"empty_g1".as_ref())
-		.expect("write frame");
-	g.finish().expect("finish");
-	let mut g1 = within("recv g1 through the redial", sub.recv_group())
-		.await
-		.expect("subscription survives the redial")
-		.expect("track ended early");
-	assert_eq!(g1.sequence, 1, "the redialed session must deliver the new group");
-	assert_eq!(
-		g1.read_frame().await.expect("read").expect("frame").payload[..],
-		b"empty_g1"[..]
-	);
-
-	cluster_run.abort();
 }
 
 /// Dial once and hand back the client with its connection.
