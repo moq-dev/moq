@@ -316,7 +316,7 @@ fn mdns_candidates_are_split_out() {
 		a=candidate:1 1 udp 2113937151 0a1b2c3d.local 54321 typ host\r\n\
 		a=candidate:2 1 udp 2113937151 192.168.1.2 54321 typ host\r\n\
 		a=end-of-candidates\r\n";
-	let (kept, mdns) = split_mdns(sdp);
+	let (kept, mdns) = split_mdns(sdp).unwrap();
 	assert_eq!(
 		kept,
 		"v=0\r\na=candidate:2 1 udp 2113937151 192.168.1.2 54321 typ host\r\na=end-of-candidates\r\n"
@@ -324,13 +324,16 @@ fn mdns_candidates_are_split_out() {
 	assert_eq!(mdns, ["candidate:1 1 udp 2113937151 0a1b2c3d.local 54321 typ host"]);
 }
 
-#[tokio::test]
-async fn ip_candidates_parse_without_mdns() {
-	let candidate = parse_candidate("candidate:2 1 udp 2113937151 192.168.1.2 54321 typ host")
-		.await
-		.unwrap();
-	assert_eq!(candidate.addr(), "192.168.1.2:54321".parse().unwrap());
-	assert!(parse_candidate("candidate:2 1 udp nope").await.is_err());
+/// A malformed `.local` candidate is refused up front, not after costing a query.
+#[test]
+fn malformed_mdns_candidates_are_refused() {
+	let sdp = "v=0\r\na=candidate:1 1 udp nope 0a1b2c3d.local 54321 typ host\r\n";
+	assert!(matches!(split_mdns(sdp), Err(Error::Candidate(_))));
+	assert!(mdns_host("candidate:1 1 udp 2113937151 0a1b2c3d.local 54321 typ nope").is_err());
+	assert_eq!(
+		mdns_host("candidate:1 1 udp 2113937151 0a1b2c3d.local 54321 typ host").unwrap(),
+		Some("0a1b2c3d.local")
+	);
 }
 
 /// Building a peer mutates its `Rtc` several times before the agent's first drain:
