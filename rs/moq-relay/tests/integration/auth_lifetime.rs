@@ -444,11 +444,13 @@ async fn forwards_the_setup_token() {
 				.await
 				.expect("connect WebSocket")
 		} else {
-			qmux::tcp::Config::new(qmux::Version::QMux01)
-				.protocols(["moqt-16"])
-				.connect(("127.0.0.1", port))
-				.await
-				.expect("connect TCP")
+			qmux::tcp::connect(("127.0.0.1", port), {
+				let mut config = qmux::Config::new(qmux::Version::QMux01);
+				config.protocol = qmux::Protocol::Negotiate(vec!["moqt-16".into()]);
+				config
+			})
+			.await
+			.expect("connect TCP")
 		};
 		let (mut send, mut recv) = session
 			.open_bi(Default::default())
@@ -1369,7 +1371,7 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	config.protocol = Some(crate::memory::newest().alpn().to_string());
 	let (client, server) = moq_net::transport::memory::pair(config);
 
-	let now = moq_net::time::now();
+	let now = moq_net::time::Instant::now();
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
 			.connect(now, client)

@@ -162,7 +162,7 @@ impl Server {
 		runtime: Deadlines,
 		session: Transport,
 		version: lite::Version,
-		client_setup: Option<lite::AcceptedSetup<Transport>>,
+		client_setup: Option<lite::AcceptedSetup>,
 		peer_hop: Option<crate::Hop>,
 		auth: crate::auth::Handle,
 	) -> Result<(Session, crate::Driver), Error> {
@@ -545,7 +545,7 @@ enum PausedHandshake {
 	LiteSetup {
 		session: Transport,
 		version: lite::Version,
-		client_setup: lite::AcceptedSetup<Transport>,
+		client_setup: lite::AcceptedSetup,
 	},
 	IetfModern(PausedIetfModern),
 	Legacy(PausedLegacy),
@@ -557,7 +557,7 @@ enum PausedHandshake {
 struct PausedIetfModern {
 	session: Transport,
 	version: ietf::Version,
-	peer_setup: ietf::PeerSetup<Transport>,
+	peer_setup: ietf::PeerSetup,
 }
 
 impl PausedIetfModern {
@@ -668,7 +668,7 @@ impl PausedLegacy {
 				// The client's requests, admitted up to our limits and granted back as they close.
 				parameters.set_varint(
 					ietf::ParameterVarInt::MaxRequestId,
-					ietf::initial_max_request_id(server.limits.requests(), true),
+					ietf::initial_max_request_id(server.limits.window(), true),
 				);
 				if let Some(implementation) = server.implementation() {
 					parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
@@ -873,7 +873,7 @@ impl Handshake {
 		self
 	}
 
-	/// Set request caps after authorizing the peer and before answering SETUP.
+	/// Set the session's limits after authorizing the peer and before answering SETUP.
 	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
 		self.inner_mut().server.limits = limits;
 		self

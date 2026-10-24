@@ -173,11 +173,7 @@ pub struct Config {
 	/// [`resolved_timeout`](Self::resolved_timeout) for the value in effect.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<std::time::Duration>,
 
 	/// Maximum time for an accepted connection to finish its handshake. Defaults to 10s; 0s waits forever.

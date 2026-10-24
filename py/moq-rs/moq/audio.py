@@ -14,6 +14,7 @@ from moq_ffi import (
     MoqAudioFrame,
     MoqAudioPacket,
     MoqAudioProducer,
+    MoqAudioProducerOptions,
 )
 
 from ._records import _from_us, _opt_us, _to_us
@@ -58,7 +59,6 @@ class EncoderOutput:
     """
 
     codec: Codec
-    track: str | None = None
     sample_rate: int | None = None
     channels: int | None = None
     bitrate: int | None = None
@@ -68,7 +68,6 @@ class EncoderOutput:
     def _ffi(self) -> MoqAudioEncoderOutput:
         return MoqAudioEncoderOutput(
             codec=self.codec,
-            track=self.track,
             sample_rate=self.sample_rate,
             channels=self.channels,
             bitrate=self.bitrate,
@@ -115,14 +114,18 @@ class Producer:
         input: EncoderInput,
         output: EncoderOutput,
         *,
+        track: str | None = None,
         bandwidth: Bandwidth | None = None,
     ) -> None:
-        """Open a audio track on the catalog's broadcast and register its rendition."""
+        """Open an audio track on the catalog's broadcast and register its rendition."""
         self._inner = MoqAudioProducer(
             catalog._inner,
-            input,
-            output._ffi(),
-            None if bandwidth is None else bandwidth._inner,
+            MoqAudioProducerOptions(
+                input=input,
+                output=output._ffi(),
+                track=track,
+                bandwidth=None if bandwidth is None else bandwidth._inner,
+            ),
         )
 
     def demand(self) -> TrackDemand:

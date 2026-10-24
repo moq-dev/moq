@@ -115,21 +115,19 @@ read, whether or not their message is complete.
 
 ## \[session] and \[peer]
 
-Request caps apply separately to each session on every transport. The relay
+Session limits apply separately to each session on every transport. The relay
 uses `[peer]` for an admitted grant marked `peer` or `upstream`, including
 verified LAN membership, and for links it dials through the cluster. A client
-certificate, route hop, or cluster-looking URL alone does not select peer caps.
+certificate, route hop, or cluster-looking URL alone does not select peer limits.
 
 ```toml
 [session]
 announces = 1000                     # Simultaneous broadcasts or namespaces.
-subscriptions = 1000                # Simultaneously held subscriptions.
-fetches = 10000                      # Independent simultaneous FETCH requests.
+requests = 10000                     # Other simultaneous moq-transport requests.
 
 [peer]
 announces = 100000
-subscriptions = 10000
-fetches = 10000
+requests = 20000
 
 [peer.quic]
 max_streams = 100000                 # Concurrent QUIC streams per direction.
@@ -145,15 +143,17 @@ not throttled by `[quic]` limits sized for one viewer, for example
 `--peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
 their transport's own limits.
 
-These are the defaults. For example, `--peer-subscriptions=50000` raises the
-subscription cap on cluster links. `--session-fetches` and `--peer-fetches`
-set the independent FETCH caps; concurrent callers of the same group each
-hold a slot. Size peer caps for the combined traffic they carry, and use
-session peak counters to check announcement and subscription headroom.
-Exceeding a cap closes the session with `TOO_MANY_REQUESTS`; reconnecting with
-the same load will exceed it again. Zero admits no entries of that kind, not unlimited
-entries. On moq-transport drafts 14 to 16 these caps also size the request
-window, so very small values can prevent other requests from progressing.
+These are the defaults. Each subscription and FETCH holds a stream on moq-lite
+and on moq-transport draft 17 and later, so `[quic]` or `[peer.quic]`
+`max_streams` bounds them there, and a peer past it waits rather than fails.
+On drafts 14 to 16, `announces` and `requests` together size the request
+window instead, which every request counts against, so very small values can
+prevent other requests from progressing. On later drafts `requests` bounds the
+PUBLISHes a peer's track listings hold; the rest are skipped. Size peer limits
+for the combined traffic they carry, and use session peak counters to check
+announcement and subscription headroom. Exceeding `announces` closes the session
+with `TOO_MANY_REQUESTS`; reconnecting with the same load will exceed it again.
+Zero admits no entries of that kind, not unlimited entries.
 
 ## \[runtime]
 
@@ -180,8 +180,8 @@ first cores, so two relays on one host, or one limited to fewer CPUs than the
 host has, would crowd onto them. Turn it on for a host the relay has to itself.
 
 `io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
-shares the same reloadable TLS identity, serves every configured version
-like the shared runtime, and refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
+shares the same reloadable TLS identity and serves every configured version
+like the shared runtime. A setting the build or host cannot deliver refuses to
 start rather than being ignored. If io\_uring workers fail to start naming
 `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 
@@ -326,7 +326,7 @@ the old connection keeps serving after a GOAWAY.
 
 ```toml
 [cache]
-capacity = "8GiB"                    # Target bytes of cached groups. "75%" of memory also works.
+capacity = "8GiB"                    # Target bytes of cached groups and buffered datagrams. "75%" of memory also works.
 headroom = "2GiB"                    # Or: keep this much system memory free and grow into the rest.
 duration = "30s"                     # Cap how long a non-latest group is kept, whatever the publisher asked.
 ```

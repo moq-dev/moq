@@ -408,7 +408,7 @@ impl Client {
 		// The server's requests, admitted up to our limits and granted back as they close.
 		parameters.set_varint(
 			ietf::ParameterVarInt::MaxRequestId,
-			ietf::initial_max_request_id(self.limits.requests(), false),
+			ietf::initial_max_request_id(self.limits.window(), false),
 		);
 		if let Some(implementation) = self.implementation() {
 			parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());

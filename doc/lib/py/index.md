@@ -25,7 +25,7 @@ so a raw byte stream needs no other importer.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
-and `await consumer.latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
+and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
 `TrackInfo(compress=True)` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
 `moq.flate.SnapshotProducer` / `StreamProducer` publish opaque payloads; their `update` / `append`
@@ -78,12 +78,12 @@ async def main():
         catalog_producer = moq.media.CatalogProducer(broadcast)
         video = moq.video.Producer(
             catalog_producer,
-            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=30),
+            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=moq.video.FrameRate(numerator=30000, denominator=1001)),
             moq.VideoEncoderOutput(
                 codec=moq.VideoCodec.H264,
-                track="camera",
                 kind=moq.VideoEncoderKind.AUTO(),  # pyright: ignore[reportArgumentType]
             ),
+            track="camera",
         )
         video.write(moq.video.Frame(timestamp=catalog_producer.now(), data=rgba))
 
@@ -102,6 +102,8 @@ async def main():
 
 asyncio.run(main())
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings.
 
 ## Things to know
 

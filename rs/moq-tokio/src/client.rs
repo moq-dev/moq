@@ -211,7 +211,7 @@ impl Client {
 		self
 	}
 
-	/// Cap the announcements and subscriptions this peer can hold on a session.
+	/// Bound what this peer can make a session hold beyond flow control.
 	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
 		self.moq = self.moq.with_limits(limits);
 		self
@@ -785,7 +785,7 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 	client: &moq_net::Client,
 	transport: S,
 ) -> Result<moq_net::Session, moq_net::Error> {
-	let (session, driver) = client.connect(moq_net::time::now(), transport).await?;
+	let (session, driver) = client.connect(moq_net::time::Instant::now(), transport).await?;
 	use tracing::Instrument;
 	tokio::spawn(crate::panic::isolate(moq_net::time::run(driver)).instrument(tracing::Span::current()));
 	Ok(session)

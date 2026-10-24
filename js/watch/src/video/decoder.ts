@@ -60,6 +60,9 @@ type DecoderOutput = {
 	// The current frame to render.
 	frame: Signal<VideoFrame | undefined>;
 
+	// Whether the current frame weaves two fields, per the rendition that decoded it.
+	interlaced: Signal<boolean>;
+
 	// The timestamp of the current frame.
 	timestamp: Signal<Milli | undefined>;
 
@@ -88,6 +91,7 @@ export class Decoder {
 	readonly #out: DecoderOutput = {
 		error: new Signal<Error | undefined>(undefined),
 		frame: new Signal<VideoFrame | undefined>(undefined),
+		interlaced: new Signal<boolean>(false),
 		timestamp: new Signal<Milli | undefined>(undefined),
 		display: new Signal<{ width: number; height: number } | undefined>(undefined),
 		stalled: new Signal<boolean>(false),
@@ -320,6 +324,7 @@ export class Decoder {
 				this.#out.error.set(undefined);
 			}
 			this.#out.timestamp.set(Milli.fromMicro(frame.timestamp as Micro));
+			this.#out.interlaced.set(active.config.interlaced);
 			this.#out.frame.update((prev) => {
 				prev?.close();
 				return frame.clone();
@@ -528,19 +533,24 @@ class DecoderTrack {
 		});
 
 		// Input processing - depends on container type
-		if (this.config.container.kind === "cmaf") {
-			effect.spawn(async () => {
-				try {
-					await this.#runCmaf(effect, sub, decoder);
-				} catch (err) {
-					if (effect.abort.aborted) return;
-					this.error.set(err instanceof Error ? err : new Error(String(err)));
-					effect.close();
-				}
-			});
-		} else {
-			this.#runLegacy(effect, sub, decoder);
-		}
+		this.#spawn(effect, async () => {
+			if (this.config.container.kind === "cmaf") await this.#runCmaf(effect, sub, decoder);
+			else this.#runLegacy(effect, sub, decoder);
+		});
+	}
+
+	// Run `task` for this track. A setup, read, or decode failure that is not its cancellation is
+	// fatal: reported through `error`, which the decoder latches, with the track's effect closed.
+	#spawn(effect: Effect, task: () => Promise<void>): void {
+		effect.spawn(async () => {
+			try {
+				await task();
+			} catch (err) {
+				if (effect.abort.aborted) return;
+				this.error.set(err instanceof Error ? err : new Error(String(err)));
+				effect.close();
+			}
+		});
 	}
 
 	#runLegacy(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
@@ -567,7 +577,7 @@ class DecoderTrack {
 		let latest: number | undefined;
 		const recovery = new Recovery();
 
-		effect.spawn(async () => {
+		this.#spawn(effect, async () => {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
@@ -652,7 +662,7 @@ class DecoderTrack {
 		let latest: number | undefined;
 		const recovery = new Recovery();
 
-		effect.spawn(async () => {
+		this.#spawn(effect, async () => {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
@@ -735,6 +745,7 @@ class DecoderTrack {
 			displayAspectWidth: this.config.displayAspectWidth,
 			displayAspectHeight: this.config.displayAspectHeight,
 			optimizeForLatency: this.config.optimizeForLatency,
+			hardwareAcceleration: hardwareAcceleration(this.config),
 			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
 			flip: false,
 		});
@@ -782,6 +793,12 @@ class DecoderTrack {
 	}
 }
 
+// Chrome configures a hardware H.264 decoder that then fails the first interlaced picture: field
+// coding only shows in the SPS, and Chrome falls back to software only when configure() fails.
+function hardwareAcceleration(config: { interlaced?: boolean }): HardwareAcceleration | undefined {
+	return config.interlaced ? "prefer-software" : undefined;
+}
+
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	if (!Catalog.containerSupported(config.container)) {
 		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.
@@ -812,6 +829,7 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 		displayAspectWidth: config.displayAspectWidth,
 		displayAspectHeight: config.displayAspectHeight,
 		optimizeForLatency: config.optimizeForLatency ?? true,
+		hardwareAcceleration: hardwareAcceleration(config),
 	});
 
 	if (supported) return true;
@@ -827,6 +845,7 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 			displayAspectWidth: config.displayAspectWidth,
 			displayAspectHeight: config.displayAspectHeight,
 			optimizeForLatency: config.optimizeForLatency ?? true,
+			hardwareAcceleration: hardwareAcceleration(config),
 		});
 		if (retry.supported) {
 			config.codec = avc1;

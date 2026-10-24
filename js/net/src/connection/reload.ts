@@ -2,7 +2,7 @@ import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { Allocator } from "../bandwidth.ts";
-import { error, SessionCode, SessionError } from "../error.ts";
+import { error, reason, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Follow } from "../util/observed.ts";
@@ -438,7 +438,7 @@ export class Reload {
 					const ended = await effect.race(connection.closed, wireOf(connection).goaway);
 					if (ended === undefined) return;
 					if (ended === null || ended instanceof Error) {
-						console.warn("connection closed, reconnecting");
+						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);
 						this.#redirects.reset();
 						if (this.established.peek() === connection) this.established.set(undefined);
 						this.#retry(effect, connected, ended ?? undefined);

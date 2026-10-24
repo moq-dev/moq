@@ -584,7 +584,8 @@ export class Connection implements Established {
 				stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 			})
 			.catch((err: unknown) => {
-				console.error("error processing object stream", err);
+				// A peer resetting a stream it no longer wants to send is routine, not an error;
+				// only a violation is, and that one closes the session with its code.
 				stream.stop(err);
 
 				// An unknown or invalid stream type MUST close the session, not just the stream.
