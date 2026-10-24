@@ -22,7 +22,7 @@ typedef Consumer = MoqAudioConsumer;
 /// The PCM layout written to a [Producer].
 typedef EncoderInput = MoqAudioEncoderInput;
 
-/// The codec side: codec, track name, rate, channels, bitrate, preset, and frame duration (0 takes the codec's own frame).
+/// The codec side: codec, rate, channels, bitrate, preset, and frame duration (0 takes the codec's own frame).
 typedef EncoderOutput = MoqAudioEncoderOutput;
 
 /// The PCM layout a [Consumer] delivers, how stale a group may get, and its playout delay.
@@ -74,3 +74,6 @@ extension AudioConsumerDuration on MoqAudioConsumer {
   /// Playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
   Duration get delay => Duration(microseconds: delayUs());
 }
+
+/// Input, codec settings, and publication ownership for a producer.
+typedef ProducerOptions = MoqAudioProducerOptions;

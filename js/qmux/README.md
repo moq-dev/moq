@@ -48,9 +48,8 @@ Deno.serve((req) => {
 ```
 
 Any already-accepted `WebSocket` works — `Deno.upgradeWebSocket`, Node's `ws`, or a
-`WebSocketStream`. Accepting the upgrade without a negotiated subprotocol falls back to the legacy
-`webtransport` wire format, so reject the request when `selectSubprotocol` returns `undefined`
-rather than accepting a socket the peer's framing won't match. If your host doesn't expose the
+`WebSocketStream`. The session refuses missing or unsupported subprotocols. Reject the upgrade
+when `selectSubprotocol` returns `undefined`. If your host doesn't expose the
 negotiated value on the socket, pass it explicitly as `{ protocol }`.
 
 The result is an ordinary `WebTransport`: the only difference from a client session is which half of

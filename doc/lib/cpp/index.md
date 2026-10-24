@@ -119,15 +119,17 @@ auto broadcast = ok(session->publish()->create_broadcast("my-stream.hang"));
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
 ok(audio->write_frame({packet, 20'000}));
 
-moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
+moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
-auto video = ok(moq::VideoProducer::init(catalog, {moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
+auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({0, rgba}));
 moq::AnnounceRoute route;
 route.epoch = moq::mint_epoch(); // a fresh epoch per run
 ok(broadcast->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings.
 
 ## Futures
 
@@ -185,7 +187,7 @@ future completed, which is the executor thread.
 
 ## Disabled renditions
 
-Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 
 ## Bandwidth estimates
 

@@ -241,7 +241,6 @@ class CoveringRoot {
 	}
 }
 
-// pending: /quest/m1/public-model/answer.md
 /**
  * One requested path: the notify node for everything watching it.
  *
@@ -508,6 +507,13 @@ class VersionedSignal<T> extends Signal<T> {
 	override set(value: T, notify?: boolean): void {
 		this.version++;
 		super.set(value, notify);
+	}
+}
+
+// Navigation belongs to relative references, resolved before publication.
+function publishPath(path: Path.Valid): void {
+	if (Path.parts(path).some((segment) => segment === "." || segment === "..")) {
+		throw new Error("broadcast path contains a navigation segment");
 	}
 }
 
@@ -1232,6 +1238,7 @@ export class Producer implements Table {
 	 */
 	createBroadcast(path: Path.Valid): broadcast.Producer {
 		path = this.#scope.path(path);
+		publishPath(path);
 		const created = this.#state.created;
 		if (!created) throw new Error("origin is closed");
 
@@ -1343,6 +1350,7 @@ export class Producer implements Table {
 
 	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Dynamic {
 		prefix = this.#scope.prefix(prefix);
+		publishPath(prefix);
 		const server = new ServeState(this.#scope.root, prefix, originated);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
@@ -1581,6 +1589,20 @@ let makeDynamic: (
 
 let makeRequest: (path: Path.Valid, server: ServeState) => Request;
 let finishRequest: (request: Request, err: Error) => void;
+let setRequestPublisher: (request: Request, publisher: Producer | undefined) => void;
+let makePrepared: (
+	request: Request,
+	answer: broadcast.Producer,
+	announcer: broadcast.Announcer,
+	epoch: Epoch.Valid,
+) => Prepared;
+let publishPrepared: (
+	request: Request,
+	answer: broadcast.Producer,
+	announcer: broadcast.Announcer,
+	epoch: Epoch.Valid,
+) => broadcast.Producer;
+let rejectPrepared: (request: Request, err: Error) => void;
 
 /**
  * An owned request for a broadcast path; see {@link Consumer.request}.
@@ -2297,7 +2319,6 @@ export class Dynamic {
 	 *
 	 * @internal
 	 */
-	// pending: /quest/m1/public-model/answer.md
 	updateRoute(
 		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): void {
@@ -2339,7 +2360,7 @@ export class Dynamic {
 						queue.delete(next.value);
 					});
 					current = next.value;
-					current.publisher = this.#publisher;
+					setRequestPublisher(current, this.#publisher);
 					yield next.value;
 					continue;
 				}
@@ -2356,9 +2377,10 @@ export class Dynamic {
 /**
  * A pending request for a broadcast to be served on demand.
  *
- * Yielded by {@link Dynamic.requested}. {@link accept} resolves it with a live
- * broadcast; {@link reject} resolves it with an error. Advancing the iterator or
- * closing it without either rejects the request.
+ * Yielded by {@link Dynamic.requested}. {@link prepare} transfers it to a prepared
+ * answer; {@link accept} resolves a forwarded request with a live broadcast;
+ * {@link reject} refuses it. Advancing or closing the iterator without transferring
+ * or answering rejects the request.
  *
  * @public
  */
@@ -2369,8 +2391,7 @@ export class Request {
 	#server: ServeState;
 	#done = false;
 	#withdrawn = false;
-	/** @internal Set only by an application claim. */
-	publisher?: Producer;
+	#publisher?: Producer;
 
 	private constructor(path: Path.Valid, server: ServeState) {
 		this.path = path;
@@ -2379,6 +2400,19 @@ export class Request {
 
 	static {
 		makeRequest = (path, server) => new Request(path, server);
+		setRequestPublisher = (request, publisher) => {
+			request.#publisher = publisher;
+		};
+		publishPrepared = (request, answer, announcer, epoch) => {
+			if (!request.#server.has(request)) throw new Error("request is closed");
+			hooks.attachAnnouncer(answer, announcer);
+			// The exact route usually settles the request on its own, resolving its waiters
+			// through the new epoch; answer it directly if it is still pending.
+			answer.announce({ epoch });
+			if (request.#server.has(request)) request.#server.accept(request, answer.consume());
+			return answer;
+		};
+		rejectPrepared = (request, err) => request.#server.reject(request, err);
 		finishRequest = (request, err) => {
 			request.#done = true;
 			request.#withdrawn = true;
@@ -2389,35 +2423,17 @@ export class Request {
 	/** Start answering as a new publisher instance, hidden until published. */
 	prepare(epoch: Epoch.Valid): Prepared {
 		if (this.#done) throw new Error("request is closed");
-		if (!this.publisher) throw new Error("forwarded requests cannot be prepared");
-		this.#done = true;
-		const answer = this.publisher.createBroadcast(this.path);
+		if (!this.#publisher) throw new Error("forwarded requests cannot be prepared");
+		const answer = this.#publisher.createBroadcast(this.path);
 		// Withheld until publish, so the answer cannot announce itself under another
 		// epoch or skip the request's admission.
 		const announcer = hooks.withholdAnnouncer(answer);
-		if (!announcer) throw new Error("origin is closed");
-		return new Prepared(this, answer, announcer, epoch);
-	}
-
-	/** @internal Publish a prepared answer after its tracks have been filled. */
-	publishPrepared(
-		answer: broadcast.Producer,
-		announcer: broadcast.Announcer,
-		epoch: Epoch.Valid,
-	): broadcast.Producer {
-		if (!this.#server.has(this)) throw new Error("request is closed");
-		if (answer.closed.peek() !== undefined) throw new Error("broadcast is closed");
-		hooks.attachAnnouncer(answer, announcer);
-		// The exact route usually settles the request on its own, resolving its waiters
-		// through the new epoch; answer it directly if it is still pending.
-		answer.announce({ epoch });
-		if (this.#server.has(this)) this.#server.accept(this, answer.consume());
-		return answer;
-	}
-
-	/** @internal Refuse the request a prepared answer abandoned. */
-	rejectPrepared(err: Error): void {
-		this.#server.reject(this, err);
+		if (!announcer) {
+			answer.close();
+			throw new Error("origin is closed");
+		}
+		this.#done = true;
+		return makePrepared(this, answer, announcer, epoch);
 	}
 
 	/**
@@ -2433,7 +2449,6 @@ export class Request {
 	 * @throws Error when handed a broadcast a session delivered. The request stays open.
 	 * @internal
 	 */
-	// pending: /quest/m1/public-model/answer.md
 	accept(source: broadcast.Producer | broadcast.Consumer): void {
 		if (this.#done) {
 			// A withdrawn request takes no answer. Only the handed-off consumer is ours;
@@ -2441,7 +2456,7 @@ export class Request {
 			if (this.#withdrawn && source instanceof broadcast.Consumer) source.close();
 			return;
 		}
-		if (this.publisher) throw new Error("claim answers must be prepared and published");
+		if (this.#publisher) throw new Error("claim answers must be prepared and published");
 		if (this.#server.originated && !(source instanceof broadcast.Producer) && wireOf(source).fromSession) {
 			throw new Error("origin cannot serve a broadcast it did not produce");
 		}
@@ -2458,41 +2473,66 @@ export class Request {
 	}
 }
 
-/** A claim answer being filled before its exact route is announced. */
+/**
+ * A claim answer being filled before its exact route is announced.
+ *
+ * Use `using` or {@link close} to refuse it unless {@link publish} transfers its broadcast.
+ * Closing the unpublished broadcast also refuses the request. A retained, unclosed answer
+ * keeps the request pending; garbage collection provides no prompt cleanup guarantee.
+ */
 export class Prepared {
 	/** The unannounced broadcast to fill before publishing; only {@link publish} announces it. */
 	readonly broadcast: broadcast.Producer;
 	readonly #request: Request;
 	readonly #announcer: broadcast.Announcer;
 	readonly #epoch: Epoch.Valid;
+	readonly #stop: Dispose;
 	#done = false;
 
-	/** @internal */
-	constructor(request: Request, answer: broadcast.Producer, announcer: broadcast.Announcer, epoch: Epoch.Valid) {
+	private constructor(
+		request: Request,
+		answer: broadcast.Producer,
+		announcer: broadcast.Announcer,
+		epoch: Epoch.Valid,
+	) {
 		this.#request = request;
 		this.broadcast = answer;
 		this.#announcer = announcer;
 		this.#epoch = epoch;
+		// Synchronous, so a request made right after the broadcast closes reaches the claim again.
+		this.#stop = hooks.onClosed(answer, () => this.close());
+	}
+
+	static {
+		makePrepared = (request, answer, announcer, epoch) => new Prepared(request, answer, announcer, epoch);
 	}
 
 	/** Announce the filled broadcast and resolve every waiting requester, refusing them if it cannot be announced. */
 	publish(): broadcast.Producer {
+		// Closing the broadcast closes this answer at once, so `#done` covers it too.
 		if (this.#done) throw new Error("prepared answer is closed");
 		this.#done = true;
+		this.#stop();
 		try {
-			return this.#request.publishPrepared(this.broadcast, this.#announcer, this.#epoch);
+			return publishPrepared(this.#request, this.broadcast, this.#announcer, this.#epoch);
 		} catch (err) {
 			this.broadcast.close();
-			this.#request.rejectPrepared(err instanceof Error ? err : new Error(String(err)));
+			rejectPrepared(this.#request, err instanceof Error ? err : new Error(String(err)));
 			throw err;
 		}
 	}
 
-	/** Abandon the answer unpublished, closing its broadcast and resolving every waiting requester with `err`. */
-	reject(err: Error): void {
+	/** Refuse an unpublished answer as unroutable and close its broadcast. Idempotent. */
+	close(): void {
 		if (this.#done) return;
 		this.#done = true;
+		this.#stop();
 		this.broadcast.close();
-		this.#request.rejectPrepared(err);
+		rejectPrepared(this.#request, unroutable());
+	}
+
+	/** Calls {@link close}, so `using` refuses an unpublished answer. */
+	[Symbol.dispose](): void {
+		this.close();
 	}
 }

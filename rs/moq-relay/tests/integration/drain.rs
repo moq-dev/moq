@@ -41,7 +41,7 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 	tokio::spawn(async move {
 		let server = moq_net::Server::new().with_versions(version.into());
 		let handshake = server
-			.accept_request(moq_net::time::now(), relay_link)
+			.accept_request(moq_net::time::Instant::now(), relay_link)
 			.await
 			.expect("relay handshake");
 		let request = Accepted::new(handshake, moq_auth::Transport::Quic);
@@ -58,7 +58,7 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 	});
 	let (client, driver) = moq_net::Client::new()
 		.with_versions(version.into())
-		.connect(moq_net::time::now(), client_link)
+		.connect(moq_net::time::Instant::now(), client_link)
 		.await
 		.expect("client handshake");
 

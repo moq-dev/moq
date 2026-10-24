@@ -71,6 +71,11 @@ catalog-bench:
     bun install --frozen-lockfile
     bun publish/bench/catalog.ts
 
+# Sweep QMux record decoding over record size x frames per record.
+qmux-record-bench:
+    bun install --frozen-lockfile
+    bun qmux/bench/record.ts
+
 # Sweep CMAF fragment decode over mdat bytes x declared sample count, including a hostile count.
 cmaf-bench:
     bun install --frozen-lockfile
@@ -142,6 +147,11 @@ slow-group-bench:
 jitter-bench:
     bun install --frozen-lockfile
     bun hang/bench/jitter.ts
+
+# Sweep players against the main-thread CPU and allocation of feeding the audio ring, in Chromium.
+ring-bench:
+    bun install --frozen-lockfile
+    bun watch/bench/ring.ts
 
 # Sweep decoder count against PCM callback size during audio warmup.
 audio-warmup-bench:

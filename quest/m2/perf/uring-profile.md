@@ -28,8 +28,8 @@ profile, and plan a quest only for one that shows up:
 - atomic RMWs in worker metrics (remote wake counters genuinely have
   several writers);
 - receive rearm churn that `IORING_RECVSEND_POLL_FIRST` would cut;
-- GSO batching on ordinary and jumbo paths after
-  [MTU parity](/quest/m1/uring-mtu.md).
+- GSO batching on ordinary and jumbo paths, now that discovery can raise
+  the MTU.
 
 Decided 2026-10-22 from the io_uring audit.
 
