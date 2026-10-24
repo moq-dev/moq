@@ -77,7 +77,9 @@ describe("render dispatch", () => {
 		expect([...read(20)]).toEqual(Array(20).fill(0));
 		send({ type: "data", timestamp: Micro(500_000), data: [new Float32Array(100).fill(2)] });
 		for (let i = 0; i < 3; i++) read(20);
-		expect(sent).toEqual([{ type: "state", epoch: 7, timestamp: Micro(560_000), stalled: false, underruns: 0 }]);
+		expect(sent).toEqual([
+			{ type: "state", epoch: 7, timestamp: Micro(560_000), stalled: false, anchored: true, underruns: 0 },
+		]);
 	});
 
 	it("parks on a latency rise and preserves unread PCM through the resize", () => {

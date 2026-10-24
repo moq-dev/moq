@@ -283,20 +283,48 @@ impl Sequence {
 	}
 }
 
-/// Whether a track's cache reflects its live feed; see [`TrackState::set_idle`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Whether a track's cache reflects its live feed; see [`TrackState::set_idle`]. Each
+/// state holds what only that feed knows, so nothing an ended feed set outlives it.
+#[derive(Clone, Copy, Debug)]
 enum Feed {
 	/// Readers take from the cache.
-	#[default]
-	Live,
+	Live {
+		/// Where a relative start taken before the feed produced anything counts back
+		/// from: the newest group when it went live, or else the first it produced since.
+		/// Kept after the group is evicted.
+		first: Option<u64>,
+		/// The group the route answered with, which its datagrams can show before any
+		/// group reaches it: relative starts count back from it until a newer group
+		/// arrives.
+		edge: Option<u64>,
+	},
 	/// The upstream subscription ended with the copy still held, so how stale the cache
 	/// is cannot be told until the route answers again.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	Idle,
+	Idle {
+		/// The newest group cached when the track went idle: what the route's answer is
+		/// judged against, whatever lands before it.
+		newest: Option<u64>,
+	},
 	/// The route answered that its feed reaches group `from`, which the cache cannot show
 	/// yet: until it can, the newest group cached would read as the live edge.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Answered { from: u64 },
+}
+
+impl Default for Feed {
+	fn default() -> Self {
+		Self::Live {
+			first: None,
+			edge: None,
+		}
+	}
+}
+
+impl Feed {
+	fn is_live(&self) -> bool {
+		matches!(self, Self::Live { .. })
+	}
 }
 
 #[derive(Default)]
@@ -368,10 +396,8 @@ pub(crate) struct TrackState {
 	// datagrams, so it can run ahead of any cached group.
 	max_sequence: Option<u64>,
 
-	// The first and newest groups the publisher produced, which fetched backfill never
-	// moves: where relative starts count back from. The first is kept after it is evicted,
-	// for a relative start taken before any group was produced.
-	first_produced: Option<u64>,
+	// The newest group the publisher produced, which fetched backfill never moves: where
+	// relative starts count back from (see `latest_live`).
 	newest_produced: Option<u64>,
 
 	// The name's sequence namespace within the broadcast, which can run past this track's
@@ -459,10 +485,6 @@ pub(crate) struct TrackState {
 	// Readers start at this group: the route's live feed starts past a gap after
 	// everything cached, so nothing bounds how old the cache below it is.
 	live_floor: Option<u64>,
-	// The newest group cached when the track went idle: what the route's answer is
-	// judged against, whatever lands before it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	idle_newest: Option<u64>,
 
 	// Where production stopped, snapshotted when the open groups are released (an
 	// abort, or the last producer dropping). Computed live from the cache otherwise;
@@ -958,9 +980,45 @@ impl TrackState {
 	}
 
 	/// Whether readers may take from the cache: it reflects the live feed, or the track
-	/// ended, which makes the cache the whole of it.
+	/// reached its end, which makes the cache the whole of it. An end declared but not
+	/// reached does not: the groups before it are still to come from the feed.
 	fn readable(&self) -> bool {
-		self.feed == Feed::Live || self.sealed || self.end.is_some() || self.abort.is_some()
+		self.feed.is_live() || self.sealed || self.abort.is_some() || self.is_complete()
+	}
+
+	/// Where relative starts count back from: the live feed's newest group, produced or
+	/// answered. `None` while the cache does not reflect the feed, since an idle copy's
+	/// newest group is only what an ended feed left: a start taken then waits, as on an
+	/// empty track. An idle copy that ends counts from its newest cached group.
+	fn latest_live(&self) -> Option<u64> {
+		let edge = match self.feed {
+			Feed::Live { edge, .. } => edge,
+			_ => None,
+		};
+		let floor = self.live_floor.unwrap_or(0);
+		self.newest_produced
+			.max(edge)
+			.filter(|&latest| self.readable() && latest >= floor)
+	}
+
+	/// Where a relative start that waited on [`Self::latest_live`] counts back from. An idle
+	/// copy that ended without going live counts from its newest group, which its cache now
+	/// holds the whole of, and not from where an earlier feed began.
+	fn first_live(&self) -> Option<u64> {
+		match self.feed {
+			Feed::Live { first, .. } => first,
+			_ => self.latest_live(),
+		}
+	}
+
+	/// The cache reflects the live feed again, which reaches `edge` if the route named it:
+	/// a relative start that waited counts back from its newest group now.
+	fn go_live(&mut self, edge: Option<u64>) {
+		self.feed = Feed::Live { first: None, edge };
+		self.feed = Feed::Live {
+			first: self.latest_live(),
+			edge,
+		};
 	}
 
 	/// Find the next live group at or after `index` in arrival order.
@@ -1804,7 +1862,9 @@ impl TrackState {
 			self.latest_group = Some(sequence);
 		}
 		if visible {
-			self.first_produced.get_or_insert(sequence);
+			if let Feed::Live { first, .. } = &mut self.feed {
+				first.get_or_insert(sequence);
+			}
 			self.newest_produced = self.newest_produced.max(Some(sequence));
 		}
 		if !self.protects(sequence) {
@@ -1886,7 +1946,7 @@ impl TrackState {
 		if let Feed::Answered { from } = self.feed
 			&& sequence >= from
 		{
-			self.feed = Feed::Live;
+			self.go_live(Some(from));
 		}
 	}
 
@@ -2302,13 +2362,13 @@ impl TrackState {
 	/// datagrams go too, since a reader returning later must not be handed them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn set_idle(&mut self) {
-		self.feed = Feed::Idle;
-		self.idle_newest = self
+		let newest = self
 			.lookup
 			.iter()
 			.rev()
 			.find(|(_, slot)| slot.is_shown())
 			.map(|(sequence, _)| *sequence);
+		self.feed = Feed::Idle { newest };
 		self.datagram_offset += self.datagrams.len();
 		self.datagrams.clear();
 		// An open group stops because this copy dropped its feed, not because the publisher
@@ -2335,12 +2395,12 @@ impl TrackState {
 	/// read as the live edge, though the route already holds a newer one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) {
-		if self.feed != Feed::Idle {
+		let Feed::Idle { newest } = self.feed else {
 			return;
-		}
+		};
 		// Judged by what survived: the cancel that idled the copy resets the group in flight,
 		// and an answer past it leaves a gap after the newest group still cached.
-		let cached = self.idle_newest.take().and_then(|newest| {
+		let cached = newest.and_then(|newest| {
 			self.lookup
 				.range(..=newest)
 				.rev()
@@ -2356,10 +2416,10 @@ impl TrackState {
 			(None, Some(cached)) => Some(cached.saturating_add(1)),
 			_ => self.live_floor,
 		};
-		self.feed = match largest {
-			Some(largest) if !self.shows(largest.group) => Feed::Answered { from: largest.group },
-			_ => Feed::Live,
-		};
+		match largest.map(|largest| largest.group) {
+			Some(from) if !self.shows(from) => self.feed = Feed::Answered { from },
+			edge => self.go_live(edge),
+		}
 	}
 
 	/// Whether readers can already see content at or past `sequence`.
@@ -2567,7 +2627,7 @@ fn poll_largest(
 /// end that is not reached yet does not count: an idle copy's largest is still only what
 /// its ended feed left.
 fn largest_live(state: &TrackState, waiter: &kio::Waiter) -> Poll<()> {
-	match state.feed == Feed::Live || state.sealed || state.abort.is_some() || state.largest_settled() {
+	match state.feed.is_live() || state.sealed || state.abort.is_some() || state.largest_settled() {
 		true => Poll::Ready(()),
 		false => {
 			state.watch_tail(waiter);
@@ -3054,7 +3114,7 @@ impl Producer {
 	/// Whether readers may take from the cache; see [`Self::set_idle`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn is_live(&self) -> bool {
-		self.state.read().feed == Feed::Live
+		self.state.read().feed.is_live()
 	}
 
 	/// While idle, the newest group cached when the track went idle: a route asked from
@@ -3062,7 +3122,10 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn idle_newest(&self) -> Option<u64> {
 		let state = self.state.read();
-		state.idle_newest.filter(|_| state.feed == Feed::Idle)
+		match state.feed {
+			Feed::Idle { newest } => newest,
+			_ => None,
+		}
 	}
 
 	/// [`Request::request_start`] for a copy already accepted, which a held copy's next
@@ -4421,7 +4484,7 @@ impl Consumer {
 		self.with_state(|state| {
 			state.is_some_and(|state| {
 				let state = state.read();
-				state.routes.is_none() && state.published && !state.closed && state.feed == Feed::Live
+				state.routes.is_none() && state.published && !state.closed && state.feed.is_live()
 			})
 		})
 	}
@@ -5587,7 +5650,7 @@ impl Cursor {
 			let preferences = subscription.read();
 			let ranges_revision = subscription.ranges_revision();
 			let state = state.read();
-			let (window, refused) = match Window::new(&preferences.ranges, state.newest_produced, &*state) {
+			let (window, refused) = match Window::new(&preferences.ranges, state.latest_live(), &*state) {
 				Ok(window) => (window, None),
 				Err(err) => (Window::new(&[], None, &*state).expect("nothing to refuse"), Some(err)),
 			};
@@ -5704,7 +5767,7 @@ impl Cursor {
 		let moved = match replaced {
 			Some((revision, ranges)) => {
 				self.filter.resolved = revision;
-				match Window::new(&ranges, state.newest_produced, &*state) {
+				match Window::new(&ranges, state.latest_live(), &*state) {
 					Ok(window) => {
 						self.filter.window = window;
 						self.filter.refused = None;
@@ -5714,10 +5777,11 @@ impl Cursor {
 				true
 			}
 			None if self.filter.window.is_settled() => false,
-			// The track had no produced group when the ranges resolved, so the newest one
-			// then was the first to arrive, however many have arrived or left since.
-			None if self.filter.window.is_pending() => self.filter.window.settle(state.first_produced, &*state),
-			None => self.filter.window.settle(state.newest_produced, &*state),
+			// The live feed had no group when the ranges resolved, so the newest one then was
+			// the first to arrive, or the newest once it went live, however many have arrived
+			// or left since.
+			None if self.filter.window.is_pending() => self.filter.window.settle(state.first_live(), &*state),
+			None => self.filter.window.settle(state.latest_live(), &*state),
 		};
 		drop(state);
 		if moved {
@@ -6281,7 +6345,7 @@ impl Republish {
 		}
 		let state = self.state.read();
 		// The update was refused before it got here if the track can't resolve it.
-		let Ok(window) = Window::new(&ranges, state.newest_produced, &*state) else {
+		let Ok(window) = Window::new(&ranges, state.latest_live(), &*state) else {
 			return;
 		};
 		drop(state);
@@ -6691,7 +6755,7 @@ impl Subscriber {
 
 	/// The lowest group this subscriber's ranges name, as resolved here when it last read:
 	/// `None` while one reaches back to the oldest group still around, or a relative
-	/// start still waits on the first group to arrive.
+	/// start still waits on the first group from the live feed.
 	///
 	/// Where a reader that waits on each group in sequence starts, rather than at whatever
 	/// arrives first, which newest-first delivery makes the latest.
@@ -6730,7 +6794,7 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => {
 				let state = cursor.state.read();
-				Window::new(ranges, state.newest_produced, &*state)
+				Window::new(ranges, state.latest_live(), &*state)
 					.map(|window| window.resolved())
 					.unwrap_or_default()
 			}
@@ -8089,6 +8153,147 @@ mod test {
 		let _answer = framed(&producer, 5, 1);
 		assert!(flag.take(), "the answer showing woke the reader");
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
+	}
+
+	/// A relay copy holding groups 0 to 3 from an ended feed, idle until its route answers.
+	fn idle_copy() -> Producer {
+		let mut producer = track_producer("test", Info::default());
+		for sequence in 0..4 {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		producer.set_idle();
+		producer
+	}
+
+	/// Every group `reader` can take right now, in delivery order.
+	fn ready_groups(reader: &mut Subscriber) -> Vec<u64> {
+		let noop = kio::Waiter::noop();
+		let mut sequences = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&noop) {
+			sequences.push(group.sequence);
+		}
+		sequences
+	}
+
+	/// A relative start taken while the copy is idle counts back from the live feed's
+	/// latest group once the route answers, not from the newest one an ended feed left.
+	#[test]
+	fn a_relative_start_on_an_idle_copy_counts_from_the_live_feed() {
+		let behind = Range {
+			start: Anchor::Relative(1),
+			end: None,
+		};
+		for (ranges, expected) in [(Range::live(), vec![4]), (behind, vec![3, 4])] {
+			let mut producer = idle_copy();
+			let mut reader = producer.subscribe(replay().with_ranges([ranges]));
+			assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the copy is idle");
+			assert_eq!(reader.floor(), None, "the start waits for the live feed");
+
+			producer.set_live(Some(Position::group(4)), None);
+			framed(&producer, 4, 1).finish().unwrap();
+			assert_eq!(ready_groups(&mut reader), expected, "{ranges:?}");
+		}
+	}
+
+	/// A relative start waits past groups the route resends below its answer: the feed
+	/// goes live, and the start resolves, only once the answer shows.
+	#[test]
+	fn a_relative_start_on_an_idle_copy_waits_for_the_answer_to_show() {
+		let mut producer = idle_copy();
+		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
+		producer.set_live(Some(Position::group(5)), None);
+		framed(&producer, 4, 1).finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the answer has not shown");
+
+		framed(&producer, 5, 1).finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![5]);
+	}
+
+	/// A route that answers with nothing leaves the cache unrelated to its feed, so a
+	/// relative start resolves at the first group the feed then produces.
+	#[test]
+	fn a_relative_start_on_an_idle_copy_skips_a_cache_the_route_disowns() {
+		let mut producer = idle_copy();
+		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
+		producer.set_live(None, None);
+		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new());
+		assert_eq!(reader.floor(), None, "no cached group anchors the start");
+
+		framed(&producer, 7, 1).finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![7]);
+		assert_eq!(reader.floor(), Some(7));
+	}
+
+	/// An end the idle copy has not reached does not make its cache the whole track: until
+	/// the route answers, it serves nothing and anchors no relative start.
+	#[test]
+	fn an_idle_copy_with_a_future_end_waits_for_the_live_feed() {
+		let mut producer = idle_copy();
+		producer.finish_at(Position::group(10)).unwrap();
+		let mut live = producer.subscribe(replay().with_ranges([Range::live()]));
+		let mut oldest = producer.subscribe(replay());
+		assert_eq!(ready_groups(&mut live), Vec::<u64>::new(), "the copy is idle");
+		assert_eq!(live.floor(), None, "the start waits for the live feed");
+		assert_eq!(ready_groups(&mut oldest), Vec::<u64>::new(), "the copy is idle");
+
+		producer.set_live(Some(Position::group(4)), None);
+		framed(&producer, 4, 1).finish().unwrap();
+		assert_eq!(ready_groups(&mut live), vec![4]);
+		assert_eq!(ready_groups(&mut oldest), vec![0, 1, 2, 3, 4]);
+	}
+
+	/// An idle copy that ends without going live makes its cache the whole track, so a
+	/// relative start that waited counts back from its newest group, not from where the
+	/// earlier feed began.
+	#[test]
+	fn a_relative_start_on_an_idle_copy_that_ends_counts_from_its_newest_group() {
+		let producer = idle_copy();
+		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
+		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the copy is idle");
+
+		producer.finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![3]);
+	}
+
+	/// A datagram can show the route's answer before any group does, as it does when a
+	/// datagram is the first thing the resumed feed sends. A relative start counts back
+	/// from that answer, not from the older groups cached below it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_relative_start_on_an_idle_copy_counts_from_a_datagram_edge() {
+		let mut producer = idle_copy();
+		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
+		producer
+			.insert_datagram(4, None, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		producer.set_live(Some(Position::group(4)), None);
+		assert_eq!(
+			ready_groups(&mut reader),
+			Vec::<u64>::new(),
+			"no group reached the edge"
+		);
+		assert_eq!(reader.floor(), Some(4), "the answer anchors the start");
+
+		framed(&producer, 5, 1).finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![5]);
+	}
+
+	/// An idle copy forgets the edge its previous feed answered with, which only a datagram
+	/// it dropped showed: when it ends without going live, a relative start counts back
+	/// from its newest cached group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_idle_copy_that_ends_forgets_an_earlier_datagram_edge() {
+		let mut producer = idle_copy();
+		producer
+			.insert_datagram(4, None, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		producer.set_live(Some(Position::group(4)), None);
+		producer.set_idle();
+		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
+		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the copy is idle");
+		producer.finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![3]);
 	}
 
 	#[test]

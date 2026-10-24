@@ -91,6 +91,7 @@ class FakeWorklet {
 			type: "state",
 			timestamp: ring.timestamp,
 			stalled: ring.stalled,
+			anchored: ring.anchored,
 			underruns: ring.underruns,
 			epoch: this.#epoch,
 		};
@@ -140,11 +141,14 @@ const globals = [
 const originals = new Map<string, PropertyDescriptor | undefined>();
 let codecs = 0;
 let codecErrors: AudioDecoderInit["error"][] = [];
+// Thrown by the next `decode`, as WebCodecs does synchronously for a chunk it refuses.
+let decodeThrows: Error | undefined;
 
 beforeEach(() => {
 	frameTimestamp = 0;
 	codecs = 0;
 	codecErrors = [];
+	decodeThrows = undefined;
 	contexts = [];
 	worklets = [];
 	moduleLoaded = Promise.resolve();
@@ -166,6 +170,7 @@ beforeEach(() => {
 			this.needsKey = true;
 		}
 		decode(chunk: { timestamp: number; type: EncodedAudioChunkType }) {
+			if (decodeThrows) throw decodeThrows;
 			if (this.needsKey && chunk.type !== "key") throw new DOMException("key chunk required", "DataError");
 			this.needsKey = false;
 			this.init.output(new FakeData(chunk.timestamp) as unknown as AudioData);
@@ -204,18 +209,22 @@ afterEach(() => {
 	mock.restore();
 });
 
-// Hands frames to whichever container consumer is reading, and ends a consumer's reads on close.
+// Hands frames to whichever container consumer is reading, and ends a consumer's reads on close. An
+// Error stands in for a malformed read.
 function feed() {
 	const closed = new WeakSet<Container.Consumer>();
-	const queue: Read[] = [];
-	let waiter: { consumer: Container.Consumer; resolve: (read: Read | undefined) => void } | undefined;
+	const queue: (Read | Error)[] = [];
+	let waiter:
+		| { consumer: Container.Consumer; resolve: (read: Read | undefined) => void; reject: (err: Error) => void }
+		| undefined;
 
 	spyOn(Container.Consumer.prototype, "next").mockImplementation(function (this: Container.Consumer) {
 		if (closed.has(this)) return Promise.resolve(undefined);
 		const read = queue.shift();
+		if (read instanceof Error) return Promise.reject(read);
 		if (read) return Promise.resolve(read);
-		return new Promise<Read | undefined>((resolve) => {
-			waiter = { consumer: this, resolve };
+		return new Promise<Read | undefined>((resolve, reject) => {
+			waiter = { consumer: this, resolve, reject };
 		});
 	});
 
@@ -229,11 +238,12 @@ function feed() {
 		close.call(this);
 	});
 
-	return (read: Read) => {
+	return (read: Read | Error) => {
 		const current = waiter;
 		waiter = undefined;
-		if (current) current.resolve(read);
-		else queue.push(read);
+		if (!current) queue.push(read);
+		else if (read instanceof Error) current.reject(read);
+		else current.resolve(read);
 	};
 }
 
@@ -700,6 +710,34 @@ for (const cmaf of [false, true]) {
 }
 
 describe("fatal decoder errors", () => {
+	// A failure in the read loop, not a WebCodecs callback, must still reach `error` and release the
+	// subscription, instead of leaving the player apparently live.
+	for (const cmaf of [false, true]) {
+		for (const failure of ["a malformed read", "a decode that throws"] as const) {
+			it(`reports ${failure} on ${cmaf ? "CMAF" : "legacy"} and releases its subscription`, async () => {
+				const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+				const playback = await play(Milli(100), false, cmaf);
+				try {
+					await playback.play(2);
+					const before = close.mock.calls.length;
+					const error = new Error(failure);
+					if (failure === "a malformed read") {
+						playback.push(error);
+					} else {
+						decodeThrows = error;
+						await playback.play(1);
+					}
+					await microtasks();
+					expect(playback.error.peek()).toBe(error);
+					expect(close.mock.calls.length).toBeGreaterThan(before);
+				} finally {
+					playback.close();
+					close.mockRestore();
+				}
+			});
+		}
+	}
+
 	it("releases audio subscriptions and retains the failure until the source changes", async () => {
 		const close = spyOn(Moq.Track.Subscriber.prototype, "close");
 		const playback = await play(Milli(100));
