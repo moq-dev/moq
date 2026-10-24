@@ -1,8 +1,11 @@
 # Persistent GitHub Actions runner VM
 
 The `github-runner-vm` NixOS module runs each repository's runner in its own
-persistent KVM guest. The guest keeps its Nix store, home caches, and runner state
-across jobs and reboots. Restarting the runner clears its checkout and build directory. It has no host filesystem mounts or tailnet access.
+persistent KVM guest. The guest keeps its Nix store and home caches across jobs,
+but each boot runs one ephemeral, just-in-time (JIT) runner and powers off when
+that listener exits. The host then mints a fresh configuration and boots it again.
+Runner registration lives only in guest runtime storage. The guest has no host
+filesystem mounts or tailnet access.
 The firewall permits public IPv4 egress and blocks the host and private networks.
 The guest boots with UEFI from an XFS root, so the compiler cache and build
 outputs can share blocks with reflinks. The host stores it in a sparse raw image;
@@ -19,7 +22,11 @@ services.github-runner-vms.queue-ci = {
     labels = [ "merge-queue" ];
   };
   network = { id = 0; uplink = "eth0"; };
-  tokenFile = "/var/lib/secrets/queue-runner.token";
+  githubApp = {
+    appId = 123;
+    installationId = 456;
+    privateKeyFile = "/var/lib/secrets/queue-runner.pem";
+  };
   resources = { cores = 8; memory = 16384; disk = 192; };
   guestConfig = {
     users.users.root.openssh.authorizedKeys.keyFiles = [ ./deploy.pub ];
@@ -34,7 +41,7 @@ services.github-runner-vms.queue-ci = {
 ```
 
 Add another named instance for another repository, with its own `network.id`,
-registration token, and guest configuration. Every instance gets a separate user,
+App configuration, and guest configuration. Every instance gets a separate user,
 disk, runtime credentials, and TAP interface; no cache data is shared between
 instances. For example:
 
@@ -42,12 +49,13 @@ instances. For example:
 services.github-runner-vms.other-ci = {
   enable = true;
   runner.url = "https://github.com/example/another-project";
+  githubApp = { appId = 123; installationId = 456; };
   network = { id = 1; uplink = "eth0"; };
   guestConfig.users.users.root.openssh.authorizedKeys.keyFiles = [ ./deploy.pub ];
 };
 ```
 
-The default token path is `/var/lib/secrets/github-runner-NAME.token`.
+The default App key path is `/var/lib/secrets/github-runner-NAME.pem`.
 Renaming an instance selects a new disk; it does not migrate its existing state.
 
 Enable virtualization in firmware and load the CPU's KVM module before activation.
@@ -67,13 +75,32 @@ workflow and its code before approving it: approval authorizes execution against
 the persistent guest and its caches. Restricting approval only to first-time
 contributors does not provide this boundary. See [GitHub's approval policy](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository).
 
-Mint a repository registration token with `gh api -X POST
-repos/OWNER/REPO/actions/runners/registration-token --jq .token`, and install it
-at `tokenFile` with mode `0600` in a root-only directory. Runtime credentials reach
-the guest through QEMU firmware configuration; secret contents never enter the
-Nix store. Keep the expired token file after registration. The guest retains its
-own long-lived credential; wiping its state requires a fresh registration token.
-Restart the host VM service after replacing the token.
+Install a GitHub App on the repository with **Administration: write** permission.
+Store its private key at `githubApp.privateKeyFile` with mode `0600` in a root-only
+host directory. `appId` and `installationId` are public IDs, not secrets. Each
+host VM start invokes a separate host-only minting unit: it signs a short-lived
+App JWT, obtains an installation token restricted to this repository, and calls
+[`generate-jitconfig`](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-a-repository).
+It refuses a non-ephemeral configuration. The App key and installation token never
+enter QEMU; only the encoded JIT config crosses the firmware interface. Secret
+contents never enter the Nix store. Runner names gain a unique suffix, so a failed
+boot cannot replace an existing registration. Select runners by their labels.
+`runner.groupId` defaults to 1.
+
+The runner's registration files and loaded JIT credential live in `/run` and are
+removed when its service ends. A root-owned latch prevents a second listener
+start during the same boot, including after startup failure. Every listener exit
+powers off the guest, and the next host VM start mints a new config. GitHub's JIT
+runners accept at most one job and are then removed, so copying that config does
+not authorize later jobs. Server-side replay refusal still needs an authorized
+live registration test; local fixtures do not substitute for GitHub's server.
+
+Before migrating a persistent registration, remove the old runner in GitHub so
+previously copied credentials cannot keep it alive. Do this only as an approved
+runner replacement. The new guest removes legacy registration files and the old
+registration-token file from its persistent disk, while retaining its separate
+cache directories. Host activation and App/key provisioning are operational steps,
+not part of building or testing this module.
 
 The host service and disk are named by the instance attribute: the example uses `queue-ci.service`
 and `/var/lib/queue-ci/root.raw`. Its disk is created once. Changing the configured
@@ -106,7 +133,7 @@ Once the runner is idle, stop its VM and copy its filesystem into the new image:
 
 ```bash
 sudo systemctl stop queue-ci
-sudo ./runner-migrate/bin/runner-migrate /var/lib/queue-ci/root.qcow2 /var/lib/queue-ci/root.raw
+sudo ./runner-migrate/bin/runner-migrate /var/lib/queue-ci/root.raw /var/lib/queue-ci/root.raw
 ```
 
 The tool keeps the source read-only, preserves registration, caches, ownership,
@@ -143,11 +170,13 @@ refuses local and self-hosted runners, and unloads the profile on exit,
 including build failure. `just gh runner-vm` does not change host policy;
 its build host must already support rootless user namespaces.
 
-`just gh runner-vm` builds a guest image and runs NixOS integration tests for
+`just gh runner-vm` checks host JWT/JIT minting with an in-memory fake API, builds
+a guest image, and runs NixOS integration tests for runtime-only registration,
+removal of legacy credentials, refusing a second listener in one boot, and
 startup without carrier, public egress for multiple guests, private-network and
 sibling-guest isolation including spoofed established replies, compatible host NAT
 settings, the runner's locked-memory budget, symlink-free home and work directories
-with state migrated from the former DynamicUser layout, free page reporting and
+with caches migrated from the former DynamicUser layout, free page reporting and
 idle cache drops, killing a job that fills memory before it thrashes the disk, and
 Nix/mbx persistence across runner and guest restarts.
 It also migrates a disposable ext4 disk, boots the resulting XFS image through

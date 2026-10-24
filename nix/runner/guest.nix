@@ -115,24 +115,13 @@
     };
   };
 
-  # Only a short-lived registration token enters the VM. The host's deployment
-  # key and private services are never mounted in the guest.
-  systemd.services.runner-token = {
-    wantedBy = [ "multi-user.target" ];
-    before = [ "github-runner-runner.service" ];
-    serviceConfig.Type = "oneshot";
-    script = ''
-      install -D -m 0600 \
-        /sys/firmware/qemu_fw_cfg/by_name/opt/io.systemd.credentials/runner-token/raw \
-        /var/lib/secrets/github-runner.token
-    '';
-  };
-
+  # The App key and installation token stay on the host. Only the single-use
+  # JIT config reaches this service; all listener registration files live in /run.
   # A static user, unlike DynamicUser, gets real cache directories instead of
   # symlinks into /var/cache/private. Builds resolve `..` lexically against
   # canonical paths (askama's template includes), which misses through a
   # symlinked HOME. On the switch, systemd moves the private directories back
-  # and chowns them, so caches and the registration survive.
+  # and chowns them, so caches survive without retaining runner registration.
   users.users.github-runner = {
     isSystemUser = true;
     group = "github-runner";
@@ -148,7 +137,10 @@
     url = runner.url;
     name = runner.name;
     extraLabels = runner.labels;
-    tokenFile = "/var/lib/secrets/github-runner.token";
+    # The nixpkgs service supplies the job sandbox, user and cache ownership.
+    # Its registration commands are replaced below by the runner's JIT entry.
+    tokenFile = "/sys/firmware/qemu_fw_cfg/by_name/opt/io.systemd.credentials/runner-jit/raw";
+    ephemeral = true;
     tokenType = "registration";
     replace = true;
     workDir = "/var/cache/github-runner-work";
@@ -163,10 +155,35 @@
     ];
     extraEnvironment = {
       HOME = config.users.users.github-runner.home;
+      RUNNER_ROOT = "/run/github-runner/runner";
       MBX_CACHE_DIR = "/var/cache/github-runner-home/.cache/mbx";
       CARGO_BUILD_JOBS = toString resources.cores;
     };
     serviceOverrides = {
+      StateDirectory = lib.mkForce [ ];
+      InaccessiblePaths = lib.mkForce [ ];
+      WorkingDirectory = lib.mkForce "/run/github-runner/runner";
+      ReadWritePaths = [ "/run/github-runner-jit" ];
+      LoadCredential = [
+        "runner-jit:/sys/firmware/qemu_fw_cfg/by_name/opt/io.systemd.credentials/runner-jit/raw"
+      ];
+      ExecStartPre = lib.mkForce [
+        "+${pkgs.writeShellScript "runner-jit-prepare" ''
+          set -euo pipefail
+          # Root owns this boot-scoped latch. A failed listener must cause a new
+          # VM boot and fresh host config, never a second registration attempt.
+          mkdir -m 0700 /run/github-runner-jit/used
+        ''}"
+      ];
+      ExecStart = lib.mkForce (
+        pkgs.writeShellScript "runner-jit" ''
+          set -euo pipefail
+          jit=$(cat "$CREDENTIALS_DIRECTORY/runner-jit")
+          exec ${pkgs.github-runner}/bin/Runner.Listener run --jitconfig "$jit"
+        ''
+      );
+      Restart = lib.mkForce "no";
+      RestartForceExitStatus = lib.mkForce [ ];
       CacheDirectory = [
         "github-runner-home"
         "github-runner-work"
@@ -188,9 +205,30 @@
       LimitMEMLOCK = "64M";
     };
   };
+  systemd.tmpfiles.rules = [ "d /run/github-runner-jit 0700 root root -" ];
+  # Older guests kept registration here; caches are separate and remain. This
+  # root-only boot step runs before the unprivileged listener sandbox starts.
+  systemd.services.runner-registration-clean = {
+    before = [ "github-runner-runner.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      rm -rf /var/lib/github-runner /var/lib/private/github-runner
+      rm -f /var/lib/secrets/github-runner.token
+    '';
+  };
   systemd.services.github-runner-runner = {
-    requires = [ "runner-token.service" ];
-    after = [ "runner-token.service" ];
+    requires = [ "runner-registration-clean.service" ];
+    after = [ "runner-registration-clean.service" ];
+  };
+
+  # Every listener exit, including a startup failure, ends the VM. Restarting
+  # the host service creates a fresh config before another job can be admitted.
+  systemd.services.github-runner-runner.unitConfig = {
+    SuccessAction = "poweroff";
+    FailureAction = "poweroff";
   };
 
   # Free page reporting hands back only free pages. The disk bypasses the host's

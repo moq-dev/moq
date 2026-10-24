@@ -19,7 +19,7 @@ runner-vm-ci:
 
 # Build and test the persistent NixOS runner VM on x86_64 Linux.
 runner-vm:
-    nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
+    nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config .#checks.x86_64-linux.github-runner-jit --print-build-logs
 
 # Lint GitHub Actions workflows, their alert coverage, and that every step runs a recipe.
 check:

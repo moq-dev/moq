@@ -18,6 +18,20 @@ let
   };
 in
 {
+  github-runner-jit =
+    pkgs.runCommand "github-runner-jit-test"
+      {
+        nativeBuildInputs = [
+          (pkgs.python3.withPackages (p: [
+            p.pyjwt
+            p.cryptography
+          ]))
+        ];
+      }
+      ''
+        python3 ${./.}/jit.test.py
+        touch "$out"
+      '';
   github-runner-vm = import ./test.nix { inherit pkgs guestModule; };
   github-runner-vm-image = import ./image-test.nix { inherit pkgs guestModule; };
   github-runner-vm-config = import ./config-test.nix { inherit pkgs; };

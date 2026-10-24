@@ -33,8 +33,24 @@ let
       guest = cfg.guest;
       device = "${utils.escapeSystemdPath "/sys/subsystem/net/devices/${tap}"}.device";
       qemu = pkgs.qemu_kvm;
+      jitConfig = pkgs.writeText "runner-jit-request.json" (
+        builtins.toJSON {
+          repository = lib.removePrefix "https://github.com/" cfg.runner.url;
+          inherit (cfg.runner) name labels;
+          inherit (cfg.githubApp) appId installationId;
+          groupId = cfg.runner.groupId;
+        }
+      );
+      jitPython = pkgs.python3.withPackages (p: [
+        p.pyjwt
+        p.cryptography
+      ]);
       stop = pkgs.writeShellScript "github-runner-vm-stop" ''
         set -euo pipefail
+        # A completed JIT job powers off QEMU itself; systemd then has no PID.
+        if test -z "''${MAINPID:-}"; then
+          exit 0
+        fi
         ${
           pkgs.python3.withPackages (p: [ p.qemu-qmp ])
         }/bin/python3 ${../runner/stop.py} "$RUNTIME_DIRECTORY/qmp"
@@ -43,6 +59,11 @@ let
     in
     {
       assertions = [
+        {
+          assertion =
+            builtins.match "https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" cfg.runner.url != null;
+          message = "Runner VM ${name} requires a github.com repository URL without a trailing slash.";
+        }
         {
           assertion = builtins.match "[a-z][a-z0-9-]{0,9}" name != null;
           message = "Runner VM names must start with a lowercase letter and contain at most 10 lowercase letters, digits, or hyphens.";
@@ -139,6 +160,30 @@ let
         };
       };
 
+      # This unit alone receives the App key. QEMU receives only its output.
+      systemd.services."github-runner-jit-${name}" = {
+        description = "Mint a single-use GitHub runner configuration";
+        serviceConfig = {
+          Type = "oneshot";
+          LoadCredential = [ "app-key:${cfg.githubApp.privateKeyFile}" ];
+          ExecStart = "${jitPython}/bin/python3 ${../runner/jit.py} ${jitConfig} /run/github-runner-jit-${name}/runner-jit";
+          Group = user;
+          RuntimeDirectory = "github-runner-jit-${name}";
+          RuntimeDirectoryMode = "0750";
+          RuntimeDirectoryPreserve = "yes";
+          ProtectHome = true;
+          ProtectSystem = "strict";
+          PrivateTmp = true;
+          NoNewPrivileges = true;
+          CapabilityBoundingSet = "";
+          RestrictAddressFamilies = [
+            "AF_INET"
+            "AF_INET6"
+            "AF_UNIX"
+          ];
+        };
+      };
+
       systemd.services.${name} = {
         description = "Persistent GitHub Actions runner VM";
         wantedBy = [ "multi-user.target" ];
@@ -186,7 +231,7 @@ let
             -device virtio-net-pci,netdev=net,mac=02:00:00:00:23:02 \
             -device virtio-rng-pci \
             -device virtio-balloon-pci,free-page-reporting=on \
-            -fw_cfg name=opt/io.systemd.credentials/runner-token,file="$CREDENTIALS_DIRECTORY/runner-token" \
+            -fw_cfg name=opt/io.systemd.credentials/runner-jit,file="/run/github-runner-jit-${name}/runner-jit" \
             -qmp unix:"$RUNTIME_DIRECTORY/qmp",server=on,wait=off \
             -nographic
         '';
@@ -197,7 +242,10 @@ let
           StateDirectoryMode = "0700";
           RuntimeDirectory = name;
           RuntimeDirectoryMode = "0700";
-          LoadCredential = [ "runner-token:${cfg.tokenFile}" ];
+          # Re-run the inactive oneshot on every VM start, including auto-restarts.
+          ExecStartPre = lib.mkAfter [
+            "+${pkgs.systemd}/bin/systemctl start github-runner-jit-${name}.service"
+          ];
           ExecStop = stop;
           Restart = "always";
           TimeoutStopSec = 120;
@@ -250,6 +298,11 @@ in
                 default = "${hostConfig.networking.hostName}-${name}";
                 description = "Runner name advertised to GitHub.";
               };
+              groupId = lib.mkOption {
+                type = lib.types.ints.positive;
+                default = 1;
+                description = "GitHub runner group ID for JIT registration.";
+              };
               labels = lib.mkOption {
                 type = lib.types.listOf lib.types.str;
                 default = [ ];
@@ -282,10 +335,20 @@ in
                 description = "Initial persistent disk capacity in GiB, at least 8.";
               };
             };
-            tokenFile = lib.mkOption {
-              type = lib.types.str;
-              default = "/var/lib/secrets/github-runner-${name}.token";
-              description = "Host path to the runtime GitHub registration token.";
+            githubApp = {
+              appId = lib.mkOption {
+                type = lib.types.ints.positive;
+                description = "GitHub App ID with repository administration write permission.";
+              };
+              installationId = lib.mkOption {
+                type = lib.types.ints.positive;
+                description = "Installation ID of the App for the runner repository.";
+              };
+              privateKeyFile = lib.mkOption {
+                type = lib.types.str;
+                default = "/var/lib/secrets/github-runner-${name}.pem";
+                description = "Host-only runtime App private key; never mounted in the guest.";
+              };
             };
             guestConfig = lib.mkOption {
               type = lib.types.deferredModule;

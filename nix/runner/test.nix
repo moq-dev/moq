@@ -8,6 +8,10 @@ let
         (name: id: {
           enable = true;
           runner.url = "https://github.com/example/${name}";
+          githubApp = {
+            appId = 1;
+            installationId = 2;
+          };
           network = {
             inherit id;
             uplink = "uplink0";
@@ -100,12 +104,12 @@ pkgs.testers.runNixOSTest {
       ];
       networking.interfaces.eth0.ipv4.addresses = lib.mkForce [ ];
       virtualisation.qemu.options = [
-        "-fw_cfg name=opt/io.systemd.credentials/runner-token,file=${pkgs.writeText "runner-token" "fixture"}"
+        "-fw_cfg name=opt/io.systemd.credentials/runner-jit,file=${pkgs.writeText "runner-jit" "fixture"}"
         "-device virtio-balloon-pci,free-page-reporting=on"
       ];
       systemd.services.cache-seed-fixture = {
-        requiredBy = [ "github-runner-runner.service" ];
-        before = [ "github-runner-runner.service" ];
+        requiredBy = [ "runner-registration-clean.service" ];
+        before = [ "runner-registration-clean.service" ];
         unitConfig.ConditionPathExists = "!/var/lib/cache-seeded";
         serviceConfig.Type = "oneshot";
         # Lay out the cache and registration the way DynamicUser left them on
@@ -117,19 +121,23 @@ pkgs.testers.runNixOSTest {
           ln -s ../private/github-runner/runner /var/lib/github-runner/runner
           echo seeded > /var/cache/private/github-runner-home/seeded
           echo registered > /var/lib/private/github-runner/runner/.runner
+          echo long-lived > /var/lib/private/github-runner/runner/.credentials
           chmod 0600 /var/cache/private/github-runner-home/seeded /var/lib/private/github-runner/runner/.runner
           chown -R nobody:nogroup /var/cache/private/github-runner-home /var/lib/private/github-runner
           touch /var/lib/cache-seeded
         '';
       };
       systemd.services.github-runner-runner.serviceConfig = {
-        ExecStartPre = lib.mkForce [
-          "+${pkgs.coreutils}/bin/touch /var/lib/github-runner/runner/.current-token"
-        ];
-        ExecStart = lib.mkForce (
+        # Override the production JIT command, which replaces nixpkgs' command.
+        ExecStart = lib.mkOverride 0 (
           pkgs.writeShellScript "cache-probe" ''
             set -euo pipefail
             test "$(cat "$HOME/seeded")" = seeded
+            test "$(cat "$CREDENTIALS_DIRECTORY/runner-jit")" = fixture
+            test "$RUNNER_ROOT" = /run/github-runner/runner
+            test ! -e /var/lib/github-runner/runner/.credentials
+            test ! -e /var/lib/private/github-runner/runner/.credentials
+            test ! -e /var/lib/secrets/github-runner.token
             # Java ignores $HOME and reads the passwd entry.
             test "$(${pkgs.getent}/bin/getent passwd "$(id -u)" | cut -d: -f6)" = "$HOME"
             mkdir -p "$MBX_CACHE_DIR"
@@ -154,6 +162,11 @@ pkgs.testers.runNixOSTest {
             exec ${pkgs.coreutils}/bin/sleep infinity
           ''
         );
+      };
+      systemd.services.github-runner-runner.unitConfig = {
+        # The fixture stays up for networking/cache checks. Production powers off.
+        SuccessAction = lib.mkForce "none";
+        FailureAction = lib.mkForce "none";
       };
       environment.systemPackages = [ pkgs.curl ];
     };
@@ -254,9 +267,13 @@ pkgs.testers.runNixOSTest {
         router.wait_for_file("/tmp/udp-result")
         router.succeed("test $(cat /tmp/udp-result) = finish")
 
-    with subtest("the runner adopts the registration DynamicUser left behind"):
-        guest.succeed("test ! -L /var/lib/github-runner/runner")
-        guest.succeed("test $(cat /var/lib/github-runner/runner/.runner) = registered")
+    with subtest("the guest removes old long-lived registration and holds only the JIT credential"):
+        guest.succeed("test ! -e /var/lib/github-runner; test ! -e /var/lib/private/github-runner")
+        guest.succeed("test ! -e /var/lib/secrets/github-runner.token")
+        guest.succeed("test -d /run/github-runner-jit/used")
+        guest.fail("su -s /bin/sh github-runner -c 'rmdir /run/github-runner-jit/used'")
+        guest.succeed("test $(systemctl show -p Restart --value github-runner-runner) = no")
+        guest.succeed("test -z \"$(find /run/credentials /var/lib -name app-key -print)\"")
 
     with subtest("the uplink stays IPv4-only"):
         guest.succeed("test $(cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6) = 1")
@@ -304,12 +321,15 @@ pkgs.testers.runNixOSTest {
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/marker")
         guest.succeed("echo cached > /tmp/nix-cache-marker")
         store_path = guest.succeed("nix-store --add /tmp/nix-cache-marker").strip()
-        guest.succeed("systemctl restart github-runner-runner")
-        guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/reused")
+        # Reusing this boot's config through the service is refused before the
+        # listener runs again. GitHub additionally removes JIT runners after one
+        # job; that authenticated server behavior is not modeled by this fixture.
+        guest.fail("systemctl restart github-runner-runner")
+        guest.succeed("journalctl -u github-runner-runner | grep -F /run/github-runner-jit/used")
         guest.shutdown()
         guest.start()
         guest.wait_for_unit("github-runner-runner.service")
-        guest.succeed("test -f /var/cache/github-runner-home/.cache/mbx/reused")
+        guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/reused")
         guest.succeed(f"test -f {store_path}")
   '';
 }
