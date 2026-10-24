@@ -4,6 +4,7 @@
  * @module
  */
 
+import type { Milli } from "@moq/clock";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { TimeoutError } from "./util/timeout.ts";
@@ -299,6 +300,24 @@ export class RefusedRedirect extends Error {
 	constructor(reason: string) {
 		super(`GOAWAY redirect refused: ${reason}`);
 		this.name = "RefusedRedirect";
+	}
+}
+
+/**
+ * The dial and the MoQ handshake together outlived the connect's `timeout` option.
+ *
+ * A caller can retry it. Mirrors the Rust `Error::ConnectTimeout`.
+ *
+ * @public
+ */
+export class ConnectTimeout extends Error {
+	/** The timeout that elapsed. */
+	readonly timeout: Milli;
+
+	constructor(timeout: Milli) {
+		super(`connect timed out after ${timeout}ms`);
+		this.name = "ConnectTimeout";
+		this.timeout = timeout;
 	}
 }
 

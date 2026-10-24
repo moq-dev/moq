@@ -126,14 +126,14 @@ pub struct Claims {
 	pub subscribe: Patterns,
 
 	/// The expiration time of the token as a unix timestamp (`exp`).
-	pub expires: Option<std::time::SystemTime>,
+	pub expires: Option<moq_clock::Wall>,
 
 	/// The issued time of the token as a unix timestamp (`iat`).
-	pub issued: Option<std::time::SystemTime>,
+	pub issued: Option<moq_clock::Wall>,
 
 	/// The time before which the token is refused, as a unix timestamp (`nbf`).
 	/// Enforced by [`Key::verify`](crate::Key::verify).
-	pub not_before: Option<std::time::SystemTime>,
+	pub not_before: Option<moq_clock::Wall>,
 }
 
 impl Claims {
@@ -158,7 +158,7 @@ impl Claims {
 	/// Expire the token at this time. Enforced by [`Key::verify`](crate::Key::verify).
 	///
 	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
-	pub fn with_expires(mut self, at: impl Into<Option<std::time::SystemTime>>) -> Self {
+	pub fn with_expires(mut self, at: impl Into<Option<moq_clock::Wall>>) -> Self {
 		self.expires = at.into();
 		self
 	}
@@ -166,7 +166,7 @@ impl Claims {
 	/// Record when the token was issued. Purely informational; nothing enforces it.
 	///
 	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
-	pub fn with_issued(mut self, at: impl Into<Option<std::time::SystemTime>>) -> Self {
+	pub fn with_issued(mut self, at: impl Into<Option<moq_clock::Wall>>) -> Self {
 		self.issued = at.into();
 		self
 	}
@@ -237,11 +237,10 @@ impl Claims {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
-	use std::time::{Duration, SystemTime};
+	use std::time::Duration;
 
 	fn patterns(texts: &[&str]) -> Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
@@ -252,8 +251,8 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),
-			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
-			issued: Some(SystemTime::now()),
+			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
+			issued: Some(moq_clock::wall()),
 			not_before: None,
 		}
 	}

@@ -335,9 +335,9 @@ UDP bytes, including retransmissions and transport overhead. The transport
 updates a connection's counters as it sends and receives, and a stats tick reads
 them without polling the session or activating its periodic sampler. A retag
 flushes the old tier and label first; closing a session records its final delta.
-An embedder creates a `transport::Wire`, registers it with `stats::Handle::wire`
-or `stats::Session::wire`, records its connection's cumulative totals on it, and
-holds the returned guard. Dropping the guard records the final reading.
+An embedder creates a `transport::Wire`, registers it with `stats::Session::wire`,
+records its connection's cumulative totals on it, and holds the returned guard.
+Dropping the guard records the final reading.
 
 Unsupported transports, including browsers and the current WebSocket/qmux
 adapter, contribute zero. WebSocket wire accounting requires the separate

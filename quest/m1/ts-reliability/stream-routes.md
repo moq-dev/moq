@@ -59,9 +59,10 @@ program's PMT arrives. A listed PMT that does not arrive within the 0.5 s of
 program clock TR 101 290 allows (`PMT_error_2`, already counted) stops
 holding the gate, so a stale or corrupt program never disables the count.
 
-Under `--program all`, every per-program `Import` reads the whole multiplex
-and `Programs::stats` merges their rows by PID, so a per-program drop row
-would shadow the program that carries the PID. `Programs` owns the
+Under `--program all`, one parser reads the multiplex and `Programs` routes
+each PID only to the programs whose PAT entry or PMT claims it
+(`Programs::readers`), while `Programs::stats` merges their rows by PID, so a
+per-program drop row would shadow the program that carries the PID. `Programs` owns the
 unclaimed-PID rows instead: a PID is dropped only when no program's PMT and
 no captured SI claims it, counted once at the multiplex rather than per
 program. A `--program N` import of an MPTS reassembles only its own PMT, so
@@ -70,11 +71,10 @@ own program's PIDs and leaves multiplex-wide accounting to `--program all`.
 When the PAT lists only the selected program, it counts as above. Chosen
 over passively acquiring every PMT, which adds a reassembler per program to
 an import that serves one.
-Classifying a PID looks it up in one map of every claimed PID, kept as
-PMTs arrive, never by searching each program's PMT. A benchmark in
-`rs/moq-mux/benches` feeds `Programs` a generated MPTS and sweeps program
-count and PID count independently, against a baseline without the
-accounting, so any slope it adds beyond the existing per-program feed shows.
+Classifying a PID reads `Programs::readers`, the PID-indexed table of every
+claimed PID kept as PMTs arrive: a PID no program reads is unclaimed. Extend
+`rs/moq-mux/benches/ts_programs.rs` to sweep PID count beside program count
+and bitrate, so any slope the accounting adds shows.
 
 A dropped PID reuses `stats::Stream`, with no new field: a row keyed by its
 PID in `Snapshot::streams`, an empty `track`, `Class::Data`, and `refused`
@@ -106,7 +106,3 @@ program 2's PIDs, asserting the catalog, the
 stats rows (the unlisted PID's row asserted field by field), and an export
 round trip of the carried streams. The MPEG-2 video arm also runs the TSDuck
 round trip and an FFmpeg decode of the export in `test/ts`.
-
-## Required
-
-- [Shared parser](/quest/m1/ts-reliability/shared-parser.md) - one parser owns the PID map this plan's accounting needs
