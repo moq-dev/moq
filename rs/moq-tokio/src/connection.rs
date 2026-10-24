@@ -119,9 +119,8 @@ pub struct Backoff {
 	/// Maximum time to spend retrying before giving up. Defaults to 10s; zero retries forever.
 	///
 	/// No new walk of the peer's addresses starts once it has passed, but one under way finishes:
-	/// each candidate but the last gets up to 5s, and the last runs to
-	/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout), so a handshake
-	/// slower than this still lands. Giving up can therefore take up to one whole walk longer.
+	/// each candidate but the last gets up to 5s, and the last runs to `--connect-timeout`,
+	/// so a handshake slower than this still lands. Giving up can therefore take up to one whole walk longer.
 	///
 	/// Resets after a healthy session outside a redirect loop, so a flapping session that
 	/// reconnects then immediately drops still counts toward the timeout.

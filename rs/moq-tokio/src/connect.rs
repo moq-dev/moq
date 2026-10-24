@@ -526,8 +526,8 @@ pub struct Config {
 	/// it fails), and the first connection to complete wins. `0s` dials every
 	/// address at once. Defaults to 250ms. Applies to the QUIC, `tcp://`, and `tls://` dials.
 	///
-	/// This staggers the attempts within one [`crate::Client::connect`]; [`Self::timeout`]
-	/// bounds that call as a whole.
+	/// This staggers the attempts within one connect; `--connect-timeout` bounds that
+	/// call as a whole.
 	/// `None` uses the default; zero disables this duration.
 	#[usage(
 		name = "connect-race",
@@ -560,13 +560,13 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub resolution_delay: Option<crate::cli::Duration>,
 
-	/// Maximum time for one [`crate::Client::connect`], covering the dial and the MoQ
+	/// Maximum time for one connect, covering the dial and the MoQ
 	/// handshake. Defaults to 30 seconds; set to 0 to wait forever.
 	///
 	/// This has to live above the transports rather than inside one: QUIC bounds its
 	/// own dial, but the WebSocket fallback and the handshake that follows either
 	/// transport have no deadline of their own, so a peer that accepts TCP and then
-	/// never speaks would hang the whole connect. [`crate::Connection`] only re-arms
+	/// never speaks would hang the whole connect. The reconnect loop only re-arms
 	/// its backoff between attempts, so an attempt that never returns stalls the
 	/// retry loop indefinitely.
 	/// `None` uses the default; zero disables this duration.
