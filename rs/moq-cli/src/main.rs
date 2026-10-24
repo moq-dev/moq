@@ -560,6 +560,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	// anything bound a port or dialed out.
 	let mut client = None;
 	let mut connection = None;
+	let local = tokio::task::LocalSet::new();
 	let result = async {
 		let Attached {
 			bandwidth,
@@ -614,17 +615,20 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		}
 
 		if locals.is_empty() {
-			drive(tasks, signals, shutdown).await
+			drive(&mut tasks, signals, shutdown).await
 		} else {
-			let local = tokio::task::LocalSet::new();
 			supervise(&local, locals.into_iter().map(Publish::run), &mut tasks);
-			local.run_until(drive(tasks, signals, shutdown)).await
+			local.run_until(drive(&mut tasks, signals, shutdown)).await
 		}
 	}
 	.await;
 
-	// Even on a setup error.
+	// Even on a setup error. Detach before the stages drop: an interrupted stage would end
+	// its open tracks unfinished, which a reader takes for the publisher failing. Once the
+	// session is closed, they end as the route lost, which a reader follows.
 	detach(connection, client, &cluster).await;
+	tasks.shutdown().await;
+	drop(local);
 	result
 }
 
@@ -925,12 +929,14 @@ async fn run_stdout(
 }
 
 /// Run until an endpoint ends, keeping all tasks alive while a signalled listener drains.
+///
+/// The tasks are left for the caller to shut down once the MoQ side is detached.
 async fn drive(
-	mut tasks: JoinSet<anyhow::Result<()>>,
+	tasks: &mut JoinSet<anyhow::Result<()>>,
 	mut signals: Signals,
 	shutdown: Option<Shutdown>,
 ) -> anyhow::Result<()> {
-	let result = loop {
+	loop {
 		tokio::select! {
 			biased;
 			() = signals.recv() => {
@@ -947,9 +953,7 @@ async fn drive(
 				None => break Ok(()),
 			}
 		}
-	};
-	tasks.shutdown().await;
-	result
+	}
 }
 
 /// The listener / HTTP-serving endpoints bridge one named broadcast, so an
@@ -1028,7 +1032,7 @@ mod tests {
 			trigger,
 			observer: observer.clone(),
 		};
-		let driving = tokio::spawn(drive(tasks, signals, Some(shutdown)));
+		let driving = tokio::spawn(async move { drive(&mut tasks, signals, Some(shutdown)).await });
 		observer.started().await;
 		assert!(!driving.is_finished(), "drain ended under an established session");
 		drop(session);
@@ -1284,7 +1288,7 @@ mod tests {
 		supervise(&local, pipelines, &mut tasks);
 
 		let err = local
-			.run_until(drive(tasks, Signals::new().unwrap(), None))
+			.run_until(drive(&mut tasks, Signals::new().unwrap(), None))
 			.await
 			.unwrap_err();
 		assert!(err.to_string().contains("pipeline panicked"), "{err}");
@@ -1301,7 +1305,7 @@ mod tests {
 		supervise(&local, pipelines, &mut tasks);
 
 		local
-			.run_until(drive(tasks, Signals::new().unwrap(), None))
+			.run_until(drive(&mut tasks, Signals::new().unwrap(), None))
 			.await
 			.unwrap();
 	}
