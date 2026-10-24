@@ -48,8 +48,8 @@ const DEFAULT_PRIORITY: i8 = 0;
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
-/// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog.
-/// The payload size limit also bounds the buffer's memory use.
+/// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog. The buffer
+/// bills its bytes to the track's [`cache::Pool`], which drops the oldest under pressure.
 pub(super) const MAX_DATAGRAMS: usize = 64;
 
 /// Slack before the eviction order is rebuilt, so a track holding just a few groups
@@ -380,9 +380,10 @@ pub(crate) struct TrackState {
 	// what each track writes and never touches another track's cache.
 	debt: u64,
 
-	// Datagrams in arrival order, bounded by `MAX_DATAGRAMS`. Shares the group
-	// sequence namespace but is otherwise independent.
-	datagrams: VecDeque<super::datagram::Stored>,
+	// Datagrams in arrival order, bounded by `MAX_DATAGRAMS` and billed to the pool, which
+	// drops the oldest under pressure. Shares the group sequence namespace but is otherwise
+	// independent.
+	datagrams: VecDeque<super::datagram::Buffered>,
 
 	// Number of datagrams dropped off the front (over capacity), mapping a subscriber's absolute
 	// cursor to an index into `datagrams` (mirrors `offset` for groups).
@@ -1058,10 +1059,17 @@ impl TrackState {
 	/// resumes at the oldest still-buffered datagram, skipping the lost ones.
 	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(super::datagram::Stored, usize)>>> {
 		let start = index.saturating_sub(self.datagram_offset);
-		if self.readable()
-			&& let Some(datagram) = self.datagrams.get(start)
+		// An ended track's expiry releases its oldest in place, which a reader skips like a drop.
+		for (i, datagram) in self
+			.datagrams
+			.iter()
+			.enumerate()
+			.skip(start)
+			.filter(|_| self.readable())
 		{
-			return Poll::Ready(Ok(Some((datagram.clone(), self.datagram_offset + start))));
+			if let Some(stored) = datagram.stored() {
+				return Poll::Ready(Ok(Some((stored, self.datagram_offset + i))));
+			}
 		}
 
 		// Nothing buffered at the cursor: the track ending terminates the datagram stream too.
@@ -1080,16 +1088,27 @@ impl TrackState {
 	}
 
 	/// Push a datagram, dropping the oldest when the send buffer is full.
+	///
+	/// Billed before the debt is settled, so its bytes accrue debt, but pushed after, so the
+	/// newcomer is never a victim of its own write.
 	fn push_datagram(&mut self, datagram: super::datagram::Stored) {
+		let datagram = super::datagram::Buffered::new(datagram, &self.cache);
+		self.charge_debt();
 		if self.datagrams.len() == MAX_DATAGRAMS {
-			self.datagrams.pop_front();
-			self.datagram_offset += 1;
+			self.drop_datagram();
 		}
 		let sequence = datagram.sequence;
 		self.datagrams.push_back(datagram);
 		let now = self.cache.pool().now_wall();
 		self.record_arrival(sequence, now);
 		self.shown(sequence);
+	}
+
+	/// Drop the oldest buffered datagram, releasing its bill.
+	fn drop_datagram(&mut self) {
+		if self.datagrams.pop_front().is_some() {
+			self.datagram_offset += 1;
+		}
 	}
 
 	/// Find the smallest-sequence cached group in `window` satisfying
@@ -1553,9 +1572,11 @@ impl TrackState {
 			}
 		}
 
-		self.arrival
-			.front()
-			.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
+		self.datagrams.front().is_some_and(|datagram| datagram.expired())
+			|| self
+				.arrival
+				.front()
+				.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
 			|| self
 				.evict
 				.front()
@@ -1563,9 +1584,10 @@ impl TrackState {
 			|| self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK
 	}
 
-	/// Expire an ended track's idle groups, whose closed channel refuses the write
-	/// [`Self::evict_expired_scan`] takes: abort them in place, releasing their frames,
-	/// and retire expired cuts, leaving slots that every read path skips.
+	/// Expire an ended track's idle groups and datagrams, whose closed channel refuses the
+	/// write [`Self::evict_expired_scan`] takes: abort the groups in place, releasing their
+	/// frames, retire expired cuts, and release the datagrams, leaving entries that every
+	/// read path skips.
 	pub(super) fn expire_closed(&self, scan: ExpiryScan) {
 		for (sequence, stamp) in &self.evict {
 			let Some(slot) = self.lookup.get(sequence) else {
@@ -1578,6 +1600,12 @@ impl TrackState {
 				slot.retired.store(true, Ordering::Relaxed);
 			} else {
 				slot.abort(Error::Old);
+			}
+		}
+		// Released oldest first, so the expired ones stay a prefix that readers skip.
+		for datagram in &self.datagrams {
+			if !datagram.release_expired() {
+				break;
 			}
 		}
 	}
@@ -1623,6 +1651,11 @@ impl TrackState {
 				// on a frame that will never arrive.
 				self.uncache(sequence).unwrap().abort(Error::Old);
 			}
+		}
+
+		// A datagram is never the live edge a late joiner needs, so even the newest goes.
+		while self.datagrams.front().is_some_and(|datagram| datagram.expired()) {
+			self.drop_datagram();
 		}
 
 		// Trim dead leading arrival entries to advance the subscriber offset. An
@@ -1986,7 +2019,9 @@ impl TrackState {
 				self.debt = self.debt.saturating_add(accrued).min(pool.used());
 				// Cap each payment at twice what was written so one write never dumps
 				// a deep backlog at once; the remainder carries to the next write.
-				self.pay_debt(&pool, written.saturating_mul(2));
+				let cap = written.saturating_mul(2);
+				let paid = self.pay_debt(&pool, cap);
+				self.pay_datagrams(cap.saturating_sub(paid));
 			}
 			// Under capacity there is nothing to work off, and stale debt would
 			// cause a spurious eviction burst at the next pressure spike.
@@ -2021,17 +2056,17 @@ impl TrackState {
 	/// the debt onto the tracks holding that staler content. When the next victim
 	/// is larger than the remaining debt it is left in place and the debt carries
 	/// over, so a small write never evicts a huge group (once the debt does cover
-	/// it, that one victim may overshoot `cap`).
-	fn pay_debt(&mut self, pool: &cache::Pool, cap: u64) {
+	/// it, that one victim may overshoot `cap`). Returns the bytes it freed.
+	fn pay_debt(&mut self, pool: &cache::Pool, cap: u64) -> u64 {
 		let average = pool.average().unwrap_or(0);
 		let mut paid = 0u64;
 		let mut scanned = 0usize;
 		for _ in 0..self.evict.len() {
 			if self.debt == 0 || paid >= cap || scanned >= EVICT_SCAN {
-				return;
+				break;
 			}
 			let Some((sequence, stamp)) = self.evict.pop_front() else {
-				return;
+				break;
 			};
 			let Some(slot) = self.lookup.get(&sequence) else {
 				// Evicted or expired; discard the dead entry.
@@ -2065,12 +2100,27 @@ impl TrackState {
 			let size = slot.cache_size();
 			if size > self.debt {
 				self.evict.push_front((sequence, stamp));
-				return;
+				break;
 			}
 
 			self.debt -= size;
 			paid = paid.saturating_add(size);
 			self.uncache(sequence).unwrap().abort(Error::Evicted);
+		}
+		paid
+	}
+
+	/// Drop this track's oldest buffered datagrams toward the debt its groups left, freeing
+	/// at most `cap` bytes. Like a group, one larger than the remaining debt stays.
+	fn pay_datagrams(&mut self, cap: u64) {
+		let mut paid = 0u64;
+		while let Some(datagram) = self.datagrams.front()
+			&& paid < cap
+			&& datagram.bytes() <= self.debt
+		{
+			self.debt -= datagram.bytes();
+			paid = paid.saturating_add(datagram.bytes());
+			self.drop_datagram();
 		}
 	}
 
@@ -8807,9 +8857,10 @@ mod test {
 	#[cfg(feature = "async")]
 	fn untimed_datagram_replay_keeps_the_buffer() {
 		let mut producer = untimed_producer();
+		// Far past the delay, but within the pool's idle window.
 		for _ in 0..3 {
 			producer.append_datagram(None, b"x".as_slice()).unwrap();
-			elapse(&producer, Duration::from_secs(60));
+			elapse(&producer, Duration::from_secs(5));
 		}
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::ZERO));
 		for sequence in 0..3 {
@@ -15539,6 +15590,151 @@ mod test {
 			"interleaved datagrams must not bypass the budget: {}",
 			pool.used()
 		);
+	}
+
+	/// A received compressed datagram inflates far past its wire size, so the send buffer
+	/// bills both forms to the pool, and pressure drops each track's oldest instead of
+	/// letting every track retain a full buffer of inflated payloads.
+	#[test]
+	#[cfg(feature = "async")]
+	fn received_compressed_datagrams_are_billed() {
+		let capacity = 1024;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let plain = bytes::Bytes::from(vec![0u8; super::super::datagram::MAX_DATAGRAM_PAYLOAD]);
+		let deflated = super::super::flate::Encoder::new().frame(&plain);
+		assert!(
+			deflated.len() < 128,
+			"the payload compresses to {} bytes",
+			deflated.len()
+		);
+
+		let tracks = 16;
+		let mut held = Vec::new();
+		for track in 0..tracks {
+			let mut producer = Producer::new(
+				broadcast.clone(),
+				format!("track{track}").as_str(),
+				Info::timed().with_compress(true),
+			);
+			let subscriber = producer.subscribe(None);
+			for sequence in 0..MAX_DATAGRAMS as u64 {
+				let datagram = Datagram {
+					sequence,
+					timestamp: Some(Timestamp::ZERO),
+					payload: deflated.clone(),
+				};
+				producer
+					.insert_deflated_datagram(datagram.into(), plain.len() as u64)
+					.unwrap();
+			}
+			held.push((producer, subscriber));
+		}
+
+		let retained: u64 = held
+			.iter()
+			.flat_map(|(producer, _)| {
+				let state = producer.state.read();
+				state
+					.datagrams
+					.iter()
+					.map(|datagram| {
+						let stored = datagram.stored().unwrap();
+						(stored.payload.len() + stored.deflated.as_ref().unwrap().len()) as u64
+					})
+					.collect::<Vec<_>>()
+			})
+			.sum();
+		assert!(
+			pool.used() >= retained,
+			"{retained} retained bytes, {} billed",
+			pool.used()
+		);
+		// Each track keeps only its newest, which no write ever evicts on its own account.
+		let newest = (plain.len() + deflated.len()) as u64;
+		assert!(
+			retained <= tracks * newest,
+			"{retained} bytes retained across {tracks} tracks"
+		);
+
+		for (_, subscriber) in &mut held {
+			assert_eq!(
+				recv_datagram(subscriber).payload,
+				plain,
+				"the newest is still delivered"
+			);
+		}
+		drop(held);
+		assert_eq!(pool.used(), 0, "the buffers release their bill when the tracks go");
+	}
+
+	/// A datagram the full buffer pushes out releases its bill, so the pool holds exactly
+	/// what the buffer retains.
+	#[test]
+	fn a_full_datagram_buffer_bills_what_it_retains() {
+		let pool = cache::Pool::unbounded();
+		let mut producer = track_producer_pooled("test", pool.clone());
+		for _ in 0..MAX_DATAGRAMS * 2 {
+			producer.append_datagram(Timestamp::ZERO, vec![0u8; 1000]).unwrap();
+		}
+		let state = producer.state.read();
+		assert_eq!(state.datagrams.len(), MAX_DATAGRAMS);
+		let billed: u64 = state.datagrams.iter().map(|datagram| datagram.bytes()).sum();
+		assert_eq!(pool.used(), billed);
+	}
+
+	/// A track that stops sending datagrams cannot pin its buffer in the shared pool: the
+	/// sweep reclaims it once idle, the newest too, since no late joiner needs it.
+	#[test]
+	fn pool_sweep_expires_idle_datagrams() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		for _ in 0..3 {
+			producer.append_datagram(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		}
+		assert!(pool.used() > 0);
+
+		elapse(&producer, Duration::from_secs(2));
+		pool.sweep();
+
+		assert!(
+			producer.state.read().datagrams.is_empty(),
+			"the sweep reclaimed idle datagrams"
+		);
+		assert_eq!(pool.used(), 0);
+	}
+
+	/// An ended track's closed state refuses the write that pops a datagram, so a stale
+	/// reader would pin its buffer: the sweep releases each idle one in place instead,
+	/// and the reader skips it like a dropped one.
+	#[test]
+	#[cfg(feature = "async")]
+	fn pool_sweep_expires_an_ended_tracks_datagrams() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		let mut stale = producer.subscribe(None);
+		producer.append_datagram(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		pool.step(Duration::from_secs(6));
+		producer.append_datagram(Timestamp::ZERO, b"new".as_slice()).unwrap();
+		producer.finish().unwrap();
+		drop(producer);
+
+		// Only the oldest is idle for the whole window.
+		pool.step(Duration::from_secs(6));
+		pool.sweep();
+		assert!(pool.used() > 0, "the newest is still within the window");
+		assert_eq!(
+			recv_datagram(&mut stale).payload,
+			b"new".as_slice(),
+			"the reader skips the released one"
+		);
+
+		pool.step(Duration::from_secs(6));
+		pool.sweep();
+		assert_eq!(pool.used(), 0, "the sweep released every idle datagram");
 	}
 
 	/// An aborted group releases its access sample along with its bytes, from any

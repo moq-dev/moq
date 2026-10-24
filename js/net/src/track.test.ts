@@ -2,6 +2,8 @@ import { expect, setSystemTime, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { Decoder } from "./flate/decoder.ts";
+import { Encoder } from "./flate/encoder.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
@@ -276,6 +278,40 @@ test("datagram buffers drop oldest at capacity without delaying active subscribe
 		expect((await slow.recvDatagram())?.sequence).toBe(sequence);
 	}
 	expect(await slow.recvDatagram()).toBeUndefined();
+});
+
+// A received compressed datagram inflates far past its wire size, so each reader inflates
+// its own copy: a slow reader's queue holds only the slices, never what a fast one realized.
+test("a datagram queue holds no plain copy another reader realized", async () => {
+	const producer = new TrackProducer("test").accept({ compress: true });
+	const slow = producer.subscribe();
+	const fast = producer.subscribe();
+	const plain = new Uint8Array(65535);
+	const slice = new Encoder().frame(plain);
+	expect(slice.length).toBeLessThan(128);
+	const decode = spyOn(Decoder.prototype, "frame");
+	try {
+		const count = 64;
+		for (let sequence = 0; sequence < count; sequence++) {
+			hooks.writeDatagram(producer, { sequence, payload: slice }, plain.length);
+		}
+		const arrived = decode.mock.calls.length;
+		const read = [];
+		for (let sequence = 0; sequence < count; sequence++) {
+			const datagram = await fast.recvDatagram();
+			expect(datagram?.payload).toEqual(plain);
+			read.push(datagram);
+		}
+		expect(decode.mock.calls.length).toBe(arrived + count);
+		for (let sequence = 0; sequence < count; sequence++) {
+			const datagram = await slow.recvDatagram();
+			expect(datagram).not.toBe(read[sequence]);
+			expect(datagram?.payload).toEqual(plain);
+		}
+		expect(decode.mock.calls.length).toBe(arrived + 2 * count);
+	} finally {
+		decode.mockRestore();
+	}
 });
 
 test("insertDatagram preserves an explicit sequence", async () => {

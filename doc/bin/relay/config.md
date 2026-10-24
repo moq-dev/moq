@@ -324,7 +324,7 @@ the old connection keeps serving after a GOAWAY.
 
 ```toml
 [cache]
-capacity = "8GiB"                    # Target bytes of cached groups. "75%" of memory also works.
+capacity = "8GiB"                    # Target bytes of cached groups and buffered datagrams. "75%" of memory also works.
 headroom = "2GiB"                    # Or: keep this much system memory free and grow into the rest.
 duration = "30s"                     # Cap how long a non-latest group is kept, whatever the publisher asked.
 ```
