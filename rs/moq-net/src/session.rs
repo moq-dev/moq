@@ -776,9 +776,8 @@ pub struct Limits {
 	/// Other moq-transport requests the peer may hold at once, such as SUBSCRIBE and FETCH.
 	///
 	/// On drafts 14 to 16 this and `announces` size the request window, which every request
-	/// counts against. Later drafts bound the PUBLISHes a peer's track listings hold with it,
-	/// skipping the rest, and still refuse a reused request ID, so a peer may leave at most
-	/// twice the sum of both runs of skipped IDs; one more closes the session with
+	/// counts against. Later drafts still refuse a reused request ID, so a peer may leave at
+	/// most twice the sum of both runs of skipped IDs; one more closes the session with
 	/// `INTERNAL_ERROR` rather than forgetting any. moq-lite ignores it.
 	pub requests: usize,
 }
@@ -836,8 +835,7 @@ impl Slots {
 
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.
 	///
-	/// A peer whose own request runs past its limits loses the session. A subscription we
-	/// would initiate, such as a listed track's PUBLISH, is skipped instead.
+	/// A peer whose own request runs past its limits loses the session.
 	pub(crate) fn acquire(&self) -> Result<Slot, Error> {
 		use std::sync::atomic::Ordering;
 		let held = self
