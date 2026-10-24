@@ -92,8 +92,14 @@ while true; do
 
     result=0
     wait -n -p pid "${!running[@]}" || result=$?
-    cat "$logs/${running[$pid]}" >&2
+    index=${running[$pid]}
     unset "running[$pid]"
-    ((result == 0)) || status=1
+    cat "$logs/$index" >&2
+    # Named here because a compiler killed outright, such as by the OOM killer
+    # under concurrent checks, prints nothing that says which source it was.
+    if ((result)); then
+        echo "error: ${sources[index]} failed with status $result" >&2
+        status=1
+    fi
 done
 exit $status
