@@ -127,12 +127,11 @@ export interface Info {
 	 * How many times its first frame a group's later stored bytes may grow before a joining
 	 * subscriber asks for a new group, or omitted to never ask. A join against a newest group
 	 * whose bytes after its first frame exceed this many times the first frame moves
-	 * {@link Demand.wanted} past it, so a late joiner never downloads much more than a
-	 * snapshot or keyframe. `0` asks on any join after a delta. An integer in `0..2^32`.
+	 * {@link Demand.wanted} past it. The joiner still receives the cached group while the new
+	 * one is pending. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
 	refresh?: number;
 	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
-	// private: passthrough
 	ietf?: IetfVersion;
 }
 
@@ -160,7 +159,6 @@ function priorityValue(value: number): number {
 	return value;
 }
 
-// private: passthrough
 /** The timescale a moq-lite hop serves a track at: none for an {@link Info.ietf} one. @internal */
 export function liteTimescale(info: Info): Timescale | undefined {
 	return info.ietf === undefined ? (info.timescale ?? undefined) : undefined;
@@ -790,6 +788,7 @@ export class Producer {
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
+		hooks.releaseTrack = (producer) => producer.#close(undefined, false);
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
 			producer.#owe();
@@ -1708,13 +1707,19 @@ export class Producer {
 	 * them.
 	 */
 	close(abort?: Error) {
+		this.#close(abort, true);
+	}
+
+	// `declare` is false for a received copy whose session closed locally: a dead route, not
+	// finished content, so a clean close there leaves the end undeclared.
+	#close(abort: Error | undefined, declare: boolean) {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
 		if (abort && this.#tailPending) this.#arrivals.expire(now(), this.#grace());
 		if (abort && this.#settled()) abort = undefined;
 		// A replacement continues its name's timeline: ending below an earlier producer's
 		// groups would contradict the ones subscribers already received.
-		if (abort === undefined && this.#state.end.peek() === undefined) {
+		if (declare && abort === undefined && this.#state.end.peek() === undefined) {
 			this.#declareEnd({ group: this.#liveEdge(), frame: 0 });
 		}
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
@@ -2258,7 +2263,6 @@ export class Subscriber {
 		return undefined;
 	}
 
-	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * An independent subscriber to the same track, with its own cursor and its own replay of
 	 * the retained window.

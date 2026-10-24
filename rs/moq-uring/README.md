@@ -32,12 +32,11 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   over the same adapter via `web-transport-proto`. `quic::web::Session` is
   a raw or web transport (`Session::raw`). Wrap it with
   `transport::Session::new(session, binding)`, using `moq_net::transport::Binding::Uri`
-  for WebTransport or `InBand` for raw QUIC, before `connect_lite`/`accept_lite`, which return
-  the session and its driver; poll the driver or await it inside a
-  `Handle::spawn` task to run it on the worker. moq-transport and the
-  SETUP-negotiated moq-lite versions box their futures with a native `Send`
-  bound, so wrap the session once more in `transport::Local`, which checks
-  the thread on every use, before `accept_request`/`connect`. Web mode maps stream and close codes through the
+  for WebTransport or `InBand` for raw QUIC. moq-net boxes the transport with a
+  native `Send` bound, so wrap the session once more in `transport::Local`, which
+  checks the thread on every use, before `connect`/`accept`. They return the
+  session and its driver; poll the driver or await it inside a `Handle::spawn`
+  task to run it on the worker. Web mode maps stream and close codes through the
   HTTP/3 error space.
 - **qlog**: `quic::qlog::Sink` points a group of workers at a directory and
   `quic::Transport::qlog` turns capture on. The pinned worker never writes to

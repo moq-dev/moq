@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Decoded reads carry gaps and encoder ends (#6475)
+
+`decode::Consumer::read()` returns `decode::Read` events instead of bare frames, the same shape as `moq_audio::decode::Read`: `Frame(frame)`, `Gap { timestamp, duration }` for lost media, and `End { end }` where the publisher stopped its encoder; `None` still means the track is finished.
+Match `decode::Read::Frame(frame)` where you took the frame before, and skip the other variants to keep the old behavior.
+An `End` now drains the decoder, so the last picture before a pause arrives without waiting for the next one.
+
+### `Source::Display` no longer opens the portal on Wayland
+
+`capture::Source::Display` captures X11 displays only, including XWayland's `x11:` ids.
+On Wayland the main display and any non-`x11:` id now fail with `Error::Unsupported` instead of opening the system picker with a selection shared by every publication in the process.
+Pass `Source::Portal(portal::Selection::new(portal::Kind::Screen))` to ask the picker, and keep that selection for the publication's reopens.
+
 ### `Control::cut` is not rate limited, and capture advertises refresh (#6048)
 
 `encode::Control::cut` no longer spaces keyframes 500 ms apart: every request forces one on the next frame, so frequent calls produce all-keyframe video.

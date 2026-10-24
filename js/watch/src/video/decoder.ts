@@ -14,7 +14,6 @@ import {
 	Signal,
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
-import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync } from "../sync";
@@ -111,9 +110,6 @@ export class Decoder {
 	// shares `closed`, so it identifies the instance where the handle itself does not.
 	#instance?: { path: Moq.Path.Valid; closed: unknown };
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
-
-	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
-	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
 	#selected?: DecoderTrack;
@@ -285,8 +281,6 @@ export class Decoder {
 
 			// Upgrade the pending track to active.
 			// #runActive will be in charge of it now.
-			if (current) current.arrivals = undefined;
-			pending.arrivals = this.#arrivals;
 			this.#active.set(pending);
 			this.#pending.set(undefined);
 			pending = undefined;
@@ -383,15 +377,9 @@ export class Decoder {
 		}, Nano.fromMilli(BUFFERING));
 	}
 
-	/** Observe every frame and gap the displayed rendition receives until the handle or this decoder closes. */
-	arrivals(): Arrivals {
-		return this.#arrivals.consume();
-	}
-
 	/** Stop and release everything this holds. */
 	close() {
 		this.#clearCurrentFrame();
-		this.#arrivals.close();
 
 		this.#signals.close();
 	}
@@ -428,9 +416,6 @@ class DecoderTrack {
 	identity: string;
 	catalog: Getter<Catalog.Root | undefined>;
 	stats: Signal<Stats | undefined>;
-	// Set once promoted, so only the rendition feeding the picture reports arrivals.
-	arrivals?: ArrivalProducer;
-
 	timestamp = new Signal<Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
@@ -543,19 +528,24 @@ class DecoderTrack {
 		});
 
 		// Input processing - depends on container type
-		if (this.config.container.kind === "cmaf") {
-			effect.spawn(async () => {
-				try {
-					await this.#runCmaf(effect, sub, decoder);
-				} catch (err) {
-					if (effect.abort.aborted) return;
-					this.error.set(err instanceof Error ? err : new Error(String(err)));
-					effect.close();
-				}
-			});
-		} else {
-			this.#runLegacy(effect, sub, decoder);
-		}
+		this.#spawn(effect, async () => {
+			if (this.config.container.kind === "cmaf") await this.#runCmaf(effect, sub, decoder);
+			else this.#runLegacy(effect, sub, decoder);
+		});
+	}
+
+	// Run `task` for this track. A setup, read, or decode failure that is not its cancellation is
+	// fatal: reported through `error`, which the decoder latches, with the track's effect closed.
+	#spawn(effect: Effect, task: () => Promise<void>): void {
+		effect.spawn(async () => {
+			try {
+				await task();
+			} catch (err) {
+				if (effect.abort.aborted) return;
+				this.error.set(err instanceof Error ? err : new Error(String(err)));
+				effect.close();
+			}
+		});
 	}
 
 	#runLegacy(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
@@ -582,7 +572,7 @@ class DecoderTrack {
 		let latest: number | undefined;
 		const recovery = new Recovery();
 
-		effect.spawn(async () => {
+		this.#spawn(effect, async () => {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
@@ -590,10 +580,7 @@ class DecoderTrack {
 				// A gap or a declared end breaks the timeline: re-anchor before decoding further, and
 				// never bridge the buffer across it.
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") {
-						recovery.gap();
-						this.arrivals?.write(gap(next));
-					}
+					if (next.kind === "gap") recovery.gap();
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -612,9 +599,7 @@ class DecoderTrack {
 				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
-				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
-				const late = this.sync.received(timestamp, frame.arrival);
-				this.arrivals?.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
+				this.sync.received(Milli.fromMicro(frame.timestamp as Micro), frame.arrival);
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -672,17 +657,14 @@ class DecoderTrack {
 		let latest: number | undefined;
 		const recovery = new Recovery();
 
-		effect.spawn(async () => {
+		this.#spawn(effect, async () => {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 
 				// A gap or a declared end breaks the timeline (see #runLegacy).
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") {
-						recovery.gap();
-						this.arrivals?.write(gap(next));
-					}
+					if (next.kind === "gap") recovery.gap();
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -701,9 +683,7 @@ class DecoderTrack {
 				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
-				const timestamp = Milli.fromMicro(frame.timestamp);
-				const late = this.sync.received(timestamp, frame.arrival);
-				this.arrivals?.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
+				this.sync.received(Milli.fromMicro(frame.timestamp), frame.arrival);
 
 				// Track decode buffer (see #runLegacy: bridge only when no gap or end came between,
 				// never on group adjacency, which proves nothing about the timeline).
