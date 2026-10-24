@@ -223,7 +223,6 @@ async fn run(
 	};
 	published.session = Some(Accepted {
 		session: session.clone(),
-		driver: crate::ffi::Background::default(),
 	});
 	drop(published);
 

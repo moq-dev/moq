@@ -156,6 +156,6 @@ preferred first; every stable version by default), `tls-disable-verify`,
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
 To decrypt a capture, set `quic-keylog=true` on either element along with
 `SSLKEYLOGFILE`; the variable alone writes nothing, and the flag without it fails
-the start.
+the start. Existing Unix log files must be private (mode 0600); files accessible to group or others are refused.
 
 `moqsrc` creates source pads only for enabled renditions. Disabling a rendition stops its media and holds its pad idle without EOS; enabling it again resumes on the same pad.

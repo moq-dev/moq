@@ -60,7 +60,7 @@ pub trait Sealed: Sized {
 
 	/// The QUIC connection under the request, to widen a peer's limits before SETUP OK.
 	#[cfg(feature = "quic")]
-	fn quic(&self) -> Option<&moq_tokio::quic::Connection> {
+	fn quic(&self) -> Option<&moq_tokio::quic::driver::Connection> {
 		None
 	}
 
@@ -81,7 +81,7 @@ pub trait Sealed: Sized {
 
 impl Sealed for moq_tokio::server::Request {
 	/// Spawned by [`Request::ok`](moq_tokio::server::Request::ok) on its own task.
-	type Driver = tokio::task::JoinHandle<moq_tokio::Result<()>>;
+	type Driver = ();
 
 	fn remote(&self) -> Option<std::net::SocketAddr> {
 		self.remote_addr()
@@ -109,7 +109,7 @@ impl Sealed for moq_tokio::server::Request {
 	}
 
 	#[cfg(feature = "quic")]
-	fn quic(&self) -> Option<&moq_tokio::quic::Connection> {
+	fn quic(&self) -> Option<&moq_tokio::quic::driver::Connection> {
 		moq_tokio::server::Request::quic(self)
 	}
 
@@ -139,14 +139,14 @@ impl Sealed for moq_tokio::server::Request {
 
 	async fn ok(self) -> anyhow::Result<(moq_net::Session, Self::Driver)> {
 		match moq_tokio::server::Request::ok(self).await {
-			Ok(ok) => Ok(ok),
+			Ok(session) => Ok((session, ())),
 			Err(moq_tokio::Error::MoqNet(err)) => Err(err.into()),
 			Err(err) => Err(err.into()),
 		}
 	}
 
-	async fn drive(driver: Self::Driver) -> anyhow::Result<()> {
-		Ok(driver.await??)
+	async fn drive((): Self::Driver) -> anyhow::Result<()> {
+		Ok(())
 	}
 }
 

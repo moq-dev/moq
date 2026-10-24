@@ -5154,7 +5154,7 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.connect.tls.root.is_empty());
 	assert!(parsed.quic.gso.is_none());
 	assert!(parsed.quic.mtu_discovery.is_none());
-	assert!(!parsed.quic.resolve().keylog);
+	assert!(parsed.quic.resolve().keylog.is_none());
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,
@@ -5179,19 +5179,16 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_backoff_initial);
 	assert_eq!(
 		config.backoff_initial_us,
-		expected.connect.backoff.initial.unwrap().as_micros() as u64
+		expected.connect.backoff.initial().as_micros() as u64
 	);
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
 	assert!(config.has_backoff_max);
-	assert_eq!(
-		config.backoff_max_us,
-		expected.connect.backoff.max.unwrap().as_micros() as u64
-	);
+	assert_eq!(config.backoff_max_us, expected.connect.backoff.max().as_micros() as u64);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
-		expected.connect.backoff.timeout,
-		Some(std::time::Duration::from_micros(config.backoff_timeout_us))
+		expected.connect.backoff.timeout(),
+		std::time::Duration::from_micros(config.backoff_timeout_us)
 	);
 
 	let websocket = expected.connect.websocket.resolve();
@@ -5219,7 +5216,9 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	// And what it reports must round-trip: dialing with it is dialing with the defaults.
 	let expected = crate::client::Config::default();
 	let reparsed = parsed(&config);
-	assert_eq!(reparsed.connect.backoff.initial, expected.connect.backoff.initial);
+	assert_eq!(reparsed.connect.backoff.initial(), expected.connect.backoff.initial());
+	assert_eq!(reparsed.connect.backoff.max(), expected.connect.backoff.max());
+	assert_eq!(reparsed.connect.backoff.timeout(), expected.connect.backoff.timeout());
 	assert_eq!(
 		reparsed.connect.websocket.resolve().enabled,
 		expected.connect.websocket.resolve().enabled
@@ -5237,13 +5236,22 @@ fn zero_with_a_flag_set_is_a_real_value() {
 	config.has_quic_keep_alive = true;
 
 	let explicit = parsed(&config);
-	assert_eq!(explicit.connect.backoff.timeout, Some(std::time::Duration::ZERO));
-	assert_eq!(explicit.quic.keep_alive, Some(std::time::Duration::ZERO));
+	assert_eq!(
+		explicit.connect.backoff.timeout,
+		Some((std::time::Duration::ZERO).into())
+	);
+	assert_eq!(explicit.quic.keep_alive, Some((std::time::Duration::ZERO).into()));
 
 	// Without the flags the same zeroes mean nothing at all.
 	let defaults = parsed(&client_config());
-	assert_ne!(defaults.connect.backoff.timeout, Some(std::time::Duration::ZERO));
-	assert_eq!(defaults.quic.keep_alive, Some(std::time::Duration::from_secs(3)));
+	assert_ne!(
+		defaults.connect.backoff.timeout,
+		Some((std::time::Duration::ZERO).into())
+	);
+	assert_eq!(
+		defaults.quic.resolve().keep_alive,
+		Some(std::time::Duration::from_secs(3))
+	);
 }
 
 #[test]
@@ -5371,19 +5379,25 @@ fn config_quic_and_backoff_knobs_apply() {
 	let parsed = parsed(&config);
 	assert_eq!(
 		parsed.connect.backoff.initial,
-		Some(std::time::Duration::from_micros(500_000))
+		Some(std::time::Duration::from_micros(500_000).into())
 	);
 	assert_eq!(parsed.connect.backoff.multiplier, 3);
 	assert_eq!(
 		parsed.connect.backoff.max,
-		Some(std::time::Duration::from_micros(10_000_000))
+		Some(std::time::Duration::from_micros(10_000_000).into())
 	);
 	assert_eq!(parsed.quic.max_streams, Some(4096));
-	assert_eq!(parsed.quic.idle_timeout, Some(std::time::Duration::from_millis(15_000)));
+	assert_eq!(
+		parsed.quic.idle_timeout,
+		Some(std::time::Duration::from_millis(15_000).into())
+	);
 	assert_eq!(parsed.quic.gso, Some(false));
 	assert_eq!(parsed.quic.mtu_discovery, Some(true));
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
-	assert_eq!(parsed.quic.keylog, Some(true));
+	assert_eq!(
+		parsed.quic.keylog,
+		Some(std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into())
+	);
 }
 
 /// Whether a qlog directory works at all is a compile-time feature, so the capability

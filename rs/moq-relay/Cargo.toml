@@ -66,7 +66,6 @@ http-body = "1.0.1"
 # reqwest-middleware 0.4, while this line matches reqwest 0.13 below.
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 humantime = { workspace = true }
-humantime-serde = { workspace = true }
 hyper-util = { workspace = true }
 moq-auth = { workspace = true, features = ["client"] }
 moq-clock = { workspace = true }
@@ -123,7 +122,7 @@ tracing-subscriber = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Workers built inside a runtime with a manual clock installed run on that clock.
-moq-uring = { workspace = true, features = ["manual"] }
+moq-uring = { workspace = true, features = ["_manual"] }
 # Which sockets the process still holds, so the embed tests can prove a stopped
 # relay closed its own without rebinding a port another test could take.
 socket2 = { workspace = true, features = ["all"] }

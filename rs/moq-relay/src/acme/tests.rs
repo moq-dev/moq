@@ -362,7 +362,7 @@ async fn certificate(State(state): State<Arc<Server>>, Route(n): Route<usize>) -
 /// A relay that takes its certificate from `directory` for `domains`, keeping state in `dir`.
 fn relay_config(directory: &Url, dir: &Path, domains: &[&str]) -> RelayConfig {
 	let mut config = RelayConfig::default();
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some((Duration::ZERO).into());
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
 	config.auth.public = vec![moq_auth::Pattern::all()];
@@ -441,9 +441,8 @@ impl Running {
 	async fn quic_serves(&self, leaf: &CertificateDer<'static>) {
 		let mut config = moq_tokio::connect::Config::default();
 		config.tls.fingerprint = vec![fingerprint(leaf)];
-		config.once = Some(true);
 		config.bind = Some("127.0.0.1:0".parse().unwrap());
-		let client = config.init(Default::default()).unwrap();
+		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: Url = format!("moql://127.0.0.1:{}/", self.quic.port()).parse().unwrap();
 		let _session = tokio::time::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
 			.await
@@ -553,7 +552,7 @@ async fn unreachable_directory_fails_inside_the_budget() {
 	let dir = tempfile::tempdir().unwrap();
 	let mut config = relay_config(&url, dir.path(), &[DOMAIN]);
 	let budget = Duration::from_secs(2);
-	config.acme.timeout = Some(budget);
+	config.acme.timeout = Some((budget).into());
 
 	let relay = Relay::load(config).await.unwrap().with_signals(false);
 	let https = relay.web_addrs().https.unwrap();
@@ -583,7 +582,7 @@ async fn a_signal_during_issuance_stops_startup() {
 	let url: Url = format!("http://{closed}/directory").parse().unwrap();
 	let dir = tempfile::tempdir().unwrap();
 	let mut config = relay_config(&url, dir.path(), &[DOMAIN]);
-	config.acme.timeout = Some(Duration::from_secs(60 * 60));
+	config.acme.timeout = Some((Duration::from_secs(60 * 60)).into());
 
 	let relay = Relay::load(config).await.unwrap();
 	let ready = relay.ready();
@@ -609,7 +608,7 @@ async fn failed_validations_stop_short_of_the_rate_limit() {
 	let dir = tempfile::tempdir().unwrap();
 	let start = || async {
 		let mut config = relay_config(&directory.url, dir.path(), &[DOMAIN]);
-		config.acme.timeout = Some(TIMEOUT);
+		config.acme.timeout = Some((TIMEOUT).into());
 		let relay = Relay::load(config).await.unwrap().with_signals(false);
 		let err = tokio::time::timeout(TIMEOUT, relay.run())
 			.await

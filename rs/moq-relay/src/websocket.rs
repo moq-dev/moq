@@ -69,7 +69,8 @@ pub(crate) async fn serve_ws(
 	options.link.server_name = server_name.map(|Extension(ServerName(name))| name);
 	options.identity = mtls.map(|Extension(MtlsPeer(identity))| identity);
 	options.socket_stats = socket_stats.map(|Extension(stats)| stats.0);
-	options.timeout = state.timeout;
+	// The listener reads `None` as no deadline; `Options` reads it as the default.
+	options.timeout = Some(state.timeout.unwrap_or_default());
 
 	Ok(ws.on_upgrade(async move |socket| {
 		// Axum hides its Tungstenite socket to avoid exposing its dependency version.
@@ -790,7 +791,7 @@ mod tests {
 			activity.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
-		options.timeout = None;
+		options.timeout = Some(Duration::ZERO);
 		let server = tokio::spawn(moq_tokio::websocket::accept(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			options,

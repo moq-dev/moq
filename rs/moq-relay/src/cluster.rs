@@ -2047,10 +2047,10 @@ impl Cluster {
 		// through backoff and eventually gives up instead of migrating forever.
 		// Downstream sessions never see a GOAWAY of their own.
 		//
-		// Forced on regardless of `--client-reconnect`: that flag is about the
-		// relay's own upstream dial, and a cluster peer link that stopped following
-		// GOAWAY would break rolling handoff, redialing the drained URL after the
-		// old session finally closed instead of migrating to the replacement.
+		// Forced on, whatever the template client says: a cluster peer link that
+		// stopped following GOAWAY would break rolling handoff, redialing the drained
+		// URL after the old session finally closed instead of migrating to the
+		// replacement.
 		//
 		// A GOAWAY naming no URI is a relay draining to restart. A peer URL names
 		// that one node, so a redial would only reach the draining process again
@@ -2089,8 +2089,7 @@ impl Cluster {
 			let mut bind = connect.resolve().bind;
 			bind.set_port(0);
 			connect.bind = Some(bind);
-			connect.backoff.timeout = Some(std::time::Duration::ZERO);
-			connect.once = Some(false);
+			connect.backoff.timeout = Some((std::time::Duration::ZERO).into());
 			connect.version = connect
 				.versions()
 				.iter()
@@ -3143,8 +3142,10 @@ mod tests {
 	#[tokio::test]
 	async fn constructed_origin_keeps_cache_and_handles() {
 		let duration = Duration::from_secs(5);
-		let mut cache = crate::cache::Config::default();
-		cache.duration = Some(duration);
+		let cache = crate::cache::Config {
+			duration: Some(duration.into()),
+			..Default::default()
+		};
 		let cache = cache.init().expect("cache");
 		let pool = cache.pool.clone();
 
@@ -3616,8 +3617,7 @@ mod tests {
 			}
 		});
 
-		let mut connect = moq_tokio::connect::Config::default();
-		connect.once = Some(true);
+		let connect = moq_tokio::connect::Config::default();
 		let fingerprint = fingerprint
 			.with_connect(connect, Default::default())
 			.with_advertise(LanAdvertise::new(port).with_fingerprint(fp.clone()));
@@ -3762,7 +3762,7 @@ mod tests {
 			..Default::default()
 		};
 		let mut quic = moq_tokio::quic::Config::default();
-		quic.idle_timeout = Some(IDLE);
+		quic.idle_timeout = Some((IDLE).into());
 		let cluster = new_cluster(config).expect("cluster").with_connect(connect, quic);
 		let started = cluster.clone().start().await.expect("start");
 		let running = tokio::spawn(started.run());
@@ -3803,7 +3803,7 @@ mod tests {
 			..Default::default()
 		};
 		let mut quic = moq_tokio::quic::Config::default();
-		quic.idle_timeout = Some(IDLE);
+		quic.idle_timeout = Some((IDLE).into());
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(1)
 			.enable_all()
@@ -3881,7 +3881,7 @@ mod tests {
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
 		let _ = moq_tokio::crypto::install_default();
 		let mut quic = moq_tokio::quic::Config::default();
-		quic.idle_timeout = Some(IDLE);
+		quic.idle_timeout = Some((IDLE).into());
 
 		let node = new_cluster(Config::default()).expect("node cluster");
 		let mut listen = moq_tokio::listen::Config::default();

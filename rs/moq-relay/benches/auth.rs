@@ -69,9 +69,8 @@ impl Fixture {
 			}
 		});
 		let mut config = moq_tokio::connect::Config::default();
-		config.once = Some(true);
 		config.version = vec!["moq-transport-22".parse().unwrap()];
-		let client = config.init(Default::default()).unwrap();
+		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().unwrap();
 		let mut connections = Vec::new();
 		let mut retained = Vec::new();
@@ -181,9 +180,8 @@ impl Queue {
 			}
 		});
 		let mut config = moq_tokio::connect::Config::default();
-		config.once = Some(true);
 		config.version = vec!["moq-transport-22".parse().unwrap()];
-		let client = config.init(Default::default()).unwrap();
+		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().unwrap();
 		let (connection, ()) = tokio::join!(async { client.connect(url).established().await.unwrap() }, async {
 			let admission = admissions.next().await.unwrap();

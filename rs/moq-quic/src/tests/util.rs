@@ -812,12 +812,7 @@ impl Write for SharedBuffer {
 pub(super) fn server_config() -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(server_crypto()));
     config.transport = Arc::new(TransportConfig::default());
-    if !cfg!(feature = "bloom") {
-        config
-            .validation_token
-            .sent(2)
-            .log(Arc::new(SimpleTokenLog::default()));
-    }
+
     config
 }
 

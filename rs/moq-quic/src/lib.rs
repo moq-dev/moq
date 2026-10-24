@@ -2,7 +2,7 @@
 //!
 //! moq-quic contains a fully deterministic implementation of QUIC protocol logic. It contains
 //! no networking code and does not get any relevant timestamps from the operating system. Most
-//! users may want to use the futures-based quinn API instead.
+//! users can use the Tokio driver in `moq_tokio::quic::driver` instead.
 //!
 //! The moq-quic API might be of interest if you want to use it from a C or C++ project
 //! through C bindings or if you want to use a different event loop than the one tokio provides.
@@ -37,7 +37,7 @@ mod entropy;
 #[doc(hidden)]
 pub mod fuzz;
 mod range_set;
-#[cfg(all(test, any(feature = "rustls-aws-lc-rs", feature = "rustls-ring")))]
+#[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
 #[expect(
     clippy::disallowed_methods,
     reason = "tests read the host clock directly"
@@ -48,9 +48,7 @@ mod varint;
 
 pub use varint::{VarInt, VarIntBoundsExceeded};
 
-#[cfg(feature = "bloom")]
 mod bloom_token_log;
-#[cfg(feature = "bloom")]
 pub use bloom_token_log::BloomTokenLog;
 
 mod connection;
@@ -66,7 +64,7 @@ pub use connection::mux;
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;
 
-#[cfg(feature = "rustls")]
+#[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
 pub use rustls;
 
 mod config;

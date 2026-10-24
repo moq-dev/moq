@@ -29,7 +29,7 @@ impl Drop for Relay {
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
 	let mut config = moq_relay::Config::default();
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some(Duration::ZERO.into());
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
@@ -47,10 +47,9 @@ async fn relay() -> Relay {
 fn client(version: &str) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.version = vec![version.parse().unwrap()];
-	config.init(Default::default()).unwrap()
+	config.init(Default::default()).unwrap().with_reconnect(false)
 }
 
 fn write(track: &track::Producer, tag: &str) {

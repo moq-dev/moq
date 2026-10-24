@@ -261,12 +261,11 @@ mod tests {
 		let addr = server.tcp_local_addr().expect("tcp listener bound");
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.expect("accept");
-			let (session, driver) = request
+			let session = request
 				.with_publisher(&pub_origin)
 				.ok()
 				.await
 				.expect("publisher session");
-			let _ = driver.await;
 			let _ = session.closed().await;
 		});
 
