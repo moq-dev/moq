@@ -71,7 +71,7 @@ struct Serve {
 	/// pick.
 	alpns: Arc<Vec<String>>,
 	/// The moq handshake every connection runs: the listener's versions and
-	/// the extensions it offers in SETUP.
+	/// the extensions and implementation it offers in SETUP.
 	moq: moq_net::Server,
 	/// The address every worker socket shares, reported as a session's `local`.
 	local: SocketAddr,
@@ -245,9 +245,15 @@ impl Workers {
 			udp,
 			pin: config.pin,
 			alpns: Arc::new(alpns),
-			moq: moq_net::Server::new()
-				.with_versions(versions)
-				.with_extensions(listen.extensions),
+			moq: {
+				let mut moq = moq_net::Server::new()
+					.with_versions(versions)
+					.with_extensions(listen.extensions);
+				if let Some(implementation) = &listen.implementation {
+					moq = moq.with_implementation(implementation);
+				}
+				moq
+			},
 			timeout: listen.resolved_timeout(),
 			reset_secret,
 			threads: Vec::new(),
