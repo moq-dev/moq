@@ -119,6 +119,8 @@ uring-changed base="":
 uring *args:
     just rs uring-check "$@"
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --tests "$@"
+    # Signal ownership and scoped tracing must also survive sharing one process.
+    cargo test --locked -p moq-relay --test integration
     # Needs a second IPv6 address on lo, which the io_uring CI lanes add.
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --test integration --run-ignored only -E 'test(=local_addr::a_v6_wildcard_answers_from_the_address_reached)' "$@"
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings

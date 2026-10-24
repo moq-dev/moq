@@ -54,7 +54,7 @@ struct Running {
 
 async fn start(config: Config) -> Running {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let stats = relay.stats().registry().clone();
 	let origin = relay.cluster().origin.consume();
 	let quic = relay.quic_addr().expect("quic listener bound");

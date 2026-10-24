@@ -72,8 +72,6 @@
 //! # }
 //! ```
 
-use std::marker::PhantomData;
-
 use bytes::Bytes;
 use moq_net::Timed;
 
@@ -144,15 +142,13 @@ fn prepare(config: &mut impl AsMut<BinaryConfig>, mode: Mode) -> crate::Result<b
 ///
 /// Every [`update`](Self::update) supersedes the last, so a consumer reads only the newest payload.
 /// For a log where every payload survives, use [`Stream`].
-pub struct Snapshot<E: CatalogExt = ()> {
+pub struct Snapshot {
 	inner: moq_flate::snapshot::Producer,
 	listing: Listing,
-	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
-	_catalog: PhantomData<fn() -> E>,
 }
 
-impl<E: CatalogExt> Snapshot<E> {
-	pub(crate) fn new<C: RenditionConfig<E> + AsMut<BinaryConfig>>(
+impl Snapshot {
+	pub(crate) fn new<E: CatalogExt, C: RenditionConfig<E> + AsMut<BinaryConfig>>(
 		track: moq_net::track::Producer,
 		rendition: crate::catalog::Rendition<E, C>,
 		mut config: C,
@@ -163,11 +159,7 @@ impl<E: CatalogExt> Snapshot<E> {
 		}
 		let inner = moq_flate::snapshot::Producer::new(track, binary);
 		let listing = Listing::new(rendition, config)?;
-		Ok(Self {
-			inner,
-			listing,
-			_catalog: PhantomData,
-		})
+		Ok(Self { inner, listing })
 	}
 
 	/// The track name, which is also the catalog key.
@@ -205,7 +197,7 @@ impl<E: CatalogExt> Snapshot<E> {
 ///
 /// Every [`append`](Self::append) is preserved and delivered in order. For a latest-value payload,
 /// use [`Snapshot`].
-pub struct Stream<E: CatalogExt = ()> {
+pub struct Stream {
 	inner: moq_flate::stream::Producer,
 	name: String,
 
@@ -213,12 +205,10 @@ pub struct Stream<E: CatalogExt = ()> {
 	/// entry advertising a track that can no longer accept records only misleads a consumer that
 	/// discovers it afterwards.
 	listing: Option<Listing>,
-	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
-	_catalog: PhantomData<fn() -> E>,
 }
 
-impl<E: CatalogExt> Stream<E> {
-	pub(crate) fn new<C: RenditionConfig<E> + AsMut<BinaryConfig>>(
+impl Stream {
+	pub(crate) fn new<E: CatalogExt, C: RenditionConfig<E> + AsMut<BinaryConfig>>(
 		track: moq_net::track::Producer,
 		rendition: crate::catalog::Rendition<E, C>,
 		mut config: C,
@@ -233,7 +223,6 @@ impl<E: CatalogExt> Stream<E> {
 			inner,
 			name: listing.name().to_string(),
 			listing: Some(listing),
-			_catalog: PhantomData,
 		})
 	}
 
