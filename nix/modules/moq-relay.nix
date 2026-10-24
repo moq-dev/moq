@@ -153,14 +153,14 @@ in
       rootUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        example = "localhost:4443";
-        description = "Root node URL to connect to (for leaf mode)";
+        example = "https://root.example.com:4443";
+        description = "Root node URL to connect to (for leaf mode); a full URL, since a bare `host:port` is refused";
       };
 
       nodeUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        example = "localhost:4444";
+        example = "https://leaf.example.com:4443";
         description = "This node's advertised URL";
       };
 
@@ -211,6 +211,10 @@ in
       {
         assertion = cfg.acme.domains == [ ] || (cfg.tls.certs == [ ] && cfg.tls.generate == [ ]);
         message = "services.moq-relay: acme.domains cannot be combined with tls.certs or tls.generate";
+      }
+      {
+        assertion = cfg.cluster.mode != "leaf" || cfg.cluster.rootUrl != null;
+        message = "services.moq-relay: cluster.mode = \"leaf\" needs cluster.rootUrl; a leaf without one runs standalone";
       }
     ];
 
@@ -370,7 +374,7 @@ in
       }
       // lib.optionalAttrs (cfg.cluster.rootUrl != null) {
         # Cluster configuration
-        MOQ_CLUSTER_ROOT = cfg.cluster.rootUrl;
+        MOQ_CLUSTER_CONNECT = cfg.cluster.rootUrl;
       }
       # Public rules refuse a token, so a peer only presents one an auth server will read.
       //

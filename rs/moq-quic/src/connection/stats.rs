@@ -29,7 +29,10 @@ impl UdpStats {
 /// Number of frames transmitted or received of each frame type
 #[derive(Default, Copy, Clone)]
 #[non_exhaustive]
-#[allow(missing_docs)]
+#[expect(
+    missing_docs,
+    reason = "one counter per frame type; the field names say what they count"
+)]
 pub struct FrameStats {
     pub acks: u64,
     pub ack_frequency: u64,

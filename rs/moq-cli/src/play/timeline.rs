@@ -519,9 +519,9 @@ pub(super) fn timestamp(timestamp: Timestamp) -> Duration {
 /// A duration from the start of the track as a wire timestamp, the inverse of
 /// [`timestamp`].
 fn media(duration: Duration) -> Timestamp {
-	// A wire timestamp caps at 2^62 - 1, which is ~146,000 years of microseconds.
-	const MAX: u128 = (1 << 62) - 1;
-	Timestamp::from_micros(duration.as_micros().min(MAX) as u64).expect("clamped to the wire maximum")
+	// A timestamp caps at 2^61 - 1, which is ~73,000 years of microseconds.
+	const MAX: u128 = (1 << 61) - 1;
+	Timestamp::from_micros(duration.as_micros().min(MAX) as u64).expect("clamped to the timestamp maximum")
 }
 
 /// Where the audio track has reached, measured from its own origin so
@@ -617,7 +617,7 @@ pub(super) struct Fit {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 

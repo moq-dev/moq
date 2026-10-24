@@ -90,7 +90,9 @@ declare -A scope=(
     # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
     # nixpkgs, and the last moves on a flake.lock bump alone.
     [obs]='^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)'
-    [flake]='(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'
+    # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
+    # and its own modules and test helpers; those still gate the full flake.
+    [flake]='(^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^flake\.lock$|^nix/|\.nix$)'
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
     [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
@@ -156,7 +158,7 @@ declare -A tools=(
     [toml]='taplo'
     [nix]='nixfmt'
     [justfile]=''
-    [gh]='actionlint bun'
+    [gh]='actionlint bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
 )
 
 # CI and the local check share one selection and one lint/test dispatch.
@@ -312,15 +314,18 @@ for module in "${selected[@]}"; do
 done
 
 # The bindings run their tests in the preamble; these suites run once here.
+# gh's tooling tests run on every diff: path selection would let a broken
+# selector skip the very tests that catch it.
 if [[ "$verb" == check ]]; then
     for module in "${selected[@]}"; do
         case "$module" in
-            rs | js | py) begin "test $module" ;;
+            rs | js | py | gh) begin "test $module" ;;
         esac
         case "$module" in
             rs) just rs test-changed "$rs_list" ;;
             js) just js test-changed "$js_list" ;;
             py) just py test ;;
+            gh) just gh test ;;
         esac
         finish
     done

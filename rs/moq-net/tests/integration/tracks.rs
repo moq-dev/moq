@@ -31,6 +31,7 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 	{
 		Ok(Some(TracksEvent::Added { name, .. })) => format!("+{name}"),
 		Ok(Some(TracksEvent::Removed { name })) => format!("-{name}"),
+		Ok(Some(TracksEvent::Finished { name })) => format!("~{name}"),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
@@ -77,10 +78,13 @@ async fn a_session_lists_its_peers_tracks() {
 	);
 	assert_eq!(next(&mut tracks).await, "+a");
 
-	let _b = broadcast.create_track("b", None).unwrap();
+	let b = broadcast.create_track("b", None).unwrap();
 	assert_eq!(next(&mut tracks).await, "+b");
 	drop(a);
 	assert_eq!(next(&mut tracks).await, "-a");
+	b.finish().unwrap();
+	drop(b);
+	assert_eq!(next(&mut tracks).await, "~b", "TRACKS_FINISH, not TRACKS_REMOVE");
 
 	broadcast.close();
 	assert_eq!(next(&mut tracks).await, "end");
@@ -151,12 +155,13 @@ async fn a_listed_track_serves_its_cached_group() {
 }
 
 /// Through a relay: the relay answers each downstream listing at once from the one
-/// upstream listing it keeps, and a cold relay's upstream tracks follow as live adds.
+/// upstream listing it keeps, a cold relay's upstream tracks follow as live adds, and a
+/// removal reaches each downstream as its upstream reported it.
 #[moq_clock::test]
 async fn a_relay_shares_its_upstream_listing() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let _a = broadcast.create_track("a", None).unwrap();
+	let a = broadcast.create_track("a", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let (relay, _upstream) = connect(&publisher, 2, lite07()).await;
@@ -172,9 +177,17 @@ async fn a_relay_shares_its_upstream_listing() {
 	assert_eq!(next(&mut two).await, "synced");
 	assert_eq!(next(&mut two).await, "+a");
 
-	let _b = broadcast.create_track("b", None).unwrap();
+	let b = broadcast.create_track("b", None).unwrap();
 	assert_eq!(next(&mut one).await, "+b");
 	assert_eq!(next(&mut two).await, "+b");
+
+	a.finish().unwrap();
+	drop(a);
+	assert_eq!(next(&mut one).await, "~a");
+	assert_eq!(next(&mut two).await, "~a");
+	drop(b);
+	assert_eq!(next(&mut one).await, "-b");
+	assert_eq!(next(&mut two).await, "-b");
 }
 
 /// A version without the Tracks Stream refuses the listing rather than answer it empty.

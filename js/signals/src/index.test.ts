@@ -84,6 +84,44 @@ describe("Signal", () => {
 		dispose();
 	});
 
+	test("deep equality sees structure that reads as undefined", async () => {
+		const signal = new Signal<unknown>(new Array(1));
+		let notified = 0;
+		const dispose = signal.subscribe(() => notified++);
+
+		// Each step against the previous value: whether a renamed key, a length, or a hole notifies.
+		const steps: [unknown, boolean][] = [
+			[new Array(2), true],
+			[[undefined, undefined], true],
+			[{ left: undefined }, true],
+			[{ right: undefined }, true],
+			[{ right: undefined }, false],
+			[Number.NaN, true],
+			[Number.NaN, false],
+		];
+		for (const [value, notifies] of steps) {
+			const before = notified;
+			signal.set(value);
+			await settle();
+			expect(notified - before, `set(${String(value)})`).toBe(notifies ? 1 : 0);
+		}
+		dispose();
+	});
+
+	test("a listener added after an unobserved write is not notified", async () => {
+		const signal = new Signal(0);
+		const first = signal.subscribe(() => {});
+		signal.set(1); // queues a flush
+		first();
+		signal.set(2); // nobody listens, so this drops the capture
+
+		const seen: number[] = [];
+		const dispose = signal.subscribe((v) => seen.push(v));
+		await settle();
+		expect(seen).toEqual([]); // it subscribed at 2, which never changed
+		dispose();
+	});
+
 	test("any number of subscribers is legitimate", async () => {
 		const signal = new Signal(0);
 		let notified = 0;
