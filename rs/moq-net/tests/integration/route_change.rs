@@ -1000,9 +1000,9 @@ async fn pair_behind_a_relay_ends_lite_06() {
 		.expect("timed out");
 }
 
-/// `P1` publishes a compressed `video` and `P2`, sharing its epoch, one compressed per
-/// `compress`, both to the relay `R`, with `D` reading through `R` over lite-07, which
-/// forwards the compressed bytes. `P1`'s session to `R` dies between groups. A copy
+/// `P1` publishes a compressed `video` to the relay `R`, and so does `P2` under the same
+/// epoch, compressed only when `compress` is set. `D` reads through `R` over lite-07,
+/// which forwards the compressed bytes. `P1`'s session to `R` dies between groups. A copy
 /// that frames the track the same way resumes. One that doesn't is refused: `D` never
 /// reads `P2`'s groups under `P1`'s framing, and the track ends with the refusal.
 async fn compression_changes_behind_a_relay(compress: bool) {
