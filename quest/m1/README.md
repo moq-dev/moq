@@ -122,6 +122,7 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Broadcast lifecycle](/quest/m1/broadcast-lifecycle/README.md) - broadcasts are online or offline with no finished state in moq-net, finished-broadcast retention is a fixed moq-mux policy, and each linger timer has one meaning
 - [JS interop tone](/quest/m1/interop-js-tone.md) - the `js ->` cells pass the audio check on every draft again, after the 2026-10-23 regression
+- [fMP4 edit lists](/quest/m1/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps, so the interop AAC tone passes the phase check
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
@@ -145,7 +146,6 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
-- [Interop pre-skip](/quest/m1/interop-preskip.md) - the interop tone check anchors phase to timestamps, so a misapplied pre-skip fails
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Subscribe update camera check](/quest/m1/subscribe-update-churn.md) - a person checks a physical-camera publish for SUBSCRIBE_UPDATE chatter; bbb and the fake camera measured quiet
 - [Unprefixed C++ free functions](/quest/m1/cpp-free-function-prefix.md) - generated free functions drop `moq_`, and `moq.hpp` deletes its five pass-through wrappers before C++ first publishes

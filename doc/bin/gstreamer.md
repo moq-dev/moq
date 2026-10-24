@@ -49,6 +49,10 @@ and stereo use a family 0 head, and three to eight channels need
 `channel-mapping-family`, `stream-count`, `coupled-count`, and
 `channel-mapping`. Caps that omit that mapping, or that contradict the header,
 are refused. `opusenc` supplies both, so a 5.1 encode plays as six channels.
+Opus buffers are read the way `opusenc` and `moqsrc` stamp them: at the time
+their first kept sample plays, with `GstAudioClippingMeta` clipping the
+pre-skip. Each is published the pre-skip, less its own clipping, later, since
+a frame timestamp counts the pre-skip.
 
 A `text/x-raw` pad is how captions get in: ffmpeg cannot mux a subtitle track
 into fragmented MP4, so `moq import fmp4` can't carry one, while a demuxer that
@@ -133,7 +137,10 @@ every returning rendition; one it omits gets EOS instead of keeping its old pad.
 Within each run, the first media frame fixes one timestamp reference and segment
 base for every pad. Audio and video keep their relative broadcast timing, even
 when their tracks use different timescales or arrive at different times. Frames
-before that reference keep an earlier PTS for downstream to clip. A new broadcast
+before that reference keep an earlier PTS for downstream to clip. Opus packets
+covering the OpusHead pre-skip carry `GstAudioClippingMeta` for it, and each
+Opus packet that keeps samples is stamped where the first one plays, so `opusdec`
+drops the priming samples and the audio lines up with video. A new broadcast
 chooses a fresh reference on the same pads; playback does not require a wall clock.
 A rendition that leaves the catalog
 gets EOS once its track ends. A broadcast that ends or loses its publisher holds
