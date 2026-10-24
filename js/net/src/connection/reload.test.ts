@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -10,6 +10,7 @@ import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { nextTask } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
@@ -256,6 +257,17 @@ test("an ended auth handle gives up instead of retrying", async () => {
 		return pair.client;
 	};
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	const clock = new Manual();
+	const restore = clock.install();
+	// Bounded by task turns rather than wall time, advancing the clock a millisecond per turn
+	// so a reconnect, if the loop tried one, would be dialed well within the bound.
+	const until = async (done: () => boolean) => {
+		for (let i = 0; i < 100 && !done(); i++) {
+			await nextTask();
+			await clock.advance(Nano.fromMilli(Milli(1)));
+		}
+		expect(done()).toBe(true);
+	};
 
 	// An unbounded retry window, so only the ended handle can stop the loop.
 	const reload = new Reload({
@@ -266,17 +278,18 @@ test("an ended auth handle gives up instead of retrying", async () => {
 	});
 	const warned = spyOn(console, "warn").mockImplementation(() => {});
 	try {
-		await waitUntil(() => reload.established.peek() !== undefined);
+		await until(() => reload.established.peek() !== undefined);
 		const aborted = new Error("auth handle aborted");
 		reload.auth.abort(aborted);
 		(await servers[0])?.abort();
 
-		await waitUntil(() => reload.error.peek() !== undefined);
+		await until(() => reload.error.peek() !== undefined);
 		expect(reload.error.peek()).toBe(aborted);
 		expect(servers.length).toBe(1);
 	} finally {
 		warned.mockRestore();
 		reload.close();
+		restore();
 		globalThis.WebTransport = original;
 	}
 });
