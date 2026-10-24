@@ -1119,6 +1119,7 @@ mod tests {
 		// Software (openh264) so the test is deterministic and never touches a
 		// hardware backend.
 		let (name, config) = roundtrip_rendition(Codec::H264, encoder::Kind::Software).await;
+		assert_eq!(config.reorder, Some(0));
 		assert!(name.ends_with(".avc3"));
 		assert_eq!(config.coded_width, Some(320));
 		assert_eq!(config.coded_height, Some(240));
