@@ -75,11 +75,12 @@ export function sanitizeCue(text: string): string {
 
 // Merge `incoming` into `stored`, both sorted by `key`, keeping the latest MAX_RETAINED. Sorting the
 // payload once and merging in one pass keeps a payload of n entries O(n log n); a splice per entry
-// would be quadratic. Ties keep arrival order.
+// would be quadratic.
 function merge<T>(stored: T[], incoming: T[], key: (value: T) => number): T[] {
 	const merged: T[] = [];
 	let i = 0;
-	for (const value of incoming.toSorted((a, b) => key(a) - key(b))) {
+	// Not `toSorted`: Chrome and Edge 97-109 lack it, and `sort` is stable, so ties keep arrival order.
+	for (const value of [...incoming].sort((a, b) => key(a) - key(b))) {
 		while (i < stored.length && key(stored[i]) <= key(value)) merged.push(stored[i++]);
 		merged.push(value);
 	}
