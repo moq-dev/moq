@@ -10,7 +10,7 @@ as Rust.
 
 ## Plan
 
-See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
+See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
 - Today `js/net/src/group.ts` caps frames and bytes and throws
   `GroupTooLarge`, and JS has no byte pool. Its eviction is whole groups by
@@ -34,4 +34,4 @@ Wire: none beyond Byte holes.
 
 ## Required
 
-- [Byte holes](/quest/m2/unbounded-groups/byte-holes.md) - the Rust contract and the lite wire this mirrors
+- [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - the Rust contract and the lite wire this mirrors

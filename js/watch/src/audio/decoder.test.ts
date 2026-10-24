@@ -860,8 +860,7 @@ describe("fatal decoder errors", () => {
 function manualAt(ms: number) {
 	const clock = new Manual();
 	clock.jump(Nano.fromMilli(Milli(ms)));
-	const restore = clock.install();
-	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), restore };
+	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), installed: clock.install() };
 }
 
 // A legacy container frame: the media timestamp, then one payload byte.
@@ -971,7 +970,7 @@ async function livePlayback(burst: number) {
 			media.peek().close();
 			producer.close();
 			await microtasks();
-			clock.restore();
+			clock.installed.close();
 		},
 	};
 }

@@ -217,7 +217,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const moveTo = (ms: number) => manual.jump(Nano(Nano.fromMilli(Milli(ms)) - manual.now()));
 	let clock = first.at;
 	moveTo(clock);
-	const restore = manual.install();
+	const installed = manual.install();
 
 	try {
 		for (let n = 1; first.at + (n - 1) * step <= end; n++) {
@@ -291,6 +291,6 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		await decode;
 		signals.close();
 		sync.close();
-		restore();
+		installed.close();
 	}
 }

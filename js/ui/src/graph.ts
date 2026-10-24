@@ -1,19 +1,22 @@
 import type { Effect } from "@moq/signals";
 
+/** Options for {@link graph}. */
 export interface GraphOptions {
-	// Fixed y-axis maximum. If omitted, the graph autoscales to its rolling peak.
+	/** Fixed y-axis maximum. If omitted, the graph autoscales to its rolling peak. */
 	max?: number;
-	// How many samples of history to retain (older samples scroll off the left).
+	/** How many samples of history to retain (older samples scroll off the left). */
 	samples?: number;
-	// Stroke/fill color for the line (any CSS color).
+	/** Stroke/fill color for the line (any CSS color). */
 	color?: string;
-	// Formats the latest value for the readout in the corner.
+	/** Formats the latest value for the readout in the corner. */
 	format?: (v: number) => string;
 }
 
+/** A sparkline created by {@link graph}. */
 export interface Graph {
+	/** The root element to mount. */
 	el: HTMLElement;
-	// Append a sample. Pass undefined to record a gap (drawn as zero).
+	/** Append a sample. Pass undefined to record a gap (drawn as zero). */
 	push(value: number | undefined): void;
 }
 
