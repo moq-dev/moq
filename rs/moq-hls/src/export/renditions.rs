@@ -705,31 +705,32 @@ impl Consumer {
 	}
 
 	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
-		match self
+		let finished = match self
 			.state
 			.poll(waiter, |current| next_event(&current.renditions, &self.seen))
 		{
-			Poll::Ready(Ok(event)) => Poll::Ready(Ok(Some(event))),
+			Poll::Ready(Ok(event)) => return Poll::Ready(Ok(Some(event))),
 			Poll::Ready(Err(state)) => {
 				match &state.finished {
 					Some(result) => result.clone()?,
 					None => return Poll::Ready(Err(crate::Error::IncompleteRecording)),
 				}
-				drop(state);
-				match self.feed.poll(waiter, |feed| {
-					if let Some(err) = &feed.failed {
-						Poll::Ready(Err(err.clone()))
-					} else if feed.ended {
-						Poll::Ready(Ok(None))
-					} else {
-						Poll::Pending
-					}
-				}) {
-					Poll::Ready(Ok(result)) => Poll::Ready(result),
-					Poll::Ready(Err(_)) => Poll::Ready(Err(crate::Error::IncompleteRecording)),
-					Poll::Pending => Poll::Pending,
-				}
+				true
 			}
+			Poll::Pending => false,
+		};
+		// A failed reference cannot wait for an otherwise live catalog to close.
+		match self.feed.poll(waiter, |feed| {
+			if let Some(err) = &feed.failed {
+				Poll::Ready(Err(err.clone()))
+			} else if feed.ended && finished {
+				Poll::Ready(Ok(None))
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(result)) => Poll::Ready(result),
+			Poll::Ready(Err(_)) => Poll::Ready(Err(crate::Error::IncompleteRecording)),
 			Poll::Pending => Poll::Pending,
 		}
 	}
@@ -777,6 +778,13 @@ mod tests {
 
 		let producer = Producer::new(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
+		producer.fanout.finish(None);
+		assert!(cursor.poll_next(&kio::Waiter::noop()).is_pending());
+		producer.finish(Ok(()));
+		assert!(cursor.next().await.unwrap().is_none());
+
+		let producer = Producer::new(Duration::from_secs(30));
+		let mut cursor = producer.subscribe();
 		producer.close();
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
@@ -785,6 +793,20 @@ mod tests {
 		let mut cursor = producer.subscribe();
 		drop(producer);
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
+	}
+
+	#[test]
+	fn a_reference_failure_is_reported_without_catalog_completion() {
+		let producer = Producer::new(Duration::from_secs(30));
+		let cursor = producer.subscribe();
+		let reference = Arc::new((Kind::Video, "video".into(), "video".into()));
+		let waiter = kio::Waiter::noop();
+		assert!(cursor.poll_next(&waiter).is_pending());
+		producer.fanout.fail(Some(&reference), crate::Error::NoVariants);
+		assert!(matches!(
+			cursor.poll_next(&waiter),
+			Poll::Ready(Err(crate::Error::NoVariants))
+		));
 	}
 
 	#[tokio::test]
