@@ -1489,9 +1489,9 @@ mod tests {
 				group: FetchGroup::Num(0),
 			}),
 			None,
-			ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+			None,
+			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
 			"/fetch/room/video?group=0".parse().unwrap(),
-			http::HeaderMap::new(),
 			State(state),
 		)
 		.await
