@@ -452,7 +452,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		{
 			self.pmt_packet(pmt_pid, pkt)?;
 		}
-		self.mux_rate.packet();
 
 		// A packet the demodulator flagged corrupt, or whose adaptation field overruns it, is
 		// carried like any other, but nothing is read from it.
@@ -516,7 +515,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 				samples: VecDeque::from([Sample { at, ticks: raw }]),
 			});
 			self.waiting_since = self.mapped.then_some(raw);
-			if self.mux_rate.pcr(raw) {
+			if self.mux_rate.pcr(raw, self.offset / TsPacket::SIZE as u64) {
 				self.record()?;
 			}
 			return Ok(None);
@@ -546,7 +545,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			if self.mux_rate.discontinuity() {
 				self.record()?;
 			}
-			if self.mux_rate.pcr(raw) {
+			if self.mux_rate.pcr(raw, self.offset / TsPacket::SIZE as u64) {
 				self.record()?;
 			}
 			// The jump is not elapsed time, so the wait for the first group starts over.
@@ -563,7 +562,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			timebase.samples.pop_front();
 		}
 		self.drain_queue()?;
-		if self.mux_rate.pcr(raw) {
+		if self.mux_rate.pcr(raw, self.offset / TsPacket::SIZE as u64) {
 			self.record()?;
 		}
 

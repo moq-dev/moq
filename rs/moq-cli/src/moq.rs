@@ -40,9 +40,8 @@ pub fn stop() {
 
 /// Notify systemd (if any) that the endpoint is up, unless the process is shutting down.
 pub fn notify_ready() {
-	if STOPPING.load(std::sync::atomic::Ordering::Relaxed) {
-		return;
-	}
 	#[cfg(unix)]
-	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+	if !STOPPING.load(std::sync::atomic::Ordering::Relaxed) {
+		let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+	}
 }
