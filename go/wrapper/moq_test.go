@@ -830,8 +830,9 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 	}
 
 	order := moq.OrderAscending
+	maxDelay := 10 * time.Second
 	consumer, err := track.Consume(&moq.Subscription{
-		MaxDelay: 10 * time.Second,
+		MaxDelay: &maxDelay,
 		Ranges:   []moq.Range{{Start: moq.AnchorRelative{Groups: 2}}},
 		Order:    &order,
 	})

@@ -30,7 +30,7 @@ impl<E: CatalogExt, D, C: RenditionConfig<E> + AsMut<D>> IntoRendition<E, D> for
 }
 
 /// A data track's catalog entry, owned for the life of its producer and kept current with the
-/// bitrate, jitter, and delay its writes measure.
+/// bitrate and delay its writes measure.
 ///
 /// Erases the entry's type, so a data producer's own type doesn't depend on which section lists it.
 pub(crate) struct Listing {
@@ -90,31 +90,27 @@ impl Listing {
 			self.estimator.discontinuity();
 		}
 		self.clock = clock;
-		let now = clock.now();
-		let flush = captured.map(|captured| (captured, moq_clock::Instant::now()));
-		self.record_at(now, bytes, flush)
+		self.record_at(clock.now(), bytes, captured)
 	}
 
 	/// [`record`](Self::record) at a chosen time, which a test needs since the broadcast clock only
-	/// moves in real time. `flush` is the capture time and the instant the frame was written.
+	/// moves in real time.
 	pub(crate) fn record_at(
 		&mut self,
 		now: moq_net::Timestamp,
 		bytes: usize,
-		flush: Option<(moq_net::Timestamp, moq_clock::Instant)>,
+		captured: Option<moq_net::Timestamp>,
 	) -> crate::Result<()> {
 		// Each write is its own span, closed by the next one.
 		self.estimator.cut(Some(now));
-		self.estimator.write(now, bytes);
+		self.estimator.rate(now, bytes);
 
-		// The spacing between writes is the application's cadence, not a flush delay, so only a
-		// capture time measures jitter and delay. Without one neither is advertised.
-		if let Some((captured, written)) = flush {
-			// A source clock running slightly fast stamps ahead of now. Measured as given, its
-			// lateness would undercut every real flush and drag the broadcast's minimum down,
-			// inflating the delay of every other track. It was flushed no later than now, so it
-			// counts as zero delay.
-			self.estimator.flush(captured.min(now), written);
+		// The write time is the application's cadence, not media time, so only a capture time takes
+		// a place in the broadcast's write order. Without one no delay is advertised.
+		if let Some(captured) = captured {
+			// A source clock running fast stamps ahead of now. Ordered as given, it would put every
+			// media track behind it by however fast it runs. It was written no later than now.
+			self.estimator.order(captured.min(now));
 		}
 		self.rendition.estimate(self.estimator.estimate())
 	}
