@@ -377,6 +377,43 @@ impl Misses {
 		asks
 	}
 
+	/// Give up what a fill still owes this reader once it is stale under the reader's budget,
+	/// as the reader skips a stale cached group, parking `waiter` on each run going stale.
+	/// A fill answers on its handler's time, so an ordered reader would otherwise wait out
+	/// a stalled one for good.
+	pub fn expire(&mut self, state: &TrackState, drift: &Drift, given_up: &mut GivenUp, waiter: &kio::Waiter) {
+		let mut stale = RangeSet::new();
+		for run in self.wanted.iter() {
+			if !state.poll_drifted(run.start, &drift.edge.servable, drift.budget, waiter) {
+				continue;
+			}
+			// Starts never rewind, so a run goes stale from its oldest group up: find where
+			// it stops, in as many checks as the run's width has bits.
+			let (mut stale_to, mut fresh) = (run.start + 1, run.end);
+			while stale_to < fresh {
+				let mid = stale_to + (fresh - stale_to) / 2;
+				match state.drifted(mid, &drift.edge, drift.budget) {
+					true => stale_to = mid + 1,
+					false => fresh = mid,
+				}
+			}
+			stale.insert(run.start..stale_to);
+		}
+		if stale.is_empty() {
+			return;
+		}
+		for run in stale.iter() {
+			self.wanted.remove(run.clone());
+		}
+		self.joins.retain_mut(|join| {
+			join.release(&stale);
+			!join.is_empty()
+		});
+		for run in stale.iter() {
+			self.give_up(run.clone(), given_up);
+		}
+	}
+
 	/// Ask the fills for `runs` in the reader's order, settling what no handler can take as
 	/// refused. Fills queue in the order asked, so a descending reader's newest run comes first.
 	pub fn ask(

@@ -6001,6 +6001,7 @@ impl Cursor {
 			}
 			misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
 		}
+		misses.expire(&self.state.read(), drift, &mut given_up, waiter);
 		if let Some(drops) = &mut self.drops {
 			for run in given_up {
 				drops.give_up(run);
@@ -16289,6 +16290,32 @@ mod test {
 			};
 			assert_eq!(read, expected, "{order:?}");
 		}
+	}
+
+	/// An ordered reader waiting on a stalled fill gives up the groups it owes once they are
+	/// stale under its budget, as it skips a stale cached group, and reads on.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stalled_fill_goes_stale_under_the_readers_budget() {
+		let (producer, dynamic, mut subscriber) = started_late();
+		let waiter = kio::Waiter::noop();
+		let next = |subscriber: &mut Subscriber| match subscriber.poll_next_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => Some(group.sequence),
+			Poll::Pending => None,
+			_ => panic!("the read ended"),
+		};
+		assert_eq!(next(&mut subscriber), None, "groups 0 and 1 are being filled");
+		// The handler takes the fill and never answers it.
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		elapse(&producer, Duration::from_secs(29));
+		assert_eq!(next(&mut subscriber), None, "still within the budget");
+		elapse(&producer, Duration::from_secs(2));
+		// Group 2 is as stale as the groups below it, superseded by group 3 as long ago.
+		assert_eq!(next(&mut subscriber), Some(3));
+		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
+		assert!(!fill.is_used(), "nobody waits on the stale fill");
 	}
 
 	/// A reader narrowing its ranges leaves the part of its fill it no longer reads: the
