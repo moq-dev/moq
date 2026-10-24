@@ -2916,8 +2916,8 @@ mod tests {
 			version: vec![version],
 			..Default::default()
 		};
-		config.backoff.initial = Some(MIN_BACKOFF);
-		config.backoff.max = Some(MIN_BACKOFF);
+		config.backoff.initial = Some((FAST).into());
+		config.backoff.max = Some((FAST).into());
 		let connection = config
 			.init(Default::default())
 			.unwrap()
@@ -2936,7 +2936,7 @@ mod tests {
 		for round in 0..2 {
 			let mut request = tokio::time::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
 			let mut requests = request.requests();
-			let (session, _task) = request.ok().await.unwrap();
+			let session = request.ok().await.unwrap();
 			loop {
 				let request = tokio::time::timeout(WAIT, requests.next()).await.unwrap().unwrap();
 				if request.token().is_empty() {
@@ -2972,8 +2972,8 @@ mod tests {
 
 		let (addr, mut accepted, _task) = serve(crate::origin::spawn()).await;
 		let mut config = crate::connect::Config::default();
-		config.backoff.initial = Some(MIN_BACKOFF);
-		config.backoff.max = Some(MIN_BACKOFF);
+		config.backoff.initial = Some((FAST).into());
+		config.backoff.max = Some((FAST).into());
 		let connection = config
 			.init(Default::default())
 			.unwrap()
