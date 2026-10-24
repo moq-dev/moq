@@ -5,9 +5,8 @@ name: Video
 # browser. SwiftShader stands in for the GPU, so no GPU runner is needed.
 #
 # Narrow trigger, like wasm.yml: the renderer, the harness, and the two files that
-# wire the renderer into `<moq-publish>` (which the harness drives). `@moq/watch`
-# wires it the same way but needs a relay to drive, so its regressions surface
-# nightly instead.
+# wire the renderer into `<moq-publish>` (which the harness drives). Buffered
+# `@moq/watch` startup is driven from an in-memory origin, without a relay.
 
 permissions:
   contents: read

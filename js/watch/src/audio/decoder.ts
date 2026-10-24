@@ -173,7 +173,14 @@ export class Decoder {
 				delay: delay !== undefined ? Milli(delay) : undefined,
 			});
 		});
-		this.#signals.cleanup(this.sync.register(playout));
+		const startup = this.#signals.computed((effect) => {
+			if (!effect.get(this.in.enabled)) return undefined;
+			if (effect.get(this.source.pending)) return null;
+			if (!effect.get(this.source.out.config)) return undefined;
+			const span = effect.get(this.#decodeBuffered)[0];
+			return span ? { ...span } : null;
+		});
+		this.#signals.cleanup(this.sync.register(playout, startup));
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
@@ -275,6 +282,7 @@ export class Decoder {
 				rate: sampleRate,
 				latency: latencySamples,
 				buffered,
+				playing: this.sync.playing,
 			});
 			effect.cleanup(() => ring.close());
 			effect.set(this.#ring, ring);
@@ -405,9 +413,8 @@ export class Decoder {
 		// Every handle to one instance shares `closed`, so it identifies the instance where the
 		// handle itself does not.
 		if (this.#instance !== undefined && this.#instance !== active.closed) {
-			this.#ring.peek()?.reset();
-			this.#decodeBuffered.set([]);
 			this.sync.reset();
+			this.reset();
 		}
 		this.#instance = active.closed;
 
@@ -820,6 +827,7 @@ export class Decoder {
 	 * Use in buffered mode at an utterance boundary (see Sync.reset).
 	 */
 	reset(): void {
+		this.#decodeBuffered.set([]);
 		this.#ring.peek()?.reset();
 	}
 
@@ -827,8 +835,8 @@ export class Decoder {
 	// a gap, or a later group after a declared end.
 	#onRead(read: Container.Read): boolean {
 		if (!this.#terminal.update(read)) return false;
-		this.#ring.peek()?.reset();
 		this.sync.reset();
+		this.reset();
 		return true;
 	}
 
