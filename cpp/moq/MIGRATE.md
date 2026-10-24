@@ -13,6 +13,13 @@ A refusal carries no application code: `drop_groups` fails the waiting fetches a
 A fill also arrives for history a subscription covers that the cache lacks, not only for a fetch.
 `Subscription::max_delay_us` is a `std::optional<uint64_t>` that still defaults to 0, where `std::nullopt` leaves the publisher's max age alone to bound delivery.
 
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `VideoFrameRate{30000, 1001}` and construct producers with `(catalog, AudioProducerOptions{input, output, track, bandwidth})` or the corresponding `VideoProducerOptions`.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
 ### Video rendition preference
 
 `moq::Video` gains `int32_t preference`. Update aggregate initializers with `0` to keep the default ranking and rebuild against the matching generated headers and native library. Higher values are preferred; compatibility transcodes use `-1`.
@@ -160,14 +167,13 @@ auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::k
 ### Native codecs have audio and video types (#5694)
 
 `BroadcastProducer::encode_audio` / `encode_video` are `moq::AudioProducer::init` / `moq::VideoProducer::init`, which take a `moq::MediaCatalogProducer`.
-The audio track name moves into `AudioEncoderOutput::track`, and a zero `frame_duration_us` takes the codec's own frame.
+The audio track name belongs to `AudioProducerOptions::track`, and a zero `frame_duration_us` takes the codec's own frame.
 `BroadcastConsumer::decode_audio` / `decode_video` are `moq::AudioConsumer::subscribe` / `moq::VideoConsumer::subscribe`, taking the broadcast first.
 Producers expose subscriber state only through `demand()`, and a video `gop` is a `moq::VideoGop` keyframe variant.
 `moq::AudioEncoder` / `moq::VideoEncoder` encode without publishing.
 
 ```cpp
 moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
-output.track = "audio";
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
-auto audio = ok(moq::AudioProducer::init(catalog, input, output, nullptr));
+auto audio = ok(moq::AudioProducer::init(catalog, {input, output, "audio", nullptr}));
 ```

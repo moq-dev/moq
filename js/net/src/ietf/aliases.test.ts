@@ -107,7 +107,8 @@ test("a later subscribe reclaims a retired alias", async () => {
 // one entry per alias it ever used.
 test("retired aliases are capped", async () => {
 	const clock = new Manual();
-	using _clock = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
 	const aliases = new TrackAliases<object>();
 
 	for (let i = 0n; i < 74n; i++) {

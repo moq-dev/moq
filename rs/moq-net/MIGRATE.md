@@ -19,6 +19,11 @@ Dropping a fill with groups unanswered names them dropped, where the live feed w
 The default stays `Some(Duration::ZERO)`, and `with_max_delay` takes `impl Into<Option<Duration>>`, so `with_max_delay(delay)` still compiles; reads and assignments of the field need the `Option`.
 A lite SUBSCRIBE carries `None` as the largest delay the wire allows.
 
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
+
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.

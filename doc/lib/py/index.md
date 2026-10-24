@@ -78,12 +78,12 @@ async def main():
         catalog_producer = moq.media.CatalogProducer(broadcast)
         video = moq.video.Producer(
             catalog_producer,
-            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=30),
+            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=moq.video.FrameRate(numerator=30000, denominator=1001)),
             moq.VideoEncoderOutput(
                 codec=moq.VideoCodec.H264,
-                track="camera",
                 kind=moq.VideoEncoderKind.AUTO(),  # pyright: ignore[reportArgumentType]
             ),
+            track="camera",
         )
         video.write(moq.video.Frame(timestamp=catalog_producer.now(), data=rgba))
 
@@ -102,6 +102,8 @@ async def main():
 
 asyncio.run(main())
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings.
 
 ## Things to know
 

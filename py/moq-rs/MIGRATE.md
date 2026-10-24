@@ -12,6 +12,13 @@ A reader narrowing its ranges can leave a single group while the fill stays used
 A refusal carries no application code: `drop_groups` fails the waiting fetches with `moq.Error.NotFound`.
 `Subscription.max_delay` also accepts `None`, leaving the publisher's max age alone to bound delivery.
 
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate(numerator=30000, denominator=1001)` and move `track=` from encoder output to `audio.Producer` / `video.Producer`.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
 ### Video rendition preference
 
 `moq.media.Video` gains `preference`, defaulting to `0`. Prefer keyword construction and upgrade `moq-ffi` alongside the wrapper. Higher values are preferred; compatibility transcodes use `-1`.
@@ -147,7 +154,7 @@ The decode consumers' `name` argument is `id`.
 ### Native codecs have `audio` and `video` modules (#5694)
 
 `BroadcastProducer.encode_audio` / `encode_video` are `moq.audio.Producer` / `moq.video.Producer`, built from a `moq.media.CatalogProducer`.
-The audio track name moves into `EncoderOutput(track=...)`, and durations and timestamps are `timedelta` (`frame_duration`, `Frame.timestamp`) instead of `_us` integers; a zero `frame_duration` takes the codec's own frame.
+The audio track name belongs to `Producer(track=...)`, and durations and timestamps are `timedelta` (`frame_duration`, `Frame.timestamp`) instead of `_us` integers; a zero `frame_duration` takes the codec's own frame.
 `BroadcastConsumer.decode_audio` / `decode_video` are `await moq.audio.Consumer.subscribe(broadcast, ...)` / `await moq.video.Consumer.subscribe(broadcast, ...)`.
 Producers expose subscriber state only through `demand()`, and a video `gop` is `moq.video.Gop.KEYFRAME(interval=...)`.
 `moq.audio.Encoder` / `moq.video.Encoder` encode without publishing.
@@ -156,7 +163,8 @@ Producers expose subscriber state only through `demand()`, and a video `gop` is 
 audio = moq.audio.Producer(
     moq.media.CatalogProducer(broadcast),
     moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=48000, channels=1),
-    moq.audio.EncoderOutput(codec=moq.audio.Codec.opus(), track="audio", frame_duration=timedelta(milliseconds=20)),
+    moq.audio.EncoderOutput(codec=moq.audio.Codec.opus(), frame_duration=timedelta(milliseconds=20)),
+    track="audio",
 )
 audio.write(moq.audio.Frame(timestamp=timedelta(0), data=pcm))
 ```

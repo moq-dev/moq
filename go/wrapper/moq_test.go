@@ -232,16 +232,21 @@ func TestEncodeAudioWithOpusObject(t *testing.T) {
 		}
 		codec := moq.OpusAudioCodec()
 		name := "mic"
-		output := moqaudio.EncoderOutput{Codec: codec, Track: &name, FrameDuration: 20 * time.Millisecond}
+		output := moqaudio.EncoderOutput{Codec: codec, FrameDuration: 20 * time.Millisecond}
 		catalog, err := moqmedia.NewCatalogProducer(broadcast)
 		if err != nil {
 			t.Fatal(err)
 		}
-		producer, err := moqaudio.NewProducer(catalog, moqaudio.EncoderInput{
-			Format:     moq.AudioSampleFormatF32,
-			SampleRate: 48000,
-			Channels:   1,
-		}, output, nil)
+		producer, err := moqaudio.NewProducer(catalog, moqaudio.ProducerOptions{
+			Input: moqaudio.EncoderInput{
+				Format:     moq.AudioSampleFormatF32,
+				SampleRate: 48000,
+				Channels:   1,
+			},
+			Output:    output,
+			Track:     &name,
+			Bandwidth: nil,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -283,11 +288,12 @@ func TestAudioConsumerDelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	audio, err := moqaudio.NewProducer(catalogProducer,
-		moqaudio.EncoderInput{Format: moq.AudioSampleFormatF32, SampleRate: 48000, Channels: 1},
-		moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &track},
-		nil,
-	)
+	audio, err := moqaudio.NewProducer(catalogProducer, moqaudio.ProducerOptions{
+		Input:     moqaudio.EncoderInput{Format: moq.AudioSampleFormatF32, SampleRate: 48000, Channels: 1},
+		Output:    moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec()},
+		Track:     &track,
+		Bandwidth: nil,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +372,12 @@ func TestEncodeAudioFrameDurations(t *testing.T) {
 		t.Fatal(err)
 	}
 	fineName := "fine"
-	fine, err := moqaudio.NewProducer(catalog, input, moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &fineName, FrameDuration: 2500 * time.Microsecond}, nil)
+	fine, err := moqaudio.NewProducer(catalog, moqaudio.ProducerOptions{
+		Input:     input,
+		Output:    moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), FrameDuration: 2500 * time.Microsecond},
+		Track:     &fineName,
+		Bandwidth: nil,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +390,12 @@ func TestEncodeAudioFrameDurations(t *testing.T) {
 	}
 
 	coarseName := "coarse"
-	_, err = moqaudio.NewProducer(catalog, input, moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &coarseName, FrameDuration: 2 * time.Millisecond}, nil)
+	_, err = moqaudio.NewProducer(catalog, moqaudio.ProducerOptions{
+		Input:     input,
+		Output:    moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), FrameDuration: 2 * time.Millisecond},
+		Track:     &coarseName,
+		Bandwidth: nil,
+	})
 	if !errors.Is(err, moq.ErrAudio) {
 		t.Fatalf("err = %v, want ErrAudio: 2 ms is not an opus frame duration", err)
 	}
@@ -430,12 +446,12 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	video, err := moqvideo.NewProducer(catalogProducer,
-		moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: 30},
-		// Software both ways so the test is deterministic everywhere.
-		moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.SoftwareEncoder()},
-		nil,
-	)
+	video, err := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
+		Input:     moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
+		Output:    moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.SoftwareEncoder()},
+		Track:     &track,
+		Bandwidth: nil,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
