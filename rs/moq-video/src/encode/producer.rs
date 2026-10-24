@@ -1930,9 +1930,10 @@ mod tests {
 		/// After congestion clears, the encoder climbs back to its ceiling although the grant
 		/// never changes again, and a failed step is retried rather than waiting for one.
 		#[tokio::test(start_paused = true)]
-		// The guard only keeps other tests out of the process-wide probe log, and this runtime has
-		// one thread, so holding it across an await blocks nothing.
-		#[allow(clippy::await_holding_lock)]
+		#[expect(
+			clippy::await_holding_lock,
+			reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+		)]
 		async fn a_quiet_grant_still_recovers_the_ceiling() {
 			let _probe = probe::exclusive();
 			let ceiling = Rate::from_mbps(4);
@@ -1954,7 +1955,7 @@ mod tests {
 			probe::refuse_once(ceiling.as_bps());
 
 			// A minute without a wake is far past anything the ramp still needs.
-			while let Ok(next) = tokio::time::timeout(Duration::from_secs(60), next_estimate(&mut rate)).await {
+			while let Ok(next) = moq_clock::timeout(Duration::from_secs(60), next_estimate(&mut rate)).await {
 				apply_estimate(&mut sink, &mut rate, next).await;
 			}
 			let bitrates = probe::bitrates();
