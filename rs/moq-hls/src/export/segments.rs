@@ -497,7 +497,7 @@ pub struct Segment {
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
-	/// The next append position and reset epoch; errors leave it unchanged.
+	/// The reset epoch and next append position; errors leave it unchanged.
 	position: (u64, u64),
 	feed: Option<Feed>,
 }
@@ -721,7 +721,7 @@ mod tests {
 
 	#[test]
 	fn a_continuous_timeline_keeps_one_discontinuity() {
-		// A cursor that skips a record (uncached, or a gap for its rendition) must not mark the
+		// A cursor that skips a declared gap for its rendition must not mark the
 		// next one: a sibling that fetched it wouldn't, and players require renditions to agree.
 		let mut timeline = Discontinuities::default();
 		assert_eq!(timeline.stamp(secs(0), secs(2)), 0);

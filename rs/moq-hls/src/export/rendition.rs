@@ -539,11 +539,8 @@ impl Rendition {
 		self.live.subscribe(self.clone())
 	}
 
-	/// Retire this rendition: close its window so every [`segments::Consumer`] over it drains
-	/// what's left and then ends.
-	///
-	/// Called when the catalog drops or replaces the rendition; a cursor's `Arc<Self>` would
-	/// otherwise park forever on a window nothing feeds anymore.
+	/// Close the window after recording its end or failure, so segment cursors drain it.
+	/// An unmarked close fails the recording instead of reporting completion.
 	pub(crate) fn close(&self) {
 		self.live.close();
 	}

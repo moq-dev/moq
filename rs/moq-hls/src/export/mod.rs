@@ -4084,8 +4084,8 @@ mod tests {
 	}
 
 	// The record path: the renditions cursor yields the video rendition, its segment cursor
-	// yields each finalized segment WITH its media, and closing the publisher drains the final
-	// segment and then ends both cursors.
+	// yields each finalized segment with its media, and losing the publisher mid-group fails
+	// both cursors instead of completing a truncated recording.
 	#[tokio::test]
 	async fn record_cursors_yield_renditions_and_segments() {
 		let origin = produce_origin();
@@ -4158,7 +4158,7 @@ mod tests {
 			end.map(|segment| segment.map(|segment| segment.segment))
 		);
 
-		// The renditions cursor also ends once the source closes.
+		// The renditions cursor also fails when the source closes abruptly.
 		let ended = tokio::time::timeout(Duration::from_secs(5), renditions.next())
 			.await
 			.expect("renditions cursor resolves");
