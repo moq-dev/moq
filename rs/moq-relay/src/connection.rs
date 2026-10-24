@@ -433,11 +433,7 @@ pub(crate) fn failure(error: &moq_net::Error) -> Option<moq_net::stats::Failure>
 	use moq_net::stats::Failure;
 	use moq_net::{Error, SessionError};
 	match error {
-		Error::Cancel
-		| Error::Closed
-		| Error::GoingAway
-		| Error::SessionClosed
-		| Error::Session(SessionError::Cancel) => None,
+		Error::Cancel | Error::Closed | Error::GoingAway | Error::Session(SessionError::Cancel) => None,
 		Error::IdleTimeout => Some(Failure::IdleTimeout),
 		Error::Transport(_) => Some(Failure::Transport),
 		_ => Some(Failure::Application),
@@ -474,7 +470,6 @@ mod tests {
 			Error::Cancel,
 			Error::Closed,
 			Error::GoingAway,
-			Error::SessionClosed,
 			Error::Session(SessionError::Cancel),
 		] {
 			assert_eq!(failure(&error), None);

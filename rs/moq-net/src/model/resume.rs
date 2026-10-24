@@ -341,7 +341,6 @@ fn route_failed(err: &Error) -> bool {
 		Error::Transport(_)
 			| Error::IdleTimeout
 			| Error::Session(_)
-			| Error::SessionClosed
 			| Error::GoingAway
 			| Error::GoawayTimeout
 			| Error::Dropped
@@ -2010,8 +2009,7 @@ mod test {
 	use futures::FutureExt;
 
 	use super::*;
-	use crate::Timestamp;
-	use crate::broadcast;
+	use crate::{SessionError, Timestamp, broadcast};
 
 	/// A route's copy of the track.
 	fn copy() -> track::Producer {
@@ -2078,8 +2076,10 @@ mod test {
 			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
 			newer.finish().unwrap();
 			routes.serve(b.consume());
-			open.abort(Error::SessionClosed).unwrap();
-			a.abort(Error::SessionClosed).unwrap();
+			open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
+			a.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
 			assert!(held.poll_read_frame(&waiter).is_pending());
 			let Poll::Ready(request) = dynamic.poll_requested_group(&waiter) else {
 				panic!("recovery fetch")
@@ -2867,7 +2867,8 @@ mod test {
 			sub.poll_recv_group(&kio::Waiter::noop()).is_pending(),
 			"B replays only group 0"
 		);
-		b.abort(Error::SessionClosed).unwrap();
+		b.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
 
 		// C lacks the group; reading a later one from it lets go of what nothing needs.
 		let c = copy();
@@ -2878,8 +2879,10 @@ mod test {
 		assert_eq!(recv(&mut sub).sequence, 1);
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
 
-		open.abort(Error::SessionClosed).unwrap();
-		a.abort(Error::SessionClosed).unwrap();
+		open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
+		a.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(read(&mut reading), None);
 	}
@@ -3346,7 +3349,9 @@ mod test {
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
-			failing.abort(Error::SessionClosed).unwrap();
+			failing
+				.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "ordered={ordered}");
 			assert_eq!(read(&mut reading), None);
 		}
@@ -3388,7 +3393,9 @@ mod test {
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
-			failing.abort(Error::SessionClosed).unwrap();
+			failing
+				.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "ordered={ordered}");
 			assert_eq!(read(&mut reading), None);
 		}
@@ -3475,7 +3482,9 @@ mod test {
 		assert_eq!(reading.sequence, 1);
 		// a's route fails too, after it finished the group.
 		a.clone().abort(Error::Dropped).unwrap();
-		failing.abort(Error::SessionClosed).unwrap();
+		failing
+			.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(read(&mut reading), None);
@@ -3508,7 +3517,11 @@ mod test {
 			failing.write_frame(ts(1), b"a".as_ref()).unwrap();
 			let mut failing = Some(failing);
 			if early {
-				failing.take().unwrap().abort(Error::SessionClosed).unwrap();
+				failing
+					.take()
+					.unwrap()
+					.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+					.unwrap();
 			}
 			let noop = kio::Waiter::noop();
 			let res = match ordered {
@@ -3522,7 +3535,9 @@ mod test {
 			// Reading on must not let go of the replaced copy while the group still needs it.
 			assert_eq!(drain(&mut sub, ordered), Vec::<u64>::new());
 			if let Some(failing) = failing {
-				failing.abort(Error::SessionClosed).unwrap();
+				failing
+					.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+					.unwrap();
 			}
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()));
@@ -3564,7 +3579,9 @@ mod test {
 			// The old route goes away, and the reader polls on and sees its copy end.
 			a.clone().abort(Error::Dropped).unwrap();
 			assert_eq!(drain(&mut sub, ordered), Vec::<u64>::new());
-			failing.abort(Error::SessionClosed).unwrap();
+			failing
+				.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 			assert_eq!(read(&mut reading), None);
 		}

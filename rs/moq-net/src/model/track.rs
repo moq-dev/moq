@@ -14,7 +14,7 @@
 //! The track is closed with [Error] when all writers or readers are dropped.
 
 use crate::sync::Mutex;
-use crate::{Error, Result, StreamError, Timescale, Timestamp, coding};
+use crate::{Error, Result, SessionError, StreamError, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
 
 use super::delivered::Delivered;
@@ -3038,14 +3038,14 @@ impl Producer {
 	/// End the track without declaring where it ends, as a closed session does.
 	///
 	/// Consumers drain the groups that finished and then end cleanly. The open groups are
-	/// aborted with [`Error::SessionClosed`], so a consumer that already pulled one ends
+	/// aborted with [`StreamError::Session`], so a consumer that already pulled one ends
 	/// with it and their writers fail. A reader following the track's routes resumes from
 	/// another one where this copy stopped. Use [`Self::finish`] or [`Self::finish_at`]
 	/// when the end is known.
 	pub fn close(self) -> Result<()> {
 		let mut state = self.modify()?;
 		state.sealed = true;
-		let open = state.tear_down(Error::SessionClosed);
+		let open = state.tear_down(Error::Stream(StreamError::Session(SessionError::Cancel)));
 		state.close();
 		open.abort();
 		Ok(())
@@ -12330,7 +12330,7 @@ mod test {
 	}
 
 	/// Closing a track aborts its open groups like [`Producer::abort`], with
-	/// [`Error::SessionClosed`].
+	/// [`StreamError::Session`].
 	#[test]
 	#[cfg(feature = "async")]
 	fn close_ends_a_pulled_open_group() {
@@ -12345,9 +12345,15 @@ mod test {
 
 		producer.close().unwrap();
 		let read = group.read_frame().now_or_never().expect("should not block");
-		assert!(matches!(read, Err(Error::SessionClosed)), "{read:?}");
+		assert!(
+			matches!(read, Err(Error::Stream(StreamError::Session(SessionError::Cancel)))),
+			"{read:?}"
+		);
 		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
-		assert!(matches!(write, Err(Error::SessionClosed)), "{write:?}");
+		assert!(
+			matches!(write, Err(Error::Stream(StreamError::Session(SessionError::Cancel)))),
+			"{write:?}"
+		);
 	}
 
 	/// Aborting an unused track aborts an open group whose reader outlived the track's
