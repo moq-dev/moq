@@ -4,17 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Subscription max delay is optional
+### Connection state
 
-`MoqSubscription.MaxDelayUs` is `*uint64`, and `nil` keeps moq-net's default of zero, which skips a superseded group at once.
-Point it at the value you set before, and regenerate the bindings for the changed checksums.
+Generated connection APIs now expose `MoqConnectionState` and `MoqConnectionPhase`, with `state()` and revision-based `state_changed(after)` instead of status, connect-count, and failure polls. Connect returns before its first dial completes. Regenerate bindings from the matching Rust metadata.
 
-### Relative and time ranges are refused over older wires
+### Exact encoder rates and publication options
 
-A track received over moq-lite-06 or earlier, or any moq-transport version, used to resolve a relative or time range anchor against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with an unsupported error.
-This covers a relative start other than the live (`0`) and oldest starts, a time start, and a relative or time end.
-A track received over moq-lite-07 resolves them as its publisher would.
-Ask for absolute groups over those wires, or resolve the anchor where the track is published.
+Encoder configuration is breaking: `MoqVideoEncoderInput.framerate` is now a
+`MoqVideoFrameRate { numerator, denominator }` (use `{30, 1}` for 30 fps or
+`{30000, 1001}` for NTSC). Zero components and rates above 1,000,000 fps are
+refused. `track` moves out of both encoder output records into
+`MoqAudioProducerOptions` / `MoqVideoProducerOptions`, alongside `input`,
+`output`, and optional `bandwidth`. Producers now take `(catalog, options)`;
+codec-only encoders keep their input/output arguments and take no publication
+settings. Regenerate bindings and rebuild the native library together.
 
 ### Video rendition preference
 

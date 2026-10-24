@@ -4,17 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Subscription max delay is optional
+### Connection state
 
-`Subscription.maxDelayUs` is `UInt64?`, and `nil` (the default) keeps moq-net's default of zero, which skips a superseded group at once.
-Explicit values are unchanged; code reading it back unwraps it.
+`Client.connect(to:)` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `stateChanged(after: state.revision)`. Use `ConnectionState.phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
 
-### Relative and time ranges are refused over older wires
+### Exact encoder rates and publication options
 
-A track received over moq-lite-06 or earlier, or any moq-transport version, used to resolve a relative or time range anchor against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with an unsupported error.
-This covers a relative start other than the live (`0`) and oldest starts, a time start, and a relative or time end.
-A track received over moq-lite-07 resolves them as its publisher would.
-Ask for absolute groups over those wires, or resolve the anchor where the track is published.
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `Video.FrameRate(numerator: 30000, denominator: 1001)` and move `track:` from encoder output to `Audio.Producer` / `Video.Producer`.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
 
 ### Video rendition preference
 
@@ -153,7 +152,7 @@ let config = Media.TrackConfig(rendition: .video(id: id, config: video))
 ### Native codecs have `Audio` and `Video` namespaces (#5694)
 
 `BroadcastProducer.encodeAudio` / `encodeVideo` are `Audio.Producer` / `Video.Producer` initializers that take a `Media.CatalogProducer`.
-The audio track name moves into the encoder output's `track`, and a zero frame duration takes the codec's own frame.
+The audio track name belongs to the producer's publication options, and a zero frame duration takes the codec's own frame.
 `BroadcastConsumer.decodeAudio` / `decodeVideo` are `Audio.Consumer.subscribe(broadcast:...)` / `Video.Consumer.subscribe(broadcast:...)`.
 Producers expose subscriber state only through `demand()`, and a video GOP is `Video.Gop.keyframe(interval:)`.
 `Audio.Encoder` / `Video.Encoder` encode without publishing.

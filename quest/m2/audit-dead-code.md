@@ -20,7 +20,7 @@ independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
 Removing a public item is a breaking change and the maintainer's call, so it is
-always a follow-up with its `MIGRATE.md` entry, never an inline fix.
+always a follow-up, never an inline fix.
 
 The m1 run (2026-10-20) removed unused `@moq/signals` dependencies from
 `@moq/json` and the browser bench, the web demo's unused `solid-element`, and

@@ -5,17 +5,20 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### Subscription max delay is optional
+### Connection state
 
-`MoqSubscription.max_delay_us` is `Option<u64>`, and `None` (the default) keeps moq-net's default of zero, which skips a superseded group at once.
-Wrap an explicit value in `Some`.
+`MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.
 
-### Relative and time ranges are refused over older wires
+### Exact encoder rates and publication options
 
-A track received over moq-lite-06 or earlier, or any moq-transport version, used to resolve a relative or time range anchor against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with an unsupported error.
-This covers a relative start other than the live (`0`) and oldest starts, a time start, and a relative or time end.
-A track received over moq-lite-07 resolves them as its publisher would.
-Ask for absolute groups over those wires, or resolve the anchor where the track is published.
+Encoder configuration is breaking: `MoqVideoEncoderInput.framerate` is now a
+`MoqVideoFrameRate { numerator, denominator }` (use `{30, 1}` for 30 fps or
+`{30000, 1001}` for NTSC). Zero components and rates above 1,000,000 fps are
+refused. `track` moves out of both encoder output records into
+`MoqAudioProducerOptions` / `MoqVideoProducerOptions`, alongside `input`,
+`output`, and optional `bandwidth`. Producers now take `(catalog, options)`;
+codec-only encoders keep their input/output arguments and take no publication
+settings. Regenerate bindings and rebuild the native library together.
 
 ### Video rendition preference
 
@@ -168,7 +171,7 @@ let config = MoqMediaTrackConfig { rendition: MoqRendition::Video { id, config: 
 ### Native codecs have audio and video namespaces (#5694)
 
 `MoqBroadcastProducer::encode_audio` / `encode_video` are the `MoqAudioProducer::new` / `MoqVideoProducer::new` constructors, which take the broadcast's `MoqMediaCatalogProducer`.
-The audio track name moves into `MoqAudioEncoderOutput::track`, and a zero `frame_duration_us` (the new default) takes the codec's own frame.
+The audio track name belongs to `MoqAudioProducerOptions::track`, and a zero `frame_duration_us` (the new default) takes the codec's own frame.
 `MoqBroadcastConsumer::decode_audio` / `decode_video` are `MoqAudioConsumer::subscribe` / `MoqVideoConsumer::subscribe`, taking the broadcast first.
 The producers' `name()`, `used()`, and `unused()` are gone; read subscriber state through `demand()`.
 `MoqVideoEncoderOutput::gop` is `Option<MoqVideoGop>`, so `Some(30)` is `Some(MoqVideoGop::Keyframe { interval: 30 })`.
@@ -176,7 +179,7 @@ Codec-only `MoqAudioEncoder` / `MoqVideoEncoder` encode without publishing.
 
 ```rust
 let catalog = MoqMediaCatalogProducer::new(broadcast)?;
-let video = MoqVideoProducer::new(&catalog, input, output, None)?;
+let video = MoqVideoProducer::new(&catalog, MoqVideoProducerOptions { input, output, track: None, bandwidth: None })?;
 let frames = MoqVideoConsumer::subscribe(&consumer, name, rendition, decoder).await?;
 ```
 

@@ -4,17 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Subscription max delay is optional
+### Sessions report a lifecycle snapshot
 
-`moq_subscription.max_delay_us` is read only when the new `max_delay_present` is true, so it is optional: a zeroed struct keeps moq-net's default of zero, which skips a superseded group at once.
-Set `max_delay_present = true` wherever you set a nonzero `max_delay_us`.
+`moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
+Each change delivers a `moq_connection_state` with `phase`, `connects`, `failure`, and the live `protocol`; copy what you keep, since it is valid only during the callback.
+Read `state->connects` where you read a positive status code. A failed dial or dropped connection now fires the callback with a negative `failure`, so drop your `moq_session_failure` polling; `moq_error()` describes it during the callback.
+The terminal call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after a requested close or the error that ended the session, where the terminal status code used to be. Release `user_data` there, as before.
 
-### Relative and time ranges are refused over older wires
+### Exact encoder rates and publication options
 
-A track received over moq-lite-06 or earlier, or any moq-transport version, used to resolve a relative or time range anchor against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with an unsupported error.
-This covers a relative start other than the live (`0`) and oldest starts, a time start, and a relative or time end.
-A track received over moq-lite-07 resolves them as its publisher would.
-Ask for absolute groups over those wires, or resolve the anchor where the track is published.
+`moq_video_encoder_input.framerate` is now `moq_video_frame_rate { numerator,
+denominator }`, changing the C ABI layout. Replace `30` with `{30, 1}` or use
+`{30000, 1001}` for an exact fractional rate. Both components must be nonzero;
+rates above 1,000,000 fps are refused. Recompile callers with the generated header
+and matching native library. Invalid rational rates return `MOQ_ERROR_INVALID_CONFIG`.
+Audio and publication track arguments are unchanged.
 
 ### Video rendition preference
 

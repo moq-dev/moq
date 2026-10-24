@@ -4,17 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Subscription max delay is optional
+### Connection state
 
-`Subscription.MaxDelay` is `*time.Duration`, and `nil` keeps moq-net's default of zero, which skips a superseded group at once.
-Point it at the duration you set before.
+`Dial` returns a connecting native client. Replace `Session.Status`, `Connects`, and `Failure` with `State()` and `StateChanged(ctx, state.Revision)`. `ConnectionState` carries `Phase`, `Connects`, `Failure`, and `Version`; `ConnectionPhase` replaces `ConnectionStatus`. Cancelling a state wait only cancels that wait. Cancel the session itself to stop its dial.
 
-### Relative and time ranges are refused over older wires
+### Exact encoder rates and publication options
 
-A track received over moq-lite-06 or earlier, or any moq-transport version, used to resolve a relative or time range anchor against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with an unsupported error.
-This covers a relative start other than the live (`0`) and oldest starts, a time start, and a relative or time end.
-A track received over moq-lite-07 resolves them as its publisher would.
-Ask for absolute groups over those wires, or resolve the anchor where the track is published.
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate{Numerator: 30000, Denominator: 1001}` and construct producers with `(catalog, ProducerOptions{Input: input, Output: output, Track: track, Bandwidth: bandwidth})` under the matching audio/video package.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
 
 ### Video rendition preference
 
@@ -156,14 +155,14 @@ config := media.TrackConfig{Rendition: media.VideoRendition(id, video)}
 ### Native codecs have `audio` and `video` packages (#5694)
 
 `BroadcastProducer.EncodeAudio` / `EncodeVideo` are `audio.NewProducer` / `video.NewProducer` (`moq.dev/moq/audio`, `moq.dev/moq/video`), built from a `media.CatalogProducer`.
-The audio track name moves into `EncoderOutput.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `audio.Frame.Timestamp`, `video.Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
+The audio track name belongs to `ProducerOptions.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `audio.Frame.Timestamp`, `video.Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
 `BroadcastConsumer.DecodeAudio` / `DecodeVideo` are `audio.Subscribe` / `video.Subscribe`, taking the broadcast after the context.
 Producers expose subscriber state only through `Demand()`, and a video GOP is `video.Keyframe(interval)`.
 `audio.NewEncoder` / `video.NewEncoder` encode without publishing.
 
 ```go
 catalog, err := moqmedia.NewCatalogProducer(broadcast)
-video, err := moqvideo.NewProducer(catalog, moqvideo.EncoderInput{...}, moqvideo.EncoderOutput{...}, nil)
+video, err := moqvideo.NewProducer(catalog, moqvideo.ProducerOptions{Input: input, Output: output})
 err = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 frames, err := moqvideo.Subscribe(ctx, consumer, name, rendition, output)
 ```

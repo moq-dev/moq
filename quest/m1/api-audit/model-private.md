@@ -30,5 +30,6 @@ Rejected: the toy-transport integration tests proving a third party could
 build from the public model; the goal they proved is dropped.
 
 Public API: moq-net and `@moq/net` removals, all main-only (none reached
-`release`), so no MIGRATE entry beyond fixing the unreleased #6111 one.
+`release`), so no migration note; the Impact bullet flags the unreleased #6111 entry
+for the cut to drop.
 Wire: none.

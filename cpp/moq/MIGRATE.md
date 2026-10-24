@@ -4,17 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Subscription max delay is optional
+### Connection state
 
-`moq::Subscription::max_delay_us` is `std::optional<uint64_t>`, and an empty value (the default) keeps moq-net's default of zero, which skips a superseded group at once.
-Explicit values are unchanged; code reading it back checks `has_value()`.
+`Client::connect` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `state_changed(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
 
-### Relative and time ranges are refused over older wires
+### Exact encoder rates and publication options
 
-A track received over moq-lite-06 or earlier, or any moq-transport version, used to resolve a relative or time range anchor against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with an unsupported error.
-This covers a relative start other than the live (`0`) and oldest starts, a time start, and a relative or time end.
-A track received over moq-lite-07 resolves them as its publisher would.
-Ask for absolute groups over those wires, or resolve the anchor where the track is published.
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `VideoFrameRate{30000, 1001}` and construct producers with `(catalog, AudioProducerOptions{input, output, track, bandwidth})` or the corresponding `VideoProducerOptions`.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
 
 ### Video rendition preference
 
@@ -163,14 +162,13 @@ auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::k
 ### Native codecs have audio and video types (#5694)
 
 `BroadcastProducer::encode_audio` / `encode_video` are `moq::AudioProducer::init` / `moq::VideoProducer::init`, which take a `moq::MediaCatalogProducer`.
-The audio track name moves into `AudioEncoderOutput::track`, and a zero `frame_duration_us` takes the codec's own frame.
+The audio track name belongs to `AudioProducerOptions::track`, and a zero `frame_duration_us` takes the codec's own frame.
 `BroadcastConsumer::decode_audio` / `decode_video` are `moq::AudioConsumer::subscribe` / `moq::VideoConsumer::subscribe`, taking the broadcast first.
 Producers expose subscriber state only through `demand()`, and a video `gop` is a `moq::VideoGop` keyframe variant.
 `moq::AudioEncoder` / `moq::VideoEncoder` encode without publishing.
 
 ```cpp
 moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
-output.track = "audio";
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
-auto audio = ok(moq::AudioProducer::init(catalog, input, output, nullptr));
+auto audio = ok(moq::AudioProducer::init(catalog, {input, output, "audio", nullptr}));
 ```
