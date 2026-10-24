@@ -76,8 +76,6 @@
 //! # }
 //! ```
 
-use std::marker::PhantomData;
-
 use moq_net::Timed;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -182,15 +180,13 @@ fn deltas_of<C: std::any::Any>(config: &C) -> bool {
 ///
 /// Every [`update`](Self::update) supersedes the last, so a consumer reads only the newest value.
 /// For a log where every record survives, use [`Stream`].
-pub struct Snapshot<T, E: CatalogExt = ()> {
+pub struct Snapshot<T> {
 	inner: moq_json::snapshot::Producer<T>,
 	listing: Listing,
-	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
-	_catalog: PhantomData<fn() -> E>,
 }
 
-impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
-	pub(crate) fn new<C>(
+impl<T: Serialize> Snapshot<T> {
+	pub(crate) fn new<C, E: CatalogExt>(
 		track: moq_net::track::Producer,
 		rendition: crate::catalog::Rendition<E, C::Config>,
 		config: C,
@@ -208,11 +204,7 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 		}
 		let inner = moq_json::snapshot::Producer::new(track, json);
 		let listing = Listing::new(rendition, config)?;
-		Ok(Self {
-			inner,
-			listing,
-			_catalog: PhantomData,
-		})
+		Ok(Self { inner, listing })
 	}
 
 	/// The track name, which is also the catalog key.
@@ -274,7 +266,7 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 ///
 /// Every [`append`](Self::append) is preserved and delivered in order. For a latest-value document,
 /// use [`Snapshot`].
-pub struct Stream<T, E: CatalogExt = ()> {
+pub struct Stream<T> {
 	inner: moq_json::stream::Producer<T>,
 	name: String,
 
@@ -282,12 +274,10 @@ pub struct Stream<T, E: CatalogExt = ()> {
 	/// entry advertising a track that can no longer accept records only misleads a consumer that
 	/// discovers it afterwards.
 	listing: Option<Listing>,
-	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
-	_catalog: PhantomData<fn() -> E>,
 }
 
-impl<T: Serialize, E: CatalogExt> Stream<T, E> {
-	pub(crate) fn new<C: RenditionConfig<E> + AsMut<JsonConfig>>(
+impl<T: Serialize> Stream<T> {
+	pub(crate) fn new<E: CatalogExt, C: RenditionConfig<E> + AsMut<JsonConfig>>(
 		track: moq_net::track::Producer,
 		rendition: crate::catalog::Rendition<E, C>,
 		mut config: C,
@@ -302,7 +292,6 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 			inner,
 			name: listing.name().to_string(),
 			listing: Some(listing),
-			_catalog: PhantomData,
 		})
 	}
 
@@ -757,35 +746,36 @@ mod test {
 
 		assert_eq!(entry(&catalog, "gps").bitrate, Some(100_000));
 		assert_eq!(entry(&catalog, "status").bitrate, Some(4_200));
-		assert_eq!(
-			entry(&catalog, "gps").jitter,
-			None,
-			"write spacing is not a flush delay"
-		);
+		assert_eq!(entry(&catalog, "gps").jitter, None, "write spacing is not jitter");
 	}
 
-	/// An unchanged snapshot value writes no frame, so its capture time must not measure a flush
+	/// An unchanged snapshot value writes no frame, so its capture time must not measure a write
 	/// that never happened.
 	#[test]
 	fn an_unchanged_snapshot_measures_nothing() {
 		let (mut broadcast, catalog) = catalog();
+		let mut gps = catalog
+			.json_stream::<Value>(timed_track(&mut broadcast, "gps"), Config::default())
+			.unwrap();
 		let mut status = catalog
 			.json_snapshot::<Value>(timed_track(&mut broadcast, "status"), Config::default())
 			.unwrap();
 		let now = catalog.clock().now();
 		let value = serde_json::json!({ "armed": true });
 		status.update(Timed::from(&value).at(now)).unwrap();
+		gps.append(Timed::from(&serde_json::json!({ "lat": 0 })).at(now))
+			.unwrap();
 		let stale = now
 			.checked_sub(moq_net::Timestamp::from_micros(1_000_000).unwrap())
 			.unwrap();
 		status.update(Timed::from(&value).at(stale)).unwrap();
-		assert_eq!(entry(&catalog, "status").jitter, None);
+		assert_eq!(entry(&catalog, "status").delay, None);
 
-		// The same stale capture on a changed value is measured.
+		// The same stale capture on a changed value is written behind gps.
 		let changed = serde_json::json!({ "armed": false });
 		status.update(Timed::from(&changed).at(stale)).unwrap();
-		let jitter = entry(&catalog, "status").jitter.expect("a late capture is jitter");
-		assert!(jitter >= std::time::Duration::from_secs(1), "{jitter:?}");
+		let delay = entry(&catalog, "status").delay.expect("a capture behind gps is delay");
+		assert!(delay >= std::time::Duration::from_secs(1), "{delay:?}");
 	}
 
 	/// The catalog is the only thing that announces a data track, so walking it is the discovery

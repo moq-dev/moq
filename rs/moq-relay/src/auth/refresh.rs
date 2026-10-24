@@ -465,11 +465,11 @@ fn with_jwt(query: Option<&str>, token: &str) -> String {
 mod tests {
 	use super::*;
 	use futures::FutureExt;
-	use std::time::{Duration, SystemTime};
+	use std::time::Duration;
 
 	fn grant(prefix: &str, seconds: u64) -> Grant {
 		let mut grant = Grant::new(prefix.parse::<moq_auth::Pattern>().unwrap(), moq_auth::Patterns::new());
-		grant.expires = Some(SystemTime::from(moq_clock::wall()) + Duration::from_secs(seconds));
+		grant.expires = Some(moq_clock::wall() + Duration::from_secs(seconds));
 		grant
 	}
 

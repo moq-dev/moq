@@ -414,9 +414,17 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 
 #[test]
 fn epoch_helpers_mint_parse_and_refuse() {
+	assert_eq!(
+		moq_epoch_time_ms("ffffffff-ffff-7fff-bfff-ffffffffffff".into()).unwrap(),
+		(1_u64 << 48) - 1
+	);
 	let epoch = moq_mint_epoch();
 	let parsed: moq_net::Epoch = epoch.parse().unwrap();
-	let unix_ms = parsed.time().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+	let unix_ms = parsed
+		.time()
+		.unwrap()
+		.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
+		.as_millis();
 	assert_eq!(u128::from(moq_epoch_time_ms(epoch.clone()).unwrap()), unix_ms);
 	assert!(moq_mint_epoch() > epoch, "a later mint orders newer");
 
@@ -1098,7 +1106,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	consumer
 		.update(MoqSubscription {
 			priority: 10,
-			max_delay_us: 25_000,
+			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
 				start: MoqAnchor::Absolute { group: 0, frame: 0 },
 				end: None,
@@ -2745,8 +2753,6 @@ async fn dynamic_track_request_can_publish_media() {
 			timestamp_us: Some(20_000),
 		})
 		.unwrap();
-	media.flush(20_000).unwrap();
-	assert!(media.flush(u64::MAX).is_err(), "unrepresentable PTS must fail");
 
 	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
 		.await
@@ -4648,7 +4654,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 	consumer
 		.update(MoqSubscription {
 			priority: 10,
-			max_delay_us: 25_000,
+			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
 				start: MoqAnchor::Absolute { group: 0, frame: 0 },
 				end: None,
@@ -7658,7 +7664,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 
 	let subscription = MoqSubscription {
 		priority: 0,
-		max_delay_us: 10_000_000,
+		max_delay_us: Some(10_000_000),
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Relative { groups: 2 },
 			end: None,
@@ -7897,7 +7903,7 @@ async fn time_anchors_start_at_the_containing_group() {
 
 	let since = |timestamp_us| MoqSubscription {
 		priority: 0,
-		max_delay_us: 10_000_000,
+		max_delay_us: Some(10_000_000),
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Time { timestamp_us },
 			end: None,

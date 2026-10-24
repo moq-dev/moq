@@ -370,15 +370,15 @@ pub struct Serve {
 	listen_public: bool,
 
 	/// The key file a `jwt` is verified against.
-	#[usage(long, conflicts = "--key-dir", value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
+	#[usage(long, conflicts("--key-dir", "--key-set"), value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 	key: Option<PathBuf>,
 
 	/// A directory of `{kid}.jwk` files, selected by the token's `kid`.
-	#[usage(long, conflicts = "--key", value_hint = usage_rs::ValueHint::DirPath)]
+	#[usage(long, conflicts("--key", "--key-set"), value_hint = usage_rs::ValueHint::DirPath)]
 	key_dir: Option<PathBuf>,
 
 	/// A JWK Set file, selecting one verification key by the token's `kid`.
-	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("json", "jwks"))]
+	#[usage(long, conflicts("--key", "--key-dir"), value_hint = usage_rs::ValueHint::FilePath, extensions("json", "jwks"))]
 	key_set: Option<PathBuf>,
 
 	/// Patterns an anonymous session may publish, rooted at `/` (repeatable); `foo/**` for a subtree.
@@ -476,9 +476,6 @@ impl Serve {
 				subscribe.iter().cloned().collect::<moq_auth::Patterns>(),
 			)
 		};
-		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
-			anyhow::bail!("--key-set conflicts with --key and --key-dir");
-		}
 		let mut policy = Policy::default();
 		policy.keys = match (&self.key, &self.key_dir, &self.key_set) {
 			(Some(key), _, _) => Some(Keys::File(key.clone())),
@@ -594,9 +591,9 @@ fn read_token(path: &std::path::Path) -> anyhow::Result<String> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct UnixTimestamp(std::time::SystemTime);
+struct UnixTimestamp(moq_clock::Wall);
 
-impl From<UnixTimestamp> for std::time::SystemTime {
+impl From<UnixTimestamp> for moq_clock::Wall {
 	fn from(value: UnixTimestamp) -> Self {
 		value.0
 	}
@@ -608,13 +605,10 @@ impl std::str::FromStr for UnixTimestamp {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		let timestamp = s.parse::<i64>().context("expected unix timestamp")?;
 		let timestamp = timestamp.try_into().context("timestamp out of range")?;
-		// checked_add, because plain `+` panics on overflow and how far a SystemTime
-		// reaches is platform-dependent: a timespec holds i64 seconds, while Windows
-		// counts 100ns ticks and runs out far sooner.
-		let value = std::time::SystemTime::UNIX_EPOCH
-			.checked_add(std::time::Duration::from_secs(timestamp))
-			.context("timestamp out of range")?;
-		Ok(Self(value))
+		// Past 2554 saturates, like a decoded token time.
+		Ok(Self(
+			moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(timestamp)),
+		))
 	}
 }
 
@@ -640,6 +634,25 @@ mod tests {
 		match parse(args).unwrap().command {
 			Command::Serve(serve) => serve,
 			other => panic!("expected serve, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn verification_key_sources_conflict_in_the_parser() {
+		let flags = ["--key", "--key-dir", "--key-set"];
+		for first in flags {
+			assert!(parse(&["moq", "auth", "serve", first, "unused"]).is_ok());
+			for second in flags {
+				if first == second {
+					continue;
+				}
+				let err = parse(&["moq", "auth", "serve", first, "unused", second, "unused"])
+					.expect_err("key sources must conflict before loading files");
+				assert!(
+					err.to_string().contains(first) && err.to_string().contains(second),
+					"{err}"
+				);
+			}
 		}
 	}
 
@@ -715,11 +728,7 @@ mod tests {
 			.policy()
 			.unwrap();
 		assert!(matches!(&set.keys, Some(Keys::Set(path)) if path == std::path::Path::new("/keys.jwks")));
-		assert!(
-			serve(&["moq", "auth", "serve", "--key", "/key.jwk", "--key-set", "/keys.jwks"])
-				.policy()
-				.is_err()
-		);
+		assert!(parse(&["moq", "auth", "serve", "--key", "/key.jwk", "--key-set", "/keys.jwks"]).is_err());
 
 		// Nothing configured is a server that refuses everyone, and like 0.14, never
 		// re-checks or closes a session on its own.
@@ -986,10 +995,11 @@ mod tests {
 		assert!("not-a-number".parse::<UnixTimestamp>().is_err());
 	}
 
-	// Whether the largest parseable timestamp is representable depends on the
-	// platform's SystemTime, so assert only that it never panics.
 	#[test]
-	fn timestamp_at_the_maximum_does_not_panic() {
-		let _ = i64::MAX.to_string().parse::<UnixTimestamp>();
+	fn timestamp_past_the_wall_range_saturates() {
+		let last = moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
+		let parse = |text: &str| moq_clock::Wall::from(text.parse::<UnixTimestamp>().unwrap());
+		assert_eq!(parse(&i64::MAX.to_string()), last);
+		assert!(parse("18446744073") < last);
 	}
 }

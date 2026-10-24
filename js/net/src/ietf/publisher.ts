@@ -48,7 +48,7 @@ import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
-import { fromWire, toWire } from "./priority.ts";
+import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { Publish, PublishDone, PublishDoneStatus } from "./publish.ts";
 import {
@@ -2581,7 +2581,7 @@ export class Publisher {
 				requestId: id,
 				trackNamespace: namespace,
 				trackName: name,
-				subscriberPriority: defaults.subscriberPriority ?? 127,
+				subscriberPriority: defaults.subscriberPriority ?? DEFAULT_WIRE,
 				groupOrder: defaults.groupOrder === GroupOrder.Ascending ? "ascending" : "descending",
 				filter: defaults.subscriptionFilter,
 				propertiesWanted: defaults.includeProperties ?? true,

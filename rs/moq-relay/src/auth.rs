@@ -1077,7 +1077,6 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
-	use std::time::SystemTime;
 
 	fn patterns(texts: &[&str]) -> moq_auth::Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
@@ -1360,7 +1359,7 @@ mod tests {
 
 		let start = moq_clock::now();
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(SystemTime::from(moq_clock::wall()) + Duration::from_secs(10));
+		grant.expires = Some(moq_clock::wall() + Duration::from_secs(10));
 		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
 		for _ in 0..9 {
 			assert!(moq_clock::timeout(Duration::from_secs(1), lease.ended()).await.is_err());
@@ -1378,7 +1377,7 @@ mod tests {
 		use std::time::Duration;
 
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(SystemTime::from(moq_clock::wall()) - Duration::from_secs(1));
+		grant.expires = Some(moq_clock::wall() - Duration::from_secs(1));
 		assert!(matches!(grant.validate(), Err(moq_auth::Error::GrantExpired)));
 
 		let start = moq_clock::now();

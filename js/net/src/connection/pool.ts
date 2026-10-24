@@ -80,6 +80,13 @@ export interface ConnectionProps {
 	delay?: ReloadDelay;
 
 	/**
+	 * Maximum time for each connection attempt, the dial and the MoQ handshake (default:
+	 * 30000ms; `0` waits forever). An attempt that outlives it is retried like any other
+	 * failure. The same bound as the `timeout` option of {@link Connection.connect}.
+	 */
+	timeout?: Milli;
+
+	/**
 	 * How to react to the relay's GOAWAY; an unset field uses its default. Every connection
 	 * migrates on GOAWAY, dialing the replacement while the old session finishes its groups.
 	 * This only tunes where it may go and for how long the old session serves.
@@ -114,7 +121,7 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * {@link ConnectionProps.goaway} policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, delay, goaway, a pinned
+ * Options the pool cannot honor (transport options, delay, timeout, goaway, a pinned
  * certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
@@ -217,6 +224,8 @@ export class Connection {
 		// A plain list is checked and copied now, so a bad name throws here and mutating the array
 		// later changes nothing. A live list is checked as it changes, failing on `error`.
 		const fixed = normalizeVersions({ ...props, versions: Array.isArray(given) ? given : undefined });
+		// Likewise a bad timeout, before anything below exists to leak.
+		if (props?.timeout !== undefined) Milli(props.timeout);
 		refuse(props);
 		this.#signals = new Effect();
 
@@ -296,6 +305,7 @@ export class Connection {
 				webtransport: props.webtransport,
 				websocket: props.websocket,
 				delay: props.delay,
+				timeout: props.timeout,
 				goaway: props.goaway,
 			});
 			signals.cleanup(() => loop.close());
@@ -434,6 +444,9 @@ function refuse(props?: ConnectionProps): void {
 	if (props.delay !== undefined) {
 		throw new Error("delay cannot be shared; pass share: false");
 	}
+	if (props.timeout !== undefined) {
+		throw new Error("timeout cannot be shared; pass share: false");
+	}
 	if (props.goaway !== undefined) {
 		throw new Error("goaway cannot be shared; pass share: false");
 	}
@@ -445,6 +458,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
 		props.delay !== undefined ||
+		props.timeout !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||
 		props.consume !== undefined
