@@ -43,13 +43,10 @@ pub(super) struct Wakes {
 	/// frame below every one skips the lock. Ordered by the starts index's lock, which a
 	/// read takes after registering and a first frame before checking this.
 	starts_from: AtomicU64,
-	/// Whether either landing index has entries. Registration, clearing, and the
-	/// landing check use RMWs: a landing
-	/// publishes the group state with Release, and registration acquires it before
-	/// judging successors. Either registration observes the landing or the landing
-	/// observes the registration. RMWs preserve that release sequence through other
-	/// landings and drains; a plain load could miss a concurrent registration.
-	/// The parked lock serializes registration and clearing after both indices drain.
+	/// Whether either landing index has entries. Relaxed: insertion checks this
+	/// with exclusive track ownership, while readers register under the track read
+	/// lock. That lock orders registration and insertion; first-frame reveal holds
+	/// only a track read lock and must always take the parked lock instead.
 	landing_waiters: AtomicBool,
 	parked: kio::Lock<Parked>,
 }
@@ -196,11 +193,16 @@ impl Wakes {
 		next
 	}
 
+	/// Whether insertion, with exclusive track ownership, may wake a landing read.
+	pub(super) fn has_landing_waiters(&self) -> bool {
+		self.landing_waiters.load(Ordering::Relaxed)
+	}
+
 	/// Park `waiter` until a group lands above `sequence`.
 	pub(super) fn watch_landing(&self, sequence: u64, waiter: &kio::Waiter) {
 		let mut parked = self.parked.lock();
 		parked.landings.entry(sequence).or_default().register(waiter);
-		self.landing_waiters.swap(true, Ordering::Acquire);
+		self.landing_waiters.store(true, Ordering::Relaxed);
 	}
 
 	/// Park `waiter`, holding group `sequence` from another copy, until it or a group
@@ -216,7 +218,7 @@ impl Wakes {
 			parked.held_sweep = sweep_at(parked.held.len());
 		}
 		parked.held.entry(sequence).or_default().register(waiter);
-		self.landing_waiters.swap(true, Ordering::Acquire);
+		self.landing_waiters.store(true, Ordering::Relaxed);
 	}
 
 	/// Park until this exact group is cached, or a declared boundary excludes it.
@@ -279,11 +281,6 @@ impl Wakes {
 	/// sequence. Reads below `oldest`, the first group still cached, can no longer expire
 	/// and are forgotten; held groups are not.
 	pub(super) fn landed(&self, below: Option<u64>, sequence: u64, oldest: u64) {
-		// Publish even when no reader is registered yet. Keep true until the drain
-		// holds the lock, so another concurrent landing cannot skip its own range.
-		if !self.landing_waiters.fetch_or(false, Ordering::Release) {
-			return;
-		}
 		let mut woken = Vec::new();
 		{
 			let mut parked = self.parked.lock();
@@ -301,8 +298,10 @@ impl Wakes {
 				woken.extend(parked.held.remove(&at));
 			}
 			parked.held_sweep = lower(parked.held_sweep, parked.held.len());
-			self.landing_waiters
-				.swap(!parked.landings.is_empty() || !parked.held.is_empty(), Ordering::AcqRel);
+			self.landing_waiters.store(
+				!parked.landings.is_empty() || !parked.held.is_empty(),
+				Ordering::Relaxed,
+			);
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -313,7 +312,7 @@ impl Wakes {
 			let mut parked = self.parked.lock();
 			self.earliest.store(u64::MAX, Ordering::Relaxed);
 			self.starts_from.store(u64::MAX, Ordering::Relaxed);
-			self.landing_waiters.swap(false, Ordering::AcqRel);
+			self.landing_waiters.store(false, Ordering::Relaxed);
 			std::mem::take(&mut *parked)
 		};
 		let lists = parked.deadlines.into_values().chain(parked.landings.into_values());
@@ -361,6 +360,7 @@ mod test {
 		wakes.landed(Some(1), 10, 1);
 		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
 		wakes.watch_held(11, &waiter);
+		assert!(wakes.has_landing_waiters());
 		wakes.watch_landing(12, &waiter);
 		wakes.wake_all();
 		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));

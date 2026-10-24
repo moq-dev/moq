@@ -1990,7 +1990,11 @@ impl TrackState {
 			// Readers and group demand reach it at once. Its arrival starts the wall clock of
 			// the reads it succeeds, but it counts as content only once it starts.
 			self.arrival.push_back((sequence, stamp));
-			self.wake_landed(sequence);
+			// Registration holds a track read lock, so this exclusive insert sees
+			// its hint. Reveal only holds a read lock and cannot use the shortcut.
+			if self.cache.wakes().has_landing_waiters() {
+				self.wake_landed(sequence);
+			}
 		}
 	}
 
