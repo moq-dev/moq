@@ -1658,6 +1658,8 @@ mod tests {
 				}),
 				auth: crate::auth::Handle::new(false),
 				early_unis: Vec::new(),
+				implementation: None,
+				peer_implementation: Default::default(),
 				extensions: Default::default(),
 			})
 			.unwrap();
