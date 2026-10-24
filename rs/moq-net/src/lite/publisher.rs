@@ -1964,7 +1964,7 @@ impl Request for SubscribeServe {
 			priority: msg.priority,
 			max_delay: serving_max_delay(shared.version, msg.max_delay),
 			order: msg.order,
-			..Bounds::from(&msg).positions()
+			..Bounds::from(&msg).groups()
 		};
 
 		// One subscriber for the whole subscription: the run loop polls its groups and its
@@ -2414,7 +2414,7 @@ mod test {
 		let mut producer = track_producer("test");
 		let mut subscriber = producer.subscribe(
 			track::Subscription::default()
-				.with_start(track::Position::group(0))
+				.with_start(0)
 				.with_max_delay(std::time::Duration::from_secs(60)),
 		);
 
@@ -3435,25 +3435,17 @@ struct Bounds {
 }
 
 impl Bounds {
-	/// The requested range as the model's half-open pair of [`track::Position`]s.
+	/// The whole groups the requested range touches, as the model's half-open range.
 	///
-	/// The wire carries the two halves of each bound separately and both ends
-	/// inclusive; the model carries whole positions with an exclusive end. The
-	/// [`Subscription`] builders own that conversion, so this goes through them
-	/// rather than repeating it.
-	fn positions(&self) -> crate::track::Subscription {
+	/// A model subscription always starts and ends on a group boundary, so a frame bound
+	/// widens to its whole group here and [`position_group`] applies it when serving.
+	fn groups(&self) -> crate::track::Subscription {
 		let mut sub = crate::track::Subscription::default();
 		if let Some(group) = self.start_group {
-			sub = sub.with_start(track::Position {
-				group,
-				frame: self.start_frame,
-			});
+			sub = sub.with_start(group);
 		}
 		if let Some(group) = self.end_group {
-			sub = sub.with_end(match self.end_frame {
-				Some(frame) => track::Position::after(group, frame),
-				None => track::Position::after_group(group),
-			});
+			sub = sub.with_end(group.checked_add(1));
 		}
 		sub
 	}
@@ -3795,14 +3787,14 @@ impl TrackRun {
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
 		// Read first: `update` replaces these preferences.
-		let requested = self.track.subscription().start().map(|start| start.group);
+		let requested = self.track.subscription().start();
 		let floored = requested.is_some_and(|group| group > 0);
 		let bounds = Bounds::from(&upd);
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
 			max_delay: serving_max_delay(self.ctx.version, upd.max_delay),
 			order: upd.order,
-			..bounds.positions()
+			..bounds.groups()
 		});
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
 		// start as no floor, so a subscription that had one above group 0 has to
@@ -3927,14 +3919,20 @@ impl TrackRun {
 			&& self.ctx.version.has_largest()
 			&& let Some(start) = self.track.subscription().start()
 			&& let Poll::Ready(Some(largest)) = self.track.poll_live(waiter)
-			&& start > largest
+			&& (track::Position {
+				group: start,
+				frame: self
+					.start_frame
+					.filter(|(group, _)| *group == start)
+					.map_or(0, |(_, frame)| frame),
+			}) > largest
 		{
-			self.start = Some(start.group);
+			self.start = Some(start);
 			writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-				group: start.group,
+				group: start,
 				largest: Some(largest),
 			}))?;
-			self.track.raise_start_to(start.group);
+			self.track.raise_start_to(start);
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
@@ -4040,6 +4038,18 @@ impl TrackRun {
 			return;
 		}
 		let sequence = datagram.sequence;
+		// The model bounds whole groups, so the peer's frame bounds are applied here, against
+		// the Object ID a relayed moq-transport datagram keeps (a public one is frame 0).
+		let object = datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0);
+		if self
+			.start_frame
+			.is_some_and(|(group, frame)| group == sequence && object < frame)
+			|| self
+				.end_frame
+				.is_some_and(|(group, frame)| group == sequence && object > frame)
+		{
+			return;
+		}
 		// Metered in the form the wire carries.
 		let (payload, _) = datagram.sent(self.ctx.version.has_compression());
 		self.track.meter_datagram(payload.len() as u64);
@@ -4099,7 +4109,8 @@ impl TrackRun {
 			return Ok(());
 		};
 		// A cap below the end bounds what the subscriber is owed, as on its side.
-		let end = final_sequence(self.track.subscription().end().map_or(fin, |end| end.min(fin)));
+		let fin = final_sequence(fin);
+		let end = self.track.subscription().end().map_or(fin, |end| end.min(fin));
 		self.drop_range(start..end, &StreamError::NotFound, writer)
 	}
 }
@@ -4651,26 +4662,23 @@ mod serve_group_test {
 	use crate::{Timestamp, broadcast};
 	use futures::FutureExt;
 
-	/// The wire's inclusive pair maps to the model's exclusive end.
-	///
-	/// The inverse of the subscriber's `WireBounds`, and the same off-by-one risk: a
-	/// whole end group becomes the head of the next one, a capped frame becomes the head
-	/// of the frame above it.
+	/// The wire's inclusive bounds map to the model's whole groups with an exclusive end: a
+	/// frame bound widens to its group, which `position_group` cuts when serving.
 	#[test]
-	fn bounds_convert_to_positions() {
+	fn bounds_convert_to_whole_groups() {
 		let whole = Bounds {
 			start_group: None,
 			start_frame: 0,
 			end_group: Some(5),
 			end_frame: None,
 		};
-		assert_eq!(whole.positions().end(), Some(track::Position::group(6)));
+		assert_eq!(whole.groups().end(), Some(6));
 
 		let capped = Bounds {
 			end_frame: Some(2),
 			..whole
 		};
-		assert_eq!(capped.positions().end(), Some(track::Position { group: 5, frame: 3 }));
+		assert_eq!(capped.groups().end(), Some(6));
 
 		let started = Bounds {
 			start_group: Some(5),
@@ -4678,9 +4686,7 @@ mod serve_group_test {
 			end_group: None,
 			end_frame: None,
 		};
-		let positions = started.positions();
-		assert_eq!(positions.start(), Some(track::Position { group: 5, frame: 3 }));
-		assert_eq!(positions.end(), None);
+		assert_eq!((started.groups().start(), started.groups().end()), (Some(5), None));
 
 		// A frame bound the peer sent without its group has nothing to count from, so it
 		// cannot reach the model at all.
@@ -4690,7 +4696,7 @@ mod serve_group_test {
 			end_group: None,
 			end_frame: Some(7),
 		};
-		assert_eq!((orphan.positions().start(), orphan.positions().end()), (None, None));
+		assert_eq!((orphan.groups().start(), orphan.groups().end()), (None, None));
 	}
 
 	/// A group whose head the publisher no longer holds is skipped, not served short:
@@ -5585,6 +5591,70 @@ mod serve_group_test {
 		assert!(order > 1);
 	}
 
+	/// The peer's frame bounds cut datagrams by Object ID: a public datagram is frame 0, a
+	/// relayed moq-transport one keeps its own, and both ends are inclusive.
+	#[moq_clock::test]
+	async fn frame_bounds_cut_datagrams_by_object_id() {
+		for (sequence, object_id, served) in [
+			(5, None, false),
+			(5, Some(1), false),
+			(5, Some(2), true),
+			(6, None, true),
+			(7, Some(3), true),
+			(7, Some(4), false),
+		] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+			let session = SinkSession::new(Log::default()).with_groups().with_datagrams(1200);
+			let log = session.log.clone();
+			let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
+			run.ctx.group = crate::transport::poll::Session::send_group(&mut run.ctx.session, 3);
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				order: Order::Descending,
+				priority: 0,
+				max_delay: Duration::from_secs(3600),
+				start_group: Some(5),
+				end_group: Some(7),
+				start_frame: 2,
+				end_frame: Some(3),
+			});
+
+			track
+				.insert_wire_datagram(crate::model::datagram::Stored {
+					datagram: crate::model::datagram::Datagram {
+						sequence,
+						timestamp: Some(Timestamp::from_millis(sequence).unwrap()),
+						payload: bytes::Bytes::from_static(b"d"),
+					},
+					wire: object_id.map(|object_id| {
+						Arc::new(crate::model::datagram::Wire {
+							object_id: Some(object_id),
+							priority: None,
+							end_of_group: false,
+							status: None,
+							properties: Default::default(),
+						})
+					}),
+					deflated: None,
+				})
+				.unwrap();
+			{
+				let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+				assert!(futures::poll!(poll.as_mut()).is_pending());
+			}
+			assert_eq!(
+				log.datagram_ranks().len(),
+				usize::from(served),
+				"group {sequence} object {object_id:?}"
+			);
+		}
+	}
+
 	/// A SUBSCRIBE_UPDATE that flips the group order reranks the next datagram, even with no
 	/// group served in between.
 	#[moq_clock::test]
@@ -5894,7 +5964,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let subscription = track::Subscription::default()
-			.with_start(track::Position::group(5))
+			.with_start(5)
 			.with_max_delay(Duration::from_secs(60));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
@@ -6268,7 +6338,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let subscription = track::Subscription::default()
-			.with_start(track::Position::group(5))
+			.with_start(5)
 			.with_max_delay(Duration::from_secs(60));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
@@ -6314,7 +6384,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let subscription = track::Subscription::default()
-			.with_start(track::Position::group(5))
+			.with_start(5)
 			.with_max_delay(Duration::from_secs(1));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
@@ -6361,7 +6431,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let subscription = track::Subscription::default()
-			.with_start(track::Position::group(0))
+			.with_start(0)
 			.with_max_delay(Duration::from_secs(1));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
@@ -6408,7 +6478,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let subscription = track::Subscription::default()
-			.with_start(track::Position::group(0))
+			.with_start(0)
 			.with_max_delay(Duration::from_secs(10));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
@@ -6452,7 +6522,7 @@ mod serve_group_test {
 		);
 		let subscriber = track.subscribe(
 			track::Subscription::default()
-				.with_start(track::Position::group(0))
+				.with_start(0)
 				.with_max_delay(Duration::from_secs(60)),
 		);
 		let (mut run, mut writer, _log) = lite_run(Version::Lite05, SinkSession::new(Log::default()), subscriber);
@@ -6493,7 +6563,7 @@ mod serve_group_test {
 		);
 		let subscriber = track.subscribe(
 			track::Subscription::default()
-				.with_start(track::Position::group(5))
+				.with_start(5)
 				.with_max_delay(Duration::from_secs(60)),
 		);
 		let (mut run, mut writer, _log) = lite_run(Version::Lite05, SinkSession::new(Log::default()), subscriber);
@@ -6561,7 +6631,7 @@ mod serve_group_test {
 		fn new(track: &mut track::Producer, start_group: u64) -> Self {
 			track.request_start(Some(0)).unwrap();
 			let subscription = track::Subscription::default()
-				.with_start(track::Position::group(start_group))
+				.with_start(start_group)
 				.with_max_delay(Duration::from_secs(30));
 			let subscriber = track.subscribe(subscription);
 

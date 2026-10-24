@@ -622,7 +622,7 @@ pub struct moq_range {
 	pub end_present: bool,
 }
 
-/// Where one end of a [moq_range] falls. Zeroing it means group 0, frame 0.
+/// Where one end of a [moq_range] falls. Zeroing it means group 0.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_anchor {
@@ -631,8 +631,6 @@ pub struct moq_anchor {
 	/// The group, or with `MOQ_ANCHOR_RELATIVE` how many groups before the latest one
 	/// (0 is the latest, and an offset past the first group clamps to it).
 	pub group: u64,
-	/// The frame within `group`, read only with `MOQ_ANCHOR_ABSOLUTE`.
-	pub frame: u64,
 	/// The presentation time in microseconds, read only with `MOQ_ANCHOR_TIME`.
 	pub timestamp_us: u64,
 }
@@ -642,7 +640,7 @@ pub struct moq_anchor {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_anchor_kind {
-	/// A fixed group and frame.
+	/// A fixed group, delivered from its first frame.
 	MOQ_ANCHOR_ABSOLUTE = 0,
 	/// A count of groups back from the latest one.
 	MOQ_ANCHOR_RELATIVE = 1,
@@ -663,12 +661,7 @@ pub enum moq_order {
 
 fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 	Ok(match anchor.kind {
-		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => {
-			moq_net::track::Anchor::Absolute(moq_net::track::Position {
-				group: anchor.group,
-				frame: anchor.frame,
-			})
-		}
+		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Absolute(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => {
 			moq_net::track::Anchor::Time(moq_net::Timestamp::from_micros(anchor.timestamp_us)?)

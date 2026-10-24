@@ -112,11 +112,7 @@ impl Producer {
 				Some(copy) if copy.from == preferences.ranges => copy.resolved.clone(),
 				_ => Vec::new(),
 			};
-			ranges.extend(
-				preferences
-					.clamped(reader.newest.map(Position::group), None, &resolved)
-					.ranges,
-			);
+			ranges.extend(preferences.clamped(reader.newest, None, &resolved).ranges);
 		}
 		demand.ranges = ranges;
 		demand
@@ -368,7 +364,7 @@ struct Copy {
 	track: track::Consumer,
 	sub: Sub,
 	/// Where the subscription was asked to start, so demand updates never ask for less.
-	floor: Option<Position>,
+	floor: Option<u64>,
 	/// The reader's ranges [`Self::resolved`] are for.
 	from: Vec<track::Range>,
 	/// Each of those ranges resolved, by index, so clamping never widens one: as the
@@ -417,7 +413,7 @@ impl Copy {
 				self.from = reader.ranges.clone();
 			}
 		}
-		reader.clamped(self.floor, self.end().map(Position::group), &self.resolved)
+		reader.clamped(self.floor, self.end(), &self.resolved)
 	}
 
 	/// The first group past where this copy was replaced, if any: one replaced before
@@ -440,7 +436,7 @@ impl Copy {
 		if let Sub::Pending(pending) = &self.sub {
 			let mut sub = ready!(pending.poll_ok(waiter))?;
 			// An anchor the wire kept may resolve below where the reader got to.
-			sub.raise_start_to(self.floor.map_or(groups.0, |floor| groups.0.max(floor.group)));
+			sub.raise_start_to(self.floor.map_or(groups.0, |floor| groups.0.max(floor)));
 			sub.end_at(groups.1);
 			self.sub = Sub::Ready(Box::new(sub));
 		}
@@ -486,7 +482,7 @@ impl Copy {
 		{
 			let start = reader.groups.0;
 			// From where it was asked to start, or else from what it first got.
-			let floor = self.floor.map(|floor| floor.group);
+			let floor = self.floor;
 			let from = floor.map_or(start, |floor| floor.max(start));
 			// A group still to land is waited for once something superseded it, as a gap is.
 			if self.since.is_some()
@@ -519,7 +515,7 @@ impl Copy {
 		let backs = |sequence: u64| {
 			// A group at or past where it was asked to start may land even before its first
 			// arrival; without a floor, only what follows its first arrival can.
-			let asked = self.floor.is_some_and(|floor| floor.group <= sequence);
+			let asked = self.floor.is_some_and(|floor| floor <= sequence);
 			self.track.peek_group(sequence).is_some()
 				|| (lands
 					&& self
@@ -872,15 +868,13 @@ impl Reader {
 				track::Range {
 					start: match range.start {
 						// The farthest offset reaches back to the oldest group, which names no floor.
-						Anchor::Relative(back) if back != u64::MAX => Anchor::Absolute(Position::group(resolved.start)),
-						Anchor::Time(_) => Anchor::Absolute(Position::group(resolved.start)),
+						Anchor::Relative(back) if back != u64::MAX => Anchor::Absolute(resolved.start),
+						Anchor::Time(_) => Anchor::Absolute(resolved.start),
 						start => start,
 					},
 					// A time end the copy has not settled stays one: its cap is not the end.
 					end: match (range.end, resolved.end) {
-						(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => {
-							Some(Anchor::Absolute(Position::group(end)))
-						}
+						(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => Some(Anchor::Absolute(end)),
 						(end, _) => end,
 					},
 				}
@@ -986,15 +980,15 @@ impl Reader {
 			copy.datagrams_done = None;
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// newest another route handed out, is not handed out.
-			copy.floor = copy.floor.max(self.newest.map(Position::group));
+			copy.floor = copy.floor.max(self.newest);
 			if let (Sub::Ready(sub), Some(floor)) = (&mut copy.sub, copy.floor) {
-				sub.raise_start_to(floor.group);
+				sub.raise_start_to(floor);
 			}
 			copy.update(&self.mirrored);
 			self.copies.push(copy);
 			return;
 		}
-		let floor = self.newest.map(Position::group);
+		let floor = self.newest;
 		// The wire request carries the floor from the first message: some sessions read
 		// the demand only once.
 		let wire = self.mirrored.clamped(floor, None, &resolved);
@@ -1588,7 +1582,7 @@ impl Reader {
 		self.groups.0 = start;
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
-				sub.start_at(copy.floor.map_or(start, |floor| start.max(floor.group)));
+				sub.start_at(copy.floor.map_or(start, |floor| start.max(floor)));
 			}
 		}
 	}
@@ -3899,7 +3893,7 @@ mod test {
 			.subscribe(kio::Producer::new(Subscription::default()).into());
 		let mut reader = sub.reader.lock().unwrap();
 		let copy = &mut reader.copies[0];
-		copy.floor = Some(Position::group(0));
+		copy.floor = Some(0);
 		let ranges = vec![track::Range {
 			start: track::Anchor::Time(ts(10_000)),
 			end: None,
@@ -3989,7 +3983,7 @@ mod test {
 		assert!(sub.recv_group().now_or_never().is_none());
 		let start = c.subscription().expect("subscribed").ranges[0].start;
 		assert!(
-			matches!(start, track::Anchor::Absolute(position) if position.group >= 10),
+			matches!(start, track::Anchor::Absolute(group) if group >= 10),
 			"the replacement asks from where b resolved the time: {start:?}"
 		);
 	}
@@ -4051,7 +4045,7 @@ mod test {
 		zero.write_frame(ts(3000), b"x".as_ref()).unwrap();
 		zero.finish().unwrap();
 		let range = track::Range {
-			start: track::Anchor::Absolute(Position::group(0)),
+			start: track::Anchor::Absolute(0),
 			end: Some(track::Anchor::Time(ts(3500))),
 		};
 		let subscription = Subscription::default()
@@ -4083,7 +4077,7 @@ mod test {
 
 	#[test]
 	fn a_replaced_copy_at_the_last_sequence_has_no_overflow_cap() {
-		for (last, end) in [(Some(u64::MAX), None), (None, Some(Position::default()))] {
+		for (last, end) in [(Some(u64::MAX), None), (None, Some(0))] {
 			let routes = Producer::new();
 			let a = copy();
 			routes.serve(a.consume());
@@ -4094,8 +4088,8 @@ mod test {
 			old.until = Some(last);
 			assert_eq!(old.wire(&Subscription::default()).end(), end);
 			// A reader's narrower bound survives an unbounded replacement cap.
-			let requested = Subscription::default().with_end(Position::group(7));
-			assert_eq!(old.wire(&requested).end(), Some(end.unwrap_or(Position::group(7))));
+			let requested = Subscription::default().with_end(7);
+			assert_eq!(old.wire(&requested).end(), Some(end.unwrap_or(7)));
 		}
 	}
 
@@ -4300,15 +4294,15 @@ mod test {
 		// One reader has not read anything yet, so it still needs the oldest range.
 		assert_eq!(routes.subscription(demand.clone(), 2).start(), None);
 		assert_eq!(recv(&mut second).sequence, 5);
-		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(Position::group(5)));
+		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(5));
 		write(&a, 10);
 		assert_eq!(recv(&mut first).sequence, 10);
-		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(Position::group(5)));
+		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(5));
 		let pending = front.consume().subscribe(Subscription::default().with_max_delay(HOUR));
 		assert_eq!(routes.subscription(front.subscription().unwrap(), 3).start(), None);
 		drop(pending);
 		drop(second);
-		assert_eq!(routes.subscription(demand, 1).start(), Some(Position::group(10)));
+		assert_eq!(routes.subscription(demand, 1).start(), Some(10));
 	}
 
 	#[moq_clock::test]

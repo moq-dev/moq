@@ -86,11 +86,10 @@ Decided:
   lite-06). A release that needs seamless failover promotes lite-07 first.
 
 Decided 2026-10-06: older versions and moq-transport lose cross-route resume,
-since their routes have no epoch, but their mid-group start handling stays.
-The IETF joining FETCH is the normal live join for every IETF subscription, and
-the IETF resume point and lite-05/06 `widen_frame_bounds` still serve any
-mid-group start: a public `Subscription::with_start` or a downstream Frame
-Start a relay forwards upstream.
+since their routes have no epoch.
+The IETF joining FETCH is the normal live join for every IETF subscription.
+Every subscription starts at a group's first frame ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)),
+so no version needs a mid-group start.
 
 The end-to-end gate republishes a name under a new epoch while the old
 publisher's session stays open, then closes the newest so the still-live older

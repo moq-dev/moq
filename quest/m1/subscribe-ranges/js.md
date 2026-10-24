@@ -28,9 +28,9 @@ IETF FETCH dispatch. Resized from [M] to [L] for it.
   was never cached, covering exact replay, empty and missing groups,
   concurrent requests, and cancellation while awaiting a reply.
 
-When ranges add frame bounds, the group model carries a lite group's
-`frameStart` instead of refusing a nonzero one as a protocol violation, as
-`lite/subscriber.ts` `runGroup` does until then. Preserve the per-reader
+Ranges stay whole groups ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)),
+so the group model keeps refusing a nonzero lite `frameStart` as a protocol
+violation, as `lite/subscriber.ts` `runGroup` does. Preserve the per-reader
 group-bound rule for reliable reads, live-edge selection, subscription
 updates, and publisher datagrams.
 

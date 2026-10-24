@@ -1940,13 +1940,6 @@ impl Handle {
 		state.abort.is_none().then_some(state.offset)
 	}
 
-	/// Whether this copy still holds every committed frame below `end`, so a compressed
-	/// tail requested there can inflate against it. Sparse object IDs are not ordinals.
-	pub(super) fn holds_prefix(&self, end: u64) -> bool {
-		let state = self.state.read();
-		state.abort.is_none() && state.offset == 0 && !state.sparse() && state.committed as u64 >= end
-	}
-
 	/// One past the last frame committed to an unfinished group, when that is past its
 	/// first: where a replacement route resumes. `None` once the group is finished, or
 	/// while it holds nothing a replacement could continue.
@@ -2535,12 +2528,6 @@ impl Consumer {
 	#[cfg(feature = "async")]
 	pub(crate) fn wire(&self) -> Option<Wire> {
 		self.cursor.state.read().wire().cloned()
-	}
-
-	/// Whether the group was relayed from moq-transport, whose Object IDs may not be its frame
-	/// ordinals.
-	pub(super) fn relayed(&self) -> bool {
-		self.cursor.state.read().wire().is_some()
 	}
 
 	/// Read a compressed group's stored DEFLATE slices instead of plain frames, with each
@@ -3254,15 +3241,14 @@ pub struct Fetch {
 
 	/// Index of the first frame to fetch within the group. Defaults to 0, the whole group.
 	///
-	/// Use this to fill a hole left by a route change: the group's head is already
-	/// cached locally and only the tail is missing.
+	/// Only a route change sets it, filling the hole after a head another route already
+	/// delivered. An application always fetches from a group's first frame, since a group is
+	/// the unit of decodability, and skips frames locally with [`Consumer::set_frames`].
 	///
-	/// There is no matching end: a fetch always runs to the end of the group, and a
-	/// caller wanting less caps the returned consumer with [`Consumer::set_frames`]. Stopping
-	/// the *fetch* short would put a group in the cache that is indistinguishable from a
-	/// complete one, so a later fetch of the whole group would resolve from it and come
-	/// up short.
-	pub frame_start: u64,
+	/// There is no matching end: stopping the *fetch* short would put a group in the cache
+	/// that is indistinguishable from a complete one, so a later fetch of the whole group
+	/// would resolve from it and come up short.
+	pub(crate) frame_start: u64,
 }
 
 impl Fetch {
@@ -3275,12 +3261,6 @@ impl Fetch {
 	/// Limit how far behind the live edge the fetched group may fall.
 	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
 		self.max_delay = Some(max_delay);
-		self
-	}
-
-	/// Set the first frame to fetch, returning `self` for chaining.
-	pub fn with_frame_start(mut self, frame_start: u64) -> Self {
-		self.frame_start = frame_start;
 		self
 	}
 }

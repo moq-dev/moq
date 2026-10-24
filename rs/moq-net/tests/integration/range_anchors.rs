@@ -9,7 +9,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Anchor, Info, Order, Position, Range, Subscription};
+use moq_net::track::{Anchor, Info, Order, Range, Subscription};
 use moq_net::{Error, Hop, Timescale, Timestamp, Version};
 use support::harness::peer;
 
@@ -107,7 +107,7 @@ fn range(start: Anchor, end: Option<Anchor>) -> Range {
 
 /// Relative and time anchors at each end, with what a reader of the held track reads.
 fn anchored() -> [(Range, Vec<u64>); 6] {
-	let zero = Anchor::Absolute(Position::group(0));
+	let zero = Anchor::Absolute(0);
 	[
 		(range(Anchor::Relative(2), None), vec![2, 3, 4]),
 		(range(Anchor::Time(millis(2500)), None), vec![2, 3, 4]),

@@ -29,7 +29,6 @@ mod finished_broadcast_mock;
 mod finite_relay;
 mod goaway;
 mod group_order;
-mod head_fetch;
 mod history_groups;
 mod idle_cancel_refetch;
 mod idle_session;

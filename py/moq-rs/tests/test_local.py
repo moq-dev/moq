@@ -12,7 +12,7 @@ import moq_ffi
 import pytest
 
 # Every group from the first, rather than only what the live edge still reaches.
-FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0, frame=0)))]
+FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0)))]
 
 
 async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
