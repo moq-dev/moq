@@ -55,7 +55,7 @@ harness. Report peak resident bytes against the budget, evictions, and throughpu
 
 ## Related
 
-- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - drops the frame cap that
+- [Unbounded groups](/quest/m1/unbounded-groups/README.md) - drops the frame cap that
   sets half of `MIN_RECEIVE_WINDOW`
 - [Perf](/quest/m2/perf/README.md) - the per-worker hot paths this budget must not add
   contention to

@@ -702,7 +702,7 @@ describe("Session integration (scripted peer)", () => {
 
 	test("keep-alives don't pile up behind a wedged socket", async () => {
 		const clock = new Manual();
-		const uninstall = clock.install();
+		const installed = clock.install();
 		try {
 			const { session, peer } = connect({ idleTimeout: 300 });
 			await session.ready;
@@ -726,7 +726,7 @@ describe("Session integration (scripted peer)", () => {
 			expect(peer.has("connection_close")).toBe(false);
 			session.close();
 		} finally {
-			uninstall();
+			installed.close();
 		}
 	});
 
@@ -1040,7 +1040,7 @@ describe("Session integration (scripted peer)", () => {
 			// with { closeCode: 0, reason: "" }. A dead peer and a clean shutdown differed
 			// only by a free-text string.
 			const clock = new Manual();
-			const uninstall = clock.install();
+			const installed = clock.install();
 			try {
 				const { session, peer } = connect({ idleTimeout: 150 });
 				await session.ready;
@@ -1071,13 +1071,13 @@ describe("Session integration (scripted peer)", () => {
 				expect(err.message).toContain("idle timeout");
 				peer.unblockWrites();
 			} finally {
-				uninstall();
+				installed.close();
 			}
 		});
 
 		test("a peer that never sends its parameters still idles out", async () => {
 			const clock = new Manual();
-			const uninstall = clock.install();
+			const installed = clock.install();
 			try {
 				const { session, peer } = connect({ idleTimeout: 150 });
 				await session.ready;
@@ -1088,13 +1088,13 @@ describe("Session integration (scripted peer)", () => {
 				expect(err.message).toContain("idle timeout");
 				expect(peer.has("ping_request")).toBe(false);
 			} finally {
-				uninstall();
+				installed.close();
 			}
 		});
 
 		test("outbound frame activity resets the idle timeout", async () => {
 			const clock = new Manual();
-			const uninstall = clock.install();
+			const installed = clock.install();
 			try {
 				const { session, peer } = connect({ idleTimeout: 120 });
 				await session.ready;
@@ -1118,7 +1118,7 @@ describe("Session integration (scripted peer)", () => {
 				session.close();
 				expect(await session.closed).toEqual({ closeCode: 0, reason: "" });
 			} finally {
-				uninstall();
+				installed.close();
 			}
 		});
 
@@ -1128,7 +1128,7 @@ describe("Session integration (scripted peer)", () => {
 			// clock, so counting every send as activity left the deadline permanently
 			// in the future and the session never closed.
 			const clock = new Manual();
-			const uninstall = clock.install();
+			const installed = clock.install();
 			try {
 				const { session, peer } = connect({ idleTimeout: 120 });
 				await session.ready;
@@ -1149,7 +1149,7 @@ describe("Session integration (scripted peer)", () => {
 				const err = await expectSessionFailure(session);
 				expect(err.message).toContain("idle timeout");
 			} finally {
-				uninstall();
+				installed.close();
 			}
 		});
 

@@ -1,8 +1,6 @@
-let loading: Promise<boolean> | undefined;
+import { objectType } from "./aac";
 
-// The WebCodecs registry's AAC codec strings. The polyfill refuses every "mp4a" string, so these
-// reach libav's own AAC decoder through the polyfill's libav.js codec escape hatch instead.
-const AAC = new Set(["mp4a.40.2", "mp4a.40.02", "mp4a.40.5", "mp4a.40.05", "mp4a.40.29", "mp4a.67"]);
+let loading: Promise<boolean> | undefined;
 
 /** Load the libav WebCodecs polyfill (Opus, plus AAC decoding) if AudioEncoder/AudioDecoder are missing. Resolves true once available. */
 export async function polyfill(): Promise<boolean> {
@@ -22,7 +20,10 @@ export async function polyfill(): Promise<boolean> {
 				if (native) return true;
 
 				type Config = Parameters<InstanceType<typeof libav.AudioDecoder>["configure"]>[0];
-				const aac = (config: Config) => typeof config.codec === "string" && AAC.has(config.codec);
+				// The polyfill refuses every "mp4a" string, so the WebCodecs registry's AAC strings reach
+				// libav's own AAC decoder through the polyfill's libav.js codec escape hatch instead.
+				const aac = (config: Config) =>
+					typeof config.codec === "string" && objectType(config.codec) !== undefined;
 				const route = (config: Config): Config =>
 					aac(config) ? { ...config, codec: { libavjs: { codec: "aac" } } } : config;
 

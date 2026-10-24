@@ -184,10 +184,8 @@ async function watch(config: Media): Promise<{ first_frame_ms: number }> {
 		origin: connection.origin,
 		probe: connection.probe,
 		name: Moq.Path.from(config.path),
-		canvas,
-		visible: "always",
-		backend: "2d",
-		muted: true,
+		video: { canvas, visible: "always", backend: "2d" },
+		audio: { muted: true },
 	});
 	const sampler = setInterval(() => {
 		const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;

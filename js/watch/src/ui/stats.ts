@@ -1,9 +1,9 @@
 import { Milli, Nano, now } from "@moq/clock";
 import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
+import { graph } from "@moq/ui";
 import type MoqWatch from "../element";
 import { formatBitrate, formatFps, formatHz, formatMillis } from "./format";
-import { graph } from "./graph";
 import { audio as audioIcon, icon, network as networkIcon, video as videoIcon } from "./icons";
 
 const POLL = Nano.fromMilli(Milli(250));
@@ -91,7 +91,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const aUnderruns = line(audioCard.grid, "Underruns");
 	track(parent, audioCard, {
 		catalog: watch.audio.source.out.catalog,
-		flag: watch.controls.muted,
+		flag: watch.controls.audio.muted,
 		label: "muted",
 	});
 
