@@ -21,6 +21,8 @@ The remaining public `SystemTime`s, as of
 - moq-quic: `TimeSource::now` and the token log's issue times.
 - moq-relay: the session's `started`.
 - moq-tokio: the certificate `expiry`.
+- moq-auth: `Claims::{expires, issued, not_before}` with their `with_*`
+  setters, and `Grant::expires`.
 - moq-cli and moq-bench: private wall times, which can move freely.
 
 `Wall` covers 1970 to 2554, so a catalog wall past that range is an error, as
@@ -39,8 +41,8 @@ representation limit into a validity rule for valid identities. Presentation
 walls (catalogs, timelines, HLS) still refuse, since their value is shown or
 used for arithmetic, not only compared.
 
-Public API: breaking in hang, moq-mux, moq-hls, moq-quic, moq-relay, and
-moq-tokio, each with a `MIGRATE.md` entry. Wire: none.
+Public API: breaking in hang, moq-mux, moq-hls, moq-quic, moq-relay, moq-auth, and
+moq-tokio; the Impact bullet says how to migrate each. Wire: none.
 
 ## Related
 

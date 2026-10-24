@@ -33,8 +33,8 @@ emit clean code. Shell `shellcheck disable` comments stay out of scope.
 A suppression stays only when fixing the lint would make the code worse; a
 signature reshaped to satisfy `too_many_arguments` or `large_enum_variant`
 on a public type is an API change, so it is a follow-up. Removing one of our
-own deprecated exports or hidden CLI spellings is a breaking change with a
-`MIGRATE.md` entry, so it is also a follow-up.
+own deprecated exports or hidden CLI spellings is a breaking change, so it is
+also a follow-up.
 
 ### What the m0 run left in place
 
