@@ -14,6 +14,7 @@ import type * as Epoch from "./epoch.ts";
 import { toStreamCode } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
+import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Groups, Info, Location, Producer, Request, Subscriber, Subscription } from "./track.ts";
@@ -562,6 +563,11 @@ export const hooks: {
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
 	/** Mark a broadcast handle served through a route claiming a shorter prefix: it lists nothing. */
 	stampUnlisted: (target: BroadcastConsumer) => void;
+	/**
+	 * Resolve a session-forwarded request with its peer's routed broadcast. An application
+	 * claim answers through `prepare` and `publish` instead. Assigned by `origin.ts`.
+	 */
+	acceptRequest: (request: OriginRequest, source: BroadcastProducer | BroadcastConsumer) => void;
 } = {
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
@@ -742,6 +748,9 @@ export const hooks: {
 	},
 	stampUnlisted: () => {
 		throw new Error("broadcast.ts not loaded");
+	},
+	acceptRequest: () => {
+		throw new Error("origin.ts not loaded");
 	},
 };
 

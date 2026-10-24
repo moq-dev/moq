@@ -4,16 +4,16 @@
 //!
 //! Two workers each claim the `pool` prefix with `origin::Producer::dynamic` and
 //! announce it to relay `R` on their own sessions, the way a transcode pool does. A
-//! viewer on `R` reads `pool/p` from worker `A`, which then closes that output and
-//! drains its claim. Nothing tells `R` the output closed, so only the front ending
-//! once unread lets the next viewer reach worker `B`, which wins the path now, rather
-//! than the drained worker.
+//! viewer on `R` reads `pool/p` from worker `A`, over the cheaper link, which then
+//! closes that output and drains its session. Nothing tells `R` the output closed, so
+//! only the front ending once unread lets the next viewer reach worker `B`, which wins
+//! the path now, rather than the drained worker.
 
 use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Hop, Timestamp, Version, broadcast, origin, track};
+use moq_net::{Epoch, Hop, Timestamp, Version, broadcast, goaway::Goaway, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -29,11 +29,12 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	producer
 }
 
-/// Have `to` pull everything `from` publishes.
-async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
+/// Have `to` pull everything `from` publishes, over a link priced at `cost`.
+async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, cost: u64) -> MockPair {
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(from.consume());
 	options.client_subscribe = Some(to.clone());
+	options.cost = Some(cost);
 	connect_mock(options).await
 }
 
@@ -45,34 +46,33 @@ async fn settle() {
 /// A worker claiming `pool`, answering each request with an output whose `video`
 /// track carries the worker's name.
 struct Worker {
-	claim: Rc<origin::Dynamic>,
+	_claim: Rc<origin::Dynamic>,
 	/// Each output with its track, which would end once its producer drops.
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 	origin: origin::Producer,
 }
 
 impl Worker {
-	fn new(hop: u64, name: &'static str, cost: u64) -> Self {
+	fn new(hop: u64, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(
-			origin
-				.dynamic_route("pool", origin::Route::default().with_cost(cost))
-				.unwrap(),
-		);
+		let claim = Rc::new(origin.dynamic("pool").unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
-				let output = broadcast::Info::new().produce();
-				let track = output.create_track("video", timed()).unwrap();
+				let prepared = request.prepare(Epoch::mint()).unwrap();
+				let track = prepared.broadcast().create_track("video", timed()).unwrap();
 				let mut group = track.append_group().unwrap();
 				group.write_frame(Timestamp::ZERO, name.as_bytes().to_vec()).unwrap();
 				group.finish().unwrap();
-				request.accept(&output);
-				served.borrow_mut().push((output, track));
+				served.borrow_mut().push((prepared.publish().unwrap(), track));
 			}
 		}));
-		Self { claim, outputs, origin }
+		Self {
+			_claim: claim,
+			outputs,
+			origin,
+		}
 	}
 
 	/// How many outputs the worker was asked for.
@@ -81,8 +81,13 @@ impl Worker {
 	}
 }
 
-/// Read the first frame of `video` at `pool/p` through `relay`.
+/// Read the first frame of `video` at `pool/p` through `relay`. The first subscription
+/// through a claim is reset once the answer's exact route arrives, the cold-start reset
+/// accepted until announce takeover lands, so the read retries once.
 async fn watch(relay: &origin::Producer) -> String {
+	let cold = relay.consume().request_broadcast("pool/p", None).await.unwrap();
+	drop(cold.track("video").unwrap().subscribe(None).await);
+	settle().await;
 	let broadcast = relay.consume().request_broadcast("pool/p", None).await.unwrap();
 	let mut subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut group = subscription.recv_group().await.unwrap().expect("a group");
@@ -93,19 +98,17 @@ async fn watch(relay: &origin::Producer) -> String {
 async fn drained_claim(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let relay = produce_origin(3);
-	let a = Worker::new(1, "a", 0);
-	let b = Worker::new(2, "b", 10);
-	let _a = link(version, &a.origin, &relay).await;
-	let _b = link(version, &b.origin, &relay).await;
+	let a = Worker::new(1, "a");
+	let b = Worker::new(2, "b");
+	let a_link = link(version, &a.origin, &relay, 1).await;
+	let _b = link(version, &b.origin, &relay, 10).await;
 	settle().await;
 
 	assert_eq!(watch(&relay).await, "a", "{version}");
 
-	// A closes its output and drains its claim, so B wins the path from here on.
+	// A closes its output and drains its session, so B wins the path from here on.
 	a.outputs.borrow().iter().for_each(|(output, _)| output.close());
-	a.claim
-		.update_route(a.claim.route().with_cost(origin::Cost::DRAIN))
-		.unwrap();
+	a_link.server.drain().send(Goaway::new()).unwrap();
 	// Past the linger, which is as long as the cache window, nothing reads the relay's
 	// front for the path.
 	moq_clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2).await;

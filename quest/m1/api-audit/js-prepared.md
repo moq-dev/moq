@@ -30,7 +30,3 @@ Test: a handler that throws after `prepare()` leaves the path answerable by
 the next request. moq.pro has no JS claim handlers.
 
 Public API: `@moq/net` breaking (`Prepared.reject` to `close`). Wire: none.
-
-## Related
-
-- [Claim request type](/quest/m1/api-audit/claim-request-type.md) - the JS `accept` half lives there

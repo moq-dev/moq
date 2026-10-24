@@ -25,7 +25,3 @@ error.
 
 Public API: breaking in moq-net (and `@moq/net`/moq-ffi if they mirror the
 trap). Wire: none.
-
-## Related
-
-- [Claim request type](/quest/m1/api-audit/claim-request-type.md) - splits `accept` off application requests in the same file; coordinate the order

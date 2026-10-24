@@ -2381,21 +2381,17 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let origin = crate::source::produce_origin();
 		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
-		let first_route = origin
-			.dynamic_route(
-				"live",
-				moq_net::origin::Route::default()
-					.with_epoch(epoch.clone())
-					.with_hops(hops.clone())
-					.with_cost(5),
-			)
-			.unwrap();
-		let pending = origin.consume().request_broadcast("live", None);
-		let first = moq_net::broadcast::Info::new().produce();
+		let route = |cost: u64| {
+			moq_net::origin::Route::default()
+				.with_epoch(epoch.clone())
+				.with_hops(hops.clone())
+				.with_cost(cost)
+		};
+		let first = origin.create_broadcast("live").unwrap();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let first_track = first.create_track("video", info.clone()).unwrap();
-		first_route.requested_broadcast().await.unwrap().accept(&first);
-		let broadcast = pending.await.unwrap();
+		first.announce(route(5)).unwrap();
+		let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
 		let track = broadcast
 			.track("video")
 			.unwrap()
@@ -2422,21 +2418,11 @@ mod tests {
 		// while the first route stays up but silent. They carry the same broadcast, so each
 		// holds every group from 1 on. The open group is given up once the track runs a
 		// full budget past it.
-		let mut routes = Vec::new();
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
-			let route = origin
-				.dynamic_route(
-					"live",
-					moq_net::origin::Route::default()
-						.with_epoch(epoch.clone())
-						.with_hops(hops.clone())
-						.with_cost(5 - sequence),
-				)
-				.unwrap();
-			let source = moq_net::broadcast::Info::new().produce();
+			let source = origin.create_broadcast("live").unwrap();
 			let mut track = source.create_track("video", info.clone()).unwrap();
-			route.requested_broadcast().await.unwrap().accept(&source);
+			source.announce(route(5 - sequence)).unwrap();
 			let mut demand = track.demand();
 			while demand.wanted_changed().await.unwrap().is_none() {}
 			if sequence == 1 {
@@ -2445,7 +2431,6 @@ mod tests {
 			for sequence in 1..=sequence {
 				write_group(&mut track, sequence, &[ts(sequence * 1_000_000)]);
 			}
-			routes.push(route);
 			sources.push((source, track));
 		}
 
