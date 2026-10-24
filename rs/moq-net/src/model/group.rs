@@ -2787,10 +2787,10 @@ impl Consumer {
 		self
 	}
 
-	/// Cap reads before frame `end` without moving the start, which [`Self::with_range`]
-	/// would clamp up to the first available frame.
-	pub(super) fn with_end(mut self, end: u64) -> Self {
-		self.cursor.end = Some(usize::try_from(end).unwrap_or(usize::MAX));
+	/// Cap reads before frame `end`, or remove the cap with `None`, without moving the
+	/// start, which [`Self::with_range`] would clamp up to the first available frame.
+	pub(crate) fn with_end(mut self, end: impl Into<Option<u64>>) -> Self {
+		self.cursor.end = end.into().map(|end| usize::try_from(end).unwrap_or(usize::MAX));
 		self
 	}
 

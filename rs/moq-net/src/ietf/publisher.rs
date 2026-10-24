@@ -5237,8 +5237,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		slice: GroupSlice,
 	) -> Self {
 		if group.wire().is_none() {
+			// Only the end: a start would clamp past a prefix the group never held,
+			// which `skip_to` leaves to fail as `Lagged`.
 			group.skip_to(slice.skip);
-			group = group.with_range((Bound::Unbounded, slice.until.map_or(Bound::Unbounded, Bound::Excluded)));
+			group = group.with_end(slice.until);
 		}
 		Self {
 			session,
@@ -6503,6 +6505,45 @@ mod group_priority_test {
 		edge.finish().unwrap();
 
 		assert!(matches!(serving.await, Err(Error::Old)));
+	}
+
+	/// A local group that never held the requested prefix fails rather than serving its
+	/// tail as the whole group, with or without an end inside it.
+	#[moq_clock::test]
+	async fn a_group_missing_its_prefix_fails() {
+		for until in [None, Some(5)] {
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let mut subscriber = track.subscribe(None);
+			let mut producer = track.create_group(group::Info { sequence: 0 }).unwrap();
+			producer.start_at(1).unwrap();
+			producer
+				.write_frame(crate::Timestamp::ZERO, b"tail".as_slice())
+				.unwrap();
+			producer.finish().unwrap();
+			let group = subscriber.recv_group().await.unwrap().expect("the group");
+
+			let mut serve = GroupServe::new(
+				SinkSession::new(Default::default()),
+				ietf::GroupHeader {
+					track_alias: 0,
+					group_id: 0,
+					sub_group_id: 0,
+					publisher_priority: 0,
+					flags: Default::default(),
+				},
+				Rank::solo(kio::Producer::new(0).consume()),
+				group,
+				Some(Timescale::MILLI),
+				Version::Draft19,
+				GroupSlice { skip: 0, until },
+			);
+			let served = kio::wait(|waiter| serve.poll_serve(waiter)).await;
+			assert!(matches!(served, Err(Error::Lagged)), "until {until:?}: {served:?}");
+		}
 	}
 
 	/// A FIN holds the subgroup's bytes until the peer acknowledges it, so a subgroup

@@ -2314,11 +2314,9 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					}
 					// The end is a serving cap only: the cached group runs to the end of
 					// the group so it stays usable for anyone else (see
-					// `group::Fetch::frame_start`).
-					let mut group = group.with_range((
-						Bound::Unbounded,
-						msg.end_frame.map_or(Bound::Unbounded, Bound::Included),
-					));
+					// `group::Fetch::frame_start`). Only the end, so the start stays where
+					// the check above found it.
+					let mut group = group.with_end(msg.end_frame.and_then(|end| end.checked_add(1)));
 
 					// Matches the timescale TRACK_INFO declared for the track.
 					let stamp = Stamp::new(shared.version, group.lite_timescale(ietf));
