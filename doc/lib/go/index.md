@@ -102,11 +102,11 @@ _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 
 track := "camera"
 catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
-video, _ := moqvideo.NewProducer(catalogProducer,
-    moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: 30},
-    moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.AutoEncoder()},
-    nil,
-)
+video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
+    Input: moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
+    Output: moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.AutoEncoder()},
+    Track: &track,
+})
 _ = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 epoch := moq.MintEpoch() // a fresh epoch per run
 _ = broadcast.Announce(moq.AnnounceRoute{Epoch: &epoch})
@@ -114,6 +114,8 @@ _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings.
 
 ## Things to know
 

@@ -293,7 +293,8 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
  */
 async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> {
 	const clock = new Manual();
-	using _clock = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
 	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_17;
 	const pair = createMockTransportPair(protocol);
 	const inject = kind === "ietf" ? captureFirstUni(pair.server) : undefined;
