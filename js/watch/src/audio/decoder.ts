@@ -732,6 +732,9 @@ export class Decoder {
 		const { timestamp, frameOffset, frames } = this.#terminal.span(sample);
 		const timestampMilli = Milli.fromMicro(timestamp);
 		if (frames === 0) {
+			// Warmup can discard more than the gate releases toward the floor, so it learns that the
+			// ring anchors no earlier than here.
+			this.#ring.peek()?.discarded(timestamp);
 			sample.close();
 			return;
 		}

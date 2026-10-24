@@ -115,6 +115,18 @@ export class Backpressure {
 		return resume;
 	}
 
+	/**
+	 * Note that decoded output before `timestamp` was discarded (codec warmup), so a ring that has not
+	 * reported a playhead anchors no earlier. A refill measured from the first frame released would
+	 * otherwise stop before anything reached the ring.
+	 */
+	discarded(timestamp: Micro): void {
+		if (this.#playhead !== undefined) return;
+		if (this.#first !== undefined && timestamp > this.#first) this.#first = timestamp;
+		if (this.#anchor !== undefined && timestamp > this.#anchor) this.#anchor = timestamp;
+		this.#release();
+	}
+
 	wait(timestamp: Micro, signal: AbortSignal): Promise<void> {
 		if (this.#closed || signal.aborted || this.#admit(timestamp)) return Promise.resolve();
 		return new Promise((resolve) => {
@@ -272,6 +284,11 @@ export class AudioBuffer {
 	// The floor as the worklet takes it.
 	#latency(): Milli {
 		return Milli.fromSecond((this.#backpressure.floor / this.rate) as Second);
+	}
+
+	/** Note that decoded output before `timestamp` was discarded, so the ring anchors no earlier. */
+	discarded(timestamp: Micro): void {
+		this.#backpressure.discarded(timestamp);
 	}
 
 	/** Insert audio samples at the given timestamp, transferring their buffers. Handles out-of-order writes. */

@@ -344,6 +344,21 @@ describe("Backpressure", () => {
 		expect(gate.queued(ms(2000))).toBe(true);
 	});
 
+	// A warmup longer than the floor discards everything the refill releases toward it, so the ring
+	// would never anchor and report the playhead the gate waits on.
+	it("refills past output discarded before the ring anchors", () => {
+		const gate = new Backpressure(1000, true, Milli(2000));
+		gate.queued(ms(60_000));
+		const signal = new AbortController().signal;
+		for (let t = 0; t <= 500; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		const wait = gate.wait(ms(520), signal);
+		expect(Bun.peek.status(wait)).toBe("pending");
+		gate.discarded(ms(520));
+		expect(Bun.peek.status(wait)).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(1020), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(1040), signal))).toBe("pending");
+	});
+
 	// An utterance that arrived whole before the reset changes nothing queued, so nothing would
 	// report it again: forgetting it would hold its first frame until the next utterance.
 	it("keeps what is queued across a reset", () => {
