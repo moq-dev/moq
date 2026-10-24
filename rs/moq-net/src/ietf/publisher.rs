@@ -1279,7 +1279,10 @@ impl Publisher {
 					// falls back to the route covering it (an `origin::Dynamic`), if any. Pinned to
 					// the instance it names, if any: another is refused, never served.
 					let requesting = origin.request_broadcast(&msg.track_namespace, msg.epoch.clone());
-					let broadcast = match self.until_withdrawn(&mut stream, |waiter| requesting.poll_ok(waiter)).await {
+					let broadcast = match self
+						.until_withdrawn(&mut stream, |waiter| requesting.poll_ok(waiter))
+						.await
+					{
 						Some(Ok(broadcast)) => broadcast,
 						// The reason is the origin's, not ours: a dynamic router refusing on
 						// authorization or a drain says so, and only an unroutable path means the
@@ -1818,7 +1821,9 @@ impl Publisher {
 		track: &crate::track::Consumer,
 		msg: &ietf::Subscribe<'_>,
 	) -> Option<Result<(TrackServe, LiveEdge), Error>> {
-		let declared = self.until_withdrawn(stream, |waiter| self.peer_setup.poll_get(waiter)).await?;
+		let declared = self
+			.until_withdrawn(stream, |waiter| self.peer_setup.poll_get(waiter))
+			.await?;
 		// A live SUBSCRIBE's NEW_GROUP_REQUEST asks nothing more: subscribing is itself a join,
 		// which the track's refresh ratio judges.
 		let mut subscription = serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
@@ -1843,7 +1848,10 @@ impl Publisher {
 		// has to come after. The resolved range is applied to the preference right below, before
 		// anything is served.
 		let subscribing = track.subscribe(subscription.clone());
-		let mut subscribed = match self.until_withdrawn(stream, |waiter| subscribing.poll_ok(waiter)).await? {
+		let mut subscribed = match self
+			.until_withdrawn(stream, |waiter| subscribing.poll_ok(waiter))
+			.await?
+		{
 			Ok(subscribed) => subscribed,
 			Err(err) => return Some(Err(err)),
 		};
@@ -1851,7 +1859,8 @@ impl Publisher {
 
 		// A relay's copy that went idle cannot say where its live edge is until its route
 		// answers again; answering from its cache would advertise a stale one.
-		self.until_withdrawn(stream, |waiter| subscribed.poll_live(waiter)).await?;
+		self.until_withdrawn(stream, |waiter| subscribed.poll_live(waiter))
+			.await?;
 
 		// The filter and any fill are relative to the live edge, so snapshot it once: the fill
 		// ends exactly where a Next Object subscription begins, which is what lets the draft's
