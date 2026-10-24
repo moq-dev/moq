@@ -149,26 +149,26 @@ impl RecvStream<'_> {
 
     /// Stop accepting data on the given receive stream
     ///
-    /// Discards unread data and notifies the peer to stop transmitting. Once stopped, further
-    /// attempts to operate on a stream will yield `ClosedStream` errors.
+    /// Discards unread and leased data, returning its credit, and notifies the peer to stop
+    /// transmitting. Once stopped, further attempts to operate on a stream will yield
+    /// `ClosedStream` errors.
     pub fn stop(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
-        let lease = self.drop_lease(error_code);
-        if lease == Some(true) {
-            return Ok(());
-        }
-        let mut entry = match self.state.recv.entry(self.id) {
-            hash_map::Entry::Occupied(s) => s,
-            // A lease outlives its finished stream; the credit it returned may only have paid debt.
-            hash_map::Entry::Vacant(_) if lease.is_some() => {
-                self.unstick();
-                return Ok(());
-            }
-            hash_map::Entry::Vacant(_) => return Err(ClosedStream { _private: () }),
+        let hash_map::Entry::Occupied(mut entry) = self.state.recv.entry(self.id) else {
+            return Err(ClosedStream { _private: () });
         };
         let stream = get_or_insert_recv(entry.get_mut(), self.state.stream_receive_window);
 
-        let (read_credits, stop_sending) = stream.stop()?;
-        if stop_sending.should_transmit() {
+        // An eviction already discarded the buffer, leaving the peer and the bytes the reader
+        // took to this stop.
+        let (read_credits, stop_sending) = match stream.lease.evicted {
+            true => (0, stream.final_offset_unknown()),
+            false => {
+                let (credits, stop_sending) = stream.stop()?;
+                (credits, stop_sending.should_transmit())
+            }
+        };
+        let mut lease = std::mem::take(&mut stream.lease);
+        if stop_sending {
             self.pending.stop_sending.push(frame::StopSending {
                 id: self.id,
                 error_code,
@@ -180,13 +180,15 @@ impl RecvStream<'_> {
         // state immediately.
         if !stream.final_offset_unknown() {
             let recv = entry.remove().expect("must have recv when stopping");
-            self.state.stream_recv_freed(self.id, recv);
+            // The lease was taken out above, so this returns no credit.
+            let _ = self.state.stream_recv_freed(self.id, recv);
             self.state.queue_max_stream_id(self.pending);
         }
 
-        if self.state.add_read_credits(read_credits).should_transmit() {
-            self.pending.max_data = true;
-        }
+        let leased = self.state.discard_lease(self.id, &mut lease);
+        let transmit = self.state.add_read_credits(read_credits);
+        self.pending.max_data |= leased.should_transmit() || transmit.should_transmit();
+        // The credit returned may only have paid a shrunk window's debt.
         self.unstick();
 
         Ok(())
@@ -211,11 +213,16 @@ impl RecvStream<'_> {
         };
 
         // Clean up state after application observes the reset, since there's no reason for the
-        // application to attempt to read or stop the stream once it knows it's reset
+        // application to attempt to read or stop the stream once it knows it's reset. A lease still
+        // holding credit returns it here, since nothing is left to release or stop it.
         let (_, recv) = entry.remove_entry();
-        self.state
+        let transmit = self
+            .state
             .stream_recv_freed(self.id, recv.expect("must have recv on reset"));
+        self.pending.max_data |= transmit.should_transmit();
         self.state.queue_max_stream_id(self.pending);
+        // The credit returned may only have paid a shrunk window's debt.
+        self.unstick();
 
         Ok(Some(code))
     }

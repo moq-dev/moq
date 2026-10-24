@@ -5,7 +5,7 @@ use thiserror::Error;
 use tracing::debug;
 
 use super::state::get_or_insert_recv;
-use super::{ClosedStream, Retransmits, ShouldTransmit, StreamId, StreamsState};
+use super::{ClosedStream, Leased, Retransmits, ShouldTransmit, StreamId, StreamsState};
 use crate::connection::assembler::{Assembler, Chunk, IllegalOrderedRead};
 use crate::connection::streams::state::StreamRecv;
 use crate::{TransportError, VarInt, frame};
@@ -22,6 +22,8 @@ pub(super) struct Recv {
     #[cfg(feature = "mux")]
     pub(super) data_end: u64,
     pub(super) stopped: bool,
+    /// What a reader leased, which lives as long as the stream does.
+    pub(super) lease: Leased,
 }
 
 impl Recv {
@@ -34,6 +36,7 @@ impl Recv {
             #[cfg(feature = "mux")]
             data_end: 0,
             stopped: false,
+            lease: Leased::default(),
         })
     }
 
@@ -48,6 +51,7 @@ impl Recv {
             self.data_end = 0;
         }
         self.stopped = false;
+        self.lease = Leased::default();
     }
 
     /// Process a STREAM frame
@@ -82,10 +86,9 @@ impl Recv {
 
         let new_bytes = self.credit_consumed_by(end, received, max_data)?;
 
-        // Stopped streams don't need to wait for the actual data, they just need to know
-        // how much there was.
+        // A stopped stream keeps no data, but an evicted one waits for its stop knowing whether
+        // the peer is done.
         if frame.fin
-            && !self.stopped
             && let RecvState::Recv { size } = &mut self.state
         {
             *size = Some(end);
@@ -119,21 +122,31 @@ impl Recv {
             return Err(ClosedStream { _private: () });
         }
 
-        // Issue flow control credit for unread data. A reset already credited everything but the
-        // data still owed below its Reliable Size.
-        let read_credits = match self.state {
+        let read_credits = self.unread_credit();
+        // This may send a spurious STOP_SENDING if we've already received all data, but it's a bit
+        // fiddly to distinguish that from the case where we've received a FIN but are missing some
+        // data that the peer might still be trying to retransmit, in which case a STOP_SENDING is
+        // still useful. A stream read to its end, as a lease leaves it, sends none.
+        let stop_sending = self.is_receiving() && !self.is_read();
+        self.stopped = true;
+        self.assembler.clear();
+        Ok((read_credits, ShouldTransmit(stop_sending)))
+    }
+
+    /// The connection credit held for data the application has not read: everything below the
+    /// end, or after a reset, what is still owed below its Reliable Size.
+    pub(super) fn unread_credit(&self) -> u64 {
+        match self.state {
             RecvState::Recv { .. } => self.end - self.assembler.bytes_read(),
             RecvState::ResetRecvd { reliable_size, .. } => {
                 self.assembler.unread_before(reliable_size)
             }
-        };
-        self.stopped = true;
-        self.assembler.clear();
-        // This may send a spurious STOP_SENDING if we've already received all data, but it's a bit
-        // fiddly to distinguish that from the case where we've received a FIN but are missing some
-        // data that the peer might still be trying to retransmit, in which case a STOP_SENDING is
-        // still useful.
-        Ok((read_credits, ShouldTransmit(self.is_receiving())))
+        }
+    }
+
+    /// Whether the application has read everything the stream will deliver.
+    pub(super) fn is_read(&self) -> bool {
+        self.final_offset().is_some() && self.unread_credit() == 0
     }
 
     /// Returns the window that should be advertised in a `MAX_STREAM_DATA` frame
@@ -380,7 +393,10 @@ impl<'a> Chunks<'a> {
                     ChunksState::Readable(recv) => StreamRecv::Open(recv),
                     _ => unreachable!("state must be ChunkState::Readable"),
                 };
-                self.streams.stream_recv_freed(self.id, recv);
+                self.pending.max_data |= self
+                    .streams
+                    .stream_recv_freed(self.id, recv)
+                    .should_transmit();
                 Err(ReadError::Reset(error_code))
             }
             RecvState::Recv { size } => {
@@ -391,7 +407,10 @@ impl<'a> Chunks<'a> {
                         ChunksState::Readable(recv) => StreamRecv::Open(recv),
                         _ => unreachable!("state must be ChunkState::Readable"),
                     };
-                    self.streams.stream_recv_freed(self.id, recv);
+                    self.pending.max_data |= self
+                        .streams
+                        .stream_recv_freed(self.id, recv)
+                        .should_transmit();
                     Ok(None)
                 } else {
                     // We don't need a distinct `ChunksState` variant for a blocked stream because
@@ -404,21 +423,10 @@ impl<'a> Chunks<'a> {
         }
     }
 
-    /// Keep the connection flow control credit for the bytes read so far, returning how many.
-    ///
-    /// Stream credit still advances on [`Self::finalize()`], but these bytes stay counted in
-    /// [`StreamsState::held`] until a lease releases or drops them.
-    pub(super) fn withhold(&mut self) -> u64 {
-        let bytes = mem::take(&mut self.read);
-        self.streams.held += bytes;
-        bytes
-    }
-
     /// Mark the read data as consumed from the stream.
     ///
     /// The number of read bytes will be released from the congestion window,
     /// allowing the remote peer to send more data if it was previously blocked.
-    /// Bytes a receive lease holds keep their connection credit until it releases them.
     ///
     /// If [`ShouldTransmit::should_transmit()`] returns `true`,
     /// a packet needs to be sent to the peer informing them that the stream is unblocked.
