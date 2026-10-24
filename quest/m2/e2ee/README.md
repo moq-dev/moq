@@ -63,6 +63,8 @@ Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so
 - [Encrypted native CLI](/quest/m2/e2ee/cli.md) - the native CLI publishes and
   plays encrypted media without exposing credentials through process metadata
   or logs
+- [Typed codes for dropped datagrams](/quest/m2/e2ee/datagram-drop-codes.md) -
+  a malformed datagram is dropped with its draft code, not `authentication`
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
