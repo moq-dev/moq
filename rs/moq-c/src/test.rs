@@ -628,6 +628,7 @@ fn publish_catalog_config_invalid_broadcast() {
 	let name = "video";
 	let codec = "vp8";
 	let video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -683,6 +684,7 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 	let name = "0.avc3";
 	let codec = "avc1.42c01e";
 	let video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -733,6 +735,7 @@ fn publish_video_config_replaces_its_own_rendition() {
 	let name = "authored";
 	let codec = "vp8";
 	let mut video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -805,6 +808,7 @@ fn publish_catalog_roundtrip() {
 	let height: u32 = 1080;
 	let description: &[u8] = &[0x01, 0x02, 0x03];
 	let video = moq_video_config {
+		preference: 0,
 		name: video_name.as_ptr() as *const c_char,
 		name_len: video_name.len(),
 		label: video_label.as_ptr() as *const c_char,
@@ -820,6 +824,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
 	let disabled_video_name = "video-disabled";
 	let disabled_video = moq_video_config {
+		preference: 0,
 		name: disabled_video_name.as_ptr() as *const c_char,
 		name_len: disabled_video_name.len(),
 		label: std::ptr::null(),
@@ -882,6 +887,7 @@ fn publish_catalog_roundtrip() {
 
 	// The video rendition we authored comes back through the consume API.
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -1005,6 +1011,7 @@ fn a_half_specified_coded_size_round_trips() {
 	let name = "video";
 	let codec = "vp8";
 	let mut video = moq_video_config {
+		preference: -1,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -1025,6 +1032,7 @@ fn a_half_specified_coded_size_round_trips() {
 	let catalog = id(catalog_cb.recv());
 
 	let mut read = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -1038,6 +1046,7 @@ fn a_half_specified_coded_size_round_trips() {
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_video_config(catalog, 0, &mut read) }, 0);
+	assert_eq!(read.preference, -1);
 	assert_eq!(read.coded_width, 1920);
 	assert_eq!(read.coded_height, 0, "the absent height must not come back invented");
 
@@ -1045,6 +1054,7 @@ fn a_half_specified_coded_size_round_trips() {
 	// size across unchanged, which is the case a shared presence flag would break
 	// by inventing a zero height.
 	let forward = publish_broadcast(origin, b"half-coded-size-forwarded");
+	video.preference = read.preference;
 	video.coded_width = read.coded_width;
 	video.coded_height = read.coded_height;
 	assert_eq!(unsafe { moq_publish_video_config(forward, &video) }, 0);
@@ -1054,6 +1064,7 @@ fn a_half_specified_coded_size_round_trips() {
 	let forwarded_task = id(unsafe { moq_consume_catalog(forwarded, Some(channel_callback), forwarded_cb.ptr) });
 	let forwarded_catalog = id(forwarded_cb.recv());
 	assert_eq!(unsafe { moq_consume_video_config(forwarded_catalog, 0, &mut read) }, 0);
+	assert_eq!(read.preference, -1);
 	assert_eq!(read.coded_width, 1920);
 	assert_eq!(read.coded_height, 0, "forwarding must not invent the absent height");
 
@@ -1083,6 +1094,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 
 	let codec = b"vp8";
 	let video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -1108,6 +1120,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 
 	// The declaration survives the round trip, so a consumer knows to parse LOC.
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -1241,6 +1254,7 @@ fn unpublishable_catalog_containers_are_rejected() {
 	let name = "video";
 	let codec = "vp8";
 	let config = |container| moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -3440,6 +3454,7 @@ fn local_publish_consume() {
 	assert_eq!(codec, "opus");
 
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -3948,6 +3963,7 @@ fn video_publish_consume() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),

@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 Generated connection APIs now expose `MoqConnectionState` and `MoqConnectionPhase`, with `state()` and revision-based `state_changed(after)` instead of status, connect-count, and failure polls. Connect returns before its first dial completes. Regenerate bindings from the matching Rust metadata.
 
+### Video rendition preference
+
+`MoqVideo` gains `preference: Int`, defaulting to `0`. Update positional constructors and regenerate the bindings with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.

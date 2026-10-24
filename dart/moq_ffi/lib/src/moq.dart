@@ -1990,6 +1990,7 @@ class MoqVideo {
   final MoqDimensions? displayAspect;
   final int? bitrate;
   final bool enabled;
+  final int preference;
   final double? framerate;
   final MoqContainer container;
   MoqVideo({
@@ -2003,6 +2004,7 @@ class MoqVideo {
     this.displayAspect,
     this.bitrate,
     this.enabled = true,
+    this.preference = 0,
     this.framerate,
     required this.container,
   });
@@ -2065,6 +2067,11 @@ class FfiConverterMoqVideo {
     );
     final enabled = enabled_lifted.value;
     new_offset += enabled_lifted.bytesRead;
+    final preference_lifted = FfiConverterInt32.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final preference = preference_lifted.value;
+    new_offset += preference_lifted.bytesRead;
     final framerate_lifted = FfiConverterOptionalDouble64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -2087,6 +2094,7 @@ class FfiConverterMoqVideo {
         displayAspect: displayAspect,
         bitrate: bitrate,
         enabled: enabled,
+        preference: preference,
         framerate: framerate,
         container: container,
       ),
@@ -2106,6 +2114,7 @@ class FfiConverterMoqVideo {
         FfiConverterOptionalMoqDimensions.allocationSize(value.displayAspect) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
         FfiConverterBool.allocationSize(value.enabled) +
+        FfiConverterInt32.allocationSize(value.preference) +
         FfiConverterOptionalDouble64.allocationSize(value.framerate) +
         FfiConverterMoqContainer.allocationSize(value.container) +
         0;
@@ -2156,6 +2165,10 @@ class FfiConverterMoqVideo {
       value.enabled,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterInt32.write(
+      value.preference,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     new_offset += FfiConverterOptionalDouble64.write(
       value.framerate,
       Uint8List.view(buf.buffer, new_offset),
@@ -2178,6 +2191,7 @@ class FfiConverterMoqVideo {
         FfiConverterOptionalMoqDimensions.allocationSize(value.displayAspect) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
         FfiConverterBool.allocationSize(value.enabled) +
+        FfiConverterInt32.allocationSize(value.preference) +
         FfiConverterOptionalDouble64.allocationSize(value.framerate) +
         FfiConverterMoqContainer.allocationSize(value.container) +
         0;
@@ -13359,6 +13373,29 @@ class FfiConverterDouble64 {
   static int write(double value, Uint8List buf) {
     buf.buffer.asByteData(buf.offsetInBytes).setFloat64(0, value);
     return FfiConverterDouble64.allocationSize();
+  }
+}
+
+class FfiConverterInt32 {
+  static int lift(int value) => value;
+  static LiftRetVal<int> read(Uint8List buf) {
+    return LiftRetVal(buf.buffer.asByteData(buf.offsetInBytes).getInt32(0), 4);
+  }
+
+  static int lower(int value) {
+    if (value < -2147483648 || value > 2147483647) {
+      throw ArgumentError("Value out of range for i32: " + value.toString());
+    }
+    return value;
+  }
+
+  static int allocationSize([int value = 0]) {
+    return 4;
+  }
+
+  static int write(int value, Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, lower(value));
+    return 4;
   }
 }
 

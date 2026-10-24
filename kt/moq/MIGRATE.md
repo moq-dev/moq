@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `Moq.connect` returns a connecting native session. Replace `status()`, `connects()`, and failure polls with `session.state()` and `session.stateChanged(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
 
+### Video rendition preference
+
+`dev.moq.media.Video` gains `preference: Int`, defaulting to `0`. Update positional constructors and use the matching moq-ffi package. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes an `AnnounceRoute`
 
 `BroadcastProducer.announce` takes `AnnounceRoute(cost, epoch)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.

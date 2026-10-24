@@ -260,6 +260,7 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 	MoqRendition::Video {
 		id: id.into(),
 		config: MoqVideo {
+			preference: 0,
 			label: None,
 			broadcast: None,
 			epoch: None,
