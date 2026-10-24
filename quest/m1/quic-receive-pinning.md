@@ -46,4 +46,3 @@ and report it in the PR.
 ## Related
 
 - [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - redesigns receive buffer ownership; must keep this bound
-- [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - the other lease fixes from the same audit

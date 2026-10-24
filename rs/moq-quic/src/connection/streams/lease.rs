@@ -156,11 +156,6 @@ impl Leased {
         (self.priority, Reverse(id))
     }
 
-    /// Whether the stream is in [`StreamsState::ranks`].
-    pub(super) fn ranked(&self) -> bool {
-        self.ranked
-    }
-
     /// Note that data arrived, waking a waiting reader, and return the stream's rank if it was
     /// leased but is not ranked yet.
     pub(super) fn arrived(&mut self, id: StreamId) -> Option<Rank> {
@@ -442,8 +437,12 @@ impl StreamsState {
         self.add_read_credits(bytes)
     }
 
-    /// Return the credit of the bytes `lease` holds, for a stream stopped or freed.
-    pub(super) fn discard_lease(&mut self, lease: &mut Leased) -> ShouldTransmit {
+    /// Take the lease of `id`, stopped or freed, out of the eviction order and return the credit
+    /// of the bytes it holds.
+    pub(super) fn discard_lease(&mut self, id: StreamId, lease: &mut Leased) -> ShouldTransmit {
+        if std::mem::take(&mut lease.ranked) {
+            self.ranks.remove(&lease.rank(id));
+        }
         let held = lease.discard();
         if std::mem::take(&mut lease.evicted) {
             self.evicted_held -= held;

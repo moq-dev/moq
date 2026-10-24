@@ -11,8 +11,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tracing::{debug, trace};
 
 use super::{
-    Leased, Next, Recv, Retransmits, Schedule, Send, SendState, ShouldTransmit, StreamEvent,
-    StreamHalf, ThinRetransmits, lease::Rank,
+    Next, Recv, Retransmits, Schedule, Send, SendState, ShouldTransmit, StreamEvent, StreamHalf,
+    ThinRetransmits, lease::Rank,
 };
 use crate::{
     Dir, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
@@ -1247,19 +1247,10 @@ impl StreamsState {
     /// Recycle a receive stream's state, returning any credit its lease still holds, as when a
     /// plain read ends a stream a lease read from.
     pub(super) fn stream_recv_freed(&mut self, id: StreamId, mut recv: StreamRecv) {
-        let lease = &mut recv.inner_mut().lease;
-        self.unrank(id, lease);
-        let _ = self.discard_lease(lease);
+        let _ = self.discard_lease(id, &mut recv.inner_mut().lease);
         self.unlooked.remove(&id);
         self.free_recv.push(recv.free(self.stream_receive_window));
         self.stream_freed(id, StreamHalf::Recv);
-    }
-
-    /// Take a stream out of the eviction order.
-    pub(super) fn unrank(&mut self, id: StreamId, lease: &Leased) {
-        if lease.ranked() {
-            self.ranks.remove(&lease.rank(id));
-        }
     }
 
     pub(super) fn max_send_data(&self, id: StreamId) -> VarInt {

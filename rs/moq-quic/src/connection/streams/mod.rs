@@ -184,8 +184,7 @@ impl RecvStream<'_> {
             self.state.queue_max_stream_id(self.pending);
         }
 
-        let leased = self.state.discard_lease(&mut lease);
-        self.state.unrank(self.id, &lease);
+        let leased = self.state.discard_lease(self.id, &mut lease);
         let transmit = self.state.add_read_credits(read_credits);
         self.pending.max_data |= leased.should_transmit() || transmit.should_transmit();
         // The credit returned may only have paid a shrunk window's debt.
