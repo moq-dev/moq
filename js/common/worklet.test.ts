@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { build } from "vite";
+import { build, createServer } from "vite";
 import { worklet } from "./vite-plugin-worklet";
 
 // A library build must never reference its worklets through import.meta.url: esbuild, Rollup, and Bun
@@ -48,4 +48,36 @@ test("library builds load worklets from a lazy blob or a hosted base, leaving no
 	}
 
 	expect(spawnSync("pgrep", ["-l", "-P", String(process.pid)], { encoding: "utf8" }).stdout).toBe("");
+});
+
+// A page that calls assets() in dev fetches the same path a build emits, so the dev server serves it.
+test("the dev server serves hosted worklets where builds emit them", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "worklet-"));
+	const server = await createServer({
+		configFile: false,
+		logLevel: "silent",
+		root: dir,
+		base: "/app/",
+		plugins: [worklet()],
+		server: { port: 0, ws: false },
+	});
+	try {
+		writeFileSync(join(dir, "render.ts"), `registerProcessor("render", class extends AudioWorkletProcessor {});\n`);
+		writeFileSync(join(dir, "index.ts"), `export { default } from "./render.ts?worklet";\n`);
+		await server.listen();
+		const origin = server.resolvedUrls?.local[0];
+		if (!origin) throw new Error("dev server has no local URL");
+
+		// Unknown until a page imports the worklet.
+		expect((await fetch(new URL("assets/render.js", origin))).status).toBe(404);
+		await server.transformRequest("/index.ts");
+		await server.transformRequest("/render.ts?worklet");
+
+		const res = await fetch(new URL("assets/render.js", origin));
+		expect(res.headers.get("content-type")).toBe("text/javascript");
+		expect(await res.text()).toContain(`registerProcessor("render"`);
+	} finally {
+		await server.close();
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
