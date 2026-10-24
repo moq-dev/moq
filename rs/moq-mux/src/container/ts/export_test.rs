@@ -1149,6 +1149,154 @@ async fn export_decodes_where_the_source_did() {
 	}
 }
 
+/// A broadcast of one H.264 rendition declaring `reorder`, with a group of `stamps` (ms, in
+/// decode order) for each entry, exported as a recording.
+/// The producers stay alive with the export, so it reads the retained tracks.
+async fn export_declared(reorder: u8, groups: &[&[u64]]) -> (Export<crate::catalog::Consumer>, impl Sized) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let track = broadcast
+		.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x64,
+		constraints: 0,
+		level: 0x1f,
+		inline: true,
+	});
+	config.reorder = Some(reorder);
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert("video".into(), config);
+	let format = HangContainer::Legacy(Kind::Video);
+	for (sequence, stamps) in groups.iter().enumerate() {
+		let mut group = track
+			.create_group(moq_net::group::Info {
+				sequence: sequence as u64,
+			})
+			.unwrap();
+		let frames: Vec<_> = stamps
+			.iter()
+			.enumerate()
+			.map(|(index, &ms)| Frame {
+				timestamp: Timestamp::from_millis(ms).unwrap(),
+				duration: None,
+				keyframe: index == 0,
+				payload: if index == 0 {
+					annexb(&[SPS, PPS, &[0x65, 0xab, 0xcd]])
+				} else {
+					annexb(&[&[0x41, 0xab, 0xcd]])
+				},
+			})
+			.collect();
+		format.write(&mut group, &frames).unwrap();
+		group.finish().unwrap();
+	}
+	track.finish().unwrap();
+	let export = open_export(crate::source::announced(&consumer).await)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	(export, (broadcast, catalog, track))
+}
+
+/// A rendition that declares its reorder depth decodes each group from that group's frames: its
+/// first frames a tick apart below its earliest presentation, wrapping the 33-bit DTS below the
+/// timeline's zero, and the rest at its presentation slots.
+#[tokio::test(start_paused = true)]
+async fn export_declared_reorder_decodes_each_group_from_its_frames() {
+	let (mut export, _keep) = export_declared(2, &[&[0, 160, 80, 40, 120], &[400, 560, 480, 440, 520]]).await;
+	let bytes: Vec<u8> = drain_frames(&mut export)
+		.await
+		.iter()
+		.flat_map(|frame| frame.payload.iter().copied())
+		.collect();
+	let wrap = 1 << 33;
+	let ms = |ms: u64| ms * 90;
+	assert_eq!(
+		video_pes_timing(&bytes),
+		[
+			(ms(0), wrap - 2),
+			(ms(160), wrap - 1),
+			(ms(80), 0),
+			(ms(40), ms(40)),
+			(ms(120), ms(80)),
+			(ms(400), ms(400) - 2),
+			(ms(560), ms(400) - 1),
+			(ms(480), ms(400)),
+			(ms(440), ms(440)),
+			(ms(520), ms(480)),
+		]
+	);
+}
+
+/// Open-GOP leading pictures an export trims, because it started at their group, still take
+/// their slots: the group's other frames decode where they do on an export that read the group
+/// before and kept them.
+#[tokio::test(start_paused = true)]
+async fn trimmed_leading_pictures_keep_their_slots() {
+	async fn timing(groups: &[&[u64]]) -> Vec<(u64, u64)> {
+		let (mut export, _keep) = export_declared(2, groups).await;
+		let bytes: Vec<u8> = drain_frames(&mut export)
+			.await
+			.iter()
+			.flat_map(|frame| frame.payload.iter().copied())
+			.collect();
+		video_pes_timing(&bytes)
+	}
+	let open: &[u64] = &[400, 320, 360, 560, 480, 440, 520];
+	let kept = timing(&[&[0, 160, 80, 40, 120], open]).await;
+	let joined = timing(&[open]).await;
+	let ms = |ms: u64| ms * 90;
+	assert_eq!(
+		kept[5..],
+		[
+			(ms(400), ms(320) - 2),
+			(ms(320), ms(320) - 1),
+			(ms(360), ms(320)),
+			(ms(560), ms(360)),
+			(ms(480), ms(400)),
+			(ms(440), ms(440)),
+			(ms(520), ms(480)),
+		]
+	);
+	let shared: Vec<_> = kept[5..]
+		.iter()
+		.filter(|(pts, _)| ![ms(320), ms(360)].contains(pts))
+		.collect();
+	assert_eq!(joined.iter().collect::<Vec<_>>(), shared);
+}
+
+/// A declared depth of zero decodes every frame at its presentation, and refuses a frame that
+/// reorders, rather than inferring a decode delay.
+#[tokio::test(start_paused = true)]
+async fn export_declared_zero_reorder_decodes_at_presentation() {
+	let (mut export, _keep) = export_declared(0, &[&[0, 40, 80, 120]]).await;
+	let bytes: Vec<u8> = drain_frames(&mut export)
+		.await
+		.iter()
+		.flat_map(|frame| frame.payload.iter().copied())
+		.collect();
+	let timing = video_pes_timing(&bytes);
+	assert_eq!(timing.len(), 4);
+	assert!(timing.iter().all(|(pts, dts)| pts == dts), "{timing:?}");
+
+	let (mut export, _keep) = export_declared(0, &[&[0, 80, 40, 120]]).await;
+	let err = loop {
+		match tokio::time::timeout(DRAIN, export.next()).await {
+			Ok(Ok(Some(_))) => {}
+			Ok(Ok(None)) | Err(_) => panic!("a frame reordered past the declared depth was exported"),
+			Ok(Err(err)) => break err,
+		}
+	};
+	assert!(err.to_string().contains("declared depth"), "{err}");
+}
+
 /// #2937: the PCR must be a uniform bounded-interval ramp, not a sample of the
 /// per-unit decode clock. On a reordered (B-frame) capture the authored DTS is a
 /// saw (reference frames leap a reorder span, B-frames nudge one tick), so a PCR

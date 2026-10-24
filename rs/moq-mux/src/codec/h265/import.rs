@@ -377,6 +377,14 @@ mod tests {
 		assert_eq!(config(&ceiling).unwrap().framerate, None);
 	}
 
+	/// The SPS's reorder depth at its highest sub-layer becomes the catalog's declaration.
+	#[test]
+	fn config_declares_the_sps_reorder_depth() {
+		let mut pyramid = vec![0, 0, 0, 1];
+		pyramid.extend_from_slice(fixtures::SPS_PYRAMID);
+		assert_eq!(config(&pyramid).unwrap().reorder, Some(2));
+	}
+
 	/// Square samples carry no display aspect, so the picture is shown at its own size.
 	#[test]
 	fn square_samples_carry_no_display_aspect() {
