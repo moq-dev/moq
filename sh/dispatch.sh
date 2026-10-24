@@ -369,6 +369,10 @@ run_lane() {
             set +e
             (
                 set -e
+                # A subshell dies on TERM at once, orphaning the phase's
+                # processes. Trapped, it exits once they do, so a cancel
+                # returns only after the whole tree has exited.
+                trap 'exit 143' TERM
                 step "$phase" "$module"
             )
             status=$?
@@ -422,7 +426,7 @@ report() {
 cancel() {
     local pid
     for pid in "${!running[@]}"; do
-        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        kill -TERM -- "-$pid" 2>/dev/null || true
     done
 }
 
@@ -436,11 +440,12 @@ trap 'cancel; wait; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Concurrent lanes buffer their output and print it whole when they finish,
-# each in its own process group so a cancel reaches its whole tree. A serial
-# run streams instead, in the terminal's group. The first failure cancels the
-# running lanes and starts no more, as a serial run stops at its first failure.
-((limit == 1)) || set -m
+# Each lane runs in its own process group, so a cancel reaches its whole tree;
+# a lane shell defers its own TERM trap until the running phase exits.
+# Concurrent lanes buffer their output and print it whole when they finish; a
+# serial run streams instead. The first failure cancels the running lanes and
+# starts no more, as a serial run stops at its first failure.
+set -m
 while true; do
     while [[ -z "$failed" && -z "$lone" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
         name=${lanes[next]}

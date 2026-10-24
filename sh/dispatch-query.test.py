@@ -238,6 +238,29 @@ class QueryTests(unittest.TestCase):
         self.assertNotIn("go check", calls)
         self.assertNotIn("dart check", calls)
 
+    def test_terminating_the_run_stops_the_running_phase(self):
+        started = self.root / "started"
+        os.mkfifo(started)
+        pid = self.root / "pid"
+        self.stub_ci(f'''case "$*" in
+    "rs lint-changed "*) echo $$ >"{pid}"; echo >"{started}"; exec sleep 600 ;;
+esac
+''')
+        self.change("rs/moq-clock/src/lib.rs")
+        for jobs in ("1", "3"):
+            with self.subTest(jobs=jobs):
+                run = subprocess.Popen(["bash", "sh/dispatch.sh", "ci", "origin/main"],
+                                       cwd=self.repo, env=dict(self.env, MOQ_CHECK_JOBS=jobs),
+                                       text=True, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.PIPE)
+                started.read_text()
+                run.terminate()
+                _, stderr = run.communicate(timeout=60)
+                self.assertEqual(run.returncode, 143, stderr)
+                self.assertRegex(stderr, r"\d+  check rs \(cancelled\)")
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int(pid.read_text()), 0)
+
     def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
         self.change("rs/moq-clock/src/lib.rs")
         calls = self.run_ci()
