@@ -96,10 +96,13 @@ pub fn wall() -> Wall {
 	runtime::wall()
 }
 
-/// The first monotonic and wall readings observed on the ambient clock.
+/// The ambient clock's origin: an instant and its wall time, fixed at the first read.
 ///
-/// Unlike [`wall`], the wall half does not change after a clock correction.
-pub fn anchor() -> (Instant, Wall) {
+/// It maps instants onto wall time and, unlike [`wall`], does not move after a clock
+/// correction. `@moq/clock`'s `origin()` returns only the wall time of instant zero, in
+/// milliseconds; here [`Wall`] is nanoseconds and comes paired with an instant, since a
+/// runtime clock's instant zero predates 1970.
+pub fn origin() -> (Instant, Wall) {
 	#[cfg(feature = "manual")]
 	if let Some(clock) = deadline::installed() {
 		return clock.anchor();

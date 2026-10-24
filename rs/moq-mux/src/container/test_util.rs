@@ -363,12 +363,18 @@ impl Link {
 		// Each driver runs as soon as its handshake resolves: the accept waits on the client's SETUP.
 		let sessions = tokio::join!(
 			async {
-				let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
+				let (session, driver) = client
+					.connect(moq_net::time::Instant::now(), client_transport)
+					.await
+					.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			},
 			async {
-				let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
+				let (session, driver) = server
+					.accept(moq_net::time::Instant::now(), server_transport)
+					.await
+					.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			}
@@ -402,12 +408,18 @@ impl Link {
 			.with_publisher(from.consume());
 		let sessions = tokio::join!(
 			async {
-				let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
+				let (session, driver) = client
+					.connect(moq_net::time::Instant::now(), client_transport)
+					.await
+					.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			},
 			async {
-				let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
+				let (session, driver) = server
+					.accept(moq_net::time::Instant::now(), server_transport)
+					.await
+					.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			}
@@ -487,6 +499,17 @@ impl moq_net::transport::poll::Session for Gated {
 		options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
 	) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, Self::Error>> {
 		self.inner.poll_open_bi(cx, options)
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: moq_net::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as moq_net::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.inner.poll_open_request(cx, options)
 	}
 
 	fn send_group(&mut self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {

@@ -40,7 +40,7 @@ decoder. Settle while building:
 Tests: a rendition advertising an hour of jitter allocates a ring of the
 receiver's fixed size and plays at the advertised delay on a stubbed clock;
 the replay harness rows keep their budgets. No wire change;
-any `js/watch` API change goes in its `MIGRATE.md`.
+any `js/watch` API change says how to migrate in the PR's Impact bullet.
 
 ## Related
 

@@ -256,7 +256,7 @@ in
             "${pkgs.moq-cli}/bin/moq auth serve"
             "--listen 127.0.0.1:${toString cfg.auth.port}"
             "--key ${authKey}"
-            "--mtls-publish '**' --mtls-subscribe '**' --mtls-peer"
+            "--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer"
           ]
           ++ lib.optionals (cfg.auth.publicPath != null) [
             "--public-publish '${publicPattern}' --public-subscribe '${publicPattern}'"
@@ -356,7 +356,7 @@ in
       }
       // lib.optionalAttrs (cfg.acme.domains != [ ]) {
         MOQ_ACME_DOMAINS = lib.concatStringsSep "," cfg.acme.domains;
-        MOQ_ACME_DIR = "${cfg.stateDir}/acme";
+        MOQ_ACME_CACHE = "${cfg.stateDir}/acme";
         MOQ_WEB_HTTPS_LISTEN = "[::]:${toString cfg.acme.httpsPort}";
       }
       // lib.optionalAttrs (cfg.acme.contact != [ ]) {

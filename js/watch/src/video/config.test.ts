@@ -56,4 +56,5 @@ test("routing and decoder inputs change the playback identity", () => {
 	expect(playbackIdentity(config({ container: { kind: "loc" } }))).not.toEqual(base);
 	expect(playbackIdentity(config({ displayAspectWidth: 16, displayAspectHeight: 9 }))).not.toEqual(base);
 	expect(playbackIdentity(config({ optimizeForLatency: false }))).not.toEqual(base);
+	expect(playbackIdentity(config({ interlaced: true }))).not.toEqual(base);
 });

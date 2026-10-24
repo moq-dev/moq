@@ -530,8 +530,8 @@ function decodeTransportParams(buffer: Uint8Array): TransportParams {
 			throw new Error("transport parameter truncated");
 		}
 
-		const paramData = buffer.slice(0, len);
-		buffer = buffer.slice(len);
+		let paramData: Uint8Array;
+		[paramData, buffer] = take(buffer, len);
 
 		// A repeated recognized parameter is a protocol error (mirrors Rust's
 		// DuplicateParam). Unknown IDs fall through and may repeat.
@@ -619,17 +619,29 @@ export function decode(buffer: Uint8Array, _version: WireFormat): Any | null {
 	return decodeQMux(buffer);
 }
 
-/** Slice `len` bytes off the front of `buffer`, rejecting truncated input.
+/** Split `len` bytes off the front of `buffer`, rejecting truncated input.
  *
- * `Uint8Array.slice` clamps to the buffer end and silently returns short data,
+ * `Uint8Array.subarray` clamps to the buffer end and silently returns short data,
  * which is the wrong behavior for parsing length-prefixed wire formats. Use
  * `take` at every site that reads a varint-declared payload length.
+ *
+ * Both halves are views of `buffer`, so splitting a record frame by frame copies
+ * nothing. A payload that outlives the record is copied by {@link own}.
  */
 function take(buffer: Uint8Array, len: number): [Uint8Array, Uint8Array] {
 	if (buffer.byteLength < len) {
 		throw new Error(`frame truncated: need ${len} bytes, have ${buffer.byteLength}`);
 	}
-	return [buffer.slice(0, len), buffer.slice(len)];
+	return [buffer.subarray(0, len), buffer.subarray(len)];
+}
+
+/** A copy of a payload the session retains past the record it arrived in.
+ *
+ * A view would keep the whole record alive behind it, so a tiny frame could pin
+ * a record many times its size against credit that counts only the frame.
+ */
+function own(payload: Uint8Array): Uint8Array {
+	return payload.slice();
 }
 
 /** Decode all frames from a QMux Record payload (draft-01).
@@ -650,197 +662,7 @@ export function decodeRecord(buffer: Uint8Array): Any[] {
 }
 
 function decodeQMux(buffer: Uint8Array): Any | null {
-	let v: VarInt;
-
-	[v, buffer] = VarInt.decode(buffer);
-	const frameType = v.value;
-
-	// PADDING
-	if (frameType === 0x00n) {
-		return null;
-	}
-
-	// STREAM frames: 0x08-0x0f
-	if (frameType >= 0x08n && frameType <= 0x0fn) {
-		const hasOff = (frameType & 0x04n) !== 0n;
-		const hasLen = (frameType & 0x02n) !== 0n;
-		const hasFin = (frameType & 0x01n) !== 0n;
-
-		[v, buffer] = VarInt.decode(buffer);
-		const id = new Stream.Id(v);
-
-		let offset: bigint | undefined;
-		if (hasOff) {
-			[v, buffer] = VarInt.decode(buffer);
-			offset = v.value;
-		}
-
-		let data: Uint8Array;
-		if (hasLen) {
-			[v, buffer] = VarInt.decode(buffer);
-			const len = Number(v.value);
-			[data, buffer] = take(buffer, len);
-		} else {
-			data = buffer;
-		}
-
-		return { type: "stream", id, offset, data, fin: hasFin };
-	}
-
-	// RESET_STREAM
-	if (frameType === 0x04n) {
-		[v, buffer] = VarInt.decode(buffer);
-		const id = new Stream.Id(v);
-
-		[v, buffer] = VarInt.decode(buffer);
-		const code = v;
-
-		[v, buffer] = VarInt.decode(buffer);
-		const finalSize = v.value;
-
-		return { type: "reset_stream", id, code, finalSize };
-	}
-
-	// RESET_STREAM_AT (draft-02): a reset that still delivers its first
-	// reliable_size bytes. reliable_size > final_size is a FRAME_ENCODING_ERROR.
-	if (frameType === RESET_STREAM_AT) {
-		[v, buffer] = VarInt.decode(buffer);
-		const id = new Stream.Id(v);
-		[v, buffer] = VarInt.decode(buffer);
-		const code = v;
-		[v, buffer] = VarInt.decode(buffer);
-		const finalSize = v.value;
-		[v, buffer] = VarInt.decode(buffer);
-		const reliableSize = v.value;
-		if (reliableSize > finalSize) {
-			throw new Error("RESET_STREAM_AT reliable_size exceeds final_size");
-		}
-		return { type: "reset_stream", id, code, finalSize, reliableSize };
-	}
-
-	// STOP_SENDING
-	if (frameType === 0x05n) {
-		[v, buffer] = VarInt.decode(buffer);
-		const id = new Stream.Id(v);
-
-		[v, buffer] = VarInt.decode(buffer);
-		const code = v;
-
-		return { type: "stop_sending", id, code };
-	}
-
-	// CONNECTION_CLOSE / APPLICATION_CLOSE
-	if (frameType === 0x1cn || frameType === 0x1dn) {
-		[v, buffer] = VarInt.decode(buffer);
-		const code = v;
-
-		// The Frame Type field is present only for CONNECTION_CLOSE (0x1c);
-		// APPLICATION_CLOSE (0x1d) omits it (RFC 9000 §19.19).
-		if (frameType === 0x1cn) {
-			[v, buffer] = VarInt.decode(buffer);
-		}
-
-		// reason_length + reason
-		[v, buffer] = VarInt.decode(buffer);
-		const reasonLen = Number(v.value);
-		let reasonBytes: Uint8Array;
-		[reasonBytes, buffer] = take(buffer, reasonLen);
-		const reason = new TextDecoder().decode(reasonBytes);
-
-		return frameType === 0x1dn
-			? { type: "application_close", code, reason }
-			: { type: "connection_close", code, reason };
-	}
-
-	// MAX_DATA
-	if (frameType === 0x10n) {
-		[v, buffer] = VarInt.decode(buffer);
-		return { type: "max_data", max: v.value };
-	}
-
-	// MAX_STREAM_DATA
-	if (frameType === 0x11n) {
-		[v, buffer] = VarInt.decode(buffer);
-		const id = new Stream.Id(v);
-		[v, buffer] = VarInt.decode(buffer);
-		return { type: "max_stream_data", id, max: v.value };
-	}
-
-	// MAX_STREAMS (bidi)
-	if (frameType === 0x12n) {
-		[v, buffer] = VarInt.decode(buffer);
-		return { type: "max_streams_bidi", max: v.value };
-	}
-
-	// MAX_STREAMS (uni)
-	if (frameType === 0x13n) {
-		[v, buffer] = VarInt.decode(buffer);
-		return { type: "max_streams_uni", max: v.value };
-	}
-
-	// DATA_BLOCKED
-	if (frameType === 0x14n) {
-		[v, buffer] = VarInt.decode(buffer);
-		return { type: "data_blocked", limit: v.value };
-	}
-
-	// STREAM_DATA_BLOCKED
-	if (frameType === 0x15n) {
-		[v, buffer] = VarInt.decode(buffer);
-		const id = new Stream.Id(v);
-		[v, buffer] = VarInt.decode(buffer);
-		return { type: "stream_data_blocked", id, limit: v.value };
-	}
-
-	// STREAMS_BLOCKED (bidi)
-	if (frameType === 0x16n) {
-		[v, buffer] = VarInt.decode(buffer);
-		return { type: "streams_blocked_bidi", limit: v.value };
-	}
-
-	// STREAMS_BLOCKED (uni)
-	if (frameType === 0x17n) {
-		[v, buffer] = VarInt.decode(buffer);
-		return { type: "streams_blocked_uni", limit: v.value };
-	}
-
-	// QX_TRANSPORT_PARAMETERS
-	if (frameType === 0x3f5153300d0a0d0an) {
-		[v, buffer] = VarInt.decode(buffer);
-		const len = Number(v.value);
-		let payload: Uint8Array;
-		[payload, buffer] = take(buffer, len);
-		const params = decodeTransportParams(payload);
-		return { type: "transport_parameters", params };
-	}
-
-	// QX_PING request
-	if (frameType === QX_PING_REQUEST) {
-		[v, buffer] = VarInt.decode(buffer);
-		return { type: "ping_request", sequence: v.value };
-	}
-
-	// QX_PING response
-	if (frameType === QX_PING_RESPONSE) {
-		[v, buffer] = VarInt.decode(buffer);
-		return { type: "ping_response", sequence: v.value };
-	}
-
-	// DATAGRAM without length — payload runs to the end of the record
-	if (frameType === 0x30n) {
-		return { type: "datagram", data: buffer, lengthPrefixed: false };
-	}
-
-	// DATAGRAM with length
-	if (frameType === 0x31n) {
-		[v, buffer] = VarInt.decode(buffer);
-		const len = Number(v.value);
-		let data: Uint8Array;
-		[data, buffer] = take(buffer, len);
-		return { type: "datagram", data, lengthPrefixed: true };
-	}
-
-	throw new Error(`Invalid QMux frame type: 0x${frameType.toString(16)}`);
+	return decodeQMuxOne(buffer)?.[0] ?? null;
 }
 
 /** Decode a single QMux frame, returning the frame and remaining buffer.
@@ -876,14 +698,12 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 		let data: Uint8Array;
 		if (hasLen) {
 			[v, buffer] = VarInt.decode(buffer);
-			const len = Number(v.value);
-			[data, buffer] = take(buffer, len);
+			[data, buffer] = take(buffer, Number(v.value));
 		} else {
-			data = buffer;
-			buffer = buffer.slice(buffer.byteLength);
+			[data, buffer] = take(buffer, buffer.byteLength);
 		}
 
-		return [{ type: "stream", id, offset, data, fin: hasFin }, buffer];
+		return [{ type: "stream", id, offset, data: own(data), fin: hasFin }, buffer];
 	}
 
 	// RESET_STREAM
@@ -897,7 +717,8 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 		return [{ type: "reset_stream", id, code, finalSize }, buffer];
 	}
 
-	// RESET_STREAM_AT (draft-02); see the single-frame decoder for the semantics.
+	// RESET_STREAM_AT (draft-02): a reset that still delivers its first
+	// reliable_size bytes. reliable_size > final_size is a FRAME_ENCODING_ERROR.
 	if (frameType === RESET_STREAM_AT) {
 		[v, buffer] = VarInt.decode(buffer);
 		const id = new Stream.Id(v);
@@ -1018,17 +839,16 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 
 	// DATAGRAM without length — payload runs to the end of the record
 	if (frameType === 0x30n) {
-		const data = buffer;
-		return [{ type: "datagram", data, lengthPrefixed: false }, buffer.slice(buffer.byteLength)];
+		const [data, rest] = take(buffer, buffer.byteLength);
+		return [{ type: "datagram", data: own(data), lengthPrefixed: false }, rest];
 	}
 
 	// DATAGRAM with length
 	if (frameType === 0x31n) {
 		[v, buffer] = VarInt.decode(buffer);
-		const len = Number(v.value);
 		let data: Uint8Array;
-		[data, buffer] = take(buffer, len);
-		return [{ type: "datagram", data, lengthPrefixed: true }, buffer];
+		[data, buffer] = take(buffer, Number(v.value));
+		return [{ type: "datagram", data: own(data), lengthPrefixed: true }, buffer];
 	}
 
 	throw new Error(`Invalid QMux frame type: 0x${frameType.toString(16)}`);

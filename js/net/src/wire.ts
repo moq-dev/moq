@@ -25,7 +25,8 @@ export interface Broadcast {
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
 	largest(name: string): track.Location | undefined;
-	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
+	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
+	fetchGroup?(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 	/** List the broadcast's tracks for `owner`, ending its older listing of this broadcast with CANCELLED. */
@@ -120,6 +121,9 @@ export interface Established {
 	readonly goaway: GetPromise<Drain>;
 }
 
+/** A produced broadcast's view, which always fetches from its own cache. */
+export type Produced = Broadcast & Required<Pick<Broadcast, "fetchGroup">>;
+
 type View = Broadcast | OriginProducer | OriginConsumer | Established;
 const views = new WeakMap<object, View>();
 
@@ -143,6 +147,7 @@ export function overrideBroadcastWire(
 	views.set(handle, { ...(view as Broadcast), ...overrides, fromSession: true });
 }
 
+export function wireOf(handle: broadcast.Producer): Produced;
 export function wireOf(handle: broadcast.Producer | broadcast.Consumer): Broadcast;
 export function wireOf(handle: origin.Producer): OriginProducer;
 export function wireOf(handle: origin.Consumer): OriginConsumer;

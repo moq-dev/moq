@@ -8,7 +8,7 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 test.each([0, 100])("a sequence hole before a paused data marker expires at %sms", async (budget) => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
@@ -48,13 +48,13 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		consumer.close();
 		track.close();
 		await reading;
-		restore();
+		installed.close();
 	}
 });
 
 test("a filled hole cancels its timer and the next hole gets a fresh budget", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
@@ -99,13 +99,13 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 		consumer.close();
 		track.close();
 		await reading;
-		restore();
+		installed.close();
 	}
 });
 
 test("the holes a stalled source left behind share one budget", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
@@ -140,13 +140,13 @@ test("the holes a stalled source left behind share one budget", async () => {
 		consumer.close();
 		track.close();
 		await reading;
-		restore();
+		installed.close();
 	}
 });
 
 test("a hole is late from the earliest arrival past it", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
@@ -184,6 +184,6 @@ test("a hole is late from the earliest arrival past it", async () => {
 		consumer.close();
 		track.close();
 		await reading;
-		restore();
+		installed.close();
 	}
 });
