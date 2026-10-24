@@ -645,7 +645,10 @@ mod tests {
 		// Refused as an auth server fault, which may pass, so the client presents it again.
 		let retried = admissions.next().await.unwrap();
 		assert_eq!(retried.request.query.as_deref(), Some("jwt=invalid"));
-		assert!(!invalid.is_finished(), "the invalid label was accepted or ended the token");
+		assert!(
+			!invalid.is_finished(),
+			"the invalid label was accepted or ended the token"
+		);
 		assert!(
 			!supervising.is_finished(),
 			"a refused attachment ended the initial grant"
