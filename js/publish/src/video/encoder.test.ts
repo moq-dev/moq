@@ -6,7 +6,7 @@ import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
-import { Order } from "../order";
+import { Estimator, Order } from "../order";
 import { Encoder } from "./encoder";
 
 // How long a fake hardware probe takes on the installed clock.
@@ -623,9 +623,10 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(fanout) },
 	};
 	const enabled = new Signal(true);
+	const order = new Order();
 	const encoder = new Encoder("video", {
 		enabled,
-		broadcast: { video: () => rendition, order: new Order() } as never,
+		broadcast: { video: () => rendition, order } as never,
 		capture: capture as never,
 	});
 
@@ -647,6 +648,8 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 			{ timestamp: 66_000 + 33_333, keyFrame: true, black: true },
 		]);
 		expect(encoder.out.active.peek()).toBe(false);
+		// The black keyframe is written during teardown, which must not seat the stopped rendition again.
+		expect(new Estimator().write(0, order)).toBe(false);
 
 		// Muting releases the capture; the rendition keeps advertising what it last published.
 		source.set(undefined);

@@ -496,9 +496,10 @@ where
 			self.count(bytes, keyframe);
 			self.observe_end(timestamp, duration);
 		} else {
-			// Buffered frames are measured on the way in instead. The flush that eventually writes
-			// them takes the track down with it when it fails, so there is nothing to unwind.
-			self.estimator.write(frame.timestamp, frame.payload.len());
+			// Buffered frames count toward the rates on the way in instead. The flush that eventually
+			// writes them takes the track down with it when it fails, so there is nothing to unwind.
+			// Their place in the write order waits for that flush, which is when the transport has them.
+			self.estimator.rate(frame.timestamp, frame.payload.len());
 			self.observe_end(frame.timestamp, frame.duration);
 			self.buffer.push(frame);
 
@@ -739,6 +740,7 @@ where
 		}
 		// Counted only once written: an abort discards the buffer, and those frames were never sent.
 		for frame in &self.buffer {
+			self.estimator.order(frame.timestamp);
 			self.count(frame.payload.len(), frame.keyframe);
 		}
 		self.buffer.clear();
@@ -751,6 +753,8 @@ where
 		self.cut(None)?;
 		self.inner.finish()?;
 		self.publish_estimate()?;
+		// A finished track may be kept around, but its media stops holding the other tracks back.
+		self.estimator.discontinuity();
 		// Dropping the recorder flushes the open record, so a track that ends before its catalog
 		// still declares a duration and is advertised.
 		self.recorder = None;
@@ -860,14 +864,16 @@ mod tests {
 		assert_eq!(estimate.bitrate, Some(1_600_000));
 	}
 
-	#[test]
-	fn catalog_write_order_measures_delay_across_renditions() {
+	type Rendition = Producer<Container, hang::catalog::VideoConfig>;
+
+	/// Video renditions sharing one catalog, each opened with a keyframe at 0.
+	fn renditions(names: &[&str]) -> (moq_net::broadcast::Producer, crate::catalog::Producer, Vec<Rendition>) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut tracks = Vec::new();
-		for name in ["fast", "slow"] {
+		for name in names {
 			let net = broadcast
-				.create_track(name, catalog.track_info(hang::catalog::PRIORITY.video))
+				.create_track(*name, catalog.track_info(hang::catalog::PRIORITY.video))
 				.unwrap();
 			let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 			let mut track = catalog
@@ -876,6 +882,12 @@ mod tests {
 			track.write(frame(0, true)).unwrap();
 			tracks.push(track);
 		}
+		(broadcast, catalog, tracks)
+	}
+
+	#[test]
+	fn catalog_write_order_measures_delay_across_renditions() {
+		let (_broadcast, catalog, mut tracks) = renditions(&["fast", "slow"]);
 
 		// The slow rendition writes each frame after the fast one has written 200ms past it.
 		for i in 1..10u64 {
@@ -891,6 +903,35 @@ mod tests {
 		assert_eq!(renditions["slow"].delay, Some(ms(200)));
 		assert_eq!(renditions["fast"].delay, None);
 		assert_eq!(renditions["slow"].jitter, None, "a constant trail is not jitter");
+	}
+
+	/// Buffered frames reach the transport when the buffer flushes, so that is where they are ordered:
+	/// interleaved by timestamp on the way in, a second-long buffer still trails the other rendition.
+	#[test]
+	fn a_buffered_rendition_is_ordered_when_it_flushes() {
+		let (_broadcast, catalog, tracks) = renditions(&["live", "buffered"]);
+		let [mut live, buffered] = <[Rendition; 2]>::try_from(tracks).ok().unwrap();
+		let mut buffered = buffered.with_buffer(std::time::Duration::from_secs(1));
+
+		for i in 1..=25u64 {
+			live.write(frame(i * 40_000, false)).unwrap();
+			buffered.write(frame(i * 40_000, false)).unwrap();
+		}
+		buffered.cut(None).unwrap();
+
+		let delay = catalog.snapshot().video.renditions["buffered"].delay;
+		assert_eq!(delay, Some(std::time::Duration::from_millis(960)));
+	}
+
+	/// A finished rendition may be kept around, but its media stops holding the others back.
+	#[test]
+	fn a_finished_rendition_stops_holding_others_back() {
+		let (_broadcast, catalog, mut tracks) = renditions(&["ended", "live"]);
+		tracks[0].write(frame(10_000_000, true)).unwrap();
+		tracks[0].finish().unwrap();
+
+		tracks[1].write(frame(1_000_000, true)).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["live"].delay, None);
 	}
 
 	/// A passthrough producer claims nothing until the first window closes, then

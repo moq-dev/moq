@@ -369,8 +369,6 @@ export class Encoder {
 	#encode(track: Moq.Track.Producer, order: Order, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
-		// A stopped rendition stops holding the others' delay back.
-		effect.cleanup(() => order.leave(this.#estimator));
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
 		const demand = track.demand();
@@ -534,6 +532,9 @@ export class Encoder {
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
+				// A stopped rendition stops holding the others' delay back. Not a cleanup: the black
+				// keyframe above is written after one would run, and would seat this rendition again.
+				order.leave(this.#estimator);
 				// The broadcast owns this static track across demand gaps. Close the current group, marking
 				// the break so a later subscriber resumes on the same track without the pre-gap group reading
 				// as live. A fatal encoder error aborts the track instead.

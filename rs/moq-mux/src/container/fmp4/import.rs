@@ -1337,6 +1337,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			media!(&mut track.output, producer => producer.finish()?, passthrough => {
 				passthrough.close()?;
 				passthrough.track.finish()?;
+				// The importer may be kept around, but its media stops holding the other tracks back.
+				passthrough.estimator.discontinuity();
 				// Dropping the recorder flushes the open record, so the track is advertised.
 				passthrough.recorder = None;
 			});
