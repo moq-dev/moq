@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Accepted bidi streams hold credit until both halves end
 
-A peer's bidirectional stream returns its MAX_STREAMS credit only once it is accepted and both halves have ended, as in QUIC. Close or abort the writable of every accepted bidi stream, even one you never write to, or the peer eventually runs out of streams to open.
+A peer's bidirectional stream returns its `MAX_STREAMS` credit only once it is accepted and both halves have ended, as in QUIC. Close or abort the writable of every accepted bidi stream, even one you never write to, or the peer eventually runs out of streams to open.
 
 ### Only QMux draft-00, 01 and 02 are supported
 
