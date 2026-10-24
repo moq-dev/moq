@@ -221,6 +221,9 @@ struct Tally {
 	tables: Option<(VersionNumber, psi::Pmt)>,
 }
 
+/// A video frame waiting on a decode clock, with the codec config it was read under.
+type Held = (Pending, Option<Bytes>);
+
 /// A frame read from its source.
 struct Pending {
 	frame: Frame,
@@ -290,9 +293,10 @@ struct Track {
 	descriptors: Vec<catalog::Descriptor>,
 	/// Authors each video frame's DTS, holding the frames until it can, for a rendition that
 	/// declares no `reorder`.
-	clock: DecodeClock<(Pending, Option<Bytes>)>,
+	clock: DecodeClock<Held>,
 	/// The current group's clock, when its rendition declared `reorder` at the group's start.
-	declared: Option<DeclaredClock<(Pending, Option<Bytes>)>>,
+	/// A trimmed leading picture holds its slot as `None`.
+	declared: Option<DeclaredClock<Option<Held>>>,
 	/// Loss counter at the last read, excluding declared ends.
 	recovery_gap: Option<u64>,
 	/// Leading pictures below the recovery keyframe have unavailable references, and whether
@@ -394,7 +398,15 @@ impl Track {
 			&& !radl(stream_type, self.source.description(), &pending.frame)
 		{
 			jitter.lose(name, ahead);
-			return Ok(());
+			// It still takes its slot, so the group's other frames decode where they do on an
+			// exporter that kept it.
+			return match &mut self.declared {
+				Some(clock) => {
+					clock.push(None, to_ticks(pending.frame.timestamp))?;
+					self.release(name, jitter, false)
+				}
+				None => Ok(()),
+			};
 		}
 		self.held = Some(pending.cut);
 		if pending.frame.keyframe {
@@ -410,7 +422,7 @@ impl Track {
 		let pts = to_ticks(pending.frame.timestamp);
 		let item = (pending, self.source.description().cloned());
 		match &mut self.declared {
-			Some(clock) => clock.push(item, pts)?,
+			Some(clock) => clock.push(Some(item), pts)?,
 			None => self.clock.push(item, pts),
 		}
 		self.release(name, jitter, false)
@@ -623,7 +635,10 @@ impl Track {
 	fn release(&mut self, name: &str, jitter: &mut jitter::Buffer<String, Queued>, flush: bool) -> anyhow::Result<()> {
 		if let Some(mut clock) = self.declared.take() {
 			let released = (|| {
-				while let Some(((mut pending, description), dts)) = clock.pop(flush)? {
+				while let Some((item, dts)) = clock.pop(flush)? {
+					let Some((mut pending, description)) = item else {
+						continue;
+					};
 					if !self.finished {
 						pending.arrived = pending.arrived.max(self.latest);
 					}

@@ -1235,6 +1235,43 @@ async fn export_declared_reorder_decodes_each_group_from_its_frames() {
 	);
 }
 
+/// Open-GOP leading pictures an export trims, because it started at their group, still take
+/// their slots: the group's other frames decode where they do on an export that read the group
+/// before and kept them.
+#[tokio::test(start_paused = true)]
+async fn trimmed_leading_pictures_keep_their_slots() {
+	async fn timing(groups: &[&[u64]]) -> Vec<(u64, u64)> {
+		let (mut export, _keep) = export_declared(2, groups).await;
+		let bytes: Vec<u8> = drain_frames(&mut export)
+			.await
+			.iter()
+			.flat_map(|frame| frame.payload.iter().copied())
+			.collect();
+		video_pes_timing(&bytes)
+	}
+	let open: &[u64] = &[400, 320, 360, 560, 480, 440, 520];
+	let kept = timing(&[&[0, 160, 80, 40, 120], open]).await;
+	let joined = timing(&[open]).await;
+	let ms = |ms: u64| ms * 90;
+	assert_eq!(
+		kept[5..],
+		[
+			(ms(400), ms(320) - 2),
+			(ms(320), ms(320) - 1),
+			(ms(360), ms(320)),
+			(ms(560), ms(360)),
+			(ms(480), ms(400)),
+			(ms(440), ms(440)),
+			(ms(520), ms(480)),
+		]
+	);
+	let shared: Vec<_> = kept[5..]
+		.iter()
+		.filter(|(pts, _)| ![ms(320), ms(360)].contains(pts))
+		.collect();
+	assert_eq!(joined.iter().collect::<Vec<_>>(), shared);
+}
+
 /// A declared depth of zero decodes every frame at its presentation, and refuses a frame that
 /// reorders, rather than inferring a decode delay.
 #[tokio::test(start_paused = true)]
