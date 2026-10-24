@@ -709,8 +709,8 @@ mod tests {
 		(Capture::new(broadcast, catalog.clone()), catalog)
 	}
 
-	fn section(table: u8, id: u16, version: u8, last: u8) -> Vec<u8> {
-		psi::section(table, id, version, 0, last, &[0, 0, 0, 0, 0, 0])
+	fn section(table: u8, id: u16, version: u8, last: u8) -> Bytes {
+		psi::section(table, id, version, 0, last, &[0, 0, 0, 0, 0, 0]).into()
 	}
 
 	#[moq_clock::test]
@@ -871,12 +871,12 @@ mod tests {
 	async fn short_form_repetitions_replace_their_deadline_and_latest_value() {
 		let (mut capture, _) = capture();
 		let mut time = vec![0x70, 0x70, 5, 0, 0, 0, 0, 0];
-		capture.section(0x14, time.clone()).unwrap();
+		capture.section(0x14, Bytes::from(time.clone())).unwrap();
 		capture.advance(Duration::from_secs(29));
-		capture.section(0x14, time.clone()).unwrap();
+		capture.section(0x14, Bytes::from(time.clone())).unwrap();
 		capture.advance(Duration::from_secs(31));
 		time[7] = 1;
-		capture.section(0x14, time.clone()).unwrap();
+		capture.section(0x14, Bytes::from(time.clone())).unwrap();
 		capture.advance(Duration::from_secs(60));
 		capture.flush(Timestamp::ZERO, false).unwrap();
 		let entry = &capture.entries[&(0x14, 0x70)];
