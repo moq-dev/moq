@@ -68,6 +68,14 @@ announce churn on today's hop-list mesh, shipping with the next cut from
 route layer ships; and stats groups as
 tracks, so per-group stats stop costing cluster announces.
 
+Added 2026-10-23 (maintainer, from a linger audit): broadcasts lose their
+finished state and retention moves to moq-mux, a break in every binding, so
+it lands before the cut.
+
+Added 2026-10-23 (maintainer, from a moq-quic audit): moq-quic and its drivers
+are unreleased, so their API is reshaped before the cut publishes it, and the
+audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
+
 ## Required
 
 - [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
@@ -87,11 +95,13 @@ tracks, so per-group stats stop costing cluster announces.
 - [No reused track names](/quest/m1/name-reuse.md) - no first-party publisher re-creates a finished track under its old name
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
+- [Receive pinning](/quest/m1/quic-receive-pinning.md) - tiny DATAGRAM or STREAM frames cannot pin moq-quic receive batches past the receive budgets
+- [Priority requeue](/quest/m1/quic-priority-requeue.md) - raising a queued QUIC stream's priority moves it at once instead of after it next sends
+- [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - receive leases and the connection window keep exact books, and eviction stops scanning every stream
 - [io_uring listen extensions](/quest/m1/uring-listen-extensions.md) - ring listeners offer the configured `[listen] extensions`
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
-- [Binding encoder config](/quest/m1/binding-encoder-config.md) - binding encoders take an exact rational framerate, and the publication track name moves to options only the producers take
 - [FFI shutdown requests the drain synchronously](/quest/m1/ffi-shutdown-sync.md) - `shutdown()` becomes a sync drain request awaited with `closed()`, so a dropped future can no longer cancel
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly under the relay conformance profile, except cases that use a subgroup other than 0
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
@@ -106,8 +116,10 @@ tracks, so per-group stats stop costing cluster announces.
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
+- [Broadcast lifecycle](/quest/m1/broadcast-lifecycle/README.md) - broadcasts are online or offline with no finished state in moq-net, finished-broadcast retention is a fixed moq-mux policy, and each linger timer has one meaning
 - [JS interop tone](/quest/m1/interop-js-tone.md) - the `js ->` cells pass the audio check on every draft again, after the 2026-10-23 regression
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break has its MIGRATE entry
+- [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
@@ -117,6 +129,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during BBR3's ProbeBW_UP so an app-limited sender validates headroom up to the target
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - Rust/FFI and OBS publishers stop encoding the top renditions their grant cannot fund and resume them once probing raises the estimate
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
+- [Play keeps its audio output](/quest/m1/play-audio-handover.md) - `moq play` switches to a replacement run without reopening its audio output, so native-play holds its derived bound
 - [Audio playout memory](/quest/m1/audio-playout-memory.md) - a catalog's advertised jitter or delay cannot size decoded PCM; the lookahead stays encoded
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
@@ -125,17 +138,14 @@ tracks, so per-group stats stop costing cluster announces.
 - [qmux local lifecycle](/quest/m1/qmux-local-lifecycle.md) - an abort blocked on send credit resets at once, and a close behind a backed-up socket still sends APPLICATION_CLOSE
 - [JS reload config](/quest/m1/js-reload-config.md) - `@moq/net` reload takes Rust's `healthy` backoff and no ignored `extensions`
 - [JS release preflight](/quest/m1/js-publish-preflight.md) - `release.ts` refuses a package whose `@moq/*` dependency is not on npm, so no dependent publishes uninstallable
-- [Stream sockets disable Nagle](/quest/m1/tcp-nodelay.md) - every qmux TCP, TLS, and WebSocket socket, accepted or dialed, sets `TCP_NODELAY`
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Encoders declare no reordering](/quest/m1/encoder-reorder.md) - moq-video encoders publish `reorder: 0`
 - [Rust resume checks compression](/quest/m1/resume-compress.md) - a same-epoch route copy with a different `compress` is refused instead of corrupting framing
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
-- [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
 - [Producers drop the phantom catalog type](/quest/m1/catalog-phantom.md) - moq-video, moq-audio and moq-mux producers lose an `E: CatalogExt` parameter that only `PhantomData` holds
 - [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
 - [Python docs stubs](/quest/m1/py-docs-stubs.md) - `just py docs` rebuilds its autosummary stubs, so a renamed symbol cannot break it
-- [Interop AAC](/quest/m1/interop-aac.md) - the Rust interop publisher adds an AAC tone and every subscriber checks it beside Opus
 - [Interop pre-skip](/quest/m1/interop-preskip.md) - the interop tone check anchors phase to timestamps, so a misapplied pre-skip fails
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Subscribe update camera check](/quest/m1/subscribe-update-churn.md) - a person checks a physical-camera publish for SUBSCRIBE_UPDATE chatter; bbb and the fake camera measured quiet
@@ -147,10 +157,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - moq-transport sessions ask for announcements only under watched prefixes, starting with UNSUBSCRIBE_NAMESPACE on d14/15
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
 - [One Annex-B exporter](/quest/m1/annexb-export.md) - H.264 and H.265 Annex-B export share one private lifecycle, which also follows a rebound rendition
-- [One CLI duration type](/quest/m1/cli-duration.md) - moq-cli, moq-bench and moq-relay reuse moq-tokio's public `cli::Duration` instead of their own copies
-- [Shared watch and publish UI](/quest/m1/js-ui.md) - a new `@moq/ui` package holds the graph, buttons, and support banner that watch and publish duplicate
 - [Simplification audit](/quest/m1/audit-simplify.md) - repeat the simplification audit, starting with the m0 leftovers, before the next major release
-- [Compile time audit](/quest/m1/audit-compile-time.md) - build-time hotspots are measured against the m0 baselines and the worst are fixed or planned
 - [Caption store bounds](/quest/m1/caption-store-bounds.md) - a hostile caption track cannot grow a viewer's cue and region store or its per-frame work without bound
 - [Peers advertise their implementation and version](/quest/m1/peer-version.md) - moq-net and `@moq/net` send a `name/version` SETUP parameter both ways, and the auth request and session span carry the client's
 - [Binding peer version](/quest/m1/binding-peer-version.md) - every binding names itself ahead of the Rust core in that parameter
@@ -160,6 +167,8 @@ tracks, so per-group stats stop costing cluster announces.
 - [Refuse unknown MOQ_* environment variables](/quest/m1/env-unknown.md) - every binary exits at startup naming a `MOQ_*` variable it does not read
 - [HLS cursors error on every incomplete recording](/quest/m1/hls-teardown.md) - the recorder cursors return `Ok(None)` only for a complete recording
 - [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - `export hls --output <dir>` records playlists and segments to a directory
+- [Group storage benchmark](/quest/m1/group-storage-bench.md) - numbers pick the append-only log, a ring buffer, or sorted runs for `GroupState` before either lands
+- [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
 
 ## Related
 

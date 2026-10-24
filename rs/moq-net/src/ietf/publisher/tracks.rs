@@ -674,8 +674,9 @@ impl Publisher {
 					let Ok(track) = broadcast.track(&name) else {
 						continue;
 					};
-					// Each paused PUBLISH holds a subscription slot; past the cap the peer is
-					// told the track exists rather than left without it.
+					// Each paused PUBLISH holds a subscription slot. Nothing else bounds how many
+					// a peer's listings hold, so past `Limits::requests` the peer is told the
+					// track exists rather than left without it.
 					let Ok(slot) = self.subscriptions.acquire() else {
 						skip(name);
 						continue;
@@ -874,7 +875,7 @@ impl Publisher {
 
 		if let Some(done) = refused {
 			drop(join);
-			return self.write_publish_done(stream, request_id, done, 0).await;
+			return self.write_publish_done(stream, request_id, done, 0, None).await;
 		}
 
 		// Group streams opened over every time the subscription forwarded, which
@@ -1010,7 +1011,7 @@ impl Publisher {
 		};
 
 		drop(join);
-		self.write_publish_done(stream, request_id, done, opened).await
+		self.write_publish_done(stream, request_id, done, opened, None).await
 	}
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
@@ -1700,10 +1701,10 @@ mod tests {
 		}
 	}
 
-	/// Each paused PUBLISH holds a subscription slot; past the cap the track is skipped
-	/// (PUBLISH_BLOCKED, the same message, on draft-18) rather than held.
+	/// Each paused PUBLISH holds a subscription slot; past `Limits::requests` the track is
+	/// skipped (PUBLISH_BLOCKED, the same message, on draft-18) rather than held.
 	#[moq_clock::test]
-	async fn past_the_subscription_cap_a_track_is_skipped() {
+	async fn past_the_request_limit_a_track_is_skipped() {
 		for version in DRAFTS {
 			let mut h = harness(version);
 			h.publisher.subscriptions = crate::session::Slots::new(1);

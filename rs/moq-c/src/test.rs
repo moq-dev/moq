@@ -4097,7 +4097,10 @@ fn video_raw_publish_consume() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30_000,
+			denominator: 1001,
+		},
 	};
 	// Software so the test is deterministic everywhere: `Auto` would reach for a
 	// hardware backend that CI runners don't have.
@@ -4114,7 +4117,7 @@ fn video_raw_publish_consume() {
 	let rgba = gray_rgba(320, 240);
 	let publish = |index: u64| {
 		let frame = moq_video_encoder_frame {
-			timestamp_us: index * 33_333,
+			timestamp_us: index * 1_001_000 / 30,
 			data: rgba.as_ptr(),
 			data_size: rgba.len(),
 		};
@@ -4263,7 +4266,10 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let encode_output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -4376,7 +4382,10 @@ fn video_raw_publish_from_many_threads() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -4447,7 +4456,10 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -4526,7 +4538,10 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -4564,7 +4579,10 @@ fn video_raw_publish_rejects_invalid_config() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let valid_output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
@@ -4585,10 +4603,22 @@ fn video_raw_publish_rejects_invalid_config() {
 	assert!(unsafe { moq_encode_video(broadcast, &bad_format, &valid_output, 0) } < 0);
 
 	let zero_framerate = moq_video_encoder_input {
-		framerate: 0,
+		framerate: moq_video_frame_rate {
+			numerator: 0,
+			denominator: 1,
+		},
 		..valid_input
 	};
 	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output, 0) } < 0);
+	let zero_denominator = moq_video_encoder_input {
+		framerate: moq_video_frame_rate {
+			numerator: 30_000,
+			denominator: 0,
+		},
+		..valid_input
+	};
+	let refused = unsafe { moq_encode_video(broadcast, &zero_denominator, &valid_output, 0) };
+	assert!(refused < 0 && refused != MOQ_ERROR_PANIC);
 
 	// Regression: dimensions arrive as a raw `u32` pair, and their product used to
 	// overflow the default-bitrate estimate inside the encoder. It has to be refused
@@ -5511,7 +5541,10 @@ fn encode_video_bitrate_caps_the_reservation() {
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 320,
 		height: 240,
-		framerate: 30,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
 	};
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,

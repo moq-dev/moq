@@ -42,6 +42,7 @@ Public API: none. Wire: none.
 - [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
 - [Tone check grace](/quest/m1/test-flakes-2/tone-grace.md) - the interop tone check charges its grace only for audible playback, so a refilling ring under CPU starvation is not a failure
 - [Relay tests in one process](/quest/m1/test-flakes-2/relay-one-process.md) - moq-relay's integration binary passes under plain `cargo test`, not only nextest
+- [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Interop timestamp gap](/quest/m1/test-flakes-2/interop-timestamp-gap.md) - `rust -> js-native-node` audio has no gap under load
 - [Go reservation grant](/quest/m1/test-flakes-2/go-reservation-grant.md) - the Go reservation test waits for its grant
 

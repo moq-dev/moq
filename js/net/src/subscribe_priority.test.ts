@@ -101,7 +101,7 @@ test.each([Lite.ALPN_07_WIP, ...Object.values(Ietf.ALPN)])(
 // a torn one closes the session as malformed.
 test.each(Object.values(Ietf.ALPN))("%s ends a subscription mid-update without a torn message", async (protocol) => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const write = Writer.prototype.write;
 	const yielding = spyOn(Writer.prototype, "write").mockImplementation(async function (this: Writer, chunk) {
 		await write.call(this, chunk);
@@ -136,7 +136,7 @@ test.each(Object.values(Ietf.ALPN))("%s ends a subscription mid-update without a
 		broadcast.close();
 		client.abort();
 		server.abort();
-		restore();
+		installed.close();
 	}
 });
 
