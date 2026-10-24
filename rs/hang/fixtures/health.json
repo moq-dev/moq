@@ -1,0 +1,1269 @@
+[
+	{
+		"name": "publisher healthy on an unimpaired link, TS errors excluded",
+		"role": "publisher",
+		"previous": {
+			"observer": {
+				"path": "room/live",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rate": 899877152,
+					"rtt": 0
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 23593641,
+						"frames": 879,
+						"keyframes": 18
+					},
+					"1.ts": {
+						"bytes": 526376,
+						"frames": 76
+					},
+					"6.mp2": {
+						"bytes": 528768,
+						"frames": 918
+					}
+				},
+				"mpegts": {
+					"streams": {
+						"111": {
+							"class": "video",
+							"track": ".avc3",
+							"units": 1080
+						}
+					}
+				}
+			}
+		},
+		"current": {
+			"observer": {
+				"path": "room/live",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rate": 721958792,
+					"rtt": 0
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 29027924,
+						"frames": 1070,
+						"keyframes": 23
+					},
+					"1.ts": {
+						"bytes": 644118,
+						"frames": 93
+					},
+					"6.mp2": {
+						"bytes": 648000,
+						"frames": 1125
+					}
+				},
+				"mpegts": {
+					"continuityCountError": 40,
+					"streams": {
+						"111": {
+							"class": "video",
+							"track": ".avc3",
+							"units": 1200
+						}
+					}
+				}
+			}
+		},
+		"interval": 4998,
+		"age": 250,
+		"health": {
+			"interval": 4998,
+			"observer": {
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"path": "room/live"
+			},
+			"renditions": {
+				"0.avc3": {
+					"bitrate": 8698332,
+					"bytes": 5434283,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 191,
+					"verdict": "healthy"
+				},
+				"1.ts": {
+					"bitrate": 188462,
+					"bytes": 117742,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 17,
+					"verdict": "healthy"
+				},
+				"6.mp2": {
+					"bitrate": 190847,
+					"bytes": 119232,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 207,
+					"verdict": "healthy"
+				}
+			},
+			"role": "publisher",
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 0,
+						"verdict": "healthy"
+					},
+					{
+						"input": "loss",
+						"value": 0,
+						"verdict": "healthy"
+					},
+					{
+						"input": "headroom",
+						"value": 79.53153384986982,
+						"verdict": "healthy"
+					}
+				],
+				"lostBytes": 0,
+				"lostPackets": 0,
+				"verdict": "healthy"
+			},
+			"verdict": "healthy"
+		}
+	},
+	{
+		"name": "publisher degrading on a link barely above its media rate",
+		"role": "publisher",
+		"previous": {
+			"observer": {
+				"path": "room/live",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 49200,
+					"lostPackets": 41,
+					"rate": 16772656,
+					"rtt": 2
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 44489957,
+						"frames": 1554,
+						"keyframes": 35
+					},
+					"1.ts": {
+						"bytes": 983492,
+						"frames": 142
+					},
+					"6.mp2": {
+						"bytes": 984960,
+						"frames": 1710
+					}
+				}
+			}
+		},
+		"current": {
+			"observer": {
+				"path": "room/live",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 49200,
+					"lostPackets": 41,
+					"rate": 13531448,
+					"rtt": 2
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 49908242,
+						"frames": 1677,
+						"keyframes": 40
+					},
+					"1.ts": {
+						"bytes": 1108160,
+						"frames": 160
+					},
+					"6.mp2": {
+						"bytes": 1104192,
+						"frames": 1917
+					}
+				}
+			}
+		},
+		"interval": 4521,
+		"age": 250,
+		"health": {
+			"interval": 4521,
+			"observer": {
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"path": "room/live"
+			},
+			"renditions": {
+				"0.avc3": {
+					"bitrate": 9587763,
+					"bytes": 5418285,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 123,
+					"verdict": "healthy"
+				},
+				"1.ts": {
+					"bitrate": 220602,
+					"bytes": 124668,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 18,
+					"verdict": "healthy"
+				},
+				"6.mp2": {
+					"bitrate": 210983,
+					"bytes": 119232,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 207,
+					"verdict": "healthy"
+				}
+			},
+			"role": "publisher",
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 2,
+						"verdict": "healthy"
+					},
+					{
+						"input": "loss",
+						"value": 0,
+						"verdict": "healthy"
+					},
+					{
+						"input": "headroom",
+						"value": 1.3505316562982286,
+						"verdict": "degraded"
+					}
+				],
+				"lostBytes": 0,
+				"lostPackets": 0,
+				"verdict": "degraded"
+			},
+			"verdict": "degraded"
+		}
+	},
+	{
+		"name": "viewer healthy across an 80 ms round trip",
+		"role": "viewer",
+		"previous": {
+			"observer": {
+				"path": "room/viewers/alice.echo",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rtt": 92
+				},
+				"renditions": {
+					"0.avc3": {
+						"arrival": {
+							"timestamp": 25649896,
+							"wall": 215023474707
+						},
+						"bytes": 23248995,
+						"frames": 893
+					},
+					"1.ts": {
+						"arrival": {
+							"timestamp": 25648764,
+							"wall": 215023474705
+						},
+						"bytes": 512524,
+						"frames": 74
+					},
+					"6.mp2": {
+						"arrival": {
+							"timestamp": 25648871,
+							"wall": 215023474705
+						},
+						"bytes": 488448,
+						"frames": 848
+					}
+				}
+			}
+		},
+		"current": {
+			"observer": {
+				"path": "room/viewers/alice.echo",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rtt": 89
+				},
+				"renditions": {
+					"0.avc3": {
+						"arrival": {
+							"timestamp": 25654756,
+							"wall": 215023479673
+						},
+						"bytes": 28749038,
+						"frames": 1065
+					},
+					"1.ts": {
+						"arrival": {
+							"timestamp": 25653662,
+							"wall": 215023479598
+						},
+						"bytes": 630266,
+						"frames": 91
+					},
+					"6.mp2": {
+						"arrival": {
+							"timestamp": 25654031,
+							"wall": 215023479665
+						},
+						"bytes": 612288,
+						"frames": 1063
+					}
+				}
+			}
+		},
+		"interval": 5004,
+		"age": 250,
+		"health": {
+			"interval": 5004,
+			"observer": {
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"path": "room/viewers/alice.echo"
+			},
+			"renditions": {
+				"0.avc3": {
+					"bitrate": 8793034,
+					"bytes": 5500043,
+					"evidence": [
+						{
+							"input": "late",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "errors",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "stalled",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 172,
+					"verdict": "healthy"
+				},
+				"1.ts": {
+					"bitrate": 188236,
+					"bytes": 117742,
+					"evidence": [
+						{
+							"input": "late",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "errors",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "stalled",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 17,
+					"verdict": "healthy"
+				},
+				"6.mp2": {
+					"bitrate": 197985,
+					"bytes": 123840,
+					"evidence": [
+						{
+							"input": "late",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "errors",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "stalled",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 215,
+					"verdict": "healthy"
+				}
+			},
+			"role": "viewer",
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 89,
+						"verdict": "healthy"
+					}
+				],
+				"lostBytes": 0,
+				"lostPackets": 0,
+				"verdict": "healthy"
+			},
+			"verdict": "healthy"
+		}
+	},
+	{
+		"name": "viewer degrading with late frames behind a slow link",
+		"role": "viewer",
+		"previous": {
+			"observer": {
+				"path": "room/viewers/alice.echo",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rtt": 8
+				},
+				"renditions": {
+					"0.avc3": {
+						"arrival": {
+							"timestamp": 25648856,
+							"wall": 215023582853
+						},
+						"bytes": 15671078,
+						"frames": 561,
+						"late": 6,
+						"stalls": 1,
+						"stalled": 80
+					},
+					"1.ts": {
+						"arrival": {
+							"timestamp": 25648482,
+							"wall": 215023583311
+						},
+						"bytes": 519450,
+						"frames": 75
+					},
+					"6.mp2": {
+						"arrival": {
+							"timestamp": 25648631,
+							"wall": 215023583156
+						},
+						"bytes": 498816,
+						"frames": 866
+					}
+				}
+			}
+		},
+		"current": {
+			"observer": {
+				"path": "room/viewers/alice.echo",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rtt": 9
+				},
+				"renditions": {
+					"0.avc3": {
+						"arrival": {
+							"timestamp": 25654076,
+							"wall": 215023588145
+						},
+						"bytes": 19753040,
+						"frames": 699,
+						"late": 10,
+						"stalls": 1,
+						"stalled": 80
+					},
+					"1.ts": {
+						"arrival": {
+							"timestamp": 25653371,
+							"wall": 215023588275
+						},
+						"bytes": 637192,
+						"frames": 92
+					},
+					"6.mp2": {
+						"arrival": {
+							"timestamp": 25653599,
+							"wall": 215023588199
+						},
+						"bytes": 618048,
+						"frames": 1073
+					}
+				}
+			}
+		},
+		"interval": 5000,
+		"age": 250,
+		"health": {
+			"interval": 5000,
+			"observer": {
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"path": "room/viewers/alice.echo"
+			},
+			"renditions": {
+				"0.avc3": {
+					"bitrate": 6531139,
+					"bytes": 4081962,
+					"evidence": [
+						{
+							"input": "late",
+							"value": 0.028985507246376812,
+							"verdict": "degraded"
+						},
+						{
+							"input": "errors",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "stalled",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 138,
+					"verdict": "degraded"
+				},
+				"1.ts": {
+					"bitrate": 188387,
+					"bytes": 117742,
+					"evidence": [
+						{
+							"input": "late",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "errors",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "stalled",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 17,
+					"verdict": "healthy"
+				},
+				"6.mp2": {
+					"bitrate": 190771,
+					"bytes": 119232,
+					"evidence": [
+						{
+							"input": "late",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "errors",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "stalled",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 207,
+					"verdict": "healthy"
+				}
+			},
+			"role": "viewer",
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 9,
+						"verdict": "healthy"
+					}
+				],
+				"lostBytes": 0,
+				"lostPackets": 0,
+				"verdict": "healthy"
+			},
+			"verdict": "degraded"
+		}
+	},
+	{
+		"name": "viewer unhealthy once playout stalls",
+		"role": "viewer",
+		"previous": {
+			"observer": {
+				"path": "room/viewers/alice.echo",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rtt": 8
+				},
+				"renditions": {
+					"0.avc3": {
+						"arrival": {
+							"timestamp": 25648856,
+							"wall": 215023582853
+						},
+						"bytes": 15671078,
+						"frames": 561,
+						"late": 6,
+						"stalls": 1,
+						"stalled": 80
+					},
+					"1.ts": {
+						"arrival": {
+							"timestamp": 25648482,
+							"wall": 215023583311
+						},
+						"bytes": 519450,
+						"frames": 75
+					},
+					"6.mp2": {
+						"arrival": {
+							"timestamp": 25648631,
+							"wall": 215023583156
+						},
+						"bytes": 498816,
+						"frames": 866
+					}
+				}
+			}
+		},
+		"current": {
+			"observer": {
+				"path": "room/viewers/alice.echo",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rtt": 9
+				},
+				"renditions": {
+					"0.avc3": {
+						"arrival": {
+							"timestamp": 25654076,
+							"wall": 215023588145
+						},
+						"bytes": 19753040,
+						"frames": 699,
+						"late": 21,
+						"stalls": 3,
+						"stalled": 680
+					},
+					"1.ts": {
+						"arrival": {
+							"timestamp": 25653371,
+							"wall": 215023588275
+						},
+						"bytes": 637192,
+						"frames": 92
+					},
+					"6.mp2": {
+						"arrival": {
+							"timestamp": 25653599,
+							"wall": 215023588199
+						},
+						"bytes": 618048,
+						"frames": 1073
+					}
+				}
+			}
+		},
+		"interval": 5000,
+		"age": 250,
+		"health": {
+			"interval": 5000,
+			"observer": {
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"path": "room/viewers/alice.echo"
+			},
+			"renditions": {
+				"0.avc3": {
+					"bitrate": 6531139,
+					"bytes": 4081962,
+					"evidence": [
+						{
+							"input": "late",
+							"value": 0.10869565217391304,
+							"verdict": "unhealthy"
+						},
+						{
+							"input": "errors",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "stalled",
+							"value": 0.12,
+							"verdict": "unhealthy"
+						}
+					],
+					"frames": 138,
+					"verdict": "unhealthy"
+				},
+				"1.ts": {
+					"bitrate": 188387,
+					"bytes": 117742,
+					"evidence": [
+						{
+							"input": "late",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "errors",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "stalled",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 17,
+					"verdict": "healthy"
+				},
+				"6.mp2": {
+					"bitrate": 190771,
+					"bytes": 119232,
+					"evidence": [
+						{
+							"input": "late",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "errors",
+							"value": 0,
+							"verdict": "healthy"
+						},
+						{
+							"input": "stalled",
+							"value": 0,
+							"verdict": "healthy"
+						}
+					],
+					"frames": 207,
+					"verdict": "healthy"
+				}
+			},
+			"role": "viewer",
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 9,
+						"verdict": "healthy"
+					}
+				],
+				"lostBytes": 0,
+				"lostPackets": 0,
+				"verdict": "healthy"
+			},
+			"verdict": "unhealthy"
+		}
+	},
+	{
+		"name": "stale publisher report is unknown",
+		"role": "publisher",
+		"previous": {
+			"observer": {
+				"path": "room/live",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rate": 899877152,
+					"rtt": 0
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 23593641,
+						"frames": 879,
+						"keyframes": 18
+					},
+					"1.ts": {
+						"bytes": 526376,
+						"frames": 76
+					},
+					"6.mp2": {
+						"bytes": 528768,
+						"frames": 918
+					}
+				}
+			}
+		},
+		"current": {
+			"observer": {
+				"path": "room/live",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rate": 721958792,
+					"rtt": 0
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 29027924,
+						"frames": 1070,
+						"keyframes": 23
+					},
+					"1.ts": {
+						"bytes": 644118,
+						"frames": 93
+					},
+					"6.mp2": {
+						"bytes": 648000,
+						"frames": 1125
+					}
+				}
+			}
+		},
+		"interval": 4998,
+		"age": 6000,
+		"health": {
+			"interval": 4998,
+			"observer": {
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"path": "room/live"
+			},
+			"renditions": {
+				"0.avc3": {
+					"bitrate": 8698332,
+					"bytes": 5434283,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "unknown"
+						}
+					],
+					"frames": 191,
+					"verdict": "unknown"
+				},
+				"1.ts": {
+					"bitrate": 188462,
+					"bytes": 117742,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "unknown"
+						}
+					],
+					"frames": 17,
+					"verdict": "unknown"
+				},
+				"6.mp2": {
+					"bitrate": 190847,
+					"bytes": 119232,
+					"evidence": [
+						{
+							"input": "skipped",
+							"value": 0,
+							"verdict": "unknown"
+						}
+					],
+					"frames": 207,
+					"verdict": "unknown"
+				}
+			},
+			"role": "publisher",
+			"stale": true,
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 0,
+						"verdict": "unknown"
+					},
+					{
+						"input": "loss",
+						"value": 0,
+						"verdict": "unknown"
+					},
+					{
+						"input": "headroom",
+						"value": 79.53153384986982,
+						"verdict": "unknown"
+					}
+				],
+				"lostBytes": 0,
+				"lostPackets": 0,
+				"verdict": "unknown"
+			},
+			"verdict": "unknown"
+		}
+	},
+	{
+		"name": "reset by a counter decrease",
+		"role": "publisher",
+		"previous": {
+			"observer": {
+				"path": "room/live"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rate": 840571496,
+					"rtt": 0
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 49908242,
+						"frames": 1677,
+						"keyframes": 40
+					},
+					"1.ts": {
+						"bytes": 1108160,
+						"frames": 160
+					},
+					"6.mp2": {
+						"bytes": 1104192,
+						"frames": 1917
+					}
+				}
+			}
+		},
+		"current": {
+			"observer": {
+				"path": "room/live"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rate": 44282776,
+					"rtt": 97
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 5443430,
+						"frames": 123,
+						"keyframes": 4
+					},
+					"1.ts": {
+						"bytes": 131594,
+						"frames": 19
+					},
+					"6.mp2": {
+						"bytes": 134784,
+						"frames": 234
+					}
+				}
+			}
+		},
+		"interval": 1000,
+		"age": 250,
+		"health": {
+			"observer": {
+				"path": "room/live"
+			},
+			"renditions": {
+				"0.avc3": {
+					"evidence": [
+						{
+							"input": "skipped",
+							"verdict": "unknown"
+						}
+					],
+					"verdict": "unknown"
+				},
+				"1.ts": {
+					"evidence": [
+						{
+							"input": "skipped",
+							"verdict": "unknown"
+						}
+					],
+					"verdict": "unknown"
+				},
+				"6.mp2": {
+					"evidence": [
+						{
+							"input": "skipped",
+							"verdict": "unknown"
+						}
+					],
+					"verdict": "unknown"
+				}
+			},
+			"reset": "decrease",
+			"role": "publisher",
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 97,
+						"verdict": "healthy"
+					},
+					{
+						"input": "loss",
+						"verdict": "unknown"
+					},
+					{
+						"input": "headroom",
+						"verdict": "unknown"
+					}
+				],
+				"verdict": "healthy"
+			},
+			"verdict": "healthy"
+		}
+	},
+	{
+		"name": "reset by an epoch change",
+		"role": "publisher",
+		"previous": {
+			"observer": {
+				"path": "room/live",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rate": 964849272,
+					"rtt": 1
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 34515307,
+						"frames": 1277,
+						"keyframes": 27
+					},
+					"1.ts": {
+						"bytes": 768786,
+						"frames": 111
+					},
+					"6.mp2": {
+						"bytes": 767232,
+						"frames": 1332
+					}
+				}
+			}
+		},
+		"current": {
+			"observer": {
+				"path": "room/live",
+				"epoch": "019a1774-02b9-7c18-a4e7-1d9f6b2c8e05"
+			},
+			"snapshot": {
+				"transport": {
+					"lostBytes": 0,
+					"lostPackets": 0,
+					"rate": 799253264,
+					"rtt": 0
+				},
+				"renditions": {
+					"0.avc3": {
+						"bytes": 39962652,
+						"frames": 1443,
+						"keyframes": 31
+					},
+					"1.ts": {
+						"bytes": 886528,
+						"frames": 128
+					},
+					"6.mp2": {
+						"bytes": 891648,
+						"frames": 1548
+					}
+				}
+			}
+		},
+		"interval": 5000,
+		"age": 250,
+		"health": {
+			"observer": {
+				"epoch": "019a1774-02b9-7c18-a4e7-1d9f6b2c8e05",
+				"path": "room/live"
+			},
+			"renditions": {
+				"0.avc3": {
+					"evidence": [
+						{
+							"input": "skipped",
+							"verdict": "unknown"
+						}
+					],
+					"verdict": "unknown"
+				},
+				"1.ts": {
+					"evidence": [
+						{
+							"input": "skipped",
+							"verdict": "unknown"
+						}
+					],
+					"verdict": "unknown"
+				},
+				"6.mp2": {
+					"evidence": [
+						{
+							"input": "skipped",
+							"verdict": "unknown"
+						}
+					],
+					"verdict": "unknown"
+				}
+			},
+			"reset": "replaced",
+			"role": "publisher",
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 0,
+						"verdict": "healthy"
+					},
+					{
+						"input": "loss",
+						"verdict": "unknown"
+					},
+					{
+						"input": "headroom",
+						"verdict": "unknown"
+					}
+				],
+				"verdict": "healthy"
+			},
+			"verdict": "healthy"
+		}
+	},
+	{
+		"name": "browser publisher with only PROBE rtt",
+		"role": "publisher",
+		"current": {
+			"observer": {
+				"path": "room/cam",
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18"
+			},
+			"snapshot": {
+				"transport": {
+					"rtt": 45,
+					"age": 800
+				},
+				"renditions": {
+					"video": {
+						"frames": 120,
+						"bytes": 310000,
+						"keyframes": 2
+					}
+				}
+			}
+		},
+		"interval": 1000,
+		"age": 250,
+		"health": {
+			"observer": {
+				"epoch": "019a1772-8c4e-7b3d-9f21-5a6e0c3d4b18",
+				"path": "room/cam"
+			},
+			"renditions": {
+				"video": {
+					"evidence": [
+						{
+							"input": "skipped",
+							"verdict": "unknown"
+						}
+					],
+					"verdict": "unknown"
+				}
+			},
+			"role": "publisher",
+			"transport": {
+				"evidence": [
+					{
+						"input": "rtt",
+						"value": 45,
+						"verdict": "healthy"
+					},
+					{
+						"input": "loss",
+						"verdict": "unknown"
+					},
+					{
+						"input": "headroom",
+						"verdict": "unknown"
+					}
+				],
+				"verdict": "healthy"
+			},
+			"verdict": "healthy"
+		}
+	}
+]
