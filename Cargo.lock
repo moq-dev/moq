@@ -4780,6 +4780,19 @@ name = "moq-clock-macros"
 version = "0.1.0"
 
 [[package]]
+name = "moq-congestion"
+version = "0.1.0"
+dependencies = [
+ "cpu-time",
+ "moq-clock",
+ "proptest",
+ "rand 0.10.3",
+ "rand_pcg",
+ "rustc-hash 2.1.3",
+ "stats_alloc",
+]
+
+[[package]]
 name = "moq-e2ee"
 version = "0.0.11"
 dependencies = [
@@ -5062,6 +5075,7 @@ dependencies = [
  "indexmap 2.14.2",
  "lru-slab",
  "moq-clock",
+ "moq-congestion",
  "moq-quic",
  "proptest",
  "qlog",
@@ -5074,7 +5088,6 @@ dependencies = [
  "rustls-pki-types",
  "rustls-platform-verifier",
  "slab",
- "stats_alloc",
  "thiserror 2.0.21",
  "tinyvec",
  "tracing",
@@ -5113,6 +5126,7 @@ dependencies = [
  "libc",
  "moq-auth 0.2.1",
  "moq-clock",
+ "moq-congestion",
  "moq-net",
  "moq-quic",
  "moq-shaper",
@@ -5336,6 +5350,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "moq-clock",
+ "moq-congestion",
  "moq-ice",
  "moq-net",
  "moq-quic",
@@ -5413,6 +5428,7 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "moq-clock",
+ "moq-congestion",
  "moq-net",
  "moq-quic",
  "moq-sock",

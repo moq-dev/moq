@@ -103,6 +103,7 @@ moq-uring = { workspace = true, optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
+moq-congestion = { path = "../moq-congestion" }
 criterion = { workspace = true }
 # An HTTP/2 client, so the admission bench can hold many requests on one connection.
 h2 = { workspace = true }

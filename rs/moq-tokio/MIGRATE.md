@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Congestion controller imports moved to `moq-congestion`
+
+Add `moq-congestion` as a dependency and replace `moq_tokio::quic::driver::congestion::` imports with `moq_congestion::`. Native QUIC and WebTransport controller selection is unchanged.
+
 ### The connection receive window is 128 MiB, and has a floor (#5878)
 
 `quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.

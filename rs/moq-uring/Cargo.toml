@@ -15,7 +15,7 @@ categories = ["asynchronous", "network-programming", "os::linux-apis"]
 [features]
 default = ["quic"]
 # QUIC and WebTransport on moq-quic, with TLS through rustls.
-quic = ["dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
+quic = ["dep:moq-congestion", "dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
 # Capture qlog traces (`quic::Transport::qlog`). Off by default: it compiles the
 # qlog crate and its serde_json encoder into moq-quic, which a production build has
 # no use for.
@@ -25,6 +25,7 @@ qlog = ["moq-quic?/qlog"]
 manual = ["moq-clock/manual"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
+moq-congestion = { workspace = true, optional = true }
 bytes = "1"
 http = "1"
 io-uring = { workspace = true }

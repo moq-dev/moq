@@ -19,7 +19,7 @@ default = ["net", "quic", "aws-lc-rs", "websocket", "tcp", "uds"]
 net = ["dep:moq-net", "dep:web-transport-trait"]
 # The async QUIC driver alone (`quic::driver`): moq-quic on tokio, without moq-net or
 # the MoQ backend. Needs a crypto-provider feature.
-driver = ["dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash", "dep:socket2"]
+driver = ["dep:moq-congestion", "dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash", "dep:socket2"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
 quic = [
     "_transport",
@@ -67,6 +67,7 @@ webrtc = ["_transport", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", 
 ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/rustls-ring"]
 
 [dependencies]
+moq-congestion = { workspace = true, optional = true }
 bytes = "1"
 # Family-restricted `getaddrinfo`, so the AAAA and A queries can be issued separately
 # (RFC 8305 section 3) while still going through the system resolver.

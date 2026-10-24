@@ -58,6 +58,7 @@ __rustls-post-quantum-test = []
 fuzz = ["dep:arbitrary", "ring"]
 
 [dependencies]
+moq-congestion = { workspace = true }
 arbitrary = { version = "1.5", features = ["derive"], optional = true }
 aws-lc-rs = { version = "1.9", default-features = false, optional = true }
 bytes = { workspace = true }
@@ -68,7 +69,6 @@ lru-slab = "0.1.2"
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
-rand_pcg = "0.10"
 ring = { version = "0.17", optional = true }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23.5", default-features = false, features = ["std"], optional = true }
@@ -88,6 +88,7 @@ rustls-pki-types = { version = "1.7", features = ["web"] }
 web-time = "1"
 
 [dev-dependencies]
+rand_pcg = { workspace = true }
 arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
 criterion = { workspace = true }
@@ -98,7 +99,6 @@ moq-clock = { path = "../moq-clock" }
 moq-quic = { path = ".", features = ["mux"] }
 proptest = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
-stats_alloc = "0.1.10"
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 wasm-bindgen-test = "0.3.45"
 
