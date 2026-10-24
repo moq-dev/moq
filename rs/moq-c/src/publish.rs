@@ -197,7 +197,6 @@ pub struct Publish {
 
 	/// Group requests delivered to a handler, freed on accept, abort, or free.
 	group_request: NonZeroSlab<moq_net::group::Request>,
-
 }
 
 impl Publish {

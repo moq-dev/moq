@@ -761,7 +761,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		let _finished = broadcast.finish().unwrap();
+		broadcast.finish().unwrap();
 		for index in 0..4 {
 			let mut track = reader
 				.track(&format!("audio-{index}"))
