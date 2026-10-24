@@ -51,7 +51,16 @@ impl Resolver {
 	}
 }
 
-async fn run(mut batches: mpsc::Receiver<Vec<String>>, commands: mpsc::Sender<Command>, lookup: impl Lookup) {
+async fn run(batches: mpsc::Receiver<Vec<String>>, commands: mpsc::Sender<Command>, lookup: impl Lookup) {
+	// Once the driver exits no lookup can reach a connection, so stop, and let
+	// signaling see the peer is closed.
+	tokio::select! {
+		_ = commands.closed() => {}
+		_ = resolve(batches, &commands, lookup) => {}
+	}
+}
+
+async fn resolve(mut batches: mpsc::Receiver<Vec<String>>, commands: &mpsc::Sender<Command>, lookup: impl Lookup) {
 	while let Some(lines) = batches.recv().await {
 		for (host, lines) in by_host(&lines) {
 			let Some(ip) = lookup.lookup(host).await else {
@@ -256,6 +265,26 @@ mod tests {
 		// The task is gone, with its query and its handle on the driver.
 		assert!(next(&mut commands).await.is_none());
 		assert_eq!(fake.in_flight.load(Ordering::SeqCst), 0);
+		assert_eq!(fake.queries(), ["host0.local"]);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn resolution_stops_with_the_driver() {
+		let fake = Fake::default();
+		let (tx, commands) = mpsc::channel(1);
+		let resolver = Resolver::spawn(tx, fake.clone());
+
+		resolver.add(vec![line(0, 0), line(1, 1)]).await.unwrap();
+		while fake.queries().is_empty() {
+			tokio::task::yield_now().await;
+		}
+		drop(commands);
+
+		// The query in flight is cancelled before it answers, the rest of the batch
+		// is skipped, and signaling sees the peer is closed.
+		moq_clock::sleep(DELAY / 2).await;
+		assert_eq!(fake.in_flight.load(Ordering::SeqCst), 0);
+		assert!(matches!(resolver.add(vec![line(2, 2)]).await, Err(Error::Closed)));
 		assert_eq!(fake.queries(), ["host0.local"]);
 	}
 }
