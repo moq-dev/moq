@@ -22,9 +22,9 @@ fn client(backoff: moq_tokio::Backoff) -> moq_tokio::Client {
 #[tokio::test]
 async fn a_transient_failure_retries_until_the_budget_runs_out() {
 	let mut backoff = moq_tokio::Backoff::default();
-	backoff.initial = Some(Duration::from_millis(20));
-	backoff.max = Some(Duration::from_millis(40));
-	backoff.timeout = Some(Duration::from_millis(200));
+	backoff.initial = Some((Duration::from_millis(20)).into());
+	backoff.max = Some((Duration::from_millis(40)).into());
+	backoff.timeout = Some((Duration::from_millis(200)).into());
 
 	// Nothing listens on port 1, so every attempt is refused: transient as far as this layer knows.
 	let url: url::Url = "tcp://127.0.0.1:1".parse().expect("failed to parse url");
@@ -78,7 +78,7 @@ async fn a_handshake_slower_than_the_retry_window_still_lands() {
 	let _server = tokio::spawn(async move {
 		let origin = moq_tokio::origin::spawn();
 		while let Some(request) = server.accept().await {
-			if let Ok((session, _driver)) = request.with_publisher(&origin).ok().await {
+			if let Ok(session) = request.with_publisher(&origin).ok().await {
 				let _ = accepted.send(session);
 			}
 		}
@@ -103,7 +103,7 @@ async fn a_handshake_slower_than_the_retry_window_still_lands() {
 
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.backoff.timeout = Some(WINDOW);
+	config.backoff.timeout = Some((WINDOW).into());
 	let client = config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("tls://127.0.0.1:{port}/").parse().expect("parse url");
 	let connection = client.connect(url);
@@ -187,7 +187,7 @@ async fn spawn_server() -> (
 		while let Some(request) = server.accept().await {
 			let origin = moq_tokio::origin::spawn();
 			match request.with_publisher(&origin).ok().await {
-				Ok((session, _driver)) => {
+				Ok(session) => {
 					let _ = accepted.send(session);
 				}
 				Err(err) => tracing::warn!(%err, "accept failed"),
@@ -201,9 +201,9 @@ async fn spawn_server() -> (
 /// A client that redials fast, so a migration lands inside the test's patience.
 fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
-	config.backoff.initial = Some(Duration::from_millis(20));
-	config.backoff.max = Some(Duration::from_millis(40));
-	config.backoff.timeout = Some(Duration::ZERO);
+	config.backoff.initial = Some((Duration::from_millis(20)).into());
+	config.backoff.max = Some((Duration::from_millis(40)).into());
+	config.backoff.timeout = Some((Duration::ZERO).into());
 	config.goaway.redirect = redirect;
 	config.init(Default::default()).expect("failed to init client")
 }
@@ -362,9 +362,9 @@ async fn a_draining_peer_does_not_exhaust_the_retry_window() {
 	// more than twice the window. A GOAWAY arriving inside the 200ms health bar is what makes a
 	// session count as drained at once rather than as a healthy session that later migrated.
 	let mut backoff = moq_tokio::Backoff::default();
-	backoff.initial = Some(Duration::from_millis(200));
-	backoff.max = Some(Duration::from_millis(200));
-	backoff.timeout = Some(Duration::from_millis(500));
+	backoff.initial = Some((Duration::from_millis(200)).into());
+	backoff.max = Some((Duration::from_millis(200)).into());
+	backoff.timeout = Some((Duration::from_millis(500)).into());
 	rides_out_a_drain(backoff, 12).await;
 }
 
@@ -374,9 +374,9 @@ async fn a_draining_peer_does_not_exhaust_the_retry_window() {
 async fn a_drain_backoff_longer_than_the_retry_window_still_redials() {
 	// From the second drained session on, the delay is 400ms against a 100ms window.
 	let mut backoff = moq_tokio::Backoff::default();
-	backoff.initial = Some(Duration::from_millis(200));
-	backoff.max = Some(Duration::from_millis(400));
-	backoff.timeout = Some(Duration::from_millis(100));
+	backoff.initial = Some((Duration::from_millis(200)).into());
+	backoff.max = Some((Duration::from_millis(400)).into());
+	backoff.timeout = Some((Duration::from_millis(100)).into());
 	rides_out_a_drain(backoff, 4).await;
 }
 
@@ -401,7 +401,7 @@ async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
 		// Held, as a draining server does: each one closes when the client leaves it.
 		let mut held = Vec::new();
 		while let Some(request) = server.accept().await {
-			let Ok((session, _driver)) = request.with_publisher(&origin).ok().await else {
+			let Ok(session) = request.with_publisher(&origin).ok().await else {
 				continue;
 			};
 			if held.len() < drained {
@@ -429,7 +429,7 @@ async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
 }
 
 /// How long each session on a bouncing fleet lives before its relay sends the GOAWAY. Twice
-/// the 50ms initial backoff these tests use, so every session counts as healthy.
+/// the 50ms healthy bar these tests use, so every session counts as healthy.
 const LIFE: Duration = Duration::from_millis(100);
 
 /// Send every session `sessions` yields the GOAWAY `uri(n)` once it has lived [`LIFE`], `n`
@@ -483,13 +483,15 @@ async fn ping_pong(
 	(url, accepts, tasks)
 }
 
-/// A backoff starting at 50ms that doubles up to `max`, giving up after `timeout`.
+/// A backoff starting at 50ms that doubles up to `max`, giving up after `timeout`, and that
+/// counts a session as healthy once it outlives the initial delay.
 fn bounced_backoff(max: Duration, timeout: Duration) -> moq_tokio::Backoff {
 	let mut backoff = moq_tokio::Backoff::default();
-	backoff.initial = Some(Duration::from_millis(50));
+	backoff.initial = Some((Duration::from_millis(50)).into());
+	backoff.healthy = Some((Duration::from_millis(50)).into());
 	backoff.multiplier = 2;
-	backoff.max = Some(max);
-	backoff.timeout = Some(timeout);
+	backoff.max = Some((max).into());
+	backoff.timeout = Some((timeout).into());
 	backoff
 }
 

@@ -92,22 +92,6 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn moq_congestion::Cont
 	}
 }
 
-/// A live QUIC connection under a session, for tuning it once the peer is known.
-pub struct Connection(driver::Connection);
-
-impl Connection {
-	pub(crate) fn new(conn: driver::Connection) -> Self {
-		Self(conn)
-	}
-
-	/// Change the flow-control limits `limits` sets; a raise reaches the peer on the next packet.
-	///
-	/// Errors, changing nothing, on limits [`Limits::validate`](crate::quic::Limits::validate) refuses.
-	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<()> {
-		Ok(self.0.set_limits(limits)?)
-	}
-}
-
 /// Errors specific to the QUIC backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -331,8 +315,8 @@ pub(crate) struct Client {
 	/// whether an IPv4 destination is reachable at all. Captured here because the
 	/// endpoint owns the socket from here on and `local_addr` can't tell us.
 	dual_stack: bool,
-	/// Whether to write session secrets to `SSLKEYLOGFILE` (see [`crate::quic::Config::keylog`]).
-	keylog: bool,
+	/// A private log opened before this client can start a handshake.
+	keylog: Option<Arc<crate::tls::KeyLog>>,
 }
 
 impl Client {
@@ -346,7 +330,12 @@ impl Client {
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "client")?;
 		let transport = Arc::new(transport);
-		let keylog = quic.keylog;
+		let keylog = quic
+			.keylog
+			.as_deref()
+			.map(crate::tls::KeyLog::open)
+			.transpose()?
+			.map(Arc::new);
 
 		// There's a bit more boilerplate to make a generic endpoint.
 		// The driver spawns its tasks on the current tokio runtime.
@@ -455,8 +444,8 @@ impl Client {
 		};
 
 		config.alpn_protocols = alpns;
-		if self.keylog {
-			config.key_log = Arc::new(rustls::KeyLogFile::new());
+		if let Some(keylog) = &self.keylog {
+			config.key_log = keylog.clone();
 		}
 
 		let config: driver::crypto::rustls::QuicClientConfig = config.try_into()?;
@@ -776,7 +765,12 @@ impl Server {
 		let quic = quic.resolve();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "server")?;
-		let keylog = quic.keylog;
+		let keylog = quic
+			.keylog
+			.as_deref()
+			.map(crate::tls::KeyLog::open)
+			.transpose()?
+			.map(Arc::new);
 		let transport = Arc::new(transport);
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
@@ -789,8 +783,8 @@ impl Server {
 		alpns.push(web::ALPN.as_bytes().to_vec());
 
 		let mut tls = (*served.config(alpns)?).clone();
-		if keylog {
-			tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		if let Some(keylog) = keylog {
+			tls.key_log = keylog;
 		}
 
 		let tls: driver::crypto::rustls::QuicServerConfig = tls.try_into()?;

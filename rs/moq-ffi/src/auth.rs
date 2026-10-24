@@ -204,7 +204,7 @@ mod tests {
 			// Nothing redials: the client stays disconnected once the session drops.
 			drop(listener);
 			let mut requests = request.requests();
-			let (session, driver) = request.ok().await.unwrap();
+			let session = request.ok().await.unwrap();
 			let mut issued = Vec::new();
 			for _ in 0..2 {
 				let request = requests.next().await.expect("token");
@@ -218,7 +218,7 @@ mod tests {
 				}));
 			}
 			let _ = drop_rx.await;
-			drop((session, driver, issued, requests));
+			drop((session, issued, requests));
 		});
 
 		let client = MoqClient::new(MoqClientConfig {

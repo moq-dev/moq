@@ -312,7 +312,8 @@ impl Session {
 	/// A close carrying no application code is otherwise [`Error::IdleTimeout`] for an
 	/// idle timeout and [`Error::Transport`] for anything else. See
 	/// [`Error::from_transport`]. If the runtime drops the driver instead of running it to
-	/// completion, this resolves with [`Error::Cancel`].
+	/// completion, this resolves with [`Error::Cancel`]. A panic while polling the driver is
+	/// a transport failure instead.
 	pub async fn closed(&self) -> Error {
 		match self
 			.closed
@@ -540,6 +541,20 @@ enum SamplerMode {
 }
 
 impl Supervisor {
+	pub(crate) fn panicked(&mut self, error: Error) {
+		self.session
+			.closing()
+			.local
+			.store(true, std::sync::atomic::Ordering::Relaxed);
+		if let Ok(mut closed) = self.closed.write() {
+			*closed = Some(Ended {
+				err: error.clone(),
+				drain: Some(Err(error.clone())),
+			});
+		}
+		let code = self.version.session_code(&SessionError::Internal);
+		self.session.abort(&error, code, "session driver panicked");
+	}
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {

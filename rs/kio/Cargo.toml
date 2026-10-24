@@ -14,7 +14,7 @@ categories = ["asynchronous", "concurrency"]
 
 [features]
 # Per-task Ready poll accounting for deterministic simulators, never production.
-sim = []
+_sim = []
 
 [dependencies]
 smallvec = { version = "1.15", features = ["union"] }
