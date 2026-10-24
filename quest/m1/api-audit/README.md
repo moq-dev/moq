@@ -68,14 +68,12 @@ Rejected in planning:
 
 - [MIGRATE matches release](/quest/m1/api-audit/migrate.md) - every break already on main has a correct entry measured against release, and entries for unreleased packages are gone
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [JS prepared answers](/quest/m1/api-audit/js-prepared.md) - a leaked or abandoned `Prepared` refuses its request instead of blocking the path
 - [The origin announces](/quest/m1/api-audit/announce-owner.md) - a broadcast producer cannot announce; the origin hands out the announcement, so `Prepared` and standalone broadcasts lose methods that always fail
 - [Unpublish what nothing uses](/quest/m1/api-audit/unpublish.md) - packages, features, and listeners with no consumer stop shipping or stop being on by default
 - [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone
 - [Binding connection state](/quest/m1/api-audit/binding-state.md) - one `state()` snapshot and `state_changed()` replace `status`, `connects`, and both `failure` polls
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - Rust and JS model exports without a consumer go private, wrong ones are deleted, and JS names mirror Rust
 - [One clean close](/quest/m1/api-audit/clean-close.md) - a clean session close has one spelling and failures are recorded inside moq-net
-- [Session limits only where needed](/quest/m1/api-audit/session-limits.md) - `session::Limits` keeps only bounds that nothing else enforces, and its documented example compiles
 - [Ranges refuse what the wire drops](/quest/m1/api-audit/ranges-wire.md) - relative and time anchors fail loud where a wire cannot carry them, `floor()` honors the subscription, and bindings take an optional max delay
 - [Derived origins borrow](/quest/m1/api-audit/derived-origin-close.md) - closing a JS `scope()` or `withPreference()` handle releases only that handle
 - [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - Python, Go, and Dart client options use the FFI's names and nesting
@@ -85,7 +83,6 @@ Rejected in planning:
 - [CLI and gst flags](/quest/m1/api-audit/cli-flags.md) - one flag name per meaning across CLI subcommands and gst elements, and `linger` means one thing
 - [Transport config](/quest/m1/api-audit/transport-config.md) - moq-tokio and moq-quic configs have one meaning for unset, enums for modes, no order-dependent setters, and no leftover features
 - [Relay config](/quest/m1/api-audit/relay-config.md) - moq-relay and its embedders load config through one path that refuses old spellings, under names that do not collide
-- [Auth and clock names](/quest/m1/api-audit/auth-clock-names.md) - refusal and reason types have distinct names, and the Rust and JS clocks mirror each other
 - [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
 - [Only sessions accept a request](/quest/m1/api-audit/claim-request-type.md) - accepting an application claim's request fails to compile, and the peer-route hatches are crate-private
 - [One range setter](/quest/m1/api-audit/serve.md) - `with_range` replaces seven cursor setters and nothing else of the serving cursor goes public

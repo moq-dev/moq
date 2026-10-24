@@ -140,7 +140,7 @@ const player = new Watch.Player({
     origin: connection.origin,
     probe: connection.probe,
     name: Moq.Path.from("alice.hang"),
-    canvas,
+    video: { canvas },
 });
 // player.broadcast, player.video, player.audio, player.text, player.sync,
 // player.renderer, and player.emitter expose the pipeline.
@@ -148,7 +148,7 @@ const player = new Watch.Player({
 ```
 
 Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
-to change later, such as `muted` or `delay`. `Player` is the pipeline inside
+to change later, such as `audio.muted` or `delay`. `Player` is the pipeline inside
 `<moq-watch>`; its parts are exported for custom composition.
 
 To chart when each audio frame arrived against when it plays, open an

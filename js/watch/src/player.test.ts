@@ -14,7 +14,7 @@ test("Player owns the shared pipeline and feeds output policy into decoders", as
 	const enabled = new Signal(true);
 	const paused = new Signal(false);
 	const muted = new Signal(false);
-	const player = new Player({ enabled, paused, muted, visible: "always" });
+	const player = new Player({ enabled, paused, audio: { muted }, video: { visible: "always" } });
 	try {
 		await flush();
 		expect(player.video.source.in.broadcast.peek()).toBe(player.broadcast);
