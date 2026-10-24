@@ -81,6 +81,10 @@ path = "examples/fuzz-seeds.rs"
 required-features = ["fuzz"]
 
 [[bench]]
+name = "storage"
+harness = false
+
+[[bench]]
 name = "origin"
 harness = false
 required-features = ["async"]
