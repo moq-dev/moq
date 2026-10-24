@@ -898,7 +898,8 @@ async fn serve_request(
 	let serving = serve.shutdown.serve();
 	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
 	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the
-	// shared runtime, and dropping it aborts the task.
+	// shared runtime, and dropping it aborts the task. Dropping the reply refuses the
+	// session with the timeout code, which its stats count.
 	let shutdown = serve.shutdown.clone();
 	let expired = std::pin::pin!(lifecycle.shared(&serve.tokio, async move { shutdown.expired().await }));
 	let reply = std::pin::pin!(request.ok());

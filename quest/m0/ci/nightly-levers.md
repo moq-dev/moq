@@ -34,4 +34,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the structural baseline
-- [Run the queue's modules in parallel](/quest/m0/ci/parallel-modules.md) - the structural baseline

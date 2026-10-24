@@ -144,12 +144,12 @@ not throttled by `[quic]` limits sized for one viewer, for example
 their transport's own limits.
 
 These are the defaults. Each subscription and FETCH holds a stream on moq-lite
-and on moq-transport draft 17 and later, so `[quic]` or `[limits.peer.quic]`
-`max_streams` bounds them there, and a peer past it waits rather than fails.
+and on moq-transport draft 17 and later, as does each PUBLISH a peer's track
+listing gets, so `[quic]` or `[limits.peer.quic]` `max_streams` bounds them
+there, and a peer past it waits rather than fails.
 On drafts 14 to 16, `announces` and `requests` together size the request
 window instead, which every request counts against, so very small values can
-prevent other requests from progressing. On later drafts `requests` bounds the
-PUBLISHes a peer's track listings hold; the rest are skipped. Size peer limits
+prevent other requests from progressing. Size peer limits
 for the combined traffic they carry, and use session peak counters to check
 announcement and subscription headroom. Exceeding `announces` closes the session
 with `TOO_MANY_REQUESTS`; reconnecting with the same load will exceed it again.
