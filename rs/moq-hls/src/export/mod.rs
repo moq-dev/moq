@@ -4180,8 +4180,8 @@ mod tests {
 		let test = Timelines::new();
 		let rendition = test.rendition("video0");
 		let mut segments = rendition.segments();
-		test.renditions.finish(Err(crate::Error::IncompleteRecording));
-		assert!(matches!(segments.next().await, Err(crate::Error::IncompleteRecording)));
+		test.renditions.finish(Err(crate::Error::NoVariants));
+		assert!(matches!(segments.next().await, Err(crate::Error::NoVariants)));
 	}
 
 	#[tokio::test(start_paused = true)]

@@ -793,17 +793,15 @@ mod tests {
 		let producer = Producer::new(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		producer.fanout.finish(None);
-		producer.finish(Err(crate::Error::IncompleteRecording));
-		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
+		producer.finish(Err(crate::Error::NoVariants));
+		assert!(matches!(cursor.next().await, Err(crate::Error::NoVariants)));
 
 		let producer = Producer::new(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		let reference = Arc::new((Kind::Video, "video".into(), "video".into()));
-		producer
-			.fanout
-			.fail(Some(&reference), crate::Error::IncompleteRecording);
+		producer.fanout.fail(Some(&reference), crate::Error::NoVariants);
 		producer.finish(Ok(()));
-		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
+		assert!(matches!(cursor.next().await, Err(crate::Error::NoVariants)));
 	}
 
 	fn entry(sequence: u64, pts: u64) -> Entry {

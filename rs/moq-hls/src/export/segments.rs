@@ -20,7 +20,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Poll, ready};
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
@@ -572,16 +572,15 @@ impl Consumer {
 
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Row>>> {
 		self.poll_feed(waiter);
-		let found = match self.state.poll(waiter, |state| -> Poll<Result<Option<Row>>> {
+		let found = match ready!(self.state.poll(waiter, |state| -> Poll<Result<Option<Row>>> {
 			match state.next_at(self.position)? {
 				Next::Ready(row) => Poll::Ready(Ok(Some(row))),
 				Next::Done => Poll::Ready(Ok(None)),
 				Next::Pending => Poll::Pending,
 			}
-		}) {
-			Poll::Ready(Ok(found)) => found?,
-			Poll::Ready(Err(_)) => return Poll::Ready(Err(crate::Error::IncompleteRecording)),
-			Poll::Pending => return Poll::Pending,
+		})) {
+			Ok(found) => found?,
+			Err(_) => return Poll::Ready(Err(crate::Error::IncompleteRecording)),
 		};
 		if found.is_some() {
 			return Poll::Ready(Ok(found));
