@@ -480,6 +480,9 @@ export class Consumer {
 		if (options?.maxDelay !== undefined) {
 			options = { ...options, maxDelay: wireMillis("maxDelay", options.maxDelay) };
 		}
+		if (!this.#broadcast.fetchGroup) {
+			return Promise.reject(new Error("fetch group is not supported by this session's version"));
+		}
 		return this.#broadcast.fetchGroup(this.name, sequence, options);
 	}
 }

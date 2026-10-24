@@ -20,7 +20,15 @@ import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
 import dev.moq.json.StreamConfig
 import dev.moq.json.Timed
+import dev.moq.json.WindowConfig
+import dev.moq.json.WindowConsumer
+import dev.moq.json.WindowEventPop
+import dev.moq.json.WindowEventPush
+import dev.moq.json.WindowProducer
 import dev.moq.json.decode
+import dev.moq.json.events
+import dev.moq.json.push
+import dev.moq.json.timestamp
 import dev.moq.json.update
 import dev.moq.json.valuesAs
 import kotlinx.serialization.Serializable
@@ -442,6 +450,39 @@ class SmokeTest {
             assertEquals(Timed(Status(state = "live1"), 1.milliseconds), consumer.next()?.decode<Status>())
             assertEquals(Timed(Status(state = "live2"), 2.milliseconds), consumer.next()?.decode<Status>())
             assertEquals(Timed(Status(state = "live4"), 4.milliseconds), consumer.latest()?.decode<Status>())
+        }
+    }
+
+    @Test
+    fun `json window yields pushes and pops in order`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = WindowConfig(compression = true)
+            val track = broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL))
+            val producer = WindowProducer(track, config)
+            val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null), config)
+            for (n in 1..3) producer.push(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
+            producer.pop(2uL, 4_000uL)
+
+            for (n in 0..2) {
+                val timed = checkNotNull(consumer.next())
+                val push = assertIs<WindowEventPush>(timed.event)
+                assertEquals(n.toULong(), push.index)
+                assertEquals(Status(state = "live${n + 1}"), push.decode<Status>())
+                assertEquals((n + 1).milliseconds, timed.timestamp)
+            }
+            val pop = checkNotNull(consumer.next())
+            assertEquals(WindowEventPop(0uL, 2uL), pop.event)
+            assertEquals(4.milliseconds, pop.timestamp)
+
+            // The cut's new group restates record 2, which this reader already has.
+            producer.cut()
+            producer.push(Status(state = "live4"), timestampUs = 5_000uL)
+            producer.finish()
+            val events = consumer.events().toList()
+            assertEquals(1, events.size)
+            val push = assertIs<WindowEventPush>(events[0].event)
+            assertEquals(3uL, push.index)
+            assertEquals(Status(state = "live4"), push.decode<Status>())
         }
     }
 

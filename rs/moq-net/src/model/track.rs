@@ -10099,6 +10099,31 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
 
+	/// A fetch with a budget parks on its deadlines even when it returns a cached group at
+	/// once, and fetches with distinct budgets never share one. Fetches that finish must not
+	/// leave their deadlines indexed for as long as the track lives.
+	#[test]
+	#[cfg(feature = "async")]
+	fn departed_budgets_leave_no_deadlines_behind() {
+		let mut producer = track_producer("test", Info::timed());
+		for second in 0..5 {
+			append_at(&mut producer, second * 1000);
+		}
+		let consumer = producer.consume();
+		for i in 0..1_000 {
+			let budget = Duration::from_millis(1_500) + Duration::from_micros(i);
+			let fetch = group::Fetch::default().with_max_delay(budget);
+			let group = consumer.fetch_group(2, fetch).now_or_never().unwrap().unwrap();
+			assert_eq!(group.sequence, 2);
+		}
+		let cache = producer.state.read().cache.clone();
+		let (media, wall) = cache.wakes().deadlines_indexed();
+		assert!(
+			media <= 32 && wall <= 32,
+			"{media} media and {wall} wall deadlines indexed"
+		);
+	}
+
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_budget_reaches_back_over_the_cache() {

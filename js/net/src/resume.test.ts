@@ -1114,6 +1114,58 @@ test("a failed group on a route whose replacement was refused ends with the refu
 	b.close();
 });
 
+/** A route offering no FETCH, like a moq-transport session's, through every handle the front clones. */
+class Unfetchable extends BroadcastConsumer {
+	constructor(shared?: never) {
+		super(shared);
+		overrideBroadcastWire(this, { fetchGroup: undefined });
+	}
+
+	override clone(): Unfetchable {
+		return new Unfetchable(this.shareState());
+	}
+
+	static of(consumer: BroadcastConsumer): Unfetchable {
+		return new Unfetchable((consumer as Unfetchable).shareState());
+	}
+}
+
+test("a failed group whose replacement cannot fetch ends with the failure, or continues from its copy", async () => {
+	for (const held of [false, true]) {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		// A budget wide enough that the newer group never gives group 0 up first.
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+		const stalled = ta.write(0, 1, false);
+		const group = sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		await group.readFrame();
+
+		// Like a moq-transport session: the route offers no FETCH to fill the rest from.
+		if (held) tb.write(0, 2);
+		else tb.write(1);
+		front.serve(Unfetchable.of(b.consume()));
+		await settle();
+		const failure = new StreamError(StreamCode.Cancel);
+		stalled.close(failure);
+		if (held) {
+			expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+			expect(await group.readFrame()).toBeUndefined();
+		} else {
+			await expect(group.readFrame()).rejects.toBe(failure);
+		}
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("draining groups to their end leaves buffered datagrams readable", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2513,12 +2565,13 @@ function counted(source: BroadcastProducer, answer?: (sequence: number) => Group
 	class Counted extends BroadcastConsumer {
 		constructor(shared?: never) {
 			super(shared);
-			const original = wireOf(this);
+			const original = wireOf(this).fetchGroup;
+			if (!original) throw new Error("a local broadcast fetches from its cache");
 			overrideBroadcastWire(this, {
 				fetchGroup: (name, sequence, options) => {
 					asked.push(sequence);
 					const answered = answer?.(sequence);
-					return answered ? Promise.resolve(answered) : original.fetchGroup(name, sequence, options);
+					return answered ? Promise.resolve(answered) : original(name, sequence, options);
 				},
 			});
 		}
