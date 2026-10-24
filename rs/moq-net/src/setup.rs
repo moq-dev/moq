@@ -39,8 +39,8 @@ pub(crate) fn decode_implementation(bytes: Option<&[u8]>) -> Result<Option<Strin
 /// The implementation the peer advertised in SETUP, published once that SETUP is read.
 ///
 /// `None` until then. The protocol holds a clone for the life of its driver, so a
-/// session that ends before the SETUP arrives closes the channel instead of leaving
-/// `Session::peer_implementation` waiting.
+/// dropped driver closes the channel; `Session::peer_implementation` also watches the
+/// session's end, for a finished driver the caller keeps.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 #[derive(Clone, Default)]
 pub(crate) struct PeerImplementation(kio::Producer<Option<Option<String>>>);

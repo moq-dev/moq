@@ -84,3 +84,30 @@ async fn an_oversized_implementation_fails_the_dial() {
 		.await;
 	assert!(matches!(dial, Err(moq_net::Error::Encode(_))), "{:?}", dial.err());
 }
+
+/// A session that ends before the peer's SETUP resolves `None`, even while the caller still
+/// holds the finished driver.
+#[moq_clock::test]
+async fn the_wait_ends_with_the_session() {
+	let version: Version = "moq-lite-06".parse().unwrap();
+	let mut transport = moq_net::transport::memory::Config::default();
+	transport.protocol = Some(version.alpn().to_string());
+	// The server end never answers, so the client's wait for SETUP can only end with the session.
+	let (client, _server) = support::mock::create_mock_session_pair(transport);
+	let (session, mut driver) = moq_net::Client::new()
+		.with_versions(version.into())
+		.connect(support::harness::now(), client)
+		.await
+		.expect("the client dials without waiting for SETUP");
+	session.abort(moq_net::Error::Cancel);
+
+	// The driver outlives its result, as one kept in a struct or a join handle would.
+	drop(moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
+		Ok::<_, std::convert::Infallible>(driver.poll(now, waiter).unwrap_or(None))
+	})));
+
+	let seen = moq_clock::timeout(std::time::Duration::from_secs(5), session.peer_implementation())
+		.await
+		.expect("the wait ends with the session");
+	assert_eq!(seen, None);
+}

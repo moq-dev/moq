@@ -149,13 +149,25 @@ impl Session {
 	/// 01-04), or the session ended first. Peer-controlled: use it for logs and
 	/// rollout counts, never to authorize.
 	pub async fn peer_implementation(&self) -> Option<String> {
-		self.peer_implementation
-			.wait(|slot| match &**slot {
+		// The slot closes only when the driver drops, which a caller holding a finished
+		// one never does, so the transport's end is watched too.
+		kio::wait(|waiter| {
+			let slot = self.peer_implementation.poll(waiter, |slot| match &**slot {
 				Some(value) => Poll::Ready(value.clone()),
 				None => Poll::Pending,
-			})
-			.await
-			.unwrap_or_default()
+			});
+			match slot {
+				Poll::Ready(Ok(value)) => return Poll::Ready(value),
+				Poll::Ready(Err(_)) => return Poll::Ready(None),
+				Poll::Pending => {}
+			}
+			let ended = self.closed.poll(waiter, |ended| match &**ended {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			});
+			ended.map(|_| None)
+		})
+		.await
 	}
 
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
