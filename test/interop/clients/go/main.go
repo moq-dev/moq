@@ -98,11 +98,11 @@ type dialOptions struct {
 // dial connects to url, printing the relay's grant in the Rust client's
 // `auth granted` shape when asked.
 func dial(ctx context.Context, url string, opts dialOptions, timeout time.Duration) (*moq.Client, error) {
-	options := []moq.ClientOption{moq.WithTLSVerify(false)}
+	config := moq.ClientConfig{TLS: moq.ClientTLS{Insecure: true}}
 	if opts.version != "" {
-		options = append(options, moq.WithVersions(opts.version))
+		config.Versions = []string{opts.version}
 	}
-	client, err := moq.Dial(ctx, url, options...)
+	client, err := moq.Dial(ctx, url, config)
 	if err != nil || !opts.grant {
 		return client, err
 	}

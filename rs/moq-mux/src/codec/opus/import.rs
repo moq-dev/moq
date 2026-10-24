@@ -59,8 +59,6 @@ impl Import {
 		self.track.abort(err);
 	}
 
-	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
-	/// the fields its config didn't supply.
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;

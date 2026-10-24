@@ -15,7 +15,8 @@ type Session struct {
 }
 
 // Closed blocks until the session closes and returns the reason. A graceful
-// close reports an error for which IsShutdown returns true. Cancelling ctx gives
+// close reports an error for which IsShutdown returns true. After Shutdown, it
+// waits for the drain and reports delivery failures. Cancelling ctx gives
 // up waiting and shuts the session down, so a caller that no longer cares about
 // the connection can tear it down by cancelling.
 func (s *Session) Closed(ctx context.Context) error {
@@ -179,13 +180,12 @@ func (s *Session) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: s.inner.Consume()}
 }
 
-// Shutdown drains finished tracks within one second, returning any drain error.
-// Explicit moq-lite-07-wip waits for the peer to receive finished tails; older Lite
-// versions, including the default lite-06, wait only for transport ACKs.
-// IETF also waits for transport ACKs.
-// Cancelling ctx aborts the session immediately.
-func (s *Session) Shutdown(ctx context.Context) error {
-	return bridge.CallErr(ctx, s.abort, s.inner.Shutdown)
+// Shutdown requests a draining close now; wait for its result with Closed.
+// Explicit moq-lite-07-wip waits for the peer to receive finished tails; older
+// Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+// Finish or abort live tracks first; the drain times out after one second.
+func (s *Session) Shutdown() {
+	s.inner.Shutdown()
 }
 
 // abort tears the session down without draining, for a cancelled ctx.

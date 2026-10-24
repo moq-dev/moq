@@ -171,6 +171,23 @@ enum TrackKind {
 	Flac(crate::codec::flac::Import),
 }
 
+/// Forward a call to whichever codec importer a [`Track`] holds.
+macro_rules! import {
+	($kind:expr, $import:ident => $body:expr) => {
+		match $kind {
+			TrackKind::Avc3 { $import, .. } | TrackKind::Avc1 { $import, .. } => $body,
+			TrackKind::Hev1 { $import, .. } | TrackKind::Hvc1 { $import, .. } => $body,
+			TrackKind::Av01 { $import, .. } => $body,
+			TrackKind::Vp8($import) => $body,
+			TrackKind::Vp9($import) => $body,
+			TrackKind::Aac($import) => $body,
+			TrackKind::Opus($import) => $body,
+			TrackKind::Mp3($import) => $body,
+			TrackKind::Flac($import) => $body,
+		}
+	};
+}
+
 /// A single-codec importer for whole frames.
 ///
 /// Use this when the caller already has whole frames (the typical case for files
@@ -407,55 +424,19 @@ impl Track {
 	pub fn finish(&mut self) -> Result<()> {
 		// Each decode flushed its whole frame, so a splitter holds only input storage, which ends
 		// with the input. The import stays, keeping the finished track and its rendition published.
-		match self.kind {
-			TrackKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				*split = Default::default();
-				import.finish()
-			}
-			TrackKind::Avc1 { ref mut import, .. } => import.finish(),
-			TrackKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				*split = Default::default();
-				import.finish()
-			}
-			TrackKind::Hvc1 { ref mut import, .. } => import.finish(),
-			TrackKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				*split = Default::default();
-				import.finish()
-			}
-			TrackKind::Vp8(ref mut import) => import.finish(),
-			TrackKind::Vp9(ref mut import) => import.finish(),
-			TrackKind::Aac(ref mut import) => import.finish(),
-			TrackKind::Opus(ref mut import) => import.finish(),
-			TrackKind::Mp3(ref mut import) => import.finish(),
-			TrackKind::Flac(ref mut import) => import.finish(),
+		match &mut self.kind {
+			TrackKind::Avc3 { split, .. } => *split = Default::default(),
+			TrackKind::Hev1 { split, .. } => *split = Default::default(),
+			TrackKind::Av01 { split, .. } => *split = Default::default(),
+			_ => {}
 		}
+		import!(&mut self.kind, import => import.finish())
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
 	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(self, err: moq_net::Error) {
-		match self.kind {
-			TrackKind::Avc3 { import, .. } => import.abort(err),
-			TrackKind::Avc1 { import, .. } => import.abort(err),
-			TrackKind::Hev1 { import, .. } => import.abort(err),
-			TrackKind::Hvc1 { import, .. } => import.abort(err),
-			TrackKind::Av01 { import, .. } => import.abort(err),
-			TrackKind::Vp8(import) => import.abort(err),
-			TrackKind::Vp9(import) => import.abort(err),
-			TrackKind::Aac(import) => import.abort(err),
-			TrackKind::Opus(import) => import.abort(err),
-			TrackKind::Mp3(import) => import.abort(err),
-			TrackKind::Flac(import) => import.abort(err),
-		}
+		import!(self.kind, import => import.abort(err))
 	}
 
 	/// Cut the current group at `end` without finishing the track.
@@ -464,19 +445,7 @@ impl Track {
 	/// per packet (the lowest latency), or at a segment cadence to align with video.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		self.group_start = None;
-		match self.kind {
-			TrackKind::Avc3 { ref mut import, .. } => import.cut(end),
-			TrackKind::Avc1 { ref mut import, .. } => import.cut(end),
-			TrackKind::Hev1 { ref mut import, .. } => import.cut(end),
-			TrackKind::Hvc1 { ref mut import, .. } => import.cut(end),
-			TrackKind::Av01 { ref mut import, .. } => import.cut(end),
-			TrackKind::Vp8(ref mut import) => import.cut(end),
-			TrackKind::Vp9(ref mut import) => import.cut(end),
-			TrackKind::Aac(ref mut import) => import.cut(end),
-			TrackKind::Opus(ref mut import) => import.cut(end),
-			TrackKind::Mp3(ref mut import) => import.cut(end),
-			TrackKind::Flac(ref mut import) => import.cut(end),
-		}
+		import!(&mut self.kind, import => import.cut(end))
 	}
 
 	/// Mark a timeline break, clearing partial frames and restarting handoff measurement.
@@ -484,92 +453,38 @@ impl Track {
 	/// Publishes a marker without lowering advertised values; resumed timestamps must continue forward.
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.group_start = None;
-		match self.kind {
-			TrackKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.discontinuity()
-			}
-			TrackKind::Avc1 { ref mut import, .. } => import.discontinuity(),
-			TrackKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.discontinuity()
-			}
-			TrackKind::Hvc1 { ref mut import, .. } => import.discontinuity(),
-			TrackKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.discontinuity()
-			}
-			TrackKind::Vp8(ref mut import) => import.discontinuity(),
-			TrackKind::Vp9(ref mut import) => import.discontinuity(),
-			TrackKind::Aac(ref mut import) => import.discontinuity(),
-			TrackKind::Opus(ref mut import) => import.discontinuity(),
-			TrackKind::Mp3(ref mut import) => import.discontinuity(),
-			TrackKind::Flac(ref mut import) => import.discontinuity(),
-		}
+		self.reset_split();
+		import!(&mut self.kind, import => import.discontinuity())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.group_start = None;
-		match self.kind {
-			TrackKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-			TrackKind::Avc1 { ref mut import, .. } => import.seek(sequence),
-			TrackKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-			TrackKind::Hvc1 { ref mut import, .. } => import.seek(sequence),
-			TrackKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-			TrackKind::Vp8(ref mut import) => import.seek(sequence),
-			TrackKind::Vp9(ref mut import) => import.seek(sequence),
-			TrackKind::Aac(ref mut import) => import.seek(sequence),
-			TrackKind::Opus(ref mut import) => import.seek(sequence),
-			TrackKind::Mp3(ref mut import) => import.seek(sequence),
-			TrackKind::Flac(ref mut import) => import.seek(sequence),
+		self.reset_split();
+		import!(&mut self.kind, import => import.seek(sequence))
+	}
+
+	/// Drop the partial access unit of a format split from a byte stream.
+	fn reset_split(&mut self) {
+		match &mut self.kind {
+			TrackKind::Avc3 { split, .. } => split.reset(),
+			TrackKind::Hev1 { split, .. } => split.reset(),
+			TrackKind::Av01 { split, .. } => split.reset(),
+			TrackKind::Avc1 { .. }
+			| TrackKind::Hvc1 { .. }
+			| TrackKind::Vp8(_)
+			| TrackKind::Vp9(_)
+			| TrackKind::Aac(_)
+			| TrackKind::Opus(_)
+			| TrackKind::Mp3(_)
+			| TrackKind::Flac(_) => {}
 		}
 	}
 
 	/// A watch-only handle to the track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
-		match self.kind {
-			TrackKind::Avc3 { ref import, .. } => import.demand(),
-			TrackKind::Avc1 { ref import, .. } => import.demand(),
-			TrackKind::Hev1 { ref import, .. } => import.demand(),
-			TrackKind::Hvc1 { ref import, .. } => import.demand(),
-			TrackKind::Av01 { ref import, .. } => import.demand(),
-			TrackKind::Vp8(ref import) => import.demand(),
-			TrackKind::Vp9(ref import) => import.demand(),
-			TrackKind::Aac(ref import) => import.demand(),
-			TrackKind::Opus(ref import) => import.demand(),
-			TrackKind::Mp3(ref import) => import.demand(),
-			TrackKind::Flac(ref import) => import.demand(),
-		}
+		import!(&self.kind, import => import.demand())
 	}
-
 	/// The name of the track this importer publishes.
 	pub fn name(&self) -> String {
 		self.demand().name().to_string()
@@ -615,6 +530,26 @@ enum TrackStreamKind {
 		split: crate::codec::av1::Split,
 		import: crate::codec::av1::Import,
 	},
+}
+
+/// Forward a call to the splitter and importer a [`TrackStream`] holds.
+macro_rules! stream {
+	($kind:expr, $split:pat, $import:pat => $body:expr) => {
+		match $kind {
+			TrackStreamKind::Avc3 {
+				split: $split,
+				import: $import,
+			} => $body,
+			TrackStreamKind::Hev1 {
+				split: $split,
+				import: $import,
+			} => $body,
+			TrackStreamKind::Av01 {
+				split: $split,
+				import: $import,
+			} => $body,
+		}
+	};
 }
 
 /// A single-codec importer for a raw byte stream with unknown frame boundaries.
@@ -711,118 +646,46 @@ impl TrackStream {
 
 	/// Decode a chunk of the byte stream.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
-		match self.kind {
-			TrackStreamKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let frames = split.decode(data, None)?;
-				import.decode(frames)
-			}
-			TrackStreamKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let frames = split.decode(data, None)?;
-				import.decode(frames)
-			}
-			TrackStreamKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let frames = split.decode(data, None)?;
-				import.decode(frames)
-			}
-		}
+		stream!(&mut self.kind, split, import => {
+			let frames = split.decode(data, None)?;
+			import.decode(frames)
+		})
 	}
 
 	/// Finish the importer, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
 		// The splitter is taken out to flush, so its input storage ends with the input. The import
 		// stays, keeping the finished track and its rendition published.
-		match self.kind {
-			TrackStreamKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let tail = std::mem::take(split).flush(None)?;
-				import.decode(tail)?;
-				import.finish()
-			}
-			TrackStreamKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let tail = std::mem::take(split).flush(None)?;
-				import.decode(tail)?;
-				import.finish()
-			}
-			TrackStreamKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let tail = std::mem::take(split).flush(None)?;
-				import.decode(tail)?;
-				import.finish()
-			}
-		}
+		stream!(&mut self.kind, split, import => {
+			let tail = std::mem::take(split).flush(None)?;
+			import.decode(tail)?;
+			import.finish()
+		})
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
 	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(self, err: moq_net::Error) {
-		match self.kind {
-			TrackStreamKind::Avc3 { import, .. } => import.abort(err),
-			TrackStreamKind::Hev1 { import, .. } => import.abort(err),
-			TrackStreamKind::Av01 { import, .. } => import.abort(err),
-		}
+		stream!(self.kind, _, import => import.abort(err))
 	}
 
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
-		match self.kind {
-			TrackStreamKind::Avc3 { ref mut import, .. } => import.cut(end),
-			TrackStreamKind::Hev1 { ref mut import, .. } => import.cut(end),
-			TrackStreamKind::Av01 { ref mut import, .. } => import.cut(end),
-		}
+		stream!(&mut self.kind, _, import => import.cut(end))
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		match self.kind {
-			TrackStreamKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-			TrackStreamKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-			TrackStreamKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-		}
+		stream!(&mut self.kind, split, import => {
+			split.reset();
+			import.seek(sequence)
+		})
 	}
 
 	/// A watch-only handle to the track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
-		match self.kind {
-			TrackStreamKind::Avc3 { ref import, .. } => import.demand(),
-			TrackStreamKind::Hev1 { ref import, .. } => import.demand(),
-			TrackStreamKind::Av01 { ref import, .. } => import.demand(),
-		}
+		stream!(&self.kind, _, import => import.demand())
 	}
-
 	/// The name of the track this importer publishes.
 	pub fn name(&self) -> String {
 		self.demand().name().to_string()

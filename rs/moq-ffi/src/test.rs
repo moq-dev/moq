@@ -5282,7 +5282,8 @@ async fn server_client_roundtrip() {
 	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	cs.shutdown().await.unwrap();
+	cs.shutdown();
+	cs.closed().await.unwrap();
 	server_session.cancel(0);
 	server.cancel();
 }
@@ -5395,14 +5396,16 @@ async fn announced_broadcast_follows_an_epochless_replacement() {
 		.await
 		.expect("the replacement was never handed out")
 		.unwrap();
-	first.shutdown().await.unwrap();
+	first.shutdown();
+	first.closed().await.unwrap();
 
 	let fresh_track = subscribe_audio(&fresh).await;
 	roundtrip(&media, &fresh_track, b"after", 2_000_000).await;
 
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	second.shutdown().await.unwrap();
+	second.shutdown();
+	second.closed().await.unwrap();
 	server.cancel();
 	drop(accept.await.unwrap());
 }
@@ -5660,7 +5663,8 @@ async fn server_client_roundtrip_auto_origin() {
 
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	cs.shutdown().await.unwrap();
+	cs.shutdown();
+	cs.closed().await.unwrap();
 	server_session.cancel(0);
 	server.cancel();
 }
@@ -7372,6 +7376,108 @@ async fn data_track_names_cannot_collide() {
 	first.finish().unwrap();
 }
 
+/// In-memory sessions whose protocol and origin drivers use the paused test clock.
+async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
+	async fn drive(driver: impl moq_net::time::Driver) -> moq_tokio::Result<()> {
+		match moq_net::time::run(driver).await {
+			moq_net::Error::Closed
+			| moq_net::Error::Cancel
+			| moq_net::Error::Session(moq_net::SessionError::Cancel) => Ok(()),
+			error => Err(error.into()),
+		}
+	}
+
+	fn origin() -> crate::origin::Origin {
+		let mut config = moq_net::origin::Config::default();
+		config.pool = moq_net::cache::Pool::unbounded();
+		let (inner, driver) = moq_net::origin::Producer::new(config);
+		tokio::spawn(moq_net::time::run(driver));
+		crate::origin::Origin {
+			inner,
+			driver: Default::default(),
+		}
+	}
+	let a = origin();
+	let b = origin();
+	let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+	let mut transport = moq_net::transport::memory::Config::default();
+	transport.protocol = Some(version.alpn().into());
+	transport.stream_buffer = 1024;
+	let (client, server) = moq_net::transport::memory::pair(transport);
+	let connect = async {
+		let (session, driver) = moq_net::Client::new()
+			.with_origin(a.inner.clone())
+			.with_versions(version.into())
+			.connect(moq_clock::Instant::now(), client)
+			.await
+			.unwrap();
+		let driver = tokio::spawn(drive(driver));
+		Arc::new(MoqSession::accepted(session, a.clone(), a, driver))
+	};
+	let accept = async {
+		let (session, driver) = moq_net::Server::new()
+			.with_origin(b.inner.clone())
+			.with_versions(version.into())
+			.accept(moq_clock::Instant::now(), server)
+			.await
+			.unwrap();
+		let driver = tokio::spawn(drive(driver));
+		Arc::new(MoqSession::accepted(session, b.clone(), b, driver))
+	};
+	tokio::join!(connect, accept)
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_without_waiter_survives_session_disposal() {
+	let (publisher, subscriber) = memory_shutdown_pair().await;
+	let broadcast = create_announced(&publisher.publish(), "tail");
+	let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
+	let remote = await_announced(&subscriber.consume(), "tail").await;
+	let reader = remote.subscribe_track("data".into(), None).await.unwrap();
+	shutdown_ready(&track, &reader).await;
+	let group = track.append_group().unwrap();
+	group
+		.write_frame(MoqFrame {
+			timestamp_us: Some(1),
+			payload: vec![42; 64 * 1024],
+		})
+		.unwrap();
+	group.finish().unwrap();
+	track.finish().unwrap();
+	// The foreign caller neither polls the result nor retains the session handle.
+	publisher.shutdown();
+	drop(publisher);
+	let frame = reader.read_frame().await.expect("finished tail").expect("last frame");
+	assert_eq!(frame.payload, vec![42; 64 * 1024]);
+	assert!(reader.read_frame().await.expect("clean end").is_none());
+	subscriber.cancel(0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_failure_survives_a_discarded_waiter() {
+	let (publisher, subscriber) = memory_shutdown_pair().await;
+	let broadcast = create_announced(&publisher.publish(), "live");
+	let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
+	let remote = await_announced(&subscriber.consume(), "live").await;
+	let reader = remote.subscribe_track("data".into(), None).await.unwrap();
+	shutdown_ready(&track, &reader).await;
+	publisher.shutdown();
+	publisher.shutdown();
+	let mut waiter = Box::pin(publisher.closed());
+	assert!(
+		waiter
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+			.is_pending()
+	);
+	drop(waiter);
+	for _ in 0..2 {
+		let error = publisher.closed().await.expect_err("unfinished track must time out");
+		assert!(matches!(error, MoqError::Protocol { details } if details.kind == MoqProtocolKind::DeliveryTimeout));
+	}
+	subscriber.cancel(0);
+}
+
 /// Real sockets exercise the FFI runtime and both accepted/client session handles.
 /// Only lite-07 acknowledges the received tail; default lite-06 closes after transport ACKs.
 async fn shutdown_pair() -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
@@ -7462,7 +7568,8 @@ async fn shutdown_delivers_the_finished_track() {
 				})?;
 				group.finish()?;
 				track.finish()?;
-				closing.shutdown().await?;
+				closing.shutdown();
+				closing.closed().await?;
 				Ok::<(), MoqError>(())
 			}),
 		)
@@ -7501,7 +7608,15 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 		shutdown_ready(&track, &reader).await;
 		let receiving = tokio::spawn(async move { reader.read_frame().await });
 		let start = moq_clock::Instant::now();
-		let err = tokio::time::timeout(TIMEOUT, publisher.shutdown())
+		let mut closed = Box::pin(publisher.closed());
+		assert!(
+			closed
+				.as_mut()
+				.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+				.is_pending()
+		);
+		publisher.shutdown();
+		let err = tokio::time::timeout(TIMEOUT, closed)
 			.await
 			.expect("shutdown")
 			.expect_err("unfinished track must time out");
