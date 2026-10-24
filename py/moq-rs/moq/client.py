@@ -9,7 +9,6 @@ from moq_ffi import (
     MoqClient,
     MoqClientConfig,
     MoqCongestionControl,
-    MoqError,
     moq_qlog_supported,
     moq_versions,
 )
@@ -60,8 +59,8 @@ class Client:
 
     The session automatically reconnects with backoff when the transport drops, and
     broadcasts consumed through it ride out the gap. Pass ``once=True`` for a one-shot
-    dial, or a :class:`Backoff` to tune the retry pacing; watch :meth:`Session.status`
-    for the connect/disconnect transitions.
+    dial, or a :class:`Backoff` to tune the retry pacing; watch
+    :meth:`Session.state_changed` for the connect/disconnect transitions.
 
     ``versions`` restricts the protocol versions offered, most preferred first, spelled
     like ``"moq-lite-03"``; empty offers every supported version, which :func:`versions` lists.
@@ -184,18 +183,8 @@ class Client:
 
     @property
     def session(self) -> Session | None:
-        """The established session, or `None` before connecting / after exit."""
+        """The connecting or connected session, or `None` before connecting / after exit."""
         return self._session
-
-    def failure(self) -> MoqError | None:
-        """Why entering the client is still dialing: the error that failed its latest
-        attempt, or ``None`` while nothing has failed or no connect is pending.
-
-        A first dial that keeps failing and retrying never finishes ``async with``, so
-        poll this from another task to show the reason. Giving up for good raises from
-        ``async with`` instead. Once connected, :meth:`Session.failure` reports the
-        reconnects."""
-        return None if self._inner is None else self._inner.failure()
 
 
 def connect(

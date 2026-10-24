@@ -152,9 +152,9 @@ No duplicate quest or workflow edit belongs here.
   copying/resource growth, CMAF allocation abuse, media reorder queues,
   watch teardown, and HLS contract investigations. MKV fragmentation below
   concerns parser replay before those queues; recheck that PR before coding.
-- [Binding bytes](/quest/m2/ffi-bytes.md),
-  [foreign polling](/quest/m2/ffi-poll-protocol.md),
-  [Kotlin calls](/quest/m2/kt-ffi-calls.md),
+- [Binding bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md),
+  [foreign polling](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
+  [Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md),
   [NVENC pooling](/quest/m2/nvenc-pool.md), and
   [watch worker planning](/quest/m2/plan-watch-worker.md) retain their scopes.
 - [Route wakes](/quest/m2/route-wakes.md),

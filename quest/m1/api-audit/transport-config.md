@@ -31,14 +31,11 @@ Decided 2026-10-22 (API audit):
   `worker::Config::with_pin` (unused), and one of `connect.once` or
   `Client::with_reconnect(bool)`; the QUIC load balancer gets one config
   path (`[listen.lb]`).
-- moq-quic: drop the unused features (`rustls-ring`, `tracing-log`, `bloom`,
-  `platform-verifier`, fips, log) and the "backwards compat" `rustls` alias
-  in a new crate; gate `pub use rustls` on `any(ring, aws-lc-rs)` so it
-  exists under `rustls-aws-lc-rs`; point crate docs at
-  `moq_tokio::quic::driver` instead of quinn.
+- moq-quic's unused features, `rustls` alias, and crate docs moved to
+  [quic-api trim](/quest/m1/quic-api/trim.md) (2026-10-23).
 - Public only for tests: `lease::Producer::{due, failed}` and `Due` go
   `pub(crate)` (drop the `tokio` feature), `connect::Config.quic` and
   `listen::Config.quic` (read only by `deprecated()`) go `pub(crate)`, and
   moq-uring `manual` and kio `sim` are renamed `_manual`/`_sim` or gated.
 
-Public API: moq-tokio, moq-quic breaking. Wire: none.
+Public API: moq-tokio breaking. Wire: none.

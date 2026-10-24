@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -98,11 +99,12 @@ func dialWorker(t *testing.T, ctx context.Context, url string) *moq.Client {
 func waitConnects(t *testing.T, ctx context.Context, session *moq.Session, want uint64) {
 	t.Helper()
 
-	for session.Connects() < want {
-		select {
-		case <-ctx.Done():
-			t.Fatalf("connects = %d, want >= %d", session.Connects(), want)
-		case <-time.After(10 * time.Millisecond):
+	state := session.State()
+	for state.Connects < want {
+		var err error
+		state, err = session.StateChanged(ctx, state.Revision)
+		if err != nil {
+			t.Fatalf("wait connects: %v", err)
 		}
 	}
 }
@@ -237,7 +239,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	if frame, err := trackConsumer.ReadFrame(ctx); err != nil || frame == nil {
 		t.Fatalf("frame before restart: frame=%+v err=%v", frame, err)
 	}
-	if err := subscriber.Session().Failure(); err != nil {
+	if err := subscriber.Session().State().Failure; err != nil {
 		t.Fatalf("failure before any drop: %v", err)
 	}
 	if version := subscriber.Session().Stats().Version; version == nil || *version == "" {
@@ -253,7 +255,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	waitConnects(t, ctx, publisher.Session(), 2)
 	waitConnects(t, ctx, subscriber.Session(), 2)
 	// The connect that advanced the count also cleared the drop's reason.
-	if err := subscriber.Session().Failure(); err != nil {
+	if err := subscriber.Session().State().Failure; err != nil {
 		t.Fatalf("failure after reconnect: %v", err)
 	}
 
@@ -343,5 +345,50 @@ func TestDialConnectionOptions(t *testing.T) {
 
 	if _, err := moq.Dial(ctx, url, moq.ClientConfig{QUIC: moq.QUICConfig{IdleTimeout: ptr(-time.Millisecond)}}); err == nil {
 		t.Fatal("negative idle timeout dialed")
+	}
+}
+
+// A public wrapper owns its first dial through Session and observes repeated failures.
+func TestFirstDialState(t *testing.T) {
+	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silent.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), reconnectTimeout)
+	defer cancel()
+	client, err := moq.Dial(ctx, "https://"+silent.LocalAddr().String(), moq.ClientConfig{
+		Bind:      "127.0.0.1:0",
+		Timeout:   ptr(100 * time.Millisecond),
+		TLS:       moq.ClientTLS{Insecure: true},
+		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
+		Backoff:   moq.Backoff{Initial: 50 * time.Millisecond, Max: 50 * time.Millisecond, Timeout: moq.RetryForever},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := client.Session()
+	defer session.Cancel(0)
+	state := session.State()
+	if state.Phase != moq.ConnectionPhaseConnecting || state.Connects != 0 {
+		t.Fatalf("initial state: %+v", state)
+	}
+	for i := 0; i < 2; i++ {
+		state, err = session.StateChanged(ctx, state.Revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.Failure == nil || state.Connects != 0 || state.Version != nil {
+			t.Fatalf("failed dial state: %+v", state)
+		}
+	}
+	// A canceled waiter must leave both the session and another observer live.
+	canceled, stop := context.WithCancel(ctx)
+	stop()
+	if _, err := session.StateChanged(canceled, state.Revision); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled waiter: %v", err)
+	}
+	if _, err := session.StateChanged(ctx, state.Revision); err != nil {
+		t.Fatalf("independent waiter: %v", err)
 	}
 }

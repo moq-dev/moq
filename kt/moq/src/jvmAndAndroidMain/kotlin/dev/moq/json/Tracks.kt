@@ -1,9 +1,10 @@
 package dev.moq.json
 
 // JSON tracks, mirroring the moq-json crate. Each type wraps a track: a
-// producer takes over a `dev.moq.TrackProducer` and advertises it in the
-// broadcast's catalog, and a consumer takes over a `dev.moq.TrackConsumer`
-// that has not read a group yet:
+// producer takes over a `dev.moq.TrackProducer` (the snapshot and stream
+// producers also advertise it in the broadcast's catalog, which has no window
+// mode), and a consumer takes over a `dev.moq.TrackConsumer` that has not read
+// a group yet:
 //
 //     val status = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), SnapshotConfig())
 //     val reader = SnapshotConsumer(consumer.subscribeTrack("status", null), SnapshotConfig())
@@ -30,12 +31,37 @@ typealias SnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
 typealias StreamConfig = uniffi.moq.MoqJsonStreamConfig
 /** A JSON string and the timestamp of the frame that carried it. */
 typealias Value = uniffi.moq.MoqJsonValue
+/** Publishes a sliding window of JSON records, pushed at the back and popped from the front. */
+typealias WindowProducer = uniffi.moq.MoqJsonWindowProducer
+/** Consumes each push, pop, and skip of a JSON window from a track it takes over. */
+typealias WindowConsumer = uniffi.moq.MoqJsonWindowConsumer
+/** Configures a JSON window track. */
+typealias WindowConfig = uniffi.moq.MoqJsonWindowConfig
+/** One change to a window: [WindowEventPush], [WindowEventPop], or [WindowEventSkip]. */
+typealias WindowEvent = uniffi.moq.MoqJsonWindowEvent
+// Kotlin cannot reach a sealed class's subtypes through its typealias, so each
+// variant gets its own.
+/** A record joined the window at its absolute index. */
+typealias WindowEventPush = uniffi.moq.MoqJsonWindowEvent.Push
+/** The records in `start until end` left the window. */
+typealias WindowEventPop = uniffi.moq.MoqJsonWindowEvent.Pop
+/** The records in `start until end` will never be delivered to this reader. */
+typealias WindowEventSkip = uniffi.moq.MoqJsonWindowEvent.Skip
+/** A [WindowEvent] and the timestamp of the frame that carried it. */
+typealias WindowTimed = uniffi.moq.MoqJsonWindowTimed
 
 /**
  * The frame's timestamp on the broadcast clock, or null when untimed. Rounded down to a whole
  * microsecond, so a tick on a track like 90 kHz may not survive a read and republish exactly.
  */
 val Value.timestamp: Duration?
+    get() = timestampUs?.toLong()?.microseconds
+
+/**
+ * The frame's timestamp on the broadcast clock, or null when untimed. A record first learned of
+ * from a group's restatement carries that frame's time, not its original push time.
+ */
+val WindowTimed.timestamp: Duration?
     get() = timestampUs?.toLong()?.microseconds
 
 /** A decoded JSON value and its frame timestamp on the broadcast clock, or null when untimed. */
@@ -61,6 +87,14 @@ inline fun <reified T> StreamProducer.append(value: T, timestampUs: ULong? = nul
     append(MoqJson.encodeToString(serializer<T>(), value), timestampUs)
 }
 
+/** Push [value] onto the window at [timestampUs] on the broadcast clock; null is untimed. */
+inline fun <reified T> WindowProducer.push(value: T, timestampUs: ULong? = null) {
+    push(MoqJson.encodeToString(serializer<T>(), value), timestampUs)
+}
+
+/** Decode the pushed record as [T]. */
+inline fun <reified T> WindowEventPush.decode(): T = MoqJson.decodeFromString(serializer<T>(), value)
+
 /**
  * Stream of each JSON state from a snapshot track, in order.
  *
@@ -71,6 +105,9 @@ fun SnapshotConsumer.values(): Flow<Value> = pull({ cancel() }) { next() }
 
 /** Stream of JSON records from a stream track, in order. */
 fun StreamConsumer.values(): Flow<Value> = pull({ cancel() }) { next() }
+
+/** Stream of changes to a window, in order. Group rolls never surface. */
+fun WindowConsumer.events(): Flow<WindowTimed> = pull({ cancel() }) { next() }
 
 /**
  * Stream of decoded snapshot states, in order.

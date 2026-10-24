@@ -4,6 +4,8 @@ How to update your OBS setup for each breaking change, newest first.
 
 ## Unreleased
 
+Connection state and first-dial failures now arrive through one lifecycle watcher. UI reads no longer poll the Client or Session for failure separately.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

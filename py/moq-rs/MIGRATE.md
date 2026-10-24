@@ -4,19 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Client options nest like moq-ffi's
+### Connection state
 
-`Client` and `connect` take moq-ffi's names and nesting: TLS, QUIC, and WebSocket knobs move into `ClientTls`, `QuicConfig`, and `WebSocketConfig` records, and `reconnect` becomes `once`.
+Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
 
-| Before | After |
-|---|---|
-| `tls_verify=False` | `tls=ClientTls(insecure=True)` |
-| `tls_roots`, `tls_system_roots`, `tls_fingerprints`, `tls_cert`, `tls_key`, `tls_host_name` | `tls=ClientTls(roots=..., system_roots=..., fingerprints=..., cert=..., key=..., host_name=...)` |
-| `max_streams`, `idle_timeout`, `keep_alive`, `gso`, `mtu_discovery`, `congestion_control`, `qlog`, `keylog` | `quic=QuicConfig(...)` with the same names |
-| `websocket_enabled`, `websocket_delay` | `websocket=WebSocketConfig(enabled=..., delay=...)` |
-| `reconnect=False` | `once=True` |
+### Exact encoder rates and publication options
 
-`bind`, `versions`, `timeout`, `race`, `resolution_delay`, `backoff`, `publish`, and `consume` are unchanged.
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate(numerator=30000, denominator=1001)` and move `track=` from encoder output to `audio.Producer` / `video.Producer`.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
 
 ### Video rendition preference
 
@@ -153,7 +150,7 @@ The decode consumers' `name` argument is `id`.
 ### Native codecs have `audio` and `video` modules (#5694)
 
 `BroadcastProducer.encode_audio` / `encode_video` are `moq.audio.Producer` / `moq.video.Producer`, built from a `moq.media.CatalogProducer`.
-The audio track name moves into `EncoderOutput(track=...)`, and durations and timestamps are `timedelta` (`frame_duration`, `Frame.timestamp`) instead of `_us` integers; a zero `frame_duration` takes the codec's own frame.
+The audio track name belongs to `Producer(track=...)`, and durations and timestamps are `timedelta` (`frame_duration`, `Frame.timestamp`) instead of `_us` integers; a zero `frame_duration` takes the codec's own frame.
 `BroadcastConsumer.decode_audio` / `decode_video` are `await moq.audio.Consumer.subscribe(broadcast, ...)` / `await moq.video.Consumer.subscribe(broadcast, ...)`.
 Producers expose subscriber state only through `demand()`, and a video `gop` is `moq.video.Gop.KEYFRAME(interval=...)`.
 `moq.audio.Encoder` / `moq.video.Encoder` encode without publishing.
@@ -162,7 +159,8 @@ Producers expose subscriber state only through `demand()`, and a video `gop` is 
 audio = moq.audio.Producer(
     moq.media.CatalogProducer(broadcast),
     moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=48000, channels=1),
-    moq.audio.EncoderOutput(codec=moq.audio.Codec.opus(), track="audio", frame_duration=timedelta(milliseconds=20)),
+    moq.audio.EncoderOutput(codec=moq.audio.Codec.opus(), frame_duration=timedelta(milliseconds=20)),
+    track="audio",
 )
 audio.write(moq.audio.Frame(timestamp=timedelta(0), data=pcm))
 ```

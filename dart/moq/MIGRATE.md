@@ -4,18 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `ConnectOptions` nests like moq-ffi's client config
+### Connection state
 
-`ConnectOptions` takes moq-ffi's names and nesting: TLS, QUIC, and WebSocket knobs move into `ClientTls`, `QuicConfig`, and `WebSocketConfig`, and `reconnect` becomes `once`.
-`ClientTls` is the generated `MoqClientTls`, which has no `const` constructor, so drop `const` from a `ConnectOptions` that sets `tls`.
+`Moq.connect` returns a connecting native session. Replace status, connect-count, and failure polls with `session.state()` and `session.stateChanged(after: state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
 
-| Before | After |
-|---|---|
-| `tlsVerify: false` | `tls: ClientTls(insecure: true)` |
-| `tlsRoots`, `tlsSystemRoots`, `tlsFingerprints`, `tlsCert`, `tlsKey`, `tlsHostName` | `tls: ClientTls(roots: ..., systemRoots: ..., fingerprints: ..., cert: ..., key: ..., hostName: ...)` |
-| `maxStreams`, `idleTimeout`, `keepAlive`, `gso`, `mtuDiscovery`, `congestionControl`, `qlog`, `keylog` | `quic: QuicConfig(...)` with the same names |
-| `websocketEnabled`, `websocketDelay` | `websocket: WebSocketConfig(enabled: ..., delay: ...)` |
-| `reconnect: false` | `once: true` |
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate(numerator: 30000, denominator: 1001)` and pass `options: ProducerOptions(input: input, output: output, track: track, bandwidth: bandwidth)` to the matching audio/video producer.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
 
 ### Video rendition preference
 

@@ -400,6 +400,10 @@ impl<E: catalog::Catalog> Import<E> {
 					self.liveness.pcr(pcr);
 					if let Some(now) = self.liveness.now() {
 						self.health.tick(now);
+						self.si.advance(
+							std::time::Duration::from_secs(now / PCR_HZ)
+								+ std::time::Duration::from_nanos((now % PCR_HZ) * 1_000 / 27),
+						);
 					}
 					if self.supports_mpegts {
 						let ready = self.mux_rate.ready();
@@ -1571,6 +1575,8 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Flush any buffered PES and finish every track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
+		// No input follows, so the bytes that waited for the rest of a packet are done.
+		self.scratch = Vec::new();
 		for pid in self.headers.keys().copied().collect::<Vec<_>>() {
 			self.damage(pid, &anyhow::anyhow!("PES header truncated at end of input"))?;
 		}
@@ -2955,8 +2961,15 @@ impl<E: catalog::Catalog> Stream<E> {
 			// Only the self-describing audio holds a frame back for a successor to confirm.
 			Stream::Aac(stream) => return stream.finish(),
 			Stream::Legacy(stream) => return stream.finish(),
-			Stream::H264 { import, .. } => import.finish()?,
-			Stream::H265 { import, .. } => import.finish()?,
+			// Each PES flushed its access unit, so the splitter holds only input storage.
+			Stream::H264 { split, import } => {
+				*split = Default::default();
+				import.finish()?
+			}
+			Stream::H265 { split, import } => {
+				*split = Default::default();
+				import.finish()?
+			}
 			Stream::Opus(stream) => stream.finish()?,
 			Stream::PesPacket(stream) => stream.finish()?,
 			Stream::Clock | Stream::Ignored => {}

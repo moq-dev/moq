@@ -213,6 +213,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    media.VideoProperties
    VideoCodec
    VideoPixelFormat
+   video.FrameRate
    VideoEncoderInput
    VideoEncoderOutput
    VideoEncoderKind

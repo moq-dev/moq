@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Sessions report a lifecycle snapshot
+
+`moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
+Each change delivers a `moq_connection_state` with `phase`, `connects`, `failure`, and the live `protocol`; copy what you keep, since it is valid only during the callback.
+Read `state->connects` where you read a positive status code. A failed dial or dropped connection now fires the callback with a negative `failure`, so drop your `moq_session_failure` polling; `moq_error()` describes it during the callback.
+The terminal call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after a requested close or the error that ended the session, where the terminal status code used to be. Release `user_data` there, as before.
+
+### Exact encoder rates and publication options
+
+`moq_video_encoder_input.framerate` is now `moq_video_frame_rate { numerator,
+denominator }`, changing the C ABI layout. Replace `30` with `{30, 1}` or use
+`{30000, 1001}` for an exact fractional rate. Both components must be nonzero;
+rates above 1,000,000 fps are refused. Recompile callers with the generated header
+and matching native library. Invalid rational rates return `MOQ_ERROR_INVALID_CONFIG`.
+Audio and publication track arguments are unchanged.
+
 ### Video rendition preference
 
 `moq_video_config` gains `int32_t preference`. Initialize it to `0` to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Rebuild C consumers against the matching header and library because the struct layout changes.

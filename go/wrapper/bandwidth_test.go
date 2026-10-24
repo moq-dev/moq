@@ -24,6 +24,8 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+	// Dial returns while connecting; the grants need the live session's estimate.
+	waitConnects(t, ctx, client.Session(), 1)
 	// Grant assertions use a live QUIC estimate, but need no traffic or probing.
 	bandwidth := client.Session().Bandwidth()
 	broadcast, err := moq.NewBroadcastProducer()
