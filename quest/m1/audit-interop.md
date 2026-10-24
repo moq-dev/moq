@@ -30,10 +30,10 @@ Decided with the maintainer on 2026-10-21:
   through every registered public relay), plus every cell of the runner's
   report with a moq.dev side: our clients, our docker relay, or
   `cdn.moq.dev`, including third-party clients failing against our relay.
-- Sync new registry entries. Once the [runner nightly](/quest/m1/interop-runner-nightly.md)
-  lands, it runs the runner's HEAD, so check that newly registered clients
-  and docker-only relays show up in its report, and ask upstream for a
-  published image for any it lists as not run. The relays page reads every
+- Sync new registry entries. The smoke workflow's upstream runner job runs
+  the runner's HEAD, so check that newly registered clients and docker-only
+  relays show up in its [report](https://git.moq.dev/interop-runner/),
+  and ask upstream for a published image for any it lists as not run. The relays page reads every
   remote relay from the registry; give new relays the per-relay config they
   need (`publish_path`, `WEBSOCKET_KEYS` in `test/smoke/relays.sh`).
 - Standing approval to open PRs on englishm/moq-interop-runner that touch only
@@ -86,7 +86,11 @@ Waiting on others:
   (closes on a request before SETUP completes),
   [meetecho/imquic#42](https://github.com/meetecho/imquic/issues/42) and
   [Eyevinn/moqlivemock#157](https://github.com/Eyevinn/moqlivemock/issues/157)
-  (interop clients drop the URL path), plus moxygen's filter type 250
+  (interop clients drop the URL path),
+  [meetecho/imquic#43](https://github.com/meetecho/imquic/issues/43)
+  (drops a data stream whose header spans reads; owned by
+  [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md)),
+  plus moxygen's filter type 250
   ([facebookexperimental/moxygen#225](https://github.com/facebookexperimental/moxygen/issues/225)),
   which also fails moqx's client against our relay.
 - The JS publisher refuses every FETCH, so every relay that fills a late
@@ -116,7 +120,6 @@ waits on [JavaScript FETCH](/quest/m1/js-fetch.md).
 
 ## Related
 
-- [Runner nightly](/quest/m1/interop-runner-nightly.md) - runs every registered client and docker relay with a published image against us
 - [Runner teardown](/quest/m3/interop-runner-approval.md) - the runner's moq.dev clients move to the withdrawing `close()` once it ships
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - Moxygen's filter type, waiting upstream
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS publisher serves FETCH, which most red `js-web` publisher cells need

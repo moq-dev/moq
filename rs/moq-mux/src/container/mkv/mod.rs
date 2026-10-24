@@ -19,6 +19,10 @@ mod import_test;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// A track field is outside the catalog's numeric range.
+	#[error("MKV {0} is outside the catalog's numeric range")]
+	ValueOutOfRange(&'static str),
+
 	/// Container display metadata has no valid catalog aspect ratio.
 	#[error("invalid display aspect: {0}")]
 	InvalidAspect(&'static str),
@@ -99,6 +103,10 @@ pub enum Error {
 	/// The named track joined after the MKV header was emitted.
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]
 	HeaderAddedTrack(String),
+
+	/// The named rendition moved to a track the header's TrackEntry does not describe.
+	#[error("MKV track '{0}' moved to a track whose codec configuration differs from the header's")]
+	TrackChanged(String),
 
 	/// The named CMAF track cannot be exported as MKV.
 	#[error("MKV export does not support CMAF {kind} track '{name}'")]

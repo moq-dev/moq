@@ -32,13 +32,18 @@
 //! estimate onto the encoder's bitrate, which `publish_capture` drives for you.
 
 mod backend;
+#[cfg_attr(
+	not(feature = "capture"),
+	allow(
+		dead_code,
+		reason = "compiled without `capture` so its tests stay in the default merge gate"
+	)
+)]
+mod cuts;
 mod encoded;
 mod encoder;
 mod producer;
 mod sink;
-// Compiled without `capture` so its tests stay in the default merge gate.
-#[cfg_attr(not(feature = "capture"), allow(dead_code))]
-mod cuts;
 
 pub use backend::NAMES;
 pub use encoded::Encoded;

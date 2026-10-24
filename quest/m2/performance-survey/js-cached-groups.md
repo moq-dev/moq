@@ -23,7 +23,7 @@ makes the result simpler.
 
 This is distinct from subscription update traffic in
 [moq-dev/moq#6305](https://github.com/moq-dev/moq/pull/6305) and the storage
-contract in [unbounded JS groups](/quest/m2/unbounded-groups/js.md).
+contract in [unbounded JS groups](/quest/m1/unbounded-groups/js.md).
 
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):
 measure the baseline before optimizing, retain paired evidence, verify equivalent

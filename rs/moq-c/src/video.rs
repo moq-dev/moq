@@ -31,7 +31,7 @@ use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 /// carry it are typed `u32`. A C caller passing an unknown discriminant gets
 /// `Error::InvalidCode` instead of UB.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_video_pixel_format {
 	/// Tightly-packed planar I420: Y, then U, then V, no row padding.
@@ -47,7 +47,7 @@ pub enum moq_video_pixel_format {
 /// Not every codec has a backend on every machine: H.265 is hardware-only, so
 /// publishing it fails where no hardware encoder is available.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_video_codec {
 	/// H.264 / AVC, published as an `avc3` track.
@@ -58,7 +58,7 @@ pub enum moq_video_codec {
 
 /// Which encoder implementation [`moq_encode_video`] should use.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_video_encoder_kind {
 	/// Prefer a platform hardware encoder, falling back to software.
@@ -71,11 +71,20 @@ pub enum moq_video_encoder_kind {
 	MOQ_VIDEO_ENCODER_KIND_NAMED = 3,
 }
 
+/// An exact video frame rate in frames per second.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_video_frame_rate {
+	/// Frames per second numerator; must be nonzero.
+	pub numerator: u32,
+	/// Frames per second denominator; must be nonzero.
+	pub denominator: u32,
+}
+
 /// Raw frame layout the caller hands to [`moq_encode_video_frame`], plus
 /// the resolution and rate the encoder is opened at. Every published frame must
 /// match `width` x `height`; scale before publishing if your source moves.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_encoder_input {
 	/// `moq_video_pixel_format` discriminant.
 	pub format: u32,
@@ -85,13 +94,12 @@ pub struct moq_video_encoder_input {
 	pub height: u32,
 	/// Nominal frames per second, used for the codec time base and the default
 	/// bitrate and keyframe interval. Must be non-zero.
-	pub framerate: u32,
+	pub framerate: moq_video_frame_rate,
 }
 
 /// Codec-side configuration for [`moq_encode_video`]. Every knob spells
 /// "unset" as 0.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_encoder_output {
 	/// `moq_video_codec` discriminant.
 	pub codec: u32,
@@ -118,7 +126,6 @@ pub struct moq_video_encoder_output {
 /// returning). The decode side has its own [`moq_video_frame`], which does carry
 /// dimensions, since there they are what the stream turned out to be.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_encoder_frame {
 	/// Presentation timestamp, in microseconds.
 	pub timestamp_us: u64,
@@ -139,7 +146,6 @@ pub struct moq_video_encoder_frame {
 /// field changes its layout, so rebuild callers against the `moq.h` that ships
 /// with the `libmoq.a` they link.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_decoder_output {
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// microseconds. Same congestion-control knob as
@@ -170,7 +176,6 @@ pub struct moq_video_decoder_output {
 /// The publish side has its own [`moq_video_encoder_frame`], which carries no
 /// dimensions because the encoder already fixed them.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_frame {
 	/// The presentation timestamp in microseconds.
 	pub timestamp_us: u64,
@@ -581,8 +586,10 @@ impl Video {
 			let frame = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				frame = consumer.read() => match frame? {
-					Some(frame) => frame,
+				read = consumer.read() => match read? {
+					Some(moq_video::decode::Read::Frame(frame)) => frame,
+					// The C ABI hands over pictures only.
+					Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => continue,
 					None => return Ok(()),
 				},
 			};
@@ -709,8 +716,8 @@ pub unsafe extern "C" fn moq_encode_video(
 
 		let format = pixel_format_from_u32(raw_input.format)?;
 
-		let framerate = moq_video::Rate::new(raw_input.framerate, 1)
-			.map_err(|_| Error::Video(moq_video::Error::InvalidFramerate(raw_input.framerate).into()))?;
+		let framerate = moq_video::Rate::new(raw_input.framerate.numerator, raw_input.framerate.denominator)
+			.map_err(|err| Error::InvalidConfig(format!("invalid framerate: {err}")))?;
 		let mut config = moq_video::encode::Config::new(raw_input.width, raw_input.height, framerate);
 		config.codec = codec_from_u32(raw_output.codec)?;
 		config.kind = unsafe { encoder_kind(raw_output)? };

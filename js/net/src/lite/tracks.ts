@@ -10,6 +10,7 @@ import { hasTracks, type Version } from "./version.ts";
 
 const TRACKS_ADD = 0x0;
 const TRACKS_REMOVE = 0x1;
+const TRACKS_FINISH = 0x2;
 // The same event the announce stream marks its initial set with.
 const SYNCED = 0x4;
 
@@ -51,11 +52,13 @@ export class Tracks {
 
 /**
  * One event the publisher sends on a Tracks Stream: TRACKS_ADD with the TRACK_INFO a Track
- * Stream would answer, TRACKS_REMOVE, or SYNCED once the listing's initial set was sent.
+ * Stream would answer, TRACKS_REMOVE for a track that left unfinished, TRACKS_FINISH for one that
+ * finished, or SYNCED once the listing's initial set was sent.
  */
 export type TracksEvent =
 	| { kind: "added"; name: string; info: TrackInfo }
 	| { kind: "removed"; name: string }
+	| { kind: "finished"; name: string }
 	| { kind: "synced" };
 
 /** Write one {@link TracksEvent}: its type, then its size-prefixed body. */
@@ -73,6 +76,8 @@ export async function encodeTracksEvent(w: Writer, event: TracksEvent, version: 
 			);
 		case "removed":
 			return Message.encode(w, (w) => w.string(event.name), { id: TRACKS_REMOVE });
+		case "finished":
+			return Message.encode(w, (w) => w.string(event.name), { id: TRACKS_FINISH });
 		case "synced":
 			return Message.encode(w, async () => {}, { id: SYNCED });
 	}
@@ -91,6 +96,8 @@ export async function decodeTracksEventMaybe(r: Reader, version: Version): Promi
 			});
 		case TRACKS_REMOVE:
 			return Message.decode(r, async (r) => ({ kind: "removed", name: await r.string() }));
+		case TRACKS_FINISH:
+			return Message.decode(r, async (r) => ({ kind: "finished", name: await r.string() }));
 		case SYNCED:
 			return Message.decode(r, async () => ({ kind: "synced" }));
 		default:

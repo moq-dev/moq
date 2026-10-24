@@ -73,11 +73,6 @@ nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
 # feature it turns on. Only bites when `capture`, `transcode`, or `play` pulls in
 # moq-video.
 openh264 = ["moq-video?/openh264", "moq-transcode?/openh264"]
-# Compatibility aliases for the pre-consolidation names, kept so a manifest that
-# already asks for the old split still resolves. Undocumented on purpose: the
-# feature tables name only `nvidia`.
-nvenc = ["nvidia"]
-nvdec = ["nvidia"]
 # Intel/AMD VAAPI hardware encoding (Linux), opt-in like the moq-video feature
 # it turns on: libva is dlopen'd at runtime, but moq-vaapi's bindgen needs
 # libclang on the build host. Only bites when `capture`, `transcode`, or `play`
@@ -200,3 +195,6 @@ path = "../../test/interop/clients/rust/finish.rs"
 [[example]]
 name = "interop-audio"
 path = "../../test/interop/clients/rust/audio.rs"
+
+[lints]
+workspace = true

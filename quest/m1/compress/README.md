@@ -86,5 +86,4 @@ This README owns the end-to-end proof and the guide once every child lands:
 
 ## Related
 
-- [Refresh](/quest/m1/refresh/README.md) - its byte ratio measures the stored, compressed group
-- [Front eviction](/quest/m2/unbounded-groups/front-eviction.md) - a compressed group's evicted prefix must refill before a reader can inflate past it
+- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - a compressed group's evicted prefix must refill before a reader can inflate past it
