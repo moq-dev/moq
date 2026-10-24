@@ -44,17 +44,14 @@ struct Pending<O> {
 	gone: kio::Producer<()>,
 }
 
-impl<S> Subscriber<S>
-where
-	S: crate::transport::poll::Boxable,
-{
+impl Subscriber {
 	/// Keep one SUBSCRIBE_NAMESPACE open for each prefix `discovery` decides on, each on a
 	/// stream from `open`, for the session's life. Only an error ends it: a request the
 	/// peer breaks the protocol on.
 	pub(in crate::ietf) async fn run_namespaces<F, O>(self, discovery: Discovery, open: F) -> Result<(), Error>
 	where
 		F: Fn() -> O,
-		O: Future<Output = Result<Stream<S, Version>, Error>>,
+		O: Future<Output = Result<Stream<Transport, Version>, Error>>,
 	{
 		let mut discovery = match self.peer_setup.get().await.solicit {
 			Some(_) => discovery,
@@ -155,7 +152,7 @@ where
 		pending: Pending<O>,
 	) -> (u64, Result<Ended, Error>)
 	where
-		O: Future<Output = Result<Stream<S, Version>, Error>>,
+		O: Future<Output = Result<Stream<Transport, Version>, Error>>,
 	{
 		let Pending {
 			blockers,

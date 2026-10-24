@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Exact encoder rates and publication options
+
+`moq_video_encoder_input.framerate` is now `moq_video_frame_rate { numerator,
+denominator }`, changing the C ABI layout. Replace `30` with `{30, 1}` or use
+`{30000, 1001}` for an exact fractional rate. Both components must be nonzero;
+rates above 1,000,000 fps are refused. Recompile callers with the generated header
+and matching native library. Invalid rational rates return `MOQ_ERROR_INVALID_CONFIG`.
+Audio and publication track arguments are unchanged.
+
+### Video rendition preference
+
+`moq_video_config` gains `int32_t preference`. Initialize it to `0` to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Rebuild C consumers against the matching header and library because the struct layout changes.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 `moq_consume_video` and `moq_consume_audio` on a rendition whose catalog `broadcast` field names a sibling now wait for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.

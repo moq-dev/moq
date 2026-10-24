@@ -18,7 +18,7 @@ import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync } from "../sync";
-import { type AudioBuffer, createAudioBuffer } from "./buffer";
+import { AudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 import { AUTO_MAX_DELAY, ringSamples, target } from "./latency";
@@ -112,7 +112,7 @@ export class Decoder {
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<Container.BufferedRanges>([]);
 
-	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
+	// Audio ring bridging the main thread and the worklet.
 	#ring = new Signal<AudioBuffer | undefined>(undefined);
 
 	// The context, worklet, and ring are keyed on this alone. It outlives a rendition's absence, so
@@ -270,8 +270,12 @@ export class Decoder {
 			const latencySamples = ringSamples(sampleRate, delay);
 			const buffered = this.sync.out.buffered.peek();
 
-			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
-			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples, buffered);
+			const ring = new AudioBuffer(worklet, {
+				channels: channelCount,
+				rate: sampleRate,
+				latency: latencySamples,
+				buffered,
+			});
 			effect.cleanup(() => ring.close());
 			effect.set(this.#ring, ring);
 
@@ -430,17 +434,9 @@ export class Decoder {
 			// A config the probe accepted can still fail to parse (a malformed init segment or Opus
 			// header). Report it like a decode failure, which also retires the outgoing estimate.
 			const props = { config, failure, path: active.path };
-			run.spawn(async () => {
-				try {
-					if (config.container.kind === "cmaf") {
-						await this.#runCmafDecoder(run, sub, props);
-					} else {
-						this.#runLegacyDecoder(run, sub, props);
-					}
-				} catch (error) {
-					if (run.abort.aborted) return;
-					failure.set(error instanceof Error ? error : new Error(String(error)));
-				}
+			spawnFatal(run, failure, async () => {
+				if (config.container.kind === "cmaf") await this.#runCmafDecoder(run, sub, props);
+				else this.#runLegacyDecoder(run, sub, props);
 			});
 		});
 	}
@@ -459,7 +455,7 @@ export class Decoder {
 		// TODO include JITTER_UNDERHEAD
 		const consumer = this.#consume(effect, sub, format, { config, path });
 
-		effect.spawn(async () => {
+		spawnFatal(effect, failure, async () => {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
@@ -549,7 +545,7 @@ export class Decoder {
 
 		const consumer = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
 
-		effect.spawn(async () => {
+		spawnFatal(effect, failure, async () => {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
@@ -774,8 +770,7 @@ export class Decoder {
 			channelData.push(data.slice(frameOffset, frameOffset + frames));
 		}
 
-		// Hand off to the ring. Shared transport writes directly; post transport
-		// transfers the ArrayBuffers.
+		// Hand off to the ring, which transfers the ArrayBuffers.
 		ring.insert(timestamp, channelData);
 
 		sample.close();
@@ -898,4 +893,17 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 		description,
 	});
 	return res.supported ?? false;
+}
+
+// Run `task` for one decode attempt. A setup, read, or decode failure that is not the attempt's
+// cancellation fails its source through `failure`, which latches it and tears the attempt down.
+function spawnFatal(effect: Effect, failure: Signal<Error | undefined>, task: () => Promise<void>): void {
+	effect.spawn(async () => {
+		try {
+			await task();
+		} catch (error) {
+			if (effect.abort.aborted) return;
+			failure.set(error instanceof Error ? error : new Error(String(error)));
+		}
+	});
 }

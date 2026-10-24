@@ -1378,11 +1378,14 @@ def test_encode_audio_with_opus_object():
     for codec_first in (True, False):
         broadcast = moq.BroadcastProducer()
         codec = moq.AudioCodec.opus()
-        output = moq.audio.EncoderOutput(codec=codec, track="mic")
+        output = moq.audio.EncoderOutput(
+            codec=codec,
+        )
         producer = moq.audio.Producer(
             moq.media.CatalogProducer(broadcast),
             moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1),
             output,
+            track="mic",
         )
         if codec_first:
             del codec
@@ -1404,7 +1407,10 @@ async def test_audio_consumer_reports_its_playout_delay():
     audio = moq.audio.Producer(
         moq.media.CatalogProducer(broadcast),
         moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1),
-        moq.audio.EncoderOutput(codec=moq.AudioCodec.opus(), track="mic"),
+        moq.audio.EncoderOutput(
+            codec=moq.AudioCodec.opus(),
+        ),
+        track="mic",
     )
 
     consumer = origin.consume()
@@ -1441,15 +1447,20 @@ async def test_decode_video_frame():
     broadcast = create_announced(origin, "video-decode-frame")
     video = moq.video.Producer(
         moq.media.CatalogProducer(broadcast),
-        moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=320, height=240, framerate=30),
+        moq.VideoEncoderInput(
+            format=moq.VideoPixelFormat.RGBA,
+            width=320,
+            height=240,
+            framerate=moq.video.FrameRate(numerator=30000, denominator=1001),
+        ),
         # Software so the encode is deterministic everywhere. uniffi nests each
         # variant inside the enum without declaring it a subclass, so the cast is
         # what makes the variant typecheck.
         moq.VideoEncoderOutput(
             codec=moq.VideoCodec.H264,
-            track="camera",
             kind=cast(moq.VideoEncoderKind, moq.VideoEncoderKind.SOFTWARE()),
         ),
+        track="camera",
     )
 
     # Seed the track so a subscriber joining below lands on encoded media.

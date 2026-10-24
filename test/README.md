@@ -10,6 +10,7 @@ questions to a harness. For builds and CI selection, see the
 | --- | --- | --- |
 | [interop](interop/README.md) | `just test interop --all` | clients built from this checkout interoperate; without `--all`, only Rust runs |
 | [wire compatibility](interop/README.md) | `just test wire-compat` | this checkout exchanges data with published versions |
+| [IETF conformance](ietf-conformance/README.md) | `just test ietf-conformance` | pinned Moxygen sections 1-7, under the relay conformance profile, preserve subgroup-zero objects through one relay |
 | [registry smoke](smoke/README.md) | `just test smoke` | published packages install and interoperate; see the guide for matrix selection |
 | [browser media](interop/README.md) | `just test media` | browser capture and playback deliver video and audio through publication lifecycle changes |
 | [failure drills](drill/README.md) | `just test drill` | relay and transport failures terminate or recover as expected |
