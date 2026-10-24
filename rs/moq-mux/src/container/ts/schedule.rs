@@ -8,7 +8,6 @@ use anyhow::Context;
 use mpeg2ts::ts::TsPacket;
 
 use super::export::PCR_INTERVAL;
-use super::lane::Grid;
 
 /// Grid slots per second, so a multiplex rate in bits per second is also the per-slot
 /// allowance in [`PACKET`] units.
@@ -21,7 +20,7 @@ const _: () = assert!(
 /// One packet in bits per second of slots: `rate` bits per second fills slot `index` up to
 /// `index * rate / PACKET` packets since the start of the timeline, so no slot rounds on
 /// its own.
-pub(super) const PACKET: u64 = TsPacket::SIZE as u64 * 8 * SLOTS_PER_SECOND;
+const PACKET: u64 = TsPacket::SIZE as u64 * 8 * SLOTS_PER_SECOND;
 /// The most of a packet a decoder buffer can receive: everything after its 4-byte header.
 const PAYLOAD: usize = TsPacket::SIZE - 4;
 /// How many empty slots to lay at most before the next packets: one second's worth. Past
@@ -64,7 +63,7 @@ fn grid_pcr(index: u128) -> u128 {
 }
 
 /// How many packets `rate` bits per second carries before slot `index` on the media timeline.
-pub(super) fn packets_before(index: u128, rate: u64) -> u128 {
+fn packets_before(index: u128, rate: u64) -> u128 {
 	index * u128::from(rate) / u128::from(PACKET)
 }
 
@@ -420,8 +419,6 @@ pub(super) struct Slot {
 	/// The padded slot opens with a packet of the clock's PID carrying its PCR, so it needs
 	/// no clock packet of its own.
 	pub clocked: bool,
-	/// The slot does not follow the one laid before it, so its PCR flags the break.
-	pub jump: bool,
 	/// The PID its clock rides.
 	pub clock: Option<u16>,
 	/// How many units of program tables finish in the slot ([`Schedule::lead`]), which go
@@ -587,8 +584,6 @@ pub(super) struct Schedule {
 	/// Every source has ended, so a unit that misses its deadline is the tail going out late
 	/// rather than an output that cannot keep up.
 	ended: bool,
-	/// The fixed lanes every slot is laid on instead, under [`Export::with_sync`](super::Export::with_sync).
-	sync: Option<Grid>,
 	/// The sequence number of the next unit pushed.
 	seq: u64,
 	/// Tables to go out ahead of the next unit pushed.
@@ -598,7 +593,6 @@ pub(super) struct Schedule {
 impl Schedule {
 	pub fn new(window: Duration) -> Self {
 		Self {
-			sync: None,
 			units: VecDeque::new(),
 			window: slot(window.as_nanos()),
 			rate: None,
@@ -627,27 +621,6 @@ impl Schedule {
 	/// Pad to `rate` bits per second from the next slot on, or stop padding.
 	pub fn set_rate(&mut self, rate: Option<u64>) {
 		self.rate = rate;
-	}
-
-	/// Lay every slot on `grid`'s fixed lanes from now on, whatever the units pushed: their
-	/// packets go straight onto it ([`Self::sync`]).
-	pub fn set_sync(&mut self, grid: Grid) {
-		self.sync = Some(grid);
-	}
-
-	/// The fixed lanes slots are laid on, under [`Self::set_sync`].
-	pub fn sync(&mut self) -> Option<&mut Grid> {
-		self.sync.as_mut()
-	}
-
-	pub fn grid(&self) -> Option<&Grid> {
-		self.sync.as_ref()
-	}
-
-	/// Under [`Self::set_sync`], keep the clock running until `decode`, nanoseconds on the
-	/// media timeline, as a unit queued here would: the grid holds packets, not decode times.
-	pub fn decodes_at(&mut self, decode: u128) {
-		self.horizon = self.horizon.max(Some(decode.div_ceil(PCR_INTERVAL.as_nanos())));
 	}
 
 	/// Hold the packets on `pid` to `buffer`.
@@ -927,31 +900,14 @@ impl Schedule {
 
 	/// Whether nothing is left to lay out: every unit sent, and the clock past its decode time.
 	pub fn is_empty(&self) -> bool {
-		if let Some(grid) = &self.sync {
-			return grid.is_empty() && self.media_done();
-		}
 		self.units.is_empty()
 			&& self
 				.horizon
 				.is_none_or(|horizon| self.next.is_some_and(|next| next > horizon))
 	}
 
-	/// Under [`Self::sync`], whether every media packet placed has gone out and the clock is past
-	/// its decode time, whatever SI is still queued.
-	pub fn media_done(&self) -> bool {
-		self.sync.as_ref().is_some_and(|grid| {
-			!grid.holds_media()
-				&& self
-					.horizon
-					.is_none_or(|horizon| grid.index().is_none_or(|next| next > horizon))
-		})
-	}
-
 	/// Drop everything queued and start the grid afresh.
 	pub fn clear(&mut self) {
-		if let Some(grid) = &mut self.sync {
-			grid.restart();
-		}
 		self.units.clear();
 		self.decoding.clear();
 		self.transport.clear();
@@ -1004,10 +960,7 @@ impl Schedule {
 	/// The next slot to lay out, and the first slot a unit still to be pushed could go out in
 	/// once every unit that may ride it is known: the `known` that settles it.
 	pub fn upcoming(&self) -> Option<(u128, u128)> {
-		let index = match &self.sync {
-			Some(grid) => grid.index()?,
-			None => self.index(None)?,
-		};
+		let index = self.index(None)?;
 		Some((index, index + 1))
 	}
 
@@ -1019,25 +972,6 @@ impl Schedule {
 	pub fn next(&mut self, known: Option<u128>) -> anyhow::Result<Option<Slot>> {
 		if known.is_none() && self.is_empty() {
 			return Ok(None);
-		}
-		if let Some(grid) = &mut self.sync {
-			let Some(index) = grid.index().filter(|&index| known.is_none_or(|known| index < known)) else {
-				return Ok(None);
-			};
-			let laid = grid.lay(index);
-			return Ok(Some(Slot {
-				index,
-				pcr: rate_pcr(index, grid.layout().rate()) as u64,
-				nulls: laid.count - 1 - laid.positions.len(),
-				packets: laid.packets,
-				keyframe: laid.keyframe,
-				units: laid.units,
-				positions: Some(laid.positions),
-				clocked: false,
-				jump: laid.jump,
-				clock: self.clock,
-				tables: 0,
-			}));
 		}
 		let Some(index) = self.index(known) else {
 			return Ok(None);
@@ -1113,7 +1047,6 @@ impl Schedule {
 			units,
 			positions: None,
 			clocked: false,
-			jump: false,
 			clock,
 			tables,
 		}))
@@ -1137,7 +1070,6 @@ impl Schedule {
 			units: Vec::new(),
 			positions: Some(Vec::new()),
 			clocked: false,
-			jump: false,
 			clock: self.clock,
 			tables: 0,
 		};
@@ -2820,7 +2752,6 @@ mod tests {
 			units: vec![],
 			positions: None,
 			clocked: false,
-			jump: false,
 			clock: None,
 			tables: 0,
 		};
@@ -2861,7 +2792,6 @@ mod tests {
 			units: vec![1, 3],
 			positions: None,
 			clocked: false,
-			jump: false,
 			clock: None,
 			tables: 0,
 		};

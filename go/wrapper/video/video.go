@@ -21,10 +21,13 @@ type PixelFormat = ffi.MoqVideoPixelFormat
 // EncoderKind selects the encoder backend; build one with moq.AutoEncoder and friends.
 type EncoderKind = ffi.MoqVideoEncoderKind
 
+// FrameRate is an exact video frame rate in frames per second.
+type FrameRate = ffi.MoqVideoFrameRate
+
 // EncoderInput declares the pixel layout, resolution, and framerate of written frames.
 type EncoderInput = ffi.MoqVideoEncoderInput
 
-// EncoderOutput configures the track name, codec, bitrate, group mode, and backend preference.
+// EncoderOutput configures the codec, bitrate, group mode, and backend preference.
 type EncoderOutput = ffi.MoqVideoEncoderOutput
 
 // Gop is how pictures are split into independently decodable groups; a nil EncoderOutput.Gop keyframes every ~2 seconds.
@@ -70,14 +73,26 @@ func (o DecoderOutput) ffi() (ffi.MoqVideoDecoderOutput, error) {
 // Producer encodes raw pictures and publishes them as a track in a broadcast's catalog.
 type Producer struct{ inner *ffi.MoqVideoProducer }
 
-// NewProducer opens a video track on the catalog's broadcast and registers its rendition; bandwidth may be nil.
-func NewProducer(catalog *media.CatalogProducer, input EncoderInput, output EncoderOutput, bandwidth *moq.Bandwidth) (*Producer, error) {
+// ProducerOptions holds input, codec settings, and publication ownership.
+type ProducerOptions struct {
+	// Input is the raw media layout the caller writes.
+	Input EncoderInput
+	// Output is the codec configuration.
+	Output EncoderOutput
+	// Track names the published track; nil derives a name from the codec.
+	Track *string
+	// Bandwidth reserves the track against a session allocator when non-nil.
+	Bandwidth *moq.Bandwidth
+}
+
+// NewProducer opens a video track on the catalog's broadcast and registers its rendition.
+func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Producer, error) {
 	var bw **ffi.MoqBandwidth
-	if bandwidth != nil {
-		raw := bridge.Bandwidth(bandwidth)
+	if options.Bandwidth != nil {
+		raw := bridge.Bandwidth(options.Bandwidth)
 		bw = &raw
 	}
-	inner, err := ffi.NewMoqVideoProducer(bridge.CatalogProducer(catalog), input, output, bw)
+	inner, err := ffi.NewMoqVideoProducer(bridge.CatalogProducer(catalog), ffi.MoqVideoProducerOptions{Input: options.Input, Output: options.Output, Track: options.Track, Bandwidth: bw})
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +138,7 @@ func (p *Producer) Finish() error { return p.inner.Finish() }
 // Encoder encodes raw pictures without publishing them.
 type Encoder struct{ inner *ffi.MoqVideoEncoder }
 
-// NewEncoder opens a codec-only encoder; output.Track is ignored.
+// NewEncoder opens a codec-only encoder.
 func NewEncoder(input EncoderInput, output EncoderOutput) (*Encoder, error) {
 	inner, err := ffi.NewMoqVideoEncoder(input, output)
 	if err != nil {
