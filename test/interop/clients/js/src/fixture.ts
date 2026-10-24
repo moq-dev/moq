@@ -56,7 +56,23 @@ export class Fixture {
 	readonly #video: Publish.Video.Encoder;
 	#generation = 0;
 
-	constructor(host: HTMLElement, url: string, name: string, fault: Fault) {
+	constructor(
+		host: HTMLElement,
+		{
+			url,
+			name,
+			fault,
+			versions,
+			generation = 0,
+		}: {
+			url: string;
+			name: string;
+			fault: Fault;
+			versions?: string[];
+			generation?: number;
+		},
+	) {
+		this.#generation = generation;
 		this.host = host;
 
 		const canvas = document.createElement("canvas");
@@ -86,7 +102,7 @@ export class Fixture {
 		const audioTrack = destination.stream.getAudioTracks()[0] as unknown as Publish.Audio.StreamTrack;
 		this.#signals.cleanup(() => audioTrack.stop());
 
-		const connection = new Moq.Connection({ url: new URL(url), enabled: true });
+		const connection = new Moq.Connection({ url: new URL(url), enabled: true, versions });
 		this.#signals.cleanup(() => connection.close());
 
 		const capture = new Publish.Video.Capture({ source: videoTrack });
@@ -167,14 +183,18 @@ export class Fixture {
 		unlock();
 		begin();
 
+		let readyAt: number | undefined;
 		this.#signals.run((effect) => {
+			const ready =
+				effect.get(connection.status) === "connected" &&
+				effect.get(video.out.catalog) !== undefined &&
+				effect.get(audio.out.catalog) !== undefined;
+			if (ready) readyAt ??= Date.now();
 			const state: FixtureState = {
 				frameId: effect.get(this.#frameId),
 				audioState: effect.get(this.#audioState),
-				ready:
-					effect.get(connection.status) === "connected" &&
-					effect.get(video.out.catalog) !== undefined &&
-					effect.get(audio.out.catalog) !== undefined,
+				ready,
+				readyAt,
 				videoActive: effect.get(video.out.active),
 				audioActive: effect.get(audio.out.active),
 				encodedFrames: effect.get(video.out.stats).frames,

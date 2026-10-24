@@ -23,7 +23,7 @@ No dynamic dispatch is added.
 
 Update every consumer in the same PR: moq-ffi (`video.rs`, `audio.rs`,
 `json.rs`, `flate.rs`), moq-c, and any example or test naming the parameter.
-Add `MIGRATE.md` entries under `## Unreleased` for moq-video, moq-audio and
+The PR's Impact bullet says how to migrate in moq-video, moq-audio and
 moq-mux. Do not claim a binary size change without measuring it.
 
 Public API: breaking Rust (type parameter removed). Wire: none.

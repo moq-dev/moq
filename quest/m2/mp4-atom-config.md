@@ -20,8 +20,8 @@ The tests already check them against mp4-atom. The fMP4 importer decodes an
 Check first for a leniency reason, such as how mp4-atom handles the
 high-profile extension or a short record from a real encoder; keep the
 hand-written path only for a reproduced case and test it. `moq_mux` exports
-`codec::h264::Avcc`, so replacing or removing it is a breaking change with a
-`MIGRATE.md` entry; prefer keeping the type and changing only how it is
+`codec::h264::Avcc`, so replacing or removing it is a breaking change;
+prefer keeping the type and changing only how it is
 filled when that is simpler. No wire change.
 
 ## Related

@@ -5,12 +5,13 @@ description: The order to roll out a release across relays, auth servers, and cl
 
 # Upgrade
 
-Every hand-written published package keeps a `MIGRATE.md` entry for each
-breaking change, newest first, saying how to migrate. The links below track
-`main`, which also holds the released sections: apply those from the version you
-run up to the one you install. `Unreleased` applies only when you build from
-`main`. Most binding users install a wrapper, such as `moq-rs` on PyPI or
-`dev.moq:moq` on Maven, whose guide is in the index below. The raw UniFFI
+Every hand-written published package keeps a `MIGRATE.md` saying how to
+migrate past each breaking release, newest first. Its section is written when
+that release is cut, not as changes land on `main`, so a build from `main` can
+be ahead of its guide. The links below track `main`: apply the sections from the
+version you run up to the one you install. Most binding users install a
+wrapper, such as `moq-rs` on PyPI or `dev.moq:moq` on Maven, whose guide is in
+the index below. The raw UniFFI
 packages published as `moq-ffi` have no guide of their own:
 [moq-ffi's](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md)
 covers that layer, in UniFFI names. This page covers what spans packages: the

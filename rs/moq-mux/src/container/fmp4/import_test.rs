@@ -3010,6 +3010,19 @@ fn unsignalled_color_stays_absent() {
 	assert!(serde_json::to_value(video).unwrap().get("color").is_none());
 }
 
+/// A field-coded SPS in the avcC marks the rendition interlaced, so the player picks a decoder that accepts it.
+#[test]
+fn field_coded_sps_marks_interlaced() {
+	for (sps, interlaced) in [
+		(crate::codec::h264::fixtures::SPS_IPB, false),
+		(crate::codec::h264::fixtures::SPS_FIELD, true),
+	] {
+		let catalog = run_fmp4(&avc1_init(sps, None));
+		let video = catalog.video.renditions.values().next().unwrap();
+		assert_eq!(video.interlaced, interlaced);
+	}
+}
+
 /// An SDR init imported to the catalog and exported again is byte-identical.
 #[test]
 fn sdr_color_round_trips_byte_identical() {

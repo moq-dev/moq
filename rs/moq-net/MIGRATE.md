@@ -4,11 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `Error::SessionClosed` is removed
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
-Nothing produces it any more.
-`track::Producer::close` aborts its open groups with `Error::Stream(StreamError::Session(SessionError::Cancel))`, which encodes as the same `SESSION_CLOSED` stream code.
-Match that, or any `StreamError::Session(_)`, where you matched `Error::SessionClosed`.
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
 
 ### Published names refuse navigation segments
 
@@ -116,7 +115,7 @@ A group followed by a frameless one is judged against the next group that has a 
 ### Ending a track aborts its open groups (#6111)
 
 Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
-Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::Stream(StreamError::Session(SessionError::Cancel))`.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::SessionClosed`.
 `track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
 
 ### Priorities are signed, with 0 unset (#6142)
@@ -440,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)
