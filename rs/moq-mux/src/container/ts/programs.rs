@@ -354,22 +354,25 @@ impl Programs {
 
 	/// Finish each program's tracks, then its catalog while it still lists them.
 	///
-	/// Returns each program's [`Finish`](moq_net::broadcast::Finish), which keeps it servable
-	/// until its media is stale; dropping one closes that program.
-	/// Fails when the input ended before its PAT listed a program or any program declared a track.
-	pub fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Finish>> {
+	/// Returns each program's broadcast. The finished tracks stay servable while this importer
+	/// is held, so hand both to a [`Linger`](crate::Linger) to keep them up for late
+	/// subscribers. Fails when the input ended before its PAT listed a program or any program
+	/// declared a track.
+	pub fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Producer>> {
 		self.demux.finish();
 		anyhow::ensure!(self.pat.is_some(), "input ended before its PAT listed a program");
 		let mut announced = false;
-		let mut finished = Vec::with_capacity(self.programs.len());
 		for program in &mut self.programs {
 			program.import.finish()?;
 			announced |= program.announce_if_listed()?;
 			program.catalog.finish()?;
-			finished.push(program.broadcast.clone().finish());
 		}
 		anyhow::ensure!(announced, "input ended before any program declared a track");
-		Ok(finished)
+		Ok(self
+			.programs
+			.iter()
+			.map(|program| program.broadcast.broadcast().clone())
+			.collect())
 	}
 
 	/// Abort every program's catalog and media tracks with `err`. Consumes the importer.
@@ -463,7 +466,7 @@ mod test {
 		for chunk in input.chunks(100) {
 			programs.decode(chunk).unwrap();
 		}
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 		assert_eq!(programs.programs.len(), 1, "only program 50 has a PMT");
 
 		let consumer = origin.consume().request_broadcast("event/50.hang", None).await.unwrap();
@@ -520,7 +523,7 @@ mod test {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
 		programs.decode(&two_section_pat()).unwrap();
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 		assert_eq!(programs.programs.len(), 2);
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 		assert_eq!(renditions(&origin, "event/2.hang").await, 1);
@@ -557,7 +560,7 @@ mod test {
 			data.extend(mp2_pes(pid, 0, 90_000, fills));
 		}
 		programs.decode(&data).unwrap();
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 
 		let started: Vec<_> = programs.programs.iter().map(|program| program.number).collect();
 		assert_eq!(started, [7, 900]);
@@ -585,7 +588,7 @@ mod test {
 		}
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 		programs.decode(&data).unwrap();
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 
 		let started: Vec<_> = programs.programs.iter().map(|program| program.number).collect();
 		assert_eq!(started, [1]);
@@ -603,7 +606,7 @@ mod test {
 		data.extend(psi_packets(0x0100, &mut 0, &[], &sections));
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 		programs.decode(&data).unwrap();
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 	}
 
@@ -621,7 +624,7 @@ mod test {
 		data.extend(packets);
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
 		programs.decode(&data).unwrap();
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 	}
 
@@ -730,7 +733,7 @@ mod test {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
 		programs.decode(&two_section_pat()).unwrap();
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 		let epochs: Vec<_> = programs
 			.programs
 			.iter()
@@ -764,7 +767,7 @@ mod test {
 		for packet in packets {
 			programs.decode(packet).unwrap();
 		}
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 		assert!(
 			programs
 				.programs
@@ -885,7 +888,7 @@ mod test {
 			"no program is known before the PAT is whole"
 		);
 		programs.decode(&input[100..]).unwrap();
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 		let after = moq_clock::wall();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {

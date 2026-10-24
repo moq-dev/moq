@@ -11,7 +11,6 @@
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
-#[cfg(test)]
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -28,11 +27,23 @@ use super::session::{
 	notify, sessions_structure,
 };
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
 	connection: crate::connection::Settings,
+	linger: Duration,
+}
+
+impl Default for Settings {
+	fn default() -> Self {
+		Self {
+			url: None,
+			broadcast: None,
+			connection: Default::default(),
+			linger: moq_mux::Linger::DEFAULT,
+		}
+	}
 }
 
 impl TryFrom<Settings> for ResolvedSettings {
@@ -59,6 +70,12 @@ struct State {
 	broadcast: moq_net::origin::Publication,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
+	/// How long a clean end keeps the finished broadcast up before its EOS.
+	linger: Duration,
+	/// Whether the finished broadcast closed, so the EOS it owes may go out.
+	drained: bool,
+	/// The task serving the finished broadcast for its linger, aborted on stop.
+	lingering: Option<tokio::task::AbortHandle>,
 	/// Whether this publication's single EOS message already went out. One per publication, not per
 	/// entry to PLAYING: a finished publication is terminal here, so there is nothing to announce twice.
 	eos_delivered: bool,
@@ -85,8 +102,8 @@ struct Control {
 
 /// Claim this publication's EOS, if it is owed and may go out now.
 ///
-/// One claim per publication, so whichever arrives first (the transition into PLAYING, or the pad that
-/// ended it) is the only one that posts. Called under `control`, which is what serializes the two.
+/// One claim per publication, so whichever arrives first (the transition into PLAYING, or the end of
+/// the linger) is the only one that posts. Called under `control`, which is what serializes the two.
 fn claim_eos(control: &mut Control) -> Posted {
 	if !control.playing {
 		return Posted::Nothing;
@@ -94,7 +111,8 @@ fn claim_eos(control: &mut Control) -> Posted {
 	let Some(state) = control.live.as_mut() else {
 		return Posted::Nothing;
 	};
-	if state.eos_delivered || state.session.completion().get() != Completion::Eos {
+	// Only a clean finish drains, so a drained publication ended with EOS.
+	if state.eos_delivered || !state.drained {
 		return Posted::Nothing;
 	}
 	state.eos_delivered = true;
@@ -175,6 +193,12 @@ impl ObjectImpl for MoqSink {
 					.blurb("The name of the broadcast to publish")
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecUInt64::builder("linger")
+					.nick("Linger")
+					.blurb("At end of stream, keep the finished broadcast up this many milliseconds for late subscribers, then post EOS; 0 closes it at once")
+					.default_value(crate::connection::duration_millis(moq_mux::Linger::DEFAULT))
+					.mutable_ready()
+					.build(),
 				// Read-only, served from the live session's status. Each notifies on change.
 				glib::ParamSpecEnum::builder::<ConnectionStatus>("status")
 					.nick("Connection status")
@@ -242,6 +266,7 @@ impl ObjectImpl for MoqSink {
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
+			"linger" => settings.linger = Duration::from_millis(value.get().unwrap()),
 			name => settings.connection.set(name, value),
 		}
 	}
@@ -273,6 +298,7 @@ impl ObjectImpl for MoqSink {
 				match name {
 					"url" => settings.url.to_value(),
 					"broadcast" => settings.broadcast.to_value(),
+					"linger" => crate::connection::duration_millis(settings.linger).to_value(),
 					name => settings.connection.get(name),
 				}
 			}
@@ -537,6 +563,7 @@ impl MoqSink {
 	/// Create the session and producers before any buffer flows.
 	fn start_session(&self) -> Result<SessionRegistration, gst::StateChangeError> {
 		let settings = self.settings.lock().unwrap().clone();
+		let linger = settings.linger;
 		let settings = ResolvedSettings::try_from(settings).map_err(|err| {
 			gst::error!(CAT, obj = self.obj(), "invalid settings: {err:#}");
 			gst::StateChangeError
@@ -555,6 +582,9 @@ impl MoqSink {
 				broadcast,
 				catalog: Some(catalog),
 				wall,
+				linger,
+				drained: false,
+				lingering: None,
 				eos_delivered: false,
 			});
 			let pads = self.pads_locked(&control);
@@ -635,7 +665,10 @@ impl MoqSink {
 		if let Some(err) = failure {
 			gst::warning!(CAT, "finalize on stop: {err:?}");
 		}
-		// Close the broadcast before reaping the session task.
+		// Close the broadcast before reaping the session task. This also ends a linger early.
+		if let Some(lingering) = state.lingering.take() {
+			lingering.abort();
+		}
 		state.broadcast.close();
 		drop(closed);
 		state.session.stop();
@@ -1016,13 +1049,55 @@ impl MoqSink {
 				false => Posted::Nothing,
 			},
 			None if completion.finish() => {
-				state.broadcast.close();
-				drop((closed, catalog));
-				claim_eos(control)
+				// The closed renditions and the catalog hold the finished tracks, so they go only
+				// once the broadcast closes.
+				let finished =
+					moq_mux::Linger::new([state.broadcast.broadcast().clone()], (closed, catalog), state.linger);
+				self.linger_locked(control, finished)
 			}
 			None => Posted::Nothing,
 		};
 		Finished { updates, message }
+	}
+
+	/// Serve the finished broadcast for its linger so a subscriber that arrives after the end still
+	/// gets the tail, and owe the EOS once it closes. With no linger, close it and owe the EOS now.
+	///
+	/// The EOS waits for the linger because `gst-launch` exits on it, and NULL closes the broadcast.
+	/// Stopping the pipeline is the interrupt: it aborts the linger, which closes the broadcast.
+	fn linger_locked<T: Send + 'static>(&self, control: &mut Control, finished: moq_mux::Linger<T>) -> Posted {
+		let state = control.live.as_mut().expect("a finished publication is live");
+		let linger = state.linger;
+		if linger.is_zero() {
+			drop(finished);
+			state.drained = true;
+			return claim_eos(control);
+		}
+		gst::info!(
+			CAT,
+			obj = self.obj(),
+			"all pads ended, serving the broadcast for {linger:?}"
+		);
+		let task = RUNTIME.spawn(linger_task(
+			finished,
+			self.obj().downgrade(),
+			state.session.completion(),
+		));
+		state.lingering = Some(task.abort_handle());
+		Posted::Nothing
+	}
+
+	/// Owe the EOS now that the finished broadcast closed, unless a newer run replaced `session`.
+	fn drained(&self, session: &CompletionHandle) {
+		let message = {
+			let mut control = self.control.lock().unwrap();
+			match control.live.as_mut() {
+				Some(state) if std::sync::Arc::ptr_eq(&state.session.completion(), session) => state.drained = true,
+				_ => return,
+			}
+			claim_eos(&mut control)
+		};
+		self.post_current(message);
 	}
 
 	fn notify_updates(&self, updates: Vec<PadUpdate>) {
@@ -1111,6 +1186,18 @@ impl MoqSink {
 	}
 }
 
+/// Serve a finished broadcast for its linger, then release the EOS its publication owes.
+async fn linger_task<T>(
+	finished: moq_mux::Linger<T>,
+	element: glib::WeakRef<super::MoqSink>,
+	session: CompletionHandle,
+) {
+	finished.wait().await;
+	if let Some(element) = element.upgrade() {
+		element.imp().drained(&session);
+	}
+}
+
 /// Build a pad's producer for `caps` in the open publication, returning its status changes and whether
 /// the caps were accepted.
 fn observe_caps(
@@ -1143,8 +1230,11 @@ mod tests {
 	use super::super::session::CompletionState;
 	use super::*;
 
+	/// A sink that closes its broadcast at the end of stream, for tests not about the linger.
 	fn sink() -> super::super::MoqSink {
-		glib::Object::builder::<super::super::MoqSink>().build()
+		glib::Object::builder::<super::super::MoqSink>()
+			.property("linger", 0u64)
+			.build()
 	}
 
 	struct CatalogRun(super::super::MoqSink);
@@ -1936,6 +2026,54 @@ mod tests {
 		let _ = element.set_state(gst::State::Null);
 	}
 
+	// A clean end keeps the broadcast up for subscribers that arrive late, and the EOS waits for it:
+	// `gst-launch` exits on that message, which would close the broadcast under them. The real sink
+	// lingers on its own runtime, so this drives the same task on a paused clock over a stand-in track.
+	#[tokio::test(start_paused = true)]
+	async fn the_eos_waits_for_the_linger() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://127.0.0.1:1");
+		sink.set_property("broadcast", "linger-test");
+		let element = sink.clone().upcast::<gst::Element>();
+		let bus = gst::Bus::new();
+		element.set_bus(Some(&bus));
+		element.set_state(gst::State::Playing).expect("start playing");
+		let (broadcast, session) = {
+			let control = sink.imp().control.lock().unwrap();
+			let state = control.live.as_ref().expect("live session");
+			(state.broadcast.broadcast().clone(), state.session.completion())
+		};
+		let consumer = broadcast.consume();
+		let track = broadcast.create_track("video", None).unwrap();
+		track.append_group().unwrap().finish().unwrap();
+		track.finish().unwrap();
+		assert!(session.finish());
+		while bus.pop().is_some() {}
+
+		let linger = Duration::from_secs(30);
+		let start = moq_clock::now();
+		let finished = moq_mux::Linger::new([broadcast], track, linger);
+		let lingering = tokio::spawn(linger_task(finished, sink.downgrade(), session));
+
+		moq_clock::sleep(linger - Duration::from_secs(1)).await;
+		let mut late = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		assert!(
+			late.recv_group().await.unwrap().is_some(),
+			"a late subscriber drains the tail"
+		);
+		assert!(bus.pop_filtered(&[gst::MessageType::Eos]).is_none(), "the EOS waits");
+
+		lingering.await.unwrap();
+		assert_eq!(moq_clock::now() - start, linger);
+		assert!(consumer.is_closed());
+		assert!(
+			bus.pop_filtered(&[gst::MessageType::Eos]).is_some(),
+			"the EOS follows the linger"
+		);
+		let _ = element.set_state(gst::State::Null);
+	}
+
 	#[test]
 	fn errors_are_scoped_to_the_session_that_produced_them() {
 		gst::init().unwrap();
@@ -2006,6 +2144,7 @@ mod tests {
 		for name in [
 			"url",
 			"broadcast",
+			"linger",
 			"tls-disable-verify",
 			"quic-idle-timeout",
 			"quic-keep-alive",
@@ -2020,6 +2159,7 @@ mod tests {
 			assert_eq!(spec(&sink, name).value_type(), u64::static_type());
 			assert_eq!(sink.property::<u64>(name), value);
 		}
+		assert_eq!(spec(&sink, "linger").default_value().get::<u64>(), Ok(30_000));
 		for name in [
 			"status",
 			"connected",

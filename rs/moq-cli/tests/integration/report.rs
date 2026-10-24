@@ -217,7 +217,7 @@ async fn import_reports_count_what_each_rendition_wrote() {
 	assert_eq!(expected.len(), 2, "the clip carries video and audio: {expected:?}");
 	assert_clean(&health);
 
-	let mut import = moq(&relay, "demo", &["import", "--report", "--max-age", "2s", "ts"])
+	let mut import = moq(&relay, "demo", &["import", "--report", "--linger", "2s", "ts"])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn the import");
@@ -284,7 +284,7 @@ async fn import_reports_a_silent_video_pid() {
 	let stimulus = suppress(CLIP, video, 2.5, 4.5);
 	let (_, health) = written(&stimulus);
 
-	let mut import = moq(&relay, "demo", &["import", "--report", "--max-age", "2s", "ts"])
+	let mut import = moq(&relay, "demo", &["import", "--report", "--linger", "2s", "ts"])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn the import");
@@ -343,7 +343,7 @@ async fn a_late_sink_reads_the_final_report() {
 	let relay = relay().await;
 	let (expected, health) = written(CLIP);
 
-	let mut import = moq(&relay, "demo", &["import", "--report", "--max-age", "10s", "ts"])
+	let mut import = moq(&relay, "demo", &["import", "--report", "--linger", "10s", "ts"])
 		// Readiness is an INFO event, independent of the invoking shell's filter.
 		.env("RUST_LOG", "info")
 		.stdin(Stdio::piped())

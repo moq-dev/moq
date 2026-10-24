@@ -61,6 +61,7 @@ pub async fn listen_import(target: ImportTarget, listen: Listen) -> anyhow::Resu
 	let mut config = server_config(&listen);
 	config.max_age = target.max_age;
 	config.bandwidth = target.bandwidth;
+	config.linger = target.linger;
 	let server = moq_rtc::Server::new(config);
 	serve(server.publish_router(publisher), "WHIP", listen).await
 }

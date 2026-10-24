@@ -150,13 +150,13 @@ impl Tls {
 }
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
-/// announced under `epoch`. Once the playlist ends, serve the finished broadcast until its
-/// media is stale.
+/// announced under `epoch`. Once the playlist ends, serve the finished broadcast for the linger.
 pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoch) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
 		name,
 		max_age,
+		linger,
 		bandwidth,
 	} = target;
 	let producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
@@ -189,11 +189,13 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 		return Err(err);
 	}
 
-	// The playlist ended: serve the finished broadcast until its media is stale, so
-	// subscribers still catching up drain the tail. An interrupt drops it at once.
-	let finish = importer.finish()?;
-	tracing::info!(linger = ?finish.linger(), "playlist ended; serving the finished broadcast until its media is stale");
-	finish.wait().await;
+	// The playlist ended: serve the finished broadcast for the linger, so a subscriber that
+	// arrives after the end still gets the tail. An interrupt drops it at once.
+	importer.finish()?;
+	tracing::info!(?linger, "playlist ended; serving the finished broadcast");
+	moq_mux::Linger::new([producer.broadcast().clone()], importer, linger)
+		.wait()
+		.await;
 	Ok(())
 }
 
@@ -428,6 +430,7 @@ mod test {
 			origin,
 			name: "hls".to_string(),
 			max_age: None,
+			linger: moq_mux::Linger::DEFAULT,
 			bandwidth: Default::default(),
 		};
 		let args = ImportArgs {
