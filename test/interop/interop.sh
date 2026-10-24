@@ -1001,11 +1001,16 @@ run_publisher() {
     client_flags "$lang"
     case "$lang" in
         rust)
-            # A finished import lingers for late readers; `stop_publisher` interrupts it and allows 10 s to close.
-            # The wire-compat FETCH lanes keep the video-only Annex-B input.
+            # A finished import stays up for its linger (a released CLI: its max-age);
+            # `stop_publisher` allows 10 s to close. The wire-compat FETCH lanes keep the
+            # video-only Annex-B input.
             if [[ "$AUDIO" -eq 1 ]]; then
+                # The max-age caps every reader's max delay, so it covers the longest, the native
+                # JS audio readers' 5 s. Each 1 s fragment lands as one burst, so with a 1 s
+                # max-age the oldest group a joining reader is served goes stale as soon as the
+                # next group lands, cutting it mid-read and failing the gap check.
                 ffmpeg_fmp4 "$tone" "$(publisher_codecs rust)" | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
-                    --broadcast "$broadcast" import --max-age 1s fmp4
+                    --broadcast "$broadcast" import --max-age 5s fmp4
             else
                 ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
                     --broadcast "$broadcast" import --max-age 1s avc3
