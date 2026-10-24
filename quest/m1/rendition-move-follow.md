@@ -14,8 +14,8 @@ consumers, moq-gst's source, and `moq play` are candidates to check. Audit
 each, make the ones that resolve once follow catalog updates, and test a move
 mid-playback for each.
 
-[Readers follow restarts](/quest/m1/sink-restart-follow.md) covers broadcast
-restarts, not track moves inside one broadcast.
+Broadcast restarts are out of scope: readers already follow those through
+`moq_mux::follow::Instances`, or stay on the old instance until its route dies.
 
 Public API: none expected. Wire: none.
 

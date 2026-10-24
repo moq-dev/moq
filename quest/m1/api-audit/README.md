@@ -89,6 +89,5 @@ Rejected in planning:
 ## Related
 
 - [Claim request type](/quest/m1/api-audit/claim-request-type.md) - removes `accept` from application requests; [the origin announces](/quest/m1/api-audit/announce-owner.md) narrows `Prepared` beside it
-- [Readers follow restarts](/quest/m1/sink-restart-follow.md) - moves readers onto the follow operation that [two broadcast resolutions](/quest/m1/api-audit/resolve.md) names
 - [API-diff check on release PRs](/quest/m1/api-diff.md) - the backstop that catches breaks this epic misses
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - the other release-readiness check
