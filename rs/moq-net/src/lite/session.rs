@@ -362,7 +362,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			started: false,
 			_setup: setup_token,
 		},
-		closing: Default::default(),
 		setup: version
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version, stats.clone())),
@@ -389,7 +388,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 pub(crate) struct Driver {
 	/// Presenting our tokens, one AUTH stream each.
 	auth: Present,
-	pub(crate) closing: std::sync::Arc<crate::session::Closing>,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
 	setup: Option<SendSetup>,
@@ -415,25 +413,25 @@ impl Driver {
 				Ok(()) => Error::Cancel,
 				Err(err) => err.clone(),
 			});
-			self.closing.record(res.as_ref().err().unwrap_or(&Error::Cancel));
 			match &res {
-				Err(Error::Transport(_) | Error::IdleTimeout) => {
+				Err(err @ (Error::Transport(_) | Error::IdleTimeout)) => {
 					tracing::info!("session terminated");
-					self.session.close(SessionError::Internal.to_code(), "");
+					self.session.abort(err, SessionError::Internal.to_code(), "");
 				}
 				Err(err) => {
 					tracing::warn!(%err, "session error");
-					self.session.close(
+					self.session.abort(
+						err,
 						crate::lite::error::to_session_code(&SessionError::from(err)),
 						err.to_string().as_ref(),
 					);
 				}
 				_ => {
 					tracing::info!("session closed");
-					self.session.close(SessionError::Cancel.to_code(), "");
+					self.session.abort(&Error::Cancel, SessionError::Cancel.to_code(), "");
 				}
 			}
-			if self.closing.is_local() {
+			if self.session.closing().is_local() {
 				self.subscriber.close();
 				return Poll::Ready(res);
 			}

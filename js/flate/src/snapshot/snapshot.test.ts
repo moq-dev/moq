@@ -159,6 +159,20 @@ test("latest lets a newer group preempt an open one", async () => {
 	track.close();
 });
 
+// Skipping to the head never widens the reader's range: a capped reader reads the newest value
+// below its cap, and a datagram past every group does not strand it.
+test("latest stays inside the reader's range", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track });
+	const subscriber = track.subscribe({ maxDelay: REPLAY_LATENCY }).withRange({ end: { excluded: 2 } });
+	const consumer = new Consumer({ track: subscriber });
+
+	for (let n = 0; n < 4; n++) producer.update({ value: bytes(n) });
+	track.appendDatagram(Time.Timestamp.now(), bytes(9));
+	expect((await consumer.latest())?.value).toEqual(bytes(1));
+	producer.finish();
+});
+
 test("an aborted track surfaces its error instead of spinning", async () => {
 	// Every read after an abort throws the same terminal error, so swallowing it as if it were a
 	// recoverable Lagged would loop forever on a rejected promise rather than telling the caller

@@ -1072,6 +1072,35 @@ mod tests {
 		assert_eq!(failed, Failures::default());
 	}
 
+	/// A task that closes the transport itself, as a protocol violation on one request does,
+	/// is the session's reason even when the transport reports only a local close, and it
+	/// wins over whatever closes it after.
+	#[test]
+	fn a_task_close_is_the_sessions_reason() {
+		use crate::stats::{Failure, Registry, Tier};
+		use crate::transport::poll::Session as _;
+		let registry = Registry::new(Default::default());
+		let client = Client::new()
+			.with_versions(Version::Lite(lite::Version::Lite04).into())
+			.with_stats(registry.tier(Tier::default()).session("root"));
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
+		let mut task = Transport::new(FakeSession::new(Some(ALPN_LITE_04), Vec::new()));
+		let (session, mut driver) =
+			futures::executor::block_on(client.connect_boxed(runtime.now(), task.clone())).unwrap();
+		task.close(SessionError::ProtocolViolation.to_code(), "malformed");
+		session.abort(Error::App(7));
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+		let err = futures::executor::block_on(session.closed());
+		assert!(
+			matches!(err, Error::Session(SessionError::ProtocolViolation)),
+			"{err:?}"
+		);
+		drop((client, session, driver));
+		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
+		assert_eq!(failed.count(Failure::Application), 1, "{failed:?}");
+	}
+
 	// Dropping the driver instead of running it tears the session
 	// down: the machine was the only transport holder, and `closed()` resolves
 	// rather than parking forever on a machine nobody polls.

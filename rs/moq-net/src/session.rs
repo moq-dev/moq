@@ -28,20 +28,24 @@ struct Ended {
 	drain: Option<Result<(), Error>>,
 }
 
-/// How this side closed the transport, shared by a session's supervisor and its protocol.
+/// How this side closed the transport, shared by every clone of it.
+///
+/// Every close goes through the boxed transport, so the first one is recorded whichever
+/// task sent it, including one ending the session from inside a single request.
 #[derive(Default)]
 pub(crate) struct Closing {
 	/// The handles closed it by dropping or draining, so received streams are not drained.
 	local: std::sync::atomic::AtomicBool,
-	/// Why this side closed it, from whichever closed it first.
-	cause: std::sync::Mutex<Option<Error>>,
+	/// The first close this side sent: its code, and the error behind it when the closer had one.
+	sent: std::sync::Mutex<Option<(u32, Option<Error>)>>,
 }
 
 impl Closing {
-	/// Remember why this side is closing the transport, unless it already gave a reason.
-	pub(crate) fn record(&self, err: &Error) {
-		let mut cause = self.cause.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		cause.get_or_insert_with(|| err.clone());
+	/// Remember that this side closed the transport with `code`, over `cause` when known,
+	/// unless it already closed it.
+	pub(crate) fn sent(&self, code: u32, cause: Option<&Error>) {
+		let mut sent = self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		sent.get_or_insert_with(|| (code, cause.cloned()));
 	}
 
 	/// Whether the handles closed the transport by dropping or draining.
@@ -49,11 +53,15 @@ impl Closing {
 		self.local.load(std::sync::atomic::Ordering::Relaxed)
 	}
 
-	fn cause(&self) -> Option<Error> {
-		self.cause
-			.lock()
-			.unwrap_or_else(std::sync::PoisonError::into_inner)
-			.clone()
+	/// Why this side closed the transport, reading a bare code with `version`'s registry.
+	fn cause(&self, version: Version) -> Option<Error> {
+		let sent = self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		let (code, cause) = sent.as_ref()?;
+		Some(
+			cause
+				.clone()
+				.unwrap_or_else(|| version.decode_session_code(*code).into()),
+		)
 	}
 }
 
@@ -427,7 +435,6 @@ impl Session {
 		let supervisor = Supervisor {
 			goaway: Some(goaway.deadline(&runtime)),
 			version,
-			closing: protocol.closing(),
 			context: context.clone(),
 			runtime: runtime.clone(),
 			closed_watch: session.clone(),
@@ -479,7 +486,6 @@ impl Session {
 pub(crate) struct Supervisor {
 	goaway: Option<goaway::Deadline>,
 	version: Version,
-	closing: Arc<Closing>,
 	/// Where the session's outcome is recorded.
 	context: crate::stats::Session,
 	runtime: crate::time::Deadlines,
@@ -553,7 +559,7 @@ impl Supervisor {
 			let err = match err.close_kind() {
 				// The transport only knows this side closed it, so the reason is ours.
 				crate::transport::CloseKind::Closed if err.session_error().is_none() => {
-					self.closing.cause().unwrap_or(Error::Cancel)
+					self.session.closing().cause(self.version).unwrap_or(Error::Cancel)
 				}
 				_ => self.version.transport_error(err),
 			};
@@ -599,7 +605,10 @@ impl Supervisor {
 			match request {
 				// The last handle dropped without asking for anything: the implicit cancel.
 				None => {
-					self.closing.local.store(true, std::sync::atomic::Ordering::Relaxed);
+					self.session
+						.closing()
+						.local
+						.store(true, std::sync::atomic::Ordering::Relaxed);
 					self.close(Error::Cancel, "dropped");
 					self.drain = Drain::Idle;
 					self.close = None;
@@ -638,9 +647,8 @@ impl Supervisor {
 
 	/// Close the transport over `cause`, this side's reason for ending the session.
 	fn close(&mut self, cause: Error, reason: &str) {
-		self.closing.record(&cause);
-		self.session
-			.close(self.version.session_code(&SessionError::from(&cause)), reason);
+		let code = self.version.session_code(&SessionError::from(&cause));
+		self.session.abort(&cause, code, reason);
 	}
 
 	/// Finish a requested drain once the protocol owes the peer nothing, or at
@@ -657,7 +665,10 @@ impl Supervisor {
 			false if deadline.poll(waiter).is_ready() => Err(Error::Timeout),
 			false => return false,
 		};
-		self.closing.local.store(true, std::sync::atomic::Ordering::Relaxed);
+		self.session
+			.closing()
+			.local
+			.store(true, std::sync::atomic::Ordering::Relaxed);
 		self.close(Error::Cancel, "");
 		self.drain = Drain::Done(res);
 		// The transport is closed, so no later request can change anything.

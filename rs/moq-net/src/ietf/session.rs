@@ -102,7 +102,6 @@ pub struct Config {
 
 pub(crate) struct Driver {
 	pub(crate) withdrawal: crate::session::Withdrawal,
-	pub(crate) closing: std::sync::Arc<crate::session::Closing>,
 	// Dispatched SUBSCRIBE and FETCH serves still owing the peer data.
 	owed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 	future: MaybeSendBox<'static, Result<(), Error>>,
@@ -182,8 +181,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 
 	let withdrawal = crate::session::Withdrawal::default();
 	let withdrawing = withdrawal.clone();
-	let supervised = std::sync::Arc::new(crate::session::Closing::default());
-	let closing = supervised.clone();
+	let closing = session.closing().clone();
 	let owed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 	let serving = owed.clone();
 
@@ -422,7 +420,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 					Poll::Pending
 				})
 				.await;
-				close(&mut session, &closing, &res);
+				close(&mut session, &res);
 				if !closing.is_local() {
 					kio::wait(|waiter| unis.poll_drain(waiter)).await;
 				}
@@ -639,7 +637,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 					Poll::Pending
 				})
 				.await;
-				close(&mut session, &closing, &res);
+				close(&mut session, &res);
 				// Before this arm's Auth serve tasks drop, so each settles with the
 				// session's error rather than a bare cancel.
 				auth.close(match &res {
@@ -671,7 +669,6 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 	Ok((
 		Driver {
 			withdrawal,
-			closing: supervised,
 			owed,
 			future: driver,
 		},
@@ -683,23 +680,23 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 ///
 /// Dropping them first would reset the control stream ahead of the close, and a strict peer
 /// closes over that reset with its own PROTOCOL_VIOLATION before it reads our code.
-fn close(session: &mut Transport, closing: &crate::session::Closing, res: &Result<(), Error>) {
-	closing.record(res.as_ref().err().unwrap_or(&Error::Cancel));
+fn close(session: &mut Transport, res: &Result<(), Error>) {
 	match res {
 		Err(err @ (Error::Transport(_) | Error::IdleTimeout)) => {
 			tracing::info!(%err, "session terminated");
-			session.close(super::error::to_session_code(&SessionError::Internal), "");
+			session.abort(err, super::error::to_session_code(&SessionError::Internal), "");
 		}
 		Err(err) => {
 			tracing::warn!(%err, "session error");
-			session.close(
+			session.abort(
+				err,
 				super::error::to_session_code(&SessionError::from(err)),
 				err.to_string().as_ref(),
 			);
 		}
 		Ok(()) => {
 			tracing::info!("session closed");
-			session.close(super::error::to_session_code(&SessionError::Cancel), "");
+			session.abort(&Error::Cancel, super::error::to_session_code(&SessionError::Cancel), "");
 		}
 	}
 }

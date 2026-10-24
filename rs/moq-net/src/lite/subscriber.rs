@@ -2221,7 +2221,7 @@ mod tests {
 			}
 			moq_clock::sleep(crate::tail::GRACE * 2).await;
 
-			let lowered = Some(Subscription::default().with_groups(2..));
+			let lowered = Some(Subscription::default().with_range(2..));
 			// The SUBSCRIBE in force, already answered.
 			let floor = Position::group(if update { 5 } else { 2 });
 			let mut sub = Sub::Active(SubStream {
@@ -6293,10 +6293,8 @@ impl TrackServe {
 		// subscriber holds, so ask from the head of its group instead: the first frame then
 		// arrives at once and says where the live feed is.
 		if !self.subscriber.version.has_largest() {
-			subscription.set_bounds(
-				subscription.start().map(|start| Position::group(start.group)),
-				subscription.end(),
-			);
+			let start = subscription.start().map(|start| Position::group(start.group));
+			*subscription = std::mem::take(subscription).with_start(start);
 		}
 		if self.subscriber.version.has_frame_bounds() {
 			return;
@@ -6320,7 +6318,7 @@ impl TrackServe {
 				"widening frame bounds to whole groups for an older peer"
 			);
 		}
-		subscription.set_bounds(start, end);
+		*subscription = std::mem::take(subscription).with_start(start).with_end(end);
 	}
 
 	/// Apply a subscription-demand change: hand back an [`Establish`] to open the
@@ -6345,7 +6343,8 @@ impl TrackServe {
 			Some(mut subscription) => {
 				// The wire carries one range: the span of every range asked for, which the
 				// subscribers' own reads narrow again.
-				subscription.set_bounds(subscription.start(), subscription.end());
+				let start = subscription.start();
+				subscription = subscription.with_start(start);
 				producer.widen_compressed(&mut subscription);
 				self.widen_frame_bounds(&mut subscription);
 				match sub {
@@ -6354,7 +6353,7 @@ impl TrackServe {
 						// the subscriber has no start of its own: a quiet track (a catalog) sends
 						// that group again, which says the cache is current.
 						if subscription.start().is_none() {
-							subscription.set_bounds(producer.idle_newest().map(Position::group), subscription.end());
+							subscription = subscription.with_start(producer.idle_newest().map(Position::group));
 						}
 						// Open an upstream SUBSCRIBE for the first subscriber.
 						Ok(Begin::Establish(self.prepare_establish(producer, subscription)))
