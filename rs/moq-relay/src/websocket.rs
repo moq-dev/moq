@@ -69,7 +69,8 @@ pub(crate) async fn serve_ws(
 	options.link.server_name = server_name.map(|Extension(ServerName(name))| name);
 	options.identity = mtls.map(|Extension(MtlsPeer(identity))| identity);
 	options.socket_stats = socket_stats.map(|Extension(stats)| stats.0);
-	options.timeout = state.timeout;
+	// The listener reads `None` as no deadline; `Options` reads it as the default.
+	options.timeout = Some(state.timeout.unwrap_or_default());
 
 	Ok(ws.on_upgrade(async move |socket| {
 		// Axum hides its Tungstenite socket to avoid exposing its dependency version.
@@ -145,7 +146,7 @@ const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19", "moqt-20", "moqt-21",
 /// `qmux-00.moqt-{18,19,20,21,22}` is excluded: moq-transport-18 and newer require
 /// qmux-01, so those pairs are illegal.
 fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
-	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * alpns.len() + qmux::ALPNS.len());
+	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * alpns.len() + qmux::Version::ALL.len());
 	for &alpn in alpns {
 		for &version in QMUX_VERSIONS {
 			if version == qmux::Version::QMux00 && QMUX01_ONLY_ALPNS.contains(&alpn) {
@@ -154,8 +155,8 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 			out.push(format!("{}{alpn}", version.prefix()));
 		}
 	}
-	for &alpn in qmux::ALPNS {
-		out.push(alpn.to_string());
+	for version in qmux::Version::ALL {
+		out.push(version.alpn().to_string());
 	}
 	out
 }
@@ -419,7 +420,8 @@ mod tests {
 			.iter()
 			.rposition(|s| s.contains('.'))
 			.expect("no versioned entries");
-		for &bare in qmux::ALPNS {
+		for version in qmux::Version::ALL {
+			let bare = version.alpn();
 			let bare_idx = list
 				.iter()
 				.position(|s| s == bare)
@@ -789,7 +791,7 @@ mod tests {
 			activity.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
-		options.timeout = None;
+		options.timeout = Some(Duration::ZERO);
 		let server = tokio::spawn(moq_tokio::websocket::accept(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			options,
