@@ -149,6 +149,20 @@ pub enum Error {
 		/// The rewind the importer refused.
 		source: moq_mux::Error,
 	},
+	/// A recording source closed without confirming its complete end.
+	#[error("recording closed before finishing")]
+	IncompleteRecording,
+
+	/// A recording cursor missed rows that left its window or were reset.
+	#[error("recording cursor missed segments")]
+	RecordingLagged,
+
+	/// A listed recording segment no longer has all its media available.
+	#[error("recording segment {segment} is unavailable")]
+	SegmentUnavailable {
+		/// The segment whose media cannot be recorded.
+		segment: u64,
+	},
 }
 
 impl Error {

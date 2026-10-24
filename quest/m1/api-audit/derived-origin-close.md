@@ -15,7 +15,7 @@ exists so a borrower cannot close the origin. `withPreference` is removed by
 - A derived handle's `close()` releases what that handle registered.
 - moq.pro relies on the old behavior in `e2e/src/relay-stats.ts` and
   `dev/smoke.ts`, where the scoped handle is the only one kept; note the
-  change in `js/net/MIGRATE.md` so the upgrade keeps the owner.
+  change in the Impact bullet so the upgrade keeps the owner.
 
 Check Rust's derived handles for the same behavior and match.
 

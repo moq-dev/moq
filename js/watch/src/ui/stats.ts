@@ -91,7 +91,7 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const aUnderruns = line(audioCard.grid, "Underruns");
 	track(parent, audioCard, {
 		catalog: watch.audio.source.out.catalog,
-		flag: watch.controls.muted,
+		flag: watch.controls.audio.muted,
 		label: "muted",
 	});
 
