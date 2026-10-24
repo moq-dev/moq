@@ -11,7 +11,7 @@ type has one name across Rust, JS, and the bindings.
 The bindings name the type `FrameRate` and leave the core `Rate`
 (`rs/moq-video/src/rate.rs`) as is. Rename the core type and its uses in
 moq-video, moq-transcode, moq-cli, moq-boy, moq-c, and moq-ffi (about 137
-references), with `MIGRATE.md` entries for each published crate.
+references); the Impact bullet says how to migrate each published crate.
 
 Decided 2026-10-23 (maintainer): rename the core type, not the bindings.
 

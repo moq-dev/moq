@@ -65,7 +65,7 @@ quinn API" and C bindings) point at `moq_tokio::quic::driver`; "Quinn" in
 `crypto/rustls.rs`; the driver's "Its API mirrors quinn's". The driver mutex
 no longer tracks lock time, so its `lock("purpose")` strings go.
 
-Each removal gets a `MIGRATE.md` entry in its crate.
+The Impact bullet says how to migrate past each removal.
 
 ## Required
 

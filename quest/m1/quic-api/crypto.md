@@ -37,8 +37,8 @@ client and server, moq-uring, moq-relay's `cluster.rs`), and about 18
 `#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]` gates in `quic::web`
 that a crypto-provider-agnostic surface no longer needs.
 
-Mirror the accessors in both drivers. MIGRATE entries in moq-quic,
-moq-tokio, and moq-uring.
+Mirror the accessors in both drivers. The Impact bullet says how
+to migrate in moq-quic, moq-tokio, and moq-uring.
 
 ## Required
 
