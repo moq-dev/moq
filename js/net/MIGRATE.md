@@ -4,19 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### One `withRange` bounds a reader
-
-`Track.Subscriber.setGroups`, `withGroups`, and their `Track.Ordered` twins are replaced by `withRange(groups)`, which returns the reader.
-Both bounds now assign: an omitted start is group 0, where `setGroups` kept the floor, so pass the floor you want to keep.
-Lowering the floor offers the cached groups below the old one that the reader never read; a group is still handed out once.
-
-```ts
-// Before
-subscriber.setGroups({ end: { excluded: 10 } });
-// After
-subscriber.withRange({ start: { included: floor }, end: { excluded: 10 } });
-```
-
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
@@ -60,19 +47,21 @@ Treat a rejected group read as the loss of that group and keep reading the track
 ### A claim answers by publishing (#5678)
 
 `Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `Origin.Request` with `request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
+Answer each `Origin.Request` with `using prepared = request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
 Only `publish` announces it: `prepared.broadcast.announce()` throws.
-Call `prepared.reject(err)` to refuse instead; JS has no destructor, so an abandoned `Prepared` holds its request open.
+`Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned producer live.
+Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
+Construct a `Prepared` only with `request.prepare()`. Its constructor and the `Request.publisher`, `publishPrepared`, and `rejectPrepared` completion hooks are no longer public.
 `Dynamic.update` and `Request.accept` are no longer part of the public API, and `accept` throws on a request from `dynamic`.
 Close the claim and claim again to change it, and close an answer's producer to end that output.
 
-### `largest()` reports within a reader's `withRange` bounds
+### `largest()` reports within a reader's `setGroups` bounds
 
-`Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `withRange`, where they used to ignore the bounds.
+`Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.
 A largest past the cap or below the floor reports nothing; the cache never stands in for it.
 A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
 Unbounded readers are unchanged.
-To read the track's edge from a capped reader, lift the cap first with `withRange({ start: { included: floor } })`, passing the floor you want to keep.
+To read the track's edge from a capped reader, lift the cap with `setGroups({})` first.
 
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
 

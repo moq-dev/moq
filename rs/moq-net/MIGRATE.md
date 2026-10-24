@@ -4,20 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### One `with_range` bounds a reader
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
-`track::Subscriber::set_groups`, `track::Ordered::set_groups`, and `track::Subscription::with_groups` are replaced by the consuming `with_range(range) -> Self`, and `group::Consumer::set_frames` by `group::Consumer::with_range`.
-On a track reader both bounds now assign: an omitted start is group 0, where `set_groups` kept the floor, so pass the floor you want to keep.
-Lowering the floor offers the cached groups below the old one that the reader never read; a group is still handed out once.
-
-```rust
-// Before
-subscriber.set_groups(5..);
-// After
-let subscriber = subscriber.with_range(5..);
-```
-
-`group::Consumer::finished` (and `poll_finished`) now ends cleanly once a `with_range` frame cap is reached, where it waited for the group itself to end, as reads already do.
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
 
 ### Published names refuse navigation segments
 
@@ -194,16 +184,16 @@ Dropping an unfinished writer now aborts the group with `Error::Dropped` immedia
 
 A `track::Subscriber` now reads only the groups its own `Subscription::ranges` cover, resolved again whenever `update` replaces them; before, they only set where its reads started.
 A reader that relied on groups another subscriber asked for must widen its own ranges.
-Once a track finishes, a subscriber with nothing left under its `with_range` cap ends rather than waiting for the cap to rise; raise it before the track finishes to read past it.
+Once a track finishes, a subscriber with nothing left under its `set_groups` cap ends rather than waiting for the cap to rise; raise it before the track finishes to read past it.
 
-### `largest()` reports only upstream state, within a reader's `with_range` bounds
+### `largest()` reports only upstream state, within a reader's `set_groups` bounds
 
-`track::Subscriber::largest()` and `track::Ordered::largest()` (and their `poll_largest`) report the track's largest only while it is within the bounds set with `with_range`, where they used to ignore the bounds.
+`track::Subscriber::largest()` and `track::Ordered::largest()` (and their `poll_largest`) report the track's largest only while it is within the bounds set with `set_groups`, where they used to ignore the bounds.
 A largest past the cap or below the floor reports nothing; the cache never stands in for it.
 A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
 Every `largest()`, `track::Producer` and `track::Consumer` included, now waits while a relay's copy is idle and reports once its new upstream subscription is live, rather than the largest an ended feed left.
 Cached groups are still served meanwhile.
-To read the track's edge from a capped reader, lift the cap first with `with_range(floor..)`, passing the floor you want to keep.
+To read the track's edge from a capped reader, lift the cap with `set_groups(..)` first.
 
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
 
@@ -260,7 +250,7 @@ session.retag(tier, &label);
 ### Subscriptions carry group ranges (#5732)
 
 `track::Subscription::start` and `end` are replaced by `ranges: Vec<Range>`, and `with_start` and `with_end` are gone.
-Use `with_range(start..end)` for one span of groups, or `with_ranges` with `Range::live()`, `Range::oldest()` (the default), or `Range::groups(..)`.
+Use `with_groups(start..end)` for one span of groups, or `with_ranges` with `Range::live()`, `Range::oldest()` (the default), or `Range::groups(..)`.
 
 ### Receive estimates come from `Session::recv_bandwidth` (#5777)
 
@@ -449,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)

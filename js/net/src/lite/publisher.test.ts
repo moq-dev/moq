@@ -874,47 +874,49 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 
 test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group and frame bounds", async (version) => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const sub = await servedSubscription({ version, startGroup: 0, startFrame: 1, endGroup: 1, endFrame: 0 });
 	const reader = sub.datagrams.getReader();
-	const received: number[] = [];
-	const reading = (async () => {
-		for (;;) {
-			const next = await reader.read();
-			if (next.done) return;
-			received.push((await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence);
-		}
-	})();
-	try {
-		for (let sequence = 0; sequence < 3; sequence++)
+	// Datagrams go out in arrival order, so each batch inserts its out-of-range ones ahead of
+	// the last in-range one: reading exactly the in-range ones proves the rest were dropped.
+	const send = (sequences: number[]) => {
+		for (const sequence of sequences)
 			sub.track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
-		await clock.advance(Nano.zero);
-		expect(received).toEqual([1]);
-		// Widen both boundaries, then narrow to one datagram. Each update is applied before new arrivals.
+	};
+	const recv = async () => {
+		const next = await reader.read();
+		if (next.done) throw new Error("datagrams ended early");
+		return (await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence;
+	};
+	// The publisher applies an update's datagram bounds before forwarding its group range, and
+	// each update here moves the range's end.
+	const applied = async (end: number) => {
+		let groups = sub.track.subscription.peek()?.groups;
+		while (groups?.end?.excluded !== end) groups = (await sub.track.subscription.changed())?.groups;
+	};
+	try {
+		send([0, 2, 1]);
+		expect(await recv()).toBe(1);
+		// Widen both boundaries, then narrow to one datagram.
 		await replayUpdate({ priority: 0, startGroup: 0, startFrame: 0, endGroup: 4, endFrame: 0 }).encode(
 			sub.client.writer,
 			version,
 		);
-		await clock.advance(Nano.zero);
-		for (let sequence = 2; sequence < 6; sequence++)
-			sub.track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
-		await clock.advance(Nano.zero);
-		expect(received).toEqual([1, 2, 3, 4]);
+		await applied(5);
+		send([2, 3, 5, 4]);
+		expect([await recv(), await recv(), await recv()]).toEqual([2, 3, 4]);
 		await replayUpdate({ priority: 0, startGroup: 6, startFrame: 1, endGroup: 7, endFrame: 0 }).encode(
 			sub.client.writer,
 			version,
 		);
-		await clock.advance(Nano.zero);
-		for (let sequence = 6; sequence < 9; sequence++)
-			sub.track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
-		await clock.advance(Nano.zero);
-		expect(received).toEqual([1, 2, 3, 4, 7]);
+		await applied(8);
+		send([6, 8, 7]);
+		expect(await recv()).toBe(7);
 	} finally {
 		await reader.cancel();
-		await reading;
 		await sub.close();
 		await sub.serving;
-		restore();
+		installed.close();
 	}
 });
 
@@ -965,7 +967,7 @@ test("lite draft-06: a cut dropped then re-created is not served", async () => {
 // stream is reset with `Old` and the group dropped.
 test("lite draft-06: a group stream that never completes is reset once the group goes stale", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const budget = Milli(1_000);
 	// The track's max age caps the subscription's budget.
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, maxAge: budget });
@@ -996,7 +998,7 @@ test("lite draft-06: a group stream that never completes is reset once the group
 		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
 	} finally {
 		await sub.close();
-		restore();
+		installed.close();
 	}
 });
 
