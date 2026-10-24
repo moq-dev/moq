@@ -19,7 +19,7 @@ default = ["net", "quic", "aws-lc-rs", "websocket", "tcp", "uds"]
 net = ["dep:moq-net", "dep:web-transport-trait"]
 # The async QUIC driver alone (`quic::driver`): moq-quic on tokio, without moq-net or
 # the MoQ backend. Needs a crypto-provider feature.
-driver = ["dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash", "dep:socket2"]
+driver = ["dep:moq-congestion", "dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash", "dep:socket2"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
 quic = [
     "_transport",
@@ -82,6 +82,7 @@ kio = { workspace = true, optional = true }
 mdns-sd = { workspace = true, optional = true }
 
 moq-clock = { workspace = true }
+moq-congestion = { workspace = true, optional = true }
 # The ICE agent behind the `webrtc` module. Private, like str0m: neither appears in this crate's API.
 moq-ice = { workspace = true, optional = true }
 moq-net = { workspace = true, optional = true }

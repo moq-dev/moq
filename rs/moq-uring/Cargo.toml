@@ -15,7 +15,7 @@ categories = ["asynchronous", "network-programming", "os::linux-apis"]
 [features]
 default = ["quic"]
 # QUIC and WebTransport on moq-quic, with TLS through rustls.
-quic = ["dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
+quic = ["dep:moq-congestion", "dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
 # Capture qlog traces (`quic::Transport::qlog`). Off by default: it compiles the
 # qlog crate and its serde_json encoder into moq-quic, which a production build has
 # no use for.
@@ -32,6 +32,7 @@ kio = { workspace = true }
 libc = { workspace = true }
 # The worker is a moq-clock backend: its turn's instant is the ambient clock.
 moq-clock = { workspace = true }
+moq-congestion = { workspace = true, optional = true }
 moq-net = { workspace = true }
 moq-quic = { workspace = true, features = ["bloom", "rustls-aws-lc-rs"], optional = true }
 moq-sock = { workspace = true }

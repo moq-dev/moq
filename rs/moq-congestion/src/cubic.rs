@@ -3,8 +3,8 @@ use std::cmp;
 use std::sync::Arc;
 
 use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory};
-use crate::connection::RttEstimator;
-use crate::packet::SpaceId;
+use crate::RttEstimator;
+use crate::SpaceId;
 use crate::{Duration, Instant};
 
 /// CUBIC Constants.
