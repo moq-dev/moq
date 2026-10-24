@@ -855,8 +855,15 @@ struct VideoConsumerInner {
 
 impl VideoConsumerInner {
 	async fn next(&mut self) -> Result<Option<Arc<MoqVideoDecodedFrame>>, MoqError> {
-		let frame = self.consumer.read().await?;
-		Ok(frame.map(|frame| Arc::new(MoqVideoDecodedFrame { frame })))
+		loop {
+			match self.consumer.read().await? {
+				Some(moq_video::decode::Read::Frame(frame)) => {
+					return Ok(Some(Arc::new(MoqVideoDecodedFrame { frame })));
+				}
+				Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => {}
+				None => return Ok(None),
+			}
+		}
 	}
 }
 
