@@ -92,9 +92,10 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
 - [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the queue builds two or more entries at once instead of one
 - [One nextest build in the queue](/quest/m0/ci/one-test-build.md) - `test rs` compiles once instead of three times
+- [Share Python check and test preparation](/quest/m0/ci/python-setup.md) - prepare editable bindings once per combined CI pass while preserving standalone commands
+- [Parallelize OBS source checks](/quest/m0/ci/obs-parallel.md) - check independent translation units concurrently when OBS is on the critical path
 - [Measure nightly compiler levers](/quest/m0/ci/nightly-levers.md) - the parallel frontend and Cranelift, adopted only if the numbers beat their risks
 - [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
-- [The gate builds a Nix package](/quest/m0/ci/nix-package-gate.md) - a change that breaks `nix build .#moq-relay` or the Dockerfile fails before `main`
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first `moq-ffi-v*` tag that runs `Release FFI`, and a `Shipping sizes` run; verify the wrappers and size keys

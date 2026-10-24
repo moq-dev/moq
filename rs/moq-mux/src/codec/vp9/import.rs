@@ -98,11 +98,6 @@ impl Import {
 		self.track.track().demand()
 	}
 
-	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
-		self.track.flush(timestamp, now)
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
@@ -115,8 +110,6 @@ impl Import {
 		self.track.abort(err);
 	}
 
-	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
-	/// the fields its config didn't supply.
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;

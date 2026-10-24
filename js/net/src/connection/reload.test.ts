@@ -1,9 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Instant, Manual, Milli, Nano } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
-import { SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
+import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
 import { Route } from "../hop.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
 import * as Lite from "../lite/index.ts";
@@ -708,4 +708,114 @@ test("redirect loop detection catches any cycle in constant memory", () => {
 
 	const redirects = new Redirects();
 	for (let hop = 0; hop < 1000; hop++) expect(redirects.move(`a${hop}`, `a${hop + 1}`)).toBe(false);
+});
+
+// Fire the installed Manual clock timer by timer until `pred` holds; returns the Manual time
+// that passed, in milliseconds.
+async function elapse(clock: Manual, pred: () => boolean): Promise<number> {
+	const start = clock.now();
+	for (;;) {
+		for (let i = 0; i < 3 && !pred(); i++) await settle();
+		if (pred()) return Nano.toMilli(Instant.durationSince(clock.now(), start));
+		await clock.fire();
+	}
+}
+
+// Stub WebTransport so each dial either hangs, as one placed on a dead target does, or
+// connects to a relay that accepts it.
+function dialPlan(plan: (dial: number) => "hang" | "ok", url: URL) {
+	const original = globalThis.WebTransport;
+	const origin = new OriginProducer();
+	let dials = 0;
+	let hungCloses = 0;
+	class Hung {
+		ready = new Promise<void>(() => {});
+		closed = new Promise<void>(() => {});
+		close() {
+			hungCloses++;
+		}
+	}
+	globalThis.WebTransport = function StubWebTransport() {
+		const dial = dials++;
+		if (plan(dial) === "hang") return new Hung();
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		void accept(pair.server, url, { publish: origin.consume() });
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	return {
+		dials: () => dials,
+		hungCloses: () => hungCloses,
+		restore: () => {
+			globalThis.WebTransport = original;
+			origin.close();
+		},
+	};
+}
+
+test("an attempt that outlives the connect timeout is retried after the backoff", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const url = new URL("https://relay.example/room");
+	// Scaled down: the attempt times out before a WebTransport hedge would dial.
+	const plan = dialPlan((dial) => (dial === 0 ? "hang" : "ok"), url);
+	const statuses: string[] = [];
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		timeout: Milli(50),
+		delay: { initial: Milli(20) },
+	});
+	const unsubscribe = reload.status.subscribe((status) => statuses.push(status));
+	try {
+		await waitUntil(() => plan.dials() === 1);
+		const waited = await elapse(clock, () => plan.dials() === 2);
+		// The 50 ms timeout, then the first backoff with its equal jitter (10 to 20 ms).
+		expect(waited).toBeGreaterThanOrEqual(60);
+		expect(waited).toBeLessThanOrEqual(70);
+		expect(plan.hungCloses()).toBe(1);
+
+		await waitUntil(() => reload.status.peek() === "connected");
+		expect(statuses).toContain("disconnected");
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		unsubscribe();
+		reload.close();
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("attempts that keep timing out give up at the retry window with ConnectTimeout", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const url = new URL("https://relay.example/room");
+	const plan = dialPlan(() => "hang", url);
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		timeout: Milli(30),
+		delay: { initial: Milli(10), multiplier: 1, max: Milli(10), timeout: Milli(100) },
+	});
+	try {
+		await waitUntil(() => plan.dials() === 1);
+		const waited = await elapse(clock, () => reload.error.peek() !== undefined);
+		// The window starts at the first failure (30 ms) and is checked at each failure after
+		// it, so giving up comes up to one attempt after the window.
+		expect(waited).toBeGreaterThanOrEqual(130);
+		expect(waited).toBeLessThan(170);
+		expect(reload.error.peek()).toBeInstanceOf(ConnectTimeout);
+		expect(plan.hungCloses()).toBe(plan.dials());
+	} finally {
+		reload.close();
+		plan.restore();
+		installed.close();
+	}
+});
+
+test("an invalid timeout is refused when the loop is built, not by every attempt", () => {
+	for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+		expect(() => new Reload({ url: new URL("https://example.com/"), timeout: timeout as Milli })).toThrow(
+			RangeError,
+		);
+	}
 });

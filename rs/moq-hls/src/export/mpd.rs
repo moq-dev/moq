@@ -13,10 +13,11 @@
 //! `Representation` id keeps the raw name. The resources are shared byte-for-byte with the
 //! HLS routes; only the time-addressed segment alias `seg/t<pts>.m4s` is DASH's own.
 
+use moq_clock::Wall;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use percent_encoding::utf8_percent_encode;
 
@@ -67,9 +68,9 @@ pub(crate) struct Representation {
 pub(crate) struct Manifest {
 	/// The wall-clock time of timeline `pts` 0 (`MPD@availabilityStartTime`). Required while
 	/// live (`type="dynamic"`); ignored once [`finished`](Self::finished).
-	pub availability_start: Option<SystemTime>,
+	pub availability_start: Option<Wall>,
 	/// When this render happened (`MPD@publishTime`, dynamic only).
-	pub publish: SystemTime,
+	pub publish: Wall,
 	/// The playlist window (`MPD@timeShiftBufferDepth`, dynamic only), or `None` when the
 	/// timeline bounds itself and the depth is the span it lists.
 	pub window: Option<Duration>,
@@ -286,7 +287,7 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 			xs_duration(duration)
 		);
 	} else {
-		let availability = manifest.availability_start.unwrap_or(SystemTime::UNIX_EPOCH);
+		let availability = manifest.availability_start.unwrap_or(Wall::UNIX_EPOCH);
 		// Reload cadence and live delay follow HLS conventions: players refresh about once
 		// per segment and sit a few segments behind the live edge (bounded by the window).
 		let update = Duration::from_secs(target);
@@ -295,8 +296,8 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		let _ = write!(
 			out,
 			" type=\"dynamic\" availabilityStartTime=\"{}\" publishTime=\"{}\" minimumUpdatePeriod=\"{}\" timeShiftBufferDepth=\"{}\" suggestedPresentationDelay=\"{}\"",
-			humantime::format_rfc3339_millis(availability),
-			humantime::format_rfc3339_millis(manifest.publish),
+			humantime::format_rfc3339_millis(availability.into()),
+			humantime::format_rfc3339_millis(manifest.publish.into()),
 			xs_duration(update),
 			xs_duration(window),
 			xs_duration(delay),
@@ -368,8 +369,8 @@ mod tests {
 		next.period = moq_net::Timestamp::from_secs(6).unwrap();
 		next.tag = "next".into();
 		let manifest = Manifest {
-			availability_start: Some(SystemTime::UNIX_EPOCH),
-			publish: SystemTime::UNIX_EPOCH,
+			availability_start: Some(Wall::UNIX_EPOCH),
+			publish: Wall::UNIX_EPOCH,
 			window: None,
 			finished: false,
 			video: vec![old, next],
@@ -393,8 +394,8 @@ mod tests {
 		next.timescale = 90_000;
 		next.period = moq_net::Timestamp::new(1, scale).unwrap();
 		let manifest = Manifest {
-			availability_start: Some(SystemTime::UNIX_EPOCH),
-			publish: SystemTime::UNIX_EPOCH,
+			availability_start: Some(Wall::UNIX_EPOCH),
+			publish: Wall::UNIX_EPOCH,
 			window: None,
 			finished: false,
 			video: vec![next],
@@ -428,8 +429,8 @@ mod tests {
 	#[test]
 	fn renders_dynamic_manifest() {
 		let manifest = Manifest {
-			availability_start: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
-			publish: SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_410_000),
+			availability_start: Some(Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
+			publish: Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_410_000),
 			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![video(vec![(0, 2_000), (2_000, 2_000)], false)],
@@ -469,7 +470,7 @@ mod tests {
 	fn renders_static_manifest_when_finished() {
 		let manifest = Manifest {
 			availability_start: None,
-			publish: SystemTime::UNIX_EPOCH,
+			publish: Wall::UNIX_EPOCH,
 			window: Some(Duration::from_secs(16)),
 			finished: true,
 			// The window starts mid-broadcast: presentation time stays anchored at pts 0 (no
@@ -492,8 +493,8 @@ mod tests {
 	#[test]
 	fn query_rides_child_urls_escaped() {
 		let manifest = Manifest {
-			availability_start: Some(SystemTime::UNIX_EPOCH),
-			publish: SystemTime::UNIX_EPOCH,
+			availability_start: Some(Wall::UNIX_EPOCH),
+			publish: Wall::UNIX_EPOCH,
 			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![video(vec![(0, 2_000)], false)],
@@ -510,8 +511,8 @@ mod tests {
 		let mut rep = video(vec![(0, 2_000)], false);
 		rep.generation = Some("run-7".into());
 		let manifest = Manifest {
-			availability_start: Some(SystemTime::UNIX_EPOCH),
-			publish: SystemTime::UNIX_EPOCH,
+			availability_start: Some(Wall::UNIX_EPOCH),
+			publish: Wall::UNIX_EPOCH,
 			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![rep],
@@ -533,8 +534,8 @@ mod tests {
 	#[test]
 	fn empty_and_gap_only_representations_are_omitted() {
 		let manifest = Manifest {
-			availability_start: Some(SystemTime::UNIX_EPOCH),
-			publish: SystemTime::UNIX_EPOCH,
+			availability_start: Some(Wall::UNIX_EPOCH),
+			publish: Wall::UNIX_EPOCH,
 			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![video(vec![(0, 2_000)], false)],
@@ -551,8 +552,8 @@ mod tests {
 		rep.name = name.into();
 		render_manifest(
 			&Manifest {
-				availability_start: Some(SystemTime::UNIX_EPOCH),
-				publish: SystemTime::UNIX_EPOCH,
+				availability_start: Some(Wall::UNIX_EPOCH),
+				publish: Wall::UNIX_EPOCH,
 				window: Some(Duration::from_secs(16)),
 				finished: false,
 				video: vec![rep],

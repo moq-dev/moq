@@ -188,7 +188,7 @@ pub struct Config {
 	/// anycast IP, steady-state on this host's unicast IP.
 	///
 	/// Honored by the QUIC backend. Accept-only, which is why it lives
-	/// here rather than in the shared [`crate::quic::Config`].
+	/// here rather than in the shared QUIC settings.
 	#[usage(
 		name = "listen-preferred-v4",
 		long = "listen-preferred-v4",
@@ -198,7 +198,7 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub preferred_v4: Option<std::net::SocketAddrV4>,
 
-	/// IPv6 address advertised as the QUIC preferred_address. See [`Self::preferred_v4`].
+	/// IPv6 address advertised as the QUIC preferred_address. Like `--listen-preferred-v4`, for IPv6.
 	#[usage(
 		name = "listen-preferred-v6",
 		long = "listen-preferred-v6",
