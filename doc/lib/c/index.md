@@ -51,6 +51,8 @@ if (session < 0)
     return fail(moq_error());
 ```
 
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings.
+
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) is
@@ -71,7 +73,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Decoded frames hold decoder buffers.** Free each frame id with `moq_decode_video_frame_free` promptly, or the decoder stalls.
 - **Stats.** `moq_session_stats()` fills `moq_connection_stats` with `rtt_us`, `estimated_send_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). Each has a `<field>_valid` flag, false when the transport does not report it, which is not the same as zero. `moq_session_snapshot()` adds the negotiated `protocol`, and while a session reconnects `moq_session_failure()` returns why, with the reason in `moq_error()`. Hold the handle returned by `moq_session_recv_bandwidth()` to request receive estimates. `moq_bandwidth_consumer_peek()` reads the estimate and `moq_bandwidth_consumer_changed()` waits for a change. `moq_bandwidth_consumer_close()` releases demand; the last consumer stops PROBE. Stats snapshots do not request it.
 - **Demand.** A watcher from `moq_publish_track_demand()` (or the media, video, and audio variants) calls back `MOQ_DEMAND_USED` or `MOQ_DEMAND_UNUSED`, again whenever the wanted group moves. `moq_publish_demand_wanted()` reads that group: start a new one once it passes your largest. Set `refresh` in `moq_track_info` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.
-- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 
 ## Reference
 

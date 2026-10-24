@@ -241,7 +241,6 @@ class CoveringRoot {
 	}
 }
 
-// pending: /quest/m1/public-model/answer.md
 /**
  * One requested path: the notify node for everything watching it.
  *
@@ -508,6 +507,13 @@ class VersionedSignal<T> extends Signal<T> {
 	override set(value: T, notify?: boolean): void {
 		this.version++;
 		super.set(value, notify);
+	}
+}
+
+// Navigation belongs to relative references, resolved before publication.
+function publishPath(path: Path.Valid): void {
+	if (Path.parts(path).some((segment) => segment === "." || segment === "..")) {
+		throw new Error("broadcast path contains a navigation segment");
 	}
 }
 
@@ -1232,6 +1238,7 @@ export class Producer implements Table {
 	 */
 	createBroadcast(path: Path.Valid): broadcast.Producer {
 		path = this.#scope.path(path);
+		publishPath(path);
 		const created = this.#state.created;
 		if (!created) throw new Error("origin is closed");
 
@@ -1343,6 +1350,7 @@ export class Producer implements Table {
 
 	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Dynamic {
 		prefix = this.#scope.prefix(prefix);
+		publishPath(prefix);
 		const server = new ServeState(this.#scope.root, prefix, originated);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
@@ -2297,7 +2305,6 @@ export class Dynamic {
 	 *
 	 * @internal
 	 */
-	// pending: /quest/m1/public-model/answer.md
 	updateRoute(
 		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): void {
@@ -2433,7 +2440,6 @@ export class Request {
 	 * @throws Error when handed a broadcast a session delivered. The request stays open.
 	 * @internal
 	 */
-	// pending: /quest/m1/public-model/answer.md
 	accept(source: broadcast.Producer | broadcast.Consumer): void {
 		if (this.#done) {
 			// A withdrawn request takes no answer. Only the handed-off consumer is ours;
