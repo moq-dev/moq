@@ -16,7 +16,7 @@ its own redirect handling; the checks apply to the client moq-hls builds.
 
 Decided 2026-10-23 (maintainer): backport once the checks have been validated
 on `main`, following the shape of
-[the shutdown backport](/quest/m0/ffi-shutdown-backport.md): cut from
+[the shutdown backport](https://github.com/moq-dev/moq/pull/6642): cut from
 `release`, no breaking change, a patch release.
 
 Public API: none on `release`. Wire: none.
