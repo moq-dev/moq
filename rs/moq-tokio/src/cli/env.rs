@@ -95,8 +95,7 @@ fn unknown(names: impl IntoIterator<Item = OsString>, known: &HashSet<&str>) -> 
 mod tests {
 	use super::*;
 
-	// Only the derived spec is read, never the parsed fields.
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "only the derived spec is read")]
 	#[derive(usage_rs::Args)]
 	struct Shared {
 		/// Declared by a flattened section.
@@ -108,7 +107,7 @@ mod tests {
 		released: Option<String>,
 	}
 
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "only the derived spec is read")]
 	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error")]
 	struct Cli {
@@ -119,7 +118,7 @@ mod tests {
 		command: Command,
 	}
 
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "only the derived spec is read")]
 	#[derive(usage_rs::Subcommands)]
 	enum Command {
 		/// Declares a variable only under a subcommand.
