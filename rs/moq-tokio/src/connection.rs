@@ -634,6 +634,9 @@ impl Shared {
 			session.abort(err.clone());
 			return;
 		}
+		// Before the state publishes, so a watcher that sees this connect already
+		// reads its estimate, and the grants that divide it.
+		let _ = self.send_bw.set(session.send_bandwidth().and_then(|bw| bw.peek()));
 		if let Ok(mut state) = self.state.write() {
 			auth::replay(&state, session, state.connects + 1);
 			// A migration replaces a live session without a disconnect in between, so
@@ -1479,7 +1482,7 @@ impl Connection {
 	///
 	/// Unlike the session's, this handle is persistent: the reconnect loop forwards each session's
 	/// estimate into it, so it survives reconnects. Its value is `None` while disconnected or when the
-	/// backend has no estimate.
+	/// backend has no estimate, and is already set when a watcher sees the connect.
 	pub fn send_bandwidth(&self) -> BandwidthConsumer {
 		self.send_bandwidth.clone()
 	}

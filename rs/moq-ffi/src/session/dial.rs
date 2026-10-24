@@ -221,6 +221,8 @@ async fn run(
 			return;
 		}
 	};
+	// Before the session publishes, so a watcher that sees it already reads its estimate.
+	let _ = send.set(session.send_bandwidth().and_then(|bw| bw.peek()));
 	published.session = Some(Accepted {
 		session: session.clone(),
 		driver: crate::ffi::Background::default(),
