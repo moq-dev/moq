@@ -83,8 +83,7 @@ impl<T> Producer<T> {
 	///
 	/// Idempotent: cutting when no group is open does nothing. A caller that stores complete groups
 	/// cuts after its edits, so every edit so far sits in a group no later frame can extend.
-	#[cfg(test)]
-	pub(crate) fn cut(&mut self) -> Result<()> {
+	pub fn cut(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().cut()
 	}
 
@@ -176,7 +175,6 @@ impl<T> Inner<T> {
 		std::task::Poll::Ready(Ok(()))
 	}
 
-	#[cfg(test)]
 	fn cut(&mut self) -> Result<()> {
 		let Some(mut group) = self.track.group.take() else {
 			return Ok(());
