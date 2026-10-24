@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import signal
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,10 +12,116 @@ spec = importlib.util.spec_from_file_location('profile', Path(__file__).with_nam
 profile = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(profile)
 
+spec = importlib.util.spec_from_file_location('runtime', Path(__file__).with_name('runtime.py'))
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
+
+
+class Runtime(unittest.TestCase):
+    def test_workers_must_match_the_backend_and_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tasks = Path(directory)
+            for backend, prefix in [('tokio-workers', 'moq-quic'), ('io-uring-workers', 'moq-uring')]:
+                with self.subTest(backend=backend):
+                    for path in tasks.glob('*/comm'):
+                        path.unlink()
+                    names = [f'{prefix}-0', f'{prefix}-1', 'tokio-runtime-w', 'moq-relay']
+                    for index, name in enumerate(names):
+                        task = tasks / str(index)
+                        task.mkdir(exist_ok=True)
+                        (task / 'comm').write_text(name + '\n')
+                    self.assertEqual(runtime.verify(tasks, backend, 2)['workers'], names[:2])
+                    other = 'io-uring-workers' if backend == 'tokio-workers' else 'tokio-workers'
+                    for selected, count in [(other, 2), (backend, 1), (backend, 3)]:
+                        with self.assertRaises(ValueError):
+                            runtime.verify(tasks, selected, count)
+                    (tasks / '2/comm').write_text('moq-quic-2' if prefix == 'moq-uring' else 'moq-uring-2')
+                    with self.assertRaises(ValueError):
+                        runtime.verify(tasks, backend, 2)
+
+    def test_profile_rejects_invalid_selection_before_building(self):
+        root = Path(__file__).resolve().parent.parent
+        for environment, diagnostic in [
+            ({'MOQ_BENCH_PROFILE_RUNTIME': 'tokio-shared'}, 'profile runtime'),
+            ({'MOQ_BENCH_PROFILE_WORKERS': '0'}, 'profile workers'),
+            ({'MOQ_BENCH_PROFILE_WORKERS': '1 257'}, 'profile workers'),
+            ({'MOQ_BENCH_PROFILE_WORKERS': '1 nope'}, 'profile workers'),
+            ({'MOQ_BENCH_PROFILE_WORKERS': '01'}, 'profile workers'),
+            ({'MOQ_BENCH_PROFILE_WORKERS': '999999999999999999999999'}, 'profile workers'),
+        ]:
+            with self.subTest(environment=environment):
+                result = subprocess.run(['bash', str(root / 'bench/run.sh'), '--profile'],
+                                        env=dict(os.environ, MOQ_BENCH_PROFILE='cpu', **environment),
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(diagnostic, result.stderr)
+
+
 FIXTURE = Path(__file__).with_name('profile.test.txt').read_text()
 IDLE, MUTEX, ALLOCATOR = '2152705', '2152709', '2152707'
 # Every fixture wait closes, so the window end only has to follow the last event.
 END = 271707 * 1_000_000_000
+
+
+class Orchestration(unittest.TestCase):
+    def test_old_base_uses_current_harness_and_generator(self):
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory) / 'repo'
+            bench = checkout / 'bench'
+            bench.mkdir(parents=True)
+            (bench / 'workloads').mkdir()
+            (bench / 'run.sh').write_text('exit 87\n')
+            environment = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+                               GIT_AUTHOR_NAME='Test', GIT_AUTHOR_EMAIL='test@example.com',
+                               GIT_COMMITTER_NAME='Test', GIT_COMMITTER_EMAIL='test@example.com')
+            for command in [['init', '-q'], ['add', '.'], ['commit', '-qm', 'old harness']]:
+                subprocess.run(['git', *command], cwd=checkout, env=environment, check=True,
+                               capture_output=True)
+            (bench / 'run.sh').write_text((root / 'bench/run.sh').read_text())
+            (bench / 'metadata.py').write_text('')
+            (bench / 'profile.py').write_text('')
+            (bench / 'relay.sh').write_text('''PROFILE=
+run_workload() {
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$1" "$4" "$5" "$LOAD_BIN" "$HOST_BIN" >> "$RUN/calls.tsv"
+    local directory=$RUN/relay/$1/$3
+    mkdir -p "$directory/cpu"
+    printf '{"recv_fps":100,"cpu_cores":1}\\n' > "$directory/summary.json"
+    printf '{"samples":999,"sampled_cores":1}\\n' > "$directory/cpu/cpu.json"
+}
+''')
+            commands = Path(directory) / 'bin'
+            commands.mkdir()
+            cargo = commands / 'cargo'
+            cargo.write_text('''#!/usr/bin/env python3
+import os
+from pathlib import Path
+output = Path(os.environ['CARGO_TARGET_DIR']) / 'profiling'
+output.mkdir(parents=True, exist_ok=True)
+check = output / 'moq-bench-uring-check'
+check.write_text('#!/bin/sh\\nexit 0\\n')
+check.chmod(0o755)
+''')
+            cargo.chmod(0o755)
+            artifacts = Path(directory) / 'evidence'
+            environment.update(PATH=str(commands) + os.pathsep + os.environ['PATH'],
+                               MOQ_BENCH_ARTIFACTS=str(artifacts), MOQ_BENCH_PROFILE='cpu',
+                               MOQ_BENCH_PROFILE_WORKLOAD='fixture', MOQ_BENCH_PROFILE_WORKERS='2',
+                               MOQ_BENCH_PROFILE_RUNTIME='io-uring-workers', MOQ_BENCH_BASE='HEAD',
+                               CARGO_TARGET_DIR=str(Path(directory) / 'target'))
+            result = subprocess.run(['bash', 'bench/run.sh', '--profile'], cwd=checkout,
+                                    env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            run, = artifacts.glob('run.*')
+            calls = [line.split('\t') for line in (run / 'calls.tsv').read_text().splitlines()]
+            self.assertEqual([call[0] for call in calls],
+                             ['base/control-cpu-2', 'base/cpu-2',
+                              'current/control-cpu-2', 'current/cpu-2'])
+            for _, backend, count, generator, sampler in calls:
+                self.assertEqual((backend, count), ('io-uring-workers', '2'))
+                self.assertIn('/current/profile/profiling/', generator)
+                self.assertIn('/current/profile/profiling/', sampler)
+            self.assertFalse((run / 'base').exists(), 'temporary base worktree must be removed')
 
 
 class Parse(unittest.TestCase):

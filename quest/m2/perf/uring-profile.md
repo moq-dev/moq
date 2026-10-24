@@ -8,20 +8,23 @@ from the same recipe instead of working around it.
 
 ## Plan
 
-`run_profile` (`bench/run.sh`) builds without `moq-relay/io-uring` and
-always runs `tokio-workers`. `just bench-runtime` already builds with the
-feature, checks kernel support, and runs `io-uring-workers`; reuse that
-build and check rather than adding a second path. Select the runtime by
-argument, keep worker count and load identical across runtimes, keep
-the existing capture modes, and fail the run if the relay did not start on
-the selected runtime. Also take a base revision the way `just bench BASE`
-does, building it in a worktree with the current harness, since a revision
-older than this quest has no runtime selector; a before/after such as the
-[clock profile](/quest/m2/perf/uring-clock-profile.md)'s then profiles the
-ring at both.
+The harness now selects `tokio-workers` or `io-uring-workers` with the fourth
+`bench-profile` argument and a base revision with the fifth. Both use the
+runtime comparison's feature build and support check, and actual worker thread
+names verify the selected backend and worker count before load. A base uses the
+current harness, generator and sampler from a temporary worktree.
 
-Once it works, read these off a chat, audio, fanout, and mixed-traffic
-profile, and plan a quest only for one that shows up:
+Remaining work needs a quiet Linux profiling host. CPU and lock captures refuse
+`perf_event_paranoid=4`; configure the documented perf access on a suitable host
+before measuring. Keep worker count and workload identical across runtimes and
+revisions, and retain the unprofiled controls and capture evidence.
+
+For example, `just bench-profile "cpu lock heap" chat 4 io-uring-workers`
+profiles one shape. Also run `audio`, `fanout` and mixed traffic (`video`), and
+compare Tokio at the same worker count. The optional base argument profiles both
+revisions, including a base whose harness predates runtime selection.
+
+Read these off the profiles, and plan a quest only for one that shows up:
 
 - the per-receive `Vec` allocation for the usually single-entry fed list in
   `Endpoint::demux`;
