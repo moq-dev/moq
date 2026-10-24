@@ -96,7 +96,6 @@ Binding durations wait on Duration support in the generated C.
 - [JS SUBSCRIBE_TRACKS follows credit](/quest/m1/js-listing-credit.md) - a `@moq/net` listing opens PUBLISHes only as stream credit admits, like moq-net
 - [Cancelled moq-transport requests stop](/quest/m1/ietf-request-cancel.md) - a cancelled request releases its state even when the peer withholds credit
 - [SUBSCRIBE setup sees a cancel](/quest/m1/ietf-setup-cancel.md) - a subscriber that cancels mid-setup releases upstream demand and its slot at once
-- [Every close records its cause](/quest/m1/close-cause.md) - protocol-violation closes and abandoned SETUP replies record why
 - [Empty segments refused](/quest/m1/empty-segments.md) - `room//cam` fails loud instead of naming `room/cam`
 - [Readers follow restarts](/quest/m1/sink-restart-follow.md) - every moq-cli and moq-gst reader, moqsrc and `moq play` included, follows instances through `announced_broadcast` and an epochless `Restart` where its output can mark it; otherwise it stays on the old instance and fails once that route dies
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
