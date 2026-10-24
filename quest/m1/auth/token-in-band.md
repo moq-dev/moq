@@ -12,10 +12,9 @@ session's first requests wait on no AUTH.
 
 ## Plan
 
-IETF AUTH initially carries only prefix-representable grants. Propagate its
-`Unsupported` result for an unrepresentable pattern union; do not retry the
-token through the URL, widen it, or leave token admission pending. Lite AUTH
-already carries the full pattern grant.
+IETF AUTH can refuse a grant too large for one AUTH_OK. Propagate its
+`Unsupported` result; do not retry the token through the URL, trim it, or
+leave token admission pending.
 
 - Client configuration separates the credential from the address: `moq_tokio::connect::Config` gains `tokens`, repeatable as
   `--connect-token` and `MOQ_CONNECT_TOKEN`, the default set for every dial
@@ -58,7 +57,7 @@ already carries the full pattern grant.
   so no token is ever granted twice. While the URL also carries it, the auth
   server sees the same credential twice: `moq auth serve` admits a SETUP
   token equal to the `?jwt=` value and refuses two different ones
-  (`serve::Refusal::TwoTokens`). Never send different values in the two
+  (`serve::Denial::TwoTokens`). Never send different values in the two
   places. A token in SETUP is bounded by SETUP's Message Length cap and
   reaches the auth server exactly as a URL token does, so an unauthenticated
   client gains nothing it could not already send in the URL. Dropped: the

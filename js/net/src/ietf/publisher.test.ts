@@ -60,7 +60,8 @@ const STREAM_WAIT = 1000;
 /** A manual clock, installed until disposed. */
 function manual(): Manual & Disposable {
 	const clock = new Manual();
-	return Object.assign(clock, { [Symbol.dispose]: clock.install() });
+	const installed = clock.install();
+	return Object.assign(clock, { [Symbol.dispose]: () => installed.close() });
 }
 
 /**
@@ -728,7 +729,7 @@ test("a blocked group header is reset when the group expires", async () => {
 // does not end the wait: PUBLISH_DONE waits on the stream, so the budget still judges it.
 test("a group stream whose FIN never completes is reset when the group expires", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 
 	let closing!: () => void;
@@ -801,7 +802,7 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		client.close();
 		broadcast.close();
 		origin.close();
-		restore();
+		installed.close();
 	}
 });
 
@@ -2849,7 +2850,7 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 test.each([Version.DRAFT_20, Version.DRAFT_22])(
 	"IETF %s: datagrams honor the absolute object range",
 	async (version) => {
-		using clock = manual();
+		using _clock = manual();
 		const fx = fixture(version);
 		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const { client } = await runSubscribe(
@@ -2863,25 +2864,19 @@ test.each([Version.DRAFT_20, Version.DRAFT_22])(
 			}),
 		);
 		const reader = fx.pair.client.datagrams.readable.getReader();
-		const received: number[] = [];
-		const reading = (async () => {
-			for (;;) {
-				const next = await reader.read();
-				if (next.done) return;
-				const datagram = await ObjectDatagram.decode(next.value, version);
-				expect(datagram.trackAlias).toBe(7n);
-				expect(datagram.objectId ?? 0).toBe(0);
-				received.push(datagram.groupId);
-			}
-		})();
 		try {
-			for (let sequence = 0; sequence < 3; sequence++)
+			// Datagrams go out in arrival order, so the in-range one arrives last: receiving it
+			// first proves both out-of-range ones ahead of it were dropped.
+			for (const sequence of [0, 2, 1])
 				track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
-			await clock.advance(Nano.zero);
-			expect(received).toEqual([1]);
+			const next = await reader.read();
+			if (next.done) throw new Error("the in-range datagram was never sent");
+			const datagram = await ObjectDatagram.decode(next.value, version);
+			expect(datagram.trackAlias).toBe(7n);
+			expect(datagram.groupId).toBe(1);
+			expect(datagram.objectId ?? 0).toBe(0);
 		} finally {
 			await reader.cancel();
-			await reading;
 			client.close();
 			fx.close();
 		}
