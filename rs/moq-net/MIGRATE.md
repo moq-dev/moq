@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
+
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
@@ -120,7 +125,7 @@ The track's default was 127, the midpoint, and the subscription's was 0, the lea
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 The publisher's `Info::priority` now breaks ties between subscriptions at one subscriber priority.
 
-On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority`, so an unset priority goes out as 128 on moq-lite (was 127) and 127 on moq-transport (was 128), and an omitted moq-transport priority is the drafts' 128, which reads as -1.
+On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority`, so an unset priority goes out as 128 on moq-lite (was 127) and 127 on moq-transport (was 128), and an absent moq-transport priority reads as 0.
 
 ### A client session asks only about what its readers watch (#6165)
 
@@ -434,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)

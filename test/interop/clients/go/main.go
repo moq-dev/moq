@@ -6,8 +6,8 @@
 // tone per channel (--tone) is encoded through libopus so the matrix exercises
 // the FFI audio path, not only the video one. subscribe connects, waits for a
 // catalog with video and audio, and exits 0 once a non-empty video frame has
-// arrived and --audio-ms of audio has been decoded to --audio-out for tone.py to
-// judge (exit 1 on timeout or no data).
+// arrived and --audio-ms of every audio rendition has been decoded to
+// --audio-out.<codec> for tone.py to judge (exit 1 on timeout or no data).
 //
 //	ffmpeg ... -f h264 - | go-interop publish --url http://localhost:4443 --broadcast b.hang --tone 440,660
 //	go-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20 --audio-out /tmp/audio --audio-ms 600
@@ -152,15 +152,19 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	audio, err := moqaudio.NewProducer(catalog, moqaudio.EncoderInput{
-		Format:     moq.AudioSampleFormatF32,
-		SampleRate: audioRate,
-		Channels:   uint32(len(tones)),
-	}, moqaudio.EncoderOutput{
-		Codec:         moq.OpusAudioCodec(),
-		Track:         func() *string { track := audioTrack; return &track }(),
-		FrameDuration: audioFrameDurationUs * time.Microsecond,
-	}, nil)
+	audioTrackName := audioTrack
+	audio, err := moqaudio.NewProducer(catalog, moqaudio.ProducerOptions{
+		Input: moqaudio.EncoderInput{
+			Format:     moq.AudioSampleFormatF32,
+			SampleRate: audioRate,
+			Channels:   uint32(len(tones)),
+		},
+		Output: moqaudio.EncoderOutput{
+			Codec:         moq.OpusAudioCodec(),
+			FrameDuration: audioFrameDurationUs * time.Microsecond,
+		},
+		Track: &audioTrackName,
+	})
 	if err != nil {
 		return err
 	}
@@ -259,7 +263,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if command != "complete\n" {
 		return errors.New("expected finish completion acknowledgement")
 	}
-	if client.Session().Connects() != 1 {
+	if client.Session().State().Connects != 1 {
 		return errors.New("publisher reconnected during finish")
 	}
 	fmt.Println("finish acknowledged")
@@ -430,15 +434,19 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 		next.Cancel()
 		return errors.New("session health track did not end after one group")
 	}
-	if client.Session().Connects() != 1 {
+	if client.Session().State().Connects != 1 {
 		return errors.New("subscriber reconnected during finish")
 	}
 	fmt.Printf("finish clean frames=%d catalog=eof announce=end health=ok\n", frames)
 	return nil
 }
 
-// decodeAudio decodes the first audioMs of the rendition to out.{txt,pcm}, the layout tone.py reads.
+// decodeAudio decodes the first audioMs of the rendition to out.<codec>.{txt,pcm}, the layout
+// tone.py reads. The codec is the catalog's up to its first `.` (`opus`, `mp4a`). The files are
+// created exclusively, so two renditions of one codec fail rather than overwrite each other.
 func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string, rendition moqmedia.Audio, out string, audioMs int) error {
+	codec, _, _ := strings.Cut(rendition.Codec, ".")
+	out += "." + codec
 	decoder, err := moqaudio.Subscribe(ctx, consumer, id, rendition, moqaudio.DecoderOutput{
 		Format:   moq.AudioSampleFormatF32,
 		MaxDelay: func() *time.Duration { d := maxDelay; return &d }(),
@@ -448,12 +456,12 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 	}
 	defer decoder.Cancel()
 
-	log, err := os.Create(out + ".txt")
+	log, err := os.OpenFile(out+".txt", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
-	pcm, err := os.Create(out + ".pcm")
+	pcm, err := os.OpenFile(out+".pcm", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
@@ -521,13 +529,10 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 		return err
 	}
 
-	var audioID string
-	var audio moqmedia.Audio
-	for audioID, audio = range catalog.Audio {
-		break
+	audioDone := make(chan error, len(catalog.Audio))
+	for audioID, audio := range catalog.Audio {
+		go func() { audioDone <- decodeAudio(ctx, consumer, audioID, audio, audioOut, audioMs) }()
 	}
-	audioDone := make(chan error, 1)
-	go func() { audioDone <- decodeAudio(ctx, consumer, audioID, audio, audioOut, audioMs) }()
 
 	var id string
 	var video moqmedia.Video
@@ -555,8 +560,10 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 	if total == 0 {
 		return errors.New("no frame data received")
 	}
-	if err := <-audioDone; err != nil {
-		return fmt.Errorf("audio: %w", err)
+	for range catalog.Audio {
+		if err := <-audioDone; err != nil {
+			return fmt.Errorf("audio: %w", err)
+		}
 	}
 	fmt.Printf("received %d bytes from %q\n", total, broadcast)
 	return nil
@@ -578,7 +585,7 @@ func run() error {
 	finish := flags.Bool("finish", false, "verify a late tail and clean broadcast end")
 	frames := flags.Int("frames", 10, "expected finish video frame count")
 	tone := flags.String("tone", "", "publish: comma-separated frequency of each channel, in Hz")
-	audioOut := flags.String("audio-out", "", "subscribe: decode audio to this prefix's .txt and .pcm")
+	audioOut := flags.String("audio-out", "", "subscribe: decode each audio rendition to this prefix's .<codec>.txt and .pcm")
 	audioMs := flags.Int("audio-ms", 0, "subscribe: how much audio to decode, in milliseconds")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		return err

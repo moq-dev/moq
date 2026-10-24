@@ -1744,15 +1744,13 @@ export class Subscriber {
 
 /**
  * A broadcast consumed from a moq-transport session. Track info is resolved by the
- * subscribe path (the inherited `resolveTrackInfo`), but the protocol has no one-shot
- * group fetch, so `track.Consumer.fetchGroup()` is rejected.
+ * subscribe path (the inherited `resolveTrackInfo`), but this client has no one-shot
+ * group fetch, so the wire offers none and `track.Consumer.fetchGroup()` is rejected.
  */
 class ConsumeBroadcast extends broadcast.Consumer {
 	constructor(state?: never) {
 		super(state);
-		overrideBroadcastWire(this, {
-			fetchGroup: () => Promise.reject(new Error("fetch group is not supported for moq-transport")),
-		});
+		overrideBroadcastWire(this, { fetchGroup: undefined });
 	}
 
 	// Preserve the subclass when the consume cache shares this broadcast across callers.

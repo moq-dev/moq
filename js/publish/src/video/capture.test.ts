@@ -297,7 +297,7 @@ test("a reader attaching to a frame held late still starts at now", async () => 
 test("a replay never starts below an earlier replay", async () => {
 	using input = frameSource();
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const advance = (ms: number) => clock.jump(Nano.fromMilli(Milli(ms)));
 	const capture = new Capture({ source: input.source });
 	const watch = new Effect();
@@ -336,7 +336,7 @@ test("a replay never starts below an earlier replay", async () => {
 		watch.close();
 		second.close();
 		capture.close();
-		restore();
+		installed.close();
 	}
 
 	expect(open()).toEqual([]);

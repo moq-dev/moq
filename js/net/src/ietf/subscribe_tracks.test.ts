@@ -97,7 +97,8 @@ async function update(stream: Stream, version: IetfVersion, id: bigint, forward:
 for (const version of drafts) {
 	test(`track listing pauses, resumes, survives listing cancellation and ends on withdrawal (${version})`, async () => {
 		const clock = new Manual();
-		using _installed = { [Symbol.dispose]: clock.install() };
+		const installed = clock.install();
+		using _installed = { [Symbol.dispose]: () => installed.close() };
 		const fx = fixture(version);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 		broadcast.announce();
@@ -163,7 +164,8 @@ for (const version of drafts) {
 	// ends with TRACK_ENDED once answered, rather than a reset that fails the peer's listing.
 	test(`a track finished before its PUBLISH is answered ends with TRACK_ENDED (${version})`, async () => {
 		const clock = new Manual();
-		using _installed = { [Symbol.dispose]: clock.install() };
+		const installed = clock.install();
+		using _installed = { [Symbol.dispose]: () => installed.close() };
 		const fx = fixture(version);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 		broadcast.announce();
@@ -184,7 +186,8 @@ for (const version of drafts) {
 	// after the transport took the bytes. A track that finishes then is listed already.
 	test(`a track finished as its PUBLISH goes out ends with TRACK_ENDED (${version})`, async () => {
 		const clock = new Manual();
-		using _installed = { [Symbol.dispose]: clock.install() };
+		const installed = clock.install();
+		using _installed = { [Symbol.dispose]: () => installed.close() };
 		const fx = fixture(version);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 		broadcast.announce();
@@ -278,7 +281,8 @@ test("draft-18 refuses SUBSCRIBE to a PUBLISHed track", async () => {
 test("a cancelled listing cannot release its replacement's prefix", async () => {
 	const version = Version.DRAFT_22;
 	const clock = new Manual();
-	using _installed = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _installed = { [Symbol.dispose]: () => installed.close() };
 	const fx = fixture(version);
 	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 	broadcast.announce();
@@ -303,7 +307,8 @@ test("grants hide tracks, revoke PUBLISHes and relist when broadened", async () 
 	const empty = (): Grant => ({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
 	const grant = new Signal<Grant | undefined>(empty());
 	const clock = new Manual();
-	using _installed = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _installed = { [Symbol.dispose]: () => installed.close() };
 	const fx = fixture(version, 10, grant);
 	const listing = await fx.list();
 	await ok(listing, version);
@@ -380,7 +385,8 @@ test("paused updates keep one slot and release it when the PUBLISH ends", async 
 	const version = Version.DRAFT_22;
 	const fx = fixture(version, 1);
 	const clock = new Manual();
-	using _installed = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _installed = { [Symbol.dispose]: () => installed.close() };
 	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 	broadcast.announce();
 	broadcast.createTrack("video");
@@ -401,7 +407,8 @@ test("a failed PUBLISH stream open returns its subscription slot", async () => {
 	const version = Version.DRAFT_22;
 	const fx = fixture(version, 1);
 	const clock = new Manual();
-	using _installed = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _installed = { [Symbol.dispose]: () => installed.close() };
 	const open = spyOn(fx.session, "openBi").mockRejectedValue(new StreamError(StreamCode.Cancel));
 	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 	broadcast.announce();
