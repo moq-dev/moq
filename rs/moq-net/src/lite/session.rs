@@ -23,6 +23,8 @@ pub(crate) struct SessionStart {
 	pub goaway: crate::goaway::Handle,
 	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
 	pub auth: crate::auth::Handle,
+	/// The implementation the peer's SETUP advertised, stored on the public [`crate::Session`].
+	pub peer_implementation: crate::setup::PeerImplementation,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -275,7 +277,14 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// reads the peer's Setup stream; capability-gated streams (PROBE) wait on it.
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
-	let peer_setup_slot = PeerSetup::new(client, session.binding()).offer_ietf(our_setup.ietf);
+	let peer_implementation = crate::setup::PeerImplementation::default();
+	let peer_setup_slot = PeerSetup::new(client, session.binding())
+		.offer_ietf(our_setup.ietf)
+		.with_implementation(peer_implementation.clone());
+	// A version without a Setup Stream advertises nothing, so there is nothing to wait for.
+	if !version.has_setup_stream() {
+		peer_implementation.set(None);
+	}
 	let early = if let Some(accepted) = peer_setup {
 		peer_setup_slot.set(accepted.setup);
 		accepted.early
@@ -331,6 +340,16 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	});
 	subscriber.announces = announces;
 
+	// SendSetup only logs a failure, so refuse a SETUP that cannot encode (one past the
+	// size bound, such as a long implementation or path) here rather than leave the peer waiting.
+	if version.has_setup_stream() {
+		crate::coding::Encode::encode(
+			&our_setup,
+			&mut crate::coding::Encoder::new(&mut Vec::new(), version.into()),
+			version,
+		)?;
+	}
+
 	let driver = Driver {
 		auth: Present {
 			stats: stats.clone(),
@@ -361,6 +380,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		driver,
 		goaway: goaway_handle,
 		auth,
+		peer_implementation,
 	})
 }
 

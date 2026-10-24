@@ -4,6 +4,7 @@ import { race } from "@moq/signals";
 import { ConnectTimeout, error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
+import { IMPLEMENTATION } from "../implementation.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
@@ -14,7 +15,7 @@ import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { exchangeSetup } from "./handshake.ts";
+import { exchangeSetup, legacyPeerImplementation } from "./handshake.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
@@ -222,6 +223,12 @@ export interface ConnectProps {
 	extensions?: Extensions.Extensions;
 
 	/**
+	 * The implementation this side advertises in SETUP. Defaults to {@link IMPLEMENTATION};
+	 * a wrapper prepends its own token, like `my-app/1.0 moq-net-js/0.4.2`. Empty sends nothing.
+	 */
+	implementation?: string;
+
+	/**
 	 * Maximum time for one connect, covering the dial and the MoQ handshake, which has no
 	 * deadline of its own (default: 30000ms). `0` waits forever. Past it, the connect rejects
 	 * with {@link ConnectTimeout} and closes whatever it had opened.
@@ -243,6 +250,8 @@ type SessionProps = {
 	client: boolean;
 	/** The moq-transport extensions this side offers. */
 	extensions: Extensions.Offered;
+	/** The implementation this side advertises in SETUP; empty sends nothing. */
+	implementation: string;
 };
 
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
@@ -318,6 +327,7 @@ async function connectInner(raw: URL, props: Omit<ConnectProps, "url">, abort: P
 		publish: props.publish,
 		client: true,
 		extensions: Extensions.offered(props.extensions),
+		implementation: props.implementation ?? IMPLEMENTATION,
 	};
 
 	const offered = offer(props.versions);
@@ -480,11 +490,9 @@ async function negotiate(
 
 	const stream = await Stream.open(session, { version: setupVersion });
 
-	const encoder = new TextEncoder();
-
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(false));
-	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
+	Ietf.implementationIntoSetup(params, wiring.implementation);
 	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
@@ -532,6 +540,7 @@ async function negotiate(
 			hidden: Ietf.hiddenFromSetup(server.parameters),
 			maxAge: Ietf.maxAgeFromSetup(server.parameters),
 			activeCount: Ietf.activeCountFromSetup(server.parameters, server.version as Ietf.IetfVersion),
+			peerImplementation: legacyPeerImplementation(session, server.parameters),
 		});
 	} else {
 		throw new Error(`unsupported server version: ${server.version.toString()}`);
@@ -552,7 +561,7 @@ async function handshakeAlpn(
 	// The IETF session code loads on demand, since most sessions negotiate lite; the ALPN already
 	// committed to IETF, so fetch it alongside SETUP.
 	const [setup, { Connection }] = await Promise.all([
-		exchangeSetup(session, version, "moq-lite-js", wiring),
+		exchangeSetup(session, version, wiring.implementation, wiring),
 		import("../ietf/connection.ts"),
 	]);
 
