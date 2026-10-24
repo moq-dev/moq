@@ -9772,7 +9772,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let expired = |held: &mut [group::Consumer; 2]| {
 			held.each_mut()
-				.map(|group| group.poll_expired_while_pending(&waiter, true))
+				.map(|group| group.poll_expired(&waiter))
 		};
 
 		// Frozen timestamps, so the wall clock alone convicts.
@@ -9820,7 +9820,7 @@ mod test {
 			newest = subscriber.assert_group();
 		}
 		elapse(&producer, budget * 2);
-		assert!(!newest.poll_expired_while_pending(&waiter, true), "the newest group");
+		assert!(!newest.poll_expired(&waiter), "the newest group");
 	}
 
 	/// A recorded successor that failed hands the clock on to the next live group even once
@@ -9834,7 +9834,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let expired = |held: &mut [group::Consumer; 2]| {
 			held.each_mut()
-				.map(|group| group.poll_expired_while_pending(&waiter, true))
+				.map(|group| group.poll_expired(&waiter))
 		};
 
 		append_at(&mut producer, 0);
@@ -9892,7 +9892,7 @@ mod test {
 		pool.step(Duration::from_secs(1));
 		append_at(&mut producer, 0); // the successor
 		assert!(
-			!held.poll_expired_while_pending(&waiter, true),
+			!held.poll_expired(&waiter),
 			"the successor is recorded"
 		);
 		let state = producer.state.downgrade();
@@ -9909,11 +9909,11 @@ mod test {
 			Some(true),
 			"expired in place"
 		);
-		assert!(!held.poll_expired_while_pending(&waiter, true), "early");
+		assert!(!held.poll_expired(&waiter), "early");
 
 		pool.step(budget - idle);
 		assert!(
-			held.poll_expired_while_pending(&waiter, true),
+			held.poll_expired(&waiter),
 			"the successor arrived a budget ago"
 		);
 	}
