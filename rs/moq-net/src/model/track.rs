@@ -16942,6 +16942,37 @@ mod test {
 		assert!(fill.is_wanted(3));
 	}
 
+	/// A source refusing a fetch as not found answers only that request, such as a head that
+	/// expired while the tail is kept, so a later reader still gets a fill for the group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_source_miss_is_asked_again_by_a_later_reader() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		for sequence in 0..5 {
+			write_group(&producer, sequence);
+		}
+		evict(&producer, 3);
+		let waiter = kio::Waiter::noop();
+		let fetch = producer.consume().fetch_group(3, None);
+		let Poll::Ready(Ok(first)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("an evicted group is a miss");
+		};
+		first.group(3).reject(Error::NotFound);
+		assert!(matches!(fetch.now_or_never(), Some(Err(Error::NotFound))));
+		drop(first);
+
+		let mut subscriber = producer.subscribe(replay().with_groups(3..4));
+		assert!(
+			subscriber.poll_next_group(&waiter).is_pending(),
+			"group 3 is being filled"
+		);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the source may still have part of group 3");
+		};
+		assert!(fill.is_wanted(3));
+	}
+
 	/// A backfill cached before its fill publishes the answer is not a live arrival: the reader
 	/// keeps it owed, so the answer still reaches it.
 	#[test]

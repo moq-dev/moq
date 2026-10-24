@@ -842,8 +842,8 @@ impl Inner {
 			return;
 		};
 		match err {
-			// The source no longer has it.
-			Error::NotFound | Error::NotFetchable => self.drop_groups(sequence..end, err),
+			// A datagram is never cached, so no request ever gets it.
+			Error::NotFetchable => self.drop_groups(sequence..end, err),
 			// Stale under the fill's budget, and so is every group older than it: a timed
 			// track's starts never rewind. Only the publisher's max age binds every reader;
 			// under the fill's own budget they are withdrawn, for a reader with a wider one.
@@ -857,7 +857,9 @@ impl Inner {
 					}
 				}
 			}
-			// Anything else says nothing about the group: refused for now, recorded nowhere.
+			// Anything else, a miss included, answers only this request: one starting at
+			// another frame may still be served, such as the tail of a group whose head
+			// expired. Refused for now, recorded nowhere.
 			err => {
 				let unresolved = self.unresolved(sequence..end);
 				self.refuse(&unresolved, err);
@@ -1015,8 +1017,9 @@ impl GroupFill {
 		self.inner.accept(self.sequence, info.into())
 	}
 
-	/// Refuse the group with the source's answer. A miss names it dropped, and
-	/// [`Error::Old`] every older group of the fill too.
+	/// Refuse the group with the source's answer, for the readers waiting now. Only a
+	/// datagram, or [`Error::Old`] under the publisher's max age (with every older group of
+	/// the fill), names it dropped.
 	pub(crate) fn reject(self, err: Error) {
 		self.inner.reject(self.sequence, err);
 	}

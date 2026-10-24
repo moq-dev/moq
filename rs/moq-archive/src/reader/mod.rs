@@ -544,13 +544,18 @@ async fn serve_group<T: ObjectStore>(
 	let mut changed = shared.changed.subscribe();
 	let mut spans = shared.index.lock().unwrap().group(track, sequence);
 
-	// The earliest retained record must hold the requested frame; an expired head is gone.
-	if spans
-		.first()
-		.is_none_or(|span| span.start > Position::new(sequence, start))
-	{
-		fill.drop_groups(sequence..sequence + 1);
-		return;
+	// The earliest retained record must hold the requested frame. Nothing retained is gone;
+	// an expired head is refused for this request alone, since a later one may ask the tail.
+	match spans.first() {
+		None => {
+			fill.drop_groups(sequence..sequence + 1);
+			return;
+		}
+		Some(span) if span.start > Position::new(sequence, start) => {
+			fill.refuse_groups(sequence..sequence + 1, moq_net::Error::NotFound);
+			return;
+		}
+		Some(_) => {}
 	}
 	// Validate the first object before accepting, so an unreadable group is a plain miss. Keep it,
 	// so a cache too small to hold it costs no second GET.
