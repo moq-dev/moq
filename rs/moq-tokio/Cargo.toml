@@ -67,7 +67,6 @@ webrtc = ["_transport", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", 
 ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/rustls-ring"]
 
 [dependencies]
-moq-congestion = { workspace = true, optional = true }
 bytes = "1"
 # Family-restricted `getaddrinfo`, so the AAAA and A queries can be issued separately
 # (RFC 8305 section 3) while still going through the system resolver.
@@ -82,6 +81,7 @@ kio = { workspace = true, optional = true }
 mdns-sd = { workspace = true, optional = true }
 
 moq-clock = { workspace = true }
+moq-congestion = { workspace = true, optional = true }
 # The ICE agent behind the `webrtc` module. Private, like str0m: neither appears in this crate's API.
 moq-ice = { workspace = true, optional = true }
 moq-net = { workspace = true, optional = true }

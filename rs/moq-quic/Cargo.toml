@@ -58,7 +58,6 @@ __rustls-post-quantum-test = []
 fuzz = ["dep:arbitrary", "ring"]
 
 [dependencies]
-moq-congestion = { workspace = true }
 arbitrary = { version = "1.5", features = ["derive"], optional = true }
 aws-lc-rs = { version = "1.9", default-features = false, optional = true }
 bytes = { workspace = true }
@@ -67,6 +66,7 @@ indexmap = { workspace = true }
 lru-slab = "0.1.2"
 # Without the runtime, which is meant for dev-dependencies; a driver brings its own.
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
+moq-congestion = { workspace = true }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
 ring = { version = "0.17", optional = true }
@@ -88,7 +88,6 @@ rustls-pki-types = { version = "1.7", features = ["web"] }
 web-time = "1"
 
 [dev-dependencies]
-rand_pcg = { workspace = true }
 arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
 criterion = { workspace = true }
@@ -98,6 +97,7 @@ moq-clock = { path = "../moq-clock" }
 # The mux module's tests run in the default merge gate.
 moq-quic = { path = ".", features = ["mux"] }
 proptest = { workspace = true }
+rand_pcg = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 wasm-bindgen-test = "0.3.45"

@@ -103,13 +103,13 @@ moq-uring = { workspace = true, optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
-moq-congestion = { path = "../moq-congestion" }
 criterion = { workspace = true }
 # An HTTP/2 client, so the admission bench can hold many requests on one connection.
 h2 = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 # Clocks only the test moves, wall time included, so a grant's life is exact.
 moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
+moq-congestion = { path = "../moq-congestion" }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
