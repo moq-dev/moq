@@ -22,7 +22,7 @@ The CLI serves the one `--broadcast` it was given, at
 
 Import follows a live playlist, joining a few segments behind its live edge,
 until every rendition's playlist ends with `EXT-X-ENDLIST`. It then keeps the
-finished broadcast up until its media is stale
+finished broadcast up for `--linger`
 (see [retention](/bin/cli#retention-and-latency)). A playlist that has already
 ended, such as a VOD recording, is refused with an error rather than imported.
 An `EXT-X-DISCONTINUITY` keeps the source's timestamps. Timestamp resets are not

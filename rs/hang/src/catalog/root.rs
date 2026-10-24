@@ -701,6 +701,7 @@ mod test {
 				enabled: true,
 				preference: 0,
 				framerate: None,
+				reorder: None,
 				optimize_for_latency: None,
 				container: Container::Legacy,
 				warmup: None,

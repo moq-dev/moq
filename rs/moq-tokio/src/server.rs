@@ -423,6 +423,9 @@ impl Server {
 			.with_versions(versions.clone())
 			.with_extensions(config.extensions)
 			.with_stats(stats);
+		if let Some(implementation) = &config.implementation {
+			moq = moq.with_implementation(implementation);
+		}
 		if let Some(publisher) = publisher {
 			moq = moq.with_publisher(publisher);
 		}
@@ -1859,6 +1862,14 @@ impl Request {
 	/// authenticated identity: authorize on the token or client certificate.
 	pub fn peer_hop(&self) -> Option<moq_net::Hop> {
 		self.handshake.peer_hop()
+	}
+
+	/// The implementation the client advertised in its SETUP, such as
+	/// `moq-net-rs/0.3.10`, or `None` when it advertised none.
+	///
+	/// Peer-controlled: use it for logs and rollout counts, never to authorize.
+	pub fn peer_implementation(&self) -> Option<&str> {
+		self.handshake.peer_implementation()
 	}
 
 	/// The credential a moq-transport client presented in its SETUP's `AUTHORIZATION

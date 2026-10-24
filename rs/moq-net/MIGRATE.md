@@ -39,6 +39,17 @@ A `!Send` transport wraps itself in a type that checks the thread on use, such a
 Replace `poll_largest(&kio::Waiter::noop())` and `largest().await` on a producer with `largest()`.
 To wait for each newer one, keep a reader and follow its stream: `let mut reader = producer.consume();`, then `reader.largest().await`.
 
+### Transport failures keep their meaning
+
+Handle `Error::IdleTimeout` separately from `Error::Transport`. A local transport close is session cancellation, not clean end-of-content.
+Converting a transport failure to `StreamError` now gives `Unroutable` rather than `Internal`, so retry or re-resolve that route where you classified stream errors.
+
+### Track ends use positions
+
+`track::Producer::finish_at` takes a `track::Position` instead of an exclusive group sequence.
+Pass `Position::group(n)` where you passed `n`, or a position within the last group to end after a frame.
+`Producer::final_sequence()` is `end()` and returns `Option<Position>`; `Subscriber::finished()` and the ordered reader return `Position` instead of `u64`.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
@@ -115,7 +126,7 @@ A group followed by a frameless one is judged against the next group that has a 
 ### Ending a track aborts its open groups (#6111)
 
 Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
-Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::SessionClosed`.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::Stream(StreamError::Session(SessionError::Cancel))`.
 `track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
 
 ### Priorities are signed, with 0 unset (#6142)
@@ -270,7 +281,7 @@ A track received over moq-lite-05/06 arrives untimed, since its timestamps may b
 One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
 
-### `broadcast::Producer::finish` is back, and lingers (#5795)
+### Broadcast `finish` returns a linger handle (#5795)
 
 `finish()` ends the broadcast cleanly and returns a `Finish` that keeps its finished tracks servable until their media is stale.
 Dropping the `Finish` closes the broadcast, so `close()` still ends it now.
@@ -454,10 +465,10 @@ let client = Client::new().with_limits(limits);
 Broadcast identity is the path, whatever the publisher or first hop.
 A publisher that restarts its group numbering must publish under a new broadcast name.
 
-### Broadcast `finish` and `abort` are removed (#4152)
+### Broadcast `abort` is removed (#4152)
 
-Close a broadcast with `close()`; its end carries no cause.
-`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`.
+`broadcast::Producer::abort` is removed; use `close()` for an immediate end without a cause.
+`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`; the broadcast end carries no cause.
 
 ### No `VarInt`
 
