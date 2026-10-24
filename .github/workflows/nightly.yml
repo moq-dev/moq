@@ -108,19 +108,6 @@ jobs:
         # Unset keys default to the ARM runner, the plain dev shell, the Rust
         # cache, no perf sampling, and nextest's default profile.
         include:
-          - name: Binding benchmark
-            recipe: bench-ffi
-            artifact: bench-ffi
-            artifact-path: target/bench/ffi
-            benchmark: true
-          # Keeps the BoltFFI and UniFFI slice building and running for the
-          # browser generator comparison, which reuses it. It skips the size
-          # step, whose moq-ffi and moq-wasm builds double the time and are
-          # already built elsewhere.
-          - name: Generator comparison
-            recipe: bench-ffi-gen build bench
-            artifact: bench-ffi-gen
-            artifact-path: target/ffi-gen/results
           - name: Audio grouping relay benchmark
             recipe: bench-audio
           - name: Relay shard sweep
@@ -440,8 +427,6 @@ jobs:
   platform:
     uses: ./.github/workflows/platform.yml
     secrets: inherit
-    with:
-      benchmarks: true
 
   # Plays the matrix in headless Chromium and the native player through moq-shaper
   # and grades what the listener heard against test/audio-quality/budgets.json.

@@ -104,6 +104,6 @@ pub extern "C" fn moq_ffi_test_clock_now() -> u64 {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test;
 
-// The binding benchmark's Rust baselines; ignored unless `just bench-ffi` asks for them.
+// The binding benchmark's Rust baselines; ignored unless rust2's `just bench-ffi` asks for them.
 #[cfg(all(test, unix))]
 mod bench;
