@@ -12,6 +12,11 @@ published version.
 Decided 2026-10-16 (maintainer interview); the diff tooling moved to its own
 m1 quest on 2026-10-22.
 
+- PRs stop writing `MIGRATE.md` entries once
+  [MIGRATE.md at the cut](/quest/m0/migrate-at-cut.md) lands (decided
+  2026-10-23): gather every `!` subject in `git log` since the `release`
+  merge base and write each PR's Impact-bullet migration note into its
+  package's guide.
 - Run the API-diff report on the cut PR and read the diff of the
   hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
   `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,

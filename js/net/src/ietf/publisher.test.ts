@@ -16,6 +16,7 @@ import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
+import { ObjectDatagram } from "./datagram.ts";
 import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
@@ -564,8 +565,13 @@ test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces 
 		for (const path of [".", "./child", ".session", ".session/extension", ".application", ".sessionish"]) {
 			const pair = createMockTransportPair(ALPNS[version]);
 			const { pub, origin } = publisher(pair.server, { session: new NativeSession(pair.server, version, true) });
-			const broadcast = publish(origin, Path.from(path));
-			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			// Navigation segments cannot be published. A covering application
+			// route still proves these reserved requests are refused before lookup.
+			const navigation = path.split("/")[0] === ".";
+			const claim = navigation ? origin.dynamic(Path.empty()) : undefined;
+			const requested = claim?.requested().next();
+			const broadcast = navigation ? undefined : publish(origin, Path.from(path));
+			const track = broadcast?.createTrack("video", { timescale: Timescale.MILLI });
 			const request = requestStream(version);
 			try {
 				await pub.runTrackStatusRequest(trackStatus(path), request.stream);
@@ -579,9 +585,11 @@ test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces 
 				}
 			} finally {
 				request.cancel();
-				track.close();
-				broadcast.close();
+				track?.close();
+				broadcast?.close();
+				claim?.close();
 				origin.close();
+				if (requested) expect((await requested).done).toBe(true);
 			}
 		}
 	}
@@ -2838,6 +2846,48 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 	}
 });
 
+test.each([Version.DRAFT_20, Version.DRAFT_22])(
+	"IETF %s: datagrams honor the absolute object range",
+	async (version) => {
+		using clock = manual();
+		const fx = fixture(version);
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				filter: { kind: "absolute", startGroup: 0n, startObject: 1n, endGroup: 1n, endObject: 0n },
+			}),
+		);
+		const reader = fx.pair.client.datagrams.readable.getReader();
+		const received: number[] = [];
+		const reading = (async () => {
+			for (;;) {
+				const next = await reader.read();
+				if (next.done) return;
+				const datagram = await ObjectDatagram.decode(next.value, version);
+				expect(datagram.trackAlias).toBe(7n);
+				expect(datagram.objectId ?? 0).toBe(0);
+				received.push(datagram.groupId);
+			}
+		})();
+		try {
+			for (let sequence = 0; sequence < 3; sequence++)
+				track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+			await clock.advance(Nano.zero);
+			expect(received).toEqual([1]);
+		} finally {
+			await reader.cancel();
+			await reading;
+			client.close();
+			fx.close();
+		}
+	},
+);
+
 /** An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the refresh ratio. */
 test("draft-20: an absolute subscribe is no join", async () => {
 	const fx = fixture();
@@ -3356,9 +3406,8 @@ test("draft-20: an inline terminal reset after its FIN falls back to a standalon
 
 /**
  * A bounded filter does not end the subscription (draft-20 removed that), so the publisher
- * keeps serving until the track does. Groups published above the end are dropped rather
- * than held: parking them would leave the serving loop waiting for a cap that never rises,
- * and PUBLISH_DONE would never go out.
+ * keeps serving until the track does. Groups held above the end cannot delay PUBLISH_DONE
+ * once the track finishes: the filter is fixed, so its terminal boundary ends serving.
  */
 test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DONE", async () => {
 	using clock = manual();

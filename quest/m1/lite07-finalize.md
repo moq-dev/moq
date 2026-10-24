@@ -98,7 +98,6 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
-- [Listing end reason](/quest/m1/listing-end-reason.md) - lite-07's TRACKS_FINISH says a listed track finished, so an IETF answerer can end it with TRACK_ENDED
 
 ## Related
 

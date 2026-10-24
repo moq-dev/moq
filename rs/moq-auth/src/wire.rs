@@ -7,7 +7,6 @@
 //! as `publish` and `subscribe`, which an old reader sees as granting nothing and
 //! refuses. Both encodings are read; one document never mixes them.
 
-use crate::Access;
 use moq_pattern::{Pattern, Patterns};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{TimestampSeconds, serde_as};
@@ -25,9 +24,9 @@ pub(crate) struct Claims {
 	#[serde(deserialize_with = "present")]
 	get: Option<Prefixes>,
 	#[serde(deserialize_with = "present")]
-	publish: Option<Access>,
+	publish: Option<Patterns>,
 	#[serde(deserialize_with = "present")]
-	subscribe: Option<Access>,
+	subscribe: Option<Patterns>,
 	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
 	exp: Option<std::time::SystemTime>,
 	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
@@ -98,14 +97,14 @@ pub(crate) struct Scope {
 	#[serde(deserialize_with = "present")]
 	get: Option<Vec<String>>,
 	#[serde(deserialize_with = "present")]
-	publish: Option<Access>,
+	publish: Option<Patterns>,
 	#[serde(deserialize_with = "present")]
-	subscribe: Option<Access>,
+	subscribe: Option<Patterns>,
 }
 
 impl From<crate::Scope> for Scope {
 	fn from(scope: crate::Scope) -> Self {
-		let grants = Grants::encode(scope.publish.into(), scope.subscribe.into());
+		let grants = Grants::encode(scope.publish, scope.subscribe);
 		Self {
 			root: scope.root,
 			put: grants.put,
@@ -127,13 +126,10 @@ impl TryFrom<Scope> for crate::Scope {
 			subscribe: wire.subscribe,
 		};
 		let (publish, subscribe) = grants.decode()?;
-		if publish.rate.is_some() || subscribe.rate.is_some() {
-			return Err("key scopes cannot carry bitrate caps".into());
-		}
 		Ok(Self {
 			root: wire.root,
-			publish: publish.path,
-			subscribe: subscribe.path,
+			publish,
+			subscribe,
 		})
 	}
 }
@@ -157,7 +153,7 @@ impl Prefixes {
 
 /// A present field, refusing an explicit `null` rather than reading it as absent,
 /// so a `null` can't hide one encoding from the mixed-encoding check.
-pub(crate) fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
 	T::deserialize(deserializer).map(Some)
 }
 
@@ -165,27 +161,22 @@ pub(crate) fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializ
 struct Grants {
 	put: Option<Vec<String>>,
 	get: Option<Vec<String>>,
-	publish: Option<Access>,
-	subscribe: Option<Access>,
+	publish: Option<Patterns>,
+	subscribe: Option<Patterns>,
 }
 
 impl Grants {
-	fn encode(publish: Access, subscribe: Access) -> Self {
+	fn encode(publish: Patterns, subscribe: Patterns) -> Self {
 		let prefixes = |patterns: &Patterns| -> Option<Vec<String>> {
 			patterns
 				.iter()
 				.map(|pattern| pattern.as_prefix().map(str::to_string))
 				.collect()
 		};
-		let some = |access: Access| (!access.is_default()).then_some(access);
+		let some = |patterns: Patterns| (!patterns.is_empty()).then_some(patterns);
 
-		match (
-			publish.rate,
-			subscribe.rate,
-			prefixes(&publish.path),
-			prefixes(&subscribe.path),
-		) {
-			(None, None, Some(put), Some(get)) => Self {
+		match (prefixes(&publish), prefixes(&subscribe)) {
+			(Some(put), Some(get)) => Self {
 				put: (!put.is_empty()).then_some(put),
 				get: (!get.is_empty()).then_some(get),
 				publish: None,
@@ -200,7 +191,7 @@ impl Grants {
 		}
 	}
 
-	fn decode(self) -> Result<(Access, Access), String> {
+	fn decode(self) -> Result<(Patterns, Patterns), String> {
 		let legacy = self.put.is_some() || self.get.is_some();
 		if !legacy {
 			return Ok((self.publish.unwrap_or_default(), self.subscribe.unwrap_or_default()));
@@ -216,6 +207,6 @@ impl Grants {
 				.map(|prefix| Pattern::subtree(prefix).map_err(|err| format!("legacy prefix {prefix:?}: {err}")))
 				.collect()
 		};
-		Ok((subtrees(self.put)?.into(), subtrees(self.get)?.into()))
+		Ok((subtrees(self.put)?, subtrees(self.get)?))
 	}
 }
