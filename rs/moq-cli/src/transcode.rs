@@ -185,7 +185,14 @@ impl Following {
 				},
 				result = async { running.as_mut().expect("guarded").await }, if running.is_some() => {
 					running = None;
-					result.context("transcoding failed")?;
+					match result {
+						Ok(()) => {}
+						// The instance ended cleanly before advertising anything to transcode.
+						Err(moq_transcode::Error::NoSource) => {
+							tracing::info!(source = %self.source_path, "ended before its video was ready, waiting for it to return");
+						}
+						Err(err) => return Err(err).context("transcoding failed"),
+					}
 				}
 			}
 		}
@@ -230,17 +237,7 @@ mod tests {
 			config: Default::default(),
 		};
 		let task = tokio::spawn(following.run());
-		async fn next(instances: &mut moq_mux::follow::Instances) -> moq_net::broadcast::Consumer {
-			loop {
-				match instances.next().await.unwrap() {
-					moq_mux::follow::Event::Start(broadcast) => return broadcast,
-					moq_mux::follow::Event::End => continue,
-				}
-			}
-		}
-		let first = moq_clock::timeout(std::time::Duration::from_secs(1), next(&mut derivatives))
-			.await
-			.unwrap();
+		let first = next(&mut derivatives).await;
 		let mut old_catalog = first
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -249,9 +246,7 @@ mod tests {
 			.unwrap();
 		let new = origin.publish("source", route()).unwrap();
 		let _new_dynamic = new.dynamic();
-		let second = moq_clock::timeout(std::time::Duration::from_secs(1), next(&mut derivatives))
-			.await
-			.unwrap();
+		let second = next(&mut derivatives).await;
 		assert!(!first.is_clone(&second));
 		assert_ne!(first.info().epoch, second.info().epoch);
 		assert!(first.is_closed(), "the superseded ladder is retired");
@@ -269,5 +264,54 @@ mod tests {
 		);
 		task.abort();
 		assert!(task.await.unwrap_err().is_cancelled());
+	}
+
+	/// A source that finishes its catalog before advertising any video is a clean end, so the
+	/// command keeps following and the next instance still gets a ladder.
+	#[tokio::test(start_paused = true)]
+	async fn a_source_ending_before_its_video_waits_for_the_next_instance() {
+		let origin = moq_tokio::origin::spawn();
+		let publish = moq_tokio::origin::spawn();
+		let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let mut old = origin.publish("source", route()).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut old, Default::default()).unwrap();
+		let mut derivatives = moq_mux::follow::Instances::new(&publish.consume(), "derived", None).unwrap();
+		let following = Following {
+			origin: origin.consume(),
+			publish: publish.clone(),
+			source_path: "source".into(),
+			output_path: "derived".into(),
+			config: Default::default(),
+		};
+		let task = tokio::spawn(following.run());
+		let first = next(&mut derivatives).await;
+
+		catalog.finish().unwrap();
+		moq_clock::timeout(std::time::Duration::from_secs(1), first.closed())
+			.await
+			.expect("the ladder outlived its source's end");
+		assert!(!task.is_finished(), "a clean end stopped following");
+
+		let new = origin.publish("source", route()).unwrap();
+		let _new_dynamic = new.dynamic();
+		let second = next(&mut derivatives).await;
+		assert!(!first.is_clone(&second));
+		task.abort();
+		assert!(task.await.unwrap_err().is_cancelled());
+	}
+
+	/// The next derivative instance announced at the output path.
+	async fn next(instances: &mut moq_mux::follow::Instances) -> moq_net::broadcast::Consumer {
+		let start = async {
+			loop {
+				match instances.next().await.unwrap() {
+					moq_mux::follow::Event::Start(broadcast) => return broadcast,
+					moq_mux::follow::Event::End => continue,
+				}
+			}
+		};
+		moq_clock::timeout(std::time::Duration::from_secs(1), start)
+			.await
+			.expect("no derivative instance was announced")
 	}
 }
