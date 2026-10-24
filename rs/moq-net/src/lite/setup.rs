@@ -56,8 +56,10 @@ impl ProbeLevel {
 	/// Both metrics are sampled rather than declared, so this only works for a
 	/// transport whose figures exist by the time the session starts. QUIC and TCP
 	/// both qualify: their RTT comes from the handshake, which has already happened.
-	pub fn detect<S: crate::transport::poll::Session>(session: &S) -> Self {
+	#[cfg(feature = "async")]
+	pub fn detect(session: &crate::driver::Transport) -> Self {
 		use crate::transport::Stats as _;
+		use crate::transport::poll::Session as _;
 		let stats = session.stats();
 		match stats.estimated_send_rate().is_some() || stats.rtt().is_some() {
 			true => Self::Report,
@@ -441,7 +443,10 @@ mod tests {
 	fn detect_reports_nothing_without_stats() {
 		use crate::lite::test_transport::{SinkSession, SinkStats};
 		let session = SinkSession::new(Default::default()).with_stats(SinkStats::default());
-		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::None);
+		assert_eq!(
+			ProbeLevel::detect(&crate::driver::Transport::new(session.clone())),
+			ProbeLevel::None
+		);
 	}
 
 	/// Either metric alone is enough to report, since the two PROBE fields are
@@ -453,11 +458,17 @@ mod tests {
 
 		let rtt_only = SinkStats::default().with_rtt(std::time::Duration::from_millis(40));
 		let session = SinkSession::new(Default::default()).with_stats(rtt_only);
-		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
+		assert_eq!(
+			ProbeLevel::detect(&crate::driver::Transport::new(session.clone())),
+			ProbeLevel::Report
+		);
 
 		let rate_only = SinkStats::default().with_send_rate(1_000_000);
 		let session = SinkSession::new(Default::default()).with_stats(rate_only);
-		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
+		assert_eq!(
+			ProbeLevel::detect(&crate::driver::Transport::new(session.clone())),
+			ProbeLevel::Report
+		);
 	}
 
 	/// Probing to a local target never reaches the wire, so a sender alone promises the
@@ -469,7 +480,10 @@ mod tests {
 
 		let stats = SinkStats::default().with_send_rate(1_000_000);
 		let session = SinkSession::new(Default::default()).with_stats(stats).with_probe();
-		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
+		assert_eq!(
+			ProbeLevel::detect(&crate::driver::Transport::new(session.clone())),
+			ProbeLevel::Report
+		);
 	}
 
 	#[test]
