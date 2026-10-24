@@ -58,6 +58,14 @@ Decisions (maintainer, 2026-10-13):
   egress), in use since 2026-10-20. Over 32 one-pass entries it took a median
   5.5 minutes per merged PR (p90 11.9, at most 24.2) against 21 minutes on a
   hosted runner, with no per-minute bill. Blacksmith is not pursued.
+  Open (found 2026-10-23): the runner deployed on that host is a
+  systemd-nspawn container (`container@moq-ci`) with `/dev/kvm` and a host
+  cache directory bound in, not the VM this decision and `nix/runner/README.md`
+  describe. Confirm which is intended before changing either.
+
+Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
+changes first (concurrent entries, parallel modules, one test build), then a
+measured nightly-compiler experiment.
 
 Decided 2026-10-15: local CPU admission, test-cost reductions, and setup
 reductions are all m0. `quest gate` owns generic command admission; repositories
@@ -81,6 +89,10 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
+- [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the queue builds two or more entries at once instead of one
+- [Run the queue's modules in parallel](/quest/m0/ci/parallel-modules.md) - `just ci` overlaps its selected modules
+- [One nextest build in the queue](/quest/m0/ci/one-test-build.md) - `test rs` compiles once instead of three times
+- [Measure nightly compiler levers](/quest/m0/ci/nightly-levers.md) - the parallel frontend and Cranelift, adopted only if the numbers beat their risks
 - [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
