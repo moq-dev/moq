@@ -177,9 +177,10 @@ declare -A compiles=(
     [fix]='rs'
 )
 
-# Lanes start in this order, so the slowest come first.
+# Lanes start in this order, so the slowest come first. dart runs alone (see
+# below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(rs carla py kt swift go cpp obs_compile dart js drafts markdown gh flake bench drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile) ;;
+    check | ci) modules=(rs carla py kt swift go cpp obs_compile js drafts markdown gh flake bench drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
     fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
 
@@ -204,6 +205,13 @@ declare -A lane=(
     [cpp]=ffi
     [obs_compile]=ffi
 )
+
+# Lanes that run with no other lane beside them. dart builds moq-ffi with the
+# filtered environment its build hook gets, then checks that the hook finds
+# that build fresh. Any other Cargo build in between reruns the host build
+# scripts in target/debug that track the environment, such as bindgen's
+# BINDGEN_EXTRA_CLANG_ARGS, and so rebuilds what the hook then rebuilds again.
+declare -A alone=([dart]=1)
 
 selected=()
 missing=()
@@ -420,6 +428,7 @@ cancel() {
 
 logs=$(mktemp -d)
 declare -A running=()
+lone=
 next=0
 failed=
 failed_status=0
@@ -433,8 +442,11 @@ trap 'exit 143' TERM
 # running lanes and starts no more, as a serial run stops at its first failure.
 ((limit == 1)) || set -m
 while true; do
-    while [[ -z "$failed" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
+    while [[ -z "$failed" && -z "$lone" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
         name=${lanes[next]}
+        if [[ -v "alone[$name]" ]] && ((${#running[@]})); then
+            break
+        fi
         next=$((next + 1))
         read -ra lane_modules <<<"${members[$name]}"
         if ((limit == 1)); then
@@ -444,6 +456,7 @@ while true; do
             run_lane "$logs/$name.times" "${lane_modules[@]}" </dev/null >"$logs/$name.log" 2>&1 &
         fi
         running[$!]=$name
+        [[ ! -v "alone[$name]" ]] || lone=$!
     done
     ((${#running[@]})) || break
 
@@ -451,6 +464,7 @@ while true; do
     wait -n -p pid "${!running[@]}" || status=$?
     name=${running[$pid]}
     unset "running[$pid]"
+    [[ "$pid" != "$lone" ]] || lone=
     if ((status)) && [[ -z "$failed" ]]; then
         failed=$name
         failed_status=$status
