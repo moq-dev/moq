@@ -414,8 +414,8 @@
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             # The commit the tag will name, until kixelated/uniffi-bindgen-cpp#6 merges and is tagged.
-            rev = "2e9dd2b2678a70e5557aba4f8f972753362ce9db";
-            hash = "sha256-KFcNFYTpl9eUHWZPhCZXxwDt7brGcZhky+yoj+4hHqQ=";
+            rev = "ca955d8b53a6674d1b872f62d55d3f4707cbe290";
+            hash = "sha256-nErLn2hQus5omIaFheJWy06wKQS9HiKNtksxaJm9Z8k=";
           };
 
           cargoHash = "sha256-fz7fn6D12zmFFSVSdySDfNRtQe+n4KCB9bXAsuvq/QY=";

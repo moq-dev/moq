@@ -74,7 +74,7 @@ jobs:
       # The tag flake.nix pins; see the comment there.
       - name: Install uniffi-bindgen-cpp
         shell: bash
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --rev 2e9dd2b2678a70e5557aba4f8f972753362ce9db
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --rev ca955d8b53a6674d1b872f62d55d3f4707cbe290
 
       # The package version lives in cpp/moq/VERSION; a tag that disagrees is a mistake.
       - name: Check version

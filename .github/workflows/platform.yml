@@ -105,7 +105,7 @@ jobs:
       - name: Install uniffi-bindgen-cpp
         if: needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
         shell: bash
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --rev 2e9dd2b2678a70e5557aba4f8f972753362ce9db
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --rev ca955d8b53a6674d1b872f62d55d3f4707cbe290
       - name: Rust compile and tests
         if: needs.scope.outputs.rs == 'true'
         shell: bash
@@ -151,7 +151,7 @@ jobs:
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Install uniffi-bindgen-cpp
         if: needs.scope.outputs.obs == 'true'
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --rev 2e9dd2b2678a70e5557aba4f8f972753362ce9db
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --rev ca955d8b53a6674d1b872f62d55d3f4707cbe290
       - name: Rust compile and tests
         if: needs.scope.outputs.rs == 'true'
         env:
