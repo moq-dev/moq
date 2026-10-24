@@ -22,7 +22,7 @@ pub(crate) async fn dial(
 	url: Url,
 	origin: moq_net::origin::Consumer,
 	path: impl moq_net::AsPath,
-) -> Result<crate::wire::Source> {
+) -> Result<()> {
 	let broadcast = origin.request_broadcast(path, None).await?;
 	let source = EgressSource::new(moq_mux::Source::new(origin, broadcast)).await?;
 	let codecs = source.catalog_codecs();
@@ -34,7 +34,7 @@ pub(crate) async fn dial(
 	// Restrict to codecs the catalog can actually source so the remote
 	// answer doesn't pick a codec we have no rendition for.
 	let mut rtc = session::rtc_with_codecs(&codecs);
-	for addr in &socket.locals {
+	for addr in socket.locals() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
 	}
@@ -79,11 +79,10 @@ pub(crate) async fn dial(
 	for mid in mids {
 		session.open_media(mid)?;
 	}
-	let wire = session.wire();
 	tokio::spawn(async move {
 		let result = session.run().await;
 		session::log_session_end("whip client", &result);
 	});
 
-	Ok(wire)
+	Ok(())
 }

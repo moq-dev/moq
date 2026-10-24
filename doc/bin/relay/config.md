@@ -19,6 +19,7 @@ Precedence is CLI, then env, then file, then defaults.
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
 version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all.
 timeout = "10s"                      # Handshake deadline. "0" waits forever.
+implementation = "edge/1"            # SETUP name for the relay. Omit for moq-relay/<v> moq-net-rs/<v>, "" to send none.
 
 [listen.reset]
 secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a random key.
@@ -48,6 +49,11 @@ epoch = false                        # Decline MoQ Epoch, so routes over moq-tra
 admission, so a peer that connects and never speaks, or whose admission never
 gets an answer, is closed instead of held open by keep-alives. An HTTP read's
 admission is bounded by the same value from the request's arrival.
+
+`implementation` names the relay in its SETUP, on accepted sessions and cluster dials
+alike. A client that advertises its own name (moq-lite-05+ or any moq-transport draft)
+reaches the [auth server](/bin/relay/auth#the-contract) with it as `implementation`,
+which is where to count client versions; older clients arrive without one.
 
 `reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of
@@ -232,8 +238,9 @@ renewal keeps the current certificate serving and retries.
 
 ## \[stun]
 
-Applications can use the relay as an explicitly selected STUN server for WebRTC
-ICE. The listener has its own UDP port and is disabled unless configured:
+Build with `cargo install moq-relay --features stun` to use the relay as an
+explicitly selected STUN server for WebRTC ICE. This feature is off by default.
+The listener has its own UDP port and is disabled unless configured:
 
 ```toml
 [stun]

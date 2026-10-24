@@ -129,24 +129,28 @@ impl<R: Incoming> Connection<R> {
 		//
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
-		let mut request = request
-			.with_stats(stats.clone())
-			.with_limits(lifecycle.cluster.limits(&lease));
+		let mut request = request.with_stats(stats).with_limits(lifecycle.cluster.limits(&lease));
 		if let Some(subscriber) = subscriber {
 			request = request.with_publisher(subscriber);
 		}
 		if let Some(publisher) = publisher {
 			request = request.with_subscriber(publisher);
 		}
-		let lease = lease.preparing(request.auth(), request.requests(), request.role())?;
+		// A grant that no longer holds is refused, so the session records why it ended.
+		let lease = match lease.preparing(request.auth(), request.requests(), request.role()) {
+			Ok(lease) => lease,
+			Err(err) => {
+				request.reject(http::StatusCode::UNAUTHORIZED).await;
+				return Err(err.into());
+			}
+		};
 		let serving = lifecycle.shutdown.serve();
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
 		let (session, driver) = lifecycle
 			.shutdown
 			.until_deadline(request.ok())
 			.await
-			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))?
-			.inspect_err(|err| setup_failed(&stats, err.downcast_ref()))?;
+			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
 
 		// Joined rather than awaited in turn, for a driver that runs only when polled. A
 		// spawned driver's panic still surfaces here, so it cannot look like cancellation.
@@ -165,7 +169,8 @@ fn span(id: u64, remote: Option<std::net::SocketAddr>) -> tracing::Span {
 		"conn",
 		id,
 		remote = remote.map(tracing::field::display),
-		session = tracing::field::Empty
+		session = tracing::field::Empty,
+		implementation = tracing::field::Empty
 	)
 }
 
@@ -272,6 +277,11 @@ impl Lifecycle {
 		request: moq_auth::Request,
 	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), StatusError> {
 		self.span.record("session", &request.id);
+		// Peer-controlled, so recorded escaped rather than displayed raw.
+		if let Some(implementation) = &request.implementation {
+			self.span
+				.record("implementation", tracing::field::debug(implementation));
+		}
 		let admitted = self.shutdown.admit(self.authorize(request)).await;
 		// Cluster admission records its own refusals; LAN and drain refusals are recorded here.
 		if let Err(err) = &admitted
@@ -420,75 +430,16 @@ pub(crate) fn session_bytes(session: &moq_net::Session) -> moq_auth::Bytes {
 	}
 }
 
-/// Admission already started the stats session, so a failed SETUP reply ends it.
-/// A cause without a MoQ error is the transport's.
-pub(crate) fn setup_failed(stats: &moq_net::stats::Session, cause: Option<&moq_net::Error>) {
-	if let Some(kind) = cause.map_or(Some(moq_net::stats::Failure::Transport), failure) {
-		stats.fail(kind);
-	}
-}
-
-/// Close classification comes only from typed protocol and transport causes.
-pub(crate) fn failure(error: &moq_net::Error) -> Option<moq_net::stats::Failure> {
-	use moq_net::stats::Failure;
-	use moq_net::{Error, SessionError};
-	match error {
-		Error::Cancel | Error::Closed | Error::GoingAway | Error::Session(SessionError::Cancel) => None,
-		Error::IdleTimeout => Some(Failure::IdleTimeout),
-		Error::Transport(_) => Some(Failure::Transport),
-		_ => Some(Failure::Application),
-	}
-}
-
 #[cfg(all(test, target_os = "linux", feature = "_uring"))]
 #[path = "../tests/integration/logs.rs"]
 mod logs;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux", feature = "_uring"))]
 mod tests {
 	use super::*;
-	use moq_net::{Error, SessionError, stats::Failure};
-
-	#[test]
-	fn a_failed_setup_reply_ends_the_admitted_session_by_its_cause() {
-		let outcome = |cause: Option<&Error>| {
-			let registry = moq_net::stats::Registry::new(Default::default());
-			let stats = registry.tier(moq_net::stats::Tier::default()).session("root");
-			setup_failed(&stats, cause);
-			drop(stats);
-			registry.snapshot().sessions()[0].1.sessions_failed
-		};
-		assert_eq!(outcome(Some(&Error::Cancel)), Default::default());
-		assert_eq!(outcome(None).count(Failure::Transport), 1);
-		assert_eq!(outcome(Some(&Error::IdleTimeout)).count(Failure::IdleTimeout), 1);
-		assert_eq!(outcome(Some(&Error::Timeout)).count(Failure::Application), 1);
-	}
-
-	#[test]
-	fn clean_closes_are_not_failures_and_typed_causes_keep_their_kind() {
-		for error in [
-			Error::Cancel,
-			Error::Closed,
-			Error::GoingAway,
-			Error::Session(SessionError::Cancel),
-		] {
-			assert_eq!(failure(&error), None);
-		}
-		assert_eq!(failure(&Error::IdleTimeout), Some(Failure::IdleTimeout));
-		assert_eq!(
-			failure(&Error::Transport("idle timeout".into())),
-			Some(Failure::Transport),
-			"messages never choose the kind"
-		);
-		assert_eq!(
-			failure(&Error::Session(SessionError::App(42))),
-			Some(Failure::Application)
-		);
-	}
 
 	/// A panic in the ring's supervision, after the worker handed it to the shared runtime, still
 	/// logs the connection's close.
-	#[cfg(all(target_os = "linux", feature = "_uring"))]
 	#[tokio::test(start_paused = true)]
 	async fn shared_supervision_panic_logs_the_connection_close() {
 		use tracing_subscriber::layer::SubscriberExt;

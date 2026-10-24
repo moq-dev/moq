@@ -7,8 +7,8 @@
 //!
 //! The media tasks need the decoders, so they stay behind `play`, but they
 //! reach the devices only through `output`: tests drive them against a
-//! recorder (`fake`), and `just rs play` runs those on every PR that reaches
-//! this crate.
+//! recorder (`fake`), and the merge gate's test build turns `play` on for every
+//! PR that reaches this crate.
 
 #![cfg_attr(
 	not(feature = "play"),
