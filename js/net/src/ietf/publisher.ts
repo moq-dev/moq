@@ -33,7 +33,6 @@ import type { Groups, Info, Position as TrackPosition, Subscriber as TrackSubscr
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
-import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -272,6 +271,21 @@ interface Published {
 /** How a listed track left the listing: it finished, or it left unfinished. */
 type Unlisted = "finished" | "removed";
 
+/** The next listed track to PUBLISH, ready but for its stream. */
+interface Staged {
+	name: string;
+	info: Info;
+	/** On draft-18, claims the track's one subscription from now on. */
+	claim?: string;
+}
+
+/** What a broadcast's listing woke for. */
+type Woken =
+	| { kind: "track"; event: broadcast.TracksEvent | undefined }
+	| { kind: "opened"; stream: Stream }
+	| { kind: "failed"; err: unknown }
+	| { kind: "changed" };
+
 /** Stop forwarding without ending the subscription. */
 class Paused extends Error {
 	/** The update to answer once forwarding stopped, if one asked; its own Request ID on drafts 15 and 16. */
@@ -331,8 +345,6 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
-	// Subscriptions the peer holds, PUBLISHes for its listings capped by `Limits.requests`.
-	#subscriptions: Slots;
 	#listings = new Set<Path.Valid>();
 	#trackClaims = new Map<string, "publish" | number>();
 
@@ -395,7 +407,6 @@ export class Publisher {
 		grant = new Signal<Grant | undefined>(undefined),
 		auth,
 		ready = Promise.resolve(),
-		limits = LIMITS,
 	}: {
 		/** The WebTransport session, for uni streams. */
 		quic: WebTransport;
@@ -419,11 +430,8 @@ export class Publisher {
 		auth?: Carrier;
 		/** Resolves once the setup tokens are answered (MoQ Auth). */
 		ready?: Promise<void>;
-		/** How many live requests the peer may hold. */
-		limits?: Limits;
 	}) {
 		this.#quic = quic;
-		this.#subscriptions = new Slots(limits.requests, { reason: "too many requests" });
 		this.#grant = grant;
 		this.#gate = new Gate(grant);
 		this.#auth = auth;
@@ -479,15 +487,10 @@ export class Publisher {
 			);
 			return;
 		}
-		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
-		// once. Stream credit bounds them, so none is refused here.
-		const charged = !msg.rangeFilters && this.#gate.allows(msg.trackNamespace);
-		if (charged) this.#subscriptions.hold();
 		if (claimed) this.#trackClaims.set(key, ((this.#trackClaims.get(key) as number | undefined) ?? 0) + 1);
 		try {
 			await this.#serveSubscribe(msg, request);
 		} finally {
-			if (charged) this.#subscriptions.release();
 			if (claimed) {
 				const count = (this.#trackClaims.get(key) as number) - 1;
 				if (count) this.#trackClaims.set(key, count);
@@ -2370,6 +2373,8 @@ export class Publisher {
 						continue;
 					}
 					skips.delete(first[0]);
+					// A FORWARD=1 listing waits for this to read its next track.
+					changed.update((n) => n + 1);
 					await Message.write(request.writer, PublishSkipped.id, first[1], version);
 				}
 				if (refusal) await request.refuse("subscribe_namespace", refusal);
@@ -2436,6 +2441,16 @@ export class Publisher {
 		}
 	}
 
+	/**
+	 * List one broadcast under a SUBSCRIBE_TRACKS: PUBLISH or skip each of its tracks until its
+	 * route goes or the broadcast ends, then let its PUBLISHes run to their end.
+	 *
+	 * A PUBLISH starts only once the peer's stream credit opens its stream, one staged at a time,
+	 * so the PUBLISHes a peer holds are bounded by the credit it grants. The listing is still read
+	 * meanwhile, since an unlisted track's PUBLISH_DONE is what returns that credit; the tracks
+	 * read but not yet PUBLISHed wait in `pending`. A FORWARD=1 listing has nothing to unlist, so
+	 * it reads its next track only once the request stream has taken the last skip.
+	 */
 	async #listBroadcast({
 		msg,
 		suffix,
@@ -2453,12 +2468,38 @@ export class Publisher {
 		skips: Map<symbol, PublishSkipped>;
 		changed: Signal<number>;
 	}) {
+		const forward = msg.parameters.forward !== false;
 		const namespace = Path.join(msg.prefix, suffix);
+		// The tracks waiting their turn for a PUBLISH, in listing order.
+		const pending = new Map<string, Info>();
+		// The next track to PUBLISH, waiting on the peer's stream credit.
+		let staged: Staged | undefined;
+		// The stream the next PUBLISH goes out on, once the peer's credit admits it.
+		let opening: Promise<Woken> | undefined;
+		// The listing's next event, read while anything else is awaited.
+		let reading: Promise<Woken> | undefined;
+		// Each sent PUBLISH's entry: setting it says the track is no longer listed.
 		const listed = new Map<string, Once<Unlisted>>();
+		// The tracks with a skip queued, so the broadcast's end cancels only its own.
 		const skipped = new Map<string, symbol>();
 		const tasks = new Set<Promise<void>>();
+		const skip = (name: string) => {
+			const key = Symbol();
+			skipped.set(name, key);
+			skips.set(key, new PublishSkipped(suffix, name));
+			changed.update((n) => n + 1);
+		};
+		const unstage = () => {
+			if (staged?.claim) this.#trackClaims.delete(staged.claim);
+			staged = undefined;
+		};
+		// The PUBLISHes already sent still end when their track is unlisted, so the listing is
+		// still read once cancelled, adding nothing.
 		const cancel = adding.subscribe((active) => {
-			if (!active && !tasks.size) hold.abort();
+			if (active) return;
+			pending.clear();
+			unstage();
+			if (!tasks.size) hold.abort();
 		});
 		let listing: broadcast.Tracks | undefined;
 		try {
@@ -2466,10 +2507,84 @@ export class Publisher {
 			const source = await this.#resolve(namespace, hold.signal, epoch);
 			listing = source.tracks();
 			for (;;) {
-				const event = await untilAborted(listing.next(), hold.signal);
+				// Stage the next pending track that will be PUBLISHed, skipping those that will
+				// not, so a stream is opened only for a PUBLISH that goes out.
+				for (const [name, info] of pending) {
+					if (staged || !adding.peek()) break;
+					pending.delete(name);
+					// Draft-18 allows one subscription per track (section 5.1), so a track the peer
+					// is subscribed to, by its SUBSCRIBE or a PUBLISH still alive, is skipped.
+					// Claimed from now, so a SUBSCRIBE cannot slip in before the PUBLISH goes out.
+					const claim =
+						this.#session.version === Version.DRAFT_18 ? JSON.stringify([namespace, name]) : undefined;
+					if (claim !== undefined) {
+						if (this.#trackClaims.has(claim)) {
+							skip(name);
+							continue;
+						}
+						this.#trackClaims.set(claim, "publish");
+					}
+					staged = { name, info, claim };
+				}
+				if (staged && !opening)
+					opening = Promise.resolve(this.#session.openBi({ timeout: null })).then(
+						(stream): Woken => ({ kind: "opened", stream }),
+						(err: unknown): Woken => ({ kind: "failed", err }),
+					);
+				const waits: PromiseLike<Woken>[] = [];
+				if (opening) waits.push(opening);
+				// A FORWARD=1 listing has nothing to unlist, so it reads its next track only once
+				// the request stream has taken the last skip.
+				if (forward && skips.size) waits.push(Signal.race(changed).then((): Woken => ({ kind: "changed" })));
+				else {
+					reading ??= listing.next().then((event): Woken => ({ kind: "track", event }));
+					waits.push(reading);
+				}
+				const woken = await untilAborted(race(waits), hold.signal);
+				if (woken.kind === "changed") continue;
+				if (woken.kind === "failed") {
+					console.debug(`listed broadcast=${namespace}: PUBLISH stream did not open`, woken.err);
+					break;
+				}
+				if (woken.kind === "opened") {
+					opening = undefined;
+					const next = staged;
+					if (!next || !adding.peek()) {
+						woken.stream.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
+						continue;
+					}
+					staged = undefined;
+					const unlisted = new Once<Unlisted>();
+					listed.set(next.name, unlisted);
+					const task = this.#runPublish({
+						msg,
+						namespace,
+						source,
+						stream: woken.stream,
+						name: next.name,
+						info: next.info,
+						unlisted,
+						adding,
+					})
+						.catch((err) => {
+							if (err instanceof ProtocolViolation) throw err;
+						})
+						.finally(() => {
+							if (next.claim) this.#trackClaims.delete(next.claim);
+							tasks.delete(task);
+							if (!adding.peek() && !tasks.size) hold.abort();
+						});
+					tasks.add(task);
+					void task.catch(() => hold.abort());
+					continue;
+				}
+				reading = undefined;
+				const event = woken.event;
 				if (!event) break;
 				if (event.kind === "synced") continue;
 				if (event.kind === "removed" || event.kind === "finished") {
+					if (staged?.name === event.name) unstage();
+					pending.delete(event.name);
 					listed.get(event.name)?.set(event.kind);
 					listed.delete(event.name);
 					const key = skipped.get(event.name);
@@ -2478,44 +2593,19 @@ export class Publisher {
 					continue;
 				}
 				if (!adding.peek()) continue;
-				const duplicate =
-					this.#session.version === Version.DRAFT_18 &&
-					this.#trackClaims.has(JSON.stringify([namespace, event.name]));
-				if (msg.parameters.forward !== false || duplicate || !this.#subscriptions.tryAcquire()) {
-					const key = Symbol();
-					skipped.set(event.name, key);
-					skips.set(key, new PublishSkipped(suffix, event.name));
-					changed.update((n) => n + 1);
-					continue;
-				}
-				const unlisted = new Once<Unlisted>();
-				listed.set(event.name, unlisted);
-				const key = JSON.stringify([namespace, event.name]);
-				if (this.#session.version === Version.DRAFT_18) this.#trackClaims.set(key, "publish");
-				const task = this.#runPublish({
-					msg,
-					namespace,
-					source,
-					name: event.name,
-					info: event.info,
-					unlisted,
-					adding,
-				})
-					.catch((err) => {
-						if (err instanceof ProtocolViolation) throw err;
-					})
-					.finally(() => {
-						this.#subscriptions.release();
-						if (this.#session.version === Version.DRAFT_18) this.#trackClaims.delete(key);
-						tasks.delete(task);
-						if (!adding.peek() && !tasks.size) hold.abort();
-					});
-				tasks.add(task);
-				void task.catch(() => hold.abort());
+				if (forward) skip(event.name);
+				else pending.set(event.name, event.info);
 			}
 		} finally {
 			cancel();
 			listing?.close();
+			pending.clear();
+			unstage();
+			// A stream that opens from now on carries nothing.
+			void opening?.then((woken) => {
+				if (woken.kind === "opened")
+					woken.stream.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
+			});
 			for (const entry of listed.values()) entry.set("removed");
 			for (const key of skipped.values()) skips.delete(key);
 			await Promise.all(tasks);
@@ -2526,6 +2616,7 @@ export class Publisher {
 		msg,
 		namespace,
 		source,
+		stream,
 		name,
 		info,
 		unlisted,
@@ -2534,6 +2625,8 @@ export class Publisher {
 		msg: SubscribeTracks;
 		namespace: Path.Valid;
 		source: broadcast.Consumer;
+		/** The PUBLISH's stream, opened once the peer's credit admitted it. */
+		stream: Stream;
 		name: string;
 		info: Info;
 		unlisted: Once<Unlisted>;
@@ -2551,21 +2644,10 @@ export class Publisher {
 		const removed = unlisted.subscribe((how) => {
 			if (how === "removed" || (how === "finished" && !publishing)) hold.abort();
 		});
-		const cancelled = () => request?.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
+		const request = new RequestStream(stream, this.#session, this.#quic);
+		const cancelled = () => request.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
 		hold.signal.addEventListener("abort", cancelled);
-		let request: RequestStream | undefined;
 		try {
-			if (!adding.peek() || unlisted.peek() !== undefined) return;
-			const opening = Promise.resolve(this.#session.openBi({ timeout: null }));
-			void opening.then(
-				(stream) => {
-					if (hold.signal.aborted)
-						stream.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
-				},
-				() => undefined,
-			);
-			const stream = await untilAborted(opening, hold.signal);
-			request = new RequestStream(stream, this.#session, this.#quic);
 			let peerEnded = false;
 			const ended = request.ended.then(() => {
 				peerEnded = true;
@@ -2762,14 +2844,14 @@ export class Publisher {
 				}
 			}
 		} catch (err) {
-			request?.abort(err);
+			request.abort(err);
 			throw err;
 		} finally {
 			stop();
 			removed();
 			hold.signal.removeEventListener("abort", cancelled);
 			hold.abort();
-			request?.close();
+			request.close();
 		}
 	}
 

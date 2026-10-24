@@ -34,10 +34,4 @@ test("tryAcquire refuses at the cap without closing the session", () => {
 	expect(slots.tryAcquire()).toBe(false);
 	slots.release();
 	expect(slots.tryAcquire()).toBe(true);
-	// A held entry counts past the cap, so tryAcquire waits for it too.
-	slots.hold();
-	slots.release();
-	expect(slots.tryAcquire()).toBe(false);
-	slots.release();
-	expect(slots.tryAcquire()).toBe(true);
 });
