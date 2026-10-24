@@ -152,6 +152,8 @@ pub struct Session {
 	closed: kio::Consumer<Option<Ended>>,
 	stats: kio::Shared<StatsState>,
 	version: Version,
+	/// What the peer's SETUP advertised, once it arrives.
+	peer_implementation: kio::Consumer<Option<Option<String>>>,
 	// Weak, so the sampler runs only while a caller holds a consumer.
 	send_bandwidth: Option<bandwidth::Weak>,
 	recv_bandwidth: Option<bandwidth::Weak>,
@@ -167,6 +169,34 @@ impl Session {
 	/// Returns the negotiated protocol version.
 	pub fn version(&self) -> Version {
 		self.version
+	}
+
+	/// The implementation the peer advertised in its SETUP, such as `moq-net-rs/0.3.10`.
+	///
+	/// Waits for the peer's SETUP, which a dialing client may not have read yet.
+	/// `None` when the peer advertised none, its version carries no SETUP (moq-lite
+	/// 01-04), or the session ended first. Peer-controlled: use it for logs and
+	/// rollout counts, never to authorize.
+	pub async fn peer_implementation(&self) -> Option<String> {
+		// The slot closes only when the driver drops, which a caller holding a finished
+		// one never does, so the transport's end is watched too.
+		kio::wait(|waiter| {
+			let slot = self.peer_implementation.poll(waiter, |slot| match &**slot {
+				Some(value) => Poll::Ready(value.clone()),
+				None => Poll::Pending,
+			});
+			match slot {
+				Poll::Ready(Ok(value)) => return Poll::Ready(value),
+				Poll::Ready(Err(_)) => return Poll::Ready(None),
+				Poll::Pending => {}
+			}
+			let ended = self.closed.poll(waiter, |ended| match &**ended {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			});
+			ended.map(|_| None)
+		})
+		.await
 	}
 
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
@@ -341,6 +371,8 @@ pub(super) struct Handles {
 	pub estimate: Option<kio::Producer<Estimate>>,
 	/// The reservations the session probes for.
 	pub bandwidth: bandwidth::Allocator,
+	/// What the peer's SETUP advertised as its implementation.
+	pub peer_implementation: crate::setup::PeerImplementation,
 }
 
 impl Session {
@@ -358,6 +390,7 @@ impl Session {
 			estimate,
 			stats: context,
 			bandwidth,
+			peer_implementation,
 		} = handles;
 		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
@@ -411,6 +444,7 @@ impl Session {
 			closed: closed_consumer,
 			stats,
 			version,
+			peer_implementation: peer_implementation.consume(),
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,
@@ -820,9 +854,8 @@ pub struct Limits {
 	/// Other moq-transport requests the peer may hold at once, such as SUBSCRIBE and FETCH.
 	///
 	/// On drafts 14 to 16 this and `announces` size the request window, which every request
-	/// counts against. Later drafts bound the PUBLISHes a peer's track listings hold with it,
-	/// skipping the rest, and still refuse a reused request ID, so a peer may leave at most
-	/// twice the sum of both runs of skipped IDs; one more closes the session with
+	/// counts against. Later drafts still refuse a reused request ID, so a peer may leave at
+	/// most twice the sum of both runs of skipped IDs; one more closes the session with
 	/// `INTERNAL_ERROR` rather than forgetting any. moq-lite ignores it.
 	pub requests: usize,
 }
@@ -880,8 +913,7 @@ impl Slots {
 
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.
 	///
-	/// A peer whose own request runs past its limits loses the session. A subscription we
-	/// would initiate, such as a listed track's PUBLISH, is skipped instead.
+	/// A peer whose own request runs past its limits loses the session.
 	pub(crate) fn acquire(&self) -> Result<Slot, Error> {
 		use std::sync::atomic::Ordering;
 		let held = self

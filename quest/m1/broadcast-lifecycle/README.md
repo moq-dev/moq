@@ -46,7 +46,6 @@ timer on main at 1582fdc07d:
 
 ## Required
 
-- [Publisher retention in moq-mux](/quest/m1/broadcast-lifecycle/retention.md) - moq-cli, the gateways, and moqsink keep a finished broadcast up for a fixed `--linger` (default 30s) through a moq-mux helper instead of moq-net's `Finish`
 - [Stateless broadcasts](/quest/m1/broadcast-lifecycle/stateless.md) - `Finish`, its linger, and finished-only supersession are gone from moq-net, `@moq/net`, moq-ffi, moq-c, and every binding
 - [TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md) - `export ts|srt --linger` becomes `--follow <duration>`, a replacement's catalog has no separate deadline, and a track failure is classified by its cause instead of a 1s grace
 - [SRT tells a clean end from a failure](/quest/m1/broadcast-lifecycle/srt-end.md) - an SRT ingest whose peer goes silent aborts instead of finishing as if it had shut down
