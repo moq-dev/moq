@@ -11,11 +11,9 @@ license = "MIT OR Apache-2.0"
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 rand = { workspace = true }
 rand_pcg = { workspace = true }
-rustc-hash = { workspace = true }
 
 [dev-dependencies]
 moq-clock = { path = "../moq-clock" }
-proptest = { workspace = true }
 stats_alloc = "0.1.10"
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
