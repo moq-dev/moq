@@ -731,7 +731,7 @@ test("when the WebSocket wins, every WebTransport dial is closed", async () => {
 		opened = sleep(Nano.fromMilli(Milli(100))).then(() => ({
 			readable: new ReadableStream(),
 			writable: new WritableStream(),
-			protocol: "",
+			protocol: "qmux-01",
 			extensions: "",
 		}));
 		closed = new Promise(() => {});
@@ -772,7 +772,7 @@ test("when WebTransport and WebSocket open in the same turn, the one not chosen 
 		opened = opened.then(() => ({
 			readable: new ReadableStream(),
 			writable: new WritableStream(),
-			protocol: "",
+			protocol: "qmux-01",
 			extensions: "",
 		}));
 		closed = new Promise(() => {});
@@ -910,7 +910,7 @@ function webSocketPlan(clock: Manual, plan: (dial: number) => WebSocketDial) {
 	const streams = () => ({
 		readable: new ReadableStream(),
 		writable: new WritableStream(),
-		protocol: "",
+		protocol: "qmux-01",
 		extensions: "",
 	});
 	native.WebSocketStream = class {

@@ -762,10 +762,9 @@ async function connectWebSocket(
 	if (!active) return undefined;
 
 	for (let wait = WEBSOCKET_REDIAL; ; wait = Milli(wait * 2)) {
-		// The default (`requireProtocol: false`) also advertises bare `qmux-01`,
-		// `qmux-00`, and `webtransport` so we still interop with relays that only
-		// know a wire-format version (today's moq-relay only accepts bare
-		// `webtransport`).
+		// The default (`requireProtocol: false`) also advertises the bare `qmux-02`,
+		// `qmux-01`, and `qmux-00`, so we still interop with relays that only know a
+		// wire-format version.
 		const quic = new Session(url, {
 			protocols: alpns,
 			versions: Object.fromEntries(alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
