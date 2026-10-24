@@ -22,8 +22,8 @@ under the same names.
   generator pin; `v0.11.0-kixelated.5+v0.32.2` already carries the C backend
   (`--lang c`).
 - Ship a `MIGRATE.md` with the package, since it is what C users install.
-  Carry over `rs/moq-c/MIGRATE.md`'s history and add an `## Unreleased`
-  entry mapping the hand-written ABI to the generated one.
+  Carry over `rs/moq-c/MIGRATE.md`'s history, and map the hand-written ABI to
+  the generated one in the PR's Impact bullet.
 - Ship a hand-written `moq_shutdown` that calls `moq_ffi_shutdown`, then
   `moq_shutdown_dispatcher`.
 - moq-c and moq-cpp each embed the moq-ffi staticlib, so one program can't link

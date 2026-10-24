@@ -5,8 +5,8 @@
 When `main` is cut into `release`, its public API is net smaller and harder
 to misuse than `release`'s. Every surface added since release has a consumer
 or is removed or made private. Overlapping operations are collapsed into one.
-Names mirror across Rust, JS, and the bindings. Every break has its
-`MIGRATE.md` entry.
+Names mirror across Rust, JS, and the bindings. Every break says how
+to migrate.
 
 Non-goals: redesigning surfaces that already have their own quest
 ([subscribe ranges](/quest/m1/subscribe-ranges/README.md),
@@ -38,8 +38,8 @@ Rules every child follows:
   reshapes it (the ordered track reader joins
   [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md); binding durations get
   [their own m2 quest](/quest/m2/ffi-durations.md)).
-- Each child lists its public API and wire impact in its PR and writes its
-  own `MIGRATE.md` entries.
+- Each child lists its public API and wire impact in its PR, and its Impact
+  bullet says how to migrate.
 
 Already gated elsewhere, so not children: the archive `Producer` and `Reader`
 disagree on layout while both claim version 2

@@ -30,7 +30,7 @@ Decided with the maintainer:
 - An m1 epic of its own, linked from the
   [API audit](/quest/m1/api-audit/README.md), whose consumer rule it follows.
 - The audit's bugs are standalone m1 quests ranked ahead of this epic.
-- No docs page: rustdoc and each crate's `MIGRATE.md` carry it.
+- No docs page: rustdoc and each PR's Impact bullet carry it.
 - A third read-only audit listed the workarounds quinn's shape forced on
   moq-tokio, moq-uring, qmux, and moq-relay; each child names the ones its
   change deletes. The maintainer pulled the driver's poll forms and native
