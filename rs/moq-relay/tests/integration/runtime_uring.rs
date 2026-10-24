@@ -995,7 +995,6 @@ async fn uring_workers_offer_the_configured_extensions() {
 
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.insecure = Some(true);
-		dial.once = Some(true);
 		dial.bind = Some("127.0.0.1:0".parse().unwrap());
 		dial.version = vec!["moq-transport-22".parse().unwrap()];
 		let client = dial.init(Default::default()).unwrap();

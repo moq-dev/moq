@@ -533,18 +533,18 @@ enum SamplerMode {
 
 impl Supervisor {
 	pub(crate) fn panicked(&mut self, error: Error) {
-		self.closing.local.store(true, std::sync::atomic::Ordering::Relaxed);
-		self.closing.record(&error);
+		self.session
+			.closing()
+			.local
+			.store(true, std::sync::atomic::Ordering::Relaxed);
 		if let Ok(mut closed) = self.closed.write() {
 			*closed = Some(Ended {
 				err: error.clone(),
-				drain: Some(Err(error)),
+				drain: Some(Err(error.clone())),
 			});
 		}
-		self.session.close(
-			self.version.session_code(&SessionError::Internal),
-			"session driver panicked",
-		);
+		let code = self.version.session_code(&SessionError::Internal);
+		self.session.abort(&error, code, "session driver panicked");
 	}
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
