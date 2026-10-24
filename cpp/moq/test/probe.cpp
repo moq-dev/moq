@@ -106,10 +106,9 @@ void audio_roundtrip() {
     auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "audio catalog producer");
     moq::AudioEncoderInput input{moq::AudioSampleFormat::kF32, 48000, 2};
     moq::AudioEncoderOutput output{};
-    output.track = "tone";
     output.codec = moq::AudioCodec::opus();
     output.frame_duration_us = 20000;
-    auto audio = ok(moq::AudioProducer::init(catalog, input, output, nullptr), "audio producer");
+    auto audio = ok(moq::AudioProducer::init(catalog, {input, output, "tone", nullptr}), "audio producer");
     auto snapshot = ok(catalogs->next().get(), "audio catalog");
     CHECK(snapshot.has_value());
     moq::AudioDecoderOutput decoded{};

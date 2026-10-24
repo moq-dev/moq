@@ -192,9 +192,14 @@ pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
 	sps_vui(nal)?.hrd
 }
 
-/// The colour an SPS NAL unit's VUI signals, when it carries a video signal type.
-pub(crate) fn sps_color(nal: &[u8]) -> Option<hang::catalog::Color> {
-	sps_vui(nal)?.color
+/// Whether an SPS NAL unit codes field pictures or field macroblock pairs (`frame_mbs_only_flag` 0).
+pub(crate) fn sps_interlaced(nal: &[u8]) -> Option<bool> {
+	if nal.len() < 4 {
+		return None;
+	}
+	let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
+	let sps = h264_parser::Sps::parse(&rbsp).ok()?;
+	Some(!sps.frame_mbs_only_flag)
 }
 
 /// What an SPS VUI declares about picture timing, sample shape, and colour.
@@ -854,6 +859,7 @@ mod tests {
 	/// Only a VUI with a video signal type adds colour, and its colour description is read whole.
 	#[test]
 	fn sps_color_reads_the_video_signal_type() {
+		let sps_color = |nal| sps_vui(nal).and_then(|vui| vui.color);
 		let sdr = sps_color(fixtures::SPS_BT709).unwrap();
 		assert_eq!(
 			(sdr.primaries, sdr.transfer, sdr.matrix, sdr.range),
