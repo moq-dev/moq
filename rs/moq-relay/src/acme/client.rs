@@ -38,8 +38,8 @@ const EXTEND_INTERVAL: Duration = Duration::from_secs(30);
 /// directory validates from, so idle scanners do not crowd the validator out.
 const CHALLENGE_CONCURRENCY: usize = 1024;
 
-/// Failed validations the first issuance tolerates within [`FAILURE_WINDOW`] before
-/// refusing to start, leaving headroom under Let's Encrypt's limit of 5 per hostname per hour.
+/// Failed validations tolerated within [`FAILURE_WINDOW`] before issuance refuses to start
+/// and renewal pauses, leaving headroom under Let's Encrypt's limit of 5 per hostname per hour.
 const FAILURE_LIMIT: usize = 3;
 
 /// How long a failed validation counts against [`FAILURE_LIMIT`], matching Let's Encrypt's window.
@@ -104,6 +104,7 @@ impl Config {
 		let failures = Failures {
 			path: cache.path("failures", &domains, directory),
 		};
+		let cert = cache.path("cert", &domains, directory);
 		let state = rustls_acme::AcmeConfig::new(&domains)
 			.contact(self.contact.iter().map(Url::as_str))
 			.directory(directory)
@@ -113,6 +114,7 @@ impl Config {
 		Ok(Some(Acme {
 			state,
 			failures,
+			cert,
 			domains: domains.join(", "),
 			timeout: self.timeout().unwrap_or(DEFAULT_TIMEOUT),
 		}))
@@ -123,6 +125,8 @@ impl Config {
 pub(crate) struct Acme {
 	state: AcmeState<io::Error>,
 	failures: Failures,
+	/// Where rustls-acme looks for the cached certificate.
+	cert: PathBuf,
 	domains: String,
 	timeout: Duration,
 }
@@ -138,12 +142,13 @@ impl Acme {
 	/// A valid cached certificate deploys at once with no challenge. Otherwise this
 	/// orders one, failing with the last ACME error once the startup budget runs out
 	/// or once [`FAILURE_LIMIT`] validations failed within the hour, counting earlier
-	/// starts: a supervisor restarting the relay would otherwise spend the rest of
-	/// the directory's allowance and lock the hostname out for an hour.
+	/// starts and renewals: a supervisor restarting the relay would otherwise spend
+	/// the rest of the directory's allowance and lock the hostname out for an hour.
 	pub(crate) async fn issue(&mut self, listener: &std::net::TcpListener) -> anyhow::Result<()> {
 		let addr = listener.local_addr()?;
 		let mut failed = self.failures.recent()?;
-		if failed.len() >= FAILURE_LIMIT {
+		// A spent budget refuses only an order; the certificate it was renewing still serves.
+		if failed.len() >= FAILURE_LIMIT && !Cache::read(&self.cert)?.is_some_and(|pem| current(&pem)) {
 			return Err(self.failures.refuse(&failed, &self.domains, addr, None));
 		}
 
@@ -164,9 +169,10 @@ impl Acme {
 		loop {
 			tokio::select! {
 				event = self.state.next() => match event.context("ACME client stopped")? {
+					// Validation never ran, so failed renewals still count against the budget.
 					Ok(EventOk::DeployedCachedCert) => {
 						tracing::info!(domains = %self.domains, "serving the cached ACME certificate");
-						return self.failures.clear();
+						return Ok(());
 					}
 					// Not ready until it is saved: a certificate lost on restart would be ordered again.
 					Ok(EventOk::DeployedNewCert) => {
@@ -228,20 +234,70 @@ impl Acme {
 
 	/// Renew in the background forever, keeping the current certificate serving through failures.
 	///
+	/// Failed validations count against the same budget as [`Self::issue`], since
+	/// rustls-acme retries a failed order within seconds. Once [`FAILURE_LIMIT`] fall
+	/// within [`FAILURE_WINDOW`], renewal stops polling the ACME state, which pauses
+	/// rustls-acme's order loop, until the oldest one ages out.
+	///
 	/// Never returns: the event stream is infinite, so its end panics, which stops
 	/// the relay through its critical tasks instead of silently ending renewal.
-	pub(crate) async fn run(mut self) {
-		loop {
-			let event = self.state.next().await.expect("the ACME event stream ended");
-			match event {
-				Ok(EventOk::DeployedNewCert) => tracing::info!(domains = %self.domains, "renewed the ACME certificate"),
-				Ok(event) => tracing::debug!(?event, "ACME"),
-				Err(err) => tracing::error!(
-					%err,
-					domains = %self.domains,
-					"ACME renewal failed; still serving the previous certificate"
-				),
+	pub(crate) async fn run(self) {
+		renew(self.state, self.failures, self.domains).await
+	}
+}
+
+/// The renewal loop over `events`, split from [`Acme::run`] so tests can drive it with fake events.
+async fn renew(
+	mut events: impl futures::Stream<Item = rustls_acme::Event<io::Error, io::Error>> + Unpin,
+	failures: Failures,
+	domains: String,
+) {
+	loop {
+		let resume = match failures.recent() {
+			Ok(failed) if failed.len() < FAILURE_LIMIT => None,
+			Ok(failed) => failed.first().map(|oldest| oldest.saturating_add(FAILURE_WINDOW)),
+			// An unknown budget counts as spent, rather than risk the directory's limit.
+			Err(err) => {
+				tracing::error!(err = format!("{err:#}"), %domains, "failed to read the ACME failure record");
+				Some(moq_clock::wall().saturating_add(FAILURE_WINDOW))
 			}
+		};
+		if let Some(resume) = resume {
+			tracing::warn!(
+				%domains,
+				resume = %humantime::format_rfc3339_seconds(resume.into()),
+				"ACME renewal paused after {FAILURE_LIMIT} failed validations within the hour, short of the directory's limit; still serving the previous certificate"
+			);
+			moq_clock::sleep(resume.saturating_duration_since(moq_clock::wall())).await;
+			continue;
+		}
+
+		match events.next().await.expect("the ACME event stream ended") {
+			Ok(EventOk::DeployedNewCert) => {
+				tracing::info!(%domains, "renewed the ACME certificate");
+				if let Err(err) = failures.clear() {
+					tracing::error!(%err, %domains, "failed to clear the ACME failure record");
+				}
+			}
+			Ok(event) => tracing::debug!(?event, "ACME"),
+			Err(err @ rustls_acme::EventError::Order(rustls_acme::OrderError::BadAuth(_))) => match failures.record() {
+				Ok(failed) => tracing::warn!(
+					%err,
+					%domains,
+					failed = failed.len(),
+					"ACME renewal validation failed; still serving the previous certificate"
+				),
+				// Unrecorded, it would never count, so assume the budget is spent.
+				Err(record) => {
+					tracing::error!(%err, record = format!("{record:#}"), %domains, "ACME renewal validation failed and could not be recorded; pausing renewal for an hour");
+					moq_clock::sleep(FAILURE_WINDOW).await;
+				}
+			},
+			Err(err) => tracing::error!(
+				%err,
+				%domains,
+				"ACME renewal failed; still serving the previous certificate"
+			),
 		}
 	}
 }
