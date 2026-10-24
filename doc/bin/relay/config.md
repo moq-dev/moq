@@ -232,8 +232,9 @@ renewal keeps the current certificate serving and retries.
 
 ## \[stun]
 
-Applications can use the relay as an explicitly selected STUN server for WebRTC
-ICE. The listener has its own UDP port and is disabled unless configured:
+Build with `cargo install moq-relay --features stun` to use the relay as an
+explicitly selected STUN server for WebRTC ICE. This feature is off by default.
+The listener has its own UDP port and is disabled unless configured:
 
 ```toml
 [stun]

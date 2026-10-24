@@ -84,7 +84,6 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 
 ## Required
 
-- [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
 - [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
 - [SUBSCRIBE_TRACKS follows credit](/quest/m1/listing-credit.md) - a listing holds state in proportion to what the peer reads, not to the catalog
@@ -99,9 +98,7 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [Stats groups as tracks](/quest/m1/stats-group-tracks.md) - one stable node broadcast per stats producer, with each group a produced track listed by TRACKS
 - [No reused track names](/quest/m1/name-reuse.md) - no first-party publisher re-creates a finished track under its old name
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
-- [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Receive pinning](/quest/m1/quic-receive-pinning.md) - tiny DATAGRAM or STREAM frames cannot pin moq-quic receive batches past the receive budgets
-- [Priority requeue](/quest/m1/quic-priority-requeue.md) - raising a queued QUIC stream's priority moves it at once instead of after it next sends
 - [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - receive leases and the connection window keep exact books, and eviction stops scanning every stream
 - [io_uring listen extensions](/quest/m1/uring-listen-extensions.md) - ring listeners offer the configured `[listen] extensions`
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq

@@ -18,7 +18,9 @@ What the code does today:
   program to every program's `Import`; the removed program's `handle_pat`
   errors, `Programs::decode` propagates it, and the whole multiplex ingest
   stops, including unrelated programs. `Programs` sees each whole PAT first
-  (`Packet::pat`), so it can retire or start programs there instead.
+  (`Packet::pat`), so it can retire or start programs there instead. A
+  program still waiting for its PMT is already dropped there, or moved to
+  the PMT PID the later PAT names.
 - A PAT naming another `transport_stream_id`, or a single-program import's
   PAT naming another program, already refuses the import.
 
@@ -33,8 +35,10 @@ Decided 2026-10-20 by the maintainer:
   If the program returns, it publishes a new epoch of its broadcast, never
   the retired instance's names for new content. A single-program import
   whose selected program leaves the PAT ends, as today.
-- Open: a PAT that names a program whose PMT never arrives. Decide whether
-  the import refuses it or waits, and which clock bounds the wait (found in
+- Open: a PAT that names a program whose PMT never arrives. `Programs`
+  creates a program's broadcast only once its PMT lists a stream, so such a
+  program waits holding only its PAT entry. Decide whether the import refuses
+  it instead, and which clock bounds the wait (found in
   [moq-dev/moq#6122](https://github.com/moq-dev/moq/pull/6122)).
 
 Rust: `rs/moq-mux` TS `Import::handle_pat` and `Programs`.

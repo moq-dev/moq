@@ -61,10 +61,9 @@ Decided 2026-10-20 (maintainer): the moq-c half lands on the
 [generated C package](/quest/m1/c/README.md), not the frozen hand-written
 ABI, so C users break once.
 
+Wall and monotonic times stay `moq_clock::Wall` and `moq_clock::Instant`, not
+media timestamps; keep the types distinct.
+
 ## Required
 
 - [Generated C bindings](/quest/m1/c/README.md) - `moq_timestamp` reaches C through the generated package, so C users break once
-
-## Related
-
-- [Controlled time](/quest/m1/time/README.md) - wall and monotonic time, not media timestamps; keep the types distinct
