@@ -610,7 +610,8 @@ mod tests {
 		};
 		for (version, want) in [(Version::Lite06, None), (Version::Lite07, msg.hop)] {
 			let mut buf = Vec::new();
-			msg.encode(&mut Encoder::new(&mut buf, version.into()), version).unwrap();
+			msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
 			let got = crate::coding::decode_buf(&mut &buf[..], version, Setup::decode).unwrap();
 			assert_eq!(got.hop, want, "{version:?}");
 		}

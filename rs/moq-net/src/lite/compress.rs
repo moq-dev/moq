@@ -323,7 +323,11 @@ impl AnnounceEncoder {
 		let base = next - id;
 		let keep = keep as u64;
 		let chain = |hops: &[Hop]| {
-			varint_size(hops.len() as u64, form) + hops.iter().map(|hop| varint_size(hop.wire_id(form), form)).sum::<usize>()
+			varint_size(hops.len() as u64, form)
+				+ hops
+					.iter()
+					.map(|hop| varint_size(hop.wire_id(form), form))
+					.sum::<usize>()
 		};
 		let size = varint_size(base, form) + chain(head) + varint_size(keep, form);
 		match size < varint_size(0, form) * 2 + chain(hops.as_slice()) {

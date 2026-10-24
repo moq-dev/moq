@@ -172,7 +172,7 @@ async function requestRoundTrip(msg: AnnounceRequest, version: Version): Promise
 // announces before they hit the wire.
 test("AnnounceRequest carries excludeHop on draft-05", async () => {
 	const got = await requestRoundTrip(new AnnounceRequest(Path.from("room/"), HopSchema.parse(42n)), Version.DRAFT_05);
-	expect(got.excludeHop).toBe(42n);
+	expect(got.excludeHop).toBe(HopSchema.parse(42n));
 });
 
 // Draft06 dropped the field: the receiver's reflected-announce check catches the same
@@ -180,7 +180,7 @@ test("AnnounceRequest carries excludeHop on draft-05", async () => {
 test("AnnounceRequest drops excludeHop on draft-06", async () => {
 	const msg = new AnnounceRequest(Path.from("room/"), HopSchema.parse(42n));
 	const got = await requestRoundTrip(msg, Version.DRAFT_06);
-	expect(got.excludeHop).toBe(0n);
+	expect(got.excludeHop).toBe(UNKNOWN_HOP);
 
 	const with05 = await bytes((w) => msg.encode(w, Version.DRAFT_05), Version.DRAFT_05);
 	const with06 = await bytes((w) => msg.encode(w, Version.DRAFT_06), Version.DRAFT_06);
