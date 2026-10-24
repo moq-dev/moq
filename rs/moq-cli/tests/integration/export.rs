@@ -345,6 +345,8 @@ async fn a_drop_exits_one_once_the_follow_expires() {
 	let (publisher, feeding) = import(&relay);
 	let stdin = feeding.await.unwrap();
 	export.output_past(0).await;
+	// The follow can't start before the interrupt.
+	let interrupted = Instant::now();
 	interrupt(publisher, stdin).await;
 
 	let (status, errors) = export.wait().await;
@@ -352,6 +354,10 @@ async fn a_drop_exits_one_once_the_follow_expires() {
 		status.code(),
 		Some(1),
 		"a drop exits 1, got {status}; exporter stderr: {errors}"
+	);
+	assert!(
+		interrupted.elapsed() >= Duration::from_millis(900),
+		"the export waited out its follow rather than failing on the drop; exporter stderr: {errors}"
 	);
 }
 

@@ -81,7 +81,7 @@ Rename `--max-age` to `--delay`.
 
 ### `moq export ts --linger` is `--follow`, and follows only the same publisher instance
 
-Rename `export ts --linger` and `export srt --linger` to `--follow`; the old spelling stops the run naming it.
+Rename `export ts --linger` to `--follow`; the old spelling stops the run naming it. `export srt` takes the same `--follow`.
 A restarted publisher exits 1 unless `--stitch` follows it as a program switch, and a stitched replacement's first catalog is awaited until it arrives or the replacement goes, so `--follow 0s` no longer refuses a cold one.
 A failure other than the publisher leaving, such as a codec TS cannot carry, exits at once rather than after a 1 s grace.
 
