@@ -262,10 +262,9 @@ impl Publisher {
 			.discovery(!declared.hidden || self.origin.includes_hidden());
 		let mut announced = origin.announced();
 
-		stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 		stream
 			.writer
-			.encode(&ietf::RequestOk {
+			.encode_message(&ietf::RequestOk {
 				request_id: None,
 				active: None,
 				largest: None,
@@ -453,13 +452,15 @@ impl Publisher {
 						),
 					};
 					let code = request::to_code(&err, request::Kind::SubscribeNamespace, self.version);
-					stream.writer.buffer_varint(ietf::RequestError::ID)?;
-					stream.writer.buffer(&ietf::RequestError {
-						request_id: None,
-						error_code: code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})?;
+					stream.writer.buffer_message(
+						ietf::RequestError::ID,
+						&ietf::RequestError {
+							request_id: None,
+							error_code: code,
+							reason_phrase: reason.into(),
+							retry_interval: 0,
+						},
+					)?;
 					return Poll::Ready(Ok(()));
 				}
 				Ok(Some(Next::GoAway { redirect })) => goaways.receive(redirect)?,
@@ -490,11 +491,13 @@ impl Publisher {
 				break;
 			};
 			drop(pending);
-			stream.writer.buffer_varint(ietf::PublishSkipped::ID)?;
-			stream.writer.buffer(&ietf::PublishSkipped {
-				suffix,
-				track_name: name.as_ref().into(),
-			})?;
+			stream.writer.buffer_message(
+				ietf::PublishSkipped::ID,
+				&ietf::PublishSkipped {
+					suffix,
+					track_name: name.as_ref().into(),
+				},
+			)?;
 		}
 		Ok(())
 	}
@@ -671,8 +674,9 @@ impl Publisher {
 					let Ok(track) = broadcast.track(&name) else {
 						continue;
 					};
-					// Each paused PUBLISH holds a subscription slot; past the cap the peer is
-					// told the track exists rather than left without it.
+					// Each paused PUBLISH holds a subscription slot. Nothing else bounds how many
+					// a peer's listings hold, so past `Limits::requests` the peer is told the
+					// track exists rather than left without it.
 					let Ok(slot) = self.subscriptions.acquire() else {
 						skip(name);
 						continue;
@@ -774,7 +778,6 @@ impl Publisher {
 		self.pause_join(join.as_ref());
 
 		tracing::debug!(id = %request_id, broadcast = %absolute, track = %name, "publish started");
-		stream.writer.buffer_varint(ietf::Publish::ID)?;
 		let publish = ietf::Publish {
 			request_id,
 			track_namespace: namespace.clone(),
@@ -790,7 +793,7 @@ impl Publisher {
 			filter: Some(params.filter),
 		};
 		let written = {
-			let mut writing = std::pin::pin!(stream.writer.encode(&publish));
+			let mut writing = std::pin::pin!(stream.writer.encode_message(&publish));
 			kio::wait(|waiter| {
 				if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(None);
@@ -872,7 +875,7 @@ impl Publisher {
 
 		if let Some(done) = refused {
 			drop(join);
-			return self.write_publish_done(stream, request_id, done, 0).await;
+			return self.write_publish_done(stream, request_id, done, 0, None).await;
 		}
 
 		// Group streams opened over every time the subscription forwarded, which
@@ -1008,7 +1011,7 @@ impl Publisher {
 		};
 
 		drop(join);
-		self.write_publish_done(stream, request_id, done, opened).await
+		self.write_publish_done(stream, request_id, done, opened, None).await
 	}
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
@@ -1698,10 +1701,10 @@ mod tests {
 		}
 	}
 
-	/// Each paused PUBLISH holds a subscription slot; past the cap the track is skipped
-	/// (PUBLISH_BLOCKED, the same message, on draft-18) rather than held.
+	/// Each paused PUBLISH holds a subscription slot; past `Limits::requests` the track is
+	/// skipped (PUBLISH_BLOCKED, the same message, on draft-18) rather than held.
 	#[moq_clock::test]
-	async fn past_the_subscription_cap_a_track_is_skipped() {
+	async fn past_the_request_limit_a_track_is_skipped() {
 		for version in DRAFTS {
 			let mut h = harness(version);
 			h.publisher.subscriptions = crate::session::Slots::new(1);

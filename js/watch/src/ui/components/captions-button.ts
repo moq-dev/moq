@@ -15,7 +15,7 @@ export function captionsButton(parent: Effect, watch: MoqWatch): HTMLElement {
 
 	parent.run((effect) => {
 		const available = Object.keys(effect.get(watch.text.out.available));
-		const selected = effect.get(watch.controls.captions);
+		const selected = effect.get(watch.controls.text.target);
 		const on = selected !== undefined;
 
 		// `.control` sets `display: flex`, which beats the UA rule for the `hidden` attribute, so
@@ -30,7 +30,7 @@ export function captionsButton(parent: Effect, watch: MoqWatch): HTMLElement {
 	parent.event(button, "click", () => {
 		// Toggling on picks the first rendition; the settings tab handles choosing among several.
 		const first = Object.keys(watch.text.out.available.peek()).at(0);
-		watch.captions = watch.controls.captions.peek() !== undefined ? undefined : first;
+		watch.captions = watch.controls.text.target.peek() !== undefined ? undefined : first;
 	});
 
 	return button;

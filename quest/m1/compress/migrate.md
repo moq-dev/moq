@@ -21,7 +21,7 @@ renames it and publishes it uncompressed, and the
 reader, so this quest lands after both and only sets the flag.
 
 - Delete the `.z` names outright, with no transition release: hangz is opt-in
-  and `main` takes breaking changes. Add the MIGRATE.md entries.
+  and `main` takes breaking changes. The Impact bullet says how to migrate.
 - Publishers: `rs/moq-mux/src/catalog/producer.rs`, `js/publish`
   (`broadcast.ts`, `catalog.ts`), `rs/moq-stats` (drop `TrackPair`), and
   the `hls` track writer (`rs/hang/src/timeline.rs` today) set `compress` on

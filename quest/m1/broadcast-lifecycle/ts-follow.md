@@ -33,8 +33,8 @@ Decided with the maintainer on 2026-10-23:
   announcement through resolution and the first catalog, but `Instances`
   yields `Start` only after resolution, so settle what `--follow` bounds
   before moving the timer onto it. Coordinate the name with that quest.
-- Docs: `doc/bin/cli.md`, `rs/moq-cli/MIGRATE.md`, `rs/moq-mux` and
-  `rs/moq-srt` MIGRATE entries.
+- Docs: `doc/bin/cli.md`, plus a migration note for moq-cli, moq-mux, and
+  moq-srt in the Impact bullet.
 
 Public API: moq-mux and moq-srt renames (breaking); moq-cli flag rename.
 Wire: none unless the failure cause needs a new code.

@@ -386,7 +386,7 @@ MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
 so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
-`--cluster-connect-api`) share `--connect-bind` with `--connect`, and each binds
+`--cluster-api-url`) share `--connect-bind` with `--connect`, and each binds
 it, while LAN dials take an ephemeral port. So a fixed `--connect-bind` port with
 both `--connect` and a WAN cluster peer is refused at startup: use port 0, or drop
 `--connect` (unset `MOQ_CONNECT` if it supplies the URL).
