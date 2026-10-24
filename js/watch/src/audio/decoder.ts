@@ -428,17 +428,9 @@ export class Decoder {
 			// A config the probe accepted can still fail to parse (a malformed init segment or Opus
 			// header). Report it like a decode failure, which also retires the outgoing estimate.
 			const props = { config, failure, path: active.path };
-			run.spawn(async () => {
-				try {
-					if (config.container.kind === "cmaf") {
-						await this.#runCmafDecoder(run, sub, props);
-					} else {
-						this.#runLegacyDecoder(run, sub, props);
-					}
-				} catch (error) {
-					if (run.abort.aborted) return;
-					failure.set(error instanceof Error ? error : new Error(String(error)));
-				}
+			spawnFatal(run, failure, async () => {
+				if (config.container.kind === "cmaf") await this.#runCmafDecoder(run, sub, props);
+				else this.#runLegacyDecoder(run, sub, props);
 			});
 		});
 	}
@@ -457,7 +449,7 @@ export class Decoder {
 		// TODO include JITTER_UNDERHEAD
 		const consumer = this.#consume(effect, sub, format, { config, path });
 
-		effect.spawn(async () => {
+		spawnFatal(effect, failure, async () => {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
@@ -547,7 +539,7 @@ export class Decoder {
 
 		const consumer = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
 
-		effect.spawn(async () => {
+		spawnFatal(effect, failure, async () => {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
@@ -908,4 +900,17 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 		description,
 	});
 	return res.supported ?? false;
+}
+
+// Run `task` for one decode attempt. A setup, read, or decode failure that is not the attempt's
+// cancellation fails its source through `failure`, which latches it and tears the attempt down.
+function spawnFatal(effect: Effect, failure: Signal<Error | undefined>, task: () => Promise<void>): void {
+	effect.spawn(async () => {
+		try {
+			await task();
+		} catch (error) {
+			if (effect.abort.aborted) return;
+			failure.set(error instanceof Error ? error : new Error(String(error)));
+		}
+	});
 }

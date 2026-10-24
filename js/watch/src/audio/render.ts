@@ -52,6 +52,8 @@ export interface State {
 	type: "state";
 	timestamp: Micro;
 	stalled: boolean;
+	// Whether `timestamp` is on the current timeline: it reads 0 until a frame anchors the ring.
+	anchored: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;
 	// The epoch of the last reset or park the worklet applied.

@@ -67,6 +67,11 @@ export class AudioRingBuffer {
 		return Micro.fromSecond((this.#readIndex / this.rate) as Second);
 	}
 
+	/** Whether an insert has anchored the indices since creation or the last reset. */
+	get anchored(): boolean {
+		return this.#anchored;
+	}
+
 	get length(): number {
 		return this.#writeIndex - this.#readIndex;
 	}

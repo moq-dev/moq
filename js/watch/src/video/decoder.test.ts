@@ -213,7 +213,12 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	let resets = 0;
 	const errors: VideoDecoderInit["error"][] = [];
 	const frames: VideoDecoderInit["output"][] = [];
-	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => reads.shift());
+	// A read that is an Error stands in for a malformed container read.
+	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => {
+		const read = reads.shift() as Read | Error | undefined;
+		if (read instanceof Error) throw read;
+		return read;
+	});
 	if (live) next.mockRestore();
 	class Codec {
 		state = "unconfigured";
@@ -645,6 +650,26 @@ it("keeps a video failure while the same rendition is muted by its publisher", a
 });
 
 for (const kind of ["legacy", "cmaf"] as const) {
+	// A failure in the read loop, not a WebCodecs callback, must still reach `error` and release
+	// the subscription, instead of leaving the player apparently live.
+	for (const [failure, reads] of [
+		["a malformed read", [new Error("malformed frame")] as unknown as Read[]],
+		["a decode that throws", [sample(1, 100_000, false)]],
+	] as const) {
+		it(`reports ${failure} on ${kind} and releases its subscription`, async () => {
+			const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+			const playback = await guardedPlayback(kind, [...reads]);
+			try {
+				await microtasks();
+				expect(playback.decoder.out.error.peek()).toBeInstanceOf(Error);
+				expect(close).toHaveBeenCalled();
+			} finally {
+				playback.close();
+				close.mockRestore();
+			}
+		});
+	}
+
 	it(`reports the outgoing ${kind} decoder failing during a rendition handover`, async () => {
 		const playback = await guardedPlayback(kind, [sample(1, 100_000)]);
 		try {

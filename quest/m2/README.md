@@ -18,15 +18,11 @@ The first follow-through is [release execution](/quest/m2/release/README.md).
 Rate-grant work targets the next unpublished lite version after finalized
 lite-07; bitrate enforcement is not part of this release.
 
-Added 2026-10-13 by the redundant TS alignment plan: TS over RTP legs,
-ranked just below deterministic TS legs, which it requires.
-
 ## Required
 
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
 - [noq adopts moq-congestion](/quest/m2/noq-congestion.md) - noq's BBR3 and Cubic delegate to the published crate behind noq's unchanged API
-- [moq.dev in the monorepo](/quest/m2/site/README.md) - moq.dev, moq.pub, and moq.watch build from `site/` against the in-tree packages, behind a cap on committed binary size
-- [Hand-drawn blog art as SVG](/quest/m2/site-svg.md) - the blog's hand-drawn PNGs become transparent palette SVGs, covers rasterized for social cards at build
+- [Cap committed binary size](/quest/m2/binary-size.md) - the merge queue rejects any binary a PR adds or grows past 500 KB
 - [P2P](/quest/m2/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [rust2 publishes its UniFFI fork](/quest/m2/rust2-uniffi.md) - waiting on kixelated/rust2 to import UniFFI and moq's generators and publish them
 - [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - moq-ffi and every wrapper build from kixelated/rust2's fork under one pin, and moq's generator code is deleted
@@ -51,6 +47,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Native browser codecs](/quest/m2/native-compression-adopt.md) - adopt native operations when timing, frame and resource contracts hold
 
 - [Time test sweep](/quest/m2/time-test-sweep.md) - unrelated test conversion and the workspace lint ratchet
+- [Drop test-only cut requests](/quest/m2/video-cut-test-only.md) - moq-video's encode producer loses code only its tests use
 
 - [Pipelined requests](/quest/m2/pipeline-requests/README.md) - SUBSCRIBE and the first FETCH go out with the track-info request at every hop, so first data arrives a round trip sooner per hop
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
@@ -79,6 +76,8 @@ ranked just below deterministic TS legs, which it requires.
 - [Nightly fuzzing keeps its corpus](/quest/m2/fuzz-corpus.md) - each fuzz target resumes from the previous Nightly's minimized corpus instead of starting from seeds
 - [Relay session bench](/quest/m2/bench-relay.md) - the same scenario through moq-relay's own connection handling
 - [Transport x version benches](/quest/m2/bench-transport-sweep.md) - the session benches sweep transports as well as versions
+- [Paired bench BASE](/quest/m2/bench-base-paired.md) - `just bench <base>` uses the nightly's paired comparison and the old one is deleted
+- [Relay NixOS module](/quest/m2/nix-relay-module.md) - module edits run moq-relay's tests, and `cluster.rootUrl` takes several peers
 - [Read-only lookup](/quest/m2/read-only-lookup.md) - a live track lookup stops waking the front and every demand watcher
 - [Ordered owed wait](/quest/m2/ordered-owed-wait.md) - an ordered reader waits within max_delay for a missing group only while the track still owes it
 - [lite-05/06 gap judgement](/quest/m2/lite-legacy-gap.md) - a resumed copy on lite-05/06 never reads a descending track's newest group as its start
@@ -133,14 +132,9 @@ ranked just below deterministic TS legs, which it requires.
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Watch decode gate](/quest/m2/watch-decode-gate.md) - video lookahead stays encoded until it is near presentation, like audio
 - [Drop announce="never"](/quest/m2/publish-announce-never.md) - `@moq/publish` offers only announce modes a watcher can reach
-- [Deterministic H.265 TS legs](/quest/m2/ts-hitless-h265.md) - H.265's buffering period gets the same group anchor as H.264
-- [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - two legs send identical RTP packets, headers included, so an ST 2022-7 receiver can merge them
-- [Old tail across a restart](/quest/m2/ts-sync-restart-tail.md) - both `--sync` legs send the old timeline's tail up to a restart, so an ST 2022-7 merge has no hole there
-- [Paced gap after a restart](/quest/m2/ts-restart-gap-burst.md) - a forward restart within the minute no longer sends every gap slot in one burst
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
-- [MKV import refuses out-of-range values](/quest/m2/mkv-dimension-overflow.md) - the Matroska importer errors on a dimension, channel count, or sample rate that would truncate
 - [Importers fill the VR fields](/quest/m2/mux-vr-fields.md) - MP4, Matroska, and Opus imports set the catalog's projection, stereo, and ambisonic layout
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
@@ -235,3 +229,4 @@ ranked just below deterministic TS legs, which it requires.
 - [CI workflow audit](/quest/m2/audit-ci.md) - repeat the per-workflow and per-job review after the release ships, against the m1 baselines
 - [Performance audit](/quest/m2/audit-perf.md) - benchmarks that regressed since the m1 run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Upstream unknown-env option in usage-rs](/quest/m2/usage-unknown-env.md) - jdx/usage refuses unknown prefixed env vars, replacing the moq-tokio helper
+- [Artifact size audit](/quest/m2/audit-size.md) - repeat the shipping, native, WASM and browser attribution after the release ships
