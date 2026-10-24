@@ -28,7 +28,9 @@ ended, such as a VOD recording, is refused with an error rather than imported.
 An `EXT-X-DISCONTINUITY` keeps the source's timestamps. Timestamp resets are not
 supported: if a rendition's timestamps go backwards under the same `EXT-X-MAP`,
 such as an encoder restart, the import fails with an error. Import the restarted
-source as a new broadcast.
+source as a new broadcast. Import fetches only from the playlist's origin
+(scheme, host, and port): a reference or redirect to another origin, such as a
+separate CDN host, fails the import.
 
 ## How export works
 

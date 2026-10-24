@@ -30,6 +30,10 @@ pub enum Error {
 	#[error("mux: {0}")]
 	Mux(#[from] moq_mux::Error),
 
+	/// An import resource or redirect hop left the playlist's origin, or the playlist uses an unsupported scheme.
+	#[error("resource is outside the playlist's origin")]
+	ResourceRefused,
+
 	/// A `file://` URL could not be turned back into a filesystem path.
 	#[error("invalid file URL")]
 	InvalidFileUrl,
@@ -136,6 +140,20 @@ pub enum Error {
 		rendition: String,
 		/// The rewind the importer refused.
 		source: moq_mux::Error,
+	},
+	/// A recording source closed without confirming its complete end.
+	#[error("recording closed before finishing")]
+	IncompleteRecording,
+
+	/// A recording cursor missed rows that left its window or were reset.
+	#[error("recording cursor missed segments")]
+	RecordingLagged,
+
+	/// A listed recording segment no longer has all its media available.
+	#[error("recording segment {segment} is unavailable")]
+	SegmentUnavailable {
+		/// The segment whose media cannot be recorded.
+		segment: u64,
 	},
 }
 

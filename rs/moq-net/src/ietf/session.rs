@@ -332,27 +332,41 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_adapter = sub_ns_adapter.clone();
 						prefixes.push(async move {
-							let stream = match version {
-								Version::Draft16 => {
-									let mut sub_ns_adapter = sub_ns_adapter;
-									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
-									let mut reader = crate::coding::Reader::new(
-										crate::transport::boxed::RecvStream::new(recv),
-										version,
-									);
-									reader.set_priority(crate::priority::RECV_CONTROL);
-									Stream {
-										writer: crate::coding::Writer::new(
-											crate::transport::boxed::SendStream::new(send),
+							let opened = async {
+								match version {
+									Version::Draft16 => {
+										let mut sub_ns_adapter = sub_ns_adapter;
+										let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+										let mut reader = crate::coding::Reader::new(
+											crate::transport::boxed::RecvStream::new(recv),
 											version,
-										),
-										reader,
+										);
+										reader.set_priority(crate::priority::RECV_CONTROL);
+										Ok(Stream {
+											writer: crate::coding::Writer::new(
+												crate::transport::boxed::SendStream::new(send),
+												version,
+											),
+											reader,
+										})
+									}
+									_ => {
+										Stream::open_request(
+											&mut crate::driver::Transport::new(sub_ns_adapter),
+											version,
+										)
+										.await
 									}
 								}
-								_ => {
-									Stream::open(&mut crate::driver::Transport::new(sub_ns_adapter.clone()), version)
-										.await?
+							}
+							.await;
+							let stream = match opened {
+								Ok(stream) => stream,
+								Err(Error::NoStreamCredit) => {
+									tracing::warn!(%prefix, "subscribe_namespace refused without stream credit");
+									return Ok(());
 								}
+								Err(err) => return Err(err),
 							};
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
@@ -553,7 +567,14 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 						let sub_ns_session = sub_ns_session.clone();
 						prefixes.push(async move {
 							let mut sub_ns_session = sub_ns_session;
-							let stream = Stream::open(&mut sub_ns_session, version).await?;
+							let stream = match Stream::open_request(&mut sub_ns_session, version).await {
+								Ok(stream) => stream,
+								Err(Error::NoStreamCredit) => {
+									tracing::warn!(%prefix, "subscribe_namespace refused without stream credit");
+									return Ok(());
+								}
+								Err(err) => return Err(err),
+							};
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
@@ -1549,6 +1570,71 @@ async fn enforce_grant(auth: crate::auth::Handle, publisher: Publisher, mut sess
 mod tests {
 	use super::*;
 	use crate::model::ProduceTest;
+
+	#[moq_clock::test]
+	async fn announce_interest_without_credit_keeps_the_session_alive() {
+		use std::sync::atomic::Ordering;
+		for version in [Version::Draft16, Version::Draft17, Version::Draft19] {
+			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let interest = origin.consume().announced();
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
+			let log = session.log.clone();
+			let mut session = crate::driver::Transport::new(session);
+			let setup = if version == Version::Draft16 {
+				Some(
+					Stream::open(&mut session, version)
+						.await
+						.expect("setup waits for credit"),
+				)
+			} else {
+				None
+			};
+			let (driver, _goaway) = start(Config {
+				runtime: crate::time::sim(),
+				stats: Default::default(),
+				session,
+				setup,
+				request_id_max: None,
+				limits: Default::default(),
+				client: true,
+				publish: None,
+				subscribe: Some(origin),
+				peer_hop: None,
+				cost: None,
+				version,
+				path: None,
+				authority: None,
+				peer_setup_stream: None,
+				peer_declared: Some(peer::Peer {
+					solicit: Some(true),
+					..Default::default()
+				}),
+				auth: crate::auth::Handle::new(false),
+				early_unis: Vec::new(),
+				extensions: Default::default(),
+			})
+			.unwrap();
+			let mut driver = std::pin::pin!(driver);
+			assert!(futures::poll!(driver.as_mut()).is_pending(), "{version}");
+			assert_eq!(
+				log.request_attempts.load(Ordering::Relaxed),
+				1,
+				"{version}: interest was attempted"
+			);
+			moq_clock::sleep(std::time::Duration::from_secs(20)).await;
+			assert!(
+				futures::poll!(driver.as_mut()).is_pending(),
+				"{version}: local refusal ended the session"
+			);
+			assert_eq!(
+				log.request_attempts.load(Ordering::Relaxed),
+				1,
+				"{version}: interest was not retried"
+			);
+			assert!(log.closes().is_empty());
+			assert!(interest.is_synced(), "a refused interest releases its snapshot");
+		}
+	}
 
 	#[moq_clock::test]
 	async fn auth_ids_share_the_modern_request_history() {

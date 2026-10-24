@@ -427,7 +427,7 @@ mod tests {
 			// Recorded as soon as the catalog lists it with its timeline, as a recorder does.
 			let mut renditions = broadcaster.renditions();
 			let rendition = match tokio::time::timeout(TIMEOUT, renditions.next()).await {
-				Ok(Some(crate::export::renditions::Event::Added(rendition))) => rendition,
+				Ok(Ok(Some(crate::export::renditions::Event::Added(rendition)))) => rendition,
 				_ => panic!("{version}: the catalog never listed the rendition"),
 			};
 			let mut cursor = rendition.segments();
@@ -515,7 +515,9 @@ mod tests {
 		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
 
 		drop(timeline);
-		track.abort(moq_net::Error::SessionClosed).unwrap();
+		track
+			.abort(moq_net::Error::Transport("connection lost".into()))
+			.unwrap();
 		for uri in ["/live/video/video0/media.m3u8", "/live/manifest.mpd"] {
 			let deadline = tokio::time::Instant::now() + TIMEOUT;
 			let response = loop {
@@ -822,7 +824,7 @@ mod tests {
 		// A timeline failure refuses listings, but its already-retained media
 		// still drains. Authorization checks must not broaden that failure.
 		let retained = broadcaster.rendition(Kind::Video, "video0").unwrap();
-		retained.fail(crate::Error::Moq(moq_net::Error::SessionClosed));
+		retained.fail(crate::Error::Moq(moq_net::Error::Transport("connection lost".into())));
 		assert!(retained.media_playlist(None).is_err());
 		assert!(retained.latest_init().await.unwrap().is_some());
 		assert!(retained.segment(&first(&retained)).await.unwrap().is_some());

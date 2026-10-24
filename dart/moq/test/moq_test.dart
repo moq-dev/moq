@@ -153,11 +153,11 @@ void main() {
 
     final client = await Moq.connect(
       'https://$address',
-      options: const ConnectOptions(
-        tlsVerify: false,
+      options: ConnectOptions(
+        tls: ClientTls(insecure: true),
         bind: '127.0.0.1:0',
         versions: version,
-        reconnect: false,
+        once: true,
       ),
     ).timeout(timeout);
     final serverSession = await accepted;
@@ -218,7 +218,10 @@ void main() {
 
     final client = await Moq.connect(
       'https://$address',
-      options: const ConnectOptions(tlsVerify: false, bind: '127.0.0.1:0'),
+      options: ConnectOptions(
+        tls: ClientTls(insecure: true),
+        bind: '127.0.0.1:0',
+      ),
     ).timeout(timeout);
     final serverSession = await accepted;
     expect(client.bandwidth(), isA<MoqBandwidth>());
@@ -283,23 +286,23 @@ void main() {
     final client = await Moq.connect(
       'https://${server.localAddr}',
       options: ConnectOptions(
-        tlsVerify: false,
-        tlsHostName: 'localhost',
+        tls: ClientTls(insecure: true, hostName: 'localhost'),
         bind: '127.0.0.1:0',
         versions: versions(),
         timeout: Duration(seconds: 5),
         race: Duration.zero,
         resolutionDelay: Duration.zero,
-        idleTimeout: Duration(seconds: 5),
-        keepAlive: Duration.zero,
-        gso: false,
-        mtuDiscovery: true,
-        congestionControl: CongestionControl.loss,
-        keylog: false,
-        reconnect: false,
+        quic: QuicConfig(
+          idleTimeout: Duration(seconds: 5),
+          keepAlive: Duration.zero,
+          gso: false,
+          mtuDiscovery: true,
+          congestionControl: CongestionControl.loss,
+          keylog: false,
+        ),
+        once: true,
         backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
-        websocketEnabled: false,
-        websocketDelay: Duration.zero,
+        websocket: WebSocketConfig(enabled: false, delay: Duration.zero),
       ),
     ).timeout(timeout);
     final serverSession = await accepted;
@@ -327,7 +330,7 @@ void main() {
       Moq.connect(
         'https://localhost',
         options: const ConnectOptions(
-          websocketDelay: Duration(microseconds: -1),
+          websocket: WebSocketConfig(delay: Duration(microseconds: -1)),
         ),
       ),
       throwsArgumentError,
