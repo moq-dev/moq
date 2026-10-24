@@ -50,6 +50,8 @@ struct Broadcast {
 	video: BTreeMap<String, hang::catalog::VideoConfig>,
 	audio: BTreeMap<String, hang::catalog::AudioConfig>,
 	finished: Finished,
+	/// Set by [`Publish::finish`]: the catalog is final, so a close leaves it alone.
+	ended: bool,
 }
 
 impl Drop for Broadcast {
@@ -63,9 +65,9 @@ type Keeping = Option<Vec<Box<dyn Send>>>;
 
 /// Finished producers a broadcast keeps until it ends.
 ///
-/// A track unlists once its last producer drops, and a finish holds only listed tracks. A
-/// `*_finish` call frees its handle, so the broadcast keeps the finished producer here instead,
-/// and [`Publish::finish`] still holds the track.
+/// A finished track stops being served once its last producer drops. A `*_finish` call frees
+/// its handle, so the broadcast keeps the finished producer here instead, and a subscriber
+/// arriving after the end still finds the track until [`Publish::close`].
 #[derive(Clone)]
 pub struct Finished(std::sync::Arc<std::sync::Mutex<Keeping>>);
 
@@ -196,8 +198,6 @@ pub struct Publish {
 	/// Group requests delivered to a handler, freed on accept, abort, or free.
 	group_request: NonZeroSlab<moq_net::group::Request>,
 
-	/// Finished broadcasts, serving their finished tracks until closed.
-	finishes: NonZeroSlab<moq_net::broadcast::Finish>,
 }
 
 impl Publish {
@@ -230,6 +230,7 @@ impl Publish {
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
 			finished: Finished::default(),
+			ended: false,
 		})?;
 		Ok(id)
 	}
@@ -284,6 +285,10 @@ impl Publish {
 	/// End the broadcast for good and release it, finalizing the catalog stream.
 	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
 		let mut broadcast = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
+		if broadcast.ended {
+			broadcast.producer.close();
+			return broadcast.driver.check();
+		}
 		let result = (|| {
 			// Retire caller-authored entries while the catalog track is still open.
 			{
@@ -305,30 +310,14 @@ impl Publish {
 		result
 	}
 
-	/// End the broadcast cleanly and release it, returning a finish handle and its linger.
-	///
-	/// The catalog finishes with its entries still listed, so a late subscriber finds the
-	/// finished tracks the handle holds.
-	pub fn finish(&mut self, broadcast: Id) -> Result<(Id, std::time::Duration), Error> {
-		let mut broadcast = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
-		// On failure the handle is gone, so close the broadcast rather than leave a dynamic holding it.
-		let ready = broadcast.catalog.finish().map_err(Error::from);
-		if let Err(err) = ready.and_then(|()| broadcast.driver.check()) {
-			broadcast.producer.close();
-			return Err(err);
-		}
-		// Released only once the finish holds their tracks.
-		let finished = broadcast.finished.release();
-		let finish = broadcast.producer.clone().finish();
-		drop(finished);
-		let linger = finish.linger();
-		Ok((self.finishes.insert(finish)?, linger))
-	}
-
-	/// Close a finished broadcast, ending its linger.
-	pub fn finish_close(&mut self, finish: Id) -> Result<(), Error> {
-		self.finishes.remove(finish).ok_or(Error::BroadcastNotFound)?;
-		Ok(())
+	/// End the broadcast's content by finishing its catalog, with its entries still listed, so
+	/// a late subscriber finds the finished tracks until [`Self::close`].
+	pub fn finish(&mut self, broadcast: Id) -> Result<(), Error> {
+		let broadcast = self.broadcast_mut(broadcast)?;
+		let result = broadcast.catalog.finish();
+		broadcast.ended |= result.is_ok();
+		broadcast.driver.check()?;
+		Ok(result?)
 	}
 
 	/// Where a broadcast keeps the producers finished on it.

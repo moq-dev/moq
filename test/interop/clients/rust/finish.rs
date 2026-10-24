@@ -7,6 +7,9 @@ use moq_mux::catalog::Stream;
 use moq_tokio::moq_net;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
+/// How long the publisher keeps its finished broadcast up for the late readers.
+const LINGER: Duration = Duration::from_secs(10);
+
 struct Args {
 	role: String,
 	url: url::Url,
@@ -87,13 +90,10 @@ async fn main() -> anyhow::Result<()> {
 		media.finish()?;
 		catalog.finish()?;
 		broadcast.announce(Default::default())?;
-		let started = moq_clock::now();
-		let finish = broadcast.finish();
-		let linger = finish.linger();
-		ensure!(!linger.is_zero(), "finished media has no linger");
-		println!("finish ready linger_us={}", finish.linger().as_micros());
-		finish.wait().await;
-		ensure!(started.elapsed() >= linger, "finish wait ended before its linger");
+		// Keep the finished broadcast up for the late readers, then take it offline.
+		let linger = moq_mux::Linger::new([broadcast], (media, catalog), LINGER);
+		println!("finish ready linger_us={}", LINGER.as_micros());
+		linger.wait().await;
 		println!("finish ended");
 		let health = origin.create_broadcast(format!("{}.health", args.broadcast))?;
 		let mut track = health.create_track("live", moq_net::track::Info::default())?;
