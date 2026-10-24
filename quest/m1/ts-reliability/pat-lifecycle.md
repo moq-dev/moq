@@ -17,7 +17,8 @@ What the code does today:
 - Under `--program all`, a later PAT that removes one program reaches every
   per-program `Import`; the removed program's `handle_pat` errors,
   `Programs::feed` propagates it, and the whole multiplex ingest stops,
-  including unrelated programs.
+  including unrelated programs. A program still waiting for its PMT is
+  instead dropped, or moved to the PMT PID the later PAT names.
 - A PAT naming another `transport_stream_id`, or a single-program import's
   PAT naming another program, already refuses the import.
 

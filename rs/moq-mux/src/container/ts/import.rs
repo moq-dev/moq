@@ -302,10 +302,12 @@ impl<E: catalog::Catalog> Import<E> {
 		self
 	}
 
-	/// Start on a packet boundary another framer already confirmed, so a packet ending the input
-	/// routes without a successor to confirm it.
-	pub(super) fn aligned(mut self) -> Self {
+	/// Carry on another reader's pass over the input: start on the packet boundary its framer
+	/// confirmed, so a packet ending the input routes without a successor to confirm it, and
+	/// keep grading where its `health` left off.
+	pub(super) fn resume(mut self, health: Health) -> Self {
 		self.framer = Framer { synced: true };
+		self.health = health;
 		self
 	}
 
@@ -1674,6 +1676,11 @@ impl<E: catalog::Catalog> Import<E> {
 	/// [`stats::Snapshot::crc_error`] per PID, for merging importers that read the same PSI.
 	pub(super) fn crc_errors(&self) -> &BTreeMap<u16, u64> {
 		&self.crc_errors
+	}
+
+	/// Whether this importer reads the PMT sections on `pid`, and counts their CRC errors.
+	pub(super) fn reads_pmt(&self, pid: Pid) -> bool {
+		self.pmt_sections.contains_key(&pid)
 	}
 
 	/// Abort every track with `err` instead of finishing, so subscribers see the
