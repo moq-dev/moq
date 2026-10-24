@@ -70,6 +70,7 @@ pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Re
 		origin,
 		name,
 		max_age,
+		linger,
 		bandwidth,
 	} = target;
 	let mut server = Server::bind(addr).await?;
@@ -86,6 +87,7 @@ pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Re
 					if let Err(err) = publish
 						.with_max_age(max_age)
 						.with_bandwidth(bandwidth)
+						.with_linger(linger)
 						.accept(&origin, &name)
 						.await
 					{
@@ -152,7 +154,8 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 	let client = Client::connect(addr, &app)
 		.await?
 		.with_max_age(target.max_age)
-		.with_bandwidth(target.bandwidth);
+		.with_bandwidth(target.bandwidth)
+		.with_linger(target.linger);
 	Ok(client.pull(&key, &target.origin, name).await?)
 }
 
