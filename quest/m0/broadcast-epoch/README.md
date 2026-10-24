@@ -33,7 +33,7 @@ identity internally; fresh requests cannot join its old cached instance.
 This does not promise cache invalidation in arbitrary older IETF relays or
 clients that retain objects across broadcasts. The negotiated
 [IETF extension](/drafts/draft-lcurley-moq-epoch.md) landed in m1, independently of
-this release gate; seamless JS handover stays in m1 too.
+this release gate, as did seamless JS handover (#5836).
 
 Non-goals: pooling, which needs nothing here. A redundant ingest pair runs on
 distinct epochs (decided 2026-10-19), so only replicas of one publisher's
@@ -128,5 +128,5 @@ handover. Keep existing reads sticky; stopping new unpinned wire work is a
 separate boundary. Catalog references apply the same identity policy to
 players and exporters, distinguishing announcement followers from readers
 that retain lifetime pins. Wall-clock expiry, live DROP dispositions,
-FETCH budgets and seamless JS handover remain m1; the IETF extension landed
-independently.
+and FETCH budgets remain m1; the IETF extension and seamless JS handover
+landed independently.

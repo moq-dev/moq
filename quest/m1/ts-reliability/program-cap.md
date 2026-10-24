@@ -14,9 +14,14 @@ Decided 2026-10-22 from the security audit, with the maintainer:
 - No new program-count constant or run budget: a cap below the PAT's domain would only refuse valid multiplexes. The session announce budget does not apply here, since it counts what a remote peer announces to us, not broadcasts `Programs` creates locally.
 - Test with a synthesized PAT naming far more programs than it carries PMTs for, and assert only the described programs exist.
 
+This starts after [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) lands, since that quest rewrites `programs.rs`.
+
 Public API: none. Wire: none.
+
+## Required
+
+- [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - rewrites `programs.rs`, the PAT handling this changes
 
 ## Related
 
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - the TS import contract this belongs to
-- [PMT lifecycle](/quest/m1/ts-reliability/pat-lifecycle.md) - the PAT handling beside it

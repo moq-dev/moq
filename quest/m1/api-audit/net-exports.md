@@ -14,13 +14,14 @@ Decided 2026-10-22 (API audit). Keep the items an m1 quest consumes:
 [routes](/quest/m1/cluster-routing/routes.md)), and
 `bandwidth::Allocator::set_target` with `transport::Probe`
 ([native probing](/quest/m1/probe-native.md),
-[native rung disable](/quest/m1/simulcast-rung-disable.md)).
+[native rung disable](/quest/m1/simulcast-rung-disable.md)), and
+`Route::{auth, with_auth}` (documented in `doc/concept/standard.md`, and
+[auth issuer](/quest/m1/auth/issuer.md) extends it; decided 2026-10-22,
+maintainer).
 
 Rust (`rs/moq-net/src/model/`), make `pub(crate)` or delete:
 
-- `Route::{auth, with_auth}` (benches only; reopen with
-  [in-band auth](/quest/m1/auth/README.md) if it needs them),
-  `broadcast::Lister` and `Dynamic::lister` (sessions only, and
+- `broadcast::Lister` and `Dynamic::lister` (sessions only, and
   `finish(&self)` does not end it), `stats::Handle::wire`,
   `cache::Pool::gc` (poll-shaped, not named `poll_*`),
   `origin::DEFAULT_UPDATE_HOLD` (external uses are test sleeps).
@@ -87,3 +88,7 @@ ungated, since an in-process transport is real API that other crates' tests
 use.
 
 Public API: removals and renames in moq-net and `@moq/net`. Wire: none.
+
+## Related
+
+- [Auth issuer](/quest/m1/auth/issuer.md) - extends `Route::auth` across reconnects and reshapes `auth::Handle`, which this quest also trims

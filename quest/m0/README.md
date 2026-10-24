@@ -2,14 +2,11 @@
 
 ## Goal
 
-The work in flight now. Relay hardening: legal moq-transport input never fails
-a session in current interop coverage, every resource a peer can make the
-relay hold is bounded by what it sent or by a budget, and no peer input panics
-the process. Identity: nothing treats who published a route as what it
+The work in flight now. Identity: nothing treats who published a route as what it
 carries; a path and the epoch on its route are the only content identity, and
 every first-party publisher that can restart mints a fresh epoch, so #4741
-stalls nobody. Alongside them: fixes for the `release` line, CI cost, and the
-recurring audits.
+stalls nobody. Alongside it: fixes for the `release` line (including the bounded
+CONNECT headers), CI cost, and the recurring audits.
 
 ## Plan
 
@@ -18,8 +15,7 @@ done. moq.pro pins this repository's `release` line, so the release gate below
 also keeps #4741 from reaching it early.
 
 Per-session request caps landed in #4820, idle fronts in #5054, and the
-lost demand-poll wake in #5091. The rest of the 2026-09-29 DoS review remains
-in m1 with relay session limits (status refreshed in the 2026-10-10 audit).
+lost demand-poll wake in #5091.
 
 Routing: Wildcard landed in #4403, so a service claims the prefix it could
 serve instead of enumerating broadcasts. Serving the relay's ingested-only
