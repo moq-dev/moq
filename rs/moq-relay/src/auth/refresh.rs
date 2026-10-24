@@ -638,23 +638,27 @@ mod tests {
 	async fn an_invalid_attachment_is_refused_without_losing_the_existing_grant() {
 		let (lease, mut admissions) = admission(grant("a/**", 3000)).await;
 		let (client, supervising) = sessions(lease).await;
-		let auth = client.auth();
-		let (result, ()) = tokio::join!(auth.add("invalid"), async {
-			let mut invalid = grant("a/**", 3000);
-			invalid.label = Some("project/*".into());
-			admissions.next().await.unwrap().grant(lease::Consumer::fixed(invalid));
-		});
-		assert!(result.is_err(), "the invalid label was discarded");
+		let invalid = present(&client, "invalid");
+		let mut label = grant("a/**", 3000);
+		label.label = Some("project/*".into());
+		admissions.next().await.unwrap().grant(lease::Consumer::fixed(label));
+		// Refused as an auth server fault, which may pass, so the client presents it again.
+		let retried = admissions.next().await.unwrap();
+		assert_eq!(retried.request.query.as_deref(), Some("jwt=invalid"));
+		assert!(!invalid.is_finished(), "the invalid label was accepted or ended the token");
 		assert!(
 			!supervising.is_finished(),
 			"a refused attachment ended the initial grant"
 		);
+		// Withdrawn, the retried token leaves the queue.
+		invalid.abort();
+		let _ = invalid.await;
+		drop(retried);
+		let auth = client.auth();
 		let (result, ()) = tokio::join!(auth.add("valid"), async {
-			admissions
-				.next()
-				.await
-				.unwrap()
-				.grant(lease::Consumer::fixed(grant("a/**", 3000)));
+			let admission = admissions.next().await.unwrap();
+			assert_eq!(admission.request.query.as_deref(), Some("jwt=valid"));
+			admission.grant(lease::Consumer::fixed(grant("a/**", 3000)));
 		});
 		result.unwrap();
 		client.abort(moq_net::Error::Cancel);
