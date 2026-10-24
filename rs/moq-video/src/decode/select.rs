@@ -6,13 +6,18 @@
 //! tolerates one more sweep of delay, so it keeps continuity. Both race on the
 //! same frames in steady state, and taking whichever is newest would flicker
 //! stripes between clean pictures, so the source is sticky instead.
+//!
+//! Gaps and ends ride in each lane's queue between its pictures, so they come out
+//! in order with whichever lane is the source. Both lanes read the same track, so
+//! the first copy of an end returned stands for both, and a loss the output has
+//! already moved past is no loss in it.
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use moq_clock::Instant;
 
-use crate::Frame;
+use super::Read;
 
 /// One of the two decoders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,20 +30,24 @@ pub(super) enum Lane {
 ///
 /// Two, so a held min-delay picture still lets the decoder behind it move the
 /// presentation clock the hold is measured on, without parking a backlog of
-/// decoded surfaces a hardware pool may need back.
+/// decoded surfaces a hardware pool may need back. Gaps and ends don't count:
+/// they hold no surface, and a lane must reach its next picture past them to
+/// lead the other.
 const QUEUE: usize = 2;
 
 /// What [`Selector::next`] decided.
 pub(super) enum Next {
-	Frame(Frame),
+	Read(Read),
 	/// Nothing to show until a lane produces more, or until the deadline passes.
 	Wait(Option<Instant>),
-	End,
+	Done,
 }
 
 #[derive(Default)]
 struct State {
-	queue: VecDeque<(Frame, Instant)>,
+	queue: VecDeque<(Read, Instant)>,
+	/// Pictures in the queue.
+	pictures: usize,
 	/// The newest timestamp this lane has decoded, shown or not.
 	newest: Option<Duration>,
 	/// Ended, or never opened.
@@ -50,6 +59,14 @@ impl State {
 	fn exhausted(&self) -> bool {
 		self.done && self.queue.is_empty()
 	}
+
+	/// The first queued picture's timestamp, and when it was decoded.
+	fn held(&self) -> Option<(Duration, Instant)> {
+		self.queue.iter().find_map(|(read, at)| match read {
+			Read::Frame(frame) => Some((Duration::from(frame.timestamp), *at)),
+			_ => None,
+		})
+	}
 }
 
 pub(super) struct Selector {
@@ -57,9 +74,13 @@ pub(super) struct Selector {
 	source: Lane,
 	/// Whether there are two lanes to choose between.
 	dual: bool,
-	/// The last timestamp returned with two lanes, which output strictly
+	/// The last picture timestamp returned with two lanes, which output strictly
 	/// increases past. A lone decoder's pictures pass through as they come.
 	last: Option<Duration>,
+	/// The furthest a gap returned with two lanes resumed at.
+	resumed: Option<Duration>,
+	/// The newest end returned with two lanes.
+	ended: Option<Duration>,
 	/// The catalog's frame interval, or the smallest step the min-delay lane has
 	/// decoded. The smallest rather than the latest, so a skip never stretches it.
 	interval: Option<Duration>,
@@ -76,6 +97,8 @@ impl Selector {
 			source: Lane::Min,
 			dual,
 			last: None,
+			resumed: None,
+			ended: None,
 			measured: interval.is_none(),
 			interval,
 		}
@@ -90,22 +113,52 @@ impl Selector {
 	/// Whether `lane` can take another decoded picture.
 	pub(super) fn wants(&self, lane: Lane) -> bool {
 		let state = &self.lanes[lane as usize];
-		!state.done && state.queue.len() < QUEUE
+		!state.done && state.pictures < QUEUE
 	}
 
-	/// A picture `lane` decoded at `now`.
-	pub(super) fn push(&mut self, lane: Lane, frame: Frame, now: Instant) {
-		let timestamp = Duration::from(frame.timestamp);
+	/// What `lane` read at `now`.
+	///
+	/// Between two pictures a lane keeps one gap, spanning every loss there, and its
+	/// first end, where the pictures before it stop. Marker-only groups read while this
+	/// lane waits behind the source then cost a bounded queue, not an entry each.
+	pub(super) fn push(&mut self, lane: Lane, read: Read, now: Instant) {
 		let state = &mut self.lanes[lane as usize];
-		if lane == Lane::Min
-			&& self.measured
-			&& let Some(step) = state.newest.and_then(|newest| timestamp.checked_sub(newest))
-			&& !step.is_zero()
-		{
-			self.interval = Some(self.interval.map_or(step, |interval| interval.min(step)));
+		let mut run = state
+			.queue
+			.iter_mut()
+			.rev()
+			.map(|(queued, _)| queued)
+			.take_while(|queued| !matches!(queued, Read::Frame(_)));
+		match &read {
+			Read::Frame(frame) => {
+				let timestamp = Duration::from(frame.timestamp);
+				if lane == Lane::Min
+					&& self.measured
+					&& let Some(step) = state.newest.and_then(|newest| timestamp.checked_sub(newest))
+					&& !step.is_zero()
+				{
+					self.interval = Some(self.interval.map_or(step, |interval| interval.min(step)));
+				}
+				state.newest = Some(state.newest.map_or(timestamp, |newest| newest.max(timestamp)));
+				state.pictures += 1;
+			}
+			Read::Gap { timestamp, duration } => {
+				if let Some(Read::Gap {
+					timestamp: start,
+					duration: span,
+				}) = run.find(|queued| matches!(queued, Read::Gap { .. }))
+				{
+					(*start, *span) = merge((*start, *span), (*timestamp, *duration));
+					return;
+				}
+			}
+			Read::End { .. } => {
+				if run.any(|queued| matches!(queued, Read::End { .. })) {
+					return;
+				}
+			}
 		}
-		state.newest = Some(state.newest.map_or(timestamp, |newest| newest.max(timestamp)));
-		state.queue.push_back((frame, now));
+		state.queue.push_back((read, now));
 	}
 
 	/// `lane` ended and will decode nothing more.
@@ -113,14 +166,10 @@ impl Selector {
 		self.lanes[lane as usize].done = true;
 	}
 
-	/// The next picture to return at `now`, or what to wait for.
+	/// The next item to return at `now`, or what to wait for.
 	pub(super) fn next(&mut self, now: Instant) -> Next {
-		// Nothing at or below the last picture returned is ever shown, so a
-		// cutover never repeats or rewinds a picture.
-		if let Some(last) = self.last {
-			for state in &mut self.lanes {
-				state.queue.retain(|(frame, _)| Duration::from(frame.timestamp) > last);
-			}
+		if self.dual {
+			self.prune();
 		}
 
 		let [min, max] = &self.lanes;
@@ -134,14 +183,13 @@ impl Selector {
 			if caught_up || (min.exhausted() && !max.exhausted()) {
 				self.source = Lane::Max;
 			}
-		} else if let Some((held, at)) = min.queue.front() {
+		} else if let Some((held, at)) = min.held() {
 			// A newer min-delay picture waits for the max-delay decoder to reach
 			// it, but never for longer than a frame: not when it already leads by
 			// more than that, not once a frame's worth of wall or media time has
 			// passed, and not after the max-delay decoder has nothing left.
-			let held = Duration::from(held.timestamp);
 			let leads = max.newest.is_none_or(|newest| held > newest + interval);
-			let wall = now.saturating_duration_since(*at);
+			let wall = now.saturating_duration_since(at);
 			let media = min.newest.unwrap_or(held).saturating_sub(held);
 			if max.exhausted() || leads || wall.max(media) >= interval {
 				self.source = Lane::Min;
@@ -151,27 +199,75 @@ impl Selector {
 		}
 
 		let source = &mut self.lanes[self.source as usize];
-		if let Some((frame, _)) = source.queue.pop_front() {
-			if self.dual {
-				self.last = Some(Duration::from(frame.timestamp));
+		if let Some((read, _)) = source.queue.pop_front() {
+			match &read {
+				Read::Frame(frame) => {
+					source.pictures -= 1;
+					if self.dual {
+						self.last = Some(Duration::from(frame.timestamp));
+					}
+				}
+				Read::Gap { timestamp, duration } if self.dual => {
+					self.resumed = Some(Duration::from(*timestamp) + Duration::from(*duration));
+				}
+				Read::End { end } if self.dual => self.ended = Some(Duration::from(*end)),
+				_ => {}
 			}
-			return Next::Frame(frame);
+			return Next::Read(read);
 		}
 
 		if self.lanes.iter().all(State::exhausted) {
-			return Next::End;
+			return Next::Done;
 		}
 
 		// Only a held min-delay picture has a deadline.
 		let deadline = match self.source {
-			Lane::Max => self.lanes[Lane::Min as usize]
-				.queue
-				.front()
-				.map(|(_, at)| *at + interval),
+			Lane::Max => self.lanes[Lane::Min as usize].held().map(|(_, at)| at + interval),
 			Lane::Min => None,
 		};
 		Next::Wait(deadline)
 	}
+
+	/// Drop what the output already moved past, so a cutover never repeats or
+	/// rewinds a picture, and never returns an end or a loss twice.
+	fn prune(&mut self) {
+		let (last, resumed, ended) = (self.last, self.resumed, self.ended);
+		for state in &mut self.lanes {
+			state.queue.retain(|(read, _)| match read {
+				Read::Frame(frame) => last.is_none_or(|last| Duration::from(frame.timestamp) > last),
+				// Lost by this lane, but the output already reached where it resumes.
+				Read::Gap { timestamp, duration } => {
+					let resume = Duration::from(*timestamp) + Duration::from(*duration);
+					last.max(resumed).is_none_or(|reached| resume > reached)
+				}
+				// Returned from the other lane, or stale behind pictures shown past it.
+				Read::End { end } => {
+					let end = Duration::from(*end);
+					ended.is_none_or(|ended| end > ended) && last.is_none_or(|last| end >= last)
+				}
+			});
+			state.pictures = state
+				.queue
+				.iter()
+				.filter(|(read, _)| matches!(read, Read::Frame(_)))
+				.count();
+		}
+	}
+}
+
+/// One gap covering two with no picture between them, or the newer alone if their
+/// scales differ.
+fn merge(
+	first: (moq_net::Timestamp, moq_net::Timestamp),
+	second: (moq_net::Timestamp, moq_net::Timestamp),
+) -> (moq_net::Timestamp, moq_net::Timestamp) {
+	let merged = || {
+		let start = first.0.min(second.0);
+		let earlier = first.0.checked_add(first.1).ok()?;
+		let later = second.0.checked_add(second.1).ok()?;
+		Some((start, earlier.max(later).checked_sub(start).ok()?))
+	};
+	merged().unwrap_or(second)
 }
 
 #[cfg(test)]
@@ -182,15 +278,47 @@ mod tests {
 
 	const FRAME: Duration = Duration::from_millis(33);
 
-	fn picture(millis: u64) -> Frame {
+	fn picture(millis: u64) -> Read {
 		let i420 = crate::I420::new(crate::Size::new(2, 2), vec![0x80; 6]).unwrap();
-		Frame::new(crate::Surface::I420(i420), Timestamp::from_millis(millis).unwrap())
+		Read::Frame(crate::Frame::new(
+			crate::Surface::I420(i420),
+			Timestamp::from_millis(millis).unwrap(),
+		))
+	}
+
+	fn gap(millis: u64, duration: u64) -> Read {
+		Read::Gap {
+			timestamp: Timestamp::from_millis(millis).unwrap(),
+			duration: Timestamp::from_millis(duration).unwrap(),
+		}
+	}
+
+	fn end(millis: u64) -> Read {
+		Read::End {
+			end: Timestamp::from_millis(millis).unwrap(),
+		}
+	}
+
+	/// Everything `next` returns at `now`, as `frame 33`, `gap 66+100`, or `end 99`.
+	fn reads(selector: &mut Selector, now: Instant) -> Vec<String> {
+		let mut out = Vec::new();
+		while let Next::Read(read) = selector.next(now) {
+			out.push(match read {
+				Read::Frame(frame) => format!("frame {}", frame.timestamp.as_millis()),
+				Read::Gap { timestamp, duration } => format!("gap {}+{}", timestamp.as_millis(), duration.as_millis()),
+				Read::End { end } => format!("end {}", end.as_millis()),
+			});
+		}
+		out
 	}
 
 	/// The millisecond timestamps of every picture `next` returns at `now`.
 	fn drain(selector: &mut Selector, now: Instant) -> Vec<u128> {
 		let mut out = Vec::new();
-		while let Next::Frame(frame) = selector.next(now) {
+		while let Next::Read(read) = selector.next(now) {
+			let Read::Frame(frame) = read else {
+				panic!("expected only pictures");
+			};
 			out.push(frame.timestamp.as_millis());
 		}
 		out
@@ -364,7 +492,7 @@ mod tests {
 		assert_eq!(drain(&mut selector, now), [33, 66]);
 		assert!(matches!(selector.next(now), Next::Wait(None)));
 		selector.finish(Lane::Max);
-		assert!(matches!(selector.next(now), Next::End));
+		assert!(matches!(selector.next(now), Next::Done));
 
 		// And the other way around: max-delay ends first while min-delay drains.
 		let mut selector = Selector::new(true, Some(FRAME));
@@ -373,7 +501,7 @@ mod tests {
 		selector.push(Lane::Min, picture(33), now);
 		selector.finish(Lane::Min);
 		assert_eq!(drain(&mut selector, now), [0, 33]);
-		assert!(matches!(selector.next(now), Next::End));
+		assert!(matches!(selector.next(now), Next::Done));
 
 		// A lane that stopped still shows what it already decoded.
 		let mut selector = Selector::new(true, Some(FRAME));
@@ -383,7 +511,7 @@ mod tests {
 		selector.push(Lane::Max, picture(33), now);
 		selector.finish(Lane::Max);
 		assert_eq!(drain(&mut selector, now), [33]);
-		assert!(matches!(selector.next(now), Next::End));
+		assert!(matches!(selector.next(now), Next::Done));
 	}
 
 	#[tokio::test]
@@ -398,7 +526,93 @@ mod tests {
 		}
 		selector.finish(Lane::Min);
 		assert_eq!(drain(&mut selector, now), [0, 66, 33]);
-		assert!(matches!(selector.next(now), Next::End));
+		assert!(matches!(selector.next(now), Next::Done));
+	}
+
+	#[tokio::test]
+	async fn one_lane_passes_gaps_and_ends_through_in_order() {
+		tokio::time::pause();
+		let now = Instant::now();
+		let mut selector = Selector::new(false, None);
+		for read in [picture(0), gap(33, 967), picture(1000), end(1033), picture(2000)] {
+			selector.push(Lane::Min, read, now);
+		}
+		selector.finish(Lane::Min);
+		assert_eq!(
+			reads(&mut selector, now),
+			["frame 0", "gap 33+967", "frame 1000", "end 1033", "frame 2000"]
+		);
+		assert!(matches!(selector.next(now), Next::Done));
+	}
+
+	/// Both decoders read the same end; it comes out once, between the stopped
+	/// encoder's pictures and the fresh one's.
+	#[tokio::test]
+	async fn an_end_both_lanes_read_is_returned_once() {
+		tokio::time::pause();
+		let now = Instant::now();
+		let mut selector = selector();
+		selector.push(Lane::Max, picture(0), now);
+		selector.push(Lane::Min, picture(0), now);
+		assert_eq!(reads(&mut selector, now), ["frame 0"]);
+
+		// The min-delay decoder reaches the end first, while the source is max-delay.
+		selector.push(Lane::Min, picture(33), now);
+		selector.push(Lane::Min, end(66), now);
+		for read in [picture(33), end(66), picture(1000)] {
+			selector.push(Lane::Max, read, now);
+		}
+		assert_eq!(reads(&mut selector, now), ["frame 33", "end 66", "frame 1000"]);
+		selector.push(Lane::Min, picture(1000), now);
+		selector.push(Lane::Min, picture(1033), now);
+		selector.push(Lane::Max, picture(1033), now);
+		assert_eq!(reads(&mut selector, now), ["frame 1033"]);
+	}
+
+	/// A loss on one decoder that the other delivered past is no loss in what
+	/// comes out; one on the decoder that takes over is.
+	#[tokio::test]
+	async fn a_gap_counts_only_when_the_output_skips_it() {
+		tokio::time::pause();
+		let now = Instant::now();
+		let mut selector = selector();
+		selector.push(Lane::Max, picture(0), now);
+		selector.push(Lane::Min, picture(0), now);
+		assert_eq!(reads(&mut selector, now), ["frame 0"]);
+
+		// The min-delay decoder lost 33..66, which the max-delay one decoded.
+		selector.push(Lane::Max, picture(33), now);
+		selector.push(Lane::Max, picture(66), now);
+		selector.push(Lane::Min, gap(33, 33), now);
+		selector.push(Lane::Min, picture(66), now);
+		assert_eq!(reads(&mut selector, now), ["frame 33", "frame 66"]);
+
+		// Then it skips a stalled group the max-delay decoder is still waiting on.
+		selector.push(Lane::Min, gap(99, 901), now);
+		selector.push(Lane::Min, picture(1000), now);
+		assert_eq!(reads(&mut selector, now), ["gap 99+901", "frame 1000"]);
+		assert_eq!(selector.source, Lane::Min);
+	}
+
+	/// Boundaries the min-delay decoder reads while the max-delay source stalls fold
+	/// into one gap and the first end, however many marker groups arrive.
+	#[tokio::test]
+	async fn a_run_of_boundaries_holds_one_gap_and_one_end() {
+		tokio::time::pause();
+		let now = Instant::now();
+		let mut selector = selector();
+		selector.push(Lane::Max, picture(0), now);
+		selector.push(Lane::Min, picture(0), now);
+		assert_eq!(reads(&mut selector, now), ["frame 0"]);
+
+		selector.push(Lane::Min, end(33), now);
+		for index in 1..1000 {
+			selector.push(Lane::Min, gap(33 * index, 10), now);
+			selector.push(Lane::Min, end(33 * index + 10), now);
+		}
+		assert_eq!(selector.lanes[Lane::Min as usize].queue.len(), 2);
+		selector.push(Lane::Min, picture(40_000), now);
+		assert_eq!(reads(&mut selector, now), ["end 33", "gap 33+32944", "frame 40000"]);
 	}
 
 	/// Whatever order the two lanes deliver in, and however often the source

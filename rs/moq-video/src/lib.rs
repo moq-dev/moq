@@ -58,7 +58,7 @@
 //! The public API is codec-agnostic: no public type, signature, or error
 //! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC / VAAPI / V4L2) or a
 //! codec implementation. [`encode::Encoder`] takes a [`Frame`],
-//! [`decode::Consumer`] and `capture::Stream` return one (CPU I420 on demand,
+//! [`decode::Read::Frame`] and `capture::Stream` carry one (CPU I420 on demand,
 //! GPU-resident when hardware decoded). So swapping
 //! or bumping any backend crate is not a breaking change for consumers. Config
 //! structs are `#[non_exhaustive]`: build them via `default()`/`new()` and set
