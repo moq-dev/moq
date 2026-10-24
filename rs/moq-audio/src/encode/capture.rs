@@ -1506,7 +1506,7 @@ mod tests {
 		let mut options = Capture::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
-		options.encode.settings.layout = PcmLayout::from_channels(channels).unwrap();
+		options.encode.config.layout = PcmLayout::from_channels(channels).unwrap();
 		let (control, driver) = Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
 		let subscription = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
 		(control, driver, source(opens, false), subscription, catalog)

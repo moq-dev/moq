@@ -43,7 +43,7 @@ transcoded, so the player must support the publisher's codecs.
 What that means for you:
 
 - **Idle renditions cost nothing**, and a segment is servable for as long as the relay's [cache](/bin/relay/config#cache) retains it. Keep `--window` (the playlist length, default 16 s) within that retention.
-- **Live joins cost the window.** The default exporter reads the timeline checkpoint and lists at most 256 segments. `export::Config::history` reads a durable recording's retained timeline groups from the beginning instead of joining only the checkpoint tail.
+- **Live joins cost the window.** The exporter reads the timeline checkpoint and lists at most 256 segments.
 - **Publish timelines.** A broadcast whose catalog advertises no timelines is skipped, and a rendition is listed only once its own timeline is advertised. Without a duration hint, a publisher declares that timeline after the rendition's first segment.
 - **Align GOPs across video renditions.** Segment boundaries come from one reference rendition. Other video renditions snap to their nearest keyframe, and a segment with none nearby becomes an `EXT-X-GAP`.
 - **Disabled renditions are hidden.** A rendition the catalog marks `enabled: false` leaves the multivariant playlist and DASH manifest until it re-enables. Its media playlist keeps serving, so a player already on it is not ended with `EXT-X-ENDLIST`. If it supplied segment boundaries, an enabled sibling takes over at its first record numbered past the last advertised one, and DASH starts a new period. The media sequence is the record number, so every edge agrees: a sibling numbered ahead restarts the playlist with a discontinuity, and one numbered behind (such as a re-enabled rung) holds every playlist until its numbering catches up. `EXT-X-DISCONTINUITY-SEQUENCE` and DASH periods are counted per edge, so edges agree on them only when no discontinuity or handoff happened while each was running.
@@ -52,21 +52,7 @@ What that means for you:
 
 A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
 `Reader` is served the same way, with no second stored copy, and lists the
-same window as a live broadcast by default. `export::Config::history` includes
-earlier timeline groups even after replay-cache eviction: the exporter FETCHes
-missing groups from the Reader's stored timeline objects before following live
-edits. Missing or unreadable stored history fails that export with an error,
-and so does a recording whose start was pruned by retention.
-
-With `export::Config::history` enabled, a durable recording's media playlists
-also accept `start` and `end` query parameters in decimal media-time seconds.
-Both are required and name a half-open range, for example
-`media.m3u8?start=12.5&end=30`. The playlist includes every overlapping
-segment, widening its start to the preceding video sync point, and adds
-`EXT-X-ENDLIST` once media covers the requested end. It remains an event
-playlist while that end is still ahead of the live edge. A malformed range
-returns HTTP 400. A live-only timeline or range past a finished recording
-returns HTTP 416 instead of a partial clip, and a failed timeline returns 500.
+same window as a live broadcast.
 
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers. HLS TLS reads `MOQ_HLS_TLS_*`;

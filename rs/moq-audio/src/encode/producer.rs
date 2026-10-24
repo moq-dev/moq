@@ -7,7 +7,7 @@ use moq_mux::container::Frame as MuxFrame;
 use moq_net::Timestamp;
 
 use super::encoded::Encoded;
-use super::encoder::{Encoder, Input, Settings};
+use super::encoder::{Config, Encoder, Input};
 use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Frame};
 
@@ -22,8 +22,8 @@ pub struct Options {
 	/// (`0.opus`, then `1.opus`, ...), matching how the video side names its
 	/// track. Subscribers find it through the catalog either way.
 	pub track: Option<String>,
-	/// Codec input and encoded output settings.
-	pub settings: Settings,
+	/// Codec input and encoded output config.
+	pub config: Config,
 	/// The connection's bandwidth, as an allocator over
 	/// [`Session::send_bandwidth`](moq_net::Session::send_bandwidth).
 	///
@@ -46,7 +46,7 @@ pub struct Options {
 	/// loss: a viewer that falls behind skips a whole group, and a lost packet
 	/// stalls the rest of its group until retransmitted. Packets still forward as
 	/// they are encoded rather than buffered until the group fills. A longer
-	/// [`Settings::frame_duration`] (up to 60 ms for Opus) also packs more audio
+	/// [`Config::frame_duration`] (up to 60 ms for Opus) also packs more audio
 	/// per group, at the cost of encoder latency. An unfinished group remains open
 	/// across a pause or [`Producer::reanchor`] until the next write; use
 	/// [`Producer::discontinuity`] to close it when capture stops.
@@ -57,7 +57,7 @@ impl Default for Options {
 	fn default() -> Self {
 		Self {
 			track: None,
-			settings: Settings::default(),
+			config: Config::default(),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			group_duration: std::time::Duration::from_millis(20),
 		}
@@ -67,7 +67,7 @@ impl Default for Options {
 /// Encode raw PCM and publish it as a moq-mux audio track.
 ///
 /// The input PCM layout is fixed at construction via [`Input`]; the codec
-/// settings via [`Options`]. Subsequent [`write`](Self::write) calls just pass a
+/// config via [`Options`]. Subsequent [`write`](Self::write) calls just pass a
 /// [`Frame`]: payload bytes and a timestamp.
 ///
 /// The catalog rendition is registered at construction (not on first write), so
@@ -134,7 +134,7 @@ impl Reserved {
 			// Mirrors the video side, which derives a unique name from the codec
 			// rather than making every caller invent one.
 			None => broadcast.unique_track(
-				&format!(".{}", options.settings.codec),
+				&format!(".{}", options.config.codec),
 				catalog.track_info(hang::catalog::PRIORITY.audio),
 			)?,
 		};
@@ -152,10 +152,10 @@ impl Reserved {
 	/// Separate from [`encode`](Self::encode), which cannot fail, so a layout the
 	/// codec rejects leaves the reservation intact for another input.
 	pub(crate) fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
-		let remix = (input.layout != options.settings.layout)
-			.then(|| Remix::new(input.layout, options.settings.layout))
+		let remix = (input.layout != options.config.layout)
+			.then(|| Remix::new(input.layout, options.config.layout))
 			.transpose()?;
-		let encoder = Encoder::new(&options.settings)?;
+		let encoder = Encoder::new(&options.config)?;
 
 		let resampler = if input.sample_rate == encoder.codec_rate() {
 			None
@@ -163,7 +163,7 @@ impl Reserved {
 			// Use microsecond precision so 2.5 ms frame_duration (supported by
 			// libopus) doesn't truncate to 2 ms.
 			let chunk_frames =
-				((input.sample_rate as u128 * encoder.settings().frame_duration.as_micros()) / 1_000_000) as usize;
+				((input.sample_rate as u128 * encoder.config().frame_duration.as_micros()) / 1_000_000) as usize;
 			Some(Resampler::new(
 				input.sample_rate,
 				encoder.codec_rate(),
@@ -657,7 +657,7 @@ mod tests {
 			};
 			let options = Options {
 				track: Some(format!("audio-{index}")),
-				settings: Settings::from_input(crate::encode::Codec::Aac, &Input::new(48_000, Layout::Mono)),
+				config: Config::from_input(crate::encode::Codec::Aac, &Input::new(48_000, Layout::Mono)),
 				..Options::default()
 			};
 			let mut producer = Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
@@ -711,14 +711,14 @@ mod tests {
 			let options = Options {
 				track: Some("audio".to_string()),
 				group_duration: Duration::from_millis(group_ms),
-				settings: Settings {
+				config: Config {
 					layout: Layout::Mono,
 					bitrate: Some(moq_net::bandwidth::Rate::from_bps(128_000)),
-					..Settings::default()
+					..Config::default()
 				},
 				..Options::default()
 			};
-			let mut decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+			let mut decoder_config = Encoder::new(&options.config).unwrap().catalog();
 			// Every packet counts here; the consumer's warmup tests cover trimming.
 			decoder_config.warmup = None;
 
@@ -772,7 +772,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		let options = Options {
 			track: Some("audio".to_string()),
-			settings: Settings::new(48_000, Layout::Mono),
+			config: Config::new(48_000, Layout::Mono),
 			..Options::default()
 		};
 		let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
@@ -895,10 +895,10 @@ mod tests {
 		};
 		let options = Options {
 			track: Some("audio".to_string()),
-			settings: Settings::new(48_000, Layout::Mono),
+			config: Config::new(48_000, Layout::Mono),
 			..Options::default()
 		};
-		let mut decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+		let mut decoder_config = Encoder::new(&options.config).unwrap().catalog();
 		// Every packet counts here; the consumer's warmup tests cover trimming.
 		decoder_config.warmup = None;
 
@@ -947,15 +947,15 @@ mod tests {
 		};
 		let options = Options {
 			track: Some("audio".to_string()),
-			settings: Settings {
+			config: Config {
 				layout: Layout::Mono,
 				bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
 				dtx: true,
-				..Settings::default()
+				..Config::default()
 			},
 			..Options::default()
 		};
-		let mut decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+		let mut decoder_config = Encoder::new(&options.config).unwrap().catalog();
 		// Every packet counts here; the consumer's warmup tests cover trimming.
 		decoder_config.warmup = None;
 
@@ -1098,8 +1098,8 @@ mod tests {
 				track: Some("audio".into()),
 				..Default::default()
 			};
-			options.settings.layout = Layout::Mono;
-			options.settings.frame_duration = Duration::from_micros(frame_us);
+			options.config.layout = Layout::Mono;
+			options.config.frame_duration = Duration::from_micros(frame_us);
 			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
 			let mut track = consumer
 				.track("audio")
@@ -1203,7 +1203,7 @@ mod tests {
 			let input = Input::new(48_000, Layout::Mono);
 			let options = Options {
 				track: Some("audio".to_string()),
-				settings: Settings::from_input(crate::encode::Codec::Aac, &input),
+				config: Config::from_input(crate::encode::Codec::Aac, &input),
 				..Options::default()
 			};
 			let stub = crate::encode::backend::stub::install();
@@ -1343,19 +1343,15 @@ mod tests {
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 			let options = Options {
 				track: Some("audio".into()),
-				settings: Settings {
+				config: Config {
 					codec,
-					..Settings::default()
+					..Config::default()
 				},
 				..Options::default()
 			};
 			let _producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
 			let published = catalog.snapshot().audio.renditions.remove("audio").unwrap();
-			assert_eq!(
-				published,
-				Encoder::new(&options.settings).unwrap().catalog(),
-				"{codec:?}"
-			);
+			assert_eq!(published, Encoder::new(&options.config).unwrap().catalog(), "{codec:?}");
 		}
 	}
 }

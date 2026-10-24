@@ -751,8 +751,7 @@ void main() {
         ),
         output: moq_audio.EncoderOutput(
           codec: moq_audio.Codec.opus(),
-
-          preset: moq_audio.Preset.lowLatency,
+          frameDurationUs: 10000,
         ),
         track: 'mic',
       ),

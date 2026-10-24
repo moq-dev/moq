@@ -22,7 +22,7 @@ typedef Consumer = MoqAudioConsumer;
 /// The PCM layout written to a [Producer].
 typedef EncoderInput = MoqAudioEncoderInput;
 
-/// The codec side: codec, rate, channels, bitrate, preset, and frame duration (0 takes the codec's own frame).
+/// The codec side: codec, rate, channels, bitrate, and frame duration (0 takes the codec's own frame).
 typedef EncoderOutput = MoqAudioEncoderOutput;
 
 /// The PCM layout a [Consumer] delivers, how stale a group may get, and its playout delay.
@@ -42,9 +42,6 @@ typedef Codec = MoqAudioCodec;
 
 /// A raw PCM sample layout.
 typedef SampleFormat = MoqAudioSampleFormat;
-
-/// How the encoder trades latency for compression; null in [EncoderOutput] means `balanced`.
-typedef Preset = MoqAudioPreset;
 
 /// Duration view over a PCM frame's timestamp.
 extension AudioFrameDuration on MoqAudioFrame {

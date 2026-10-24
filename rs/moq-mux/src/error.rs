@@ -180,11 +180,6 @@ pub enum Error {
 		composition_time_ms: i32,
 	},
 
-	/// [`timeline::Producer::resume`](crate::timeline::Producer::resume) received a checkpoint
-	/// whose record at this window index has a different sequence.
-	#[error("timeline checkpoint record at index {0} has a different sequence")]
-	TimelineCheckpoint(u64),
-
 	/// [`timeline::Producer::push`](crate::timeline::Producer::push) received a record out of order.
 	#[error("timeline record {actual} pushed where {expected} was next")]
 	TimelineSequence {
