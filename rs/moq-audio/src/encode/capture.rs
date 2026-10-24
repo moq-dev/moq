@@ -203,7 +203,7 @@ impl Control {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		options: Capture,
-	) -> Result<(Self, Driver<E>), Error> {
+	) -> Result<(Self, Driver), Error> {
 		Self::build(broadcast, catalog, options, Supervisor::default())
 	}
 
@@ -212,7 +212,7 @@ impl Control {
 		catalog: moq_mux::catalog::Producer<E>,
 		options: Capture,
 		supervisor: Supervisor,
-	) -> Result<(Self, Driver<E>), Error> {
+	) -> Result<(Self, Driver), Error> {
 		let clock = catalog.clock();
 		let reserved = Reserved::new(&mut broadcast, catalog, &options.encode)?;
 		let track_name: Arc<str> = reserved.name().into();
@@ -340,11 +340,11 @@ impl Control {
 /// The driver owns the broadcast producer so its identity remains alive through
 /// stop, failure, replacement, and restart. Dropping the final [`Control`]
 /// ends the driver and releases that identity.
-pub struct Driver<E: CatalogExt = ()> {
+pub struct Driver {
 	_broadcast: moq_net::broadcast::Producer,
 	// Held for the driver lifetime once the layout reveals the encoded rate.
 	_reservation: Option<moq_net::bandwidth::Reservation>,
-	track: Option<Track<E>>,
+	track: Option<Track>,
 	/// The codec settings the rendition is built from once the layout is known.
 	encode: Options,
 	/// The catalog's clock, so samples land on the mapping it advertises.
@@ -359,13 +359,13 @@ pub struct Driver<E: CatalogExt = ()> {
 	park_on_failure: bool,
 }
 
-impl<E: CatalogExt> fmt::Debug for Driver<E> {
+impl fmt::Debug for Driver {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Driver").finish_non_exhaustive()
 	}
 }
 
-impl<E: CatalogExt> Driver<E> {
+impl Driver {
 	/// Run capture until the final control handle drops or the MoQ track ends.
 	pub async fn run(self) -> Result<(), Error> {
 		self.run_with(DeviceSource).await
@@ -584,7 +584,7 @@ impl<E: CatalogExt> Driver<E> {
 		}
 	}
 
-	fn producer_mut(&mut self) -> &mut Producer<E> {
+	fn producer_mut(&mut self) -> &mut Producer {
 		self.track
 			.as_mut()
 			.and_then(Track::producer)
@@ -627,15 +627,15 @@ enum DriveEvent {
 	clippy::large_enum_variant,
 	reason = "one per publication and moved twice, so boxing the large variant saves nothing"
 )]
-enum Track<E: CatalogExt = ()> {
+enum Track {
 	/// Registered in the broadcast but not the catalog, because the rendition
 	/// describes a PCM layout no probe has returned yet.
-	Reserved(Reserved<E>),
+	Reserved(Reserved),
 	/// Probed, so the rendition is registered and samples can be encoded.
-	Encoding(Producer<E>),
+	Encoding(Producer),
 }
 
-impl<E: CatalogExt> Track<E> {
+impl Track {
 	fn track(&self) -> &moq_net::track::Producer {
 		match self {
 			Self::Reserved(reserved) => reserved.track(),
@@ -643,7 +643,7 @@ impl<E: CatalogExt> Track<E> {
 		}
 	}
 
-	fn producer(&mut self) -> Option<&mut Producer<E>> {
+	fn producer(&mut self) -> Option<&mut Producer> {
 		match self {
 			Self::Reserved(_) => None,
 			Self::Encoding(producer) => Some(producer),
@@ -830,8 +830,8 @@ trait Output {
 	fn write(&mut self, samples: capture::Samples, timestamp_us: u64) -> Result<(), Error>;
 }
 
-struct EncoderOutput<'a, E: CatalogExt> {
-	producer: &'a mut Producer<E>,
+struct EncoderOutput<'a> {
+	producer: &'a mut Producer,
 	clock: &'a moq_mux::Clock,
 	/// The source the supervisor was started with, so a published state can
 	/// never name an input this stream isn't actually reading.
@@ -841,7 +841,7 @@ struct EncoderOutput<'a, E: CatalogExt> {
 	device: Option<capture::Device>,
 }
 
-impl<E: CatalogExt> Output for EncoderOutput<'_, E> {
+impl Output for EncoderOutput<'_> {
 	fn waiting(&mut self) {
 		self.device = None;
 		self.silence();
@@ -902,7 +902,7 @@ impl<E: CatalogExt> Output for EncoderOutput<'_, E> {
 	}
 }
 
-impl<E: CatalogExt> EncoderOutput<'_, E> {
+impl EncoderOutput<'_> {
 	/// Levels ride their own channel: they change every buffer, so folding them
 	/// into [`State`] would wake every [`Control::changed`] waiter at the
 	/// capture rate and rebuild the whole snapshot to do it.

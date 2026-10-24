@@ -560,7 +560,7 @@ impl ExportSource {
 						moq_net::Error::Cancel
 						| moq_net::Error::Closed
 						| moq_net::Error::GoingAway
-						| moq_net::Error::SessionClosed
+						| moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel))
 						| moq_net::Error::Session(moq_net::SessionError::Cancel),
 					)))
 					| Poll::Pending

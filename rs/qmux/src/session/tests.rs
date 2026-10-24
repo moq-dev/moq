@@ -218,6 +218,39 @@ async fn the_peer_limits_concurrent_streams() {
 	opening.await.expect("credit returned once the first stream is done");
 }
 
+#[tokio::test(start_paused = true)]
+async fn request_credit_is_refused_without_parking_an_open() {
+	let mut server_config = config(Version::QMux02);
+	server_config.max_streams_bidi = 1;
+	let (mut client, mut server) = pair(config(Version::QMux02), server_config).await;
+	let mut cx = Context::from_waker(std::task::Waker::noop());
+	let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(&mut cx, Default::default()) else {
+		panic!("initial request has credit");
+	};
+	assert!(matches!(
+		client.poll_open_request(&mut cx, Default::default()),
+		Poll::Ready(Ok(None))
+	));
+	assert!(matches!(
+		client.poll_open_request(&mut cx, Default::default()),
+		Poll::Ready(Ok(None))
+	));
+	send.finish().unwrap();
+	let (mut peer_send, mut peer_recv) = server.accept_bi().await.unwrap();
+	peer_send.finish().unwrap();
+	read_all(&mut peer_recv).await.unwrap();
+	read_all(&mut recv).await.unwrap();
+	drop((send, recv, peer_send, peer_recv));
+	client
+		.open_bi(Default::default())
+		.await
+		.expect("only one fresh open consumes returned credit");
+	assert!(matches!(
+		client.poll_open_request(&mut cx, Default::default()),
+		Poll::Ready(Ok(None))
+	));
+}
+
 /// Poll `future` once, after letting every other task run.
 async fn futures_poll_once<F: std::future::Future + Unpin>(future: &mut F) -> Option<F::Output> {
 	tokio::time::sleep(Duration::from_millis(10)).await;

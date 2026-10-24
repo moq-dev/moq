@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Context;
 use hang::moq_net;
 use moq_mux::catalog::{self, Stream};
-use moq_net::announce::Event as AnnounceEvent;
+use moq_mux::follow::{Event as FollowEvent, Instances};
 // The ambient clock, which follows tokio's paused clock when a test drives the
 // playout clock itself.
 use moq_clock::Instant;
@@ -76,25 +76,24 @@ impl<O: Output> Media<O> {
 	/// and an end lets what is playing finish while waiting for the next start. An
 	/// update is the same instance, which its subscriptions already ride out.
 	async fn play(self) -> anyhow::Result<()> {
-		let mut follow = self.origin.follow(&self.broadcast)?;
+		let mut follow = Instances::new(&self.origin, &self.broadcast, None)?;
 		let mut playing = None;
 
 		loop {
 			tokio::select! {
 				event = follow.next() => {
-					// The origin is gone, so nothing can announce the path again.
-					let Some(event) = event else { return Ok(()) };
-					let announce = match event {
-						AnnounceEvent::Start(announce) | AnnounceEvent::Restart(announce) => announce,
-						AnnounceEvent::Update(_) => continue,
-						AnnounceEvent::End(_) => {
+					let broadcast = match event {
+						Ok(FollowEvent::Start(broadcast)) => broadcast,
+						Ok(FollowEvent::End) => {
 							tracing::info!(broadcast = %self.broadcast, "offline, waiting for it to return");
 							continue;
 						}
+						Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => return Ok(()),
+						Err(err) => return Err(err).context("failed to follow the broadcast"),
 					};
 					tracing::info!(
 						broadcast = %self.broadcast,
-						epoch = announce.route.epoch.as_ref().map(tracing::field::display),
+						epoch = broadcast.info().epoch.as_ref().map(tracing::field::display),
 						"online"
 					);
 
@@ -104,7 +103,7 @@ impl<O: Output> Media<O> {
 					self.video.lock().unwrap().clear();
 					self.drained.notify_one();
 					self.output.send(Event::Wake);
-					playing = Some(Box::pin(self.play_broadcast()));
+					playing = Some(Box::pin(self.play_broadcast(broadcast)));
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
@@ -118,14 +117,8 @@ impl<O: Output> Media<O> {
 		}
 	}
 
-	/// Play the broadcast now at the path until its catalog and every track it
-	/// started end.
-	async fn play_broadcast(&self) -> anyhow::Result<()> {
-		let broadcast = self
-			.origin
-			.request_broadcast(&self.broadcast, None)
-			.await
-			.context("failed to subscribe to the broadcast")?;
+	/// Play the instance handed out by the follower until its catalog and tracks end.
+	async fn play_broadcast(&self, broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 		let source = moq_mux::Source::new(self.origin.clone(), broadcast.clone());
 		let mut catalogs = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
 			.await
@@ -1476,6 +1469,23 @@ mod tests {
 			PACKET_DURATION * 10,
 			"the new broadcast did not play in full"
 		);
+	}
+
+	/// A selected handler's explicit refusal is terminal, rather than an offline gap that a
+	/// later announcement might fix. Waiting forever hides a wrong path or denied request.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_broadcast_ends_the_player() {
+		let origin = moq_tokio::origin::spawn();
+		let handler = origin.dynamic_route("", Default::default()).unwrap();
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		let request = handler.requested_broadcast().await.unwrap();
+		request.reject(moq_net::Error::NotFound);
+		tokio::time::timeout(Duration::from_secs(1), player)
+			.await
+			.expect("a refusal held the player")
+			.unwrap();
+		assert!(recorder.events().iter().any(|event| matches!(event, Event::Failed(_))));
 	}
 
 	/// Without epochs (moq-lite 06), a restart that overlaps the old route still

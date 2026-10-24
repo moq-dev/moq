@@ -71,7 +71,7 @@ async def _publish_tone(audio: moq.audio.Producer, tones: list[int]) -> None:
 
 
 def _client(url: str, version: str | None) -> moq.Client:
-    return moq.Client(url, tls_verify=False, versions=[] if version is None else [version])
+    return moq.Client(url, tls=moq.ClientTls(insecure=True), versions=[] if version is None else [version])
 
 
 async def _print_grant(client: moq.Client, timeout: float) -> None:

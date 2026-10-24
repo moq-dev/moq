@@ -494,8 +494,8 @@ def test_track_info_keeps_native_default_priority():
 
 def test_string_sequences_refuse_a_bare_string():
     """A bare str would split into characters, so the config refuses it up front."""
-    with pytest.raises(TypeError, match="tls_roots"):
-        moq.Client("https://localhost:4443", tls_roots="ca.pem")
+    with pytest.raises(TypeError, match="roots"):
+        moq.Client("https://localhost:4443", tls=moq.ClientTls(roots="ca.pem"))
     with pytest.raises(TypeError, match="versions"):
         moq.Server(versions="moq-lite-03")
 
@@ -929,8 +929,7 @@ def test_public_api_exports():
     assert isinstance(moq.connect("https://example.com"), moq.Client)
     client = moq.connect(
         "https://example.com",
-        tls_roots=["root.pem"],
-        tls_fingerprints=["abc123"],
+        tls=moq.ClientTls(roots=["root.pem"], fingerprints=["abc123"]),
     )
     assert client._config.tls.roots == ["root.pem"]
     assert client._config.tls.fingerprints == ["abc123"]
