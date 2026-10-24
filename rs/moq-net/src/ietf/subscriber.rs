@@ -1205,8 +1205,7 @@ impl Subscriber {
 					subscribe_options: ietf::SubscribeOptions::Namespace,
 					hidden,
 				};
-				stream.writer.varint(ietf::SubscribeNamespaceLegacy::ID).await?;
-				stream.writer.encode(&msg).await?;
+				stream.writer.encode_message(&msg).await?;
 			}
 			_ => {
 				let msg = ietf::SubscribeNamespace {
@@ -1214,8 +1213,7 @@ impl Subscriber {
 					namespace: prefix.clone(),
 					hidden,
 				};
-				stream.writer.varint(ietf::SubscribeNamespace::ID).await?;
-				stream.writer.encode(&msg).await?;
+				stream.writer.encode_message(&msg).await?;
 			}
 		}
 
@@ -2193,14 +2191,15 @@ impl Subscriber {
 	async fn write_ok(&self, stream: &mut Stream<Transport, Version>, request_id: RequestId) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => {
-				stream.writer.buffer_varint(ietf::PublishNamespaceOk::ID)?;
-				stream.writer.encode(&ietf::PublishNamespaceOk { request_id }).await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 				stream
 					.writer
-					.encode(&ietf::RequestOk {
+					.encode_message(&ietf::PublishNamespaceOk { request_id })
+					.await?;
+			}
+			Version::Draft15 | Version::Draft16 => {
+				stream
+					.writer
+					.encode_message(&ietf::RequestOk {
 						largest: None,
 						request_id: Some(request_id),
 						active: None,
@@ -2208,10 +2207,9 @@ impl Subscriber {
 					.await?;
 			}
 			_ => {
-				stream.writer.buffer_varint(ietf::RequestOk::ID)?;
 				stream
 					.writer
-					.encode(&ietf::RequestOk {
+					.encode_message(&ietf::RequestOk {
 						largest: None,
 						request_id: None,
 						active: None,
@@ -2900,7 +2898,7 @@ impl Subscriber {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 					validity.check(waiter)?;
-					Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+					Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 				})
 				.await
 				{
@@ -3006,10 +3004,9 @@ impl Subscriber {
 			}
 			None => {
 				async {
-					stream.writer.varint(ietf::Subscribe::ID).await?;
 					stream
 						.writer
-						.encode(&ietf::Subscribe {
+						.encode_message(&ietf::Subscribe {
 							max_age,
 							new_group,
 							request_id,
@@ -3799,9 +3796,8 @@ impl Subscriber {
 		update: Update,
 	) -> Result<(), Error> {
 		let request_id = self.control.next_request_id(&self.runtime).await?;
-		writer.varint(ietf::SubscribeUpdate::ID).await?;
 		writer
-			.encode(&ietf::SubscribeUpdate {
+			.encode_message(&ietf::SubscribeUpdate {
 				max_age: update.max_age,
 				request_id,
 				subscription_request_id: matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
@@ -3867,8 +3863,7 @@ impl Subscriber {
 		writer: &mut crate::coding::Writer<crate::transport::boxed::SendStream, Version>,
 		request_id: RequestId,
 	) -> Result<(), Error> {
-		writer.varint(ietf::Unsubscribe::ID).await?;
-		writer.encode(&ietf::Unsubscribe { request_id }).await?;
+		writer.encode_message(&ietf::Unsubscribe { request_id }).await?;
 		Ok(())
 	}
 
@@ -3899,7 +3894,7 @@ impl Subscriber {
 					if let Poll::Ready(err) = track.poll_closed(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					Stream::poll_open(&mut opening, this.version, &mut waiter.context())
+					Stream::poll_open_request(&mut opening, this.version, &mut waiter.context())
 				})
 				.await?;
 				stream = super::request_stream::with_stats(stream, this.origin.stats(), this.version);
@@ -3925,10 +3920,9 @@ impl Subscriber {
 					}
 				}
 				if let Err(err) = async {
-					stream.writer.varint(ietf::Fetch::ID).await?;
 					stream
 						.writer
-						.encode(&ietf::Fetch {
+						.encode_message(&ietf::Fetch {
 							request_id: fetch_id,
 							subscriber_priority: super::priority::to_wire(
 								track.subscription().map(|s| s.priority).unwrap_or(0),
@@ -4105,7 +4099,7 @@ impl Subscriber {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
 			validity.check(waiter)?;
-			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 		})
 		.await
 		{
@@ -4134,10 +4128,9 @@ impl Subscriber {
 		};
 
 		let written = async {
-			stream.writer.varint(ietf::TrackStatus::ID).await?;
 			stream
 				.writer
-				.encode(&ietf::TrackStatus {
+				.encode_message(&ietf::TrackStatus {
 					request_id,
 					track_namespace: broadcast_path.to_owned(),
 					track_name: track_name.into(),
@@ -4222,8 +4215,10 @@ impl Subscriber {
 		let dynamic = request.dynamic();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge. Idle
 		// from the accept, so no reader takes it as live in between.
-		let track = request.idle().accept(accepted_info(&ok.properties, self.version));
+		let track = request.idle().stage(accepted_info(&ok.properties, self.version));
+		// Marked received before any reader sees it, so none resolves an anchor this wire dropped.
 		track.received();
+		let track = track.commit();
 		Some(Idle {
 			demand: track.demand(),
 			track,
@@ -5208,7 +5203,7 @@ impl Subscriber {
 			if let Poll::Ready(err) = track::TrackState::poll_closed(&request.state, waiter) {
 				return Poll::Ready(Err(err));
 			}
-			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
+			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
 		})
 		.await
 		{
@@ -5265,10 +5260,9 @@ impl Subscriber {
 			},
 		};
 		let res = async {
-			stream.writer.varint(ietf::Fetch::ID).await?;
 			stream
 				.writer
-				.encode(&ietf::Fetch {
+				.encode_message(&ietf::Fetch {
 					request_id: fetch_id,
 					subscriber_priority: super::priority::to_wire(request.priority()),
 					group_order: GroupOrder::Ascending,
@@ -5480,8 +5474,7 @@ impl Subscriber {
 				// The adapter has no transport reset, so deliver FETCH_CANCEL without a
 				// subsequent writer drop discarding unacknowledged control bytes.
 				let res = async {
-					stream.writer.varint(ietf::FetchCancel::ID).await?;
-					stream.writer.encode(&ietf::FetchCancel { request_id }).await?;
+					stream.writer.encode_message(&ietf::FetchCancel { request_id }).await?;
 					stream.writer.close().await
 				}
 				.await;
@@ -16009,6 +16002,31 @@ mod joining_fetch_tests {
 				);
 				assert_eq!(log.bi_opens(), 0);
 			}
+		}
+	}
+
+	#[moq_clock::test]
+	async fn refusing_a_joining_fetch_spends_no_request_credit() {
+		for version in JOINING_DRAFTS {
+			let session = ScriptedSession::new(Vec::new()).without_credit();
+			let (mut subscriber, track, _tasks) = pending_join(crate::driver::Transport::new(session), version);
+			subscriber.control = Control::new(
+				match version {
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(RequestId(2)),
+					_ => None,
+				},
+				false,
+			);
+			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
+			assert!(
+				joining.poll(&kio::Waiter::noop()).is_ready(),
+				"{version}: refusal must be immediate"
+			);
+			assert_eq!(
+				subscriber.control.poll_next_request_id(&kio::Waiter::noop()),
+				Poll::Ready(RequestId(1)),
+				"{version}: refusal spends neither an ID nor MAX_REQUEST_ID credit"
+			);
 		}
 	}
 

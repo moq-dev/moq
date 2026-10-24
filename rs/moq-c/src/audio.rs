@@ -144,7 +144,7 @@ pub struct moq_audio_frame {
 /// An audio producer, shared so the Opus encode in `write` runs with the global
 /// lock released. See [`Shared`].
 pub(crate) struct AudioEncoder {
-	producer: moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>,
+	producer: moq_audio::encode::Producer,
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
 	finished: crate::publish::Finished,
 }
@@ -254,8 +254,9 @@ impl Audio {
 				biased;
 				_ = &mut close => return Ok(()),
 				frame = consumer.read() => match frame {
-					Ok(Some(moq_audio::decode::Read::Frame { frame, .. })) => frame,
-					Ok(Some(moq_audio::decode::Read::End { .. })) => continue,
+					Ok(Some(moq_audio::decode::Read::Frame(frame))) => frame,
+					// The C ABI hands over PCM only.
+					Ok(Some(moq_audio::decode::Read::Gap { .. } | moq_audio::decode::Read::End { .. })) => continue,
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather

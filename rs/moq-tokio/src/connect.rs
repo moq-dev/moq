@@ -533,11 +533,7 @@ pub struct Config {
 	/// bounds that call as a whole.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub race: Option<std::time::Duration>,
 
 	/// Delay before also dialing the next resolved address. Defaults to 250ms; 0s dials every address at once.
@@ -564,11 +560,7 @@ pub struct Config {
 	/// Defaults to 50ms; `0s` dials as soon as any address resolves.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub resolution_delay: Option<std::time::Duration>,
 
 	/// Delay before dialing IPv4 while the full DNS answer is outstanding. Defaults to 50ms.
@@ -592,11 +584,7 @@ pub struct Config {
 	/// retry loop indefinitely.
 	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
+	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<std::time::Duration>,
 
 	/// Maximum time for one connect, covering the dial and the MoQ handshake. Defaults to 30s; 0s waits forever.
@@ -653,8 +641,8 @@ pub struct Config {
 
 	/// Dial once instead of redialing (with backoff) whenever the session drops.
 	///
-	/// A [`crate::Connection`] reconnects by default. With this set, the session's
-	/// close surfaces through [`crate::Connection::closed`] instead.
+	/// The connection reconnects by default. With this set, the session's
+	/// close surfaces through its closed event instead.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "connect-once",
@@ -677,12 +665,12 @@ pub struct Config {
 	#[usage(skip)]
 	pub(crate) reconnect: Option<bool>,
 
-	/// Retry pacing for [`crate::Client::connect`] (`--backoff-*`).
+	/// Retry pacing for [`crate::Client::connect`] (`--connect-backoff-*`).
 	#[usage(flatten)]
 	#[serde(default)]
 	pub backoff: Backoff,
 
-	/// How [`crate::Client::connect`] reacts to a peer's GOAWAY (`--goaway-*`).
+	/// How [`crate::Client::connect`] reacts to a peer's GOAWAY (`--connect-goaway-*`).
 	#[usage(flatten)]
 	#[serde(default)]
 	pub goaway: Goaway,
@@ -748,6 +736,8 @@ impl Config {
 	/// skipped the check can't reach a dial that quietly ignored half of it.
 	pub fn deprecated(&self) -> crate::cli::Deprecated {
 		let mut found = self.legacy.deprecated();
+		found.extend(self.backoff.deprecated());
+		found.extend(self.goaway.deprecated());
 		if self.connect.is_some() {
 			found.toml("connect", "url", None);
 		}

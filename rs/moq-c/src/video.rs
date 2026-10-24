@@ -71,6 +71,16 @@ pub enum moq_video_encoder_kind {
 	MOQ_VIDEO_ENCODER_KIND_NAMED = 3,
 }
 
+/// An exact video frame rate in frames per second.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct moq_video_frame_rate {
+	/// Frames per second numerator; must be nonzero.
+	pub numerator: u32,
+	/// Frames per second denominator; must be nonzero.
+	pub denominator: u32,
+}
+
 /// Raw frame layout the caller hands to [`moq_encode_video_frame`], plus
 /// the resolution and rate the encoder is opened at. Every published frame must
 /// match `width` x `height`; scale before publishing if your source moves.
@@ -84,7 +94,7 @@ pub struct moq_video_encoder_input {
 	pub height: u32,
 	/// Nominal frames per second, used for the codec time base and the default
 	/// bitrate and keyframe interval. Must be non-zero.
-	pub framerate: u32,
+	pub framerate: moq_video_frame_rate,
 }
 
 /// Codec-side configuration for [`moq_encode_video`]. Every knob spells
@@ -236,7 +246,7 @@ async fn follow_reservation(
 			max = next;
 			control = Control::new(Policy::new(max));
 		}
-		let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
+		let Some(bitrate) = control.update(estimate, moq_net::time::Instant::now()) else {
 			continue;
 		};
 
@@ -268,7 +278,7 @@ async fn follow_reservation(
 /// owns the thread instead, so every caller is welcome.
 pub(crate) struct VideoEncoder {
 	encoder: moq_video::encode::Sink,
-	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	producer: moq_video::encode::Producer,
 	format: moq_video_pixel_format,
 	/// The encoded resolution, from the publish config. Frames carry only pixels,
 	/// so this is what says how to read them.
@@ -349,7 +359,7 @@ pub struct DecoderOutput {
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	mut producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	mut producer: moq_video::encode::Producer,
 	drained: Result<(), moq_video::Error>,
 	finished: &crate::publish::Finished,
 ) -> Result<(), Error> {
@@ -576,8 +586,10 @@ impl Video {
 			let frame = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				frame = consumer.read() => match frame? {
-					Some(frame) => frame,
+				read = consumer.read() => match read? {
+					Some(moq_video::decode::Read::Frame(frame)) => frame,
+					// The C ABI hands over pictures only.
+					Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => continue,
 					None => return Ok(()),
 				},
 			};
@@ -704,8 +716,8 @@ pub unsafe extern "C" fn moq_encode_video(
 
 		let format = pixel_format_from_u32(raw_input.format)?;
 
-		let framerate = moq_video::Rate::new(raw_input.framerate, 1)
-			.map_err(|_| Error::Video(moq_video::Error::InvalidFramerate(raw_input.framerate).into()))?;
+		let framerate = moq_video::Rate::new(raw_input.framerate.numerator, raw_input.framerate.denominator)
+			.map_err(|err| Error::InvalidConfig(format!("invalid framerate: {err}")))?;
 		let mut config = moq_video::encode::Config::new(raw_input.width, raw_input.height, framerate);
 		config.codec = codec_from_u32(raw_output.codec)?;
 		config.kind = unsafe { encoder_kind(raw_output)? };
@@ -1001,10 +1013,7 @@ mod tests {
 
 	/// A video track wired up without an encoder, plus a subscriber on it: enough
 	/// to pin what [`finalize`] shows the far end.
-	async fn track_under_test() -> (
-		moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
-		moq_net::track::Subscriber,
-	) {
+	async fn track_under_test() -> (moq_video::encode::Producer, moq_net::track::Subscriber) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = moq_mux::catalog::Config::default()
 			.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default());

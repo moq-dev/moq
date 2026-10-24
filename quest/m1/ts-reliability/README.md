@@ -84,8 +84,7 @@ refused means an error or a counted drop.
 Decided in the 2026-10-22 root-cause audit: the rows above kept getting
 patched one at a time because two foundations were missing. Decode time is
 reconstructed from history instead of decode order, and import state has no
-owner that retires it. Those quests, and the shared parser that the routes
-and PAT plans build on, rank ahead of the remaining rows. Rejected: carrying
+owner that retires it. Those quests rank ahead of the remaining rows. Rejected: carrying
 decode time in every frame container, one shared ingest byte budget,
 and replacing the demux with GStreamer or another parser (it fixes neither
 cause). Out of scope for now: decoupling catalog publication from mux-rate
@@ -101,7 +100,6 @@ remain with their current quests.
 
 - [State bound](/quest/m1/ts-reliability/state-bound.md) - SI and revision state retire with what the source stops repeating
 - [Decode order](/quest/m1/ts-reliability/decode-order.md) - TS, MKV and FLV author DTS from decode order and a declared `reorder` depth
-- [Shared parser](/quest/m1/ts-reliability/shared-parser.md) - `--program all` scans the multiplex once
 - [Access units](/quest/m1/ts-reliability/pes-access-units.md) - a PES carrying several access units publishes each at its own time
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted

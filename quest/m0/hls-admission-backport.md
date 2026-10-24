@@ -4,7 +4,7 @@
 
 `release`, which moq.dev runs, refuses the same hostile HLS playlists `main`
 does: the origin-admission and redirect-hop checks from
-[HLS admission](/quest/m1/release-audit/hls-admission.md) ship in a
+[moq-dev/moq#6374](https://github.com/moq-dev/moq/pull/6374) ship in a
 non-breaking `moq-hls` patch release.
 
 ## Plan
@@ -20,7 +20,3 @@ on `main`, following the shape of
 `release`, no breaking change, a patch release.
 
 Public API: none on `release`. Wire: none.
-
-## Required
-
-- [HLS admission](/quest/m1/release-audit/hls-admission.md) - the checks land and are validated on `main` first

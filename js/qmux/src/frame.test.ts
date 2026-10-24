@@ -382,3 +382,57 @@ describe("maxStreamPayload", () => {
 		// stream ID come out of the budget.
 	});
 });
+
+describe("record decoding cost", () => {
+	/** The bytes `Uint8Array.prototype.slice` copies while `run` runs. */
+	function copied(run: () => void): number {
+		const slice = Uint8Array.prototype.slice;
+		let bytes = 0;
+		Uint8Array.prototype.slice = function (this: Uint8Array, ...args: [number?, number?]) {
+			const out = slice.apply(this, args);
+			bytes += out.byteLength;
+			return out;
+		} as typeof slice;
+		try {
+			run();
+		} finally {
+			Uint8Array.prototype.slice = slice;
+		}
+		return bytes;
+	}
+
+	/** A record of `count` copies of one encoded frame. */
+	function record(frame: Frame.Any, count: number): Uint8Array {
+		const one = Frame.encode(frame, "qmux-01");
+		const out = new Uint8Array(one.byteLength * count);
+		for (let i = 0; i < count; i++) out.set(one, i * one.byteLength);
+		return out;
+	}
+
+	const id = new Stream.Id(VarInt.from(4n));
+
+	test("decoding copies each payload once, however many frames follow it", () => {
+		// The largest default record of empty STREAM frames: each frame's remainder used to be
+		// copied, about 45 MB for this one record.
+		const empty = record({ type: "stream", id, data: new Uint8Array(0), fin: false }, 5_460);
+		let frames: Frame.Any[] = [];
+		expect(copied(() => (frames = Frame.decodeRecord(empty)))).toBe(0);
+		expect(frames.length).toBe(5_460);
+
+		const payloads = record({ type: "stream", id, data: new Uint8Array(32).fill(7), fin: false }, 400);
+		expect(copied(() => Frame.decodeRecord(payloads))).toBe(400 * 32);
+	});
+
+	test("a retained payload does not alias its record", () => {
+		const body = record({ type: "stream", id, data: new Uint8Array([1]), fin: false }, 2);
+		const [first] = Frame.decodeRecord(body);
+		if (first.type !== "stream") throw new Error("expected a stream frame");
+		expect(first.data.buffer).not.toBe(body.buffer);
+		expect(first.data.buffer.byteLength).toBe(1);
+	});
+
+	test("a truncated length is still refused", () => {
+		const one = Frame.encode({ type: "stream", id, data: new Uint8Array(8), fin: false }, "qmux-01");
+		expect(() => Frame.decodeRecord(one.subarray(0, one.byteLength - 1))).toThrow("frame truncated");
+	});
+});

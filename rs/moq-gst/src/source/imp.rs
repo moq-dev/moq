@@ -40,25 +40,22 @@ static NEXT_AUDIO_PAD_ID: AtomicU64 = AtomicU64::new(0);
 struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
-	versions: Option<String>,
-	tls_disable_verify: bool,
-	quic_keylog: bool,
+	connection: crate::connection::Settings,
 }
 
 #[derive(Debug, Clone)]
 struct ResolvedSettings {
 	url: url::Url,
 	broadcast: String,
-	/// Empty offers every supported version.
-	versions: Vec<moq_net::Version>,
-	tls_disable_verify: bool,
-	quic_keylog: bool,
+	connect: moq_tokio::connect::Config,
+	quic: moq_tokio::quic::Config,
 }
 
 impl TryFrom<Settings> for ResolvedSettings {
 	type Error = anyhow::Error;
 
 	fn try_from(value: Settings) -> Result<Self> {
+		let (connect, quic) = value.connection.resolve()?;
 		Ok(Self {
 			url: url::Url::parse(value.url.as_ref().context("url property is required")?)?,
 			broadcast: value
@@ -66,16 +63,8 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.as_ref()
 				.context("broadcast property is required")?
 				.clone(),
-			versions: value
-				.versions
-				.iter()
-				.flat_map(|versions| versions.split(','))
-				.map(str::trim)
-				.filter(|version| !version.is_empty())
-				.map(|version| version.parse().map_err(anyhow::Error::msg))
-				.collect::<Result<_>>()?,
-			tls_disable_verify: value.tls_disable_verify,
-			quic_keylog: value.quic_keylog,
+			connect,
+			quic,
 		})
 	}
 }
@@ -218,11 +207,7 @@ impl SessionController {
 
 /// The dial's configuration: versions and TLS as set, retrying without a budget.
 fn connect_config(settings: &ResolvedSettings) -> moq_tokio::connect::Config {
-	let mut config = moq_tokio::connect::Config::default();
-	config.version = settings.versions.clone();
-	config.tls.insecure = Some(settings.tls_disable_verify);
-	config.backoff.timeout = Some(std::time::Duration::ZERO);
-	config
+	settings.connect.clone()
 }
 
 /// Start the reconnecting dial and the origin its announcements land in.
@@ -235,8 +220,7 @@ fn connect(
 	let _rt = RUNTIME.enter();
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let mut quic = moq_tokio::quic::Config::default();
-	quic.keylog = Some(settings.quic_keylog);
+	let quic = settings.quic.clone();
 	let client = config.init(quic)?.with_subscriber(origin);
 	let connection = client.connect(settings.url.clone());
 	Ok((client, connection, consumer))
@@ -273,26 +257,10 @@ impl ObjectImpl for MoqSrc {
 					.blurb("The broadcast name to subscribe to")
 					.mutable_ready()
 					.build(),
-				glib::ParamSpecString::builder("versions")
-					.nick("Versions")
-					.blurb("Comma-separated protocol versions to offer, most preferred first, like moq-lite-06; unset offers every stable version")
-					.mutable_ready()
-					.build(),
-				glib::ParamSpecBoolean::builder("tls-disable-verify")
-					.nick("TLS Disable Verify")
-					.blurb("Disable TLS certificate verification")
-					.default_value(false)
-					.mutable_ready()
-					.build(),
-				glib::ParamSpecBoolean::builder("quic-keylog")
-					.nick("QUIC TLS key log")
-					.blurb(
-						"Danger: write TLS session secrets to the file SSLKEYLOGFILE names; without it the start fails",
-					)
-					.default_value(false)
-					.mutable_ready()
-					.build(),
 			]
+			.into_iter()
+			.chain(crate::connection::properties())
+			.collect()
 		});
 		PROPS.as_ref()
 	}
@@ -320,10 +288,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
-			"versions" => settings.versions = value.get().unwrap(),
-			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
-			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
-			_ => unreachable!(),
+			name => settings.connection.set(name, value),
 		}
 	}
 
@@ -332,10 +297,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url.to_value(),
 			"broadcast" => settings.broadcast.to_value(),
-			"versions" => settings.versions.to_value(),
-			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
-			"quic-keylog" => settings.quic_keylog.to_value(),
-			_ => unreachable!(),
+			name => settings.connection.get(name),
 		}
 	}
 }
@@ -1976,9 +1938,7 @@ mod session_tests {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoCodec, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{
-		NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, Settings, TrackKind, follow_catalog, follow_path,
-	};
+	use super::{NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, TrackKind, follow_catalog, follow_path};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -2021,7 +1981,7 @@ mod session_tests {
 		}
 		for err in [
 			moq_net::Error::Closed,
-			moq_net::Error::SessionClosed,
+			moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel)),
 			moq_net::Error::Cancel,
 		] {
 			assert!(super::source_lost(&err), "{err:?}");
@@ -2942,29 +2902,9 @@ mod session_tests {
 		ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
 			broadcast: "test".into(),
-			versions: Vec::new(),
-			tls_disable_verify: false,
-			quic_keylog: false,
+			connect: crate::connection::Settings::default().resolve().unwrap().0,
+			quic: Default::default(),
 		}
-	}
-
-	/// `versions` reaches the dial in order, and an unknown name fails the start instead of
-	/// offering the defaults.
-	#[test]
-	fn versions_reach_the_dial() {
-		let settings = |versions: &str| Settings {
-			url: Some("https://127.0.0.1:1".into()),
-			broadcast: Some("test".into()),
-			versions: Some(versions.into()),
-			..Default::default()
-		};
-		let resolved = ResolvedSettings::try_from(settings(" moq-transport-14 , moq-lite-06 ")).unwrap();
-		let config = super::connect_config(&resolved);
-		let expected: Vec<moq_net::Version> = vec!["moq-transport-14".parse().unwrap(), "moq-lite-06".parse().unwrap()];
-		assert_eq!(config.version, expected);
-
-		let err = ResolvedSettings::try_from(settings("moq-lite-06,moq-lite-99")).unwrap_err();
-		assert!(err.to_string().contains("moq-lite-99"), "{err}");
 	}
 
 	/// The source retries without a budget, so an outage of any length is ridden out
@@ -2981,10 +2921,8 @@ mod session_tests {
 		if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
 			return;
 		}
-		let keylog = ResolvedSettings {
-			quic_keylog: true,
-			..unreachable()
-		};
+		let mut keylog = unreachable();
+		keylog.quic.keylog = Some(true);
 		let err = super::connect(&keylog)
 			.err()
 			.expect("a keylog without SSLKEYLOGFILE must be refused");

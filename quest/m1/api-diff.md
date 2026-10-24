@@ -41,4 +41,4 @@ instead of first appearing at the cut:
   of scope until a missed break shows they are needed.
 
 Run it against `main` when it lands and put the unmarked breaks it finds in
-the PR description, so their `MIGRATE.md` entries land before the cut.
+the PR description, so the migration audit covers them at the cut.

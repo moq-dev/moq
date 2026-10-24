@@ -370,15 +370,15 @@ pub struct Serve {
 	listen_public: bool,
 
 	/// The key file a `jwt` is verified against.
-	#[usage(long, conflicts = "--key-dir", value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
+	#[usage(long, conflicts("--key-dir", "--key-set"), value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 	key: Option<PathBuf>,
 
 	/// A directory of `{kid}.jwk` files, selected by the token's `kid`.
-	#[usage(long, conflicts = "--key", value_hint = usage_rs::ValueHint::DirPath)]
+	#[usage(long, conflicts("--key", "--key-set"), value_hint = usage_rs::ValueHint::DirPath)]
 	key_dir: Option<PathBuf>,
 
 	/// A JWK Set file, selecting one verification key by the token's `kid`.
-	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("json", "jwks"))]
+	#[usage(long, conflicts("--key", "--key-dir"), value_hint = usage_rs::ValueHint::FilePath, extensions("json", "jwks"))]
 	key_set: Option<PathBuf>,
 
 	/// Patterns an anonymous session may publish, rooted at `/` (repeatable); `foo/**` for a subtree.
@@ -397,13 +397,14 @@ pub struct Serve {
 	#[usage(long)]
 	mtls_subscribe: Vec<Pattern>,
 
-	/// Mark sessions with a verified certificate as cluster peers: relays forwarding what entered elsewhere.
-	#[usage(long)]
-	mtls_peer: bool,
+	/// The role verified certificates have on cluster links: peer or upstream.
+	#[usage(long, choices("peer", "upstream"))]
+	mtls_link: Option<moq_auth::serve::Link>,
 
-	/// Mark those peers upstream: never offered a route learned from another upstream. Needs `--mtls-peer`.
-	#[usage(long)]
-	mtls_upstream: bool,
+	#[usage(long = "mtls-peer", hide = true, default_missing = "true", num_args = 0..=1, require_equals = true)]
+	mtls_peer: Option<bool>,
+	#[usage(long = "mtls-upstream", hide = true, default_missing = "true", num_args = 0..=1, require_equals = true)]
+	mtls_upstream: Option<bool>,
 
 	/// The tier label stamped on every grant, handed to the relay's stats.
 	#[usage(long)]
@@ -411,11 +412,11 @@ pub struct Serve {
 
 	/// How often the relay re-checks each grant. Off by default; needs `--expires`.
 	#[usage(long)]
-	revalidate: Option<crate::duration::Duration>,
+	revalidate: Option<moq_tokio::cli::Duration>,
 
 	/// How long a grant with no bound of its own lasts: anonymous sessions, tokens without `exp`, certificates without one. Off by default.
 	#[usage(long)]
-	expires: Option<crate::duration::Duration>,
+	expires: Option<moq_tokio::cli::Duration>,
 
 	/// The most live sessions presenting one token. Needs `--revalidate`.
 	#[usage(long)]
@@ -429,8 +430,8 @@ pub struct Serve {
 impl Serve {
 	/// The policy these flags describe, refusing a cadence the relay would spin on.
 	fn policy(&self) -> anyhow::Result<Policy> {
-		let revalidate = self.revalidate.map(|cadence| cadence.into_std());
-		let expires = self.expires.map(|bound| bound.into_std());
+		let revalidate = self.revalidate.map(std::time::Duration::from);
+		let expires = self.expires.map(Into::into);
 		if revalidate.is_some_and(|cadence| cadence.is_zero()) {
 			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
 		}
@@ -444,11 +445,11 @@ impl Serve {
 				"--limit-token and --limit-remote need --revalidate, which ages out the slots of dead relays"
 			);
 		}
-		if self.mtls_peer && self.mtls_publish.is_empty() && self.mtls_subscribe.is_empty() {
-			anyhow::bail!("--mtls-peer needs --mtls-publish or --mtls-subscribe, or every certificate is refused");
+		if self.mtls_peer.is_some() || self.mtls_upstream.is_some() {
+			anyhow::bail!("--mtls-peer and --mtls-upstream are removed; use --mtls-link peer or --mtls-link upstream");
 		}
-		if self.mtls_upstream && !self.mtls_peer {
-			anyhow::bail!("--mtls-upstream needs --mtls-peer; only a cluster peer can be upstream");
+		if self.mtls_link.is_some() && self.mtls_publish.is_empty() && self.mtls_subscribe.is_empty() {
+			anyhow::bail!("--mtls-link needs --mtls-publish or --mtls-subscribe, or every certificate is refused");
 		}
 		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
 		// broadcast `anon`, so either silent reading would mislead someone upgrading.
@@ -475,9 +476,6 @@ impl Serve {
 				subscribe.iter().cloned().collect::<moq_auth::Patterns>(),
 			)
 		};
-		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
-			anyhow::bail!("--key-set conflicts with --key and --key-dir");
-		}
 		let mut policy = Policy::default();
 		policy.keys = match (&self.key, &self.key_dir, &self.key_set) {
 			(Some(key), _, _) => Some(Keys::File(key.clone())),
@@ -487,8 +485,7 @@ impl Serve {
 		};
 		policy.public = rules(&self.public_publish, &self.public_subscribe);
 		policy.mtls = rules(&self.mtls_publish, &self.mtls_subscribe);
-		policy.mtls_peer = self.mtls_peer;
-		policy.mtls_upstream = self.mtls_upstream;
+		policy.mtls_link = self.mtls_link;
 		policy.tier = self.tier.clone();
 		policy.revalidate = revalidate;
 		policy.expires = expires;
@@ -644,6 +641,25 @@ mod tests {
 	}
 
 	#[test]
+	fn verification_key_sources_conflict_in_the_parser() {
+		let flags = ["--key", "--key-dir", "--key-set"];
+		for first in flags {
+			assert!(parse(&["moq", "auth", "serve", first, "unused"]).is_ok());
+			for second in flags {
+				if first == second {
+					continue;
+				}
+				let err = parse(&["moq", "auth", "serve", first, "unused", second, "unused"])
+					.expect_err("key sources must conflict before loading files");
+				assert!(
+					err.to_string().contains(first) && err.to_string().contains(second),
+					"{err}"
+				);
+			}
+		}
+	}
+
+	#[test]
 	fn serve_refuses_a_public_bind_without_saying_so() {
 		let err = serve(&["moq", "auth", "serve", "--listen", "0.0.0.0:4440"])
 			.listener()
@@ -682,8 +698,8 @@ mod tests {
 			"**",
 			"--mtls-subscribe",
 			"**",
-			"--mtls-peer",
-			"--mtls-upstream",
+			"--mtls-link",
+			"upstream",
 			"--tier",
 			"internal",
 			"--revalidate",
@@ -704,7 +720,7 @@ mod tests {
 		);
 		assert!(policy.public.publish.is_empty());
 		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
-		assert!(policy.mtls_peer && policy.mtls_upstream);
+		assert_eq!(policy.mtls_link, Some(moq_auth::serve::Link::Upstream));
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.expires, Some(std::time::Duration::from_secs(7200)));
@@ -715,18 +731,14 @@ mod tests {
 			.policy()
 			.unwrap();
 		assert!(matches!(&set.keys, Some(Keys::Set(path)) if path == std::path::Path::new("/keys.jwks")));
-		assert!(
-			serve(&["moq", "auth", "serve", "--key", "/key.jwk", "--key-set", "/keys.jwks"])
-				.policy()
-				.is_err()
-		);
+		assert!(parse(&["moq", "auth", "serve", "--key", "/key.jwk", "--key-set", "/keys.jwks"]).is_err());
 
 		// Nothing configured is a server that refuses everyone, and like 0.14, never
 		// re-checks or closes a session on its own.
 		let bare = serve(&["moq", "auth", "serve"]).policy().unwrap();
 		assert!(bare.keys.is_none());
 		assert!(bare.public.is_empty() && bare.mtls.is_empty());
-		assert!(!bare.mtls_peer && !bare.mtls_upstream);
+		assert_eq!(bare.mtls_link, None);
 		assert_eq!(bare.revalidate, None);
 		assert_eq!(bare.expires, None);
 
@@ -739,11 +751,10 @@ mod tests {
 			(&["--limit-token", "3"], "need --revalidate"),
 			(&["--limit-remote", "3", "--expires", "1h"], "need --revalidate"),
 			// A peer marking with nothing granted to certificates marks nobody.
-			(&["--mtls-peer"], "--mtls-peer needs"),
-			(
-				&["--mtls-subscribe", "**", "--mtls-upstream"],
-				"--mtls-upstream needs --mtls-peer",
-			),
+			(&["--mtls-link", "peer"], "--mtls-link needs"),
+			(&["--mtls-subscribe", "**", "--mtls-upstream"], "use --mtls-link"),
+			(&["--mtls-peer=false"], "use --mtls-link"),
+			(&["--mtls-upstream=false"], "use --mtls-link"),
 		] {
 			let argv: Vec<&str> = ["moq", "auth", "serve"].iter().chain(args).copied().collect();
 			let err = serve(&argv).policy().unwrap_err().to_string();
