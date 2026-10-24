@@ -193,13 +193,7 @@ impl Serving {
 			Err(err) => return Err(anyhow::Error::new(err).context("admission timed out")),
 			Ok(Ok(lease)) => lease,
 			Ok(Err(err)) => {
-				let status = axum::http::StatusCode::from(&err);
-				let reject = match status {
-					axum::http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
-					axum::http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
-					status => moq_tokio::server::Reject::App(status.as_u16()),
-				};
-				request.reject(reject).await.ok();
+				request.reject(moq_net::SessionError::from(&err)).await.ok();
 				return Err(anyhow::Error::new(err).context("session refused"));
 			}
 		};
@@ -215,7 +209,7 @@ impl Serving {
 			.then(|| origin.scope(&token.root, &token.publish).ok())
 			.flatten();
 		if publish.is_none() && subscribe.is_none() {
-			request.reject(moq_tokio::server::Reject::Forbidden).await.ok();
+			request.reject(moq_net::SessionError::Unauthorized).await.ok();
 			anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
 		}
 
@@ -266,7 +260,7 @@ fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio:
 					return;
 				} else if serving.lan && !is_public_transport(request.transport(), serving.public_quic) {
 					tracing::debug!(path = %request.path(), "refusing a non-peer request on the LAN mesh listener");
-					request.reject(moq_tokio::server::Reject::App(404)).await.ok();
+					request.reject(moq_net::SessionError::App(404)).await.ok();
 					return;
 				} else {
 					match moq_tokio::panic::isolate(serving.serve_client(request)).await {

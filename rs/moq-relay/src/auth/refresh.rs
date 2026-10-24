@@ -226,7 +226,7 @@ impl Refresh {
 			return;
 		}
 		let Ok(token) = std::str::from_utf8(request.token()) else {
-			request.reject(SessionError::Unauthorized, "token is not UTF-8");
+			request.reject(SessionError::MalformedAuthToken, "token is not UTF-8");
 			return;
 		};
 		let mut facts = source.request.clone();
@@ -428,7 +428,7 @@ fn refuse(request: auth::Request, err: super::Error) {
 			request.reject(SessionError::Internal, "auth server unavailable");
 		}
 		super::Error::Forbidden(reason) => request.reject(SessionError::Unauthorized, reason),
-		_ => request.reject(SessionError::Unauthorized, "token refused"),
+		err => request.reject(SessionError::from(&err), "token refused"),
 	}
 }
 

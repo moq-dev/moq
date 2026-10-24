@@ -2035,8 +2035,8 @@ run_matrix() {
         fi
     done
 
-    # The relay refuses a token on its public rules, and Chromium has to read the close code and
-    # reason it sends. WebSocket must surface Unauthorized and stop reconnecting too.
+    # The relay refuses a token that is not a JWT, and Chromium has to read the close code and
+    # reason it sends. WebSocket must surface MalformedAuthToken and stop reconnecting too.
     # Chromium is the strict peer here, so no Rust client stands in for it. The relay refuses
     # before any version is negotiated, so one pass covers it.
     if [[ "$VERSION" == auto ]] && needs js; then

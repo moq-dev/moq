@@ -486,7 +486,7 @@ async fn mtls_test(scheme: &str, reject: bool) {
 		let has_cert = request.peer_identity().is_some();
 		let _ = identity_tx.send(has_cert);
 		if reject {
-			request.reject(moq_tokio::server::Reject::Forbidden).await?;
+			request.reject(moq_net::SessionError::Unauthorized).await?;
 			return Ok::<_, anyhow::Error>(has_cert);
 		}
 		let (session, _driver) = request.with_publisher(pub_origin.consume()).ok().await?;

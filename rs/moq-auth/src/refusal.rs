@@ -11,6 +11,8 @@ pub enum Reason {
 	Forbidden,
 	/// The verified credential has expired.
 	Expired,
+	/// The credential could not be parsed, so presenting it again fails the same way.
+	Malformed,
 	/// The decider refused the credential or session.
 	#[default]
 	#[serde(other)]
@@ -23,6 +25,7 @@ impl std::fmt::Display for Reason {
 			Self::Refused => "refused",
 			Self::Forbidden => "forbidden",
 			Self::Expired => "expired",
+			Self::Malformed => "malformed",
 		})
 	}
 }
