@@ -19,14 +19,21 @@ contradicting `Lease::close`'s own rule that `Dropped` is an effect of the
 close, not a verdict.
 
 - Add `biased;` to that `select!` and poll `session.closed()` first.
-  `Lease::close` already folds in a real, non-`Dropped` revocation, so none is
-  lost.
+- `Lease::close` folds in a non-`Dropped` reason from one poll of
+  `Refresh::ended`, but `Credential::changed` polls `issued.closed()` ahead
+  of expiry and `consumer.changed()`, so after a close it reports `Withdrawn`
+  even when the decider's revocation is already pending. Poll expiry and
+  `consumer.changed()` ahead of the withdrawal: a verdict the decider already
+  gave outranks the close that withdrew the credential, and a credential that
+  merely refreshed is still withdrawn on the next poll.
 - A peer that withdraws its last credential on a live session still ends it
   as today.
 
-Test (mocked time, as the refresh tests do): a session whose only remaining
-credential is in band closes cleanly; the lease reports the session reason
-and no application failure.
+Tests (mocked time, as the refresh tests do): a session whose only remaining
+credential is in band closes cleanly, and the lease reports the session reason
+and no application failure. A revocation of that credential already pending
+when the transport closes is still recorded as the revocation, with its
+failure kind.
 
 Public API: none. Wire: none.
 
