@@ -6332,6 +6332,10 @@ impl Cursor {
 
 	fn advance_sequence(&mut self, group: group::Consumer) -> group::Consumer {
 		self.next_sequence = group.sequence.checked_add(1);
+		// The reader holds the group itself now, as on the arrival path.
+		if let Some(misses) = &mut self.misses {
+			misses.take_filled(group.sequence);
+		}
 		// The delivery commits everything the seek stepped over to reach this group.
 		self.commit_seek_stale(self.next_sequence.unwrap_or(u64::MAX));
 		group.cache_refresh();
@@ -16359,6 +16363,33 @@ mod test {
 		for sequence in [0, 1, 6, 7, 9] {
 			assert!(!fill.is_wanted(sequence), "group {sequence} went stale");
 		}
+	}
+
+	/// An ordered reader taking a filled group leaves the fill at once, so a reader that drops
+	/// the group without reading on stops holding the fill's source.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_reader_leaves_a_filled_group_it_takes() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let mut subscriber = producer.subscribe(replay().with_groups(0..1));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		assert!(
+			subscriber.poll_next_group(&waiter).is_pending(),
+			"group 0 is being filled"
+		);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		let _writing = fill.accept(0, None).unwrap();
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("the filled group is read");
+		};
+		assert_eq!(group.sequence, 0);
+		drop(group);
+		assert!(fill.poll_unused(&waiter).is_ready(), "nobody waits on the fill now");
 	}
 
 	/// A reader narrowing its ranges leaves the part of its fill it no longer reads: the

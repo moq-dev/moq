@@ -115,10 +115,11 @@ impl Misses {
 		}
 	}
 
-	/// Take `sequence` as handed out.
+	/// Take `sequence` as handed out, if a fill answered it.
 	pub fn take_filled(&mut self, sequence: u64) {
-		self.filled.remove(&sequence);
-		self.release(sequence);
+		if self.filled.remove(&sequence) {
+			self.release(sequence);
+		}
 	}
 
 	/// Stop holding a filled `sequence` in its fill: handed out, the group's own reader
