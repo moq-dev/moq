@@ -72,7 +72,6 @@ Rejected in planning:
 - [Unpublish what nothing uses](/quest/m1/api-audit/unpublish.md) - packages, features, and listeners with no consumer stop shipping or stop being on by default
 - [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - the dead and test-only moq-net, `@moq/net`, and moq-ffi items the follow-up audit found go private or away
-- [One clean close](/quest/m1/api-audit/clean-close.md) - a clean session close has one spelling and failures are recorded inside moq-net
 - [Derived origins borrow](/quest/m1/api-audit/derived-origin-close.md) - closing a JS `scope()` handle releases only that handle
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
 - [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
