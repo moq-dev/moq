@@ -2001,7 +2001,7 @@ test("closing a derived handle withdraws the sessions and answers attached throu
 	expect(withdraw).toBeDefined();
 	await settle();
 	expect(request.active.peek()).toBeDefined();
-	expect(request.unroutable.peek()).toBe(false);
+	expect(consumer.discovery.peek()).toBe(false);
 	expect(announced.synced.peek()).toBe(false);
 	expect(interests.splice(0)).toEqual(["+"]);
 
@@ -2013,20 +2013,20 @@ test("closing a derived handle withdraws the sessions and answers attached throu
 	consumer.request(Path.from("later"), { announced: true }).close();
 	expect(interests).toEqual([]);
 
-	// The answer and the initial set in flight went with the handle, and nothing is left
-	// that could answer instead.
+	// The answer, the attached session, and the initial set in flight went with the handle.
 	expect(request.active.peek()).toBeUndefined();
+	expect(consumer.discovery.peek()).toBeUndefined();
 	expect(announced.synced.peek()).toBe(true);
 	const retry = consumer.request(path);
-	expect(retry.unroutable.peek()).toBe(true);
 
-	// A session still using the released handle cannot answer, count as an answerer, or
+	// A session still using the released handle cannot answer, count as attached, or
 	// hold readers unsynced.
 	expect(wireOf(scoped).answer(path, new BroadcastProducer().consume())).toBeUndefined();
 	wireOf(scoped).attach(false);
 	wireOf(scoped).snapshot(Path.empty());
 	await settle();
-	expect(retry.unroutable.peek()).toBe(true);
+	expect(retry.active.peek()).toBeUndefined();
+	expect(consumer.discovery.peek()).toBeUndefined();
 	expect(announced.synced.peek()).toBe(true);
 
 	// The session's own teardown afterwards is a no-op.

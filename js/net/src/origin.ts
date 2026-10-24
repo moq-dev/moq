@@ -1379,7 +1379,6 @@ export class Producer implements Table {
 		}));
 	}
 
-	/**
 	// Run `release` once, at the first of its own call or this derived handle's close, so a
 	// borrower's close withdraws what it registered. The owner's close tears down everything.
 	#hold(release: Dispose): Dispose {
