@@ -125,6 +125,9 @@ impl Chain {
 	}
 }
 
+// A chain costs a cached frame nothing over the one buffer it holds otherwise.
+const _: () = assert!(size_of::<Payload>() == size_of::<Bytes>());
+
 impl Default for Payload {
 	fn default() -> Self {
 		Self::Whole(Bytes::new())
@@ -227,7 +230,10 @@ impl Cached {
 	pub fn into_frame(self) -> Frame {
 		Frame {
 			timestamp: self.timestamp,
-			payload: self.payload.contiguous(0),
+			payload: match self.payload {
+				Payload::Whole(bytes) => bytes,
+				chain => chain.contiguous(0),
+			},
 			arrived: self.arrived,
 		}
 	}
