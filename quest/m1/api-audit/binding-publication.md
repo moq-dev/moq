@@ -46,7 +46,3 @@ admission (including a mismatched fill), and a stale publication against a
 replacement. Run `just test interop --all`.
 
 Public API: breaking in moq-ffi, the C ABI, and every wrapper. Wire: none.
-
-## Related
-
-- [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - touches the same wrapper packages
