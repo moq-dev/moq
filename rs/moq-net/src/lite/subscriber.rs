@@ -549,14 +549,24 @@ struct SubscriptionCleanup(Lock<HashMap<u64, TrackEntry>>);
 impl SubscriptionCleanup {
 	/// End every active subscription with the session's error. Group machines own
 	/// their cleanup independently; this records the track's terminal state.
+	///
+	/// A subscription the publisher already ended finishes instead, here and on
+	/// [`Self::close`]: its track is over, and what arrived stays servable to readers
+	/// still behind rather than handed to another route.
 	fn abort(&self, err: &Error) {
 		for (_, entry) in self.0.lock().drain() {
-			let _ = entry.producer.abort(err.clone());
+			let _ = match entry.tail.read().is_ended() {
+				true => entry.producer.finish(),
+				false => entry.producer.abort(err.clone()),
+			};
 		}
 	}
 	fn close(&self) {
 		for (_, entry) in self.0.lock().drain() {
-			let _ = entry.producer.close();
+			let _ = match entry.tail.read().is_ended() {
+				true => entry.producer.finish(),
+				false => entry.producer.close(),
+			};
 		}
 	}
 }
@@ -7518,6 +7528,7 @@ impl ServeLoop {
 								// (it bounds presentation-time drift), but it is how long the
 								// subscriber was willing to wait for a late group anyway.
 								if let Ok(mut tail) = active.tail.write() {
+									tail.end();
 									tail.set_grace(tail::grace(
 										subscription.map(|sub| sub.max_delay).unwrap_or_default(),
 									));

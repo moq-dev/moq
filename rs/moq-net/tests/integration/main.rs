@@ -45,6 +45,7 @@ mod quiet_catalog;
 mod range_anchors;
 mod received_rewind;
 mod refresh;
+mod relay_upstream_close;
 mod rejoin;
 mod replacement;
 mod request_caps;
