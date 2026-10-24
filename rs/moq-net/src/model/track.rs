@@ -16740,15 +16740,13 @@ mod test {
 		}
 		evict(&producer, 3);
 		let waiter = kio::Waiter::noop();
-		let tail = producer
-			.consume()
-			.fetch_group(
-				3,
-				group::Fetch {
-					frame_start: 2,
-					..Default::default()
-				},
-			);
+		let tail = producer.consume().fetch_group(
+			3,
+			group::Fetch {
+				frame_start: 2,
+				..Default::default()
+			},
+		);
 		let Poll::Ready(Ok(first)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("an evicted group is a miss");
 		};
