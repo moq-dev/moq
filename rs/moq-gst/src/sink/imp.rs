@@ -649,7 +649,6 @@ impl MoqSink {
 		// Map and copy outside the lock so the per-pad lock covers only the producer write. Avoiding the
 		// copy for an oversized buffer needs a reliable, media-aware size heuristic; moq-net remains the
 		// authority and rejects FrameTooLarge before reserving its own group slot.
-		let pts = buffer.pts();
 		// Only subtitles use this: a cue needs an explicit end, unlike a media frame.
 		let duration = buffer.duration();
 		let current_running_time = self.obj().current_running_time();
@@ -690,6 +689,7 @@ impl MoqSink {
 				return Ok(gst::FlowSuccess::Ok);
 			}
 			let outcome = lifecycle.media.place_wall(&buffer, sample).and_then(|()| {
+				let pts = lifecycle.media.timeline_pts(&buffer)?;
 				lifecycle
 					.media
 					.push_buffer(data, pts, duration, current_running_time, moq_net::time::Instant::now())
