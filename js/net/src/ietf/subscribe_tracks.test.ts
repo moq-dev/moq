@@ -20,7 +20,7 @@ import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const drafts = [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21, Version.DRAFT_22];
 
-function fixture(version: IetfVersion, subscriptions = 10, grant = new Signal<Grant | undefined>(undefined)) {
+function fixture(version: IetfVersion, requests = 10, grant = new Signal<Grant | undefined>(undefined)) {
 	const pair = createMockTransportPair(ALPN.DRAFT_22);
 	const origin = new Origin();
 	const session = new NativeSession(pair.server, version, false);
@@ -30,7 +30,7 @@ function fixture(version: IetfVersion, subscriptions = 10, grant = new Signal<Gr
 		publish: origin.consume(),
 		requiresSolicitation: true,
 		grant,
-		limits: { announces: 10, subscriptions, fetches: 10 },
+		limits: { announces: 10, requests },
 	});
 	const tasks: Promise<void>[] = [];
 	const streams: Stream[] = [];

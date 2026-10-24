@@ -43,7 +43,7 @@ export const SessionCode = Object.freeze(
 		InvalidRequestId: 0x4 as SessionCode,
 		/** A key-value pair was malformed or repeated more than allowed. */
 		KeyValueFormatting: 0x6 as SessionCode,
-		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements or subscriptions. */
+		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements. */
 		TooManyRequests: 0x7 as SessionCode,
 		/** A PATH the peer may not send, such as a server sending one at all. */
 		InvalidPath: 0x8 as SessionCode,
