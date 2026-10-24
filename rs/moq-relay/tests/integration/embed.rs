@@ -152,7 +152,7 @@ async fn embed_and_stop(mut config: Config) {
 	// No drain window: the sessions are already gone by the time the owner
 	// stops, and the test should not wait out the default.
 	config.drain_timeout = Duration::ZERO;
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let http = relay.web_addrs().http.expect("http listener bound");
 	assert_eq!(
@@ -430,7 +430,7 @@ async fn embedded_listener_health_reaches_metrics() {
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
 	config.drain_timeout = Duration::ZERO;
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let internal = relay.internal().addr().expect("internal listener bound");
 	let ready = relay.ready();
 	let trigger = relay.shutdown_trigger().clone();

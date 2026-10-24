@@ -341,7 +341,7 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 /// passed at publish time.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
-	inner: std::sync::Mutex<Option<moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>>>,
+	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
 	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqBandwidth>>,
