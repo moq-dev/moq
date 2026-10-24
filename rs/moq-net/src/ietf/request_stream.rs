@@ -119,17 +119,19 @@ pub(super) fn refuse_update<W: crate::transport::poll::SendStream>(
 		return Ok(());
 	}
 	let request_id = super::RequestId::decode(&mut body.decoder(version), version).map_err(DecodeError::complete)?;
-	writer.buffer_varint(super::RequestError::ID)?;
-	writer.buffer(&super::RequestError {
-		request_id: Some(request_id),
-		error_code: super::error::request::to_code(
-			&Error::Unsupported,
-			super::error::request::Kind::Subscribe,
-			version,
-		),
-		reason_phrase: "update not supported".into(),
-		retry_interval: 0,
-	})
+	writer.buffer_message(
+		super::RequestError::ID,
+		&super::RequestError {
+			request_id: Some(request_id),
+			error_code: super::error::request::to_code(
+				&Error::Unsupported,
+				super::error::request::Kind::Subscribe,
+				version,
+			),
+			reason_phrase: "update not supported".into(),
+			retry_interval: 0,
+		},
+	)
 }
 
 /// A message the adapter routed onto a draft 14-16 request after the request itself.
@@ -317,8 +319,7 @@ pub(super) async fn reject(
 	mut stream: Stream<Transport, Version>,
 	error: super::RequestError<'_>,
 ) -> Result<(), Error> {
-	stream.writer.varint(super::RequestError::ID).await?;
-	stream.writer.encode(&error).await?;
+	stream.writer.encode_message(&error).await?;
 	// A peer dropping the response after reading the refusal is a normal end.
 	let _ = stream.writer.close().await;
 	Ok(())
@@ -347,15 +348,16 @@ pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
 		(Version::Draft14, Kind::TrackStatus) => super::TRACK_STATUS_ERROR_14,
 		_ => super::RequestError::ID,
 	};
-	writer.buffer_varint(id)?;
-	writer
-		.encode(&super::RequestError {
+	writer.buffer_message(
+		id,
+		&super::RequestError {
 			request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16).then_some(request_id),
 			error_code: super::error::request::to_code(err, kind, version),
 			reason_phrase: reason.into(),
 			retry_interval: 0,
-		})
-		.await
+		},
+	)?;
+	std::future::poll_fn(|cx| writer.poll_flush(cx)).await
 }
 
 /// A framed subscription update, preserving omitted preferences.
