@@ -5177,6 +5177,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "hyper-util",
+ "kio 0.6.2",
  "libc",
  "moq-auth 0.2.1",
  "moq-clock",

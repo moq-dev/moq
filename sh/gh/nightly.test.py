@@ -101,7 +101,7 @@ class NightlyTest(unittest.TestCase):
     def test_every_cargo_bench_target_runs_nightly(self):
         covered = set()
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
-        for group in ("rust-bench", "rust-shared", "rust-extra", "rust-uring"):
+        for group in ("rust-bench", "rust-shared", "rust-relay", "rust-extra", "rust-uring"):
             self.assertIn(f"recipe: gh nightly {group}\n", workflow)
             result, calls = self.run_group(group)
             self.assertEqual(result.returncode, 0, result.stderr)
