@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Refusal` is `RefusalKind` (#6510)
+
+The re-exported `moq_stats::Refusal` follows moq-net's rename: use `moq_stats::RefusalKind`.
+
 ### Track names and readers take an `Encoding` (#6472)
 
 `traffic_track`, `sessions_track`, `totals_track`, `presence_track`, and `prefix_track` take an `Encoding` instead of a `compressed: bool`, and `consume::Config` and `aggregate::Config` replace `compression: bool` and `with_compression(bool)` with `encoding: Encoding` and `with_encoding(Encoding)`.

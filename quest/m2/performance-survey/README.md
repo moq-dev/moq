@@ -150,13 +150,12 @@ No duplicate quest or workflow edit belongs here.
   allocations, ingest batching, worker quiescence and runtime selection.
 - The [release audit](/quest/m1/release-audit/README.md) owns QMux copying
   ([qmux-copy](/quest/m1/release-audit/qmux-copy.md)), media reorder queues
-  ([decode-order](/quest/m1/ts-reliability/decode-order.md)), watch teardown
-  ([watch-errors](/quest/m1/release-audit/watch-errors.md)), and the HLS
+  ([decode-order](/quest/m1/ts-reliability/decode-order.md)), and the HLS
   contract quests. MKV fragmentation below concerns parser replay before those
   queues.
-- [Binding bytes](/quest/m2/ffi-bytes.md),
-  [foreign polling](/quest/m2/ffi-poll-protocol.md),
-  [Kotlin calls](/quest/m2/kt-ffi-calls.md),
+- [Binding bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md),
+  [foreign polling](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
+  [Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md),
   [NVENC pooling](/quest/m2/nvenc-pool.md), and
   [watch worker planning](/quest/m2/plan-watch-worker.md) retain their scopes.
 - [Route wakes](/quest/m2/route-wakes.md),

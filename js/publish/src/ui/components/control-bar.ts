@@ -1,10 +1,10 @@
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
+import { settingsButton } from "@moq/ui";
 import type MoqPublish from "../../element";
 import type { UiState } from "../state";
 import { audioToggle } from "./audio-toggle";
 import { fullscreenButton } from "./fullscreen-button";
-import { settingsButton } from "./settings-button";
 import { statusBadge } from "./status-badge";
 import { videoToggle } from "./video-toggle";
 
@@ -18,7 +18,7 @@ export function controlBar(parent: Effect, publish: MoqPublish, state: UiState, 
 	const spacer = DOM.create("div", { className: "controls-spacer" });
 
 	const right = DOM.create("div", { className: "controls-group" });
-	right.append(settingsButton(parent, state), fullscreenButton(parent, player));
+	right.append(settingsButton(parent, state.panel), fullscreenButton(parent, player));
 
 	bar.append(left, spacer, right);
 	return bar;

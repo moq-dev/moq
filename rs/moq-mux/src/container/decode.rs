@@ -1,7 +1,21 @@
 use std::collections::VecDeque;
+use std::time::Duration;
+
+use moq_clock::Instant;
 
 /// The largest supported reorder span in 90 kHz ticks.
 pub(crate) const MAX_REORDER: u64 = 2 * 90_000;
+
+/// Which frames [`DecodeClock::pop`] gives out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Settle {
+	/// Those whose slot the highest PTS read settled.
+	Due,
+	/// Those, and the frame held longest, which is overdue ([`DecodeClock::settle`]).
+	Front,
+	/// Every frame held, as nothing still to come is presented before them.
+	All,
+}
 
 /// A video rendition's decode clock, authored from presentation timestamps.
 ///
@@ -23,13 +37,21 @@ pub(crate) const MAX_REORDER: u64 = 2 * 90_000;
 /// (reordering deeper than all of those) is nudged one tick past the last DTS, so the clock
 /// stays strictly increasing.
 ///
+/// A source whose PTS stops advancing would hold every frame after it here, so a frame that
+/// has waited longer than its lookahead plus the export's delay is overdue, and settled at
+/// once ([`Self::settle`]): a live source's PTS keeps pace with its arrival, so the frames
+/// held stay within what the source sends in that time, like the jitter buffer's.
+///
 /// Ticks are continuous (unwrapped) 90 kHz, so the clock never wraps mid-stream; the 33-bit
 /// wire wrap happens once at emission.
 pub(crate) struct DecodeClock<T> {
-	/// Frames read but not yet given a DTS, in decode order, with their PTS.
-	held: VecDeque<(T, u64)>,
+	/// Frames read but not yet given a DTS, in decode order, with their PTS and arrival.
+	held: VecDeque<(T, u64, Instant)>,
 	/// The held frames' PTS, ascending: the slots they decode in, in turn.
-	slots: Vec<u64>,
+	slots: VecDeque<u64>,
+	/// How many leading slots, paired with the held frame of the same rank, already bound the
+	/// delay, so draining a backlog scans each pair once.
+	bounded: usize,
 	/// The highest PTS read.
 	high: Option<u64>,
 	/// The furthest a frame was presented below the highest PTS read before it, plus a tick.
@@ -44,7 +66,8 @@ impl<T> Default for DecodeClock<T> {
 	fn default() -> Self {
 		Self {
 			held: VecDeque::new(),
-			slots: Vec::new(),
+			slots: VecDeque::new(),
+			bounded: 0,
 			high: None,
 			reach: 0,
 			delay: 0,
@@ -54,8 +77,8 @@ impl<T> Default for DecodeClock<T> {
 }
 
 impl<T> DecodeClock<T> {
-	/// Hold the next frame in decode order, presented at `pts`.
-	pub(crate) fn push(&mut self, item: T, pts: u64) {
+	/// Hold the next frame in decode order, presented at `pts`, which `arrived` when read.
+	pub(crate) fn push(&mut self, item: T, pts: u64, arrived: Instant) {
 		if let Some(high) = self.high
 			&& pts < high
 		{
@@ -64,30 +87,39 @@ impl<T> DecodeClock<T> {
 		self.high = Some(self.high.map_or(pts, |high| high.max(pts)));
 		let at = self.slots.partition_point(|&slot| slot <= pts);
 		self.slots.insert(at, pts);
-		self.held.push_back((item, pts));
+		self.bounded = self.bounded.min(at);
+		self.held.push_back((item, pts, arrived));
 	}
 
 	/// The next frame and its DTS, once its slot is settled `lookahead` past (the catalog
-	/// `jitter`), or at once when `flush`. `floor` is the least reorder delay, in ticks.
-	pub(crate) fn pop(&mut self, lookahead: u64, floor: u64, flush: bool) -> Option<(T, u64)> {
+	/// `jitter`), or at once as `settle` says. `floor` is the least reorder delay, in ticks.
+	pub(crate) fn pop(&mut self, lookahead: u64, floor: u64, settle: Settle) -> Option<(T, u64)> {
 		let high = self.high?;
-		let lookahead = lookahead.max(self.reach);
-		let settled = |slot: u64| flush || high >= slot.saturating_add(lookahead);
-		if !settled(*self.slots.first()?) {
+		let lookahead = self.lookahead(lookahead);
+		let front = *self.slots.front()?;
+		let settled = |slot: u64| match settle {
+			Settle::All => true,
+			Settle::Front if slot <= front => true,
+			_ => high >= slot.saturating_add(lookahead),
+		};
+		if !settled(front) {
 			return None;
 		}
 		// Every settled frame bounds the delay, so one decoding later never steps it back.
 		let mut delay = self.delay.max(floor);
-		for (&slot, (_, pts)) in self.slots.iter().zip(&self.held) {
+		let mut bounded = self.bounded;
+		for (&slot, (_, pts, _)) in self.slots.range(bounded..).zip(self.held.range(bounded..)) {
 			if !settled(slot) {
 				break;
 			}
 			delay = delay.max(slot.saturating_sub(*pts));
+			bounded += 1;
 		}
 		self.delay = delay.min(MAX_REORDER);
+		self.bounded = bounded - 1;
 
-		let slot = self.slots.remove(0);
-		let (item, _) = self.held.pop_front()?;
+		let slot = self.slots.pop_front()?;
+		let (item, ..) = self.held.pop_front()?;
 		let dts = slot.saturating_sub(self.delay);
 		let dts = match self.last {
 			Some(last) if dts <= last => last + 1,
@@ -95,5 +127,30 @@ impl<T> DecodeClock<T> {
 		};
 		self.last = Some(dts);
 		Some((item, dts))
+	}
+
+	/// What [`Self::pop`] settles short of a flush: [`Settle::Front`] once the frame held
+	/// longest is overdue, having waited, by the `latest` arrival read, longer than `lookahead`
+	/// plus the export's `delay`, else [`Settle::Due`].
+	pub(crate) fn settle(&self, lookahead: u64, latest: Instant, delay: Duration) -> Settle {
+		let Some((.., arrived)) = self.held.front() else {
+			return Settle::Due;
+		};
+		let lookahead = Duration::from_nanos(self.lookahead(lookahead) * 1_000_000_000 / 90_000);
+		match latest.saturating_duration_since(*arrived) > lookahead + delay {
+			true => Settle::Front,
+			false => Settle::Due,
+		}
+	}
+
+	/// How many frames are held.
+	#[cfg(test)]
+	pub(crate) fn len(&self) -> usize {
+		self.held.len()
+	}
+
+	/// How far past a slot the highest PTS must be to settle it, under `lookahead`.
+	fn lookahead(&self, lookahead: u64) -> u64 {
+		lookahead.max(self.reach).min(MAX_REORDER)
 	}
 }

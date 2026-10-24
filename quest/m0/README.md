@@ -38,8 +38,11 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [web-transport-proto 0.6.3](/quest/m0/web-transport-proto-0.6.3.md) - `main` and `release` lock the upstream release that bounds decoded CONNECT headers, so a peer can't make a relay hold megabytes per session before auth
+- [64-bit Hop IDs](/quest/m0/hop-id-64.md) - a moq-transport peer with any non-zero 64-bit Hop ID keeps its session, and Hop IDs are `u64` in Rust and JS
+- [MALFORMED_AUTH_TOKEN session code](/quest/m0/malformed-auth-token-code.md) - a 0x16 close reports a malformed token instead of `unknown code=22`, and moq-net sends it for an unparseable token
 - [qmux 0.5.3](/quest/m0/qmux-0.5.3.md) - crates.io publishes qmux 0.5.3 with the builder session config the release backport of #5609 needs
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
+- [H.265 aspect backport](/quest/m0/h265-aspect-backport.md) - `release` publishes the #5574 fix, so a square-pixel H.265 stream plays at its picture's aspect
 - [HLS admission backport](/quest/m0/hls-admission-backport.md) - `release` refuses the hostile HLS playlists `main` does, without breaking `import::Config::client`
 - [Adopt quest resolve](/quest/m0/quest-resolve.md) - local merges resolve concurrent quest link-list edits once kixelated/quest ships its merge driver
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last

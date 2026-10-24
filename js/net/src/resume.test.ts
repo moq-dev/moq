@@ -106,7 +106,7 @@ async function setup() {
 
 test("returning to a route reuses its subscription and held group", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -142,13 +142,13 @@ test("returning to a route reuses its subscription and held group", async () => 
 		front.consumer.close();
 		for (const handle of handles) handle.close();
 		for (const source of sources) source.close();
-		restore();
+		installed.close();
 	}
 });
 
 test("a returning route resumes where a fresh copy would", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
@@ -181,7 +181,7 @@ test("a returning route resumes where a fresh copy would", async () => {
 		front.consumer.close();
 		for (const handle of handles) handle.close();
 		for (const source of sources) source.close();
-		restore();
+		installed.close();
 	}
 });
 
@@ -329,7 +329,7 @@ test("a resumed fork shares an on-demand track request", async () => {
 });
 
 test("a lagging same-epoch replica resumes from one publisher's bytes exactly once", async () => {
-	const { clock, restore } = manual();
+	const { clock, installed } = manual();
 	const publisher = new Producer();
 	const original = publisher.createBroadcast(path);
 	original.announce({ epoch: EPOCH });
@@ -462,7 +462,7 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 		publisher.close();
 		origin.close();
 		const outcomes = await Promise.all([a.done, b.done]);
-		restore();
+		installed.close();
 		expect(outcomes).toEqual([undefined, undefined]);
 	}
 });
@@ -710,7 +710,7 @@ test("datagrams a new copy replays are handed out once", async () => {
 
 test("a replacement delivers unseen datagrams below the newest sequence", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	try {
 		const { a, b, swap, active, close } = await setup();
 		const ta = copy(a);
@@ -728,13 +728,13 @@ test("a replacement delivers unseen datagrams below the newest sequence", async 
 		sub.close();
 		close();
 	} finally {
-		restore();
+		installed.close();
 	}
 });
 
 test.each([0, 100])("datagram identities stay within the reader's %p ms budget", async (budget) => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	try {
 		const front = new Front();
 		const a = new BroadcastProducer();
@@ -762,7 +762,7 @@ test.each([0, 100])("datagram identities stay within the reader's %p ms budget",
 		front.consumer.close();
 		a.close();
 	} finally {
-		restore();
+		installed.close();
 	}
 });
 
@@ -1720,10 +1720,10 @@ test("the largest follows the serving copy across a swap without moving back, an
 	b.close();
 });
 
-/** A manual clock, installed until `restore`. */
+/** A manual clock, installed until `installed` closes. */
 function manual() {
 	const clock = new Manual();
-	return { clock, restore: clock.install() };
+	return { clock, installed: clock.install() };
 }
 
 const SECOND = Milli(1000);
@@ -1731,7 +1731,7 @@ const SECOND = Milli(1000);
 test.each(["lands", "dropped", "expired"])(
 	"an arrival reader gets a group still in flight on the replaced route (%s)",
 	async (outcome) => {
-		const { clock, restore } = manual();
+		const { clock, installed } = manual();
 		const front = new Front();
 		const a = new BroadcastProducer();
 		const b = new BroadcastProducer();
@@ -1765,7 +1765,7 @@ test.each(["lands", "dropped", "expired"])(
 			front.consumer.close();
 			a.close();
 			b.close();
-			restore();
+			installed.close();
 		}
 	},
 );
@@ -2197,7 +2197,7 @@ test("closing with an abort settles a recovery in flight with it", async () => {
 test.each(["lands", "expired"])(
 	"the serving copy closing cleanly settles closed once a group the replaced copy may carry is in (%s)",
 	async (outcome) => {
-		const { clock, restore } = manual();
+		const { clock, installed } = manual();
 		const front = new Front();
 		const a = new BroadcastProducer();
 		const b = new BroadcastProducer();
@@ -2231,7 +2231,7 @@ test.each(["lands", "expired"])(
 			front.consumer.close();
 			a.close();
 			b.close();
-			restore();
+			installed.close();
 		}
 	},
 );
