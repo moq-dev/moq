@@ -113,7 +113,7 @@ async def test_fetch_abort_is_a_stream_app_code():
         request.abort(404)
 
     task = asyncio.create_task(reject())
-    with pytest.raises(moq.Error.Protocol) as raised:  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Protocol) as raised:
         await consumer.fetch_group("events", 5)
     await task
     protocol = moq.protocol_error(raised.value)
@@ -147,11 +147,11 @@ def test_protocol_error_helper_covers_known_app_and_unknown():
 
 
 def test_error_str_is_rust_display():
-    assert str(moq.Error.Closed()) == "closed"  # type: ignore[attr-defined]
-    error = moq.Error.Transport(reason="reset")  # type: ignore[attr-defined]
+    assert str(moq.Error.Closed()) == "closed"
+    error = moq.Error.Transport(reason="reset")
     assert str(error) == "transport: reset"
     details = moq.ProtocolError(scope=moq.ErrorScope.STREAM, code=468, kind=moq.ProtocolKind.APP, message="gone")
-    assert str(moq.Error.Protocol(details)) == "gone"  # type: ignore[attr-defined]
+    assert str(moq.Error.Protocol(details)) == "gone"
 
 
 def test_publish_media_lifecycle():
@@ -402,11 +402,11 @@ async def test_announced_epoch_restarts():
     assert isinstance(restart, moq.AnnounceEventRestart)
     assert restart.announce.route.epoch == second
 
-    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.InvalidEpoch):
         moq.epoch_time(first.upper())
     with pytest.raises(OverflowError):
         moq.epoch_time("ffffffff-ffff-7000-8000-000000000000")
-    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.InvalidEpoch):
         broadcast.announce(moq.AnnounceRoute(epoch="not-an-epoch"))
     broadcast.close()
 
@@ -423,7 +423,7 @@ async def test_finish_lingers_until_closed():
     track.finish()
     finish = broadcast.finish()
     assert finish.linger == timedelta(hours=1)
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Closed):
         broadcast.consume()
 
     # Cancelling the wait is the interrupt: the broadcast closes at once.
@@ -581,7 +581,7 @@ async def test_json_window_roundtrip():
     assert event == moq.json.Timed(moq.json.WindowPop(range(0, 2)), timedelta(milliseconds=3))
 
     producer.finish()
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Closed):
         producer.push({"n": 3}, timestamp=timedelta(milliseconds=4))
     assert [event async for event in consumer] == []
 
@@ -643,7 +643,7 @@ async def test_json_window_skips_records_outside_the_checkpoint():
     ]
 
     producer.finish()
-    with pytest.raises(moq.Error.JsonTrack):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.JsonTrack):
         moq.json.WindowProducer(broadcast.publish_track("bad"), checkpoint_records=0)
 
 
@@ -669,7 +669,7 @@ async def test_json_producers_report_demand():
     await asyncio.wait_for(until_wanted(stream_demand, False), timeout=5.0)
 
     snapshot.finish()
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Closed):
         await asyncio.wait_for(until_wanted(snapshot_demand), timeout=5.0)
 
 
@@ -701,7 +701,7 @@ async def test_dynamic_track_request():
     track.finish()
     broadcast.close()
     del track
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Closed):
         await asyncio.wait_for(until_wanted(demand), timeout=5.0)
 
 
@@ -1226,14 +1226,14 @@ async def test_container_group_takes_over_an_unread_group():
     group.write_frame(_legacy(1_000_000, b"a"), timedelta(milliseconds=1))
     raw = await _recv_raw(consumer)
     assert await raw.read_frame() is not None
-    with pytest.raises(moq.Error.AlreadyCommitted):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.AlreadyCommitted):
         moq.media.GroupConsumer(raw, _LEGACY)
 
     group = track.append_group()
     group.write_frame(_legacy(1_020_000, b"b"), timedelta(milliseconds=2))
     raw = await _recv_raw(consumer)
     media = moq.media.GroupConsumer(raw, _LEGACY)
-    with pytest.raises(moq.Error.Cancelled):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Cancelled):
         await raw.read_frame()
     frame = await asyncio.wait_for(anext(media), timeout=5.0)
     assert frame.timestamp == timedelta(microseconds=1_020_000)
@@ -1249,9 +1249,10 @@ async def test_container_group_fails_loudly():
     # A truncated varint timestamp: the 2-byte form with only its first byte.
     group.write_frame(b"\x40", timedelta(milliseconds=1))
     raw = await _recv_raw(consumer)
-    with pytest.raises(moq.Error.Codec):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Codec):
         moq.media.GroupConsumer(raw, cast(moq.media.Container, moq.media.Container.CMAF(init=b"")))
     media = moq.media.GroupConsumer(raw, _LEGACY)
+    # UniFFI rebinds the error class, hiding its Exception base from pyright.
     with pytest.raises(moq.Error):  # type: ignore[attr-defined]
         await asyncio.wait_for(anext(media), timeout=5.0)
 
@@ -1445,7 +1446,7 @@ def test_audio_encoder_preset_init_and_bitrate():
     encoder.set_bitrate(32_000)
     assert encoder.encode([0.0] * encoder.frame_size).data
 
-    with pytest.raises(moq.Error.Audio):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Audio):
         moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=20)))
 
 
@@ -1699,7 +1700,7 @@ def test_media_catalog_handle_closes_with_broadcast():
     catalog = moq.media.CatalogProducer(broadcast)
     catalog.set_section("app", {"value": 42})
     broadcast.close()
-    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Closed):
         catalog.remove_section("app")
 
 

@@ -198,7 +198,7 @@ async def test_session_state_names_a_failing_first_dial():
             assert state.connects == 0
             for _ in range(2):
                 state = await asyncio.wait_for(session.state_changed(state.revision), timeout=10)
-                assert isinstance(state.failure, moq.Error.Connect)  # type: ignore[attr-defined]
+                assert isinstance(state.failure, moq.Error.Connect)
                 assert state.connects == 0
             session.cancel(0)
 
@@ -321,10 +321,10 @@ async def test_client_connection_knobs():
 
 async def test_invalid_config_fails_on_enter():
     """A value the native side cannot use fails the connect or listen, not a later call."""
-    with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Config):
         async with moq.Client("https://localhost", versions=["moq-lite-99"]):
             pass
-    with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Config):
         async with moq.Server("not-an-address", tls_generate=["localhost"]):
             pass
 
@@ -334,7 +334,7 @@ async def test_server_keylog_requires_sslkeylogfile(monkeypatch):
     monkeypatch.delenv("SSLKEYLOGFILE", raising=False)
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], keylog=False):
         pass
-    with pytest.raises(moq.Error.Config, match="SSLKEYLOGFILE"):  # type: ignore[attr-defined]
+    with pytest.raises(moq.Error.Config, match="SSLKEYLOGFILE"):
         async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], keylog=True):
             pass
 
