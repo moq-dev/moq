@@ -1,7 +1,7 @@
 //! Admission and lease behavior for a gateway embedding the relay.
 
+use crate::{auth, cluster};
 use moq_auth::{Grant, Pattern, Patterns, Role, Transport, lease};
-use moq_relay::{auth, cluster};
 
 fn patterns(texts: &[&str]) -> Patterns {
 	texts.iter().map(|text| text.parse::<Pattern>().unwrap()).collect()
@@ -184,8 +184,10 @@ async fn gateway_admission_refuses_once_in_the_shared_stats_registry() {
 async fn embedded_expired_refusals_keep_verified_root_and_tier() {
 	tokio::time::pause();
 	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
-	let mut config = moq_relay::stats::Config::default();
-	config.enabled = true;
+	let config = crate::stats::Config {
+		enabled: true,
+		..Default::default()
+	};
 	let producer = config.build(cluster.origin.clone()).unwrap();
 	let registry = producer.registry().clone();
 	let cluster = cluster.with_stats(producer);
