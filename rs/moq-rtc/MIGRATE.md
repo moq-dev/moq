@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Client calls run the session
+
+`Client::publish` and `Client::subscribe` resolve once the session ends, instead of once it negotiates.
+Spawn or select on the future to run other work alongside it, and drop it to end the session.
+A peer disconnect resolves `Ok(())`. A `publish` whose source publisher leaves fails, as does a WHEP server session's `Response::run`.
+
 ### One router path
 
 `whip::router(server, publisher)` and `whep::router(server, subscriber)` are private.
