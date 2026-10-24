@@ -66,6 +66,9 @@ impl std::fmt::Display for Transport {
 /// plain boxed flavor suffices.
 type OpBox<T> = futures::future::BoxFuture<'static, T>;
 
+/// A stream op that hands the stream back with its result, or `None` if interrupted.
+type StreamOp<S, T, E> = OpBox<(S, Option<Result<T, E>>)>;
+
 /// Adapts one of this crate's async backends (qmux, iroh, quic) to the poll interface
 /// moq-net requires.
 ///
@@ -286,13 +289,12 @@ enum SendState<S: GroupedSend + 'static> {
 	/// retrying caller supplied the same bytes. A `None` result means the write
 	/// was interrupted by a reset (see [`SendStream::interrupt`]).
 	Writing {
-		#[allow(clippy::type_complexity)]
-		fut: OpBox<(S, Option<Result<(), S::Error>>)>,
+		fut: StreamOp<S, (), S::Error>,
 		chunk: Bytes,
 	},
 	/// The closed() acknowledgement watch; a `None` result means it was
 	/// interrupted by a late reset or priority change (see [`SendStream::interrupt`]).
-	Closing(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<(), S::Error>>)>),
+	Closing(StreamOp<S, (), S::Error>),
 }
 
 impl<S: GroupedSend + 'static> SendStream<S> {
@@ -668,7 +670,7 @@ enum RecvState<S: web_transport_trait::RecvStream + 'static> {
 	Idle(S),
 	/// A read in flight; a `None` result means it was interrupted by a stop
 	/// (see [`RecvStream::interrupt`]).
-	Reading(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<Option<Bytes>, S::Error>>)>),
+	Reading(StreamOp<S, Option<Bytes>, S::Error>),
 }
 
 impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
@@ -955,7 +957,7 @@ impl GroupedSend for web_transport_iroh::SendStream {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::sync::{
 		Arc, Mutex,

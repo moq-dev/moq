@@ -305,7 +305,7 @@ pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::or
 
 /// A session's snapshot of its peer's initial announcements, for the synced bench.
 /// Drop it to land the snapshot.
-pub struct Snapshot(#[allow(dead_code)] crate::model::Snapshot);
+pub struct Snapshot(#[allow(dead_code, reason = "held for its drop, which lands the snapshot")] crate::model::Snapshot);
 
 /// Start a snapshot under `prefix`, as a session requesting announcements there does.
 pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
