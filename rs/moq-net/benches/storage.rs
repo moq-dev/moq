@@ -969,11 +969,11 @@ const MAX_ROUNDS: usize = 50_000;
 const ROUND_BUDGET_MS: u64 = 1_500;
 
 /// The fixed cost of releasing and joining the workers, with no reads.
-fn baseline(filter: &str) {
-	for (threads, readers) in sweep() {
+fn baseline(filter: &str, threads: usize, readers: usize) {
+	{
 		let label = format!("baseline/none/threads_{threads}");
 		if !label.contains(filter) {
-			continue;
+			return;
 		}
 		let crew = Crew::new((0..threads).map(|_| -> Work { Box::new(|| {}) }).collect());
 		rounds(&label, readers, &crew, || {});
@@ -981,11 +981,11 @@ fn baseline(filter: &str) {
 }
 
 /// One-frame groups: each round makes a group, and every reader opens and drains it.
-fn single<S: Shape>(payload: &Payloads, filter: &str) {
-	for (threads, readers) in sweep() {
+fn single<S: Shape>(payload: &Payloads, filter: &str, threads: usize, readers: usize) {
+	{
 		let label = format!("single/{}/threads_{threads}", S::NAME);
 		if !label.contains(filter) {
-			continue;
+			return;
 		}
 		// One mailbox per worker, so handing out the group never contends between them.
 		let mailboxes: Vec<Arc<Mutex<Option<Arc<S>>>>> = (0..threads).map(|_| Default::default()).collect();
@@ -1021,14 +1021,15 @@ fn single<S: Shape>(payload: &Payloads, filter: &str) {
 /// A long-lived group under front eviction. Each round appends `k` frames and evicts
 /// down to `WINDOW`; with `refill`, it also refills one frame of the evicted front run,
 /// which half the readers follow.
-fn edge<S: Shape>(payload: &Payloads, filter: &str, name: &str, k: u64, refill: bool) {
-	for (threads, readers) in sweep() {
+fn edge<S: Shape>(payload: &Payloads, filter: &str, case: Case, threads: usize, readers: usize) {
+	let Case { name, k, refill } = case;
+	{
 		if refill && readers < 2 * threads {
-			continue;
+			return;
 		}
 		let label = format!("{name}/{}/threads_{threads}", S::NAME);
 		if !label.contains(filter) {
-			continue;
+			return;
 		}
 		let shape = Arc::new(S::new(0));
 		// Start with an evicted front well past the refill run.
@@ -1087,15 +1088,29 @@ fn edge<S: Shape>(payload: &Payloads, filter: &str, name: &str, k: u64, refill: 
 	}
 }
 
-fn contended<S: Shape>(filter: &str, refill: bool) {
-	let payload = Payloads::new();
-	single::<S>(&payload, filter);
-	edge::<S>(&payload, filter, "edge", 1, false);
-	edge::<S>(&payload, filter, "burst", BATCH as u64, false);
-	if refill {
-		edge::<S>(&payload, filter, "refill", 1, true);
-	}
+/// A long-lived group workload.
+#[derive(Clone, Copy)]
+struct Case {
+	name: &'static str,
+	k: u64,
+	refill: bool,
 }
+
+const EDGE: Case = Case {
+	name: "edge",
+	k: 1,
+	refill: false,
+};
+const BURST: Case = Case {
+	name: "burst",
+	k: BATCH as u64,
+	refill: false,
+};
+const REFILL: Case = Case {
+	name: "refill",
+	k: 1,
+	refill: true,
+};
 
 fn uncontended<S: Shape>(c: &mut Criterion) {
 	let payload = Payloads::new();
@@ -1117,15 +1132,28 @@ criterion_group! {
 }
 
 /// `STORAGE_ROUNDS=<filter>` runs the contended round workloads whose label contains
-/// the filter (empty for all) instead of the Criterion benches.
+/// the filter (empty for all) instead of the Criterion benches. Every shape runs each
+/// case back to back, so they share the host's load at the time.
 fn main() {
 	if let Some(filter) = std::env::var_os("STORAGE_ROUNDS") {
 		let filter = filter.to_string_lossy();
-		baseline(&filter);
-		contended::<Deque>(&filter, false);
-		contended::<Runs>(&filter, true);
-		contended::<Log>(&filter, true);
-		contended::<Ring>(&filter, true);
+		let payload = Payloads::new();
+		for (threads, readers) in sweep() {
+			baseline(&filter, threads, readers);
+			single::<Deque>(&payload, &filter, threads, readers);
+			single::<Runs>(&payload, &filter, threads, readers);
+			single::<Log>(&payload, &filter, threads, readers);
+			single::<Ring>(&payload, &filter, threads, readers);
+			for case in [EDGE, BURST] {
+				edge::<Deque>(&payload, &filter, case, threads, readers);
+				edge::<Runs>(&payload, &filter, case, threads, readers);
+				edge::<Log>(&payload, &filter, case, threads, readers);
+				edge::<Ring>(&payload, &filter, case, threads, readers);
+			}
+			edge::<Runs>(&payload, &filter, REFILL, threads, readers);
+			edge::<Log>(&payload, &filter, REFILL, threads, readers);
+			edge::<Ring>(&payload, &filter, REFILL, threads, readers);
+		}
 		return;
 	}
 	group();
