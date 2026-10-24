@@ -34,6 +34,5 @@ Wire: none.
 
 ## Required
 
-- [Dynamic names](/quest/m2/e2ee/dynamic-names.md) - the approved naming design can change the physical-name mapping this fixes
 - [Wrapper traits over moq-net](/quest/m2/net-wrap/README.md) - Rust and JS readers take the traits the e2ee consumer implements
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - the producer this mirrors

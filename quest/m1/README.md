@@ -111,7 +111,6 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for an opt-in `hls` field
 - [A listing's clean end keeps its finishes](/quest/m1/listing-clean-end.md) - a broadcast ending right after its tracks finish ends each finished track's IETF PUBLISH with TRACK_ENDED, in Rust and JS
 - [Compressed tracks](/quest/m1/compress/README.md) - a track flagged `compress` is DEFLATEd per group by moq-net, forwarded compressed, and inflated once on the relay for peers that cannot signal it; `catalog.json.z` and moq-flate go away
-- [The lite draft agrees that a forbidden value closes the session](/quest/m1/lite-draft-close-rules.md) - the frame-bound and lite-06 Timescale rules say close the session, matching the code and the Message Length rule
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
