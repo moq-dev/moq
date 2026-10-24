@@ -49,6 +49,10 @@ and stereo use a family 0 head, and three to eight channels need
 `channel-mapping-family`, `stream-count`, `coupled-count`, and
 `channel-mapping`. Caps that omit that mapping, or that contradict the header,
 are refused. `opusenc` supplies both, so a 5.1 encode plays as six channels.
+Opus buffers are read the way `opusenc` and `moqsrc` stamp them: at the time
+their first kept sample plays, with `GstAudioClippingMeta` clipping the
+pre-skip. Each is published the pre-skip, less its own clipping, later, since
+a frame timestamp counts the pre-skip.
 
 A `text/x-raw` pad is how captions get in: ffmpeg cannot mux a subtitle track
 into fragmented MP4, so `moq import fmp4` can't carry one, while a demuxer that

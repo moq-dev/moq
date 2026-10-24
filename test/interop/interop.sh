@@ -360,14 +360,16 @@ publisher_codecs() {
         *) echo opus ;;
     esac
 }
-# phase_checked <round> <subscriber>: whether tone.py also holds the tone's phase to the decode's
-# timestamps, which fails a misapplied pre-skip or AAC priming. Every publisher's tone starts at
+# phase_checked <round> <subscriber> <codec>: whether tone.py also holds the tone's phase to the
+# decode's timestamps, which fails a misapplied pre-skip. Every publisher's tone starts at
 # timestamp zero except the browser's, whose capture clock is not tied to its WAV. The native-JS
 # subscriber hands WebCodecs raw Opus without the OpusHead, as the player does, which keeps the
-# pre-skip for the player to trim, and its libav fallback stamps milliseconds.
+# pre-skip for the player to trim, and its libav fallback stamps milliseconds. AAC waits on the
+# fMP4 importer applying the edit list that carries ffmpeg's 1024 priming samples
+# (quest/m1/fmp4-edit-lists.md).
 # shellcheck disable=SC2329  # reached from run_cell, which 'harness_spawn' invokes
 phase_checked() {
-    [[ "$1" != js* && "$2" != js-native-* ]]
+    [[ "$1" != js* && "$2" != js-native-* && "$3" == opus ]]
 }
 
 # Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
@@ -1392,9 +1394,9 @@ run_cell() {
     # rendition here, and a missing one fails like a garbled one. Each is judged, so the
     # wrong-tone control can require every rendition to fail.
     if [[ "$status" -eq 0 && "$AUDIO" -eq 1 && "$sub" != js ]]; then
-        local phase=()
-        if phase_checked "$pub" "$sub"; then phase=(--phase); fi
         for codec in ${codecs//,/ }; do
+            local phase=()
+            if phase_checked "$pub" "$sub" "$codec"; then phase=(--phase); fi
             echo "the $codec rendition:"
             python3 "$INTEROP_DIR/tone.py" --tone "$tone" ${phase[@]+"${phase[@]}"} "$decoded.$codec" || status=$?
         done

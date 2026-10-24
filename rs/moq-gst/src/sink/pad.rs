@@ -61,6 +61,8 @@ struct Media {
 	/// a successful decode may publish nothing (a header-only buffer), and a delta only misses its
 	/// keyframe while no group is open.
 	keyframe: bool,
+	/// An Opus pad's pre-skip, which moves its PTS onto hang's timeline.
+	pre_skip: Option<PreSkip>,
 }
 
 impl Media {
@@ -410,6 +412,7 @@ impl Pad {
 			return Ok(name);
 		}
 
+		let mut pre_skip = None;
 		let (track, audio, name): (import::Track, bool, String) = match structure.name().as_str() {
 			"video/x-h264" => {
 				let (track, name) = Self::reserve_video(
@@ -513,6 +516,7 @@ impl Pad {
 				// The OpusHead lives in the caps. There is no init buffer in the stream, so a
 				// head built from channels and rate alone would drop a surround mapping.
 				let config = opus_catalog(structure)?;
+				pre_skip = PreSkip::new(&config)?;
 				let name = Self::track_name(&broadcast, requested, ".opus");
 				let request = broadcast
 					.reserve_track(name.clone())
@@ -534,6 +538,7 @@ impl Pad {
 			encoder,
 			discontinuity: false,
 			keyframe: !audio,
+			pre_skip,
 		})));
 		self.caps = Some(caps.clone());
 		Ok(name)
@@ -750,6 +755,18 @@ impl Pad {
 	/// (or an oversized frame, rejected by moq-net) invalidates only this pad and says so in the
 	/// returned outcome. Returns an error when an unstamped opaque buffer has no current
 	/// running time, so the caller fails the flow instead of silently dropping data.
+	/// The PTS `buffer` publishes at: its own, except an Opus packet's, which moves onto hang's
+	/// timeline (see [`PreSkip`]).
+	pub(super) fn timeline_pts(&mut self, buffer: &gst::BufferRef) -> Result<Option<gst::ClockTime>> {
+		match &mut self.track {
+			Some(Sink::Media(media)) if !self.failed => match &mut media.pre_skip {
+				Some(pre_skip) => pre_skip.pts(buffer),
+				None => Ok(buffer.pts()),
+			},
+			_ => Ok(buffer.pts()),
+		}
+	}
+
 	pub fn push_buffer(
 		&mut self,
 		data: Bytes,
@@ -905,6 +922,67 @@ fn opus_catalog(structure: &gst::StructureRef) -> Result<hang::catalog::AudioCon
 	// a surround track with no description.
 	config.encode().context("Opus caps do not make an OpusHead")?;
 	Ok(config.into())
+}
+
+/// Moves Opus packets from GStreamer's timeline onto hang's. `opusenc` (and moqsrc) stamp a packet
+/// where its first kept sample plays, clipping the OpusHead pre-skip with `GstAudioClippingMeta`,
+/// while a hang frame timestamp counts the pre-skip: each packet lands the pre-skip, less what it
+/// clips itself, later.
+struct PreSkip {
+	/// The OpusHead's pre-skip, in 48 kHz samples.
+	total: u64,
+	/// The samples of the packets clipped whole at PTS zero just before this one.
+	clipped: u64,
+}
+
+impl PreSkip {
+	/// The pre-skip of an Opus config's OpusHead, or `None` with none to restore.
+	fn new(config: &hang::catalog::AudioConfig) -> Result<Option<Self>> {
+		let Some(head) = &config.description else {
+			return Ok(None);
+		};
+		let total = moq_mux::codec::opus::Config::parse(&mut head.as_ref())?.pre_skip.into();
+		Ok((total > 0).then_some(Self { total, clipped: 0 }))
+	}
+
+	/// The hang timestamp of `buffer`, an Opus packet stamped the GStreamer way.
+	fn pts(&mut self, buffer: &gst::BufferRef) -> Result<Option<gst::ClockTime>> {
+		let Some(pts) = buffer.pts() else {
+			return Ok(None);
+		};
+		let clip = match buffer.meta::<gst_audio::AudioClippingMeta>().map(|meta| meta.start()) {
+			None => 0,
+			Some(gst::GenericFormattedValue::Default(clip)) => clip.map_or(0, |clip| *clip),
+			Some(other) => anyhow::bail!("Opus clipping meta counts {:?}, not samples", other.format()),
+		};
+		let late = self
+			.total
+			.checked_sub(clip)
+			.context("Opus clipping meta trims more than the OpusHead pre-skip")?;
+		if clip > 0 && pts.is_zero() {
+			let samples: u64 = moq_mux::codec::opus::packet_samples(&buffer.map_readable()?)
+				.context("malformed Opus packet")?
+				.into();
+			if clip >= samples {
+				// A packet clipped whole plays nothing, so its stamp saturated at zero and lost where
+				// it sat: place it after those before it, as a stream starting at zero has them.
+				let at = self.clipped;
+				self.clipped += samples;
+				return Ok(Some(samples_time(at)?));
+			}
+		}
+		self.clipped = 0;
+		Ok(Some(pts + samples_time(late)?))
+	}
+}
+
+/// The duration of `samples` at Opus's 48 kHz.
+fn samples_time(samples: u64) -> Result<gst::ClockTime> {
+	use gst::prelude::MulDiv;
+	let nanos = samples
+		.mul_div_round(gst::ClockTime::SECOND.nseconds(), 48_000)
+		.context("Opus pre-skip overflows the clock")?;
+	Ok(gst::ClockTime::from_nseconds(nanos))
 }
 
 fn opus_count(structure: &gst::StructureRef, field: &str, what: &str) -> Result<u32> {
@@ -1450,14 +1528,26 @@ mod tests {
 
 	/// `opusenc` 5.1 caps, plus the packets it produced.
 	fn opusenc_surround() -> (gst::Caps, Vec<Bytes>) {
+		let (caps, buffers) = opusenc(
+			"audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=6,channel-mask=(bitmask)0x3f",
+			"20",
+		);
+		let packets = buffers
+			.iter()
+			.map(|buffer| Bytes::copy_from_slice(buffer.map_readable().expect("map opus packet").as_slice()))
+			.collect();
+		(caps, packets)
+	}
+
+	/// Three 20 ms buffers of `raw` through `opusenc frame-size=<frame_size>`: its caps, plus the
+	/// packets it produced.
+	fn opusenc(raw: &str, frame_size: &str) -> (gst::Caps, Vec<gst::Buffer>) {
 		use gst::prelude::*;
 		use std::sync::{Arc, Mutex};
 
-		let pipeline = gst::parse::launch(
-			"audiotestsrc num-buffers=3 samplesperbuffer=960 ! \
-			 audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=6,channel-mask=(bitmask)0x3f ! \
-			 opusenc name=enc ! fakesink",
-		)
+		let pipeline = gst::parse::launch(&format!(
+			"audiotestsrc num-buffers=3 samplesperbuffer=960 ! {raw} ! opusenc name=enc frame-size={frame_size} ! fakesink"
+		))
 		.expect("opusenc pipeline")
 		.downcast::<gst::Pipeline>()
 		.expect("pipeline");
@@ -1476,11 +1566,7 @@ mod tests {
 				*caps_probe.lock().unwrap() = pad.current_caps();
 			}
 			if let Some(buffer) = info.buffer() {
-				let map = buffer.map_readable().expect("map opus packet");
-				packets_probe
-					.lock()
-					.unwrap()
-					.push(Bytes::copy_from_slice(map.as_slice()));
+				packets_probe.lock().unwrap().push(buffer.copy());
 			}
 			gst::PadProbeReturn::Ok
 		})
@@ -1509,6 +1595,28 @@ mod tests {
 		let packets = packets.lock().unwrap().clone();
 		assert!(!packets.is_empty(), "opusenc produced no packets");
 		(caps, packets)
+	}
+
+	/// opusenc stamps each packet where its first kept sample plays, saturating at zero, and clips
+	/// the pre-skip; restoring hang's timeline lays its packets back to back from zero, both when
+	/// the pre-skip fits in the first packet and when it clips several whole.
+	#[test]
+	fn opusenc_packets_land_back_to_back_on_hang_timeline() {
+		gst::init().unwrap();
+		for (frame_size, micros) in [("20", 20_000), ("2.5", 2_500)] {
+			let (caps, buffers) = opusenc("audio/x-raw,rate=48000,channels=1", frame_size);
+			let config = opus_catalog(caps.structure(0).unwrap()).unwrap();
+			let mut pre_skip = PreSkip::new(&config).unwrap().expect("opusenc sets a pre-skip");
+			assert!(buffers[0].meta::<gst_audio::AudioClippingMeta>().is_some());
+			for (index, buffer) in buffers.iter().enumerate() {
+				assert_eq!(
+					pre_skip.pts(buffer).unwrap(),
+					Some(gst::ClockTime::from_useconds(index as u64 * micros)),
+					"packet {index} of {frame_size} ms, stamped {:?}",
+					buffer.pts()
+				);
+			}
+		}
 	}
 
 	// The regression: a real 5.1 opusenc stream publishes the family 1 head its caps

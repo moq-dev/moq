@@ -32,17 +32,18 @@ Go, and C++, `moq-c` for C, `decodebin` on each `audio_N` pad for GStreamer, and
 publisher's channel count, contiguous timestamps, and each channel's tone carrying
 most of its energy by a Goertzel filter. A garbled decode (wrong channel order or
 sample rate), silence, a timestamp gap, or a rendition left undecoded fails the cell.
-Each publisher's tone starts at timestamp zero, so `--phase` also holds every
+Each publisher's tone starts at timestamp zero, so `--phase` also holds every Opus
 rendition's tone to its timestamps within a sample, which fails a decoder that keeps
-or drops the wrong number of priming samples (Opus pre-skip or AAC priming). It skips
-the browser publisher, whose capture clock is not tied to its WAV, and the native-JS
-subscriber, which leaves the pre-skip to the player as WebCodecs does and stamps
-milliseconds. The browser plays each rendition in a page of its own, the player pinned
-to it by `controls.audio.target`, and runs the same filter on each channel of the
-player's audio graph. A negative control then has the Rust CLI swap its channels'
-tones, and every subscriber must refuse every rendition as the wrong tone, not fail
-some other way. `interop.sh` is the one place the tones and each publisher's codecs
-are chosen.
+or drops the wrong pre-skip. It skips the browser publisher, whose capture clock is
+not tied to its WAV, and the native-JS subscriber, which leaves the pre-skip to the
+player as WebCodecs does and stamps milliseconds. AAC is skipped until the fMP4
+importer applies the edit list holding ffmpeg's priming
+([quest](/quest/m1/fmp4-edit-lists.md)). The browser plays each rendition in a page
+of its own, the player pinned to it by `controls.audio.target`, and runs the same
+filter on each channel of the player's audio graph. A negative control then has the
+Rust CLI swap its channels' tones, and every subscriber must refuse every rendition
+as the wrong tone, not fail some other way. `interop.sh` is the one place the tones
+and each publisher's codecs are chosen.
 
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
