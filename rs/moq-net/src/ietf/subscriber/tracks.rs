@@ -429,21 +429,23 @@ impl Subscriber {
 		let mut stream = request_stream::with_stats(stream?, self.origin.stats(), self.version);
 		// No draft with SUBSCRIBE_TRACKS has MAX_REQUEST_ID, so this never waits on credit.
 		let request_id = kio::wait(|waiter| self.control.poll_next_request_id(waiter)).await;
-		stream.writer.buffer_varint(ietf::SubscribeTracks::ID)?;
-		stream.writer.buffer(&ietf::SubscribeTracks {
-			request_id,
-			prefix: prefix.as_path(),
-			forward: false,
-			subscriber_priority: None,
-			group_order: None,
-			filter: None,
-			fill: None,
-			properties_wanted: true,
-			new_group: None,
-			range_filters: false,
-			track_filter: false,
-			authorization_token: None,
-		})?;
+		stream.writer.buffer_message(
+			ietf::SubscribeTracks::ID,
+			&ietf::SubscribeTracks {
+				request_id,
+				prefix: prefix.as_path(),
+				forward: false,
+				subscriber_priority: None,
+				group_order: None,
+				filter: None,
+				fill: None,
+				properties_wanted: true,
+				new_group: None,
+				range_filters: false,
+				track_filter: false,
+				authorization_token: None,
+			},
+		)?;
 		tracing::debug!(prefix = %self.origin.absolute(prefix), id = %request_id, "subscribe_tracks started");
 
 		let mut messages = Messages::new(self.session.clone(), self.control.client());
@@ -631,10 +633,9 @@ impl Subscriber {
 		);
 		let mut messages = Messages::new(self.session.clone(), self.control.client());
 		let accepted = async {
-			stream.writer.varint(ietf::Subscribe::ID).await?;
 			stream
 				.writer
-				.encode(&ietf::Subscribe {
+				.encode_message(&ietf::Subscribe {
 					max_age: None,
 					new_group: None,
 					request_id,
@@ -853,18 +854,18 @@ impl Subscriber {
 				Version::Draft18 => ietf::PublishOk::ID,
 				_ => ietf::RequestOk::ID,
 			};
-			stream.writer.varint(id).await?;
-			stream
-				.writer
-				.encode(&ietf::PublishOk {
+			stream.writer.buffer_message(
+				id,
+				&ietf::PublishOk {
 					request_id: None,
 					forward: false,
 					subscriber_priority: None,
 					group_order: None,
 					filter: None,
 					new_group: None,
-				})
-				.await
+				},
+			)?;
+			std::future::poll_fn(|cx| stream.writer.poll_flush(cx)).await
 		}
 		.await;
 		if let Err(err) = ok {
@@ -1136,9 +1137,8 @@ impl Subscriber {
 		forward: &Forward,
 	) -> Result<(), Error> {
 		let request_id = self.control.next_request_id(&self.runtime).await?;
-		writer.varint(ietf::SubscribeUpdate::ID).await?;
 		writer
-			.encode(&ietf::SubscribeUpdate {
+			.encode_message(&ietf::SubscribeUpdate {
 				max_age: forward.max_age,
 				request_id,
 				subscription_request_id: None,
