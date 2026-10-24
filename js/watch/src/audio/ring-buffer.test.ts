@@ -412,6 +412,26 @@ describe("resize", () => {
 		expect(buffer.stalled).toBe(false); // Already covers the new floor
 	});
 
+	// Buffered playback promises to play through everything queued, so a lower floor must not drop
+	// the oldest unread audio the way a live ring does.
+	it("keeps every unread sample when a buffered ring's floor drops", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Milli, buffered: true });
+		write(buffer, 0 as Milli, 100, { channels: 1, value: 1.0 });
+		write(buffer, 100 as Milli, 80, { channels: 1, value: 2.0 });
+		expect(buffer.length).toBe(180);
+
+		buffer.resize(30 as Milli);
+		expect(buffer.capacity).toBe(180);
+		expect(buffer.length).toBe(180);
+		expect(Milli.fromMicro(buffer.timestamp)).toBe(0 as Milli);
+		const [output] = read(buffer, 180, 1);
+		expect([...output]).toEqual([...Array(100).fill(1), ...Array(80).fill(2)]);
+
+		// Drained, it shrinks back to the new floor's capacity on the next resize.
+		buffer.resize(30 as Milli);
+		expect(buffer.capacity).toBe(60);
+	});
+
 	it("should be a no-op when capacity is unchanged", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Milli });
 
@@ -650,9 +670,8 @@ describe("decoded rate must match the ring (#2352)", () => {
 });
 
 describe("live anchoring", () => {
-	// The SharedArrayBuffer ring anchors in both modes; this keeps the postMessage fallback
-	// in step. Without anchoring, a first frame at a large timestamp gap-filled the whole ring
-	// with zeros, un-stalled on that overflow, and left the playhead a floor before the frame.
+	// Without anchoring, a first frame at a large timestamp gap-filled the whole ring with zeros,
+	// un-stalled on that overflow, and left the playhead a floor before the frame.
 	it("anchors a live ring to the first frame instead of gap-filling from zero", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Milli });
 		expect(buffer.capacity).toBe(200);

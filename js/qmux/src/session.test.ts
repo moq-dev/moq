@@ -238,7 +238,7 @@ function connect(config?: Config): { session: Session; peer: FakePeer } {
 	// Idle timer off so a stray interval can't interfere with the test.
 	// Bare version ALPNs are offered by default (requireProtocol defaults to false).
 	const session = new Session("https://example/test", {
-		config: { maxIdleTimeout: 0n, ...config },
+		config: { idleTimeout: null, ...config },
 	});
 	const peer = FakePeer.last as FakePeer;
 	return { session, peer };
@@ -552,7 +552,7 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("RESET_STREAM final_size consumes connection flow control", async () => {
-		const { session, peer } = connect({ maxData: 4n, maxStreamDataUni: 10n });
+		const { session, peer } = connect({ receiveWindow: 4n, streamReceiveWindow: 10n });
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
 
@@ -569,7 +569,7 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("RESET_STREAM final_size is cumulative with later stream data for MAX_DATA", async () => {
-		const { session, peer } = connect({ maxData: 10n, maxStreamDataUni: 10n });
+		const { session, peer } = connect({ receiveWindow: 10n, streamReceiveWindow: 10n });
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
 
@@ -595,7 +595,7 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("RESET_STREAM final_size replenishes connection credit once discarded", async () => {
-		const { session, peer } = connect({ maxData: 10n, maxStreamDataUni: 10n });
+		const { session, peer } = connect({ receiveWindow: 10n, streamReceiveWindow: 10n });
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
 
@@ -784,7 +784,7 @@ describe("Session integration (scripted peer)", () => {
 		const clock = new Manual();
 		const uninstall = clock.install();
 		try {
-			const { session, peer } = connect({ maxIdleTimeout: 300n });
+			const { session, peer } = connect({ idleTimeout: 300 });
 			await session.ready;
 			await waitFor(() => peer.has("transport_parameters"));
 			peer.send({ type: "transport_parameters", params: peerParams() });
@@ -810,9 +810,64 @@ describe("Session integration (scripted peer)", () => {
 		}
 	});
 
+	test("malformed and unsupported config is refused before transport setup", () => {
+		const socket = {
+			opened: new Promise(() => {}),
+			closed: new Promise(() => {}),
+			close: () => {},
+		} as unknown as WebSocketStreamLike;
+		const invalid = [
+			{ receiveWindow: -1 },
+			{ receiveWindow: null },
+			{ receiveWindow: "64" },
+			{ streamReceiveWindow: 64 },
+			{ maxStreamsBidi: null },
+			{ maxStreamsUni: 1 },
+			{ maxRecordSize: null },
+			{ maxDatagramFrameSize: 64 },
+			{ maxData: 64n },
+			{ maxStreamDataUni: 64n },
+			{ maxIdleTimeout: 1000n },
+			{ unknown: 1n },
+		];
+		for (const config of invalid) {
+			expect(() => Session.accept(socket, { config: config as unknown as Config })).toThrow();
+		}
+	});
+
+	test("undefined optional settings resolve to defaults before advertisement", async () => {
+		const { session, peer } = connect({
+			receiveWindow: undefined,
+			streamReceiveWindow: undefined,
+			idleTimeout: undefined,
+			maxDatagramFrameSize: undefined,
+		});
+		await session.ready;
+		await waitFor(() => peer.has("transport_parameters"));
+		const frame = peer
+			.received()
+			.find(
+				(frame): frame is Frame.TransportParameters => frame.type === "transport_parameters",
+			) as Frame.TransportParameters;
+		expect(frame.params.initialMaxData).toBe(1_048_576n);
+		expect(frame.params.initialMaxStreamDataUni).toBe(262_144n);
+		expect(frame.params.maxIdleTimeout).toBe(30_000n);
+		expect(frame.params.maxDatagramFrameSize).toBe(Frame.DEFAULT_MAX_RECORD_SIZE);
+		session.close();
+	});
+
+	test("disabled config uses null and invalid durations fail before opening", () => {
+		for (const idleTimeout of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+			expect(() => new Session("https://example/test", { config: { idleTimeout } })).toThrow("idleTimeout");
+		}
+		expect(() => new Session("https://example/test", { config: { maxDatagramFrameSize: 0n } })).toThrow(
+			"maxDatagramFrameSize",
+		);
+	});
+
 	test("config values that don't fit a varint are refused up front", () => {
 		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
-		expect(() => new Session("https://example/test", { config: { maxData: -1n } })).toThrow("VarInt");
+		expect(() => new Session("https://example/test", { config: { receiveWindow: -1n } })).toThrow("VarInt");
 		expect(() => new Session("https://example/test", { config: { maxStreamsBidi: VarInt.MAX + 1n } })).toThrow(
 			"VarInt",
 		);
@@ -932,7 +987,7 @@ describe("Session integration (scripted peer)", () => {
 			protocols: ["moq-lite-04"],
 			versions: { "moq-lite-04": "qmux-01" },
 			requireProtocol: true,
-			config: { maxIdleTimeout: 0n },
+			config: { idleTimeout: null },
 		});
 
 		const err = await settleTo(session.ready);
@@ -1129,7 +1184,7 @@ describe("Session integration (scripted peer)", () => {
 			const clock = new Manual();
 			const uninstall = clock.install();
 			try {
-				const { session, peer } = connect({ maxIdleTimeout: 150n });
+				const { session, peer } = connect({ idleTimeout: 150 });
 				await session.ready;
 				await waitFor(() => peer.has("transport_parameters"));
 				// A successfully written keep-alive is send activity under QMux. Block the
@@ -1166,7 +1221,7 @@ describe("Session integration (scripted peer)", () => {
 			const clock = new Manual();
 			const uninstall = clock.install();
 			try {
-				const { session, peer } = connect({ maxIdleTimeout: 150n });
+				const { session, peer } = connect({ idleTimeout: 150 });
 				await session.ready;
 				await waitFor(() => peer.has("transport_parameters"));
 
@@ -1183,7 +1238,7 @@ describe("Session integration (scripted peer)", () => {
 			const clock = new Manual();
 			const uninstall = clock.install();
 			try {
-				const { session, peer } = connect({ maxIdleTimeout: 120n });
+				const { session, peer } = connect({ idleTimeout: 120 });
 				await session.ready;
 				peer.send({ type: "transport_parameters", params: peerParams() });
 
@@ -1217,7 +1272,7 @@ describe("Session integration (scripted peer)", () => {
 			const clock = new Manual();
 			const uninstall = clock.install();
 			try {
-				const { session, peer } = connect({ maxIdleTimeout: 120n });
+				const { session, peer } = connect({ idleTimeout: 120 });
 				await session.ready;
 				peer.send({ type: "transport_parameters", params: peerParams() });
 
@@ -1382,7 +1437,7 @@ describe("Session integration (scripted peer)", () => {
 	test("datagrams: a DATAGRAM we never advertised support for is fatal", async () => {
 		// ourParams.maxDatagramFrameSize = 0 → we advertised no datagram support, so
 		// receiving one at all is a PROTOCOL_VIOLATION (RFC 9221), not a droppable frame.
-		const { session, peer } = connect({ maxDatagramFrameSize: 0n });
+		const { session, peer } = connect({ maxDatagramFrameSize: null });
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
 
@@ -1450,7 +1505,7 @@ describe("Session integration (scripted peer)", () => {
 
 	test("MAX_STREAM_DATA is extended on delivery to the app, not on receipt", async () => {
 		// Small per-stream window so a few delivered chunks cross the half-window threshold.
-		const { session, peer } = connect({ maxStreamDataUni: 1000n });
+		const { session, peer } = connect({ streamReceiveWindow: 1000n });
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
 
@@ -1495,8 +1550,8 @@ describe("Session integration (scripted peer)", () => {
 		// sends a full stream plus FIN while the application never reads the acceptor.
 		const { session, peer } = connect({
 			maxStreamsUni: 1n,
-			maxData: 100n,
-			maxStreamDataUni: 100n,
+			receiveWindow: 100n,
+			streamReceiveWindow: 100n,
 		});
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
@@ -1692,7 +1747,7 @@ describe("Session integration (scripted peer)", () => {
 			// connection recv offset; if they aren't also counted as consumed, the
 			// advertised window never replenishes and the peer is wrongly starved /
 			// eventually tripped into a 1002 flow-control close.
-			const { session, peer } = connect({ maxData: 300n });
+			const { session, peer } = connect({ receiveWindow: 300n });
 			await session.ready;
 			peer.send({ type: "transport_parameters", params: peerParams() });
 
@@ -1879,7 +1934,7 @@ function accept(options?: { config?: Config; protocol?: string }): { session: Se
 	const peer = new FakePeer("wss://example/test", { protocol: options?.protocol });
 	const session = Session.accept(peer as unknown as WebSocketStreamLike, {
 		// Idle timer off so a stray interval can't interfere with the test.
-		config: { maxIdleTimeout: 0n, ...options?.config },
+		config: { idleTimeout: null, ...options?.config },
 	});
 	return { session, peer };
 }
@@ -1891,6 +1946,17 @@ async function firstStreamId(peer: FakePeer): Promise<Stream.Id> {
 }
 
 describe("Session.accept (server role)", () => {
+	for (const protocol of ["", "webtransport", "unknown", "qmux-99"]) {
+		test(`refuses unsupported subprotocol ${JSON.stringify(protocol)}`, async () => {
+			const { session, peer } = accept({ protocol });
+			expect(await settleTo(session.ready)).toBeInstanceOf(Error);
+			const error = await expectSessionFailure(session);
+			expect((error.cause as Error).message).toContain("Unsupported QMux subprotocol");
+			expect(peer.sent).toEqual([]);
+			expect(peer.closeInfo).toBeDefined();
+		});
+	}
+
 	test("streams we open are server-initiated", async () => {
 		// The whole point of the role: a server minting client-initiated ids would
 		// collide with the client's own streams.
@@ -1989,11 +2055,10 @@ describe("Session.accept (server role)", () => {
 	});
 
 	test("the protocol option stands in for a socket that doesn't report one", async () => {
-		// Without the override this negotiates the legacy `webtransport` wire format
-		// and misreads every QMux frame the peer sends.
+		// Without the override an empty negotiated subprotocol is refused.
 		const peer = new FakePeer("wss://example/test", { protocol: "" });
 		const session = Session.accept(peer as unknown as WebSocketStreamLike, {
-			config: { maxIdleTimeout: 0n },
+			config: { idleTimeout: null },
 			protocol: "qmux-01.moq-lite-04",
 		});
 		await session.ready;
@@ -2005,7 +2070,7 @@ describe("Session.accept (server role)", () => {
 	test("a plain WebSocket is adopted, not just a WebSocketStream", async () => {
 		// What Deno.upgradeWebSocket / `ws` actually hand back.
 		const ws = new FakeServerSocket("wss://example/test", "qmux-01");
-		const session = Session.accept(ws, { config: { maxIdleTimeout: 0n } });
+		const session = Session.accept(ws, { config: { idleTimeout: null } });
 		await session.ready;
 
 		await waitFor(() => ws.sent.length > 0);
@@ -2098,20 +2163,6 @@ describe("STREAM frame size", () => {
 		expect((err.cause as Error).message).toContain("max_frame_size");
 		await waitFor(() => sentCloseCode(peer) !== undefined);
 		expect(sentCloseCode(peer)).toBe(1002);
-	});
-
-	test("the legacy binding delivers a full-size frame", async () => {
-		// No record layer here, so the message is the frame; these bytes are
-		// unchanged across every release of this package.
-		const { session, peer } = accept({ protocol: "webtransport" });
-		await session.ready;
-
-		const id = Stream.Id.create(0n, Stream.Dir.Uni, false);
-		const data = new Uint8Array(Frame.MAX_FRAME_SIZE - 2).fill(0x5a);
-		peer.sendRaw(Frame.encode({ type: "stream", id, data, fin: true }, "webtransport"));
-
-		expect(await readIncomingUni(session)).toEqual(data);
-		session.close();
 	});
 
 	test("a record over max_record_size closes the session", async () => {
@@ -2251,7 +2302,7 @@ describe("RESET_STREAM_AT (qmux-02)", () => {
 	test("the delivered prefix and the discarded tail both return connection credit", async () => {
 		// A 10-byte window replenishes once 5 or more are consumed: the discarded
 		// tail (4) or the prefix (6) alone stays below that, so MAX_DATA 20 needs both.
-		const { session, peer, id, reader } = await open([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], { maxData: 10n });
+		const { session, peer, id, reader } = await open([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], { receiveWindow: 10n });
 		await reset(peer, resetStreamAt(id, 0, 10n, 6n));
 		expect(peer.has("max_data")).toBe(false);
 
@@ -2264,7 +2315,7 @@ describe("RESET_STREAM_AT (qmux-02)", () => {
 	});
 
 	test("a refused stream's reliable prefix still returns connection credit", async () => {
-		const { session, peer } = accept({ protocol: "qmux-02", config: { maxData: 10n } });
+		const { session, peer } = accept({ protocol: "qmux-02", config: { receiveWindow: 10n } });
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
 

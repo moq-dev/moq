@@ -45,7 +45,7 @@ interface State {
  * Every frame a decoder receives while this handle is open, and every gap between them, in delivery order.
  *
  * Unread entries queue until {@link next} takes them, so read continuously or close the handle;
- * closing releases the queue. Obtain one from a decoder's `arrivals()`.
+ * closing releases the queue. Obtain one from `Audio.Decoder.arrivals()`.
  */
 export class Arrivals implements AsyncIterable<Arrival> {
 	readonly #state: State;

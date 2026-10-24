@@ -7,6 +7,8 @@
 
 #[cfg(feature = "async")]
 use crate::coding::Stream;
+#[cfg(feature = "async")]
+use crate::driver::Transport;
 
 use crate::{
 	DecodeError, Error, SessionError,
@@ -37,7 +39,7 @@ pub fn from_setup(params: &Parameters, version: Version) -> Result<Option<Token>
 }
 
 /// Present `token` in our SETUP, by value.
-#[cfg_attr(not(test), expect(dead_code))]
+#[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
 pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> Result<(), EncodeError> {
 	params.set_bytes(ParameterBytes::AuthorizationToken, encode(token, version)?);
 	Ok(())
@@ -108,8 +110,8 @@ pub(super) fn reason(err: &DecodeError) -> &'static str {
 /// Section 8.9 rejects the message rather than the session. Every request starts with its
 /// Request ID, so it is read from the undecoded `body`.
 #[cfg(feature = "async")]
-pub(super) async fn reject<S: crate::transport::poll::Session>(
-	mut stream: Stream<S, Version>,
+pub(super) async fn reject(
+	mut stream: Stream<Transport, Version>,
 	kind: request::Kind,
 	body: super::Body,
 	err: DecodeError,

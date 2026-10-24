@@ -210,10 +210,11 @@ async function watch(config: Media): Promise<{ first_frame_ms: number }> {
 		player?.close();
 		connection.close();
 	});
-	const error = player.error;
+	const decoders = [player.video, player.audio];
 	const failed = new Promise<never>((_, reject) => {
-		const stop = error.subscribe((err) => err && reject(err));
-		cleanup.push(stop);
+		for (const decoder of decoders) {
+			cleanup.push(decoder.out.error.subscribe((err) => err && reject(err)));
+		}
 	});
 	return { first_frame_ms: await Promise.race([first, failed]) };
 }

@@ -375,19 +375,6 @@ impl<F: Container> Consumer<F> {
 			}
 		}
 
-		// Reap aborted groups the cursor hasn't reached: nothing below settles them
-		// (the read arm only handles the front at the cursor, and neither the skip
-		// target scan nor the empty-group check counts an abort), so one left ahead
-		// of a sequence gap would park the consumer forever. Buffered frames read
-		// before the abort stay deliverable, and a fault found among them waits for
-		// its place in delivery order, so a group holding either is kept; the front
-		// at the cursor keeps the eviction fast path in the read arm below.
-		// poll_aborted registers the waiter on live groups, so a later abort re-polls.
-		let current = self.current;
-		self.discard(|group| {
-			group.sequence > current && group.buffered.is_empty() && group.fault.is_none() && group.poll_aborted(waiter)
-		})?;
-
 		loop {
 			if self.pending.front().is_none_or(|group| group.sequence <= self.current) {
 				self.hole_timer = None;
@@ -481,6 +468,18 @@ impl<F: Container> Consumer<F> {
 					}
 				}
 			}
+
+			// Reap later aborts only when delivery blocks. An aborted group beyond a
+			// sequence gap must not park the reader forever. Buffered frames and faults
+			// stay in delivery order; the current group has its eviction path above.
+			// Live groups register the waiter here so a later abort wakes the reader.
+			let current = self.current;
+			self.discard(|group| {
+				group.sequence > current
+					&& group.buffered.is_empty()
+					&& group.fault.is_none()
+					&& group.poll_aborted(waiter)
+			})?;
 
 			// The current group's furthest presentation point (timestamp + duration).
 			let current_end = if let Some(current) = self.pending.front_mut()
