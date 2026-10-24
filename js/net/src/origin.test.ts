@@ -2170,30 +2170,40 @@ test("closing a derived handle withdraws the sessions and answers attached throu
 
 	const request = consumer.request(path);
 	const detach = wireOf(scoped).attach(false);
+	const snapshot = wireOf(scoped).snapshot(Path.empty());
+	const announced = consumer.announced();
 	const upstream = new BroadcastProducer();
 	const withdraw = wireOf(scoped).answer(path, upstream.consume());
 	expect(withdraw).toBeDefined();
 	await settle();
 	expect(request.active.peek()).toBeDefined();
 	expect(request.unroutable.peek()).toBe(false);
+	expect(announced.synced.peek()).toBe(false);
 
 	scoped.close();
 	await settle();
 
-	// The answer went with the handle, and nothing is left that could answer instead.
+	// The answer and the initial set in flight went with the handle, and nothing is left
+	// that could answer instead.
 	expect(request.active.peek()).toBeUndefined();
+	expect(announced.synced.peek()).toBe(true);
 	const retry = consumer.request(path);
 	expect(retry.unroutable.peek()).toBe(true);
 
-	// A session still using the released handle cannot answer or count as an answerer.
+	// A session still using the released handle cannot answer, count as an answerer, or
+	// hold readers unsynced.
 	expect(wireOf(scoped).answer(path, new BroadcastProducer().consume())).toBeUndefined();
 	wireOf(scoped).attach(false);
+	wireOf(scoped).snapshot(Path.empty());
 	await settle();
 	expect(retry.unroutable.peek()).toBe(true);
+	expect(announced.synced.peek()).toBe(true);
 
 	// The session's own teardown afterwards is a no-op.
 	withdraw?.();
+	snapshot();
 	detach();
+	announced.close();
 	retry.close();
 	request.close();
 	origin.close();

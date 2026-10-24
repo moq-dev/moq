@@ -1172,7 +1172,8 @@ export class Producer implements Table {
 			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),
-			snapshot: (prefix) => this.#state.addSnapshot(this.#scope.prefix(prefix)),
+			snapshot: (prefix) =>
+				this.#borrowed?.closed ? () => {} : this.#hold(this.#state.addSnapshot(this.#scope.prefix(prefix))),
 			get requests() {
 				if (thisProducer.#scope === Scope.all) return thisProducer.#state.requests;
 				thisProducer.#requests ??= new Derived([thisProducer.#state.requests], (requests) =>
