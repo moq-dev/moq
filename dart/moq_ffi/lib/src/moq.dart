@@ -261,7 +261,6 @@ class FfiConverterMoqAudioEncoderInput {
 
 class MoqAudioEncoderOutput {
   final MoqAudioCodec codec;
-  final String? track;
   final int? sampleRate;
   final int? channels;
   final int? bitrate;
@@ -269,7 +268,6 @@ class MoqAudioEncoderOutput {
   final MoqAudioPreset? preset;
   MoqAudioEncoderOutput({
     required this.codec,
-    this.track = null,
     this.sampleRate = null,
     this.channels = null,
     this.bitrate = null,
@@ -290,11 +288,6 @@ class FfiConverterMoqAudioEncoderOutput {
     );
     final codec = codec_lifted.value;
     new_offset += codec_lifted.bytesRead;
-    final track_lifted = FfiConverterOptionalString.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final track = track_lifted.value;
-    new_offset += track_lifted.bytesRead;
     final sampleRate_lifted = FfiConverterOptionalUInt32.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -323,7 +316,6 @@ class FfiConverterMoqAudioEncoderOutput {
     return LiftRetVal(
       MoqAudioEncoderOutput(
         codec: codec,
-        track: track,
         sampleRate: sampleRate,
         channels: channels,
         bitrate: bitrate,
@@ -337,7 +329,6 @@ class FfiConverterMoqAudioEncoderOutput {
   static RustBuffer lower(MoqAudioEncoderOutput value) {
     final total_length =
         FfiConverterMoqAudioCodec.allocationSize(value.codec) +
-        FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterOptionalUInt32.allocationSize(value.sampleRate) +
         FfiConverterOptionalUInt32.allocationSize(value.channels) +
         FfiConverterOptionalUInt32.allocationSize(value.bitrate) +
@@ -353,10 +344,6 @@ class FfiConverterMoqAudioEncoderOutput {
     int new_offset = buf.offsetInBytes;
     new_offset += FfiConverterMoqAudioCodec.write(
       value.codec,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    new_offset += FfiConverterOptionalString.write(
-      value.track,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalUInt32.write(
@@ -384,7 +371,6 @@ class FfiConverterMoqAudioEncoderOutput {
 
   static int allocationSize(MoqAudioEncoderOutput value) {
     return FfiConverterMoqAudioCodec.allocationSize(value.codec) +
-        FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterOptionalUInt32.allocationSize(value.sampleRate) +
         FfiConverterOptionalUInt32.allocationSize(value.channels) +
         FfiConverterOptionalUInt32.allocationSize(value.bitrate) +
@@ -494,6 +480,99 @@ class FfiConverterMoqAudioPacket {
 
   static int allocationSize(MoqAudioPacket value) {
     return FfiConverterUint8List.allocationSize(value.data) + 0;
+  }
+}
+
+class MoqAudioProducerOptions {
+  final MoqAudioEncoderInput input;
+  final MoqAudioEncoderOutput output;
+  final String? track;
+  final MoqBandwidth? bandwidth;
+  MoqAudioProducerOptions({
+    required this.input,
+    required this.output,
+    this.track = null,
+    this.bandwidth = null,
+  });
+}
+
+class FfiConverterMoqAudioProducerOptions {
+  static MoqAudioProducerOptions lift(RustBuffer buf) {
+    return FfiConverterMoqAudioProducerOptions.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqAudioProducerOptions> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final input_lifted = FfiConverterMoqAudioEncoderInput.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final input = input_lifted.value;
+    new_offset += input_lifted.bytesRead;
+    final output_lifted = FfiConverterMoqAudioEncoderOutput.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final output = output_lifted.value;
+    new_offset += output_lifted.bytesRead;
+    final track_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final track = track_lifted.value;
+    new_offset += track_lifted.bytesRead;
+    final bandwidth_lifted = FfiConverterOptionalMoqBandwidth.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final bandwidth = bandwidth_lifted.value;
+    new_offset += bandwidth_lifted.bytesRead;
+    return LiftRetVal(
+      MoqAudioProducerOptions(
+        input: input,
+        output: output,
+        track: track,
+        bandwidth: bandwidth,
+      ),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqAudioProducerOptions value) {
+    final total_length =
+        FfiConverterMoqAudioEncoderInput.allocationSize(value.input) +
+        FfiConverterMoqAudioEncoderOutput.allocationSize(value.output) +
+        FfiConverterOptionalString.allocationSize(value.track) +
+        FfiConverterOptionalMoqBandwidth.allocationSize(value.bandwidth) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqAudioProducerOptions value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterMoqAudioEncoderInput.write(
+      value.input,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterMoqAudioEncoderOutput.write(
+      value.output,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalString.write(
+      value.track,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalMoqBandwidth.write(
+      value.bandwidth,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqAudioProducerOptions value) {
+    return FfiConverterMoqAudioEncoderInput.allocationSize(value.input) +
+        FfiConverterMoqAudioEncoderOutput.allocationSize(value.output) +
+        FfiConverterOptionalString.allocationSize(value.track) +
+        FfiConverterOptionalMoqBandwidth.allocationSize(value.bandwidth) +
+        0;
   }
 }
 
@@ -1990,6 +2069,7 @@ class MoqVideo {
   final MoqDimensions? displayAspect;
   final int? bitrate;
   final bool enabled;
+  final int preference;
   final double? framerate;
   final MoqContainer container;
   MoqVideo({
@@ -2003,6 +2083,7 @@ class MoqVideo {
     this.displayAspect,
     this.bitrate,
     this.enabled = true,
+    this.preference = 0,
     this.framerate,
     required this.container,
   });
@@ -2065,6 +2146,11 @@ class FfiConverterMoqVideo {
     );
     final enabled = enabled_lifted.value;
     new_offset += enabled_lifted.bytesRead;
+    final preference_lifted = FfiConverterInt32.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final preference = preference_lifted.value;
+    new_offset += preference_lifted.bytesRead;
     final framerate_lifted = FfiConverterOptionalDouble64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -2087,6 +2173,7 @@ class FfiConverterMoqVideo {
         displayAspect: displayAspect,
         bitrate: bitrate,
         enabled: enabled,
+        preference: preference,
         framerate: framerate,
         container: container,
       ),
@@ -2106,6 +2193,7 @@ class FfiConverterMoqVideo {
         FfiConverterOptionalMoqDimensions.allocationSize(value.displayAspect) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
         FfiConverterBool.allocationSize(value.enabled) +
+        FfiConverterInt32.allocationSize(value.preference) +
         FfiConverterOptionalDouble64.allocationSize(value.framerate) +
         FfiConverterMoqContainer.allocationSize(value.container) +
         0;
@@ -2156,6 +2244,10 @@ class FfiConverterMoqVideo {
       value.enabled,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterInt32.write(
+      value.preference,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     new_offset += FfiConverterOptionalDouble64.write(
       value.framerate,
       Uint8List.view(buf.buffer, new_offset),
@@ -2178,6 +2270,7 @@ class FfiConverterMoqVideo {
         FfiConverterOptionalMoqDimensions.allocationSize(value.displayAspect) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
         FfiConverterBool.allocationSize(value.enabled) +
+        FfiConverterInt32.allocationSize(value.preference) +
         FfiConverterOptionalDouble64.allocationSize(value.framerate) +
         FfiConverterMoqContainer.allocationSize(value.container) +
         0;
@@ -3988,7 +4081,7 @@ class MoqVideoEncoderInput {
   final MoqVideoPixelFormat format;
   final int width;
   final int height;
-  final int framerate;
+  final MoqVideoFrameRate framerate;
   MoqVideoEncoderInput({
     required this.format,
     required this.width,
@@ -4019,7 +4112,7 @@ class FfiConverterMoqVideoEncoderInput {
     );
     final height = height_lifted.value;
     new_offset += height_lifted.bytesRead;
-    final framerate_lifted = FfiConverterUInt32.read(
+    final framerate_lifted = FfiConverterMoqVideoFrameRate.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final framerate = framerate_lifted.value;
@@ -4040,7 +4133,7 @@ class FfiConverterMoqVideoEncoderInput {
         FfiConverterMoqVideoPixelFormat.allocationSize(value.format) +
         FfiConverterUInt32.allocationSize(value.width) +
         FfiConverterUInt32.allocationSize(value.height) +
-        FfiConverterUInt32.allocationSize(value.framerate) +
+        FfiConverterMoqVideoFrameRate.allocationSize(value.framerate) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -4061,7 +4154,7 @@ class FfiConverterMoqVideoEncoderInput {
       value.height,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterUInt32.write(
+    new_offset += FfiConverterMoqVideoFrameRate.write(
       value.framerate,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -4072,20 +4165,18 @@ class FfiConverterMoqVideoEncoderInput {
     return FfiConverterMoqVideoPixelFormat.allocationSize(value.format) +
         FfiConverterUInt32.allocationSize(value.width) +
         FfiConverterUInt32.allocationSize(value.height) +
-        FfiConverterUInt32.allocationSize(value.framerate) +
+        FfiConverterMoqVideoFrameRate.allocationSize(value.framerate) +
         0;
   }
 }
 
 class MoqVideoEncoderOutput {
   final MoqVideoCodec codec;
-  final String? track;
   final int? bitrate;
   final MoqVideoGop? gop;
   final MoqVideoEncoderKind kind;
   MoqVideoEncoderOutput({
     required this.codec,
-    this.track = null,
     this.bitrate = null,
     this.gop = null,
     required this.kind,
@@ -4104,11 +4195,6 @@ class FfiConverterMoqVideoEncoderOutput {
     );
     final codec = codec_lifted.value;
     new_offset += codec_lifted.bytesRead;
-    final track_lifted = FfiConverterOptionalString.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final track = track_lifted.value;
-    new_offset += track_lifted.bytesRead;
     final bitrate_lifted = FfiConverterOptionalUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -4127,7 +4213,6 @@ class FfiConverterMoqVideoEncoderOutput {
     return LiftRetVal(
       MoqVideoEncoderOutput(
         codec: codec,
-        track: track,
         bitrate: bitrate,
         gop: gop,
         kind: kind,
@@ -4139,7 +4224,6 @@ class FfiConverterMoqVideoEncoderOutput {
   static RustBuffer lower(MoqVideoEncoderOutput value) {
     final total_length =
         FfiConverterMoqVideoCodec.allocationSize(value.codec) +
-        FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
         FfiConverterOptionalMoqVideoGop.allocationSize(value.gop) +
         FfiConverterMoqVideoEncoderKind.allocationSize(value.kind) +
@@ -4153,10 +4237,6 @@ class FfiConverterMoqVideoEncoderOutput {
     int new_offset = buf.offsetInBytes;
     new_offset += FfiConverterMoqVideoCodec.write(
       value.codec,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    new_offset += FfiConverterOptionalString.write(
-      value.track,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalUInt64.write(
@@ -4176,7 +4256,6 @@ class FfiConverterMoqVideoEncoderOutput {
 
   static int allocationSize(MoqVideoEncoderOutput value) {
     return FfiConverterMoqVideoCodec.allocationSize(value.codec) +
-        FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
         FfiConverterOptionalMoqVideoGop.allocationSize(value.gop) +
         FfiConverterMoqVideoEncoderKind.allocationSize(value.kind) +
@@ -4239,6 +4318,65 @@ class FfiConverterMoqVideoFrame {
   static int allocationSize(MoqVideoFrame value) {
     return FfiConverterUInt64.allocationSize(value.timestampUs) +
         FfiConverterUint8List.allocationSize(value.data) +
+        0;
+  }
+}
+
+class MoqVideoFrameRate {
+  final int numerator;
+  final int denominator;
+  MoqVideoFrameRate({required this.numerator, required this.denominator});
+}
+
+class FfiConverterMoqVideoFrameRate {
+  static MoqVideoFrameRate lift(RustBuffer buf) {
+    return FfiConverterMoqVideoFrameRate.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqVideoFrameRate> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final numerator_lifted = FfiConverterUInt32.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final numerator = numerator_lifted.value;
+    new_offset += numerator_lifted.bytesRead;
+    final denominator_lifted = FfiConverterUInt32.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final denominator = denominator_lifted.value;
+    new_offset += denominator_lifted.bytesRead;
+    return LiftRetVal(
+      MoqVideoFrameRate(numerator: numerator, denominator: denominator),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqVideoFrameRate value) {
+    final total_length =
+        FfiConverterUInt32.allocationSize(value.numerator) +
+        FfiConverterUInt32.allocationSize(value.denominator) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqVideoFrameRate value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterUInt32.write(
+      value.numerator,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterUInt32.write(
+      value.denominator,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqVideoFrameRate value) {
+    return FfiConverterUInt32.allocationSize(value.numerator) +
+        FfiConverterUInt32.allocationSize(value.denominator) +
         0;
   }
 }
@@ -4314,6 +4452,99 @@ class FfiConverterMoqVideoPacket {
     return FfiConverterUInt64.allocationSize(value.timestampUs) +
         FfiConverterUint8List.allocationSize(value.data) +
         FfiConverterBool.allocationSize(value.keyframe) +
+        0;
+  }
+}
+
+class MoqVideoProducerOptions {
+  final MoqVideoEncoderInput input;
+  final MoqVideoEncoderOutput output;
+  final String? track;
+  final MoqBandwidth? bandwidth;
+  MoqVideoProducerOptions({
+    required this.input,
+    required this.output,
+    this.track = null,
+    this.bandwidth = null,
+  });
+}
+
+class FfiConverterMoqVideoProducerOptions {
+  static MoqVideoProducerOptions lift(RustBuffer buf) {
+    return FfiConverterMoqVideoProducerOptions.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqVideoProducerOptions> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final input_lifted = FfiConverterMoqVideoEncoderInput.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final input = input_lifted.value;
+    new_offset += input_lifted.bytesRead;
+    final output_lifted = FfiConverterMoqVideoEncoderOutput.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final output = output_lifted.value;
+    new_offset += output_lifted.bytesRead;
+    final track_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final track = track_lifted.value;
+    new_offset += track_lifted.bytesRead;
+    final bandwidth_lifted = FfiConverterOptionalMoqBandwidth.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final bandwidth = bandwidth_lifted.value;
+    new_offset += bandwidth_lifted.bytesRead;
+    return LiftRetVal(
+      MoqVideoProducerOptions(
+        input: input,
+        output: output,
+        track: track,
+        bandwidth: bandwidth,
+      ),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqVideoProducerOptions value) {
+    final total_length =
+        FfiConverterMoqVideoEncoderInput.allocationSize(value.input) +
+        FfiConverterMoqVideoEncoderOutput.allocationSize(value.output) +
+        FfiConverterOptionalString.allocationSize(value.track) +
+        FfiConverterOptionalMoqBandwidth.allocationSize(value.bandwidth) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqVideoProducerOptions value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterMoqVideoEncoderInput.write(
+      value.input,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterMoqVideoEncoderOutput.write(
+      value.output,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalString.write(
+      value.track,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalMoqBandwidth.write(
+      value.bandwidth,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqVideoProducerOptions value) {
+    return FfiConverterMoqVideoEncoderInput.allocationSize(value.input) +
+        FfiConverterMoqVideoEncoderOutput.allocationSize(value.output) +
+        FfiConverterOptionalString.allocationSize(value.track) +
+        FfiConverterOptionalMoqBandwidth.allocationSize(value.bandwidth) +
         0;
   }
 }
@@ -7807,15 +8038,11 @@ class MoqAudioProducer implements MoqAudioProducerInterface {
   }
   MoqAudioProducer({
     required MoqMediaCatalogProducer catalog,
-    required MoqAudioEncoderInput input,
-    required MoqAudioEncoderOutput output,
-    MoqBandwidth? bandwidth = null,
+    required MoqAudioProducerOptions options,
   }) : _ptr = rustCall(
          (status) => uniffi_moq_ffi_fn_constructor_moqaudioproducer_new(
            FfiConverterMoqMediaCatalogProducer.lower(catalog),
-           FfiConverterMoqAudioEncoderInput.lower(input),
-           FfiConverterMoqAudioEncoderOutput.lower(output),
-           FfiConverterOptionalMoqBandwidth.lower(bandwidth),
+           FfiConverterMoqAudioProducerOptions.lower(options),
            status,
          ),
          moqExceptionErrorHandler,
@@ -13076,15 +13303,11 @@ class MoqVideoProducer implements MoqVideoProducerInterface {
   }
   MoqVideoProducer({
     required MoqMediaCatalogProducer catalog,
-    required MoqVideoEncoderInput input,
-    required MoqVideoEncoderOutput output,
-    MoqBandwidth? bandwidth = null,
+    required MoqVideoProducerOptions options,
   }) : _ptr = rustCall(
          (status) => uniffi_moq_ffi_fn_constructor_moqvideoproducer_new(
            FfiConverterMoqMediaCatalogProducer.lower(catalog),
-           FfiConverterMoqVideoEncoderInput.lower(input),
-           FfiConverterMoqVideoEncoderOutput.lower(output),
-           FfiConverterOptionalMoqBandwidth.lower(bandwidth),
+           FfiConverterMoqVideoProducerOptions.lower(options),
            status,
          ),
          moqExceptionErrorHandler,
@@ -13263,6 +13486,29 @@ class FfiConverterDouble64 {
   static int write(double value, Uint8List buf) {
     buf.buffer.asByteData(buf.offsetInBytes).setFloat64(0, value);
     return FfiConverterDouble64.allocationSize();
+  }
+}
+
+class FfiConverterInt32 {
+  static int lift(int value) => value;
+  static LiftRetVal<int> read(Uint8List buf) {
+    return LiftRetVal(buf.buffer.asByteData(buf.offsetInBytes).getInt32(0), 4);
+  }
+
+  static int lower(int value) {
+    if (value < -2147483648 || value > 2147483647) {
+      throw ArgumentError("Value out of range for i32: " + value.toString());
+    }
+    return value;
+  }
+
+  static int allocationSize([int value = 0]) {
+    return 4;
+  }
+
+  static int write(int value, Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, lower(value));
+    return 4;
   }
 }
 
@@ -15709,19 +15955,11 @@ external void uniffi_moq_ffi_fn_free_moqaudioproducer(
 );
 
 @Native<
-  Pointer<Void> Function(
-    Pointer<Void>,
-    RustBuffer,
-    RustBuffer,
-    RustBuffer,
-    Pointer<RustCallStatus>,
-  )
+  Pointer<Void> Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)
 >(assetId: _uniffiAssetId)
 external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqaudioproducer_new(
   Pointer<Void> catalog,
-  RustBuffer input,
-  RustBuffer output,
-  RustBuffer bandwidth,
+  RustBuffer options,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -18014,19 +18252,11 @@ external void uniffi_moq_ffi_fn_free_moqvideoproducer(
 );
 
 @Native<
-  Pointer<Void> Function(
-    Pointer<Void>,
-    RustBuffer,
-    RustBuffer,
-    RustBuffer,
-    Pointer<RustCallStatus>,
-  )
+  Pointer<Void> Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)
 >(assetId: _uniffiAssetId)
 external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqvideoproducer_new(
   Pointer<Void> catalog,
-  RustBuffer input,
-  RustBuffer output,
-  RustBuffer bandwidth,
+  RustBuffer options,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -19727,7 +19957,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_constructor_moqaudioencoder_new() != 52616) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_constructor_moqaudioproducer_new() != 49804) {
+  if (uniffi_moq_ffi_checksum_constructor_moqaudioproducer_new() != 51486) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqflatesnapshotproducer_new() !=
@@ -19811,7 +20041,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_constructor_moqvideoencoder_new() != 22531) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_constructor_moqvideoproducer_new() != 7631) {
+  if (uniffi_moq_ffi_checksum_constructor_moqvideoproducer_new() != 34351) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
 }

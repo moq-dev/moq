@@ -4,12 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Decoded reads carry encoder ends (#5687)
+### Decoded reads carry gaps and encoder ends (#5687, #6475)
 
-`decode::Consumer::read()` returns `decode::Read` events instead of bare frames: `Frame { discontinuity, frame }` and `End { discontinuity, end }`; `None` still means the track is finished.
-An `End` can be followed by final PCM with the same `discontinuity` before a fresh encoder bumps it, and a bump with no `End` before it is a loss.
+`decode::Consumer::read()` returns `decode::Read` events instead of bare frames, the same shape as `moq_video::decode::Read`: `Frame(frame)`, `Gap { timestamp, duration }` for lost media, and `End { end }` where the publisher stopped its encoder; `None` still means the track is finished.
+Frames after an `End` that start before `end` are the stopped encoder's final PCM; the first at or past it comes from a fresh encoder.
 Binding audio frame APIs keep their existing shape.
-Play `decode::Read::Frame { frame, .. }` as before, and trim after `decode::Read::End { end, .. }`.
+Play `decode::Read::Frame(frame)` as before, restart playback after a `Gap`, and expect the end of the current timeline at `End { end }`.
 
 ### Capture handles are `Control` and `Capture`
 

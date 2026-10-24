@@ -102,11 +102,11 @@ _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 
 track := "camera"
 catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
-video, _ := moqvideo.NewProducer(catalogProducer,
-    moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: 30},
-    moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.AutoEncoder()},
-    nil,
-)
+video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
+    Input: moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
+    Output: moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.AutoEncoder()},
+    Track: &track,
+})
 _ = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 epoch := moq.MintEpoch() // a fresh epoch per run
 _ = broadcast.Announce(moq.AnnounceRoute{Epoch: &epoch})
@@ -114,6 +114,8 @@ _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings.
 
 ## Things to know
 
@@ -132,7 +134,7 @@ shows which module holds each.
 - **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero. `Version` names the negotiated protocol, and while a client session reconnects `Session().Failure()` says why. Hold the owned `BandwidthConsumer` returned by `Session().RecvBandwidth()` to receive bandwidth estimates. `Rate()` reads the current estimate in bits per second and `RateChanged(ctx)` waits for a new one. Calling `Close()` on the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `moq.WithVersions`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `Session().Auth().Grant()` is the `Grant` the relay sent back, nil until it answers and while a client session reconnects; `GrantChanged(ctx)` waits for the next one. `Add(ctx, token)` presents a fresh token without reconnecting, returns an `AuthToken` whose grant joins the union until `Close()`, and is presented again on every reconnect. A refusal returns the relay's code.
 - **Errors.** Read diagnostic payloads from `Reason` and structured protocol failures from `Details`.
-- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `Preference`; `0` is the default and `-1` marks a compatibility transcode.
 - **Track demand.** Obtain a dynamic track request’s `Demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Runtime
