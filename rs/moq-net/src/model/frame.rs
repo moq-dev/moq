@@ -109,6 +109,13 @@ pub(crate) struct Chain {
 }
 
 impl Chain {
+	/// The whole chain copied into one buffer.
+	#[cold]
+	#[inline(never)]
+	fn concat(self) -> Bytes {
+		Payload::Chain(self).contiguous(0)
+	}
+
 	/// The frame's length, past which nothing is stored.
 	fn end(&self) -> usize {
 		let last = self.segments.last().map_or(0, Bytes::len);
@@ -135,12 +142,14 @@ impl Default for Payload {
 }
 
 impl From<Bytes> for Payload {
+	#[inline]
 	fn from(bytes: Bytes) -> Self {
 		Self::Whole(bytes)
 	}
 }
 
 impl Payload {
+	#[inline]
 	pub fn len(&self) -> usize {
 		match self {
 			Self::Whole(bytes) => bytes.len(),
@@ -148,6 +157,7 @@ impl Payload {
 		}
 	}
 
+	#[inline]
 	pub fn is_empty(&self) -> bool {
 		self.len() == 0
 	}
@@ -227,12 +237,14 @@ pub(crate) struct Cached {
 
 impl Cached {
 	/// The frame read whole, copying a chain of segments into one buffer.
+	// Inlined on every whole read, so the rare chain copy stays out of line.
+	#[inline]
 	pub fn into_frame(self) -> Frame {
 		Frame {
 			timestamp: self.timestamp,
 			payload: match self.payload {
 				Payload::Whole(bytes) => bytes,
-				chain => chain.contiguous(0),
+				Payload::Chain(chain) => chain.concat(),
 			},
 			arrived: self.arrived,
 		}
@@ -240,6 +252,7 @@ impl Cached {
 }
 
 impl From<Frame> for Cached {
+	#[inline]
 	fn from(frame: Frame) -> Self {
 		Self {
 			timestamp: frame.timestamp,

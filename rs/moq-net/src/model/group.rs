@@ -2895,6 +2895,7 @@ impl Consumer {
 	}
 
 	/// Read the next frame as stored, so a frame in segments stays in them.
+	#[inline]
 	fn poll_read_cached(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Cached>>> {
 		if self.recover.is_none() {
 			return self.poll_read_frame_once(waiter);
