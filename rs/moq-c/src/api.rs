@@ -155,8 +155,6 @@ pub enum moq_container_format {
 	MOQ_CONTAINER_FORMAT_TS = 2,
 	/// Flash Video, as used by RTMP.
 	MOQ_CONTAINER_FORMAT_FLV = 3,
-	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	MOQ_CONTAINER_FORMAT_CMAF = 4,
 }
 
 /// Configuration for [moq_publish_audio].
@@ -309,7 +307,6 @@ fn container_format_from_u32(value: u32) -> Result<moq_mux::import::ContainerFor
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_MKV as u32 => ContainerFormat::Mkv,
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_TS as u32 => ContainerFormat::Ts,
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_FLV as u32 => ContainerFormat::Flv,
-		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_CMAF as u32 => ContainerFormat::Cmaf,
 		_ => return Err(Error::InvalidCode),
 	})
 }
@@ -2961,6 +2958,8 @@ pub unsafe extern "C" fn moq_publish_dynamic(
 /// [moq_publish_dynamic_cancel] was called) or a negative error. After the terminal
 /// (`<= 0`) callback, `user_data` is never touched again. Cached groups never reach the
 /// handler. Answer each request with [moq_group_request_accept] or [moq_group_request_abort].
+/// A request whose group nobody reads any more is withdrawn: answering it then fails as not
+/// found, so move on to the next request.
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
@@ -3174,9 +3173,10 @@ pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 	})
 }
 
-/// Reject a group request with an application error code, failing the waiting fetches.
+/// Reject a group request, failing the waiting fetches as not found.
 ///
-/// Consumes the request handle. Returns a zero on success, or a negative code on failure.
+/// The error code is not delivered. Consumes the request handle. Returns a zero on success,
+/// or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {

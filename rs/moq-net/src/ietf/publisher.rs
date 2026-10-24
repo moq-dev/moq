@@ -29,16 +29,12 @@ use super::{Message, Version, cluster, error::request, peer, request_update};
 
 mod tracks;
 
-/// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_DELAY_MS: u64 = super::max_age::MAX_MILLIS;
-
 /// Preserve retained groups when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
-		// Demand can cross a Lite hop before the producer's retention bound is
-		// known, so use the largest duration that remains wire-encodable.
-		max_delay: Duration::from_millis(MAX_SAFE_DELAY_MS),
+		// No Max Age is the publisher's retention alone, whatever it turns out to be.
+		max_delay: None,
 		..Default::default()
 	}
 }
@@ -1407,7 +1403,7 @@ impl Publisher {
 						// What an update changed while forwarding outlives the pause.
 						let applied = track_serve.track.subscription();
 						msg.subscriber_priority = super::priority::to_wire(applied.priority);
-						msg.max_age = applied.max_delay.as_millis().try_into().ok();
+						msg.max_age = applied.max_delay.and_then(|delay| delay.as_millis().try_into().ok());
 						track_serve.close_groups();
 						self.pause_join(_join.as_ref());
 						drop(track_serve);
@@ -1828,7 +1824,7 @@ impl Publisher {
 		// which the track's refresh ratio judges.
 		let mut subscription = serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
 		if let Some(max_age) = msg.max_age {
-			subscription.max_delay = Duration::from_millis(max_age);
+			subscription.max_delay = Some(Duration::from_millis(max_age));
 		}
 		// A range that resolves without the live edge has a fixed start, which is no join:
 		// bound the subscription before subscribing so the ratio never judges it. From the
@@ -2116,7 +2112,7 @@ impl Publisher {
 		}
 		if let Some(max_age) = update.max_age {
 			let mut subscription = serve.track.subscription();
-			subscription.max_delay = Duration::from_millis(max_age);
+			subscription.max_delay = Some(Duration::from_millis(max_age));
 			serve.track.update(subscription).map_err(failed)?;
 		}
 		if let Some(value) = update.new_group {
@@ -11140,7 +11136,7 @@ mod serve_tests {
 			let request = h._broadcast.reserve_track("cam").unwrap();
 			let dynamic = request.dynamic();
 			let fetching = request.consume().fetch_group(4, None);
-			let mut fetched = dynamic.requested_group().await.unwrap().accept(None).unwrap();
+			let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
 			for object in 0..2 {
 				fetched.write_frame(None, format!("4-{object}").into_bytes()).unwrap();
 			}
@@ -14280,7 +14276,10 @@ mod tests {
 		}
 
 		let subscription = serving_subscription(128);
-		assert_eq!(subscription.max_delay.as_millis(), MAX_SAFE_DELAY_MS as u128);
+		assert_eq!(
+			subscription.max_delay, None,
+			"no Max Age is the publisher's retention alone"
+		);
 		let mut subscriber = producer.subscribe(subscription);
 		for sequence in [0, 1] {
 			let group = subscriber
