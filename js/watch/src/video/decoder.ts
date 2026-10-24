@@ -643,7 +643,7 @@ class DecoderTrack {
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
 				decoder.decode(chunk);
-				if (!this.sync.playing.peek()) await this.#waitStartup(effect, Milli.fromMicro(frame.timestamp));
+				if (!this.sync.playing.peek()) await this.#waitStartup(effect);
 			}
 		});
 	}
@@ -726,14 +726,14 @@ class DecoderTrack {
 						timestamp: frame.timestamp,
 					}),
 				);
-				if (!this.sync.playing.peek()) await this.#waitStartup(effect, Milli.fromMicro(frame.timestamp));
+				if (!this.sync.playing.peek()) await this.#waitStartup(effect);
 			}
 		});
 	}
 
 	// Once this track has filled its floor, leave further media encoded upstream while the other
 	// track fills. Otherwise a missing audio track could retain unbounded decoded GPU frames.
-	async #waitStartup(effect: Effect, timestamp: Milli): Promise<void> {
+	async #waitStartup(effect: Effect): Promise<void> {
 		// Some codecs need more input before their first output. Do not park that input
 		// behind a gate that needs the very picture the decoder has not produced yet.
 		if (this.first.peek() === undefined) return;
@@ -747,7 +747,9 @@ class DecoderTrack {
 			if (span.end - span.start < inner.get(this.sync.out.delay)) refill.set(true);
 		});
 		try {
-			await effect.race(refill, this.sync.wait(timestamp, waiting.abort));
+			// Wait on the span's first picture, which is due the moment startup releases, so decoding
+			// resumes with the whole floor still ahead instead of once it has played out.
+			await effect.race(refill, this.sync.wait(span.start, waiting.abort));
 		} finally {
 			waiting.close();
 		}

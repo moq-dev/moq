@@ -1062,6 +1062,32 @@ it("bounds startup decoding while another track is missing and releases it on cl
 	}
 });
 
+// Resuming only once the held floor has played out would leave no decoded lookahead.
+it("resumes decoding the moment shared startup releases", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true, 1000);
+	const audio = new Signal<{ start: Milli; end: Milli } | null>(null);
+	const remove = playback.sync.register(new Signal(Milli(100)), audio);
+	if (!playback.track) throw new Error("missing video track");
+	const group = playback.track.appendGroup();
+	try {
+		for (let i = 0; i < 8; i++) group.writeFrame(legacyFrame(Micro(i * 40_000)));
+		await microtasks();
+		await clock.advance(0);
+		expect(playback.submitted).toEqual([0, 40_000, 80_000, 120_000]);
+		audio.set({ start: Milli(0), end: Milli(100) });
+		await microtasks();
+		await clock.advance(0);
+		expect(playback.submitted).toHaveLength(8);
+	} finally {
+		remove();
+		group.close();
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
 it("refills the video floor after a discontinuity instead of waiting on the previous poster timestamp", async () => {
 	const clock = manualAt(0);
 	const reads: Read[] = [

@@ -45,9 +45,7 @@ async function poster(audio: boolean, buffered: boolean) {
 		name,
 		catalogFormat: "manual",
 		catalog,
-		canvas,
-		visible: "always",
-		backend: "2d",
+		video: { canvas, visible: "always", backend: "2d" },
 		delay: Milli(100),
 		buffer: Milli(buffered ? 1000 : 0),
 	});
