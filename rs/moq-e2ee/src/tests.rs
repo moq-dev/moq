@@ -986,8 +986,8 @@ fn secrets_stay_out_of_debug() {
 fn failed_group_write_does_not_burn_nonce() {
 	let mut pair = pair("video");
 	let mut group = pair.producer.append_group().unwrap();
-	// (2^62-1) seconds overflows conversion to the milli-scale track.
-	let huge = moq_net::Timestamp::from_secs((1 << 62) - 1).unwrap();
+	// (2^61-1) seconds overflows conversion to the milli-scale track.
+	let huge = moq_net::Timestamp::from_secs((1 << 61) - 1).unwrap();
 	assert!(group.write_frame(huge, b"bad").is_err());
 	assert_eq!(group.invocations(), 0);
 	let big = vec![0u8; MAX_GROUPED_PLAINTEXT + 1];

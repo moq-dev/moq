@@ -9,6 +9,16 @@ How to update your code for each breaking change, newest first.
 `json::Snapshot<T, E>` and `json::Stream<T, E>` are `json::Snapshot<T>` and `json::Stream<T>`, and `binary::Snapshot<E>` and `binary::Stream<E>` are `binary::Snapshot` and `binary::Stream`: the catalog entry they keep is type-erased.
 The catalog `Producer<E>` methods that create them are unchanged, so callers only drop the type argument from the names.
 
+### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
+
+A passthrough `container::fmp4::Import` refuses a group that starts below the previous one with `Error::TimestampRewind` before opening it, as an unwrapped track does, instead of `Error::Moq(moq_net::Error::TimestampMismatch)` from a group it already opened.
+Match `TimestampRewind` where you matched `TimestampMismatch`.
+
+### `Source` waits for a sibling's first announcement (#6254)
+
+`Source::bind`, `resolve`, and `subscribe_track` now wait for a sibling nothing announces yet instead of failing with `Unroutable`, and keep the first instance they resolve: once it goes, they answer that ended broadcast rather than waiting for the next.
+Where you skipped a rendition on that error, bound the call yourself (`tokio::time::timeout`, or drop it), or follow the sibling's instances with `Source::follow`.
+
 ### JSON `delta_ratio` is `deltas`
 
 `json::Config::delta_ratio` and `with_delta_ratio` are replaced by `deltas: bool` and `with_deltas` (default `true`).

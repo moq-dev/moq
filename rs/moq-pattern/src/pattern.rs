@@ -132,7 +132,7 @@ impl Segment {
 	}
 
 	/// Whether this segment matches one path segment.
-	fn matches(&self, part: &str) -> bool {
+	pub(crate) fn matches(&self, part: &str) -> bool {
 		match self {
 			Self::Literal(literal) => literal == part,
 			Self::Wildcard => true,
@@ -791,7 +791,7 @@ impl Pattern {
 	}
 
 	/// The segments before and after the `**`. Only meaningful when there is one.
-	fn split(&self) -> (&[Segment], &[Segment]) {
+	pub(crate) fn split(&self) -> (&[Segment], &[Segment]) {
 		match self.globstar {
 			Some(index) => (&self.segments[..index], &self.segments[index + 1..]),
 			None => (&self.segments, &[]),

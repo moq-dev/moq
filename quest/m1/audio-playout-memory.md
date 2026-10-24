@@ -17,9 +17,8 @@ and confirmed by source at
 `target()` in `js/watch/src/audio/latency.ts` floors the measured term by the
 rendition's advertised `jitter` and adds its catalog `delay`; both are any
 u53 in `js/hang/src/catalog/audio.ts`. `ringSamples` turns that target into
-`latencySamples`, and `createAudioBuffer` allocates
-`max(rate, latencySamples * 2)` frames per channel of shared float PCM. The
-audit computed 512 MiB for a 48 kHz stereo rendition advertising ten minutes
+`latencySamples`, and the render worklet's `AudioRingBuffer` allocates
+`latencySamples * 2` frames per channel of float PCM. The audit computed 512 MiB for a 48 kHz stereo rendition advertising ten minutes
 of jitter and 4 GiB for one hour, without allocating them. The estimator's 2 s
 ceiling bounds only the measured term.
 
@@ -37,15 +36,13 @@ decoder. Settle while building:
   receiver's existing flow-controlled store.
 - Whether the non-buffered path survives once both paths gate on timestamps,
   or folds into the buffered one. Prefer one path.
-- The `postMessage` ring and the shared ring must behave the same.
 
 Tests: a rendition advertising an hour of jitter allocates a ring of the
 receiver's fixed size and plays at the advertised delay on a stubbed clock;
-the replay harness rows keep their budgets on both rings. No wire change;
+the replay harness rows keep their budgets. No wire change;
 any `js/watch` API change goes in its `MIGRATE.md`.
 
 ## Related
 
 - [Buffered backpressure timestamps](/quest/m1/audio-backpressure-timestamps.md) - the 32-bit truncation in the same `Backpressure`, landing first
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target this sizes memory for
-- [Jitter estimator density](/quest/m1/jitter-density.md) - the CPU side of the same hostile-publisher concern

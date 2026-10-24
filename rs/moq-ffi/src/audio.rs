@@ -702,6 +702,65 @@ mod tests {
 		assert!(matches!(error, MoqError::Unsupported));
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn retired_audio_producers_keep_clean_tails_for_late_readers() {
+		let broadcast = crate::producer::MoqBroadcastProducer::new().unwrap();
+		let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+		let reader = broadcast.consume_inner().unwrap();
+		for index in 0..4 {
+			let audio = MoqAudioProducer::new(
+				&catalog,
+				MoqAudioEncoderInput {
+					format: MoqAudioSampleFormat::F32,
+					sample_rate: 48_000,
+					channels: 1,
+				},
+				MoqAudioEncoderOutput {
+					codec: MoqAudioCodec::opus(),
+					track: Some(format!("audio-{index}")),
+					sample_rate: None,
+					channels: None,
+					bitrate: None,
+					frame_duration_us: 0,
+					preset: None,
+				},
+				None,
+			)
+			.unwrap();
+			// A partial codec frame makes finish publish the final packet and lookahead.
+			audio
+				.write(MoqAudioFrame {
+					timestamp_us: 0,
+					data: vec![0.1_f32; 860].into_iter().flat_map(f32::to_ne_bytes).collect(),
+				})
+				.unwrap();
+			audio.finish().unwrap();
+			drop(audio);
+			broadcast
+				.with_state(|state| {
+					assert_eq!(state.catalog.snapshot().audio.renditions.len(), index + 1);
+					Ok(())
+				})
+				.unwrap();
+		}
+		let _finished = broadcast.finish().unwrap();
+		for index in 0..4 {
+			let mut track = reader
+				.track(&format!("audio-{index}"))
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			let mut frames = 0;
+			while let Some(mut group) = track.recv_group().await.unwrap() {
+				while group.read_frame().await.unwrap().is_some() {
+					frames += 1;
+				}
+			}
+			assert!(frames > 0);
+		}
+	}
+
 	#[test]
 	fn codec_only_encoder_uses_the_codec_frame_default() {
 		let output = MoqAudioEncoderOutput {

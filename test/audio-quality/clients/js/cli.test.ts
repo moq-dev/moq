@@ -10,15 +10,15 @@ test("trace is accepted through the audio-quality wrapper", () => {
 		"near-zero",
 		"--codecs",
 		"opus",
-		"--rings",
-		"isolated",
+		"--runtimes",
+		"chromium",
 		"--trace",
 	]);
 	expect(result.exitCode).toBe(0);
-	expect(result.stdout.toString().trim()).toBe("chromium-opus-48000-near-zero-isolated");
+	expect(result.stdout.toString().trim()).toBe("chromium-opus-48000-near-zero");
 });
 
-test("the native ring lists native rows and no replays", () => {
+test("the native runtime lists native rows and no replays", () => {
 	const result = Bun.spawnSync([
 		"bash",
 		fileURLToPath(new URL("../../run.sh", import.meta.url)),
@@ -27,9 +27,9 @@ test("the native ring lists native rows and no replays", () => {
 		"mild,relay-mic",
 		"--codecs",
 		"opus",
-		"--rings",
-		"pulse",
+		"--runtimes",
+		"native",
 	]);
 	expect(result.exitCode).toBe(0);
-	expect(result.stdout.toString().trim()).toBe("native-opus-48000-mild-pulse");
+	expect(result.stdout.toString().trim()).toBe("native-opus-48000-mild");
 });

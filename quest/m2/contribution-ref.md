@@ -35,9 +35,8 @@ references") and its decision notes rather than starting over:
   until the contribution resolves. A reader that follows announcements
   follows the contribution's Start, End, and Restart; one that follows none
   pins the first resolution for its parent catalog instance. Reuse
-  `moq_mux::Source`'s pinning and the `Source::follow` from
-  [reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md);
-  do not add a second one.
+  `moq_mux::Source`'s pinning and `Source::follow`; do not add a second
+  one.
 - #5722 was stacked on #5699's reference `epoch`, which has landed; rebuild
   it on `main`.
 
@@ -50,7 +49,3 @@ contributor restart.
 Public API: a catalog `contributions` section in `hang` and `@moq/hang`, and
 `Broadcast.contribution` in `@moq/watch`. Wire: a new optional catalog
 field.
-
-## Required
-
-- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - owns `Source::follow`, which a contribution's announcement followers reuse

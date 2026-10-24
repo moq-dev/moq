@@ -22,6 +22,11 @@ impl Delivered {
 			.is_some_and(|(_, last)| sequence <= *last)
 	}
 
+	/// The first sequence above the handed-out prefix, or none once every sequence is past.
+	pub fn floor(&self) -> Option<u64> {
+		self.runs.get(&0).map_or(Some(0), |last| last.checked_add(1))
+	}
+
 	/// Whether every sequence in `groups` was handed out, or is below the floor.
 	pub fn covers(&self, groups: std::ops::Range<u64>) -> bool {
 		groups.is_empty()
@@ -75,6 +80,11 @@ impl Delivered {
 		}
 	}
 
+	/// The last run starting below `sequence`.
+	pub fn last_before(&self, sequence: u64) -> Option<u64> {
+		self.runs.range(..sequence).next_back().map(|(start, _)| *start)
+	}
+
 	/// How many runs it holds: one per gap, plus the floor.
 	#[cfg(test)]
 	pub fn runs(&self) -> usize {
@@ -104,6 +114,7 @@ mod test {
 		assert_eq!(runs(&delivered), [(4, 8)]);
 		assert!(delivered.contains(4) && delivered.contains(8));
 		assert!(!delivered.contains(3) && !delivered.contains(9));
+		assert_eq!(delivered.floor(), Some(0), "a run above a gap is not the prefix");
 		assert!(delivered.covers(4..9) && delivered.covers(9..9));
 		assert!(!delivered.covers(3..5) && !delivered.covers(8..10));
 	}
@@ -117,6 +128,7 @@ mod test {
 		assert_eq!(runs(&delivered), [(0, 0), (u64::MAX, u64::MAX)]);
 		delivered.forget_below(u64::MAX);
 		assert_eq!(runs(&delivered), [(0, u64::MAX)]);
+		assert_eq!(delivered.floor(), None);
 	}
 
 	#[test]
@@ -126,6 +138,11 @@ mod test {
 			delivered.insert(sequence);
 		}
 		assert_eq!(delivered.above_gap(), Some(3));
+		assert_eq!(delivered.last_before(0), None);
+		assert_eq!(delivered.last_before(3), None);
+		assert_eq!(delivered.last_before(5), Some(3));
+		assert_eq!(delivered.last_before(9), Some(5));
+		assert_eq!(delivered.last_before(13), Some(12));
 		delivered.forget_below(0);
 		assert_eq!(delivered.runs(), 4);
 
@@ -134,6 +151,7 @@ mod test {
 		assert_eq!(runs(&delivered), [(0, 6), (9, 9), (12, 12)]);
 		assert_eq!(delivered.above_gap(), Some(9));
 		assert!(delivered.contains(4), "below the floor counts as handed out");
+		assert_eq!(delivered.floor(), Some(7));
 
 		// A floor inside a gap keeps the run above it.
 		delivered.forget_below(11);
