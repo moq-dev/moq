@@ -109,7 +109,9 @@ pub enum Order {
 ///
 /// A relative or time anchor resolves at the hop that serves it, when it starts serving
 /// and again whenever the subscriber replaces its ranges. Before any group exists a
-/// relative anchor resolves at the first one, so [`Range::live`] starts there.
+/// relative anchor resolves at the first one, so [`Range::live`] starts there. A relay's
+/// copy waiting on a fresh upstream answer counts from the live feed's latest group once
+/// it answers, never from the groups an ended feed left in its cache.
 ///
 /// Over a session, the copy resolves them only on moq-lite-07, which reports the live edge
 /// and media time and asks upstream for every group the budget allows. A copy received

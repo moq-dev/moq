@@ -1,3 +1,5 @@
+use crate::driver::Transport;
+use crate::transport::poll::Session as _;
 use std::{
 	collections::{HashMap, hash_map::Entry},
 	sync::atomic::{AtomicU64, Ordering},
@@ -752,7 +754,7 @@ impl Drop for JoiningTask {
 }
 
 #[derive(Clone)]
-pub(super) struct Subscriber<S: crate::transport::poll::Session> {
+pub(super) struct Subscriber {
 	// Scoped to a minted source on the clone that serves its requests.
 	validity: crate::model::broadcast::RequestValidity,
 	// The publisher instance the minted source was resolved under (MoQ Epoch), named on
@@ -761,7 +763,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	epoch: Option<crate::Epoch>,
 	// Arms the track-alias and request-id timeouts.
 	runtime: crate::time::Deadlines,
-	session: S,
+	session: Transport,
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
 	control: Control,
@@ -800,7 +802,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// tracks it lists to us.
 	pub(super) announces: crate::session::Slots,
 	// What SUBSCRIBE_TRACKS lists of the peer's tracks.
-	listings: Lock<tracks::Listings<S>>,
+	listings: Lock<tracks::Listings>,
 }
 
 /// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
@@ -861,17 +863,14 @@ async fn resolve_track_alias(
 	.await
 }
 
-impl<S> Subscriber<S>
-where
-	S: crate::transport::poll::Boxable,
-{
+impl Subscriber {
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "private plumbing; a single-use argument struct would only rename the parameters"
 	)]
 	pub fn new(
 		runtime: crate::time::Deadlines,
-		session: S,
+		session: Transport,
 		origin: origin::Producer,
 		control: Control,
 		peer_hop: Option<crate::Hop>,
@@ -1164,9 +1163,9 @@ where
 	/// `snapshot` holds the origin's announce consumers under the prefix short of
 	/// synced. It drops once the NAMESPACE messages MoQ Active Count promised are
 	/// in, on REQUEST_OK without the extension, or when no request goes out at all.
-	pub async fn run_subscribe_namespace<T: crate::transport::poll::Session>(
+	pub async fn run_subscribe_namespace(
 		&mut self,
-		mut stream: Stream<T, Version>,
+		mut stream: Stream<Transport, Version>,
 		prefix: PathOwned,
 		snapshot: crate::model::Snapshot,
 	) -> Result<(), Error> {
@@ -1306,15 +1305,15 @@ where
 		clippy::too_many_arguments,
 		reason = "private plumbing; a single-use argument struct would only rename the parameters"
 	)]
-	async fn run_namespace_entries<T: crate::transport::poll::Session>(
+	async fn run_namespace_entries(
 		&mut self,
-		stream: &mut Stream<T, Version>,
+		stream: &mut Stream<Transport, Version>,
 		prefix: &PathOwned,
 		peer: &cluster::Peer,
 		negotiated: ietf::Negotiated,
 		live: &mut HashMap<PathOwned, Advertisement>,
 		mut initial: Initial,
-		messages: &mut super::request_stream::Messages<S>,
+		messages: &mut super::request_stream::Messages,
 	) -> Result<(), Error> {
 		loop {
 			// Every counted NAMESPACE is in the origin by now, dropped ones included.
@@ -1425,7 +1424,7 @@ where
 		&mut self,
 		id: u64,
 		body: ietf::Body,
-		stream: Stream<S, Version>,
+		stream: Stream<Transport, Version>,
 		peer: cluster::Peer,
 		epoch: bool,
 		declared: Option<bool>,
@@ -1516,7 +1515,7 @@ where
 	/// other decode error leaves the session open.
 	fn reject_token(
 		&self,
-		stream: Stream<S, Version>,
+		stream: Stream<Transport, Version>,
 		kind: request::Kind,
 		body: ietf::Body,
 		err: DecodeError,
@@ -1565,7 +1564,7 @@ where
 	#[cfg(test)]
 	async fn run_publish_namespace_stream(
 		&mut self,
-		stream: Stream<S, Version>,
+		stream: Stream<Transport, Version>,
 		msg: ietf::PublishNamespace<'_>,
 		peer: cluster::Peer,
 		declared: Option<bool>,
@@ -1589,7 +1588,7 @@ where
 
 	async fn serve_publish_namespace_stream(
 		&mut self,
-		mut stream: Stream<S, Version>,
+		mut stream: Stream<Transport, Version>,
 		incoming: IncomingNamespace<'_>,
 	) -> Result<(), Error> {
 		let IncomingNamespace {
@@ -1781,7 +1780,7 @@ where
 	/// (moq-transport Section 9.5.1).
 	async fn run_publish_namespace_updates(
 		&mut self,
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		path: &PathOwned,
 		held: Held,
 		peer: cluster::Peer,
@@ -2108,7 +2107,7 @@ where
 	/// and PUBLISH_NAMESPACE_CANCEL before it, where the request outlives its stream.
 	async fn cancel_announce(
 		&self,
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		request_id: RequestId,
 		path: &PathOwned,
 		err: &Error,
@@ -2146,7 +2145,7 @@ where
 	/// a feature we don't implement is not a protocol violation.
 	async fn run_publish_stream(
 		&mut self,
-		mut stream: Stream<S, Version>,
+		mut stream: Stream<Transport, Version>,
 		msg: ietf::Publish<'_>,
 	) -> Result<(), Error> {
 		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
@@ -2191,7 +2190,7 @@ where
 		Ok(())
 	}
 
-	async fn write_ok(&self, stream: &mut Stream<S, Version>, request_id: RequestId) -> Result<(), Error> {
+	async fn write_ok(&self, stream: &mut Stream<Transport, Version>, request_id: RequestId) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => {
 				stream.writer.buffer_varint(ietf::PublishNamespaceOk::ID)?;
@@ -2226,7 +2225,7 @@ where
 	/// Refuse a PUBLISH_NAMESPACE on the bidi stream that carries it.
 	async fn write_error(
 		&self,
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		request_id: RequestId,
 		err: &Error,
 		reason: &str,
@@ -2245,7 +2244,7 @@ where
 	/// Refuse a PUBLISH on the bidi stream that carries it.
 	async fn write_publish_error(
 		&self,
-		stream: &mut Stream<S, Version>,
+		stream: &mut Stream<Transport, Version>,
 		request_id: RequestId,
 		err: &Error,
 		reason: &str,
@@ -2702,7 +2701,7 @@ where
 		&self,
 		path: &Path<'_>,
 		lister: &std::sync::Arc<broadcast::Lister>,
-		listening: &mut Option<tracks::Listening<S>>,
+		listening: &mut Option<tracks::Listening>,
 		waiter: &kio::Waiter,
 	) {
 		loop {
@@ -3754,10 +3753,10 @@ where
 	/// Read the subscription's PUBLISH_DONE, and on the way the answers to the
 	/// REQUEST_UPDATEs counted in `unanswered`. Any other message is unexpected.
 	async fn read_publish_done(
-		reader: &mut Reader<S::RecvStream, Version>,
+		reader: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		version: Version,
 		unanswered: &AtomicU64,
-		messages: &mut super::request_stream::Messages<S>,
+		messages: &mut super::request_stream::Messages,
 	) -> Result<ietf::PublishDone<'static>, Error> {
 		// A refused update is followed by PUBLISH_DONE, which ends the subscription. Its
 		// count stays, so no further update goes out meanwhile, and no answer is owed.
@@ -3795,7 +3794,7 @@ where
 	/// carrying only what changed, under a Request ID of its own.
 	async fn write_update(
 		&self,
-		writer: &mut Writer<S::SendStream, Version>,
+		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		subscription: RequestId,
 		update: Update,
 	) -> Result<(), Error> {
@@ -3834,7 +3833,7 @@ where
 	/// cancellation (draft-19 section 3.3.2), so section 3.3.3's pair applies, an endpoint
 	/// that has already FINed its sending direction cancels with STOP_SENDING on the
 	/// receiving one.
-	async fn cancel_subscribe(&self, stream: Stream<S, Version>, request_id: RequestId) {
+	async fn cancel_subscribe(&self, stream: Stream<Transport, Version>, request_id: RequestId) {
 		let Stream { mut writer, mut reader } = stream;
 
 		if self.unsubscribes()
@@ -3865,7 +3864,7 @@ where
 
 	async fn write_unsubscribe(
 		&self,
-		writer: &mut crate::coding::Writer<S::SendStream, Version>,
+		writer: &mut crate::coding::Writer<crate::transport::boxed::SendStream, Version>,
 		request_id: RequestId,
 	) -> Result<(), Error> {
 		writer.varint(ietf::Unsubscribe::ID).await?;
@@ -3995,7 +3994,7 @@ where
 
 	async fn finish_joining_fetch(
 		&mut self,
-		mut stream: Stream<S, Version>,
+		mut stream: Stream<Transport, Version>,
 		progress: kio::Shared<JoiningState>,
 	) -> Result<(), Error> {
 		let cancelled = |waiter: &kio::Waiter| {
@@ -4048,8 +4047,8 @@ where
 
 	async fn read_subscribe_response(
 		&self,
-		stream: &mut Stream<S, Version>,
-		messages: &mut super::request_stream::Messages<S>,
+		stream: &mut Stream<Transport, Version>,
+		messages: &mut super::request_stream::Messages,
 	) -> Result<Option<Accepted>, Error> {
 		// Read type_id + size + body from the stream
 		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
@@ -4237,7 +4236,10 @@ where
 
 	/// Read the answer to a TRACK_STATUS: TRACK_STATUS_OK, or the publisher's refusal as an
 	/// error.
-	async fn read_track_status_response(&self, stream: &mut Stream<S, Version>) -> Result<ietf::TrackStatusOk, Error> {
+	async fn read_track_status_response(
+		&self,
+		stream: &mut Stream<Transport, Version>,
+	) -> Result<ietf::TrackStatusOk, Error> {
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
@@ -4257,7 +4259,10 @@ where
 		Err(request::from_code(code, request::Kind::TrackStatus, self.version))
 	}
 
-	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
+	pub async fn recv_group(
+		&mut self,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
+	) -> Result<(), Error> {
 		let group: ietf::GroupHeader = stream.decode().await?;
 		// Ranked as the least urgent subscription until its alias resolves.
 		stream.set_priority(crate::priority::recv_group(i8::MIN, group.group_id, Default::default()));
@@ -4603,10 +4608,7 @@ impl<const EXTENSIONS: bool> Decode<Version> for PeekFirst<EXTENSIONS> {
 	}
 }
 
-impl<S> Subscriber<S>
-where
-	S: crate::transport::poll::Boxable,
-{
+impl Subscriber {
 	/// The group producer this subgroup stream writes into, and the Object ID it starts at.
 	///
 	/// The first object is peeked before any producer exists, since a standalone
@@ -4615,7 +4617,7 @@ where
 	/// fetch stream began, which the first Object ID decides.
 	async fn open_group(
 		&self,
-		stream: &mut Reader<S::RecvStream, Version>,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		track: &mut track::Producer,
 		fill: &kio::Producer<Fill>,
 		resume: Option<track::Position>,
@@ -4818,8 +4820,8 @@ enum IngestPhase {
 }
 
 impl GroupIngest {
-	fn new<S: crate::transport::poll::Boxable>(
-		subscriber: &Subscriber<S>,
+	fn new(
+		subscriber: &Subscriber,
 		group: &ietf::GroupHeader,
 		timescale: Option<Timescale>,
 		start: Option<u64>,
@@ -4840,10 +4842,7 @@ impl GroupIngest {
 	}
 }
 
-impl<S> Subscriber<S>
-where
-	S: crate::transport::poll::Boxable,
-{
+impl Subscriber {
 	/// Read a fill fetch stream: the head of the group a subscription joins part way through.
 	///
 	/// A draft-20 fill answers the FILL_PARAMETERS we sent and is named by the SUBSCRIBE's
@@ -4852,7 +4851,10 @@ where
 	/// into a group producer of its own and hands that to the subgroup stream carrying the
 	/// rest of the group; see [`Fill`]. A reset stream is the publisher's fill-failure
 	/// signal, and arrives here as a read error, which drops the head and the join with it.
-	pub async fn recv_fill(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
+	pub async fn recv_fill(
+		&mut self,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
+	) -> Result<(), Error> {
 		// The dispatcher peeked the stream type to get here.
 		let _ = stream.varint().await?;
 		let header: ietf::FetchHeader = stream.decode().await?;
@@ -4974,7 +4976,7 @@ where
 	/// half-written head is a group with no end.
 	async fn run_fill(
 		&mut self,
-		stream: &mut Reader<S::RecvStream, Version>,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		track: &mut track::Producer,
 		timescale: Option<Timescale>,
 		resume: Option<track::Position>,
@@ -5010,7 +5012,7 @@ where
 	/// objects below `resume` are dropped: another route already delivered them.
 	async fn run_fill_objects(
 		&mut self,
-		stream: &mut Reader<S::RecvStream, Version>,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		track: &mut track::Producer,
 		timescale: Option<Timescale>,
 		resume: Option<track::Position>,
@@ -5113,7 +5115,7 @@ where
 	/// past it unless `keep`.
 	async fn recv_fetch_payload(
 		&self,
-		stream: &mut Reader<S::RecvStream, Version>,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		producer: &mut crate::recv::Group,
 		payload: FetchPayload,
 	) -> Result<Fetched, Error> {
@@ -5473,7 +5475,7 @@ where
 	}
 
 	/// Cancel a FETCH using the negotiated draft's existing cancellation signal.
-	async fn cancel_group_fetch(&self, mut stream: Stream<S, Version>, request_id: RequestId) {
+	async fn cancel_group_fetch(&self, mut stream: Stream<Transport, Version>, request_id: RequestId) {
 		stream.reader.abort(&Error::Cancel);
 		match self.version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
@@ -5496,8 +5498,8 @@ where
 	/// Read the answer to a FETCH: FETCH_OK, or the publisher's refusal as an error.
 	async fn read_fetch_response(
 		&self,
-		stream: &mut Stream<S, Version>,
-		messages: &mut super::request_stream::Messages<S>,
+		stream: &mut Stream<Transport, Version>,
+		messages: &mut super::request_stream::Messages,
 	) -> Result<ietf::FetchOk, Error> {
 		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
@@ -5519,7 +5521,7 @@ where
 	/// Write a group FETCH's objects into the group it accepted.
 	async fn recv_group_fetch(
 		&mut self,
-		stream: &mut Reader<S::RecvStream, Version>,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		slot: kio::Producer<GroupFetch>,
 	) -> Result<(), Error> {
 		// FETCH_OK can trail its own fetch stream. Taking the group in the same step is
@@ -5603,7 +5605,7 @@ where
 	/// Before draft-20 they must also reach it.
 	async fn recv_group_fetch_objects(
 		&self,
-		stream: &mut Reader<S::RecvStream, Version>,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		producer: &mut crate::recv::Group,
 		start: u64,
 		end: Option<u64>,
@@ -6034,12 +6036,12 @@ mod tests {
 		use crate::transport::poll::Session as _;
 		let mut session = ScriptedSession::eof(responses);
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-		let mut reader = Reader::new(recv, Version::Draft19);
-		let result = Subscriber::<ScriptedSession>::read_publish_done(
+		let mut reader = Reader::new(crate::transport::boxed::RecvStream::new(recv), Version::Draft19);
+		let result = Subscriber::read_publish_done(
 			&mut reader,
 			Version::Draft19,
 			&AtomicU64::new(0),
-			&mut crate::ietf::request_stream::Messages::new(session.clone(), true),
+			&mut crate::ietf::request_stream::Messages::new(crate::driver::Transport::new(session.clone()), true),
 		)
 		.await;
 		if clean {
@@ -6071,7 +6073,7 @@ mod tests {
 
 		let mut session = ScriptedSession::new(wire);
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-		let mut reader = Reader::new(recv, VERSION);
+		let mut reader = Reader::new(crate::transport::boxed::RecvStream::new(recv), VERSION);
 		let result = decode_fetch_object(&mut reader, VERSION, true)
 			.now_or_never()
 			.expect("refused at the prefix, not parked on the body");
@@ -6209,7 +6211,7 @@ mod tests {
 
 		Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			None,
@@ -6294,7 +6296,7 @@ mod tests {
 		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			scoped,
 			Control::new(None, false),
 			None,
@@ -6314,7 +6316,9 @@ mod tests {
 		);
 		let prefix = namespaces.pop().unwrap();
 
-		let stream = Stream::open(&mut session.clone(), Version::Draft16).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Draft16)
+			.await
+			.unwrap();
 		let mut run =
 			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
 		// Parks awaiting the peer's response; the request is already on the wire.
@@ -6329,7 +6333,10 @@ mod tests {
 	/// framing can't drift from the encoder under test.
 	async fn namespace_response(version: Version, suffix: &str) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		let mut writer = crate::coding::Writer::new(
+			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+			version,
+		);
 
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
@@ -6376,7 +6383,7 @@ mod tests {
 		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			scoped,
 			Control::new(None, false),
 			None,
@@ -6389,7 +6396,9 @@ mod tests {
 		);
 
 		let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
 		let mut run =
 			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
@@ -6425,8 +6434,10 @@ mod tests {
 
 		for (reflected, drops) in [(false, true), (true, true), (true, false)] {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			);
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
@@ -6470,7 +6481,7 @@ mod tests {
 			});
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
-				session.clone(),
+				crate::driver::Transport::new(session.clone()),
 				origin,
 				Control::new(None, false),
 				None,
@@ -6483,7 +6494,9 @@ mod tests {
 			);
 
 			let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
-			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+				.await
+				.unwrap();
 			let mut run =
 				std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
 			let mut result = None;
@@ -6556,7 +6569,7 @@ mod tests {
 		});
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			None,
@@ -6570,7 +6583,9 @@ mod tests {
 		subscriber.announces = crate::session::Slots::new(1);
 
 		let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let mut run =
 			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
 		let mut result = None;
@@ -6596,8 +6611,10 @@ mod tests {
 
 		for (negotiated, count) in [(true, None), (false, Some(0))] {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			);
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
@@ -6619,7 +6636,7 @@ mod tests {
 			});
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
-				session.clone(),
+				crate::driver::Transport::new(session.clone()),
 				origin,
 				Control::new(None, false),
 				None,
@@ -6631,7 +6648,9 @@ mod tests {
 				Default::default(),
 			);
 
-			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+				.await
+				.unwrap();
 			let res = subscriber
 				.run_subscribe_namespace(
 					stream,
@@ -6650,7 +6669,10 @@ mod tests {
 	/// NAMESPACE_DONE for one prefixed with `-`.
 	async fn counted_response(version: Version, active: Option<u64>, entries: &[&str]) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		let mut writer = crate::coding::Writer::new(
+			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+			version,
+		);
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
@@ -6693,11 +6715,7 @@ mod tests {
 		version: Version,
 		active_count: bool,
 		session: crate::lite::test_transport::ScriptedSession,
-	) -> (
-		Subscriber<crate::lite::test_transport::ScriptedSession>,
-		crate::origin::Consumer,
-		crate::model::Snapshot,
-	) {
+	) -> (Subscriber, crate::origin::Consumer, crate::model::Snapshot) {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let snapshot = origin.snapshot("");
@@ -6709,7 +6727,7 @@ mod tests {
 		});
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			None,
@@ -6732,7 +6750,9 @@ mod tests {
 				crate::lite::test_transport::ScriptedSession::new(counted_response(VERSION, Some(2), entries).await);
 			let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
 			let mut cursor = consumer.announced();
-			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+				.await
+				.unwrap();
 			let mut run =
 				std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot));
 			for _ in 0..10 {
@@ -6754,7 +6774,9 @@ mod tests {
 		let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, false, session.clone());
 		let cursor = consumer.announced();
 		assert!(!cursor.is_synced());
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let mut run =
 			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot));
 		for _ in 0..10 {
@@ -6775,7 +6797,9 @@ mod tests {
 				session.close(crate::lite::test_transport::Close::Fin);
 			}
 			let (mut subscriber, _consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
-			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+				.await
+				.unwrap();
 			let res = subscriber
 				.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot)
 				.await;
@@ -6868,9 +6892,7 @@ mod tests {
 
 	/// Build a subscriber with `subscribes` pre-populated, so alias binding can be
 	/// exercised without driving a whole SUBSCRIBE exchange.
-	fn subscriber_with_tracks(
-		tracks: &[(RequestId, &str, &str)],
-	) -> Subscriber<crate::lite::test_transport::SinkSession> {
+	fn subscriber_with_tracks(tracks: &[(RequestId, &str, &str)]) -> Subscriber {
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The tests drive binding directly, so nothing spawns; leaking keeps the handle alive
 		// without a spawner.
@@ -6878,7 +6900,7 @@ mod tests {
 
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
-			crate::lite::test_transport::SinkSession::new(Default::default()),
+			crate::driver::Transport::new(crate::lite::test_transport::SinkSession::new(Default::default())),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -7128,8 +7150,10 @@ mod tests {
 		// A peer that rejects the subscribe outright.
 		let rejection = {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			);
 			writer.varint(ietf::RequestError::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestError {
@@ -7151,7 +7175,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -7199,7 +7223,7 @@ mod tests {
 	fn waiting_on_auth(
 		version: Version,
 	) -> (
-		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		Subscriber,
 		crate::lite::test_transport::Log,
 		crate::auth::Handle,
 		Vec<crate::auth::Auth>,
@@ -7214,7 +7238,7 @@ mod tests {
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -7323,7 +7347,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -7394,7 +7418,7 @@ mod tests {
 			let (auth, _cred) = revocable_auth();
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
-				session,
+				crate::driver::Transport::new(session.clone()),
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				Control::new(Some(RequestId(1)), false),
 				None,
@@ -7459,7 +7483,7 @@ mod tests {
 			let (auth, _cred) = revocable_auth();
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
-				session,
+				crate::driver::Transport::new(session.clone()),
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				Control::new(None, false),
 				None,
@@ -7524,7 +7548,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -7601,7 +7625,7 @@ mod tests {
 		let control = Control::new(credit.then_some(RequestId(1)), false);
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			control.clone(),
 			None,
@@ -7803,7 +7827,7 @@ mod tests {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
-				session,
+				crate::driver::Transport::new(session.clone()),
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				Control::new(None, false),
 				None,
@@ -7926,10 +7950,16 @@ mod tests {
 		let log = session.log.clone();
 
 		let control = Control::new(None, false);
-		let adapter = super::super::adapter::ControlStreamAdapter::new(session.clone(), control.clone(), VERSION);
+		let adapter = super::super::adapter::ControlStreamAdapter::new(
+			crate::driver::Transport::new(session.clone()),
+			control.clone(),
+			VERSION,
+		);
 
 		// The one real bidi everything is multiplexed onto.
-		let control_stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let control_stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let running = adapter.clone();
 		let (_goaway_handle, goaway) = crate::goaway::Handle::new(true);
 		moq_clock::sim::spawn(async move {
@@ -7939,7 +7969,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			adapter,
+			crate::driver::Transport::new(adapter),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			control,
 			None,
@@ -8013,7 +8043,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -8109,8 +8139,10 @@ mod tests {
 		// A peer that accepts the subscription, binding alias 7, then says nothing more.
 		let subscribe_ok = {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				version,
+			);
 			writer.varint(ietf::SubscribeOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::SubscribeOk {
@@ -8134,7 +8166,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -8218,8 +8250,10 @@ mod tests {
 
 		let subscribe_ok = {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				version,
+			);
 			writer.varint(ietf::SubscribeOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::SubscribeOk {
@@ -8241,7 +8275,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -8372,7 +8406,7 @@ mod tests {
 					let (tasks, _task_set) = crate::util::TaskSet::new();
 					let mut subscriber = Subscriber::new(
 						crate::time::sim(),
-						session,
+						crate::driver::Transport::new(session.clone()),
 						crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce(),
 						Control::new(None, false),
 						None,
@@ -8459,7 +8493,7 @@ mod tests {
 					let (tasks, _task_set) = crate::util::TaskSet::new();
 					let mut subscriber = Subscriber::new(
 						crate::time::sim(),
-						session,
+						crate::driver::Transport::new(session.clone()),
 						crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 						Control::new(None, false),
 						None,
@@ -8545,7 +8579,7 @@ mod tests {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
-				session,
+				crate::driver::Transport::new(session.clone()),
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				Control::new(None, false),
 				None,
@@ -8663,7 +8697,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			None,
@@ -8676,7 +8710,7 @@ mod tests {
 		);
 		subscriber.announces = crate::session::Slots::new(1);
 
-		let advert = |subscriber: &Subscriber<_>| subscriber.route(None, &cluster::Peer::default()).expect("route");
+		let advert = |subscriber: &Subscriber| subscriber.route(None, &cluster::Peer::default()).expect("route");
 		let a = crate::Path::new("a").to_owned();
 		let b = crate::Path::new("b").to_owned();
 		let (first, repeat, over, last) = (
@@ -8721,7 +8755,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			Some(assigned),
@@ -8782,7 +8816,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			Some(peer),
@@ -8822,7 +8856,7 @@ mod tests {
 			std::mem::forget(task_set);
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
-				crate::lite::test_transport::SinkSession::new(Default::default()),
+				crate::driver::Transport::new(crate::lite::test_transport::SinkSession::new(Default::default())),
 				origin.clone(),
 				Control::new(None, false),
 				Some(peer),
@@ -8861,12 +8895,7 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_some());
 	}
 
-	fn cluster_subscriber(
-		self_origin: crate::Hop,
-	) -> (
-		Subscriber<crate::lite::test_transport::SinkSession>,
-		crate::origin::Producer,
-	) {
+	fn cluster_subscriber(self_origin: crate::Hop) -> (Subscriber, crate::origin::Producer) {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let origin = crate::origin::Config::new(self_origin).produce();
 		let (tasks, task_set) = crate::util::TaskSet::new();
@@ -8876,7 +8905,7 @@ mod tests {
 
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			origin.clone(),
 			Control::new(None, false),
 			None,
@@ -9014,7 +9043,7 @@ mod tests {
 		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			None,
@@ -9026,7 +9055,9 @@ mod tests {
 			Default::default(),
 		);
 
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		subscriber
 			.run_subscribe_namespace(
 				stream,
@@ -9055,8 +9086,10 @@ mod tests {
 
 		let script = {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			);
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
@@ -9099,7 +9132,7 @@ mod tests {
 		});
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			None,
@@ -9111,7 +9144,9 @@ mod tests {
 			Default::default(),
 		);
 
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
 			stream,
 			crate::Path::new("").to_owned(),
@@ -9167,7 +9202,7 @@ mod tests {
 				let (tasks, _task_set) = crate::util::TaskSet::new();
 				let mut subscriber = Subscriber::new(
 					crate::time::sim(),
-					session.clone(),
+					crate::driver::Transport::new(session.clone()),
 					origin,
 					Control::new(None, false),
 					None,
@@ -9178,7 +9213,9 @@ mod tests {
 					tasks,
 					Default::default(),
 				);
-				let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+					.await
+					.unwrap();
 				let msg = ietf::PublishNamespace {
 					request_id: RequestId(0),
 					track_namespace: crate::Path::new("room/host"),
@@ -9212,7 +9249,10 @@ mod tests {
 
 		let path = crate::Path::new("room/host").to_owned();
 		let log = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+		let mut writer = crate::coding::Writer::new(
+			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+			VERSION,
+		);
 		writer
 			.encode_message(&ietf::PublishNamespaceDone {
 				track_namespace: path.borrow(),
@@ -9229,7 +9269,7 @@ mod tests {
 		std::mem::forget(task_set);
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			None,
@@ -9241,7 +9281,9 @@ mod tests {
 			Default::default(),
 		);
 
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let msg = ietf::PublishNamespace {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
@@ -9276,8 +9318,10 @@ mod tests {
 			let mut script = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
 			script.extend_from_slice(body);
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				version,
+			);
 			writer
 				.encode_message(&ietf::PublishNamespaceDone {
 					track_namespace: path.borrow(),
@@ -9293,7 +9337,7 @@ mod tests {
 			std::mem::forget(task_set);
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
-				session.clone(),
+				crate::driver::Transport::new(session.clone()),
 				origin,
 				Control::new(None, false),
 				None,
@@ -9305,7 +9349,9 @@ mod tests {
 				Default::default(),
 			);
 
-			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
 			let msg = ietf::PublishNamespace {
 				request_id: RequestId(0),
 				track_namespace: path.borrow(),
@@ -9351,7 +9397,10 @@ mod tests {
 		// The peer sends something that does not belong on this stream, ending it with an
 		// error while the advertisement is still live.
 		let log = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+		let mut writer = crate::coding::Writer::new(
+			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+			VERSION,
+		);
 		writer.varint(ietf::NamespaceDone::ID).await.unwrap();
 		let script = log.writes.lock().unwrap().clone();
 
@@ -9360,7 +9409,7 @@ mod tests {
 		std::mem::forget(task_set);
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			None,
@@ -9373,7 +9422,9 @@ mod tests {
 		);
 
 		let path = crate::Path::new("room/host").to_owned();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let msg = ietf::PublishNamespace {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
@@ -9596,7 +9647,7 @@ mod tests {
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer::default();
 		let (old, new) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let advert = |subscriber: &Subscriber<_>, epoch: &crate::Epoch| {
+		let advert = |subscriber: &Subscriber, epoch: &crate::Epoch| {
 			subscriber
 				.route(None, &peer)
 				.expect("route")
@@ -9644,7 +9695,7 @@ mod tests {
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer::default();
 		let (old, new) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let advert = |subscriber: &Subscriber<_>, epoch: &crate::Epoch| {
+		let advert = |subscriber: &Subscriber, epoch: &crate::Epoch| {
 			subscriber
 				.route(None, &peer)
 				.expect("route")
@@ -9790,7 +9841,10 @@ mod tests {
 	async fn publish_namespace_updates(updates: &[cluster::Advert]) -> Vec<u8> {
 		const VERSION: Version = Version::Draft19;
 		let log = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+		let mut writer = crate::coding::Writer::new(
+			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+			VERSION,
+		);
 
 		for (i, advert) in updates.iter().enumerate() {
 			writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
@@ -9820,13 +9874,15 @@ mod tests {
 		attached: &cluster::Advert,
 		script: Vec<u8>,
 	) -> (
-		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		Subscriber,
 		crate::origin::Consumer,
-		Stream<crate::lite::test_transport::ScriptedSession, Version>,
+		Stream<Transport, Version>,
 		crate::origin::Driver,
+		crate::lite::test_transport::Log,
 	) {
 		const VERSION: Version = Version::Draft19;
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let log = session.log.clone();
 		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::new(self_origin));
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
@@ -9836,7 +9892,7 @@ mod tests {
 
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, true),
 			None,
@@ -9854,8 +9910,10 @@ mod tests {
 		assert_eq!(id, 0, "the harness advertisement is the first");
 		assert!(routed_now(&consumer, "room/host").is_some(), "attached to start with");
 
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
-		(subscriber, consumer, stream, driver)
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
+		(subscriber, consumer, stream, driver, log)
 	}
 
 	/// Build a subscriber whose peer replays `updates` on one PUBLISH_NAMESPACE stream,
@@ -9866,16 +9924,17 @@ mod tests {
 		attached: &cluster::Advert,
 		updates: &[cluster::Advert],
 	) -> (
-		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		Subscriber,
 		crate::origin::Consumer,
-		Stream<crate::lite::test_transport::ScriptedSession, Version>,
+		Stream<Transport, Version>,
+		crate::lite::test_transport::Log,
 	) {
 		let script = publish_namespace_updates(updates).await;
-		let (subscriber, consumer, stream, driver) = update_harness(self_origin, peer, attached, script).await;
+		let (subscriber, consumer, stream, driver, log) = update_harness(self_origin, peer, attached, script).await;
 		// Dropping the driver tears the origin down, so leak it: these tests only
 		// need the synchronous half.
 		std::mem::forget(driver);
-		(subscriber, consumer, stream)
+		(subscriber, consumer, stream, log)
 	}
 
 	/// How many times `type_id` was written to the peer, as a one-byte message type.
@@ -9924,8 +9983,8 @@ mod tests {
 		let peer = peer_9();
 		let (clean, _) = clean_and_looped();
 		let script = publish_namespace_updates(std::slice::from_ref(&clean)).await;
-		let (mut subscriber, _consumer, mut stream, _driver) = update_harness(self_origin, &peer, &clean, script).await;
-		let log = subscriber.session.log.clone();
+		let (mut subscriber, _consumer, mut stream, _driver, log) =
+			update_harness(self_origin, &peer, &clean, script).await;
 		// The initial request is already retired; its ID remains permanently spent.
 		assert!(subscriber.control.accept(RequestId(3)).unwrap().is_none());
 		let mut attached = Some(0);
@@ -9958,8 +10017,8 @@ mod tests {
 		let peer = peer_9();
 		let (clean, looped) = clean_and_looped();
 
-		let (mut subscriber, consumer, mut stream) = reflected_harness(self_origin, &peer, &clean, &[looped]).await;
-		let log = subscriber.session.log.clone();
+		let (mut subscriber, consumer, mut stream, log) =
+			reflected_harness(self_origin, &peer, &clean, &[looped]).await;
 
 		let path = crate::Path::new("room/host").to_owned();
 		let mut attached = Some(0);
@@ -10008,7 +10067,7 @@ mod tests {
 		let peer = peer_9();
 		let (clean, looped) = clean_and_looped();
 
-		let (mut subscriber, consumer, mut stream) =
+		let (mut subscriber, consumer, mut stream, _log) =
 			reflected_harness(self_origin, &peer, &clean, &[looped, clean.clone()]).await;
 
 		let path = crate::Path::new("room/host").to_owned();
@@ -10060,7 +10119,7 @@ mod tests {
 		std::mem::forget(task_set);
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, true),
 			None,
@@ -10099,7 +10158,9 @@ mod tests {
 			.start_announce(path.clone(), advert, Admit::Token(Some(hold)))
 			.unwrap();
 
-		let mut stream = Stream::open(&mut session.clone(), Version::Draft19).await.unwrap();
+		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Draft19)
+			.await
+			.unwrap();
 		let mut attached = Some(0);
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
@@ -10149,8 +10210,10 @@ mod tests {
 
 		let script = {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			);
 			writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
 			writer
 				.encode(&ietf::PublishNamespaceUpdate {
@@ -10166,9 +10229,9 @@ mod tests {
 			writes.clone()
 		};
 
-		let (mut subscriber, consumer, mut stream, driver) = update_harness(self_origin, &peer, &held, script).await;
+		let (mut subscriber, consumer, mut stream, driver, log) =
+			update_harness(self_origin, &peer, &held, script).await;
 		std::mem::forget(driver);
-		let log = subscriber.session.log.clone();
 		assert_eq!(routed_now(&consumer, "room/host").expect("routed").cost.value(), 4);
 
 		let path = crate::Path::new("room/host").to_owned();
@@ -10215,8 +10278,8 @@ mod tests {
 		};
 
 		let script = publish_namespace_updates(&[cheaper]).await;
-		let (mut subscriber, _consumer, mut stream, driver) = update_harness(self_origin, &peer, &clean, script).await;
-		let log = subscriber.session.log.clone();
+		let (mut subscriber, _consumer, mut stream, driver, log) =
+			update_harness(self_origin, &peer, &clean, script).await;
 
 		// Tear the origin down underneath the advertisement: the route can no longer be
 		// repriced, which is the one way an in-place update fails.
@@ -10273,9 +10336,9 @@ mod tests {
 		};
 
 		let script = publish_namespace_updates(&[other_publisher]).await;
-		let (mut subscriber, consumer, mut stream, driver) = update_harness(self_origin, &peer, &clean, script).await;
+		let (mut subscriber, consumer, mut stream, driver, log) =
+			update_harness(self_origin, &peer, &clean, script).await;
 		std::mem::forget(driver);
-		let log = subscriber.session.log.clone();
 
 		let path = crate::Path::new("room/host").to_owned();
 		let mut attached = Some(0);
@@ -10319,8 +10382,10 @@ mod tests {
 
 		let script = {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			);
 			writer.varint(ietf::PublishNamespace::ID).await.unwrap();
 			writer
 				.encode(&ietf::PublishNamespace {
@@ -10341,7 +10406,8 @@ mod tests {
 			writes.clone()
 		};
 
-		let (mut subscriber, _consumer, mut stream, driver) = update_harness(self_origin, &peer, &clean, script).await;
+		let (mut subscriber, _consumer, mut stream, driver, _log) =
+			update_harness(self_origin, &peer, &clean, script).await;
 		std::mem::forget(driver);
 
 		let path = crate::Path::new("room/host").to_owned();
@@ -10420,7 +10486,7 @@ mod tests {
 
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
-				session.clone(),
+				crate::driver::Transport::new(session.clone()),
 				origin,
 				Control::new(None, false),
 				None,
@@ -10432,7 +10498,9 @@ mod tests {
 				Default::default(),
 			);
 
-			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
 			let msg = ietf::Publish {
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("room/host"),
@@ -10461,8 +10529,10 @@ mod tests {
 				const NOT_SUPPORTED: u64 = 0x3;
 
 				let log = crate::lite::test_transport::Log::default();
-				let mut writer =
-					crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+				let mut writer = crate::coding::Writer::new(
+					crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+					version,
+				);
 
 				match version {
 					Version::Draft14 => {
@@ -10509,7 +10579,7 @@ mod tests {
 		version: Version,
 		first_script: Vec<u8>,
 	) -> (
-		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		Subscriber,
 		crate::auth::Requests,
 		crate::auth::Auth,
 		origin::Consumer,
@@ -10523,11 +10593,11 @@ mod tests {
 
 	/// [`auth_announce_harness`] over a given session, such as one that finishes the stream
 	/// after its script.
-	fn auth_announce_harness_on<S: crate::transport::poll::Boxable + Clone>(
+	fn auth_announce_harness_on<S: crate::transport::poll::Boxable>(
 		version: Version,
 		session: S,
 	) -> (
-		Subscriber<S>,
+		Subscriber,
 		crate::auth::Requests,
 		crate::auth::Auth,
 		origin::Consumer,
@@ -10564,7 +10634,7 @@ mod tests {
 
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			// The announcing peer is the server here, so its update IDs are odd.
 			Control::new(None, true),
@@ -10612,7 +10682,10 @@ mod tests {
 	/// sends it.
 	async fn publish_namespace_update_with_token(version: Version) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		let mut writer = crate::coding::Writer::new(
+			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+			version,
+		);
 		let msg = ietf::PublishNamespaceUpdate {
 			request_id: RequestId(3),
 			namespace_request_id: (version == Version::Draft16).then_some(RequestId(1)),
@@ -10629,7 +10702,10 @@ mod tests {
 	/// parameters (HOP_PATH/ROUTE_COST), framed as the peer sends it.
 	async fn publish_namespace_update_with_token_and_cluster(version: Version) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		let mut writer = crate::coding::Writer::new(
+			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+			version,
+		);
 		let msg = ietf::PublishNamespaceUpdate {
 			request_id: RequestId(3),
 			namespace_request_id: None,
@@ -10648,7 +10724,9 @@ mod tests {
 	async fn a_publish_namespace_token_authorizes_an_uncovered_announce() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, Vec::new());
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		let acceptor = async {
 			let mut held = Vec::new();
@@ -10693,8 +10771,11 @@ mod tests {
 		] {
 			let gate = kio::Producer::new(false);
 			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
-			let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness_on(version, session);
-			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let (mut subscriber, mut requests, _cred, consumer, session) =
+				auth_announce_harness_on(version, session.clone());
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
 				stream,
 				token_publish_namespace(),
@@ -10775,18 +10856,23 @@ mod tests {
 		const VERSION: Version = Version::Draft16;
 		let done = {
 			let log = crate::lite::test_transport::Log::default();
-			crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION)
-				.encode_message(&ietf::PublishNamespaceDone {
-					track_namespace: crate::Path::new("room/alice"),
-					request_id: RequestId(1),
-				})
-				.await
-				.unwrap();
+			crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			)
+			.encode_message(&ietf::PublishNamespaceDone {
+				track_namespace: crate::Path::new("room/alice"),
+				request_id: RequestId(1),
+			})
+			.await
+			.unwrap();
 			log.writes.lock().unwrap().clone()
 		};
 		// The application never takes the token, so only the withdrawal can end the wait.
 		let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(VERSION, done);
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
 			stream,
 			token_publish_namespace(),
@@ -10819,7 +10905,9 @@ mod tests {
 	async fn a_refused_publish_namespace_token_is_not_announced() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, Vec::new());
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		let acceptor = async {
 			let request = requests.next().await.expect("a request");
@@ -10860,7 +10948,9 @@ mod tests {
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth);
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 		let acceptor = {
@@ -10912,7 +11002,9 @@ mod tests {
 		let auth = crate::auth::Handle::new(false);
 		auth.authorize(&limit("room"));
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 		let acceptor = {
 			let consulted = consulted.clone();
@@ -10967,7 +11059,9 @@ mod tests {
 		let auth = crate::auth::Handle::new(false);
 		auth.authorize(&crate::auth::Grant::default());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let acceptor = async move {
 			let request = requests.next().await.expect("a request");
 			let _held = request.accept(crate::auth::Grant::all());
@@ -11018,8 +11112,10 @@ mod tests {
 		// The announce's peer says nothing; the subscription's accepts it.
 		let subscribe_ok = {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			);
 			writer.varint(ietf::SubscribeOk::ID).await.unwrap();
 			let ok = ietf::SubscribeOk {
 				request_id: None,
@@ -11035,7 +11131,9 @@ mod tests {
 		// Serve the route, which the harness leaves undriven.
 		let (tasks, mut task_set) = crate::util::TaskSet::new();
 		subscriber.tasks = tasks;
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
 			stream,
 			token_publish_namespace(),
@@ -11111,7 +11209,9 @@ mod tests {
 			let (mut subscriber, mut requests, _cred, consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
 			let rt = subscriber.runtime.clone();
-			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
 
 			let answered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 			let acceptor = {
@@ -11183,9 +11283,12 @@ mod tests {
 	async fn a_lapsed_announce_grant_retracts_before_the_peer_reads() {
 		const VERSION: Version = Version::Draft18;
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_fin();
-		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness_on(VERSION, session);
+		let (mut subscriber, mut requests, _cred, consumer, session) =
+			auth_announce_harness_on(VERSION, session.clone());
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		let acceptor = async move {
 			let request = requests.next().await.expect("a request");
@@ -11248,9 +11351,12 @@ mod tests {
 		script.extend(body);
 
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]).with_unacked_fin();
-		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness_on(VERSION, session);
+		let (mut subscriber, mut requests, _cred, consumer, session) =
+			auth_announce_harness_on(VERSION, session.clone());
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		let acceptor = async move {
 			let request = requests.next().await.expect("a request");
@@ -11289,7 +11395,9 @@ mod tests {
 			let (mut subscriber, mut requests, _cred, _consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
 			let rt = subscriber.runtime.clone();
-			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
 
 			let answered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 			let acceptor = {
@@ -11342,8 +11450,12 @@ mod tests {
 			if version == Version::Draft16 {
 				let cancel = {
 					let log = crate::lite::test_transport::Log::default();
-					let mut writer =
-						crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+					let mut writer = crate::coding::Writer::new(
+						crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(
+							log.clone(),
+						)),
+						version,
+					);
 					writer
 						.encode_message(&ietf::PublishNamespaceCancel {
 							track_namespace: crate::Path::new("room/alice"),
@@ -11375,7 +11487,9 @@ mod tests {
 		for version in [Version::Draft16, Version::Draft18] {
 			let (mut subscriber, mut requests, _cred, consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
-			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
 			let tokenless = ietf::PublishNamespace {
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("other/alice"),
@@ -11420,7 +11534,9 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness(VERSION, publish_namespace_update_with_token_and_cluster(VERSION).await);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		// A negotiated peer over a free link, so the advertised cost is the route's warm cost.
 		let peer = cluster::Peer {
@@ -11473,7 +11589,10 @@ mod tests {
 		cost: Option<u64>,
 	) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		let mut writer = crate::coding::Writer::new(
+			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+			version,
+		);
 		let msg = ietf::PublishNamespaceUpdate {
 			request_id: RequestId(rid),
 			namespace_request_id: None,
@@ -11500,7 +11619,9 @@ mod tests {
 		script.extend(publish_namespace_update_token_rid(VERSION, 0x07, Some(hop_path(&[7, 11])), None).await);
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		// A negotiated peer over a free link, so the advertised cost is the route's warm cost.
 		let peer = cluster::Peer {
@@ -11581,7 +11702,9 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		// Accept the initial token, then never answer a renewal, so the buffer only grows.
 		let acceptor = async move {
@@ -11639,7 +11762,9 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		let acceptor = async move {
 			let first = requests.next().await.expect("a request");
@@ -11682,7 +11807,9 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		let acceptor = async move {
 			let first = requests.next().await.expect("a request");
@@ -11724,7 +11851,9 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		let acceptor = async move {
 			let first = requests.next().await.expect("a request");
@@ -11770,9 +11899,12 @@ mod tests {
 			script.extend(publish_namespace_update_token_rid(VERSION, rid, None, None).await);
 		}
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]).with_unacked_fin();
-		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness_on(VERSION, session);
+		let (mut subscriber, mut requests, _cred, consumer, session) =
+			auth_announce_harness_on(VERSION, session.clone());
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		let acceptor = async move {
 			let first = requests.next().await.expect("a request");
@@ -11812,7 +11944,7 @@ mod tests {
 		version: Version,
 		limit: Option<crate::auth::Grant>,
 	) -> (
-		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		Subscriber,
 		crate::auth::Requests,
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
@@ -11829,7 +11961,7 @@ mod tests {
 		version: Version,
 		auth: crate::auth::Handle,
 	) -> (
-		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		Subscriber,
 		crate::auth::Requests,
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
@@ -11844,7 +11976,7 @@ mod tests {
 		auth: crate::auth::Handle,
 		session: crate::lite::test_transport::ScriptedSession,
 	) -> (
-		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		Subscriber,
 		crate::auth::Requests,
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
@@ -11860,7 +11992,7 @@ mod tests {
 
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			origin,
 			Control::new(None, false),
 			None,
@@ -11888,7 +12020,9 @@ mod tests {
 		{
 			let (mut subscriber, mut requests, consumer, session) =
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
-			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+				.await
+				.unwrap();
 			let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 			let acceptor = {
 				let consulted = consulted.clone();
@@ -11935,7 +12069,9 @@ mod tests {
 		{
 			let (mut subscriber, mut requests, consumer, session) =
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
-			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+				.await
+				.unwrap();
 			let acceptor = async move {
 				let request = requests.next().await.expect("a request reaches the acceptor");
 				request.reject(crate::SessionError::Unauthorized, "no");
@@ -11974,8 +12110,11 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::per_stream_eof(vec![
 			publish_namespace_update_with_token(VERSION).await,
 		]);
-		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness_on(VERSION, session);
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let (mut subscriber, mut requests, _cred, consumer, session) =
+			auth_announce_harness_on(VERSION, session.clone());
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let popped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 		let acceptor = {
 			let popped = popped.clone();
@@ -12025,8 +12164,10 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 		let queued = {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			);
 			writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
 			writer
 				.encode(&ietf::PublishNamespaceUpdate {
@@ -12043,9 +12184,12 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::per_stream_eof(vec![
 			[publish_namespace_update_with_token(VERSION).await, queued].concat(),
 		]);
-		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness_on(VERSION, session);
+		let (mut subscriber, mut requests, _cred, _consumer, session) =
+			auth_announce_harness_on(VERSION, session.clone());
 		let control = subscriber.control.clone();
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let acceptor = async move {
 			let first = requests.next().await.expect("a request");
 			let _issued = first.accept(crate::auth::Grant::all());
@@ -12082,8 +12226,10 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 		let queued = {
 			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+				VERSION,
+			);
 			writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
 			writer
 				.encode(&ietf::PublishNamespaceUpdate {
@@ -12113,8 +12259,11 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::per_stream_eof(vec![
 			[publish_namespace_update_with_token(VERSION).await, queued].concat(),
 		]);
-		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness_on(VERSION, session);
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let (mut subscriber, mut requests, _cred, _consumer, session) =
+			auth_announce_harness_on(VERSION, session.clone());
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 		let acceptor = async move {
 			let first = requests.next().await.expect("a request");
 			let _issued = first.accept(crate::auth::Grant::all());
@@ -12169,7 +12318,9 @@ mod tests {
 		for (grant, admitted) in [(read_only, false), (write_only, true)] {
 			let (mut subscriber, mut requests, consumer, session) =
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
-			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+				.await
+				.unwrap();
 			let acceptor = async move {
 				let request = requests.next().await.expect("a request reaches the acceptor");
 				let _issued = request.accept(grant);
@@ -12209,7 +12360,9 @@ mod tests {
 	async fn a_token_less_request_on_a_no_auth_session_is_unchanged() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, _requests, consumer, session) = auth_announce_harness_no_ext(VERSION, None);
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			.await
+			.unwrap();
 
 		let mut msg = token_publish_namespace();
 		msg.authorization_token = None;
@@ -12551,7 +12704,6 @@ mod stitch_tests {
 		coding::{Encode as _, Encoder},
 		lite::test_transport::ScriptedSession,
 		model::ProduceTest,
-		transport::poll::Session as _,
 		util::{TaskSet, Tasks},
 	};
 
@@ -12727,18 +12879,16 @@ mod stitch_tests {
 	}
 
 	/// A reader over the next scripted stream, decoded as draft-18.
-	async fn read_draft18(
-		session: &ScriptedSession,
-	) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
+	async fn read_draft18(session: &ScriptedSession) -> Reader<crate::transport::boxed::RecvStream, Version> {
 		let mut session = session.clone();
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-		Reader::new(recv, Version::Draft18)
+		Reader::new(crate::transport::boxed::RecvStream::new(recv), Version::Draft18)
 	}
 
 	/// A subscriber holding one draft-20 subscription, as its SUBSCRIBE_OK left it: the
 	/// alias bound, the timescale declared, and `fill` waiting on its fetch stream.
 	struct Harness {
-		subscriber: Subscriber<ScriptedSession>,
+		subscriber: Subscriber,
 		session: ScriptedSession,
 		track: track::Producer,
 		fill: kio::Producer<Fill>,
@@ -12759,7 +12909,7 @@ mod stitch_tests {
 
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
-				session.clone(),
+				crate::driver::Transport::new(session.clone()),
 				origin,
 				Control::new(None, false),
 				None,
@@ -12842,10 +12992,10 @@ mod stitch_tests {
 		}
 
 		/// A reader over the next scripted stream, standing in for one the peer opened.
-		async fn stream(&self) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
+		async fn stream(&self) -> Reader<crate::transport::boxed::RecvStream, Version> {
 			let mut session = self.session.clone();
 			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-			Reader::new(recv, VERSION)
+			Reader::new(crate::transport::boxed::RecvStream::new(recv), VERSION)
 		}
 	}
 
@@ -13035,12 +13185,12 @@ mod stitch_tests {
 			false => (origin, None),
 		};
 
-		let mut downstream = ScriptedSession::per_stream(vec![vec![]]);
+		let downstream = ScriptedSession::per_stream(vec![vec![]]);
 		let peer = peer::PeerSetup::default();
 		peer.set(peer::Peer::default());
 		let publisher = crate::ietf::Publisher::new(
 			crate::time::sim(),
-			downstream.clone(),
+			crate::driver::Transport::new(downstream.clone()),
 			served.consume(),
 			Control::new(None, false),
 			None,
@@ -13113,7 +13263,9 @@ mod stitch_tests {
 			.unwrap();
 			ietf::Subscribe::ID
 		};
-		let stream = Stream::open(&mut downstream, egress).await.unwrap();
+		let stream = Stream::open(&mut crate::driver::Transport::new(downstream.clone()), egress)
+			.await
+			.unwrap();
 		publisher
 			.handle_stream(id, ietf::Body(body.into()), stream, false)
 			.unwrap()
@@ -13817,12 +13969,12 @@ mod stitch_tests {
 					}
 					false => (origin, None),
 				};
-				let mut downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
+				let downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
 				let peer = peer::PeerSetup::default();
 				peer.set(peer::Peer::default());
 				let publisher = crate::ietf::Publisher::new(
 					crate::time::sim(),
-					downstream.clone(),
+					crate::driver::Transport::new(downstream.clone()),
 					served.consume(),
 					Control::new(None, false),
 					None,
@@ -13863,7 +14015,9 @@ mod stitch_tests {
 				subscribe
 					.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 					.unwrap();
-				let stream = Stream::open(&mut downstream, version).await.unwrap();
+				let stream = Stream::open(&mut crate::driver::Transport::new(downstream.clone()), version)
+					.await
+					.unwrap();
 				publisher
 					.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, false)
 					.unwrap()
@@ -13927,12 +14081,12 @@ mod stitch_tests {
 					.recv_datagram(datagram.encode_bytes(ingress).unwrap())
 					.unwrap();
 				track.finish().unwrap();
-				let mut downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
+				let downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
 				let peer = peer::PeerSetup::default();
 				peer.set(peer::Peer::default());
 				let publisher = crate::ietf::Publisher::new(
 					crate::time::sim(),
-					downstream.clone(),
+					crate::driver::Transport::new(downstream.clone()),
 					origin.consume(),
 					Control::new(None, false),
 					None,
@@ -13960,7 +14114,9 @@ mod stitch_tests {
 				subscribe
 					.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
 					.unwrap();
-				let stream = Stream::open(&mut downstream, egress).await.unwrap();
+				let stream = Stream::open(&mut crate::driver::Transport::new(downstream.clone()), egress)
+					.await
+					.unwrap();
 				publisher
 					.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, false)
 					.unwrap()
@@ -15374,8 +15530,8 @@ mod stitch_tests {
 
 	/// A subscriber reading one scripted group fetch stream, already past its header.
 	struct GroupFetchRun {
-		subscriber: Subscriber<ScriptedSession>,
-		stream: Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version>,
+		subscriber: Subscriber,
+		stream: Reader<crate::transport::boxed::RecvStream, Version>,
 		track: track::Producer,
 		_tasks: (Tasks, TaskSet),
 	}
@@ -15386,7 +15542,7 @@ mod stitch_tests {
 			let tasks = TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
-				session.clone(),
+				crate::driver::Transport::new(session.clone()),
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				Control::new(None, false),
 				None,
@@ -15406,7 +15562,7 @@ mod stitch_tests {
 
 			Self {
 				subscriber,
-				stream: Reader::new(recv, version),
+				stream: Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
 				track,
 				_tasks: tasks,
 			}
@@ -15463,7 +15619,6 @@ mod joining_fetch_tests {
 		coding::{Encode as _, Encoder},
 		lite::test_transport::ScriptedSession,
 		model::ProduceTest,
-		transport::poll::Session as _,
 		util::{TaskSet, Tasks},
 	};
 	use futures::FutureExt;
@@ -15577,7 +15732,7 @@ mod joining_fetch_tests {
 	}
 
 	struct JoinRun {
-		subscriber: Subscriber<ScriptedSession>,
+		subscriber: Subscriber,
 		session: ScriptedSession,
 		_hold: (
 			crate::broadcast::Producer,
@@ -15603,7 +15758,7 @@ mod joining_fetch_tests {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
-				session.clone(),
+				crate::driver::Transport::new(session.clone()),
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				control,
 				None,
@@ -15692,10 +15847,7 @@ mod joining_fetch_tests {
 		));
 	}
 
-	fn pending_join<S: crate::transport::poll::Boxable>(
-		session: S,
-		version: Version,
-	) -> (Subscriber<S>, track::Producer, TaskSet) {
+	fn pending_join(session: Transport, version: Version) -> (Subscriber, track::Producer, TaskSet) {
 		let (tasks, task_set) = TaskSet::new();
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
@@ -15738,7 +15890,7 @@ mod joining_fetch_tests {
 			let (tasks, _task_set) = TaskSet::new();
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
-				session,
+				crate::driver::Transport::new(session.clone()),
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				Control::new(None, false),
 				None,
@@ -15815,7 +15967,7 @@ mod joining_fetch_tests {
 	async fn a_request_failing_mid_head_settles_the_fill() {
 		for version in [Version::Draft18, Version::Draft19] {
 			let session = ScriptedSession::per_stream_reset(vec![fetch_ok(version)]);
-			let (subscriber, track, _tasks) = pending_join(session, version);
+			let (subscriber, track, _tasks) = pending_join(crate::driver::Transport::new(session.clone()), version);
 			let fill = subscriber.state.lock().subscribes[&RequestId(99)].fill.clone();
 			// A fetch stream is writing the head.
 			if let Ok(mut state) = fill.write() {
@@ -15837,7 +15989,8 @@ mod joining_fetch_tests {
 				let gate = kio::Producer::new(false);
 				let session = ScriptedSession::gated_open(Vec::new(), gate.consume());
 				let log = session.log.clone();
-				let (mut subscriber, track, _tasks) = pending_join(session, version);
+				let (mut subscriber, track, _tasks) =
+					pending_join(crate::driver::Transport::new(session.clone()), version);
 				let route = kio::Producer::new(());
 				subscriber.validity = crate::model::broadcast::RequestValidity::token(Some(route.consume()));
 				let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
@@ -15868,7 +16021,7 @@ mod joining_fetch_tests {
 			let gate = kio::Producer::new(false);
 			let session = ScriptedSession::gated_open(Vec::new(), gate.consume());
 			let log = session.log.clone();
-			let (subscriber, track, mut tasks) = pending_join(session, version);
+			let (subscriber, track, mut tasks) = pending_join(crate::driver::Transport::new(session.clone()), version);
 			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
 			assert!(joining.poll(&kio::Waiter::noop()).is_pending());
 			drop(joining);
@@ -15889,7 +16042,7 @@ mod joining_fetch_tests {
 			let gate = kio::Producer::new(false);
 			let session = crate::lite::test_transport::SinkSession::gated_bi_prefix(2, gate.consume());
 			let log = session.log.clone();
-			let (subscriber, track, mut tasks) = pending_join(session, version);
+			let (subscriber, track, mut tasks) = pending_join(crate::driver::Transport::new(session.clone()), version);
 			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
 			assert!(joining.poll(&kio::Waiter::noop()).is_pending());
 			assert_eq!(log.writes.lock().unwrap().len(), 2, "partial header");
@@ -15927,7 +16080,7 @@ mod joining_fetch_tests {
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let session = ScriptedSession::per_stream(Vec::new()).with_unacked_fin();
 			let log = session.log.clone();
-			let (subscriber, track, mut tasks) = pending_join(session, version);
+			let (subscriber, track, mut tasks) = pending_join(crate::driver::Transport::new(session.clone()), version);
 			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
 			assert!(joining.poll(&kio::Waiter::noop()).is_pending());
 			drop(joining);
@@ -16108,7 +16261,7 @@ mod joining_fetch_tests {
 			w.bytes(b"x").unwrap();
 			let data = ScriptedSession::new(objects);
 			let (_, recv) = data.clone().open_bi(Default::default()).await.unwrap();
-			let mut reader = Reader::new(recv, version);
+			let mut reader = Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 			let mut receiving = run.subscriber.clone();
 			let mut fill = Box::pin(receiving.recv_fill(&mut reader));
 			assert!(futures::poll!(fill.as_mut()).is_pending());
@@ -16151,7 +16304,7 @@ mod joining_fetch_tests {
 		let (tasks, _task_set) = TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -16262,7 +16415,7 @@ mod joining_fetch_tests {
 				objects.push(b'x');
 				let data = ScriptedSession::new(objects);
 				let (_, recv) = data.clone().open_bi(Default::default()).await.unwrap();
-				let mut reader = Reader::new(recv, version);
+				let mut reader = Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 				let mut receiving = subscriber.clone();
 				let mut fill = Box::pin(receiving.recv_group_fetch(&mut reader, slot.clone()));
 				assert!(futures::poll!(fill.as_mut()).is_pending());
@@ -16395,7 +16548,7 @@ mod joining_fetch_tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -16461,7 +16614,7 @@ mod joining_fetch_tests {
 					let (tasks, _task_set) = crate::util::TaskSet::new();
 					let subscriber = Subscriber::new(
 						crate::time::sim(),
-						session.clone(),
+						crate::driver::Transport::new(session.clone()),
 						crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 						Control::new(None, false),
 						None,
@@ -16602,7 +16755,7 @@ mod joining_fetch_tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
-			session.clone(),
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -16635,7 +16788,7 @@ mod joining_fetch_tests {
 
 		// The fetch stream, as the peer would open it.
 		let (_, recv) = session.clone().open_bi(Default::default()).await.unwrap();
-		let mut stream = Reader::new(recv, version);
+		let mut stream = Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
 		subscriber
 			.clone()
 			.recv_fill(&mut stream)
@@ -16703,11 +16856,11 @@ mod new_group_tests {
 
 	const VERSION: Version = Version::Draft22;
 
-	type PeerStream = Stream<memory::Session, Version>;
+	type PeerStream = Stream<Transport, Version>;
 
 	struct Relay {
 		track: track::Consumer,
-		probe: Subscriber<memory::Session>,
+		probe: Subscriber,
 		peer: memory::Session,
 		serving: moq_clock::sim::JoinHandle<()>,
 		/// Landed groups stay open, as a live publisher's would.
@@ -16722,7 +16875,7 @@ mod new_group_tests {
 		let (tasks, task_set) = TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -16769,7 +16922,9 @@ mod new_group_tests {
 	impl Relay {
 		/// Accept the SUBSCRIBE the relay sends upstream, returning its NEW_GROUP_REQUEST.
 		async fn accept(&mut self) -> (PeerStream, Option<u64>) {
-			let mut stream = Stream::accept(&mut self.peer, VERSION).await.unwrap();
+			let mut stream = Stream::accept(&mut crate::driver::Transport::new(self.peer.clone()), VERSION)
+				.await
+				.unwrap();
 			let (id, body) = read(&mut stream).await;
 			assert_eq!(id, ietf::Subscribe::ID);
 			let msg = ietf::Subscribe::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
@@ -17018,15 +17173,12 @@ mod track_property_tests {
 
 	/// Subscribe to one track through a relay on `version`, whose publisher answers with
 	/// `block` as SUBSCRIBE_OK's Track Properties, returning what the subscriber got.
-	async fn subscribe(
-		version: Version,
-		block: &[u8],
-	) -> (Result<track::Subscriber, Error>, Subscriber<memory::Session>) {
-		let (session, mut peer) = memory::pair(memory::Config::default());
+	async fn subscribe(version: Version, block: &[u8]) -> (Result<track::Subscriber, Error>, Subscriber) {
+		let (session, peer) = memory::pair(memory::Config::default());
 		let (tasks, _task_set) = TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
-			session,
+			crate::driver::Transport::new(session.clone()),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
@@ -17049,7 +17201,9 @@ mod track_property_tests {
 				.await;
 		});
 
-		let mut stream = Stream::accept(&mut peer, version).await.unwrap();
+		let mut stream = Stream::accept(&mut crate::driver::Transport::new(peer.clone()), version)
+			.await
+			.unwrap();
 		assert_eq!(stream.reader.varint().await.unwrap(), ietf::Subscribe::ID);
 		let _subscribe: ietf::Body = stream.reader.decode().await.unwrap();
 
