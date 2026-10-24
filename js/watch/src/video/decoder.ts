@@ -533,19 +533,24 @@ class DecoderTrack {
 		});
 
 		// Input processing - depends on container type
-		if (this.config.container.kind === "cmaf") {
-			effect.spawn(async () => {
-				try {
-					await this.#runCmaf(effect, sub, decoder);
-				} catch (err) {
-					if (effect.abort.aborted) return;
-					this.error.set(err instanceof Error ? err : new Error(String(err)));
-					effect.close();
-				}
-			});
-		} else {
-			this.#runLegacy(effect, sub, decoder);
-		}
+		this.#spawn(effect, async () => {
+			if (this.config.container.kind === "cmaf") await this.#runCmaf(effect, sub, decoder);
+			else this.#runLegacy(effect, sub, decoder);
+		});
+	}
+
+	// Run `task` for this track. A setup, read, or decode failure that is not its cancellation is
+	// fatal: reported through `error`, which the decoder latches, with the track's effect closed.
+	#spawn(effect: Effect, task: () => Promise<void>): void {
+		effect.spawn(async () => {
+			try {
+				await task();
+			} catch (err) {
+				if (effect.abort.aborted) return;
+				this.error.set(err instanceof Error ? err : new Error(String(err)));
+				effect.close();
+			}
+		});
 	}
 
 	#runLegacy(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
@@ -572,7 +577,7 @@ class DecoderTrack {
 		let latest: number | undefined;
 		const recovery = new Recovery();
 
-		effect.spawn(async () => {
+		this.#spawn(effect, async () => {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
@@ -657,7 +662,7 @@ class DecoderTrack {
 		let latest: number | undefined;
 		const recovery = new Recovery();
 
-		effect.spawn(async () => {
+		this.#spawn(effect, async () => {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
