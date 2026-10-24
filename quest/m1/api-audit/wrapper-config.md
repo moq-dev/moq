@@ -16,7 +16,7 @@ Python (`py/moq-rs/.../client.py` `tls_verify`, `reconnect`), Go
 
 - Rename to the FFI names and nesting. Keep each language's idiomatic
   duration type at the wrapper boundary;
-  [binding durations](/quest/m2/ffi-durations.md) moves the FFI itself off
+  [binding durations](/quest/m1/ffi-durations.md) moves the FFI itself off
   `_us` integers later.
 - Go: replace functional options with a config struct.
 

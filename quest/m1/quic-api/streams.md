@@ -101,7 +101,7 @@ driver's waiter method arrives with [poll_acked](/quest/m2/quic-ack-hook.md).
 **moq-uring.** Its driver gets the same names and signatures and passes
 `send::Options` to the open, as moq-tokio's does, instead of applying them
 through setters afterwards. Moved here from
-[drop web-transport-trait](/quest/m2/drop-web-transport-trait.md).
+[drop web-transport-trait](/quest/m1/drop-web-transport-trait.md).
 
 Update every consumer (`quic::web` in both crates, qmux, the backends,
 moq-relay's tests). `poll_*` forms come in [poll](/quest/m1/quic-api/poll.md). MIGRATE entries in moq-quic, moq-tokio, moq-uring, and
