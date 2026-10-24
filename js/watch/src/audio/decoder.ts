@@ -185,16 +185,14 @@ export class Decoder {
 			if (!effect.get(this.source.out.config)) return undefined;
 			const span = effect.get(this.#decodeBuffered)[0];
 			if (!span) return null;
-			// Deep targets stay encoded, but a later range cannot fill a hole after decoded audio.
-			const queued = effect.get(this.#queued) ?? [];
-			const hold = Milli.fromMicro(ringHold(effect.get(this.sync.out.delay)));
-			let end = span.end;
-			for (const range of queued) {
-				// Match decoded-span rounding slack; do not bridge a missing packet.
-				if (range.start > end + 1) break;
-				end = Milli(Math.max(end, range.end));
+			// Deep targets stay encoded, so count the audio queued past the decoded span. Sum it across
+			// holes: a lost packet must not hold startup, and the missing audio is not counted as buffered.
+			let queued = 0;
+			for (const range of effect.get(this.#queued) ?? []) {
+				queued += Math.max(0, range.end - Math.max(range.start, span.end));
 			}
-			return { start: span.start, end: Milli(Math.min(end, span.end + hold)) };
+			const hold = Milli.fromMicro(ringHold(effect.get(this.sync.out.delay)));
+			return { start: span.start, end: Milli(span.end + Math.min(queued, hold)) };
 		});
 		this.#signals.cleanup(this.sync.register(playout, startup));
 		this.#identity = this.#signals.computed((effect) => {
