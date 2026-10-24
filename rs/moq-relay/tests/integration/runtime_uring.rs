@@ -1006,16 +1006,18 @@ async fn uring_workers_offer_the_configured_extensions() {
 					assert!(admission.attached(), "an AUTH token arrived as a new session");
 					admission.grant(grant());
 				});
-				token
+				let (_, answer) = token
 					.expect("the token was never answered")
 					.expect("the token was refused");
+				assert_eq!(answer, moq_net::auth::Answer::Granted);
 			}
 			false => {
-				let err = presented.await.expect("the token was never answered").err();
-				assert!(
-					matches!(err, Some(moq_tokio::Error::MoqNet(moq_net::Error::Unsupported))),
-					"a token without MoQ Auth: {err:?}"
-				);
+				// Without MoQ Auth no AUTH stream carries it: only a request naming it does.
+				let (_, answer) = presented
+					.await
+					.expect("the token was never answered")
+					.expect("a moq-transport request can carry the token");
+				assert_eq!(answer, moq_net::auth::Answer::Requests, "a token without MoQ Auth");
 			}
 		}
 
