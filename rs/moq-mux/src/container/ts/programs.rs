@@ -48,6 +48,9 @@ pub struct Programs {
 struct Waiting {
 	sections: SectionReassembler,
 	programs: HashSet<u16>,
+	/// Whether a program read this PID when the section still assembling began, and so counts
+	/// it if it is corrupt.
+	began_read: bool,
 }
 
 /// One program's broadcast.
@@ -219,17 +222,26 @@ impl Programs {
 			return Ok(());
 		};
 		let before = waiting.sections.clone();
+		let read = !self.readers[usize::from(packet.pid)].is_empty();
+		let carried = waiting.sections.assembling();
+		let began = waiting.began_read;
 		let mut sections = Vec::new();
 		waiting.sections.push(packet.pkt, &mut sections);
+		// The section still assembling began in this packet, unless the one before carried on.
+		if waiting.sections.assembling() && (!carried || !sections.is_empty()) {
+			waiting.began_read = read;
+		}
+		// Corrupt sections no program read from their start.
 		let mut corrupt = 0;
 		let mut latest: Vec<psi::Pmt> = Vec::new();
-		for section in sections {
+		for (index, section) in sections.into_iter().enumerate() {
 			// Other tables may share the PID.
 			if section.first() != Some(&psi::PMT_TABLE_ID) {
 				continue;
 			}
 			if !psi::crc_ok(&section) {
-				corrupt += 1;
+				let read = if index == 0 && carried { began } else { read };
+				corrupt += u64::from(!read);
 				continue;
 			}
 			if let Some(pmt) = psi::Pmt::parse(&section)
@@ -241,8 +253,7 @@ impl Programs {
 		}
 		latest.retain(|pmt| !pmt.streams.is_empty());
 		if latest.is_empty() {
-			// A program reading this PID counts its errors.
-			if corrupt > 0 && self.readers[usize::from(packet.pid)].is_empty() {
+			if corrupt > 0 {
 				*self.crc_errors.entry(packet.pid).or_default() += corrupt;
 				tracing::warn!(pid = packet.pid, "dropped a PSI section with a bad CRC");
 			}
@@ -641,6 +652,28 @@ mod test {
 		data.extend(psi_packets(0x0200, &mut 0, &[], &corrupt(pmt(2))));
 		programs.decode(&data).unwrap();
 		assert_eq!(programs.programs.len(), 1);
+		assert_eq!(programs.stats().crc_error, 1);
+
+		// The same move landing while the corrupt section is partway in: the program it moved
+		// never saw that section begin, so the scan counts it.
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut cc = 0;
+		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100), (2, 0x0200)]));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
+		let mut private = vec![0x80, 200];
+		private.resize(202, 0);
+		let split = psi_packets(
+			0x0200,
+			&mut 0,
+			&[],
+			&corrupt(pmt_section(2, 0, &[(MP2, 0x0071, &private)])),
+		);
+		assert_eq!(split.len(), 2 * 188, "the corrupt PMT spans two packets");
+		data.extend_from_slice(&split[..188]);
+		data.extend(psi_packets(0, &mut cc, &[], &psi::section(0x00, 1, 1, 0, 0, &moved)));
+		data.extend_from_slice(&split[188..]);
+		programs.decode(&data).unwrap();
 		assert_eq!(programs.stats().crc_error, 1);
 	}
 

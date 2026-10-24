@@ -2660,6 +2660,11 @@ pub(super) struct SectionReassembler {
 }
 
 impl SectionReassembler {
+	/// Whether a section is partway assembled.
+	pub(super) fn assembling(&self) -> bool {
+		!self.acc.is_empty()
+	}
+
 	/// Consume one 188-byte TS packet, appending every completed section to `out`.
 	pub(super) fn push(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
 		let mut completed = Vec::new();
