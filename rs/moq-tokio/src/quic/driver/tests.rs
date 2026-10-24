@@ -2269,6 +2269,43 @@ async fn consume(recv: &mut RecvStream, n: usize) {
     .unwrap()
 }
 
+/// A tiny datagram, and a tiny stream frame taken from a lease, each reach the application in
+/// an allocation of their own rather than as a slice of the receive batch they arrived in, which
+/// their credit does not pay for.
+#[tokio::test]
+async fn tiny_frames_do_not_pin_receive_batches() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (client, server) = connect_self(&endpoint).await;
+
+    client
+        .send_datagram(Bytes::from_static(b"x"), Default::default())
+        .unwrap();
+    assert!(owns_exactly(server.read_datagram().await.unwrap()));
+
+    let mut send = client.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"y").await.unwrap();
+    let mut recv = server.accept_uni().await.unwrap();
+    let taken = poll_fn(|cx| {
+        recv.poll_lease(cx, 1).map_ok(|mut lease| {
+            let len = lease.chunk().len();
+            lease.copy_to_bytes(len)
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(taken, &b"y"[..]);
+    assert!(owns_exactly(taken));
+}
+
+/// Whether `bytes` is the only handle on an allocation of exactly its own size.
+fn owns_exactly(bytes: Bytes) -> bool {
+    let len = bytes.len();
+    bytes
+        .try_into_mut()
+        .is_ok_and(|bytes| bytes.capacity() == len)
+}
+
 #[derive(Default)]
 struct WakeCounter {
     wakes: AtomicUsize,

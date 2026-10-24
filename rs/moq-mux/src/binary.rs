@@ -615,9 +615,10 @@ mod test {
 	/// payload would read as a near-zero bitrate.
 	#[test]
 	fn an_unset_host_clock_still_marks_a_reanchor() {
-		use std::time::{Duration, SystemTime};
+		use moq_clock::Wall;
+		use std::time::Duration;
 
-		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		crate::clock::fake_host_wall(Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 		let (mut broadcast, catalog) = catalog();
 		let reserved = catalog.reserve();
 		let mut stream = catalog

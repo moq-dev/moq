@@ -31,13 +31,12 @@ Decided with the maintainer on 2026-10-23; see the epic for why.
   its `CACHE_WINDOW` use there.
 - Update `doc/concept` with one paragraph on the model (online = announced,
   end of content = track FIN, retention = app policy), plus `doc/lib/*`, and
-  the Impact bullet says how to migrate every affected package.
+  the Impact bullet says how to migrate every affected package. It
+  supersedes the `MIGRATE.md` entries on `finish` (#5795, #6157, and the
+  binding entries measured against release's `finish()` alias for
+  `close()`), for the cut to collapse.
 - Coordinate with [publication owner](/quest/m1/api-audit/announce-owner.md),
   which touches the same handles.
 
 Public API: breaking in moq-net, `@moq/net`, moq-ffi, moq-c, and every
 binding. Wire: none.
-
-## Required
-
-- [Publisher retention in moq-mux](/quest/m1/broadcast-lifecycle/retention.md) - Rust publishers stop using `Finish` first, so none loses its tail in between

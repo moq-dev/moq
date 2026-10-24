@@ -5,8 +5,8 @@
 `moq export ts --linger` and `moq export srt --linger` become `--follow
 <duration>`: how long to wait for the publisher, or with `--stitch` a
 replacement, to come back. The default 0 means don't follow. The Rust
-`container::ts::Follower::with_linger` and moq-srt's `Subscribe::with_linger`
-and `Client::with_linger` become `with_follow`. A replacement's first catalog
+`container::ts::Follower::with_linger` becomes `with_follow`, matching
+moq-srt's `Subscribe::with_follow` and `Client::with_follow`. A replacement's first catalog
 is awaited until it arrives or the replacement withdraws, with no deadline of
 its own. A track failure is classified by its cause, not by waiting
 `CLOSE_GRACE` (1s) to see whether the announcement also goes.
@@ -36,5 +36,5 @@ Decided with the maintainer on 2026-10-23:
 - Docs: `doc/bin/cli.md`, plus a migration note for moq-cli, moq-mux, and
   moq-srt in the Impact bullet.
 
-Public API: moq-mux and moq-srt renames (breaking); moq-cli flag rename.
+Public API: moq-mux rename (breaking); moq-cli flag rename.
 Wire: none unless the failure cause needs a new code.

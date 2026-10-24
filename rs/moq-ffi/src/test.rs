@@ -414,9 +414,17 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 
 #[test]
 fn epoch_helpers_mint_parse_and_refuse() {
+	assert_eq!(
+		moq_epoch_time_ms("ffffffff-ffff-7fff-bfff-ffffffffffff".into()).unwrap(),
+		(1_u64 << 48) - 1
+	);
 	let epoch = moq_mint_epoch();
 	let parsed: moq_net::Epoch = epoch.parse().unwrap();
-	let unix_ms = parsed.time().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+	let unix_ms = parsed
+		.time()
+		.unwrap()
+		.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
+		.as_millis();
 	assert_eq!(u128::from(moq_epoch_time_ms(epoch.clone()).unwrap()), unix_ms);
 	assert!(moq_mint_epoch() > epoch, "a later mint orders newer");
 
@@ -5442,7 +5450,7 @@ async fn announced_broadcast_retries_a_dropped_wait() {
 /// restart that announced it must not hand it out again while the caller holds it. `dynamic_at`
 /// is where the route the wait first resolves through covers the path: above it, the takeover's
 /// restart lands while resolving; at it, the origin holds that restart for
-/// [`moq_net::origin::DEFAULT_UPDATE_HOLD`].
+/// the default [`moq_net::origin::Config::update_hold`].
 async fn announced_broadcast_hands_out_a_takeover_once(dynamic_at: &str) {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, dynamic_at);
@@ -5463,7 +5471,7 @@ async fn announced_broadcast_hands_out_a_takeover_once(dynamic_at: &str) {
 		.unwrap();
 
 	let next = tokio::spawn(async move { followed.available().await });
-	tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
+	tokio::time::sleep(moq_net::origin::Config::default().update_hold * 2).await;
 	assert!(!next.is_finished(), "the takeover was handed out twice");
 	next.abort();
 	takeover.close().unwrap();
@@ -5541,7 +5549,7 @@ async fn announced_broadcast_hands_out_a_gap_while_resolving_once() {
 		.expect("the wait never asked for the broadcast")
 		.unwrap();
 	dynamic.cancel();
-	tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
+	tokio::time::sleep(moq_net::origin::Config::default().update_hold * 2).await;
 	let arrival = create_announced(&origin, "live");
 	let _held = tokio::time::timeout(TIMEOUT, first)
 		.await
@@ -5550,7 +5558,7 @@ async fn announced_broadcast_hands_out_a_gap_while_resolving_once() {
 		.unwrap();
 
 	let next = tokio::spawn(async move { followed.available().await });
-	tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
+	tokio::time::sleep(moq_net::origin::Config::default().update_hold * 2).await;
 	assert!(!next.is_finished(), "the arrival was handed out twice");
 	next.abort();
 	arrival.close().unwrap();
@@ -7785,8 +7793,8 @@ async fn auth_tokens_join_and_leave_the_union() {
 		..Default::default()
 	};
 	let serving = tokio::spawn(async move {
-		let request = listener.accept().await.expect("accept");
-		let mut requests = request.auth().requests().unwrap();
+		let mut request = listener.accept().await.expect("accept");
+		let mut requests = request.requests();
 		let (session, driver) = request.ok().await.unwrap();
 		let mut issued = Vec::new();
 		while let Some(request) = requests.next().await {
