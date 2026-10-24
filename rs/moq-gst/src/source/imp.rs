@@ -1959,7 +1959,11 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod session_tests {
 	use std::collections::{BTreeMap, HashSet};
 	use std::sync::atomic::Ordering;

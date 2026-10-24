@@ -855,8 +855,15 @@ struct VideoConsumerInner {
 
 impl VideoConsumerInner {
 	async fn next(&mut self) -> Result<Option<Arc<MoqVideoDecodedFrame>>, MoqError> {
-		let frame = self.consumer.read().await?;
-		Ok(frame.map(|frame| Arc::new(MoqVideoDecodedFrame { frame })))
+		loop {
+			match self.consumer.read().await? {
+				Some(moq_video::decode::Read::Frame(frame)) => {
+					return Ok(Some(Arc::new(MoqVideoDecodedFrame { frame })));
+				}
+				Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => {}
+				None => return Ok(None),
+			}
+		}
 	}
 }
 
@@ -911,6 +918,7 @@ fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::
 		config.display_aspect_height = Some(aspect.height);
 	}
 	config.bitrate = catalog_video.bitrate;
+	config.preference = catalog_video.preference;
 	config.framerate = catalog_video.framerate;
 	config.container = catalog_video.container.into();
 	Ok(config)
@@ -984,6 +992,7 @@ mod decode_tests {
 
 	fn catalog_video(codec: &str) -> MoqVideo {
 		MoqVideo {
+			preference: 0,
 			label: None,
 			broadcast: None,
 			epoch: None,
@@ -1006,9 +1015,10 @@ mod decode_tests {
 	fn video_config_refuses_disabled_renditions() {
 		let mut config = catalog_video("avc1.64001f");
 		config.enabled = false;
+		config.preference = -1;
 		assert!(matches!(video_config(config.clone()), Err(MoqError::NotFound)));
 		config.enabled = true;
-		assert!(video_config(config).is_ok());
+		assert_eq!(video_config(config).unwrap().preference, -1);
 	}
 
 	#[test]

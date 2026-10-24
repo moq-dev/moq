@@ -46,7 +46,7 @@ pub mod web;
 pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
 
 impl ServerId {
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "only the QUIC backend reads it")]
 	pub(crate) fn len(&self) -> usize {
 		self.0.len()
 	}
@@ -755,7 +755,10 @@ impl Resolved {
 	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
 	/// send rate steady enough for a live encoder to track, which is what this stack
 	/// carries.
-	#[cfg_attr(not(any(feature = "quic", feature = "iroh")), allow(dead_code))]
+	#[cfg_attr(
+		not(any(feature = "quic", feature = "iroh")),
+		allow(dead_code, reason = "only the QUIC backends use it")
+	)]
 	pub(crate) fn congestion(&self) -> CongestionControl {
 		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}
@@ -764,7 +767,7 @@ impl Resolved {
 	///
 	/// Only meaningful once [`Config::validate`] has passed; a build without the
 	/// `qlog` feature never gets here with a directory set.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
 	}
@@ -773,7 +776,7 @@ impl Resolved {
 	///
 	/// Only the iroh backend consults this, to reject a GSO-off request it can't
 	/// satisfy; the other backends toggle GSO directly.
-	#[cfg_attr(not(feature = "iroh"), allow(dead_code))]
+	#[cfg_attr(not(feature = "iroh"), allow(dead_code, reason = "only the `iroh` feature uses it"))]
 	pub(crate) fn gso_disabled(&self) -> bool {
 		self.gso == Some(false)
 	}
