@@ -66,4 +66,5 @@ C's audio decoder neither takes nor reports a playout delay, and C has no in-ban
 ## Upgrading
 
 Each package keeps a `MIGRATE.md` saying how to migrate past every breaking
-change; [Upgrade](/setup/upgrade#migration-guides) links them all.
+release, written when that release is cut;
+[Upgrade](/setup/upgrade#migration-guides) links them all.
