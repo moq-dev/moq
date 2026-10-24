@@ -209,6 +209,7 @@ jobs:
               - "rs/moq-auth/**"
               - "rs/moq-cli/**"
               - "rs/moq-clock/**"
+              - "rs/moq-congestion/**"
               - "rs/moq-flate/**"
               - "rs/moq-hls/**"
               - "rs/moq-ice/**"

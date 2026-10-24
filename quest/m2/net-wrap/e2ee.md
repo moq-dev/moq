@@ -67,6 +67,15 @@ the reverse (decided 2026-10-20, maintainer):
 - Frames: AEAD authenticates a whole frame, so the wrapper's frame producer
   buffers chunks from `write` and seals at `finish`, and its frame consumer
   yields chunks only after the frame authenticates.
+- Listing (maintainer, 2026-10-24): the wire listing (moq-lite's Tracks
+  stream, IETF SUBSCRIBE_TRACKS) carries physical names unchanged, so
+  relays list a protected broadcast like any other. The consumer's `tracks`
+  opens each listed physical name and reports its semantic name. A name that does not
+  open (relay-forged, another epoch's, malformed) is skipped after one open
+  and keeps no state: a relay can inject names into a listing, so ending
+  the listing would let it deny discovery. Test a forged and an
+  older-epoch name among valid ones. Opening needs
+  [reversible names](/quest/m2/e2ee/reversible-names.md).
 - Demand and preference cross the wrapper: an encrypted track's demand is
   its physical track's, and preference updates reach the physical track.
 - Keep the nonce rules the epic specifies: a group producer still owns its

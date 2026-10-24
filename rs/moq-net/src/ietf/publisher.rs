@@ -695,7 +695,7 @@ pub(super) struct Publisher {
 	auth: crate::auth::Handle,
 	// Dispatched finite serves, including those not yet polled.
 	pub(super) owed: Arc<AtomicUsize>,
-	// Subscriptions the peer holds, PUBLISHes for its listings capped by `session::Limits::requests`.
+	// Subscriptions the peer holds, PUBLISHes for its listings included, counted for the peak.
 	pub(super) subscriptions: crate::session::Slots,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
@@ -4550,21 +4550,18 @@ struct TrackServe {
 impl TrackServe {
 	fn new(
 		session: Transport,
-		mut track: track::Subscriber,
+		track: track::Subscriber,
 		request_id: RequestId,
 		version: Version,
 		range: ServeRange,
 		timescale: Option<Timescale>,
 	) -> Self {
-		match range.start {
-			Some(start) => track.start_at(start.group),
-			None => {
-				if let Some(latest) = track.latest_sequence() {
-					track.start_at(latest);
-				}
-			}
-		}
-		track.end_at(range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group)));
+		let floor = match range.start {
+			Some(start) => start.group,
+			None => track.latest_sequence().unwrap_or(0),
+		};
+		let end = range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group));
+		let track = track.with_range((Bound::Included(floor), end));
 		let datagrams = session.max_datagram_size() > 0;
 		// A Timestamp whose units were not declared is worse than none. Drafts 14-16
 		// never write TIMESCALE, whatever the caller passed in, so datagrams and group
@@ -5159,6 +5156,22 @@ impl Queued {
 	}
 }
 
+/// Why to stop writing `group` while the transport parks it: the subscription's budget gave
+/// it up, or the frames this cursor has yet to read are gone with no route to continue them.
+/// A clean finish is no reason.
+///
+/// Waking on every frame written to a parked group costs what a reader parked at the live
+/// edge already pays: each of its pending reads judges the budget too.
+fn poll_given_up(group: &mut group::Consumer, waiter: &kio::Waiter) -> Option<Error> {
+	if group.poll_expired(waiter) {
+		return Some(Error::Old);
+	}
+	match group.poll_finished(waiter) {
+		Poll::Ready(Err(err)) => Some(err),
+		_ => None,
+	}
+}
+
 /// Serves one group on its own unidirectional stream in the moq-transport
 /// subgroup format.
 struct GroupServe {
@@ -5229,8 +5242,10 @@ impl GroupServe {
 		slice: GroupSlice,
 	) -> Self {
 		if group.wire().is_none() {
+			// Only the end: a start would clamp past a prefix the group never held,
+			// which `skip_to` leaves to fail as `Lagged`.
 			group.skip_to(slice.skip);
-			group.end_at(slice.until.map_or(Bound::Unbounded, Bound::Excluded));
+			group = group.with_end(slice.until);
 		}
 		Self {
 			session,
@@ -5268,7 +5283,7 @@ impl GroupServe {
 		if !matches!(self.state, GroupState::Open) {
 			return Poll::Ready(Ok(()));
 		}
-		if let Some(err) = self.group.poll_abandoned(waiter, false) {
+		if let Some(err) = poll_given_up(&mut self.group, waiter) {
 			self.state = GroupState::Done;
 			return Poll::Ready(Err(err));
 		}
@@ -5336,10 +5351,9 @@ impl GroupServe {
 								// Parking on the transport is the one stall the group cursor cannot
 								// see, and the only place a served group applies the drift budget:
 								// flow control must not pin a stream that has gone stale, or one
-								// whose unread rest the cache evicted. `true` because the transport
-								// still owns bytes the cursor has released.
+								// whose unread rest the cache evicted.
 								Poll::Pending => {
-									if let Some(err) = self.group.poll_abandoned(waiter, true) {
+									if let Some(err) = poll_given_up(&mut self.group, waiter) {
 										break 'serve Err(err);
 									}
 									return Poll::Pending;
@@ -5356,10 +5370,9 @@ impl GroupServe {
 									// Parking on the transport is the one stall the group cursor cannot
 									// see, and the only place a served group applies the drift budget:
 									// flow control must not pin a stream that has gone stale, or one
-									// whose unread rest the cache evicted. `true` because the transport
-									// still owns bytes the cursor has released.
+									// whose unread rest the cache evicted.
 									Poll::Pending => {
-										if let Some(err) = self.group.poll_abandoned(waiter, true) {
+										if let Some(err) = poll_given_up(&mut self.group, waiter) {
 											break 'serve Err(err);
 										}
 										return Poll::Pending;
@@ -5544,7 +5557,7 @@ impl GroupServe {
 						// Those bytes still hold the connection until acknowledged, so a
 						// group gone stale meanwhile releases them like one still serving:
 						// dropping the writer resets the stream.
-						Poll::Pending if self.group.poll_expired_while_pending(waiter, true) => {
+						Poll::Pending if self.group.poll_expired(waiter) => {
 							self.state = GroupState::Done;
 							return Poll::Ready(Err(Error::Old));
 						}
@@ -6497,6 +6510,45 @@ mod group_priority_test {
 		edge.finish().unwrap();
 
 		assert!(matches!(serving.await, Err(Error::Old)));
+	}
+
+	/// A local group that never held the requested prefix fails rather than serving its
+	/// tail as the whole group, with or without an end inside it.
+	#[moq_clock::test]
+	async fn a_group_missing_its_prefix_fails() {
+		for until in [None, Some(5)] {
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let mut subscriber = track.subscribe(None);
+			let mut producer = track.create_group(group::Info { sequence: 0 }).unwrap();
+			producer.start_at(1).unwrap();
+			producer
+				.write_frame(crate::Timestamp::ZERO, b"tail".as_slice())
+				.unwrap();
+			producer.finish().unwrap();
+			let group = subscriber.recv_group().await.unwrap().expect("the group");
+
+			let mut serve = GroupServe::new(
+				crate::driver::Transport::new(SinkSession::new(Default::default())),
+				ietf::GroupHeader {
+					track_alias: 0,
+					group_id: 0,
+					sub_group_id: 0,
+					publisher_priority: 0,
+					flags: Default::default(),
+				},
+				Rank::solo(kio::Producer::new(0).consume()),
+				group,
+				Some(Timescale::MILLI),
+				Version::Draft19,
+				GroupSlice { skip: 0, until },
+			);
+			let served = kio::wait(|waiter| serve.poll_serve(waiter)).await;
+			assert!(matches!(served, Err(Error::Lagged)), "until {until:?}: {served:?}");
+		}
 	}
 
 	/// A FIN holds the subgroup's bytes until the peer acknowledges it, so a subgroup
@@ -16924,16 +16976,15 @@ struct ServeRange {
 impl ServeRange {
 	/// Bound `subscription` to this range.
 	fn apply(&self, subscription: &mut Subscription) {
-		subscription.set_bounds(
-			self.start.map(|start| track::Position {
+		*subscription = std::mem::take(subscription)
+			.with_start(self.start.map(|start| track::Position {
 				group: start.group,
 				frame: start.object,
-			}),
-			self.end.and_then(|end| match end.object {
+			}))
+			.with_end(self.end.and_then(|end| match end.object {
 				Some(object) => track::Position::after(end.group, object),
 				None => track::Position::after_group(end.group),
-			}),
-		);
+			}));
 	}
 }
 
@@ -17127,7 +17178,7 @@ mod range_tests {
 
 		// Next Group against a live edge of 8 asks for 9, which does not exist yet.
 		let mut subscriber = track.subscribe(None);
-		subscriber.start_at(9);
+		subscriber.set_range(9..);
 		assert!(
 			futures::poll!(std::pin::pin!(subscriber.recv_group())).is_pending(),
 			"a future start must wait for its group rather than serving the live edge"

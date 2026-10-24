@@ -12,8 +12,11 @@ Decided 2026-10-23: remove repeated Python preparation. Keep existing coverage
 and the `testing,openh264` feature contract.
 
 - `py/justfile` currently synchronizes the environment and runs `_develop`
-  in both recipes. `sh/dispatch.sh` separates them with other binding checks
-  that also build moq-ffi through Cargo with other features.
+  in both recipes. The sample below predates parallel modules, when
+  `sh/dispatch.sh` separated them with other binding checks that also build
+  moq-ffi through Cargo with other features. py's test now runs right after
+  its check in the same lane; if the second preparation no longer rebuilds,
+  delete this quest.
 - In [queue run 39996587979](https://github.com/moq-dev/moq/actions/runs/39996587979),
   the second preparation rebuilt the UniFFI generator for 43.70 seconds,
   in addition to native build and installation work. Repeated compilation
@@ -23,8 +26,7 @@ and the `testing,openh264` feature contract.
   after Rust, binding, feature, or dependency changes, and stop on preparation
   failure. Prefer the smallest recipe/dispatch refactor that achieves this.
 - Other languages use different features and build environments. This quest
-  does not unify every native artifact; running modules concurrently belongs
-  to [parallel modules](/quest/m0/ci/parallel-modules.md).
+  does not unify every native artifact.
 - Verify one preparation in the combined pass, standalone checks and tests
   from a fresh environment, and rebuilds after relevant input changes.
   Measure combined Python and full selected-gate time before and after on
