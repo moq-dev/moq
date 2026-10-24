@@ -4726,6 +4726,7 @@ dependencies = [
  "hang",
  "kio 0.6.2",
  "moq-audio",
+ "moq-clock",
  "moq-json",
  "moq-loc",
  "moq-mux",
