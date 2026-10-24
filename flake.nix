@@ -413,8 +413,7 @@
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
-            # The commit the tag will name, until kixelated/uniffi-bindgen-cpp#6 merges and is tagged.
-            rev = "ca955d8b53a6674d1b872f62d55d3f4707cbe290";
+            rev = "v${version}";
             hash = "sha256-nErLn2hQus5omIaFheJWy06wKQS9HiKNtksxaJm9Z8k=";
           };
 
