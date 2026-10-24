@@ -66,9 +66,9 @@ indexmap = { workspace = true }
 lru-slab = "0.1.2"
 # Without the runtime, which is meant for dev-dependencies; a driver brings its own.
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
+moq-congestion = { workspace = true }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
-rand_pcg = "0.10"
 ring = { version = "0.17", optional = true }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23.5", default-features = false, features = ["std"], optional = true }
@@ -97,8 +97,8 @@ moq-clock = { path = "../moq-clock" }
 # The mux module's tests run in the default merge gate.
 moq-quic = { path = ".", features = ["mux"] }
 proptest = { workspace = true }
+rand_pcg = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
-stats_alloc = "0.1.10"
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 wasm-bindgen-test = "0.3.45"
 

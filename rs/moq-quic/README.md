@@ -2,6 +2,8 @@
 
 MoQ's sans-IO QUIC state machine, a hard fork of [quinn-proto](https://github.com/quinn-rs/quinn).
 
+BBR3, Cubic, and Unlimited live in [moq-congestion](../moq-congestion); this crate supplies QUIC packet and RTT inputs to them.
+
 All credit for the code goes to the quinn developers; it stays under quinn's MIT or Apache-2.0 license.
 
 ## Upstream
@@ -70,7 +72,7 @@ Changes on top of the upstream commit, besides the renames:
 - **`ACK_FREQUENCY` upper bound**: a Requested Max Ack Delay of 2^14 ms or more closes the connection with `PROTOCOL_VIOLATION`, as [draft-ietf-quic-ack-frequency-14](https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.html#section-4) section 4 requires, mirroring RFC 9000's bound on the `max_ack_delay` transport parameter, and a configured `AckFrequencyConfig::max_ack_delay` is requested just below it. quinn checks only the lower bound; not offered upstream yet.
 - **qlog pacing rate** in bits per second, as qlog defines it.
 - **Send-side stream checks**, from [quinn#2918](https://github.com/quinn-rs/quinn/pull/2918) at [`30934486`](https://github.com/quinn-rs/quinn/pull/2918/commits/30934486f75a0436119434d71f36917c955ba5bc) (open upstream), ported by hand with authorship kept: `STOP_SENDING` and `MAX_STREAM_DATA` naming a peer-initiated stream past the advertised limit close with `STREAM_LIMIT_ERROR`, as RFC 9000 section 4.6 requires, where quinn ignores the `STOP_SENDING` for a bidirectional stream. Unlike quinn#2918, the limit is the one last sent in transport parameters or `MAX_STREAMS`, not one raised locally but not yet announced. `received_stop_sending` returns `Result<Option<u64>, TransportError>`, keeping the fork's RESET\_STREAM\_AT Reliable Size. If quinn merges it, recheck against the merged commit and move it to the cherry-pick list.
-- moq-dev/noq's congestion-callback regressions, reworked onto quinn's test harness.
+- moq-dev/noq's congestion-callback regressions, reworked onto quinn's test harness. Controller implementation fixes and unit tests live in `moq-congestion`.
 - [quinn#2724](https://github.com/quinn-rs/quinn/pull/2724) (`moq_sock::udp`): when the kernel rejects a GSO batch with `EIO` or `EINVAL`, the socket halts GSO and resends the batch as individual datagrams instead of dropping it.
   We extend it to resend batches built before GSO was halted too, which upstream's version drops, and to log only the first rejection.
   A `WouldBlock` partway through the resend makes the caller retry the whole batch, duplicating the datagrams already sent; QUIC drops the duplicates.

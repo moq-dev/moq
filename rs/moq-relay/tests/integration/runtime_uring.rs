@@ -995,7 +995,7 @@ fn uring_workers_bound_stalled_handshakes() {
 			tls.alpn_protocols = vec![alpn.to_vec()];
 			let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
 			let mut transport = driver::TransportConfig::default();
-			transport.congestion_controller_factory(std::sync::Arc::new(driver::congestion::Unlimited));
+			transport.congestion_controller_factory(std::sync::Arc::new(moq_congestion::Unlimited));
 			let mut config = driver::ClientConfig::new(std::sync::Arc::new(crypto));
 			config.transport_config(std::sync::Arc::new(transport));
 			config

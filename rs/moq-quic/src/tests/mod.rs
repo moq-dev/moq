@@ -425,7 +425,7 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
             _is_ecn: bool,
             _lost_bytes: u64,
             _largest_lost: u64,
-            _space: SpaceId,
+            _space: moq_congestion::SpaceId,
         ) {
         }
 
@@ -6411,7 +6411,7 @@ impl Controller for PacingOnlyController {
         _is_ecn: bool,
         _lost_bytes: u64,
         _largest_lost: u64,
-        _space: SpaceId,
+        _space: moq_congestion::SpaceId,
     ) {
     }
 
@@ -6510,7 +6510,7 @@ impl Controller for FixedQuantumController {
         _is_ecn: bool,
         _lost_bytes: u64,
         _largest_lost: u64,
-        _space: SpaceId,
+        _space: moq_congestion::SpaceId,
     ) {
     }
 
@@ -6644,8 +6644,17 @@ impl PacketRecorder {
 }
 
 impl Controller for PacketRecorder {
-    fn on_packet_sent(&mut self, now: Instant, _bytes: u16, number: u64, space: SpaceId) {
-        let packet = Packet { space, number };
+    fn on_packet_sent(
+        &mut self,
+        now: Instant,
+        _bytes: u16,
+        number: u64,
+        space: moq_congestion::SpaceId,
+    ) {
+        let packet = Packet {
+            space: space.into(),
+            number,
+        };
         self.push(PacketEvent::Sent { at: now, packet });
     }
 
@@ -6655,16 +6664,28 @@ impl Controller for PacketRecorder {
         sent: Instant,
         _bytes: u64,
         number: u64,
-        space: SpaceId,
+        space: moq_congestion::SpaceId,
         _app_limited: bool,
-        _rtt: &RttEstimator,
+        _rtt: &moq_congestion::RttEstimator,
     ) {
-        let packet = Packet { space, number };
+        let packet = Packet {
+            space: space.into(),
+            number,
+        };
         self.push(PacketEvent::Acked { sent, packet });
     }
 
-    fn on_packet_lost(&mut self, _lost_bytes: u16, number: u64, space: SpaceId, _now: Instant) {
-        let packet = Packet { space, number };
+    fn on_packet_lost(
+        &mut self,
+        _lost_bytes: u16,
+        number: u64,
+        space: moq_congestion::SpaceId,
+        _now: Instant,
+    ) {
+        let packet = Packet {
+            space: space.into(),
+            number,
+        };
         self.push(PacketEvent::Lost { packet });
     }
 
@@ -6676,10 +6697,10 @@ impl Controller for PacketRecorder {
         is_ecn: bool,
         _lost_bytes: u64,
         largest_lost: u64,
-        space: SpaceId,
+        space: moq_congestion::SpaceId,
     ) {
         let largest = Packet {
-            space,
+            space: space.into(),
             number: largest_lost,
         };
         self.push(PacketEvent::Congestion {

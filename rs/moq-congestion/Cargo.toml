@@ -1,0 +1,23 @@
+[package]
+name = "moq-congestion"
+description = "QUIC congestion controllers for Media over QUIC"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
+rand = { workspace = true }
+rand_pcg = { workspace = true }
+
+[dev-dependencies]
+moq-clock = { path = "../moq-clock" }
+stats_alloc = "0.1.10"
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+cpu-time = "1.0.0"
+
+[lints]
+workspace = true

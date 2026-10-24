@@ -1,8 +1,12 @@
 //! Logic for controlling the rate at which data is sent
 
-use crate::connection::RttEstimator;
-pub use crate::packet::SpaceId;
-use crate::{Duration, Instant};
+use moq_clock::Instant;
+use std::time::Duration;
+
+mod rtt;
+mod space;
+pub use rtt::RttEstimator;
+pub use space::SpaceId;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -192,7 +196,6 @@ pub trait Controller: Send + Sync {
 /// but also to alter the pacing of the connection with
 /// `pacing_rate` and `send_quantum`
 #[derive(Default)]
-#[non_exhaustive]
 pub struct ControllerMetrics {
     /// Congestion window (bytes)
     pub congestion_window: u64,
