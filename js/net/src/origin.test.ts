@@ -2515,3 +2515,22 @@ test("public announcements saturate static costs and refuse invalid cost shapes"
 	broadcast.close();
 	origin.close();
 });
+
+test("published names refuse navigation segments", () => {
+	const origin = new Producer();
+	try {
+		for (const name of ["room/./cam", "room/../cam", ".", ".."]) {
+			const path = Path.from(name);
+			expect(() => origin.createBroadcast(path)).toThrow();
+			expect(() => origin.dynamic(path)).toThrow();
+			expect(() => wireOf(origin).receive(path, Route.default)).toThrow();
+		}
+		const scoped = origin.scope(Path.from("room/.."), new Path.Patterns([Path.Pattern.all()]));
+		expect(() => scoped.createBroadcast(Path.from("cam"))).toThrow();
+		for (const path of ["room/.pro/cam", "room/a..b", "room/cam"]) {
+			origin.createBroadcast(Path.from(path)).close();
+		}
+	} finally {
+		origin.close();
+	}
+});

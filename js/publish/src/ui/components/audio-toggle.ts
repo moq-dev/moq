@@ -1,7 +1,7 @@
 import type { Effect } from "@moq/signals";
+import { controlButton } from "@moq/ui";
 import type MoqPublish from "../../element";
 import { icon, micOff, microphone } from "../icons";
-import { controlButton } from "./button";
 
 /** Toggles whether audio is published (publish.muted). Red when muted. */
 export function audioToggle(parent: Effect, publish: MoqPublish): HTMLElement {

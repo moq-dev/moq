@@ -576,8 +576,10 @@ impl Video {
 			let frame = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				frame = consumer.read() => match frame? {
-					Some(frame) => frame,
+				read = consumer.read() => match read? {
+					Some(moq_video::decode::Read::Frame(frame)) => frame,
+					// The C ABI hands over pictures only.
+					Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => continue,
 					None => return Ok(()),
 				},
 			};

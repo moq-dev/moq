@@ -13,6 +13,13 @@ How to update your code for each breaking change, newest first.
 - `Client::with_cost` takes `impl Into<origin::Cost>`, like `Route::with_cost`. A `u64` still works.
 - Without the default `async` feature, the `auth`, `goaway`, and `setup` modules are private, since only sessions hand out their types.
 
+### Published names refuse navigation segments
+
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Rust reports `Error::NavigationSegment`; the existing protocol error codes carry the refusal to a peer.
+Path normalization, relative references, and subscription paths retain their semantics.
+
 ### A listing says whether a removed track finished (#6399)
 
 `broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
