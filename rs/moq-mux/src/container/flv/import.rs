@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
-use hang::catalog::{AAC, AudioCodec, AudioConfig, H264, VideoConfig};
+use hang::catalog::{AAC, AudioCodec, AudioConfig, VideoConfig};
 
 use super::{
 	AAC_RAW, AAC_SEQUENCE_HEADER, AUDIO_FORMAT_AAC, AUDIO_FORMAT_EX, AUDIO_FORMAT_MP3, AUDIO_PACKET_CODED_FRAMES,
@@ -221,7 +221,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let data = &body[5..];
 
 		match avc_packet_type {
-			AVC_SEQUENCE_HEADER => self.init_video(DEFAULT_TRACK_ID, config_from_avcc(data)?),
+			AVC_SEQUENCE_HEADER => self.init_video(DEFAULT_TRACK_ID, crate::codec::h264::config(data)?),
 			AVC_NALU => self.write_video(
 				DEFAULT_TRACK_ID,
 				data,
@@ -291,7 +291,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		match packet_type {
 			VIDEO_PACKET_SEQUENCE_START => {
 				let config = match fourcc {
-					b"avc1" => config_from_avcc(payload)?,
+					b"avc1" => crate::codec::h264::config(payload)?,
 					b"hvc1" => crate::codec::h265::config_from_hvcc(payload)?,
 					b"av01" => crate::codec::av1::config_from_av1c(payload)?,
 					// VP9 carries its config in band; the SequenceStart vpcC is
@@ -602,6 +602,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Finish every track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		// No input follows, so the buffer that waited for the rest of a tag is done.
+		self.buffer = BytesMut::new();
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for stream in self.video.values_mut() {
@@ -721,22 +723,6 @@ fn take_fourcc(cursor: &mut &[u8]) -> Option<[u8; 4]> {
 	let fourcc = cursor.get(0..4)?.try_into().expect("slice is 4 bytes");
 	*cursor = &cursor[4..];
 	Some(fourcc)
-}
-
-/// Build a video config for the `avc1` shape from an `AVCDecoderConfigurationRecord`.
-fn config_from_avcc(avcc_bytes: &[u8]) -> anyhow::Result<VideoConfig> {
-	let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
-	let mut config = VideoConfig::new(H264 {
-		profile: avcc.profile,
-		constraints: avcc.constraints,
-		level: avcc.level,
-		inline: false,
-	});
-	config.description = Some(Bytes::copy_from_slice(avcc_bytes));
-	config.coded_width = avcc.coded_width;
-	config.coded_height = avcc.coded_height;
-	config.color = avcc.sps.first().and_then(|sps| crate::codec::h264::sps_color(sps));
-	Ok(config)
 }
 
 /// Build an audio config for AAC from an `AudioSpecificConfig`.
