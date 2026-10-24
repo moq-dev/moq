@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { errors } from "../internal";
-import { type Baseline, Estimator } from "../jitter";
+import { Estimator, type Order } from "../order";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
@@ -194,7 +194,7 @@ export class Encoder {
 	};
 	#signals = new Effect();
 	#estimator = new Estimator();
-	// The estimator's jitter and delay, republished whenever either rises.
+	// The estimator's delay, republished whenever it rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
 	// What this rendition advertised on each broadcast, keyed by the broadcast or, for a local preview,
 	// the encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
@@ -335,7 +335,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, broadcast.baseline, effect);
+			this.#encode(track, broadcast.order, effect);
 		});
 
 		// Reserve against the connection for as long as this track is live. Wait
@@ -366,7 +366,7 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, baseline: Baseline, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, order: Order, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
@@ -401,7 +401,7 @@ export class Encoder {
 					producer.encode(frame, frame.timestamp as Micro, key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
-					if (this.#estimator.flush(frame.timestamp, baseline)) {
+					if (this.#estimator.write(frame.timestamp, order)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
 				},
@@ -532,6 +532,9 @@ export class Encoder {
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
+				// A stopped rendition stops holding the others' delay back. Not a cleanup: the black
+				// keyframe above is written after one would run, and would seat this rendition again.
+				order.leave(this.#estimator);
 				// The broadcast owns this static track across demand gaps. Close the current group, marking
 				// the break so a later subscriber resumes on the same track without the pre-gap group reading
 				// as live. A fatal encoder error aborts the track instead.

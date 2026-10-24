@@ -2745,8 +2745,6 @@ async fn dynamic_track_request_can_publish_media() {
 			timestamp_us: Some(20_000),
 		})
 		.unwrap();
-	media.flush(20_000).unwrap();
-	assert!(media.flush(u64::MAX).is_err(), "unrepresentable PTS must fail");
 
 	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
 		.await

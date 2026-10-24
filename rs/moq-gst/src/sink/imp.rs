@@ -692,7 +692,7 @@ impl MoqSink {
 				let pts = lifecycle.media.timeline_pts(&buffer)?;
 				lifecycle
 					.media
-					.push_buffer(data, pts, duration, current_running_time, moq_net::time::Instant::now())
+					.push_buffer(data, pts, duration, current_running_time)
 					.map_err(anyhow::Error::msg)
 			});
 			let changes = match &outcome {
@@ -1121,9 +1121,7 @@ fn observe_caps(
 ) -> (Option<Notifications>, bool) {
 	lifecycle.media.reserve(catalog, state.wall.clone());
 	let requested = lifecycle.requested().map(str::to_owned);
-	let mut options = ProducerOptions::new(caps)
-		.with_container(lifecycle.container().into())
-		.with_encoder(lifecycle.encoder());
+	let mut options = ProducerOptions::new(caps).with_container(lifecycle.container().into());
 	if let Some(track) = requested.as_deref() {
 		options = options.with_track(track);
 	}
@@ -1652,65 +1650,6 @@ mod tests {
 		};
 		assert!(next.text.renditions.is_empty());
 		assert!(next.audio.renditions.contains_key("audio"));
-	}
-
-	#[test]
-	fn a_playing_pause_cycle_does_not_raise_encoder_jitter() {
-		gst::init().unwrap();
-		let sink = sink();
-		sink.set_property("url", "https://127.0.0.1:1");
-		sink.set_property("broadcast", "pause-test");
-		let pad = sink
-			.request_pad_simple("sink_0")
-			.unwrap()
-			.downcast::<MoqSinkPad>()
-			.unwrap();
-		sink.set_state(gst::State::Paused).unwrap();
-		let (broadcast, catalog) = {
-			let control = sink.imp().control.lock().unwrap();
-			let state = control.live.as_ref().unwrap();
-			(state.broadcast.clone(), state.catalog.as_ref().unwrap().clone())
-		};
-		let caps = gst::Caps::builder("audio/x-opus")
-			.field("rate", 48_000i32)
-			.field("channels", 2i32)
-			.build();
-		assert!(matches!(
-			pad.lifecycle().media.observe_caps(
-				&broadcast,
-				&catalog,
-				ProducerOptions::new(&caps).with_track("audio").with_encoder(true)
-			),
-			CapsOutcome::Active(_)
-		));
-		let segment = gst::FormattedSegment::<gst::ClockTime>::new();
-		pad.lifecycle().media.observe_segment(segment.upcast());
-		sink.set_state(gst::State::Playing).unwrap();
-		let anchor = moq_net::time::Instant::now();
-		for (pts, arrival) in [(0, 0), (20, 120), (40, 6_000), (60, 6_020)] {
-			if pts == 40 {
-				sink.set_state(gst::State::Paused).unwrap();
-				sink.set_state(gst::State::Playing).unwrap();
-			}
-			assert_eq!(
-				pad.lifecycle()
-					.media
-					.push_buffer(
-						Bytes::from_static(b"opus frame"),
-						Some(gst::ClockTime::from_mseconds(pts)),
-						None,
-						None,
-						anchor + Duration::from_millis(arrival)
-					)
-					.unwrap(),
-				PushOutcome::Published
-			);
-		}
-		assert_eq!(
-			catalog.snapshot().audio.renditions["audio"].jitter,
-			Some(Duration::from_millis(100))
-		);
-		sink.set_state(gst::State::Null).unwrap();
 	}
 
 	fn spec(element: &super::super::MoqSink, name: &str) -> glib::ParamSpec {

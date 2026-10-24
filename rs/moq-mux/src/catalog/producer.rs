@@ -287,9 +287,9 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// Connection allocator passthrough tracks claim their peak-hold bitrate on.
 	/// See [`Config::with_bandwidth`].
 	bandwidth: moq_net::bandwidth::Allocator,
-	/// The minimum flush lateness across this catalog's renditions, which each rendition's
-	/// advertised `delay` is measured against.
-	baseline: super::estimate::Baseline,
+	/// The write order across this catalog's renditions, which each rendition's advertised
+	/// `delay` is measured against.
+	order: super::estimate::Order,
 	/// What each media track minted under this catalog has written. See [`stats`](Self::stats).
 	sent: Arc<crate::stats::Registry<crate::stats::Sent>>,
 }
@@ -304,7 +304,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			cutting: self.cutting.clone(),
 			max_age: self.max_age,
 			bandwidth: self.bandwidth.clone(),
-			baseline: self.baseline.clone(),
+			order: self.order.clone(),
 			sent: self.sent.clone(),
 		}
 	}
@@ -467,7 +467,7 @@ impl<E: CatalogExt> Producer<E> {
 			cutting: config.timeline,
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,
-			baseline: Default::default(),
+			order: Default::default(),
 			sent: Default::default(),
 		})
 	}
@@ -864,7 +864,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// A fresh estimator whose `delay` is measured against this catalog's other renditions.
 	pub(crate) fn estimator(&self) -> super::Estimator {
-		super::Estimator::with_broadcast(self.baseline.clone())
+		super::Estimator::with_order(self.order.clone())
 	}
 
 	/// The allocator passthrough tracks claim on. fMP4 writes groups by hand, so it reads this itself.

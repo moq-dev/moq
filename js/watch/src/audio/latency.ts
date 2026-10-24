@@ -4,11 +4,11 @@ import { Micro, Milli, Second } from "@moq/clock";
 export interface Target {
 	/** The arrival estimate from the container consumer. */
 	measured: Milli;
-	/** The flush span the rendition advertises, if any. */
+	/** The batch or reorder span the rendition advertises as `jitter`, if any. */
 	advertised?: Milli;
 	/** The codec's frame duration, if known. */
 	frame?: Milli;
-	/** The catalog `delay`: how far this rendition trails the broadcast's earliest one, if any. */
+	/** The catalog `delay`: how far this rendition trails the broadcast's others, if any. */
 	delay?: Milli;
 }
 
@@ -17,7 +17,7 @@ export interface Target {
  * the rendition's catalog delay.
  *
  * The advertised span is a floor rather than an addend, because the receiver's measurement already
- * contains the publisher's flush delay. The catalog delay is an addend, because the measurement is
+ * contains the publisher's batching. The catalog delay is an addend, because the measurement is
  * taken against the track's own fastest frame and cancels any offset between tracks. See
  * doc/concept/audio-jitter.md.
  */
