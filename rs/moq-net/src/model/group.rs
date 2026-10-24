@@ -4838,6 +4838,62 @@ mod test {
 		}
 	}
 
+	/// A prefetched batch mixing small and segmented frames hands each one out intact,
+	/// whether it is read whole, streamed, or read as stored for the wire.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_batch_mixes_segmented_frames() {
+		let mut group = Info { sequence: 0 }.produce();
+		let payloads: Vec<Bytes> = (0..Prefetch::CAP)
+			.map(|i| match i % 2 {
+				0 => Bytes::from(vec![i as u8; 3]),
+				_ => Bytes::from((0..2 * frame::SEGMENT + 7).map(|b| (b + i) as u8).collect::<Vec<_>>()),
+			})
+			.collect();
+		for payload in &payloads {
+			let mut frame = group
+				.create_frame(frame::Info {
+					size: payload.len() as u64,
+					timestamp: Some(Timestamp::ZERO),
+				})
+				.unwrap();
+			// Written in pieces, so the large ones chain.
+			for piece in payload.chunks(300_000) {
+				frame.write(payload.slice_ref(piece)).unwrap();
+			}
+			group = frame.finish().unwrap();
+		}
+		group.finish().unwrap();
+
+		let mut whole = group.consume();
+		for (i, payload) in payloads.iter().enumerate() {
+			let frame = whole.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(&frame.payload, payload, "whole frame {i}");
+		}
+
+		// The first read prefetches the batch, so the streamed rest come out of it.
+		let mut mixed = group.consume();
+		mixed.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		for (i, payload) in payloads.iter().enumerate().skip(1) {
+			let mut frame = mixed.next_frame().now_or_never().unwrap().unwrap().unwrap();
+			let first = frame.read_chunk().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(first.len(), payload.len().min(frame::SEGMENT), "streamed frame {i} lost its segments");
+			let rest = frame.read_all().now_or_never().unwrap().unwrap();
+			assert_eq!([first, rest].concat(), payload[..], "streamed frame {i}");
+		}
+
+		let mut objects = group.consume();
+		let waiter = kio::Waiter::noop();
+		for (i, payload) in payloads.iter().enumerate() {
+			let Poll::Ready(Ok(Some(object))) = objects.poll_read_object(&waiter) else {
+				panic!("frame {i} is ready");
+			};
+			let chained = matches!(object.frame.payload, Payload::Chain(_));
+			assert_eq!(chained, payload.len() > frame::SEGMENT, "stored frame {i}");
+			assert_eq!(object.frame.payload.contiguous(0), payload, "stored frame {i}");
+		}
+	}
+
 	/// A repetitive frame DEFLATE shrinks, distinct per index.
 	fn verbose(index: usize) -> Bytes {
 		Bytes::from(format!("{index}:{}", "moq".repeat(300)))
