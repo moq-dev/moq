@@ -7,14 +7,13 @@ use std::time::Duration;
 
 mod export {
 	pub const PCR_INTERVAL: Duration = Duration::from_millis(25);
-	pub const PSI_INTERVAL: Duration = Duration::from_millis(500);
 	use std::time::Duration;
 }
-#[path = "../src/container/ts/lane.rs"]
-#[allow(dead_code)]
-mod lane;
 #[path = "../src/container/ts/schedule.rs"]
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 mod schedule;
 
 fn packet(pid: u16) -> [u8; 188] {

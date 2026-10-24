@@ -68,3 +68,6 @@ harness = false
 [[bench]]
 name = "containers"
 harness = false
+
+[lints]
+workspace = true

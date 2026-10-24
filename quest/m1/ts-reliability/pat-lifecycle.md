@@ -46,7 +46,3 @@ new epoch.
 ## Required
 
 - [Shared parser](/quest/m1/ts-reliability/shared-parser.md) - one parser owns the PID map this plan's accounting needs
-
-## Related
-
-- [PMT export](/quest/m1/ts-reliability/pmt-export.md) - the export follows a moved PMT PID with a new PAT
