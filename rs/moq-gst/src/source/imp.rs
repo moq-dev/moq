@@ -583,9 +583,9 @@ async fn follow_path(
 	mut shutdown: watch::Receiver<bool>,
 	lost: impl Future<Output = anyhow::Error>,
 ) -> Result<()> {
-	use moq_net::announce::Event;
+	use moq_mux::follow::{Event, Instances};
 
-	let mut follow = origin.follow(path)?;
+	let mut follow = Instances::new(origin, path, None)?;
 	let pads = Pads::default();
 	let mut runs = tokio::task::JoinSet::new();
 	// Cancels the latest run.
@@ -594,37 +594,41 @@ async fn follow_path(
 
 	tracing::info!(%path, "waiting for broadcast to be announced");
 	let result = loop {
-		let start = tokio::select! {
+		let broadcast = tokio::select! {
 			_ = shutdown.changed() => break Ok(()),
 			err = &mut lost => break Err(err),
 			event = follow.next() => match event {
-				// The origin is gone, so nothing can announce the path again.
-				None => break Ok(()),
-				Some(Event::Start(announce) | Event::Restart(announce)) => {
-					tracing::info!(%path, epoch = announce.route.epoch.as_ref().map(tracing::field::display), "online");
-					true
+				Ok(Event::Start(broadcast)) => {
+					tracing::info!(%path, epoch = broadcast.info().epoch.as_ref().map(tracing::field::display), "online");
+					Some(broadcast)
 				}
-				// The same instance, re-priced or failed over, which the run rides out.
-				Some(Event::Update(_)) => false,
-				Some(Event::End(_)) => {
+				Ok(Event::End) => {
 					tracing::info!(%path, "offline, holding pads until it returns");
-					false
+					None
 				}
+				Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => break Ok(()),
+				Err(err) => break Err(anyhow::Error::from(err).context("broadcast refused")),
 			},
 			joined = runs.join_next(), if !runs.is_empty() => match joined.expect("guarded by is_empty") {
-				Ok(Ok(())) => false,
+				Ok(Ok(())) => None,
 				Ok(Err(err)) => break Err(err),
 				Err(err) => break Err(anyhow::Error::from(err).context("run panicked")),
 			},
 		};
 
-		if start {
+		if let Some(broadcast) = broadcast {
 			// Cut over at once: the old run's readers hand their pads back without waiting for their
 			// subscriptions to end.
 			if let Some(cancel) = latest.take() {
 				let _ = cancel.send(true);
 			}
-			latest = Some(play(&mut runs, origin, path, &pads, &element, &shutdown));
+			latest = Some(play(
+				&mut runs,
+				moq_mux::Source::new(origin.clone(), broadcast),
+				&pads,
+				&element,
+				&shutdown,
+			));
 		}
 	};
 
@@ -637,39 +641,18 @@ async fn follow_path(
 	result
 }
 
-/// Start a run: one request for the path and the catalog it serves, until it ends or the next
-/// start or restart replaces it. Returns what cancels it.
+/// Start the instance handed out by the follower until it ends or is replaced, returning its cancel handle.
 fn play(
 	runs: &mut tokio::task::JoinSet<Result<()>>,
-	origin: &moq_net::origin::Consumer,
-	path: &str,
+	source: moq_mux::Source,
 	pads: &Pads,
 	element: &glib::WeakRef<super::MoqSrc>,
 	shutdown: &watch::Receiver<bool>,
 ) -> watch::Sender<bool> {
 	let (cancel, mut cancelled) = watch::channel(false);
-	let (origin, path, pads, task_element, shutdown) = (
-		origin.clone(),
-		path.to_string(),
-		pads.clone(),
-		element.clone(),
-		shutdown.clone(),
-	);
+	let (pads, task_element, shutdown) = (pads.clone(), element.clone(), shutdown.clone());
 	runs.spawn_on(
 		STREAMING.scope(element.clone(), async move {
-			let broadcast = tokio::select! {
-				_ = cancelled.changed() => return Ok(()),
-				broadcast = origin.request_broadcast(&path, None) => match broadcast {
-					Ok(broadcast) => broadcast,
-					// The route went between the announcement and the request.
-					Err(err) if source_lost(&err) => {
-						tracing::warn!(%path, %err, "broadcast unavailable, holding pads");
-						return Ok(());
-					}
-					Err(err) => return Err(anyhow::Error::from(err).context("broadcast refused")),
-				},
-			};
-			let source = moq_mux::Source::new(origin, broadcast);
 			follow_catalog(source, &pads, task_element, &shutdown, &mut cancelled).await
 		}),
 		RUNTIME.handle(),
@@ -3513,6 +3496,33 @@ mod session_tests {
 
 		stop(session);
 		handler.abort();
+		recorder.assert_one_pad_held();
+	}
+
+	/// A route that never answers must not hold the reader on a stale resolution once a
+	/// replacement serves the path. An answer arriving late cannot replace the chosen run.
+	#[test]
+	fn a_replacement_supersedes_a_pending_broadcast_request() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let pool = origin.dynamic_route("", epoch()).unwrap();
+		let session = follow(&element, &origin);
+		let pending = super::RUNTIME.block_on(async {
+			tokio::time::timeout(Duration::from_secs(10), pool.requested_broadcast())
+				.await
+				.unwrap()
+				.unwrap()
+		});
+		let mut new = Publisher::new(&origin, epoch(), video_rendition());
+		recorder.written(&mut new, 2);
+		let mut old = Publisher::standalone(video_rendition());
+		pending.accept(old.broadcast.consume());
+		old.write(1);
+		recorder.written(&mut new, 3);
+		stop(session);
+		assert!(!recorder.seen().iter().any(|seen| matches!(seen, Seen::Buffer(_, 1))));
 		recorder.assert_one_pad_held();
 	}
 

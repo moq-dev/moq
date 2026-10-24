@@ -641,7 +641,7 @@ impl Subscriber {
 					request_id,
 					track_namespace: key.0.as_path(),
 					track_name: key.1.as_ref().into(),
-					subscriber_priority: super::super::priority::ABSENT_WIRE,
+					subscriber_priority: super::super::priority::DEFAULT_WIRE,
 					// No update can change it, so it takes the order a reader gets by default.
 					group_order: track::Order::default().into(),
 					filter: Filter::NextObject,

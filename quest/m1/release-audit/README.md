@@ -1,4 +1,4 @@
-# Resolve the release audit findings
+# [S] Resolve the release audit findings
 
 ## Goal
 
@@ -90,8 +90,6 @@ work, because obs-moq ships on its own schedule.
 The entries comprise reproduced or source-confirmed findings
 and contract/lifetime investigations. Each
 child records whether its behavior is new on main or inherited from release.
-
-- [Finish bitrate recovery](/quest/m1/release-audit/rate-recovery.md) - a quiet bandwidth grant no longer strands moq-video, moq-ffi, and moq-c encoders partway up the ramp
 
 ## Related
 

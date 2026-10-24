@@ -944,7 +944,7 @@ mod tests {
 	}
 
 	/// Feed ~40ms 100 kB frames over more than the bitrate window, with a measured
-	/// 40ms container batch span. PTS spacing alone says nothing about flush delay.
+	/// 40ms container batch span. PTS spacing alone says nothing about jitter.
 	fn feed<E: CatalogExt, C: RenditionConfig<E>>(rendition: &mut Rendition<E, C>) {
 		let mut estimator = super::super::Estimator::new();
 		estimator.burst(Duration::from_millis(40));

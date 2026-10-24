@@ -484,9 +484,10 @@ impl<'a> SendStream<'a> {
 
     /// Set the priority within the stream's send group, or session-wide when ungrouped
     ///
-    /// Higher values go first; equal values share bytes round robin. A queued stream moves to
-    /// its new priority the next time it is requeued, which is after every frame when
-    /// [`TransportConfig::send_fairness`](crate::TransportConfig::send_fairness) is on.
+    /// Higher values go first; equal values share bytes round robin. A queued stream moves at
+    /// once, behind the streams already queued at its new priority. With
+    /// [`TransportConfig::send_fairness`](crate::TransportConfig::send_fairness) off, a stream
+    /// its group is partway through keeps going first until it runs out of data.
     ///
     /// # Panics
     /// - when applied to a receive stream
@@ -500,6 +501,9 @@ impl<'a> SendStream<'a> {
             .get_or_insert_with(|| Send::new(max_send_data));
 
         stream.priority = priority;
+        self.state
+            .pending
+            .set_stream_priority(&mut stream.slot, priority);
         Ok(())
     }
 
