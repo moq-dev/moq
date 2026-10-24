@@ -34,4 +34,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the structural baseline
-- [One nextest build in the queue](/quest/m0/ci/one-test-build.md) - the build this would speed up

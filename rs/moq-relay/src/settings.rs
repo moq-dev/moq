@@ -44,6 +44,7 @@ pub struct Settings {
 	#[usage(flatten)]
 	stats: Stats,
 
+	#[cfg(feature = "stun")]
 	#[usage(flatten)]
 	stun: Stun,
 
@@ -296,6 +297,7 @@ struct PeerQuic {
 	send_window: Option<u64>,
 }
 
+#[cfg(feature = "stun")]
 #[derive(usage_rs::Config)]
 #[usage(prefix = "stun")]
 struct Stun {

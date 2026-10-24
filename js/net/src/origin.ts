@@ -10,14 +10,13 @@
  *
  * @module
  */
-import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, race, Signal } from "@moq/signals";
+import { Derived, type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import type * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { Route, routesEqual } from "./hop.ts";
 import {
-	compareEpochs,
 	compareRouteCandidates,
 	compareRoutes,
 	coveringPrefixes,
@@ -41,27 +40,6 @@ import {
 
 export type { Cost, Hop, Route } from "./hop.ts";
 export { isAnonymous } from "./hop.ts";
-
-/**
- * How much an endpoint prefers a link over its others; higher wins. A positive value promotes a
- * link and a negative one demotes it. See {@link Producer.withPreference}.
- */
-export type Preference = number & { readonly _brand: "preference" };
-
-/** Constructors for {@link Preference}. */
-export const Preference = Object.assign(
-	/** Rank a link, throwing a `RangeError` outside -128..=127. */
-	(value: number): Preference => {
-		if (!Number.isInteger(value) || value < -128 || value > 127) {
-			throw new RangeError(`preference must be an integer in -128..=127: ${value}`);
-		}
-		return value as Preference;
-	},
-	{
-		/** The neutral 0 every link starts at, and what a broadcast published locally ranks. */
-		default: 0 as Preference,
-	},
-);
 
 /** The rooted permissions shared by a handle and every route it inserts. */
 class Scope {
@@ -300,8 +278,6 @@ export interface RouteEntry {
 	/** The paths the entry may serve beneath its prefix, when its producer is scoped. */
 	readonly claim?: Path.Patterns;
 	readonly route: Signal<Route>;
-	/** The rank of the link the entry arrived on; see {@link Producer.withPreference}. */
-	readonly preference: Preference;
 	readonly originated: boolean;
 	readonly server?: ServeState;
 }
@@ -309,7 +285,6 @@ export interface RouteEntry {
 /** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
 interface Candidate extends Advertised {
 	readonly exact: boolean;
-	readonly preference: Preference;
 }
 
 /**
@@ -319,20 +294,10 @@ interface Candidate extends Advertised {
  */
 function compareCandidates(a: Candidate, b: Candidate): number {
 	return (
-		compareLinks(a.route, b.route, a.preference, b.preference) ||
 		compareRoutes(a.route, b.route) ||
 		Number(b.exact) - Number(a.exact) ||
 		a.route.hops.length - b.route.hops.length
 	);
-}
-
-/**
- * Orders routes from different links: the newer epoch, since an older one is a publisher that
- * was replaced, then the higher link {@link Preference}, so metrics from different operators are
- * never compared. Zero on a tie, leaving the rest to {@link compareRoutes}.
- */
-function compareLinks(a: Route, b: Route, aPreference: Preference, bPreference: Preference): number {
-	return compareEpochs(a, b) || bPreference - aPreference;
 }
 
 /**
@@ -354,9 +319,7 @@ function preferredEntry(
 		}
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		const order =
-			compareLinks(a, b, entry.preference, best.preference) || compareRouteCandidates(path, prefix, a, b);
-		if (order < 0) best = entry;
+		if (compareRouteCandidates(path, prefix, a, b) < 0) best = entry;
 	}
 	return best;
 }
@@ -564,7 +527,6 @@ class OriginState {
 					route: entry.route.peek(),
 					claim: entry.claim,
 					exact: false,
-					preference: entry.preference,
 				});
 			}
 			if (list.length > 0) out.set(path, list);
@@ -575,7 +537,6 @@ class OriginState {
 				identity: front,
 				route: advertised?.get(path) ?? Route.default,
 				exact: true,
-				preference: Preference.default,
 			};
 			const list = out.get(path);
 			if (list) list.push(local);
@@ -709,12 +670,6 @@ class OriginState {
 		else for (const prefix of frontier(this.#watches)) listener(prefix, true);
 		return () => this.#interests.delete(listener);
 	}
-
-	// How many things are prepared to answer a request: attached sessions, plus reconnecting
-	// connections that have no session right now but will. Zero means an unrouted path is
-	// unroutable rather than merely unanswered, which is the whole difference between "wait,
-	// this is coming" and "nothing here can ever serve you".
-	answerers = new Signal(0);
 
 	closed = new Once<Error | null>();
 
@@ -1027,17 +982,17 @@ class OriginState {
 
 	/**
 	 * Whether the announced local broadcast at `path` wins over `entry`, the best route a
-	 * session or dynamic handle announced there. They compare as any two routes do, with the
-	 * local broadcast at {@link Preference.default}: an identified route strictly cheaper
-	 * than the local one wins, and the local broadcast wins a tie. A route at a shorter prefix never competes, since the most specific
-	 * prefix wins outright. False when nothing is announced locally at `path`.
+	 * session or dynamic handle announced there. They compare as any two routes do: an
+	 * identified route strictly cheaper than the local one wins, and the local broadcast wins a
+	 * tie. A route at a shorter prefix never competes, since the most specific prefix wins
+	 * outright. False when nothing is announced locally at `path`.
 	 */
 	localWins(path: Path.Valid, entry: RouteEntry | undefined): boolean {
 		const local = this.advertisedLocal.peek()?.get(path);
 		if (!local || !this.local.peek()?.has(path)) return false;
 		if (!entry || !this.routes.peek()?.get(path)?.includes(entry)) return true;
 		const remote = entry.route.peek();
-		return (compareLinks(local, remote, Preference.default, entry.preference) || compareRoutes(local, remote)) <= 0;
+		return compareRoutes(local, remote) <= 0;
 	}
 
 	/**
@@ -1140,16 +1095,16 @@ export interface RequestOptions {
  * the origin down. A reconnecting session re-announces the table on each attach, so
  * advertisements made while offline surface on the next connection.
  *
- * Create, attach {@link dynamic} for tracks served on demand, populate, then
- * {@link broadcast.Producer.announce}: an exact-path subscribe before the tracks exist is
- * refused, and nobody can see or reach a broadcast until it announces.
+ * Create a broadcast, populate its tracks, then {@link broadcast.Producer.announce}: an
+ * exact-path subscribe before the tracks exist is refused, and nobody can see or reach a
+ * broadcast until it announces. To publish broadcasts on demand instead, claim a prefix with
+ * {@link dynamic} and answer the requests beneath it.
  *
  * @public
  */
 export class Producer implements Table {
 	#state = new OriginState();
 	#scope = Scope.all;
-	#preference = Preference.default;
 	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
 
 	// The reader backing the passthroughs, so holding a Producer never requires the
@@ -1167,7 +1122,6 @@ export class Producer implements Table {
 				}),
 			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
-			expect: () => this.#expect(),
 			snapshot: (prefix) => this.#state.addSnapshot(this.#scope.prefix(prefix)),
 			get requests() {
 				if (thisProducer.#scope === Scope.all) return thisProducer.#state.requests;
@@ -1189,28 +1143,7 @@ export class Producer implements Table {
 		const producer = new Producer();
 		producer.#state = this.#state;
 		producer.#scope = scope;
-		producer.#preference = this.#preference;
 		producer.#reader = makeConsumer(this.#state, scope);
-		return producer;
-	}
-
-	/**
-	 * Rank the link this handle (and any handle derived from it) is given to: higher wins, and
-	 * every handle starts at the neutral {@link Preference.default}.
-	 *
-	 * Applies to what {@link dynamic} advertises, which is how a session lands its peer's
-	 * routes, not to a broadcast published here. A route with a newer epoch still wins, but
-	 * among the rest preference decides before cost, so links to different operators rank by
-	 * this instead of comparing their metrics. Hand each CDN's session its own rank to use the
-	 * primary while it has a route and fail over to the next. Mirrors
-	 * `origin::Producer::with_preference` in rs/moq-net.
-	 */
-	withPreference(preference: Preference): Producer {
-		const producer = new Producer();
-		producer.#state = this.#state;
-		producer.#scope = this.#scope;
-		producer.#preference = preference;
-		producer.#reader = makeConsumer(this.#state, this.#scope);
 		return producer;
 	}
 
@@ -1358,7 +1291,6 @@ export class Producer implements Table {
 			scope: this.#scope,
 			claim: this.#scope.allowed?.intersect(new Path.Patterns([Path.Pattern.subtree(prefix)])),
 			route: new Signal(route),
-			preference: this.#preference,
 			originated,
 			server,
 		};
@@ -1406,13 +1338,11 @@ export class Producer implements Table {
 	 */
 	#attach(discovery: boolean): Dispose {
 		this.#sessions(1, discovery);
-		const release = this.#expect();
 		let detached = false;
 		return () => {
 			if (detached) return;
 			detached = true;
 			this.#sessions(-1, discovery);
-			release();
 		};
 	}
 
@@ -1421,30 +1351,6 @@ export class Producer implements Table {
 			total: total + delta,
 			discovery: d + (discovery ? delta : 0),
 		}));
-	}
-
-	/**
-	 * Declare that something will answer requests on this origin, even with no session
-	 * attached right now.
-	 *
-	 * A reconnecting connection holds one for its whole life, so a request made during a
-	 * reconnect (or before the first session establishes) stays pending instead of reading as
-	 * unroutable. Without it, {@link Request.unroutable} would fire on every page load, in the
-	 * window between wiring the origin up and the handshake completing. Call the returned
-	 * dispose when the connection is done for good.
-	 *
-	 * @internal
-	 */
-	#expect(): Dispose {
-		this.#state.answerers.update((count) => count + 1);
-		let released = false;
-		return () => {
-			if (released) return;
-			released = true;
-			// Clamped because closing the origin zeroes the count, and the sessions attached at
-			// the time still release afterwards.
-			this.#state.answerers.update((count) => Math.max(0, count - 1));
-		};
 	}
 
 	/**
@@ -1544,9 +1450,6 @@ export class Producer implements Table {
 			cached.front.close();
 		}
 		this.#state.materialized.clear();
-		// Nothing will answer a request on a closed origin, whatever is still attached, so
-		// existing requests report unroutable rather than waiting on a corpse.
-		this.#state.answerers.set(0);
 		this.#state.requests.update((requests) => {
 			for (const slot of requests?.values() ?? []) {
 				slot.answer?.close();
@@ -1574,7 +1477,6 @@ let makeConsumer: (state: OriginState, scope: Scope) => Consumer;
 let makeRequesting: (
 	path: Path.Valid,
 	active: Getter<broadcast.Consumer | undefined>,
-	unroutable: Getter<boolean>,
 	closed: Once<Error | null>,
 	dispose: Dispose,
 ) => Requesting;
@@ -1623,17 +1525,6 @@ export class Requesting {
 	readonly active: Getter<broadcast.Consumer | undefined>;
 
 	/**
-	 * Whether nothing can serve this path, as opposed to not having served it yet.
-	 *
-	 * True when the origin routes nothing here and nothing is prepared to answer: no session
-	 * attached and no connection reconnecting toward one. False whenever {@link active} is
-	 * set, and false while a connection is still coming up, so the ordinary page-load window
-	 * before the first handshake reads as pending rather than as a missing broadcast.
-	 * An announced request can still resolve on a later announcement. True once refused or closed.
-	 */
-	readonly unroutable: Getter<boolean>;
-
-	/**
 	 * Settles on refusal, origin shutdown, or explicit close.
 	 * A pinned or blind request also ends when its accepted instance stops serving;
 	 * an unpinned announced request waits for a later start instead.
@@ -1646,20 +1537,17 @@ export class Requesting {
 	private constructor(
 		path: Path.Valid,
 		active: Getter<broadcast.Consumer | undefined>,
-		unroutable: Getter<boolean>,
 		closed: GetPromise<Error | null>,
 		dispose: Dispose,
 	) {
 		this.path = path;
 		this.active = active;
-		this.unroutable = unroutable;
 		this.closed = closed;
 		this.#dispose = dispose;
 	}
 
 	static {
-		makeRequesting = (path, active, unroutable, closed, dispose) =>
-			new Requesting(path, active, unroutable, closed, dispose);
+		makeRequesting = (path, active, closed, dispose) => new Requesting(path, active, closed, dispose);
 	}
 
 	/** Withdraw the request. The path stays routed for any other open request. Idempotent. */
@@ -1774,10 +1662,6 @@ export class Consumer {
 		let previous = this.#state.instance(absolute);
 		const active = new Signal<broadcast.Consumer | undefined>(undefined);
 		const closed = new Once<Error | null>();
-		const missing = new Derived(
-			[active, this.#state.answerers, closed],
-			(value, answerers, error) => error !== undefined || (!value && answerers === 0),
-		);
 		let current: Requesting | undefined;
 		// Whether `current` ever resolved, so losing it reads as an end rather than a refusal.
 		let resolved = false;
@@ -1865,7 +1749,7 @@ export class Consumer {
 			changed();
 		}
 
-		return makeRequesting(path, active, missing, closed, () => finish(null));
+		return makeRequesting(path, active, closed, () => finish(null));
 	}
 
 	#resolve(path: Path.Valid, options: RequestOptions): Requesting {
@@ -1874,15 +1758,10 @@ export class Consumer {
 		path = this.#scope.path(path);
 		const requests = this.#state.requests.peek();
 		if (!requests) {
-			// Closed origin: a request that can never resolve, and says so.
+			// Closed origin: a request that can never resolve ends at once.
 			const closed = new Once<Error | null>();
-			return makeRequesting(
-				relative,
-				new Signal<broadcast.Consumer | undefined>(undefined),
-				getter(true),
-				closed,
-				() => closed.set(null),
-			);
+			closed.set(this.#state.closed.peek() ?? null);
+			return makeRequesting(relative, new Signal<broadcast.Consumer | undefined>(undefined), closed, () => {});
 		}
 
 		let slot = requests.get(path);
@@ -1976,18 +1855,7 @@ export class Consumer {
 			discovered(resolution);
 		});
 
-		// Only meaningful while nothing is routed, so it reads the route rather than `active`:
-		// the two cannot disagree, since a routed path always has an answerer-independent
-		// answer.
-		const unroutable = new Derived(
-			[route, this.#state.answerers, closed],
-			(resolution, answerers, ended) =>
-				ended !== undefined ||
-				(epoch !== undefined && resolution?.epoch !== epoch) ||
-				(!own(resolution) && answerers === 0),
-		);
-
-		return makeRequesting(relative, active, unroutable, closed, () => {
+		return makeRequesting(relative, active, closed, () => {
 			// Releases this request's handle; the route itself belongs to the table.
 			released = true;
 			unsubscribe();
@@ -2264,7 +2132,7 @@ export class Consumer {
  * requests beneath it.
  *
  * Drop it (or {@link close}) to retract the route and reject anything still waiting
- * with {@link StreamCode.Unroutable}. {@link update} re-prices it in place.
+ * with {@link StreamCode.Unroutable}. Close it and claim again to change it.
  *
  * @public
  */
