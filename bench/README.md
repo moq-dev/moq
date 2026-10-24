@@ -492,7 +492,6 @@ Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
 `paired.json`.
 
-
 ## Local check capacity
 
 Prepare the same warm dependencies and artifacts in each isolated checkout, then
