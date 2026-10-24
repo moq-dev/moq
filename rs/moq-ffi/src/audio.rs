@@ -477,8 +477,8 @@ impl ConsumerInner {
 			let read = self.consumer.read().await;
 			self.delay.store(micros(self.consumer.delay()), Ordering::Relaxed);
 			match read? {
-				Some(moq_audio::decode::Read::Frame { frame, .. }) => return Ok(Some(frame.into())),
-				Some(moq_audio::decode::Read::End { .. }) => {}
+				Some(moq_audio::decode::Read::Frame(frame)) => return Ok(Some(frame.into())),
+				Some(moq_audio::decode::Read::Gap { .. } | moq_audio::decode::Read::End { .. }) => {}
 				None => return Ok(None),
 			}
 		}
