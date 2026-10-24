@@ -115,10 +115,15 @@ struct Counts {
 }
 
 impl Counts {
-	/// Fold in a program's counters. Programs sharing a PMT or PCR PID count the same sections
-	/// and packets, so each count takes the larger.
+	/// Fold in a program's counters. Programs sharing a PMT, PCR or elementary PID count the
+	/// same sections and packets, each since it started, so each count takes the larger.
 	fn merge(&mut self, import: &Import<Ext>) {
-		self.streams.extend(import.stats().streams);
+		for (pid, row) in import.stats().streams {
+			self.streams
+				.entry(pid)
+				.and_modify(|ours| ours.combine(&row, u64::max))
+				.or_insert(row);
+		}
 		for (&pid, &count) in import.crc_errors() {
 			let merged = self.crc_errors.entry(pid).or_default();
 			*merged = (*merged).max(count);
@@ -187,7 +192,7 @@ impl Programs {
 		demux.push(data);
 		while let Some(packet) = demux.next() {
 			if let Some(pat) = &packet.pat {
-				self.follow(pat);
+				self.follow(pat)?;
 			} else if !self.waiting.is_empty() {
 				self.describe(&packet)?;
 			}
@@ -241,11 +246,22 @@ impl Programs {
 	/// Follow a whole PAT, from the first that lists a program: retire each started program it
 	/// no longer lists, move each waiting one to the PMT PID it names or drop it, and wait for
 	/// the PMT of each it adds. A started program follows its own PMT PID.
-	fn follow(&mut self, pat: &psi::Pat) {
+	///
+	/// Fails on a PAT naming another transport stream while a program runs, as each program's
+	/// importer would, and when a retired program cannot finish.
+	fn follow(&mut self, pat: &psi::Pat) -> anyhow::Result<()> {
 		self.wait_longer();
 		// The PAT repeats several times a second, mostly unchanged.
 		if self.pat.as_ref() == Some(pat) {
-			return;
+			return Ok(());
+		}
+		if let Some(running) = self.pat.as_ref().filter(|_| !self.programs.is_empty()) {
+			anyhow::ensure!(
+				running.transport_stream_id == pat.transport_stream_id,
+				"the PAT changed transport_stream_id from {} to {} while its programs run, which their carried service information does not describe",
+				running.transport_stream_id,
+				pat.transport_stream_id
+			);
 		}
 		let mut listed = HashMap::new();
 		for entry in &pat.programs {
@@ -255,13 +271,13 @@ impl Programs {
 			}
 		}
 		if self.pat.is_none() && listed.is_empty() {
-			return;
+			return Ok(());
 		}
 		let mut index = 0;
 		while index < self.programs.len() {
 			match listed.contains_key(&self.programs[index].number) {
 				true => index += 1,
-				false => self.retire(index),
+				false => self.retire(index)?,
 			}
 		}
 		let mut moved = Vec::new();
@@ -299,6 +315,7 @@ impl Programs {
 			self.waiting.entry(pid).or_default().programs.insert(number, 0);
 		}
 		self.pat = Some(pat.clone());
+		Ok(())
 	}
 
 	/// Count a PAT against every waiting program, and warn once about those it makes late.
@@ -326,10 +343,20 @@ impl Programs {
 
 	/// End program `index`, which the PAT no longer lists: finish its tracks, then its catalog,
 	/// and close its broadcast, so it is unannounced now rather than lingering. Subscribers
-	/// already reading a track read it to its end, and the other programs carry on whatever
-	/// this one left unfinished. What it counted beyond them is kept.
-	fn retire(&mut self, index: usize) {
-		let mut program = self.programs.remove(index);
+	/// already reading a track read it to its end, and the other programs carry on. What it
+	/// counted beyond them is kept.
+	///
+	/// Fails when the program cannot finish, as an import does at the end of its input.
+	fn retire(&mut self, index: usize) -> anyhow::Result<()> {
+		let program = &mut self.programs[index];
+		tracing::info!(
+			program = program.number,
+			"TS program left the PAT; retiring its broadcast"
+		);
+		// A refusal leaves the program listed, so the caller's abort reaches it with the rest.
+		program.import.finish()?;
+		program.catalog.finish()?;
+		let program = self.programs.remove(index);
 		for &pid in &program.claims {
 			self.readers[usize::from(pid)].retain(|&reader| reader != index);
 		}
@@ -349,24 +376,14 @@ impl Programs {
 				*touched -= 1;
 			}
 		}
-		tracing::info!(
-			program = program.number,
-			"TS program left the PAT; retiring its broadcast"
-		);
 		self.announced |= program.pending.is_none();
-		let finished = program
-			.import
-			.finish()
-			.and_then(|()| program.catalog.finish().map_err(anyhow::Error::from));
-		if let Err(err) = finished {
-			tracing::warn!(program = program.number, error = %err, "TS program retired unfinished");
-		}
 		program.broadcast.close();
 		let mut counts = Counts::default();
 		counts.merge(&program.import);
 		let mut retired = counts.beyond(&self.running());
 		retired.add(&self.retired);
 		self.retired = retired;
+		Ok(())
 	}
 
 	/// Read a packet on a waiting PMT PID, and start each program whose PMT it completes with a
@@ -564,9 +581,10 @@ mod test {
 	use super::*;
 	use crate::catalog::hang::Container;
 	use crate::container::Consumer;
-	use crate::container::ts::fixture::Mux;
+	use crate::container::ts::fixture::{Flags, Mux};
 	use crate::container::ts::import::test::{
-		MP2, corrupt, fifty_programs, mp2_pes, pat_section, pmt_section, psi_packets, two_programs, two_section_pat,
+		CUE, MP2, corrupt, fifty_programs, mp2_pes, pat_section, pmt_section, psi_packets, two_programs,
+		two_section_pat,
 	};
 
 	/// The epoch each running program publishes under, announced yet or not.
@@ -732,6 +750,79 @@ mod test {
 			.unwrap();
 		assert_eq!(programs.programs.len(), 1);
 		assert_eq!(programs.stats().crc_error, 2, "each dropped section still counts once");
+	}
+
+	/// Programs sharing an elementary PID count its units once, each from its own start, so the
+	/// earliest reader's count stands, while they all run and as they leave.
+	#[test]
+	fn programs_sharing_a_stream_count_it_once() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let all = [(1, 0x100), (2, 0x200), (3, 0x300)];
+		let mut mux = Mux::default();
+		// Each PMT arrives a PES after the one before, so each program counts less.
+		for (cc, &(program, pid)) in (0..).zip(&all) {
+			mux.pat(&all).pmt(pid, program, 0x61, &[(MP2, 0x61)], 0);
+			mux.out
+				.extend(mp2_pes(0x61, cc, 90_000 + u64::from(cc) * 18_000, [0x61; 2]));
+			programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		}
+		assert_eq!(programs.programs.len(), 3);
+		assert_eq!(programs.stats().streams[&0x61].units, 6);
+		for listed in [&all[1..], &all[2..]] {
+			mux.pat(listed);
+			programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+			assert_eq!(programs.programs.len(), listed.len());
+			assert_eq!(programs.stats().streams[&0x61].units, 6, "{} running", listed.len());
+		}
+	}
+
+	/// A PAT naming another transport stream is refused while a program runs, before it retires
+	/// one, even when it lists none of them.
+	#[test]
+	fn a_pat_naming_another_transport_stream_is_refused() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut steps = Steps::new();
+		steps.step(&mut programs, &[(1, 0x100)]);
+		steps.mux.pat_in(2, &[(2, 0x200)]);
+		let err = programs.decode(&std::mem::take(&mut steps.mux.out)).unwrap_err();
+		assert!(format!("{err:#}").contains("transport_stream_id"), "{err:#}");
+		assert_eq!(programs.programs.len(), 1, "a refused PAT retires nothing");
+	}
+
+	/// A dropped program that cannot finish refuses the multiplex, as at the end of the input,
+	/// and stays listed for the abort that follows, so its subscribers see the cause.
+	#[tokio::test(start_paused = true)]
+	async fn a_retired_program_that_cannot_finish_refuses_the_multiplex() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		// Program 2 carries a clock on 0x71 and SCTE-35 on 0x72, and no PTS to place a cue by.
+		let mut cuei = vec![0xe0, 0x71, 0xf0, 6, 0x05, 4];
+		cuei.extend_from_slice(b"CUEI");
+		cuei.extend_from_slice(&[0x02, 0xe0, 0x71, 0xf0, 0, 0x86, 0xe0, 0x72, 0xf0, 0]);
+		let mut mux = Mux::default();
+		mux.pat(&[(1, 0x100), (2, 0x200)])
+			.pmt(0x100, 1, 0x61, &[(MP2, 0x61)], 0)
+			.section(0x200, &psi::section(psi::PMT_TABLE_ID, 2, 0, 0, 0, &cuei))
+			.packet(0x71, Flags::pcr(27_000_000))
+			.section(0x72, &CUE);
+		mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.programs.len(), 2);
+		let mut catalog = programs.programs[1].catalog.consume().unwrap();
+
+		mux.pat(&[(1, 0x100)]);
+		let err = programs.decode(&std::mem::take(&mut mux.out)).unwrap_err();
+		assert!(format!("{err:#}").contains("without a media timestamp"), "{err:#}");
+		programs.abort(moq_net::Error::Transport("decode failed".into()));
+		let err = loop {
+			match catalog.next().await {
+				Ok(Some(_)) => {}
+				other => break other.unwrap_err(),
+			}
+		};
+		assert!(matches!(err, crate::Error::Moq(moq_net::Error::Transport(ref reason)) if reason == "decode failed"));
 	}
 
 	#[tokio::test(start_paused = true)]
