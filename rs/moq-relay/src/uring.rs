@@ -72,6 +72,8 @@ struct Serve {
 	alpns: Arc<Vec<String>>,
 	/// The negotiated-version restriction, when the operator set one.
 	versions: moq_net::Versions,
+	/// `listen.implementation`, the value this listener advertises in SETUP.
+	implementation: Option<String>,
 	/// The address every worker socket shares, reported as a session's `local`.
 	local: SocketAddr,
 	/// `listen.timeout`, which each worker's endpoint starts at a connection's
@@ -110,6 +112,7 @@ pub struct Workers {
 	pin: bool,
 	alpns: Arc<Vec<String>>,
 	versions: moq_net::Versions,
+	implementation: Option<String>,
 	timeout: Option<std::time::Duration>,
 	reset_secret: Option<[u8; 32]>,
 
@@ -248,6 +251,7 @@ impl Workers {
 			pin: config.pin,
 			alpns: Arc::new(alpns),
 			versions,
+			implementation: listen.implementation.clone(),
 			timeout: listen.resolved_timeout(),
 			reset_secret,
 			threads: Vec::new(),
@@ -302,6 +306,7 @@ impl Workers {
 			tokio: tokio::runtime::Handle::current(),
 			alpns: self.alpns.clone(),
 			versions: self.versions.clone(),
+			implementation: self.implementation.clone(),
 			local: self.addr,
 			timeout: self.timeout,
 			reset_secret: self.reset_secret,
@@ -748,7 +753,10 @@ async fn serve_connection(
 
 	deadline.close = Some(transport.clone());
 	let conn = transport.clone();
-	let server = moq_net::Server::new().with_versions(serve.versions.clone());
+	let mut server = moq_net::Server::new().with_versions(serve.versions.clone());
+	if let Some(implementation) = &serve.implementation {
+		server = server.with_implementation(implementation);
+	}
 	let binding = match url {
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,

@@ -103,6 +103,10 @@ pub struct MockConnectOptions {
 	pub client_discovers_all: bool,
 	/// Pause the receiving driver while its transport keeps delivering data.
 	pub server_gate: Option<kio::Consumer<bool>>,
+	/// What the client advertises as its implementation, when not the default.
+	pub client_implementation: Option<String>,
+	/// What the server advertises as its implementation, when not the default.
+	pub server_implementation: Option<String>,
 }
 
 impl MockConnectOptions {
@@ -125,6 +129,8 @@ impl MockConnectOptions {
 			server_polls: None,
 			client_discovers_all: true,
 			server_gate: None,
+			client_implementation: None,
+			server_implementation: None,
 		}
 	}
 }
@@ -167,6 +173,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	if let Some(cost) = opts.cost {
 		client = client.with_cost(cost);
 	}
+	if let Some(implementation) = opts.client_implementation {
+		client = client.with_implementation(implementation);
+	}
 	if let Some(publish) = &opts.client_publish {
 		client = client.with_publisher(publish);
 	}
@@ -191,6 +200,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	}
 	if let Some(limits) = opts.server_limits {
 		server = server.with_limits(limits);
+	}
+	if let Some(implementation) = opts.server_implementation {
+		server = server.with_implementation(implementation);
 	}
 
 	// Run both handshakes concurrently and spawn each side's driver

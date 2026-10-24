@@ -58,11 +58,12 @@ export type ReloadDelay = {
  *
  * {@link ConnectProps.transport} is excluded: a supplied session is good for exactly one
  * connection, so the reconnect loop has nothing to reuse once that session drops. Call
- * {@link connect} directly when you have a session to hand over.
+ * {@link connect} directly when you have a session to hand over. Every attempt advertises
+ * the default {@link ConnectProps.implementation}.
  *
  * @internal
  */
-export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport"> & {
+export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport" | "implementation"> & {
 	/** A reload owns the abort signal for each connection attempt. */
 	signal?: never;
 
