@@ -22,7 +22,6 @@ normative:
   RFC4648:
   RFC5116:
   RFC5869:
-  RFC8452:
   RFC9562:
 
 informative:
@@ -37,7 +36,7 @@ This document specifies moq-e2ee-00, a versioned profile for end-to-end encrypti
 Authorized publishers and subscribers share a 32-byte broadcast secret out of band.
 Each publisher instance mints an epoch and announces it on the route for an opaque broadcast path.
 HKDF-SHA-256 derives per-track AES-128-GCM keys from the secret and the epoch; grouped frames and datagrams use separate key domains.
-Physical track names are a deterministic AES-128-GCM-SIV encryption of the semantic names, so a publisher can serve a name it never declared.
+Physical track names are a deterministic AES-128-GCM encryption of the semantic names under an HMAC-derived nonce, so a publisher can serve a name it never declared.
 Media frames and datagrams carry only ciphertext plus a 16-byte tag.
 The profile binds object identity through derivation and the nonce, not an on-wire header.
 
@@ -186,27 +185,28 @@ opaque    = HKDF-Expand(prk, path_info, 16)
 The opaque path segment is the unpadded base64url encoding of `opaque` ({{RFC4648}} Section 5): 22 ASCII characters.
 The epoch is deliberately absent from this derivation, so a subscriber can derive the prefix before discovering an instance.
 
-Physical track names encrypt the semantic name deterministically under a name key:
+Physical track names encrypt the semantic name deterministically, using only HMAC-SHA-256 and AES-128-GCM:
 
 ~~~
-name_info = "moq-e2ee-00 name"
-            || bytes(context)
-            || bytes(epoch)
-            || u64(kid)
-name_key  = HKDF-Expand(prk, name_info, 16)
+scope     = bytes(context) || bytes(epoch) || u64(kid)
+name_mac  = HKDF-Expand(prk, "moq-e2ee-00 name-mac" || scope, 32)
+name_key  = HKDF-Expand(prk, "moq-e2ee-00 name-key" || scope, 16)
 padded    = semantic_name || 0x80 || 0x00 ... 0x00
-physical  = AES-128-GCM-SIV(name_key, zero_nonce, padded)
+nonce     = HMAC-SHA-256(name_mac, padded)[0..12]
+physical  = nonce || AES-128-GCM(name_key, nonce, padded)
 ~~~
 
 `semantic_name` is the UTF-8 bytes of the application's track name (`catalog.json`, `video`, and so on).
 `padded` is `semantic_name`, one `0x80` byte, and the fewest zero bytes that make its length a multiple of 16.
-AES-128-GCM-SIV is the AEAD of {{RFC8452}} with a nonce of 12 zero bytes and an empty AAD; `physical` is its ciphertext followed by its 16-byte tag.
-The physical track name is the unpadded base64url encoding of `physical` ({{RFC4648}} Section 5), a valid moq-lite track name of at least 43 characters.
+`nonce` is the first 12 bytes of the HMAC output.
+AES-128-GCM uses an empty AAD and outputs ciphertext followed by its 16-byte tag ({{RFC5116}}).
+The physical track name is the unpadded base64url encoding of `physical` ({{RFC4648}} Section 5), a valid moq-lite track name of at least 59 characters.
 This function may hide any track-shaped name the application wants a relay not to read; it is not limited to media tracks.
 
-The fixed nonce is deliberate: equal semantic names under one generation share one physical name, so relays deduplicate and cache requests for it.
-A publisher recovers the semantic name of a requested physical name by decoding and opening it under `name_key`.
-A name that does not decode, fails to open, has noncanonical padding, or is not UTF-8 was not issued under the generation; the publisher MUST answer it as a missing track and MUST NOT retain state for it.
+The nonce is a function of the name, so equal semantic names under one generation share one physical name, and relays deduplicate and cache requests for it.
+A publisher recovers the semantic name of a requested physical name by decoding it, opening the ciphertext under `name_key` with the leading 12 bytes as the nonce, and recomputing `nonce` from the result.
+A name that does not decode, fails to open, has a nonce that differs from the recomputed one, has noncanonical padding, or is not UTF-8 was not issued under the generation; the publisher MUST answer it as a missing track and MUST NOT retain state for it.
+The nonce check keeps one physical name per semantic name, so two tracks never share the payload keys that semantic name derives.
 
 AEAD keys are 16 bytes, one per semantic name and domain:
 
@@ -298,7 +298,7 @@ GCM authenticity also depends on total processed blocks, so `2^24` frames at the
 Small records hit the invocation cap first; large records hit the byte cap first.
 A receiver counts failed opens too, since each is an AEAD invocation under that key.
 These caps apply to the payload keys of {{derive}}, not `name_key`.
-It encrypts once per distinct semantic name, and each failed open of a forged name is a forgery attempt whose {{RFC8452}} success probability stays negligible at any rate a relay can send requests.
+It encrypts once per distinct semantic name, so `q` names collide on a nonce with probability about `q^2 / 2^97`, and each failed open of a forged name is a forgery attempt whose success probability stays negligible at any rate a relay can send requests.
 
 
 # Failure Behavior {#failure}
@@ -308,7 +308,7 @@ There is no plaintext fallback.
 Typed failures:
 
 - `invalid_secret`: secret is not 32 bytes.
-- `identity`: an integer is outside {{bounds}}, a `bytes` field exceeds 65535, an epoch is not canonical UUIDv7 text, a physical name is not unpadded base64url decoding to a valid padded length plus `Nt` bytes, or `domain` is not `0x00`/`0x01`.
+- `identity`: an integer is outside {{bounds}}, a `bytes` field exceeds 65535, an epoch is not canonical UUIDv7 text, a physical name is not unpadded base64url decoding to a 12-byte nonce, a valid padded length, and `Nt` bytes, or `domain` is not `0x00`/`0x01`.
 - `exhausted`: the next AEAD operation would exceed `2^24` uses of that key or `2^36` plaintext bytes under that key.
 - `reuse`: encrypting at an identity this instance already used.
 - `oversize`: plaintext plus tag exceeds the transport payload limit, or a ciphertext is shorter than `Nt` or larger than that limit.
@@ -382,7 +382,7 @@ This document requests no registrations.
 - Require internally minted producing epochs and consume-only bindings for discovered epochs.
 - Require canonical UUIDv7 epochs, carried on the route rather than in the path, leaving HKDF UUID inputs unchanged.
 - Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.
-- Derive physical track names by AES-128-GCM-SIV encryption of the padded semantic name, so a publisher recovers any requested name, and bind AEAD keys to the semantic name.
+- Derive physical track names by AES-128-GCM encryption of the padded semantic name under an HMAC-SHA-256 nonce, so a publisher recovers any requested name, and bind AEAD keys to the semantic name.
 
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}
