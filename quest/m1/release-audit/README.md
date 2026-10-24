@@ -1,4 +1,4 @@
-# Resolve the release audit findings
+# [S] Resolve the release audit findings
 
 ## Goal
 
