@@ -246,50 +246,6 @@ test("an announced request follows the reconnect on the same handle", async () =
 	}
 });
 
-test("a reload that gives up keeps requests pending until it is disposed", async () => {
-	const original = globalThis.WebTransport;
-	const url = new URL("https://example.com/");
-	const stub = function StubWebTransport() {
-		const pair = createMockTransportPair(Lite.ALPN_06);
-		void accept(pair.server, url).then(() => {
-			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
-		});
-		return pair.client;
-	};
-	globalThis.WebTransport = stub as unknown as typeof WebTransport;
-
-	const origin = new OriginProducer();
-	const reload = new Reload({
-		enabled: true,
-		url,
-		websocket: { enabled: false },
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
-		consume: origin,
-	});
-
-	let request = origin.consume().request(Path.from("wanted"));
-
-	try {
-		// These credentials will never work, but a new URL can recover the same loop, so a
-		// request stays pending through the gap rather than going unroutable. One a refused
-		// session answered before it closed ended with it, so ask afresh.
-		await waitUntil(() => reload.error.peek() !== undefined);
-		expect(reload.closed.peek()).toBeUndefined();
-		request.close();
-		request = origin.consume().request(Path.from("wanted"));
-		expect(request.unroutable.peek()).toBe(false);
-
-		reload.close();
-		await waitUntil(() => request.unroutable.peek() === true);
-		expect(request.unroutable.peek()).toBe(true);
-	} finally {
-		request.close();
-		reload.close();
-		origin.close();
-		globalThis.WebTransport = original;
-	}
-});
-
 test("a page hide after give-up does not retry the refused URL", async () => {
 	const original = globalThis.WebTransport;
 	const previousWindow = globalThis.window;

@@ -240,8 +240,8 @@ pub async fn peer_with_latency(
 	b: &origin::Producer,
 	latency: std::time::Duration,
 ) -> MockPair {
-	let a = a.clone().peer();
-	let b = b.clone().peer();
+	let a = a.clone().with_link(moq_net::origin::Link::Peer);
+	let b = b.clone().with_link(moq_net::origin::Link::Peer);
 	let mut options = MockConnectOptions::new(version);
 	options.client_publish = Some(a.consume().with_hidden(true));
 	options.client_subscribe = Some(a);

@@ -83,6 +83,7 @@ pub struct Relay {
 	/// The ACME client, issuing before [`Self::run`] serves and renewing after.
 	#[cfg(feature = "acme")]
 	acme: Option<crate::acme::Acme>,
+	#[cfg(feature = "stun")]
 	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
 	shutdown: shutdown::Observer,
@@ -322,6 +323,7 @@ impl Relay {
 		// starts them on its first accept.
 		let server = server.bind().await.context("failed to bind listeners")?;
 
+		#[cfg(feature = "stun")]
 		let stun = crate::stun::Server::bind(config.stun).await?;
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
@@ -337,6 +339,7 @@ impl Relay {
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health())
 			.bind()?;
+		#[cfg(feature = "stun")]
 		let internal = internal.with_stun(stun.as_ref().map(|stun| stun.counters.clone()));
 		// Bound but not yet serving: registering here (rather than after the
 		// threads start) is what gives every worker a series from the first
@@ -366,6 +369,7 @@ impl Relay {
 			web,
 			#[cfg(feature = "acme")]
 			acme,
+			#[cfg(feature = "stun")]
 			stun,
 			addr,
 			shutdown,
@@ -543,6 +547,7 @@ impl Relay {
 			web,
 			#[cfg(feature = "acme")]
 			acme,
+			#[cfg(feature = "stun")]
 			stun,
 			shutdown,
 			shutdown_trigger,
@@ -730,10 +735,13 @@ impl Relay {
 		};
 
 		let stun = async move {
+			#[cfg(feature = "stun")]
 			match stun {
 				Some(stun) => stun.run().await,
 				None => std::future::pending().await,
 			}
+			#[cfg(not(feature = "stun"))]
+			std::future::pending::<anyhow::Result<()>>().await
 		};
 		let result = tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
@@ -847,6 +855,7 @@ async fn serve_listening(
 #[cfg(test)]
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
+	#[cfg(feature = "stun")]
 	#[tokio::test]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
 		use stun_types::message::{BINDING, Message, MessageWriteVec};
