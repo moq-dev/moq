@@ -26,8 +26,8 @@ test-only uses in `rs/moq-hls`, `rs/moq-gst` and `rs/moq-relay`.
 `rs/moq-net/src/model/track.rs`'s `close` constructs it only to convert it;
 decided 2026-10-22 (maintainer): keep the removal and construct
 `StreamError::Session(SessionError::Cancel)` there directly. Removing a
-public variant is a breaking Rust change: add the `rs/moq-net/MIGRATE.md`
-entry. Wire: none.
+public variant is a breaking Rust change: mark the title `!` and say how to
+migrate in the Impact bullet. Wire: none.
 
 ## Related
 

@@ -50,7 +50,7 @@ Decided with the maintainer on 2026-10-18:
   to nearest and says so in its doc; the record itself stays exact.
 - **One PR across every binding**, per the cross-package sync table, so each
   binding breaks once. No shim: the microsecond fields are removed, not kept
-  beside the record. Each package gets a `MIGRATE.md` entry, and `doc/lib/*`
+  beside the record. The Impact bullet says how to migrate each package, and `doc/lib/*`
   and `doc/bin/obs.md` update in the same PR.
 
 Verification: round-trip a 90 kHz tick, a present zero, and untimed through

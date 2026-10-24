@@ -224,8 +224,8 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 				.with_stats(stats.clone())
 		});
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
-		let subscriptions = crate::session::Slots::new(limits.subscriptions)
-			.with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+		let subscriptions =
+			crate::session::Slots::new(limits.requests).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 		let announces =
 			crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
@@ -239,7 +239,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 					);
 					return Err(err);
 				};
-				let control = Control::new(request_id_max, client).with_window(limits.requests(), client, version);
+				let control = Control::new(request_id_max, client).with_window(limits.window(), client, version);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version).with_stats(&stats);
 				// Boxed like a draft-17+ transport, so the publisher and subscriber below
 				// are the same instantiation as theirs.
@@ -260,7 +260,6 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
-				publisher.fetches = crate::session::Slots::new(limits.fetches);
 
 				let mut subscriber = Subscriber::new(
 					runtime.clone(),
@@ -401,7 +400,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 				res
 			}
 			_ => {
-				let control = Control::new(None, client).with_history(limits.requests());
+				let control = Control::new(None, client).with_history(limits.window());
 				// Send SETUP and retain its writer for the session's lifetime. Only a failure
 				// ends the session; the other branches report how it closed.
 				let setup = err_only(run_setup(
@@ -434,7 +433,6 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
-				publisher.fetches = crate::session::Slots::new(limits.fetches);
 
 				// Only the dialing side fails loud on a publication outside its grant: a
 				// server's publish origin is everything the peer may read, not what it

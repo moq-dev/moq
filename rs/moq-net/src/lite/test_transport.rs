@@ -927,6 +927,8 @@ pub struct ScriptedSession {
 	incoming_bidis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
+	/// Set by [`Self::with_unacked_uni_fins`]; shared, so every clone counts down one budget.
+	unacked_unis: Arc<AtomicUsize>,
 	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
@@ -955,6 +957,7 @@ impl ScriptedSession {
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
+			unacked_unis: Default::default(),
 			datagram_size: 0,
 			groups: false,
 		}
@@ -969,6 +972,13 @@ impl ScriptedSession {
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
 	pub fn with_unacked_fin(mut self) -> Self {
 		self.unacked_fin = true;
+		self
+	}
+
+	/// Never acknowledge the FIN of the next `count` unidirectional streams opened, like a
+	/// peer stalled on those alone.
+	pub fn with_unacked_uni_fins(self, count: usize) -> Self {
+		self.unacked_unis.store(count, Ordering::Relaxed);
 		self
 	}
 
@@ -1120,7 +1130,12 @@ impl poll::Session for ScriptedSession {
 		_cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<Self::SendStream, Self::Error>> {
-		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
+		let mut send = SinkSend::new(self.log.clone());
+		send.unacked_fin = self
+			.unacked_unis
+			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| count.checked_sub(1))
+			.is_ok();
+		Poll::Ready(Ok(send.opened(options)))
 	}
 
 	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
