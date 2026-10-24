@@ -137,7 +137,7 @@ impl<R: Incoming> Connection<R> {
 			request = request.with_subscriber(publisher);
 		}
 		// A grant that no longer holds is refused, so the session records why it ended.
-		let lease = match lease.preparing(request.auth(), request.role()) {
+		let lease = match lease.preparing(request.auth(), request.requests(), request.role()) {
 			Ok(lease) => lease,
 			Err(err) => {
 				request.reject(http::StatusCode::UNAUTHORIZED).await;

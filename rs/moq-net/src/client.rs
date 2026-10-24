@@ -136,8 +136,8 @@ impl Client {
 	/// A price the peer declares applies only where we set none. An unpriced link costs
 	/// `1`, which makes the cost track the hop count and so reproduces plain
 	/// shortest-path routing.
-	pub fn with_cost(mut self, cost: u64) -> Self {
-		self.cost = Some(cost);
+	pub fn with_cost(mut self, cost: impl Into<crate::origin::Cost>) -> Self {
+		self.cost = Some(cost.into().value());
 		self
 	}
 

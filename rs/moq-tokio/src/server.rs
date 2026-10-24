@@ -1836,13 +1836,18 @@ impl Request {
 	/// bidirectional session (it omitted the role, or the version carries none).
 	/// Available on every transport. Use it to reject a token that lacks the scope for
 	/// the client's intended direction.
-	pub fn role(&self) -> Option<moq_net::Role> {
+	pub fn role(&self) -> Option<moq_net::setup::Role> {
 		self.handshake.role()
 	}
 
-	/// Answer the peer's tokens before accepting and starting its protocol driver.
+	/// The session's auth handle, the same one the accepted session's `auth` returns.
 	pub fn auth(&self) -> moq_net::auth::Handle {
 		self.handshake.auth()
+	}
+
+	/// Answer the peer's tokens yourself; see [`moq_net::server::Handshake::requests`].
+	pub fn requests(&mut self) -> moq_net::auth::Requests {
+		self.handshake.requests()
 	}
 
 	/// The Hop ID the peer declared in its SETUP (moq-lite-05+).

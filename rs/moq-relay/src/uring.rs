@@ -880,7 +880,7 @@ async fn serve_request(
 		request = request.with_deadline(at);
 	}
 	// A grant that no longer holds is refused, so the session records why it ended.
-	let lease = match lease.preparing(request.auth(), request.role()) {
+	let lease = match lease.preparing(request.auth(), request.requests(), request.role()) {
 		Ok(lease) => lease,
 		Err(err) => {
 			request.close(err.clone());
