@@ -41,6 +41,8 @@ Decided 2026-10-23 (API audit follow-up, maintainer):
 
 Kept, so the next audit skips them: `transport::memory` stays public and
 ungated, since an in-process transport is real API that other crates' tests
-use.
+use. `Route::{auth, with_auth}` stay public, since `doc/concept/standard.md`
+documents them and [auth issuer](/quest/m1/auth/issuer.md) extends them
+(decided 2026-10-22, maintainer).
 
 Public API: removals and renames in moq-net and `@moq/net`. Wire: none.

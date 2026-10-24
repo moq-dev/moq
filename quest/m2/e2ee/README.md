@@ -76,8 +76,6 @@ The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/587
 - [Encrypted native CLI](/quest/m2/e2ee/cli.md) - the native CLI publishes and
   plays encrypted media without exposing credentials through process metadata
   or logs
-- [Typed codes for dropped datagrams](/quest/m2/e2ee/datagram-drop-codes.md) -
-  a malformed datagram is dropped with its draft code, not `authentication`
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
