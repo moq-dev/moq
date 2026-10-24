@@ -11,13 +11,13 @@ stay for now.
 
 ## Plan
 
-See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
+See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
 - Today a completed frame is one `Bytes`, and a declared-size frame
   preallocates up to the session `Budget` (`model/frame.rs`). Readers already
   stream an in-flight frame by byte offset. Keep that cursor, and let it walk
   across segment boundaries.
-- Segments are the unit that [Byte holes](/quest/m2/unbounded-groups/byte-holes.md)
+- Segments are the unit that [Byte holes](/quest/m1/unbounded-groups/byte-holes.md)
   later evicts and refills, so give them a stable byte range within the frame.
 - Choose the segment size from benchmarks, and keep it a storage detail
   rather than a public knob. Coalescing the chunks the transport delivers is

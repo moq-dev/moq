@@ -6,7 +6,7 @@ A benchmark picks the storage behind `GroupState`'s frames before either
 proposal lands: the [append-only log](/quest/m2/perf/kio-channel-contention/log.md)
 (lock-free cursor reads, front eviction by an atomic base), or a ring buffer
 in its place, against the sorted runs of
-[Front eviction](/quest/m2/unbounded-groups/front-eviction.md) (in-place
+[Front eviction](/quest/m1/unbounded-groups/front-eviction.md) (in-place
 refill below `committed`). The outcome is numbers and a recommendation, and
 both quests then build on the chosen shape.
 
@@ -27,15 +27,15 @@ than evicting the middle of a group, which moved to m3
   quest needs anyway.
 - Bench how each shape refills a front hole: runs patch in place; a log or
   ring buffer needs a side run below its base. Rejecting the refill is not an
-  option: the [unbounded groups](/quest/m2/unbounded-groups/README.md) reader
+  option: the [unbounded groups](/quest/m1/unbounded-groups/README.md) reader
   contract refills an evicted run and returns `Error::Evicted` only when no
   source has it. If the log wins, say what Front eviction's refill becomes.
 - Record the numbers and the choice in the
   [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md) and
-  the [unbounded groups epic](/quest/m2/unbounded-groups/README.md).
+  the [unbounded groups epic](/quest/m1/unbounded-groups/README.md).
 
 Public API: none. Wire: none.
 
 ## Related
 
-- [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) - changes what a frame entry holds, not how a group stores its frames
+- [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - changes what a frame entry holds, not how a group stores its frames

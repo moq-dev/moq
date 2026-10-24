@@ -3,8 +3,11 @@ package dev.moq
 import dev.moq.media.*
 import dev.moq.audio.Consumer as AudioConsumer
 import dev.moq.audio.Producer as AudioProducer
+import dev.moq.audio.ProducerOptions as AudioProducerOptions
 import dev.moq.video.Consumer as VideoConsumer
 import dev.moq.video.Producer as VideoProducer
+import dev.moq.video.ProducerOptions as VideoProducerOptions
+import dev.moq.video.FrameRate as VideoFrameRate
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
@@ -621,8 +624,11 @@ class SmokeTest {
             val catalog = CatalogProducer(broadcast)
             val fine = AudioProducer(
                 catalog,
-                input,
-                AudioEncoderOutput(codec = AudioCodec.opus(), track = "fine", frameDurationUs = 2_500u),
+                AudioProducerOptions(
+                    input = input,
+                    output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDurationUs = 2_500u),
+                    track = "fine",
+                ),
             )
             // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
             fine.write(AudioFrame(timestampUs = 0uL, data = ByteArray(120 * 4)))
@@ -631,8 +637,11 @@ class SmokeTest {
             assertFailsWith<MoqException.Audio> {
                 AudioProducer(
                     catalog,
-                    input,
-                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "coarse", frameDurationUs = 2_000u),
+                    AudioProducerOptions(
+                        input = input,
+                        output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDurationUs = 2_000u),
+                        track = "coarse",
+                    ),
                 )
             }
         }
@@ -689,8 +698,11 @@ class SmokeTest {
             origin.createBroadcast("audio-delay").use { broadcast ->
                 val audio = AudioProducer(
                     CatalogProducer(broadcast),
-                    AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
-                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "mic"),
+                    AudioProducerOptions(
+                        input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
+                        output = AudioEncoderOutput(codec = AudioCodec.opus(), ),
+                        track = "mic",
+                    ),
                 )
                 broadcast.announce(AnnounceRoute())
 
@@ -728,10 +740,12 @@ class SmokeTest {
             origin.createBroadcast("video-decode-frame").use { broadcast ->
                 val video = VideoProducer(
                     CatalogProducer(broadcast),
-                    VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
-                    // Software so the encode is deterministic everywhere.
-                    VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
-                    null,
+                    VideoProducerOptions(
+                        input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoFrameRate(30000u, 1001u)),
+                        output = VideoEncoderOutput(codec = VideoCodec.H264,  kind = softwareEncoder),
+                        track = "camera",
+                        bandwidth = null,
+                    ),
                 )
                 broadcast.announce(AnnounceRoute())
 
@@ -780,8 +794,15 @@ class SmokeTest {
         for (codecFirst in listOf(true, false)) {
             BroadcastProducer().use { broadcast ->
                 val codec = AudioCodec.opus()
-                val output = AudioEncoderOutput(codec = codec, track = "mic")
-                val producer = AudioProducer(CatalogProducer(broadcast), input, output)
+                val output = AudioEncoderOutput(codec = codec)
+                val producer = AudioProducer(
+                    CatalogProducer(broadcast),
+                    AudioProducerOptions(
+                        input = input,
+                        output = output,
+                        track = "mic",
+                    ),
+                )
                 if (codecFirst) {
                     codec.close()
                 } else {

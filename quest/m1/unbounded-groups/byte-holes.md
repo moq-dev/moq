@@ -10,7 +10,7 @@ next unpublished lite version after lite-07. The frame cap
 
 ## Plan
 
-See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
+See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
 - `Position` gains a byte offset within the frame. A lite range end can
   carry it, and so can a group stream header, beside `frame_start`. A
@@ -39,4 +39,4 @@ Wire: a byte offset on the next lite version's range ends and group header.
 
 ## Required
 
-- [Front eviction](/quest/m2/unbounded-groups/front-eviction.md) - run-based group state and in-place refill
+- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - run-based group state and in-place refill

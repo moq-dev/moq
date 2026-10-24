@@ -114,9 +114,9 @@ async def publish(
             moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=AUDIO_RATE, channels=len(tones)),
             moq.audio.EncoderOutput(
                 codec=moq.audio.Codec.opus(),
-                track=AUDIO_TRACK,
                 frame_duration=timedelta(microseconds=AUDIO_FRAME_DURATION_US),
             ),
+            track=AUDIO_TRACK,
         )
         producer.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {tones} Hz tone) to {url}")

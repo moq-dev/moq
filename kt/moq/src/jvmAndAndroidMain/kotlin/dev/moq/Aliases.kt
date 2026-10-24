@@ -145,7 +145,7 @@ typealias VideoCodec = uniffi.moq.MoqVideoCodec
 typealias VideoPixelFormat = uniffi.moq.MoqVideoPixelFormat
 /** The pixel layout, resolution, and framerate the caller feeds a video producer. */
 typealias VideoEncoderInput = uniffi.moq.MoqVideoEncoderInput
-/** The video track name, codec, bitrate, keyframe interval, and backend preference. */
+/** The video codec, bitrate, keyframe interval, and backend preference. */
 typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 /** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
