@@ -20,12 +20,12 @@ independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
 Scope: this audit owns per-crate build cost in one build (dev, release, and
-incremental). The [CI workflow audit](/quest/m1/audit-ci.md) owns job-level CI
+incremental). The [CI workflow audit](/quest/m2/audit-ci.md) owns job-level CI
 cost and caching; the [dependency audit](/quest/m2/audit-deps.md) owns
 deduplicating and upgrading dependencies.
 
-What to check first: whether [moq-net compiles once](/quest/m1/net-erase-transport.md)
-landed. If so, rerun `cargo llvm-lines` on the moq-tokio lib and compare the
+What to check first: [moq-net compiles once](https://github.com/moq-dev/moq/pull/6176)
+landed, so rerun `cargo llvm-lines` on the moq-tokio lib and compare the
 transport share below, then rerun the thin-LTO size comparison against the
 smaller archive. Then whether `cargo-llvm-lines` joined the pinned shell.
 
@@ -137,7 +137,7 @@ Not measured: thin sizes for linux_arm64, darwin_arm64 and windows_amd64;
 build time above two jobs; wall-clock runtime.
 
 Decision (maintainer, 2026-10-20): keep fat LTO, and revisit once
-[moq-net compiles once](/quest/m1/net-erase-transport.md) shrinks the archive.
+[moq-net compiles once](https://github.com/moq-dev/moq/pull/6176) shrinks the archive.
 Thin saves about 40% of the final unit's wall time on two jobs, but release
 builds run only nightly and on release PRs, off the merge-queue gate. It costs
 10 MiB of the Go archive's headroom under a hard publish limit while that
@@ -146,7 +146,7 @@ builds join the PR gate.
 
 ### Results of the m0 run
 
-- Planned: [moq-net compiles once](/quest/m1/net-erase-transport.md) removes
+- Planned: [moq-net compiles once](https://github.com/moq-dev/moq/pull/6176) removes
   the per-transport copies, the largest attributable dev IR (43% of moq-tokio)
   and a share of the release fat-LTO module.
 - Explained, no action: the release `moq` unit is all LLVM backend work on one

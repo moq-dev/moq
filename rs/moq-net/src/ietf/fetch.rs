@@ -328,6 +328,8 @@ pub struct FetchOk {
 	pub request_id: Option<RequestId>,
 	pub group_order: GroupOrder,
 	pub end_of_track: bool,
+	/// Drafts 14-19 use the last object plus one, or Object 0 for the whole End Group;
+	/// draft 20 and later use an inclusive End Location.
 	pub end_location: Location,
 	/// The track's properties, as SUBSCRIBE_OK carries them: MAX_CACHE_DURATION from the
 	/// draft-14/15 parameters, the Track Properties block from draft-16 on.

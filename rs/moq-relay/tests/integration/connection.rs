@@ -47,7 +47,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		let remote = subscriber.consume().request_broadcast("ladder", None).await.unwrap();
 		let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 		for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
-			// Lite05/06 zigzag the first timestamp from zero, halving its positive range.
+			// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
 			let timestamp = moq_net::Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap();
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 			group.write_frame(timestamp, b"ladder".as_ref()).unwrap();

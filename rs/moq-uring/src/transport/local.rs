@@ -5,13 +5,12 @@ use std::task::{Context, Poll};
 
 /// A worker's transport, usable where moq-net wants a `Send` one.
 ///
-/// moq-transport boxes its futures with a native `Send` bound, which a worker's
+/// moq-net boxes every transport with a native `Send` bound, which a worker's
 /// `!Send` [`Session`](super::Session) cannot meet, so wrap the session in this
 /// before `Server::accept_request` or `Client::connect`. The session, its
 /// streams, and its send groups never leave the worker that polls them, so
 /// this checks the thread on every use and panics anywhere else instead of
-/// proving it at compile time. moq-lite needs none of it: hand the session to
-/// `accept_request_lite` or `connect_lite` directly.
+/// proving it at compile time.
 #[derive(Clone)]
 pub struct Local<T>(SendWrapper<T>);
 
@@ -102,6 +101,14 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn stats(&self) -> impl moq::Stats {
 		self.0.stats()
 	}
+
+	fn wire(&self) -> Option<moq::Wire> {
+		self.0.wire()
+	}
+
+	fn probe(&self) -> Option<moq::Probe> {
+		self.0.probe()
+	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {
@@ -172,7 +179,7 @@ mod tests {
 	use super::*;
 	use moq_net::transport::memory;
 
-	/// The point of the wrapper: a worker's `!Send` session meets moq-transport's bounds.
+	/// The point of the wrapper: a worker's `!Send` session meets moq-net's bounds.
 	#[cfg(feature = "quic")]
 	#[test]
 	fn meets_the_boxed_driver_bounds() {

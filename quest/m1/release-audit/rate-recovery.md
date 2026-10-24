@@ -64,6 +64,13 @@ Decided with the maintainer on 2026-10-22:
   spins the arm. Unit-test it, and cover the quiet-grant path on each caller:
   the final raise fails once, the grant never changes, and the encoder
   still reaches its ceiling.
+- The deadline path must not reapply a stale ceiling. moq-ffi's
+  `MoqVideoProducer::set_bitrate` releases `inner` before it stores
+  `follow.ceiling`, so a deadline that read the old, higher ceiling could
+  apply it after the user lowered it. Read the ceiling while holding the
+  encoder lock (or store it before releasing `inner`), and test that
+  interleaving: a lowered ceiling racing a due deadline never applies the
+  old value.
 - Fix all three callers in the same PR.
 
 Public API: additive. It adds `moq_mux::rate::Control::deadline`, a way to
