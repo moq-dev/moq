@@ -196,9 +196,10 @@ if (frame.timestamp_present) use(frame.timestamp_us);
 
 `moq_route.cold` and `has_cold` are removed; drop them.
 
-### `moq_publish_finish` is removed (#4152)
+### `moq_publish_finish` no longer closes (#4152)
 
-Close the broadcast with `moq_publish_close`.
+`moq_publish_finish(broadcast)` was a deprecated alias for `moq_publish_close`; it now finishes only the catalog and leaves the handle valid, so the broadcast stays up until `moq_publish_close`.
+Call `moq_publish_close` where you called `moq_publish_finish`, or the broadcast and its handle are never released.
 
 ### A decoded frame can fail on its own (#4094)
 
