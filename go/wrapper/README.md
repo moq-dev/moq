@@ -33,7 +33,7 @@ import (
 
 ctx := context.Background()
 
-client, err := moq.Dial(ctx, "https://relay.example.com")
+client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
 if err != nil {
 	log.Fatal(err)
 }
@@ -62,8 +62,9 @@ for event, err := range announced.All(ctx) {
 
 ## Common APIs
 
-Client TLS can be configured with `WithTLSRoots`, `WithTLSSystemRoots`, and
-`WithTLSFingerprints`. Use `WithClientTLSCert` and `WithClientTLSKey` for mTLS.
+`Dial` takes a `ClientConfig` whose names and nesting mirror moq-ffi's
+`MoqClientConfig`. Client TLS is configured in `ClientConfig.TLS` with `Roots`,
+`SystemRoots`, and `Fingerprints`; set `Cert` and `Key` for mTLS.
 Use fingerprints with `Server.CertFingerprints()` when
 pinning a generated self-signed certificate.
 

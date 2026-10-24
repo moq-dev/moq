@@ -55,5 +55,5 @@ timer on main at 1582fdc07d:
 ## Related
 
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case, whose late readers rely on retention
-- [CLI and gst flags](/quest/m1/api-audit/cli-flags.md) - removes the opt-in `linger` booleans, leaving completion to this epic
+- [CLI and gst flags](https://github.com/moq-dev/moq/pull/6522) - removed the opt-in `linger` booleans, leaving completion to this epic
 - [Publication owner](/quest/m1/api-audit/announce-owner.md) - adds `origin::Publication`; it must not forward a `finish` this epic deletes
