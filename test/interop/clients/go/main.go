@@ -263,7 +263,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if command != "complete\n" {
 		return errors.New("expected finish completion acknowledgement")
 	}
-	if client.Session().Connects() != 1 {
+	if client.Session().State().Connects != 1 {
 		return errors.New("publisher reconnected during finish")
 	}
 	fmt.Println("finish acknowledged")
@@ -434,7 +434,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 		next.Cancel()
 		return errors.New("session health track did not end after one group")
 	}
-	if client.Session().Connects() != 1 {
+	if client.Session().State().Connects != 1 {
 		return errors.New("subscriber reconnected during finish")
 	}
 	fmt.Printf("finish clean frames=%d catalog=eof announce=end health=ok\n", frames)

@@ -22,8 +22,8 @@ under the same names.
   generator pin; `v0.11.0-kixelated.5+v0.32.2` already carries the C backend
   (`--lang c`).
 - Ship a `MIGRATE.md` with the package, since it is what C users install.
-  Carry over `rs/moq-c/MIGRATE.md`'s history and add an `## Unreleased`
-  entry mapping the hand-written ABI to the generated one.
+  Carry over `rs/moq-c/MIGRATE.md`'s history, and map the hand-written ABI to
+  the generated one in the PR's Impact bullet.
 - Ship a hand-written `moq_shutdown` that calls `moq_ffi_shutdown`, then
   `moq_shutdown_dispatcher`.
 - moq-c and moq-cpp each embed the moq-ffi staticlib, so one program can't link
@@ -32,6 +32,7 @@ under the same names.
   target of `rs/moq-ffi` changes, and its `moq.h` C ABI) point at the
   generated package instead; update `AGENTS.md` in this quest.
 
-The hand-written `moq_session_failure` names a retrying first dial; the
-generated package must keep that, through the moq-ffi report added in
-[moq-dev/moq#6131](https://github.com/moq-dev/moq/pull/6131).
+The hand-written session callback delivers a `moq_connection_state`
+snapshot naming a retrying first dial, ending with a terminal closed
+snapshot; the generated package must keep both, through moq-ffi's `state()`
+and `state_changed()`.
