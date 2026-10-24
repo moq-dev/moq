@@ -25,15 +25,12 @@ entry.
 - Finish `sh/obs/includes.sh` and its generated C++ package preparation before
   starting concurrent syntax checks. Preserve all source/test coverage,
   compiler flags, per-source diagnostics, and the aggregate failure result.
-- Take concurrency from the bound parallel modules and local admission share;
-  do not create a second scheduling policy or unbounded fanout.
+- Take concurrency from the module lane bound (`MOQ_CHECK_JOBS` in
+  `sh/dispatch.sh`) and local admission share; do not create a second
+  scheduling policy or unbounded fanout.
 - Verify a failing source makes the command fail, all sources are checked, and
   interruption reaps children. Compare serial and parallel runs on the same
   inputs, reporting header preparation separately from compilation.
-
-## Required
-
-- [Run the queue's modules in parallel](/quest/m0/ci/parallel-modules.md) - decides whether OBS stays on the critical path, and owns the fanout bound
 
 ## Related
 
