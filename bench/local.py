@@ -57,6 +57,8 @@ def main():
                         stamp = stem.with_suffix(".started")
                         with stem.with_suffix(".log").open("w") as log:
                             env = dict(os.environ, NEXTEST_TEST_THREADS=str(workers))
+                            # Without --jobs, the record's null means sh/dispatch.sh's default.
+                            env.pop("MOQ_CHECK_JOBS", None)
                             if jobs:
                                 env["MOQ_CHECK_JOBS"] = str(jobs)
                             env.pop("QUEST_GATE_ADMITTED", None)
