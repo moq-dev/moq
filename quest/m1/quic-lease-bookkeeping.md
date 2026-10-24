@@ -50,5 +50,4 @@ values, asserting `held` equals the sum of the leases' held bytes.
 
 ## Related
 
-- [Receive pinning](/quest/m1/quic-receive-pinning.md) - the lease `take()` pinning fix
 - [qmux receive leases](/quest/m2/qmux-receive-lease.md) - brings leases to qmux on the same state machine

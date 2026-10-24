@@ -23,5 +23,4 @@ other moq-quic PR is open, or rerun the formatter over the conflict.
 
 ## Required
 
-- [Receive pinning](/quest/m1/quic-receive-pinning.md) - fix quests ranked ahead land before the whole-crate diff
-- [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - same
+- [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - fix quests ranked ahead land before the whole-crate diff
