@@ -1,3 +1,5 @@
+#[cfg(test)]
+use rand::RngExt;
 use std::{fmt, sync::Arc};
 #[cfg(feature = "qlog")]
 use std::{io, sync::Mutex};
@@ -361,7 +363,7 @@ impl TransportConfig {
     ///
     /// # Example
     /// ```
-    /// # use moq_quic::*; use std::sync::Arc;
+    /// # use moq_quic::*; use moq_congestion as congestion; use std::sync::Arc;
     /// let mut config = TransportConfig::default();
     /// config.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
     /// ```
@@ -435,7 +437,16 @@ impl Default for TransportConfig {
             #[cfg(test)]
             deterministic_packet_numbers: false,
 
-            congestion_controller_factory: Arc::new(congestion::Bbr3Config::default()),
+            congestion_controller_factory: Arc::new({
+                let config = congestion::Bbr3Config::default();
+                #[cfg(test)]
+                let config = {
+                    let mut config = config;
+                    config.probe_rng_seed(crate::entropy::rng().random());
+                    config
+                };
+                config
+            }),
 
             enable_segmentation_offload: true,
 

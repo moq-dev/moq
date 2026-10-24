@@ -62,7 +62,6 @@ mod packet_crypto;
 use packet_crypto::{PrevCrypto, ZeroRttCrypto};
 
 mod paths;
-pub use paths::RttEstimator;
 use paths::{PathData, PathResponses};
 
 pub(crate) mod qlog;
@@ -1721,7 +1720,7 @@ impl Connection {
             self.path.in_flight.bytes,
             self.app_limited,
             self.spaces[space].largest_acked_packet,
-            space,
+            space.into(),
         );
 
         if new_largest && ack_eliciting_acked {
@@ -1845,7 +1844,7 @@ impl Connection {
                     true,
                     0,
                     largest_sent,
-                    space,
+                    space.into(),
                 );
             }
         }
@@ -1863,9 +1862,9 @@ impl Connection {
                 info.time_sent,
                 info.size.into(),
                 pn,
-                space,
+                space.into(),
                 self.app_limited,
-                &self.path.rtt,
+                &moq_congestion::RttEstimator::new(self.path.rtt.get()),
             );
         }
 
@@ -2055,7 +2054,7 @@ impl Connection {
                 let info = self.spaces[pn_space].take(packet).unwrap(); // safe: lost_packets is populated just above
                 self.path
                     .congestion
-                    .on_packet_lost(info.size, packet, pn_space, now);
+                    .on_packet_lost(info.size, packet, pn_space.into(), now);
                 self.config.qlog_sink.emit_packet_lost(
                     packet,
                     &info,
@@ -2100,7 +2099,7 @@ impl Connection {
                     false,
                     size_of_lost_packets,
                     largest_lost,
-                    pn_space,
+                    pn_space.into(),
                 );
             }
         }
