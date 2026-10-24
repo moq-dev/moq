@@ -110,7 +110,3 @@ reordering publishes a new rendition; flat and backward PTS through MKV and
 TS export retain at most `reorder` frames, swept over item count and payload
 size; each importer sets `reorder` from the SPS and from source offsets.
 Keep the T-STD controls passing.
-
-## Related
-
-- [Access units across PES](/quest/m1/ts-reliability/pes-access-units.md) - TS import's other video timing gap

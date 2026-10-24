@@ -35,6 +35,9 @@ use crate::catalog::hang::CatalogExt;
 use crate::codec::{aac, ac3, eac3, h264, h265, legacy, mp2, opus};
 use moq_net::Timestamp;
 
+#[path = "video.rs"]
+mod video;
+
 /// Demuxes an MPEG-TS byte stream into a MoQ broadcast.
 ///
 /// Supports H.264 (stream type 0x1B), H.265 (0x24), ADTS AAC (0x0F), MP2
@@ -42,9 +45,16 @@ use moq_net::Timestamp;
 /// ADTS-framed and is dropped. Each codec stream is fed to its importer, which
 /// manages the track, catalog config, and keyframe-based group boundaries.
 ///
-/// Partial header contents hold at most 264 bytes per PID. PES payloads and sections awaiting a
-/// timestamp share half a MoQ group's byte budget; held sections also share half its frame
-/// budget. Exceeding either limit refuses the input instead of retaining more bytes.
+/// Video access units can span PES packets, and one PES can contain several. Its PTS
+/// stamps the AU whose required start-code prefix begins there, once. Later AUs need
+/// anchored POC and proportional timing: AVC's TS timing descriptor plus fixed-rate
+/// SPS VUI, or HEVC's `poc_proportional_to_timing_flag`. Missing timing ends the import;
+/// it is not recoverable packet damage. Raw elementary-stream import keeps its
+/// caller-supplied timestamp mode.
+///
+/// Partial header contents hold at most 264 bytes per PID. PES payloads, retained video
+/// AUs, and sections awaiting a timestamp share half a MoQ group's byte budget;
+/// buffered units also share half its frame budget. Exceeding either limit refuses the input instead of retaining more bytes.
 ///
 /// Elementary streams we don't decode are carried verbatim, one MoQ track per
 /// PID, when the catalog `E` carries the [`mpegts`](super::Mpegts) section: section-framed
@@ -712,6 +722,15 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 
 	fn ensure_stream(&mut self, pid: Pid, stream_type: u8, descriptors: &[catalog::Descriptor]) -> anyhow::Result<()> {
+		let temporal_poc = if stream_type == StreamType::H264 as u8 {
+			video::temporal_poc(descriptors)?
+		} else {
+			false
+		};
+		if let Some(Stream::H264 { assembly, .. }) = self.streams.get_mut(&pid) {
+			assembly.clock.temporal_poc = temporal_poc;
+		}
+
 		// A later PMT can remap a PID that was section-framed (intercepted in
 		// `decode`) to a PES codec/verbatim stream. Drop the stale section route first,
 		// or it would keep intercepting the PID and the new stream would never get data.
@@ -751,6 +770,11 @@ impl<E: catalog::Catalog> Import<E> {
 					.unique_track(".avc3", self.catalog.track_info(hang::catalog::PRIORITY.video))?;
 				Stream::H264 {
 					split: h264::Split::new(),
+					assembly: {
+						let mut assembly = video::Assembly::new(video::Codec::Avc);
+						assembly.clock.temporal_poc = temporal_poc;
+						assembly
+					},
 					import: Box::new(h264::Import::new(track, self.reserve(), self.video_hint())?),
 				}
 			}
@@ -760,6 +784,7 @@ impl<E: catalog::Catalog> Import<E> {
 					.unique_track(".hev1", self.catalog.track_info(hang::catalog::PRIORITY.video))?;
 				Stream::H265 {
 					split: h265::Split::new(),
+					assembly: video::Assembly::new(video::Codec::Hevc),
 					import: Box::new(h265::Import::new(track, self.reserve(), self.video_hint())?),
 				}
 			}
@@ -998,17 +1023,20 @@ impl<E: catalog::Catalog> Import<E> {
 			self.keep_stats(pid, Some(stats::Stream::new(".ts", stats::Class::Data)));
 		}
 		self.unclocked.remove(&pid);
-		if let Some(stream) = self.streams.get_mut(&pid) {
-			if let Stream::PesPacket(stream) = &mut *stream {
-				stream.settle(&self.placement);
-				let (published, dropped) = stream.release(&self.timebase, &self.pts, generation)?;
-				units += published;
-				unplaced += dropped;
-				anyhow::ensure!(
-					stream.held.is_empty(),
-					"TS private PES reached a PMT revision without a media timestamp"
-				);
-			}
+		if let Some(stream) = self.streams.get_mut(&pid)
+			&& let Stream::PesPacket(stream) = &mut *stream
+		{
+			stream.settle(&self.placement);
+			let (published, dropped) = stream.release(&self.timebase, &self.pts, generation)?;
+			units += published;
+			unplaced += dropped;
+			anyhow::ensure!(
+				stream.held.is_empty(),
+				"TS private PES reached a PMT revision without a media timestamp"
+			);
+		}
+		units += self.finish_stream(pid)?;
+		if let Some(stream) = self.streams.get(&pid) {
 			// A verbatim entry leaves with its stream; a decoded track's is recorded here.
 			if self.recorded_media.remove(&pid)
 				&& let Some(name) = stream.media_track_name()
@@ -1016,7 +1044,6 @@ impl<E: catalog::Catalog> Import<E> {
 			{
 				mpegts.tracks.remove(&name);
 			}
-			units += stream.finish()?;
 		}
 		if let Some(stream) = self.streams.remove(&pid) {
 			// Finishing can publish a held frame, which its counters then include.
@@ -1168,9 +1195,35 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
+	fn video_damage(&mut self, pid: Pid) {
+		let damage = match self.streams.get_mut(&pid) {
+			Some(Stream::H264 { assembly, .. } | Stream::H265 { assembly, .. }) => assembly.take_damage(),
+			_ => None,
+		};
+		if let Some((count, err)) = damage {
+			*self.damaged.entry(pid.as_u16()).or_default() += count;
+			self.damage_log.record(pid.as_u16(), &err);
+		}
+	}
+
 	/// Refuse one damaged unit without changing any other PID or the program clock.
 	fn damage(&mut self, pid: Pid, err: &anyhow::Error) -> anyhow::Result<()> {
-		self.pending.remove(&pid);
+		// Complete AUs ahead of the damaged packet remain valid, including those
+		// in an unbounded PES. Its final NAL/AU is never flushed at a loss boundary.
+		if let Some(pending) = self.pending.remove(&pid)
+			&& let Some(stream @ (Stream::H264 { .. } | Stream::H265 { .. })) = self.streams.get_mut(&pid)
+		{
+			let result = stream.write(pending, false);
+			self.video_damage(pid);
+			let units = match result {
+				Ok(units) => units,
+				Err(err) if err.is::<Damaged>() => video::published(&err),
+				Err(err) => return Err(err),
+			};
+			self.published |= units > 0;
+			self.liveness.delivered(pid.as_u16(), units);
+			self.record_media_track(pid)?;
+		}
 		self.headers.remove(&pid);
 		match self.streams.get_mut(&pid) {
 			// Nothing is imported from it, so there is nothing to refuse or report.
@@ -1210,13 +1263,24 @@ impl<E: catalog::Catalog> Import<E> {
 		if pending.pts.is_some() {
 			self.initial_reservation = None;
 		}
-		let units = match stream.write(pending, batched) {
-			Ok(units) => units,
-			Err(err) if err.is::<Damaged>() => return self.damage(pid, &err),
+		let result = stream.write(pending, batched);
+		self.video_damage(pid);
+		let (units, damage) = match result {
+			Ok(units) => (units, None),
+			Err(err) if err.is::<Damaged>() => (video::published(&err), Some(err)),
 			Err(err) => return Err(err),
 		};
-		if truncated {
-			stream.lost()?;
+		if let Some(err) = damage {
+			self.damage(pid, &err)?;
+		} else if truncated {
+			if matches!(self.streams.get(&pid), Some(Stream::H264 { .. } | Stream::H265 { .. })) {
+				self.damage(
+					pid,
+					&anyhow::anyhow!("PES payload truncated before its declared length"),
+				)?;
+			} else {
+				self.streams.get_mut(&pid).expect("existing route").lost()?;
+			}
 		}
 		self.published |= units > 0;
 		self.liveness.delivered(pid.as_u16(), units);
@@ -1569,6 +1633,27 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
+	fn finish_stream(&mut self, pid: Pid) -> anyhow::Result<u64> {
+		let Some(stream) = self.streams.get_mut(&pid) else {
+			return Ok(0);
+		};
+		let result = stream.finish();
+		self.video_damage(pid);
+		match result {
+			Ok(units) => Ok(units),
+			Err(err) if err.is::<Damaged>() => {
+				let units = video::published(&err);
+				self.damage(pid, &err)?;
+				self.streams
+					.get_mut(&pid)
+					.expect("damage preserves the route")
+					.finish()?;
+				Ok(units)
+			}
+			Err(err) => Err(err),
+		}
+	}
+
 	/// Flush any buffered PES and finish every track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		// No input follows, so the bytes that waited for the rest of a packet are done.
@@ -1592,9 +1677,11 @@ impl<E: catalog::Catalog> Import<E> {
 		// EOF releases an unmeasured short source as well as its decoder reservations.
 		self.mux_rate_reservation = None;
 		self.initial_reservation = None;
-		for (pid, stream) in &mut self.streams {
-			let units = stream.finish()?;
+		for pid in self.streams.keys().copied().collect::<Vec<_>>() {
+			let units = self.finish_stream(pid)?;
+			self.published |= units > 0;
 			self.liveness.delivered(pid.as_u16(), units);
+			self.record_media_track(pid)?;
 		}
 		for section in self.sections.values_mut() {
 			section.finish()?;
@@ -1762,12 +1849,31 @@ impl Retained {
 		if !reserve(&self.staging.units, units, STAGING_UNITS_MAX) {
 			self.staging.bytes.fetch_sub(bytes, Ordering::Relaxed);
 			anyhow::bail!(
-				"TS staging exceeds {STAGING_UNITS_MAX} sections and whole PES while waiting for a timestamp"
+				"TS staging exceeds {STAGING_UNITS_MAX} buffered units while waiting for a boundary or timestamp"
 			);
 		}
 		self.bytes += bytes;
 		self.units += units;
 		Ok(())
+	}
+
+	fn resize(&mut self, bytes: usize, units: usize) -> anyhow::Result<()> {
+		self.grow(bytes.saturating_sub(self.bytes), units.saturating_sub(self.units))?;
+		self.staging.bytes.fetch_sub(self.bytes - bytes, Ordering::Relaxed);
+		self.staging.units.fetch_sub(self.units - units, Ordering::Relaxed);
+		self.bytes = bytes;
+		self.units = units;
+		Ok(())
+	}
+
+	fn take(&mut self, bytes: usize, units: usize) -> Self {
+		self.bytes -= bytes;
+		self.units -= units;
+		Self {
+			staging: self.staging.clone(),
+			bytes,
+			units,
+		}
 	}
 
 	fn clear(&mut self) {
@@ -2770,10 +2876,12 @@ fn unit_error(err: crate::Error) -> anyhow::Error {
 enum Stream<E: catalog::Catalog = ()> {
 	H264 {
 		split: h264::Split,
+		assembly: video::Assembly,
 		import: Box<h264::Import>,
 	},
 	H265 {
 		split: h265::Split,
+		assembly: video::Assembly,
 		import: Box<h265::Import>,
 	},
 	Aac(Box<AacStream<E>>),
@@ -2791,58 +2899,21 @@ impl<E: catalog::Catalog> Stream<E> {
 	/// Route one reassembled PES, returning how many access units it published.
 	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<u64> {
 		match self {
-			Stream::H264 { split, import } => {
-				let reorder = reorder_delay(pending.pts, pending.dts);
-				let pts = on_clock(pending.pts, pending.offset)?;
-				let params = split.params();
-				// Each PES is one access unit, so flush to emit it immediately.
-				let published = (|| {
-					let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
-					frames.extend(split.flush(pts).map_err(unit_error)?);
-					let mut published = 0;
-					for frame in frames {
-						published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
-					}
-					anyhow::Ok(published)
-				})();
-				// A refused unit must not leave its parameter sets for a bare keyframe to re-inject.
-				// The snapshot is per PES, so if one carries several AUs, a later damaged AU also rolls
-				// back new parameter sets an earlier, already published AU brought.
-				if published.as_ref().is_err_and(|err| err.is::<Damaged>()) {
-					split.restore(params);
-				}
-				let published = published?;
-				// After decode, so the track (and its catalog rendition) exists.
-				if let Some(reorder) = reorder {
-					import.observe_reorder(reorder)?;
-				}
-				Ok(published)
+			Stream::H264 {
+				split,
+				assembly,
+				import,
+			} => {
+				assembly.push(pending)?;
+				video::avc(split, import, assembly, false)
 			}
-			Stream::H265 { split, import } => {
-				let reorder = reorder_delay(pending.pts, pending.dts);
-				let pts = on_clock(pending.pts, pending.offset)?;
-				let params = split.params();
-				// Each PES is one access unit, so flush to emit it immediately.
-				let published = (|| {
-					let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
-					frames.extend(split.flush(pts).map_err(unit_error)?);
-					let mut published = 0;
-					for frame in frames {
-						published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
-					}
-					anyhow::Ok(published)
-				})();
-				// A refused unit must not leave its parameter sets for a bare keyframe to re-inject.
-				// The snapshot is per PES, so if one carries several AUs, a later damaged AU also rolls
-				// back new parameter sets an earlier, already published AU brought.
-				if published.as_ref().is_err_and(|err| err.is::<Damaged>()) {
-					split.restore(params);
-				}
-				let published = published?;
-				if let Some(reorder) = reorder {
-					import.observe_reorder(reorder)?;
-				}
-				Ok(published)
+			Stream::H265 {
+				split,
+				assembly,
+				import,
+			} => {
+				assembly.push(pending)?;
+				video::hevc(split, import, assembly, false)
 			}
 			Stream::Aac(stream) => stream.write(pending, batched),
 			Stream::Opus(stream) => stream.write(pending),
@@ -2866,19 +2937,18 @@ impl<E: catalog::Catalog> Stream<E> {
 
 	/// Whether a PES cut short by a break is still worth publishing.
 	///
-	/// True where one PES carries many independently decodable units, so the ones ahead of
-	/// the cut are whole and correct on their own. False where it carries exactly one: half
-	/// an access unit is a picture with missing slices, and half a keyframe stays wrong for
-	/// every picture that references it. Verbatim payloads are all-or-nothing the same way.
+	/// True where codec framing proves complete units ahead of the cut. A video
+	/// assembler publishes only pictures closed by a following codec boundary;
+	/// its unconfirmed tail is discarded by `lost`. Verbatim PES are all-or-nothing.
 	fn salvages_partial_pes(&self) -> bool {
 		match self {
-			Stream::Aac(_) | Stream::Legacy(_) => true,
+			Stream::Aac(_) | Stream::Legacy(_) | Stream::H264 { .. } | Stream::H265 { .. } => true,
 			// Opus carries many packets per PES like the audio above, but its framing is
 			// declared rather than self-describing: a trailing packet cut short of the length
 			// its control header promises is a parse error, and that error would travel up out
 			// of `decode` and end the session. Losing the PES beats losing the broadcast.
 			Stream::Opus(_) => false,
-			Stream::H264 { .. } | Stream::H265 { .. } | Stream::PesPacket(_) => false,
+			Stream::PesPacket(_) => false,
 			Stream::Clock | Stream::Ignored => false,
 		}
 	}
@@ -2888,8 +2958,14 @@ impl<E: catalog::Catalog> Stream<E> {
 	/// break the stream recovers from in place.
 	fn desync(&mut self) {
 		match self {
-			Stream::H264 { split, .. } => split.reset(),
-			Stream::H265 { split, .. } => split.reset(),
+			Stream::H264 { split, assembly, .. } => {
+				split.reset();
+				assembly.reset();
+			}
+			Stream::H265 { split, assembly, .. } => {
+				split.reset();
+				assembly.reset();
+			}
 			Stream::Aac(stream) => stream.desync(),
 			Stream::Legacy(stream) => stream.desync(),
 			Stream::Opus(_) | Stream::PesPacket(_) | Stream::Clock | Stream::Ignored => {}
@@ -2935,11 +3011,23 @@ impl<E: catalog::Catalog> Stream<E> {
 
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
 		match self {
-			Stream::H264 { split, import, .. } => {
+			Stream::H264 {
+				split,
+				assembly,
+				import,
+				..
+			} => {
+				assembly.reset();
 				split.reset();
 				Ok(import.seek(sequence)?)
 			}
-			Stream::H265 { split, import, .. } => {
+			Stream::H265 {
+				split,
+				assembly,
+				import,
+				..
+			} => {
+				assembly.reset();
 				split.reset();
 				Ok(import.seek(sequence)?)
 			}
@@ -2957,14 +3045,29 @@ impl<E: catalog::Catalog> Stream<E> {
 			// Only the self-describing audio holds a frame back for a successor to confirm.
 			Stream::Aac(stream) => return stream.finish(),
 			Stream::Legacy(stream) => return stream.finish(),
-			// Each PES flushed its access unit, so the splitter holds only input storage.
-			Stream::H264 { split, import } => {
+			// No input follows: drain the clean tail, then release the splitter and
+			// assembler outright, including the parameter caches a loss reset keeps.
+			Stream::H264 {
+				split,
+				assembly,
+				import,
+			} => {
+				let published = video::avc(split, import, assembly, true)?;
 				*split = Default::default();
-				import.finish()?
+				*assembly = video::Assembly::new(video::Codec::Avc);
+				import.finish()?;
+				return Ok(published);
 			}
-			Stream::H265 { split, import } => {
+			Stream::H265 {
+				split,
+				assembly,
+				import,
+			} => {
+				let published = video::hevc(split, import, assembly, true)?;
 				*split = Default::default();
-				import.finish()?
+				*assembly = video::Assembly::new(video::Codec::Hevc);
+				import.finish()?;
+				return Ok(published);
 			}
 			Stream::Opus(stream) => stream.finish()?,
 			Stream::PesPacket(stream) => stream.finish()?,
@@ -4215,6 +4318,7 @@ pub(super) mod test {
 	use std::time::Duration;
 
 	use moq_net::Timestamp;
+
 	use mpeg2ts::es::StreamType;
 
 	use super::{Continuation, Continuity, SectionReassembler, Stream};
@@ -5598,10 +5702,8 @@ pub(super) mod test {
 		out
 	}
 
-	// A break mid-picture is not the same as a break mid-audio. One video PES is exactly one
-	// access unit, so there is no whole unit ahead of the cut to salvage: publishing what
-	// arrived would hand the decoder a picture with missing slices, and a keyframe missing
-	// slices stays wrong for every picture that references it. Drop it and wait for the next.
+	// A PES ending mid-picture cannot prove that picture complete. Keep only AUs
+	// closed by a codec boundary ahead of a cut, and recover at the next keyframe.
 	#[tokio::test(start_paused = true)]
 	async fn video_drops_a_partial_access_unit_across_a_continuity_break() {
 		const VIDEO_PID: u16 = 0x0050;
@@ -8084,7 +8186,10 @@ pub(super) mod test {
 		let err = import
 			.decode(&packet(true, (super::STAGING_UNITS_MAX % 16) as u8, 0, &CUE))
 			.unwrap_err();
-		assert!(err.to_string().contains("whole PES while waiting for a timestamp"));
+		assert!(err.to_string().contains(&format!(
+			"TS staging exceeds {} buffered units",
+			super::STAGING_UNITS_MAX
+		)));
 		assert_eq!(import.sections[&0x21].held.len(), super::STAGING_UNITS_MAX);
 		assert_eq!(
 			import.staging.bytes.load(super::Ordering::Relaxed),
@@ -8379,6 +8484,195 @@ pub(super) mod test {
 
 	const VIDEO: u16 = 0x0050;
 
+	#[tokio::test(start_paused = true)]
+	async fn video_pes_continuation_keeps_the_access_unit_timestamp() {
+		let au = annexb_au(true);
+		// Split inside the IDR, so neither PES is an independently decodable picture.
+		let cut = au.len() - 2;
+		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		data.extend(video_pes(VIDEO, 0, FRAME, None, &au[..cut]));
+		data.extend(video_pes(VIDEO, 1, FRAME * 9, None, &au[cut..]));
+		let frames = video_frames(&data).await;
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload.as_ref(), au);
+		assert_eq!(frames[0].timestamp.as_micros(), u128::from(FRAME) * 1_000_000 / 90_000);
+	}
+
+	#[test]
+	fn video_pes_does_not_reuse_its_pts_for_an_untimestampable_successor() {
+		let mut payload = annexb_au(true);
+		payload.extend(annexb_au(false));
+		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		data.extend(video_pes(VIDEO, 0, FRAME, None, &payload));
+		let err = match import_all(&data) {
+			Ok(_) => panic!("a second AU cannot reuse the first AU's PES PTS"),
+			Err(err) => err,
+		};
+		assert!(!err.is::<super::Damaged>(), "timing refusal must end the import");
+		assert!(err.to_string().contains("timestamp"), "{err:#}");
+	}
+
+	/// Repacketize actual encoder-produced POCs, retaining an independent PTS
+	/// oracle from its original TS rather than deriving the expected values.
+	#[tokio::test(start_paused = true)]
+	async fn video_poc_repartition_preserves_frames_timestamps_and_export() {
+		use crate::container::ts::fixture;
+		use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
+		use mpeg2ts::ts::TsPacketReader;
+		use std::io::Cursor;
+		for (kind, fixture) in [
+			(StreamType::H264, &include_bytes!("test_data/poc-avc.ts")[..]),
+			(StreamType::H265, &include_bytes!("test_data/poc-hevc.ts")[..]),
+		] {
+			let mut reader = PesPacketReader::new(TsPacketReader::new(Cursor::new(fixture)));
+			let mut pictures = Vec::new();
+			while let Some(pes) = reader.read_pes_packet().unwrap() {
+				pictures.push((pes.header.pts.unwrap().as_u64(), pes.data));
+			}
+			assert_eq!(pictures.len(), 12);
+			let mut baseline = None;
+			for layout in ["single", "combined", "split", "no-clock"] {
+				if layout == "no-clock" && kind != StreamType::H264 {
+					continue;
+				}
+				let mut mux = fixture::Mux::default();
+				mux.pat(&[(1, 0x1000)]);
+				// fixed_frame_rate_flag + temporal_poc_flag. The AVC VUI alone
+				// deliberately does not authorize multiplying POC by a clock tick.
+				let descriptor = if kind == StreamType::H264 && layout != "no-clock" {
+					&[0x2a, 2, 0x7e, 0xdf][..]
+				} else {
+					&[]
+				};
+				mux.pmt_with(0x1000, 1, VIDEO, &[(kind as u8, VIDEO, descriptor)], 0);
+				let push = |mux: &mut fixture::Mux, pts: Option<u64>, payload: &[u8]| {
+					let header_len = if pts.is_some() { 8 } else { 3 };
+					let len = header_len + payload.len();
+					let mut pes = vec![
+						0,
+						0,
+						1,
+						0xe0,
+						(len >> 8) as u8,
+						len as u8,
+						0x80,
+						if pts.is_some() { 0x80 } else { 0 },
+						if pts.is_some() { 5 } else { 0 },
+					];
+					if let Some(pts) = pts {
+						pes.extend(pes_timestamp(2, pts));
+					}
+					pes.extend(payload);
+					mux.whole(VIDEO, &pes);
+				};
+				match layout {
+					"single" => {
+						for (pts, data) in &pictures {
+							push(&mut mux, Some(*pts), data);
+						}
+					}
+					"combined" | "no-clock" => {
+						for chunk in pictures.chunks(4) {
+							let data: Vec<u8> = chunk.iter().flat_map(|(_, data)| data.iter().copied()).collect();
+							push(&mut mux, Some(chunk[0].0), &data);
+						}
+					}
+					"split" => {
+						for (pts, data) in &pictures {
+							// All three required prefix bytes and the final slice body
+							// are exercised on opposite sides of a PES boundary.
+							for (n, chunk) in data.chunks(2).enumerate() {
+								push(&mut mux, if n == 0 { Some(*pts) } else { None }, chunk);
+							}
+						}
+					}
+					_ => unreachable!(),
+				}
+				if layout == "no-clock" {
+					// Valid AVC with fixed-rate SPS VUI still needs the TS
+					// temporal-POC promise before numeric POC can mean time.
+					let err = match import_all(&mux.out) {
+						Ok(_) => panic!("SPS fixed frame rate alone cannot timestamp a later AU"),
+						Err(err) => err,
+					};
+					assert!(!err.is::<super::Damaged>());
+					assert!(err.to_string().contains("proportional"), "{err:#}");
+					continue;
+				}
+				let (consumer, catalog, _import) =
+					import_all(&mux.out).unwrap_or_else(|err| panic!("{kind:?} {layout}: {err:#}"));
+				let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+				let frames = read_track(&consumer, &name, crate::container::Kind::Video).await;
+				let observed: Vec<_> = frames
+					.iter()
+					.map(|f| (f.timestamp.as_micros(), f.keyframe, f.payload.clone()))
+					.collect();
+				assert_eq!(frames.len(), pictures.len(), "{kind:?} {layout}");
+				assert_eq!(
+					frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>(),
+					pictures
+						.iter()
+						.map(|(pts, _)| u128::from(*pts) * 1_000_000 / 90_000)
+						.collect::<Vec<_>>(),
+					"{kind:?} {layout}"
+				);
+				match &baseline {
+					None => baseline = Some(observed.clone()),
+					Some(expected) => assert_eq!(&observed, expected, "{kind:?} {layout}"),
+				}
+				let mut export =
+					crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
+						.await
+						.unwrap()
+						.with_delay(Duration::from_secs(30))
+						.with_replay();
+				let mut ts = Vec::new();
+				while let Ok(frame) = tokio::time::timeout(Duration::from_secs(100), export.next()).await {
+					let Some(frame) = frame.unwrap() else {
+						break;
+					};
+					ts.extend(frame.payload);
+				}
+				let roundtrip = video_frames(&ts).await;
+				assert_eq!(
+					roundtrip
+						.iter()
+						.map(|f| (f.timestamp.as_micros(), f.keyframe, f.payload.clone()))
+						.collect::<Vec<_>>(),
+					observed,
+					"export {kind:?} {layout}"
+				);
+			}
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn video_parameter_sets_commit_per_au_instead_of_per_pes() {
+		use crate::container::test_util::{IDR, PPS, SPS};
+		let extra_pps = [0x68, 0xce, 0x3c, 0x81];
+		let mut payload = Vec::new();
+		for nal in [SPS, PPS, &extra_pps, IDR, &[0x67, 0x42], &[0x65, 0x80]] {
+			payload.extend([0, 0, 0, 1]);
+			payload.extend(nal);
+		}
+		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		data.extend(video_pes(VIDEO, 0, 90_000, None, &payload));
+		// A later keyframe proves the damaged AU ended and must recover with
+		// the last committed parameter sets, including the extra PPS above.
+		let mut bare = vec![0, 0, 0, 1];
+		bare.extend(IDR);
+		data.extend(video_pes(VIDEO, 1, 180_000, None, &bare));
+		let (consumer, catalog, import) = import_all(&data).unwrap();
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		let frames = read_track(&consumer, &name, crate::container::Kind::Video).await;
+		assert_eq!(frames.len(), 2);
+		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
+		assert_eq!(import.stats().streams[&VIDEO].units, 2);
+		for frame in &frames {
+			assert!(frame.payload.windows(extra_pps.len()).any(|nal| nal == extra_pps));
+		}
+	}
+
 	/// Damage on one PID refuses that unit and its dependent pictures while another PID
 	/// carries on. A later decode call resumes from the next keyframe.
 	async fn damaged_video_recovers(damage: &str) {
@@ -8388,6 +8682,15 @@ pub(super) mod test {
 			..Default::default()
 		};
 		mux.gop(VIDEO, 90_000);
+		if matches!(damage, "pes" | "adaptation" | "adaptation-clock" | "tei") {
+			// These faults hide the next PES entirely. An AUD received ahead of
+			// the fault proves the preceding picture complete; the AUD's own
+			// picture remains unconfirmed and is discarded at the loss.
+			let mut au = annexb_au(false);
+			au.extend([0, 0, 1, 9, 0xf0]);
+			let last = mux.out.len() - 188;
+			mux.out[last..].copy_from_slice(&video_pes(VIDEO, 3, 90_000 + 3 * FRAME, None, &au));
+		}
 		mux.gop(peer, 90_000);
 		let damaged_at = mux.out.len();
 		mux.gop(VIDEO, 90_000 + 4 * FRAME);
@@ -8409,8 +8712,8 @@ pub(super) mod test {
 				packet.copy_from_slice(&video_pes(VIDEO, 4, 90_000 + 5 * FRAME, Some(90_000 + 4 * FRAME), &au));
 			}
 			"queued" => {
-				// The AUD completes the IDR before the forbidden NAL fails, so the splitter
-				// has already queued it when the unit is refused.
+				// The AUD closes a valid IDR before the forbidden NAL in the next
+				// AU fails. That already-admitted IDR must remain committed.
 				let mut au = annexb_au(true);
 				au.extend_from_slice(&[0, 0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0xe1, 0x80, 0, 0, 0, 1, 0x41, 0x9a]);
 				packet.copy_from_slice(&video_pes(VIDEO, 4, 90_000 + 5 * FRAME, Some(90_000 + 4 * FRAME), &au));
@@ -8451,16 +8754,35 @@ pub(super) mod test {
 		import.finish().unwrap();
 		assert_eq!(import.stats().streams[&VIDEO].damaged, u64::from(damage != "clean"));
 		assert_eq!(import.stats().streams[&peer].damaged, 0);
-		for (pid, expected) in [(VIDEO, if damage == "clean" { 12 } else { 8 }), (peer, 12)] {
+		for (pid, expected) in [
+			(
+				VIDEO,
+				if damage == "clean" {
+					12
+				} else if damage == "queued" {
+					9
+				} else {
+					8
+				},
+			),
+			(peer, 12),
+		] {
 			let Stream::H264 { import: video, .. } = &import.streams[&Pid::new(pid).unwrap()] else {
 				panic!("video route");
 			};
 			let frames = read_track(&consumer, video.name(), crate::container::Kind::Video).await;
 			assert_eq!(frames.len(), expected, "published pictures on PID {pid}");
 			if pid == VIDEO && damage != "clean" {
-				assert!(frames[4].keyframe, "recovery starts at a keyframe");
+				let recovery = if damage == "queued" { 5 } else { 4 };
+				if damage == "queued" {
+					assert!(
+						frames[4].keyframe,
+						"the valid AU before the damaged tail remains committed"
+					);
+				}
+				assert!(frames[recovery].keyframe, "recovery starts at a keyframe");
 				assert_eq!(
-					frames[4].timestamp.as_micros(),
+					frames[recovery].timestamp.as_micros(),
 					u128::from(90_000 + 9 * FRAME) * 1_000_000 / 90_000
 				);
 			}
@@ -8483,7 +8805,7 @@ pub(super) mod test {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn damaged_unit_drops_a_picture_the_splitter_queued() {
+	async fn damaged_tail_preserves_an_access_unit_already_admitted() {
 		damaged_video_recovers("queued").await;
 	}
 
@@ -8661,15 +8983,19 @@ pub(super) mod test {
 		);
 	}
 
-	/// A damaged PES start refuses only its own unit: the unbounded PES before it ends there,
-	/// whole, and still publishes.
+	/// A damaged PES start does not revoke the AU a codec boundary already
+	/// completed in the preceding unbounded PES.
 	#[test]
 	fn damaged_pes_start_flushes_the_unit_before_it() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		let unbounded = |cc, pts, keyframe| {
-			let mut packet = video_pes(VIDEO, cc, pts, None, &annexb_au(keyframe));
+			let mut au = annexb_au(keyframe);
+			if keyframe {
+				au.extend([0, 0, 1, 9, 0xf0]);
+			}
+			let mut packet = video_pes(VIDEO, cc, pts, None, &au);
 			let start = 5 + usize::from(packet[4]);
 			packet[start + 4..start + 6].fill(0);
 			packet
@@ -8698,7 +9024,11 @@ pub(super) mod test {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		let unbounded = |cc, pts, keyframe| {
-			let mut packet = video_pes(VIDEO, cc, pts, None, &annexb_au(keyframe));
+			let mut au = annexb_au(keyframe);
+			if keyframe {
+				au.extend([0, 0, 1, 9, 0xf0]);
+			}
+			let mut packet = video_pes(VIDEO, cc, pts, None, &au);
 			let start = 5 + usize::from(packet[4]);
 			packet[start + 4..start + 6].fill(0);
 			packet
@@ -8715,33 +9045,35 @@ pub(super) mod test {
 		assert_eq!(
 			import.stats().streams[&VIDEO].units,
 			1,
-			"only the keyframe the second start proved whole"
+			"only the keyframe the AUD proved whole"
 		);
 	}
 
 	/// A malformed unbounded PES drained at EOF is still refused and counted.
 	#[test]
 	fn damaged_final_access_unit_is_refused() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.reserve());
 		let mut au = annexb_au(true);
 		let nal = au
 			.windows(5)
 			.position(|bytes| bytes[..4] == [0, 0, 0, 1] && bytes[4] & 0x1f == 5)
 			.unwrap();
 		au[nal + 4] |= 0x80;
-		let mut packet = video_pes(VIDEO, 0, 90_000, None, &au);
-		let start = 5 + usize::from(packet[4]);
-		packet[start + 4..start + 6].fill(0);
-		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
-		data.extend(packet);
-		import.decode(&data).unwrap();
-		assert_eq!(import.stats().streams[&VIDEO].damaged, 0, "PES has not ended yet");
-		import.finish().unwrap();
-		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
-		assert_eq!(import.stats().streams[&VIDEO].units, 0);
-		assert!(catalog.snapshot().video.renditions.is_empty());
+		for au in [au, vec![0], vec![0, 0], vec![0, 0, 0]] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve());
+			let mut packet = video_pes(VIDEO, 0, 90_000, None, &au);
+			let start = 5 + usize::from(packet[4]);
+			packet[start + 4..start + 6].fill(0);
+			let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+			data.extend(packet);
+			import.decode(&data).unwrap();
+			assert_eq!(import.stats().streams[&VIDEO].damaged, 0, "PES has not ended yet");
+			import.finish().unwrap();
+			assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
+			assert_eq!(import.stats().streams[&VIDEO].units, 0);
+			assert!(catalog.snapshot().video.renditions.is_empty());
+		}
 	}
 
 	/// An invalid trailing Opus control header refuses the complete PES before its first
@@ -8792,6 +9124,7 @@ pub(super) mod test {
 			Pid::new(VIDEO).unwrap(),
 			Stream::H264 {
 				split: crate::codec::h264::Split::new(),
+				assembly: super::video::Assembly::new(super::video::Codec::Avc),
 				import: Box::new(video),
 			},
 		);
@@ -8846,8 +9179,13 @@ pub(super) mod test {
 				damaged_at = mux.out.len();
 			}
 			let cc = mux.cc(VIDEO);
-			mux.out
-				.extend_from_slice(&video_pes(VIDEO, cc, pts, dts, &annexb_au(keyframe)));
+			mux.out.extend_from_slice(&video_pes(VIDEO, cc, pts, dts, &{
+				let mut au = annexb_au(keyframe);
+				if i == 1 {
+					au.extend([0, 0, 1, 9, 0xf0]);
+				}
+				au
+			}));
 		}
 		mux.out[damaged_at + 1] |= 0x80;
 
@@ -8953,6 +9291,12 @@ pub(super) mod test {
 			..Default::default()
 		};
 		mux.gops(VIDEO, 90_000, 2);
+		// A codec boundary, not the following clock marker, vouches for the
+		// final picture on the old timeline.
+		let mut last = annexb_au(false);
+		last.extend([0, 0, 1, 9, 0xf0]);
+		let at = mux.out.len() - 188;
+		mux.out[at..].copy_from_slice(&video_pes(VIDEO, 7, 90_000 + 7 * FRAME, None, &last));
 		mux.out.extend_from_slice(&clock_break_packet(VIDEO));
 		// Inside the track's 30 s retention, so the reader still reaches the first pass.
 		mux.gops(VIDEO, 20 * 90_000, 2);

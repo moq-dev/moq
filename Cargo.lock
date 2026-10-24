@@ -4950,6 +4950,7 @@ dependencies = [
  "criterion",
  "futures",
  "h264-parser",
+ "h264-reader 0.9.0",
  "hang",
  "kio 0.6.2",
  "memchr",

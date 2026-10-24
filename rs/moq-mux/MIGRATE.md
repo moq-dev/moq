@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### TS video timestamps belong to access-unit starts (#6534)
+
+`ts::Import` assembles H.264/H.265 across PES boundaries instead of flushing each PES.
+A PES PTS stamps the AU starting there once. Multiple AUs in one PES need anchored
+POC plus declared proportional timing: AVC's TS timing descriptor needs both
+`fixed_frame_rate_flag` and `temporal_poc_flag`, alongside fixed-rate SPS VUI;
+HEVC needs VUI's `vui_poc_proportional_to_timing_flag`. Each field of field-coded video is
+its own AU, so a field pair in one PES needs that clock too. Configure the encoder/muxer to declare that
+clock, or supply each AU's PTS in its own PES. Missing timing now ends the import
+instead of repeating a timestamp. Packet loss discards the unconfirmed AU tail;
+codec-proven completed AUs remain published. Call `finish()` to drain a clean tail.
+Raw elementary, RTSP, and FFI timestamp modes are unchanged.
+
 ### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
 
 A passthrough `container::fmp4::Import` refuses a group that starts below the previous one with `Error::TimestampRewind` before opening it, as an unwrapped track does, instead of `Error::Moq(moq_net::Error::TimestampMismatch)` from a group it already opened.
