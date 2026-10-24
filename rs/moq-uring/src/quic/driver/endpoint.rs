@@ -258,6 +258,7 @@ impl Inner {
 	/// Route every datagram in one receive, then kick the connections fed.
 	fn demux(self: &Rc<Self>, packet: &udp::Packet) {
 		let from = packet.from();
+		let dst_ip = packet.dst_ip();
 		let ecn = packet.ecn().map(super::ecn_to_quic);
 		// Where the endpoint writes its own answers (version negotiation,
 		// retry, a refusal), reused across the whole receive.
@@ -279,13 +280,12 @@ impl Inner {
 				false => std::mem::take(&mut payload),
 			};
 			buf.clear();
-			// The socket does not report which local address a datagram
-			// arrived on, so the four-tuple stays half known, exactly as it
-			// does on a platform without `IP_PKTINFO`.
+			// The local address lets moq-quic answer from the one the peer
+			// reached, which a wildcard bind on a multihomed host needs.
 			let event = self
 				.endpoint
 				.borrow_mut()
-				.handle(self.owner.now(), from, None, ecn, segment, &mut buf);
+				.handle(self.owner.now(), from, dst_ip, ecn, segment, &mut buf);
 			match event {
 				Some(DatagramEvent::ConnectionEvent(key, event)) => {
 					let conn = self.conns.borrow().get(&key).cloned();
@@ -424,6 +424,7 @@ impl Inner {
 			to: transmit.destination,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
+			src_ip: transmit.src_ip,
 		};
 		if let Err(err) = tx.send(transmit) {
 			tracing::debug!(%err, "failed to send an endpoint response");

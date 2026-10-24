@@ -13,8 +13,6 @@ pub(super) struct Send {
     pub(super) slot: Slot,
     /// Whether a frame containing a FIN bit must be transmitted, even if we don't have any new data
     pub(super) fin_pending: bool,
-    /// Whether this stream is in the `connection_blocked` list of `Streams`
-    pub(super) connection_blocked: bool,
     /// Value of `max_data` for which a `STREAM_DATA_BLOCKED` frame was most recently queued
     ///
     /// A new frame is only queued once the peer has raised the limit.
@@ -34,7 +32,6 @@ impl Send {
             priority: 0,
             slot: Slot::default(),
             fin_pending: false,
-            connection_blocked: false,
             data_blocked_limit: None,
             stop_reason: None,
             notify: None,
@@ -72,7 +69,7 @@ impl Send {
             return Err(WriteError::Stopped(error_code));
         }
         let budget = self.max_data - self.pending.offset();
-        if budget == 0 {
+        if budget == 0 || limit == 0 {
             return Err(WriteError::Blocked);
         }
         let mut limit = limit.min(budget) as usize;

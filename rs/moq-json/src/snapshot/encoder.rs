@@ -281,8 +281,9 @@ impl<T> Encoder<T> {
 	/// Restate the last committed value as a full snapshot, which must open a new group.
 	///
 	/// For a caller that opens groups itself: call it when a joiner wants a fresh group, such as when
-	/// [`Demand::wanted`](moq_net::track::Demand::wanted) passes the largest group written, so the
-	/// joiner reads the value without the deltas before it. Returns `None` before the first value,
+	/// [`Demand::wanted`](moq_net::track::Demand::wanted) passes the largest group written. The new
+	/// group restates the value without the deltas before it, though that joiner still reads the
+	/// cached group first. Returns `None` before the first value,
 	/// when there is nothing to restate. The frame is a [`Pending`] like any other.
 	pub fn snapshot(&mut self) -> Result<Option<Pending<'_, T>>> {
 		let bytes = match &self.last {

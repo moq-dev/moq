@@ -40,5 +40,4 @@ Public API and wire: none; this is a user guide for existing feature owners.
 
 ## Required
 
-- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - settles how readers pin and follow catalog references
 - [Announcement takeover](/quest/m1/announce-takeover.md) - establishes the continuity operation the guide demonstrates

@@ -45,7 +45,6 @@ pub struct Datagram {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-// private: passthrough
 pub(crate) struct Wire {
 	pub object_id: Option<u64>,
 	pub priority: Option<u8>,
@@ -55,7 +54,6 @@ pub(crate) struct Wire {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-// private: passthrough
 pub(crate) struct Stored {
 	pub datagram: Datagram,
 	pub wire: Option<std::sync::Arc<Wire>>,
@@ -68,7 +66,7 @@ pub(crate) struct Stored {
 impl Stored {
 	/// The payload a session sends, with its inflated size when that is the DEFLATE slice:
 	/// only a session that carries `compression` takes a compressed track's stored form.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn sent(&self, compression: bool) -> (&Bytes, Option<u64>) {
 		match &self.deflated {
 			Some(deflated) if compression => (deflated, Some(self.datagram.payload.len() as u64)),
