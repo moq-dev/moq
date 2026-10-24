@@ -56,7 +56,7 @@ DOM without a framework, which is what the UI overlays use.
 import { useValue } from "@moq/signals/react";
 
 function Volume({ watch }) {
-    const volume = useValue(watch.controls.volume);
-    return <input type="range" value={volume} onChange={(e) => watch.controls.volume.set(+e.target.value)} />;
+    const volume = useValue(watch.controls.audio.volume);
+    return <input type="range" value={volume} onChange={(e) => watch.controls.audio.volume.set(+e.target.value)} />;
 }
 ```

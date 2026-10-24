@@ -3,8 +3,11 @@ package dev.moq
 import dev.moq.media.*
 import dev.moq.audio.Consumer as AudioConsumer
 import dev.moq.audio.Producer as AudioProducer
+import dev.moq.audio.ProducerOptions as AudioProducerOptions
 import dev.moq.video.Consumer as VideoConsumer
 import dev.moq.video.Producer as VideoProducer
+import dev.moq.video.ProducerOptions as VideoProducerOptions
+import dev.moq.video.FrameRate as VideoFrameRate
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
@@ -17,7 +20,15 @@ import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
 import dev.moq.json.StreamConfig
 import dev.moq.json.Timed
+import dev.moq.json.WindowConfig
+import dev.moq.json.WindowConsumer
+import dev.moq.json.WindowEventPop
+import dev.moq.json.WindowEventPush
+import dev.moq.json.WindowProducer
 import dev.moq.json.decode
+import dev.moq.json.events
+import dev.moq.json.push
+import dev.moq.json.timestamp
 import dev.moq.json.update
 import dev.moq.json.valuesAs
 import kotlinx.serialization.Serializable
@@ -443,6 +454,39 @@ class SmokeTest {
     }
 
     @Test
+    fun `json window yields pushes and pops in order`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = WindowConfig(compression = true)
+            val track = broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL))
+            val producer = WindowProducer(track, config)
+            val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null), config)
+            for (n in 1..3) producer.push(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
+            producer.pop(2uL, 4_000uL)
+
+            for (n in 0..2) {
+                val timed = checkNotNull(consumer.next())
+                val push = assertIs<WindowEventPush>(timed.event)
+                assertEquals(n.toULong(), push.index)
+                assertEquals(Status(state = "live${n + 1}"), push.decode<Status>())
+                assertEquals((n + 1).milliseconds, timed.timestamp)
+            }
+            val pop = checkNotNull(consumer.next())
+            assertEquals(WindowEventPop(0uL, 2uL), pop.event)
+            assertEquals(4.milliseconds, pop.timestamp)
+
+            // The cut's new group restates record 2, which this reader already has.
+            producer.cut()
+            producer.push(Status(state = "live4"), timestampUs = 5_000uL)
+            producer.finish()
+            val events = consumer.events().toList()
+            assertEquals(1, events.size)
+            val push = assertIs<WindowEventPush>(events[0].event)
+            assertEquals(3uL, push.index)
+            assertEquals(Status(state = "live4"), push.decode<Status>())
+        }
+    }
+
+    @Test
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false, compression = false)
@@ -619,8 +663,11 @@ class SmokeTest {
             val catalog = CatalogProducer(broadcast)
             val fine = AudioProducer(
                 catalog,
-                input,
-                AudioEncoderOutput(codec = AudioCodec.opus(), track = "fine", frameDurationUs = 2_500u),
+                AudioProducerOptions(
+                    input = input,
+                    output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDurationUs = 2_500u),
+                    track = "fine",
+                ),
             )
             // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
             fine.write(AudioFrame(timestampUs = 0uL, data = ByteArray(120 * 4)))
@@ -629,8 +676,11 @@ class SmokeTest {
             assertFailsWith<MoqException.Audio> {
                 AudioProducer(
                     catalog,
-                    input,
-                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "coarse", frameDurationUs = 2_000u),
+                    AudioProducerOptions(
+                        input = input,
+                        output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDurationUs = 2_000u),
+                        track = "coarse",
+                    ),
                 )
             }
         }
@@ -694,8 +744,11 @@ class SmokeTest {
             origin.createBroadcast("audio-delay").use { broadcast ->
                 val audio = AudioProducer(
                     CatalogProducer(broadcast),
-                    AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
-                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "mic"),
+                    AudioProducerOptions(
+                        input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
+                        output = AudioEncoderOutput(codec = AudioCodec.opus(), ),
+                        track = "mic",
+                    ),
                 )
                 broadcast.announce(AnnounceRoute())
 
@@ -733,10 +786,12 @@ class SmokeTest {
             origin.createBroadcast("video-decode-frame").use { broadcast ->
                 val video = VideoProducer(
                     CatalogProducer(broadcast),
-                    VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
-                    // Software so the encode is deterministic everywhere.
-                    VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
-                    null,
+                    VideoProducerOptions(
+                        input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoFrameRate(30000u, 1001u)),
+                        output = VideoEncoderOutput(codec = VideoCodec.H264,  kind = softwareEncoder),
+                        track = "camera",
+                        bandwidth = null,
+                    ),
                 )
                 broadcast.announce(AnnounceRoute())
 
@@ -785,8 +840,15 @@ class SmokeTest {
         for (codecFirst in listOf(true, false)) {
             BroadcastProducer().use { broadcast ->
                 val codec = AudioCodec.opus()
-                val output = AudioEncoderOutput(codec = codec, track = "mic")
-                val producer = AudioProducer(CatalogProducer(broadcast), input, output)
+                val output = AudioEncoderOutput(codec = codec)
+                val producer = AudioProducer(
+                    CatalogProducer(broadcast),
+                    AudioProducerOptions(
+                        input = input,
+                        output = output,
+                        track = "mic",
+                    ),
+                )
                 if (codecFirst) {
                     codec.close()
                 } else {

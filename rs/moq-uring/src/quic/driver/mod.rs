@@ -29,7 +29,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 #[cfg(feature = "qlog")]
 use super::qlog;
-use super::{Congestion, Error, Identity, SEGMENT, Transport, client, server};
+use super::{Congestion, Error, Identity, Transport, client, server};
 use crate::udp;
 
 /// Per-stream flow control credit, which returns as bytes are read, so it only paces a stream.
@@ -41,8 +41,8 @@ const CONNECTION_WINDOW: u32 = 128 * 1024 * 1024;
 const _: () = assert!(CONNECTION_WINDOW as u64 >= moq_net::transport::MIN_RECEIVE_WINDOW);
 /// Unacknowledged outgoing data to buffer, whatever the peer allows.
 const SEND_WINDOW: u32 = 16 * 1024 * 1024;
-/// How many datagrams to buffer in each direction.
-const DATAGRAM_WINDOW: usize = 64 * SEGMENT;
+/// Datagram bytes to buffer in each direction, about 64 full-size datagrams.
+const DATAGRAM_WINDOW: usize = 96 * 1024;
 
 fn ecn_to_quic(ecn: udp::Ecn) -> moq_quic::EcnCodepoint {
 	match ecn {
@@ -96,12 +96,11 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 		.clone()
 }
 
-/// The endpoint-wide configuration: how connection ids are minted, the reset
-/// key, and the largest datagram we tell peers we can receive.
+/// The endpoint-wide configuration: how connection ids are minted and the reset key.
 pub(crate) fn endpoint_config(
 	shard: Option<moq_sock::shard::Shard>,
 	reset_secret: Option<&[u8; 32]>,
-) -> Result<Arc<moq_quic::EndpointConfig>, Error> {
+) -> Arc<moq_quic::EndpointConfig> {
 	let mut config = moq_quic::EndpointConfig::default();
 	// The random ids below validate a predecessor's too, so the reset reaches them.
 	if let Some(secret) = reset_secret {
@@ -119,10 +118,7 @@ pub(crate) fn endpoint_config(
 		}
 		Box::new(cids)
 	}));
-	config
-		.max_udp_payload_size(SEGMENT as u16)
-		.map_err(|err| Error::Quic(err.to_string()))?;
-	Ok(Arc::new(config))
+	Arc::new(config)
 }
 
 /// Dial as `config` says.
@@ -282,11 +278,10 @@ fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Err
 	transport.send_window(send_window);
 	transport.datagram_receive_buffer_size(Some(DATAGRAM_WINDOW));
 	transport.datagram_send_buffer_size(DATAGRAM_WINDOW);
-	// Every datagram in a GSO train is one SEGMENT, so the packet size is not
-	// moq-quic's to discover: pin it and turn the probing off.
-	transport.initial_mtu(SEGMENT as u16);
-	transport.min_mtu(SEGMENT as u16);
-	transport.mtu_discovery_config(None);
+	// moq-quic probes by default; the 1200-byte floor reaches every path.
+	if !config.mtu_discovery {
+		transport.mtu_discovery_config(None);
+	}
 	transport.congestion_controller_factory(match config.congestion {
 		Congestion::Loss => {
 			Arc::new(moq_congestion::CubicConfig::default()) as Arc<dyn moq_congestion::ControllerFactory + Send + Sync>

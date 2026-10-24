@@ -76,6 +76,7 @@ hex = { workspace = true }
 hmac = { workspace = true, optional = true }
 http = { version = "1", optional = true }
 humantime = "2.3"
+humantime-serde = { workspace = true }
 if-addrs = { workspace = true, optional = true }
 kio = { workspace = true, optional = true }
 mdns-sd = { workspace = true, optional = true }
