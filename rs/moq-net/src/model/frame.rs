@@ -147,14 +147,12 @@ impl Default for Payload {
 }
 
 impl From<Bytes> for Payload {
-	#[inline]
 	fn from(bytes: Bytes) -> Self {
 		Self::Whole(bytes)
 	}
 }
 
 impl Payload {
-	#[inline]
 	pub fn len(&self) -> usize {
 		match self {
 			Self::Whole(bytes) => bytes.len(),
@@ -162,7 +160,6 @@ impl Payload {
 		}
 	}
 
-	#[inline]
 	pub fn is_empty(&self) -> bool {
 		self.len() == 0
 	}
@@ -241,7 +238,6 @@ pub(crate) struct Cached {
 }
 
 impl From<Frame> for Cached {
-	#[inline]
 	fn from(frame: Frame) -> Self {
 		Self {
 			timestamp: frame.timestamp,
