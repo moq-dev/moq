@@ -30,10 +30,10 @@ Decided with the maintainer on 2026-10-21:
   through every registered public relay), plus every cell of the runner's
   report with a moq.dev side: our clients, our docker relay, or
   `cdn.moq.dev`, including third-party clients failing against our relay.
-- Sync new registry entries. Once the [runner nightly](/quest/m1/interop-runner-nightly.md)
-  lands, it runs the runner's HEAD, so check that newly registered clients
-  and docker-only relays show up in its report, and ask upstream for a
-  published image for any it lists as not run. The relays page reads every
+- Sync new registry entries. The smoke workflow's upstream runner job runs
+  the runner's HEAD, so check that newly registered clients and docker-only
+  relays show up in its [report](https://git.moq.dev/interop-runner/),
+  and ask upstream for a published image for any it lists as not run. The relays page reads every
   remote relay from the registry; give new relays the per-relay config they
   need (`publish_path`, `WEBSOCKET_KEYS` in `test/smoke/relays.sh`).
 - Standing approval to open PRs on englishm/moq-interop-runner that touch only
@@ -148,7 +148,6 @@ and moqtopus and xquic-draft-18 over WebTransport (raw QUIC only).
 
 ## Related
 
-- [Runner nightly](/quest/m1/interop-runner-nightly.md) - runs every registered client and docker relay with a published image against us
 - [Runner client bump](/quest/m2/release/runner-client-bump.md) - the runner's Rust client moves to the cut and its API
 - [Runner teardown](/quest/m3/interop-runner-approval.md) - the runner's moq.dev clients move to the withdrawing `close()` once it ships
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - Moxygen's filter type, waiting upstream
