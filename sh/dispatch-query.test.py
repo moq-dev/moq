@@ -191,7 +191,7 @@ class QueryTests(unittest.TestCase):
         self.env.update(MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
         self.env["PATH"] = f"{self.bin}:{os.environ['PATH']}"
-        for script in ("markdown.sh", "shell.sh"):
+        for script in ("markdown.sh", "shell.sh", "large-files.sh"):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)

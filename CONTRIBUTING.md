@@ -16,6 +16,7 @@ PRs into `release` use a merge commit, so their history survives until they land
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
 - AI commit attribution goes in a `Co-Authored-By:` trailer, not the commit body.
 - Never commit binaries or build artifacts (`.a`, `.so`, `.dylib`, `.dll`, wheels).
+- Keep other binary files, such as images and fixtures, under 500 KiB; list an unavoidable exception in `sh/large-files.allow` with a reason.
 
 # PRs
 

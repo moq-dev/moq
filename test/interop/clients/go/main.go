@@ -152,15 +152,19 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	audio, err := moqaudio.NewProducer(catalog, moqaudio.EncoderInput{
-		Format:     moq.AudioSampleFormatF32,
-		SampleRate: audioRate,
-		Channels:   uint32(len(tones)),
-	}, moqaudio.EncoderOutput{
-		Codec:         moq.OpusAudioCodec(),
-		Track:         func() *string { track := audioTrack; return &track }(),
-		FrameDuration: audioFrameDurationUs * time.Microsecond,
-	}, nil)
+	audioTrackName := audioTrack
+	audio, err := moqaudio.NewProducer(catalog, moqaudio.ProducerOptions{
+		Input: moqaudio.EncoderInput{
+			Format:     moq.AudioSampleFormatF32,
+			SampleRate: audioRate,
+			Channels:   uint32(len(tones)),
+		},
+		Output: moqaudio.EncoderOutput{
+			Codec:         moq.OpusAudioCodec(),
+			FrameDuration: audioFrameDurationUs * time.Microsecond,
+		},
+		Track: &audioTrackName,
+	})
 	if err != nil {
 		return err
 	}

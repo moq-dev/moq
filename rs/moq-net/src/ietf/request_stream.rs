@@ -1,3 +1,5 @@
+use crate::driver::Transport;
+use crate::transport::poll::Session as _;
 use std::task::{Context, Poll, ready};
 
 use super::{Message, Version};
@@ -8,11 +10,11 @@ use crate::{
 
 /// Legacy receives are framed once by the physical multiplexer, not again by
 /// the virtual request decoder. Encodes still count at their typed codec.
-pub(super) fn with_stats<S: crate::transport::poll::Session>(
-	stream: Stream<S, Version>,
+pub(super) fn with_stats(
+	stream: Stream<Transport, Version>,
 	stats: &crate::stats::Session,
 	version: Version,
-) -> Stream<S, Version> {
+) -> Stream<Transport, Version> {
 	let mut stream = stream.with_stats(stats);
 	if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 		stream.reader = stream.reader.with_stats(&Default::default());
@@ -28,10 +30,10 @@ pub(super) fn fin_cancels(version: Version) -> bool {
 }
 
 /// Watch abrupt cancellation after the requester has finished sending messages.
-pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
-	stream: &mut Stream<S, Version>,
+pub(super) fn poll_cancel(
+	stream: &mut Stream<Transport, Version>,
 	finished: &mut bool,
-	messages: &mut Messages<S>,
+	messages: &mut Messages,
 	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<Result<(), Error>> {
@@ -57,8 +59,8 @@ pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
 /// what it sent meanwhile: a waiting message (an update, say) ends the watch on the reader and
 /// is read once the request is answered. A withdrawal queued behind an update is therefore seen
 /// only then; until the verifier answers, the requester holds nothing but its own slot.
-pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
-	stream: &mut Stream<S, Version>,
+pub(super) fn poll_withdrawn(
+	stream: &mut Stream<Transport, Version>,
 	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<()> {
@@ -87,8 +89,8 @@ pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
 /// An update modifies the request rather than ending it, and the requests watched here
 /// apply none, so each is refused with [`refuse_update`] and the request stays open. Any
 /// other message is `Err(Cancel)`, and the stream finishing is `Ok(())`.
-pub(super) fn poll_legacy_end<S: crate::transport::poll::Session>(
-	stream: &mut Stream<S, Version>,
+pub(super) fn poll_legacy_end(
+	stream: &mut Stream<Transport, Version>,
 	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<Result<(), Error>> {
@@ -108,8 +110,8 @@ pub(super) fn poll_legacy_end<S: crate::transport::poll::Session>(
 /// Draft 14 answers no update. Drafts 15 and 16 answer each with exactly one REQUEST_OK or
 /// REQUEST_ERROR naming the update's own Request ID, and a refusal leaves any request but a
 /// subscription standing, so NOT_SUPPORTED is the whole answer.
-pub(super) fn refuse_update<S: crate::transport::poll::SendStream>(
-	writer: &mut crate::coding::Writer<S, Version>,
+pub(super) fn refuse_update<W: crate::transport::poll::SendStream>(
+	writer: &mut crate::coding::Writer<W, Version>,
 	body: &super::Body,
 	version: Version,
 ) -> Result<(), Error> {
@@ -246,13 +248,13 @@ impl GoAways {
 }
 
 /// The messages on one request stream, keeping GOAWAY validation across response phases.
-pub(super) struct Messages<S> {
-	session: S,
+pub(super) struct Messages {
+	session: Transport,
 	goaways: GoAways,
 }
 
-impl<S: crate::transport::poll::Session> Messages<S> {
-	pub fn new(session: S, client: bool) -> Self {
+impl Messages {
+	pub fn new(session: Transport, client: bool) -> Self {
 		Self {
 			session,
 			goaways: GoAways::new(client),
@@ -311,8 +313,8 @@ impl<S: crate::transport::poll::Session> Messages<S> {
 }
 
 /// Refuse a modern request with its complete REQUEST_ERROR, then finish the response.
-pub(super) async fn reject<S: crate::transport::poll::Session>(
-	mut stream: Stream<S, Version>,
+pub(super) async fn reject(
+	mut stream: Stream<Transport, Version>,
 	error: super::RequestError<'_>,
 ) -> Result<(), Error> {
 	stream.writer.varint(super::RequestError::ID).await?;
@@ -326,8 +328,8 @@ pub(super) async fn reject<S: crate::transport::poll::Session>(
 ///
 /// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into, so
 /// only the message type changes; draft-17 then drops the Request ID.
-pub(super) async fn write_error<S: crate::transport::poll::SendStream>(
-	writer: &mut crate::coding::Writer<S, Version>,
+pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
+	writer: &mut crate::coding::Writer<W, Version>,
 	kind: super::error::request::Kind,
 	request_id: super::RequestId,
 	err: &Error,
@@ -569,9 +571,11 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft19, Version::Draft21, Version::Draft22] {
 			// GOAWAY, REQUEST_OK, then another GOAWAY on the same stream.
 			let script = vec![0x10, 0, 2, 0, 0, 0x07, 0, 0, 0x10, 0, 2, 0, 0];
-			let mut session = ScriptedSession::eof(script);
-			let mut stream = Stream::open(&mut session, version).await.unwrap();
-			let mut messages = Messages::new(session.clone(), true);
+			let session = ScriptedSession::eof(script);
+			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), true);
 			assert_eq!(messages.message(&mut stream.reader).await.unwrap().0, 0x07);
 			assert!(matches!(
 				messages.message(&mut stream.reader).await,
@@ -590,9 +594,15 @@ mod tests {
 		let registry = Registry::new(Default::default());
 		let stats = registry.tier(Tier::default()).session("");
 		let version = Version::Draft22;
-		let mut session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0, 0x07, 0, 0]);
-		let mut stream = with_stats(Stream::open(&mut session, version).await.unwrap(), &stats, version);
-		let mut messages = Messages::new(session.clone(), true);
+		let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0, 0x07, 0, 0]);
+		let mut stream = with_stats(
+			Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap(),
+			&stats,
+			version,
+		);
+		let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), true);
 		assert_eq!(messages.message(&mut stream.reader).await.unwrap().0, 0x07);
 		let rx = |class| {
 			let rows = registry.snapshot().control();
@@ -606,9 +616,11 @@ mod tests {
 	async fn a_goaway_does_not_cancel_a_pending_request() {
 		use crate::lite::test_transport::ScriptedSession;
 		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
-			let mut session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
-			let mut stream = Stream::open(&mut session, version).await.unwrap();
-			let mut messages = Messages::new(session.clone(), false);
+			let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
+			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), false);
 			let mut finished = false;
 			assert!(
 				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
@@ -654,10 +666,12 @@ mod tests {
 			};
 			let mut update = vec![super::super::SubscribeUpdate::ID as u8, 0, body.len() as u8];
 			update.extend_from_slice(body);
-			let mut session = ScriptedSession::new(update);
-			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let session = ScriptedSession::new(update);
+			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
 			let mut finished = false;
-			let mut messages = Messages::new(session.clone(), false);
+			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), false);
 
 			let polled = futures::poll!(std::future::poll_fn(|cx| poll_cancel(
 				&mut stream,
@@ -771,13 +785,19 @@ mod tests {
 			Kind::TrackStatus,
 		] {
 			let shared = Log::default();
-			let mut writer = crate::coding::Writer::new(SinkSend::new(shared.clone()), version);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(shared.clone())),
+				version,
+			);
 			write_error(&mut writer, kind, request_id, &err, reason, version)
 				.await
 				.unwrap();
 
 			let legacy = Log::default();
-			let mut writer = crate::coding::Writer::new(SinkSend::new(legacy.clone()), version);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(legacy.clone())),
+				version,
+			);
 			let error_code = to_code(&err, kind, version);
 			let reason_phrase = reason.into();
 			match kind {
