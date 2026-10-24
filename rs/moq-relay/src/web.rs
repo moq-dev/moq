@@ -1096,11 +1096,15 @@ async fn serve_fetch(
 		let group = match async { crate::fetch_group(&broadcast.track(&track)?, sequence).await }.await {
 			Ok(group) => group,
 			// A miss upstream arrives as the stream reset that refused the FETCH. A datagram
-			// group is never cached, so it is a miss too.
+			// group is never cached, and a group past the track's max age is gone, so both
+			// are misses too.
 			Err(
 				moq_net::Error::NotFound
 				| moq_net::Error::NotFetchable
-				| moq_net::Error::Stream(moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable),
+				| moq_net::Error::Old
+				| moq_net::Error::Stream(
+					moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable | moq_net::StreamError::Old,
+				),
 			) => {
 				return Err(StatusCode::NOT_FOUND);
 			}
@@ -1443,6 +1447,58 @@ mod tests {
 				(0, 0)
 			);
 		}
+	}
+
+	/// A group the track's max age has dropped is gone, which is a 404 rather than a 500.
+	#[tokio::test(start_paused = true)]
+	async fn http_fetch_of_an_expired_group_is_not_found() {
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
+		let auth = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		}
+		.init("test", &moq_tokio::tls::Connect::default(), false)
+		.unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let broadcast = cluster.origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast
+			.create_track(
+				"video",
+				moq_net::track::Info::default()
+					.with_timescale(moq_net::Timescale::MILLI)
+					.with_max_age(std::time::Duration::from_millis(500)),
+			)
+			.unwrap();
+		// Group 0 can only present until group 1 starts at 1s, a full second behind the 2s
+		// edge: past the 500ms max age, so it is no longer served.
+		for millis in [0, 1000, 2000] {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let state = Web::new(auth, cluster, certificates, Config::default()).state;
+		let status = serve_fetch(
+			Path("room/video".into()),
+			Query(FetchParams {
+				auth: AuthQuery { jwt: None },
+				group: FetchGroup::Num(0),
+			}),
+			None,
+			None,
+			ConnectInfo("127.0.0.1:1234".parse().unwrap()),
+			"/fetch/room/video?group=0".parse().unwrap(),
+			State(state),
+		)
+		.await
+		.map(|_| ())
+		.into_response()
+		.status();
+		assert_eq!(status, StatusCode::NOT_FOUND);
 	}
 
 	#[tokio::test(start_paused = true)]

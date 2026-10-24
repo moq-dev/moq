@@ -197,8 +197,8 @@ impl Broadcaster {
 		self.renditions.subscribe()
 	}
 
-	/// Resolve once at least one rendition has a playable media playlist. How long to wait is
-	/// the caller's policy: wrap this in a timeout (or select against it) as needed.
+	/// Resolve once at least one rendition has a playable media playlist or a settled failure.
+	/// How long to wait is the caller's policy: wrap this in a timeout as needed.
 	pub async fn ready(&self) {
 		self.renditions.ready().await;
 	}

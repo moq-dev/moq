@@ -134,6 +134,7 @@ case "$1" in
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
+        javascript qmux-record just js qmux-record-bench
         javascript cmaf just js cmaf-bench
         javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench

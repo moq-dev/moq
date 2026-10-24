@@ -125,7 +125,10 @@ function interleave(data: AudioData): Float32Array {
 	return out;
 }
 
-/** Decode the first `ms` of the rendition to `{out}.{txt,pcm}`, the layout tone.py reads. */
+/**
+ * Decode the first `ms` of the rendition to `{out}.{codec}.{txt,pcm}`, the layout tone.py reads, the codec
+ * named by the catalog's up to its first `.`. Created exclusively, so two renditions of one codec fail.
+ */
 async function audio(
 	bc: Moq.Broadcast.Consumer,
 	[name, config]: [string, Catalog.AudioConfig],
@@ -187,10 +190,12 @@ async function audio(
 	}
 	if (failed) throw failed;
 
-	writeFileSync(`${out}.txt`, `${log.join("\n")}\n`);
+	const prefix = `${out}.${config.codec.split(".")[0]}`;
+	writeFileSync(`${prefix}.txt`, `${log.join("\n")}\n`, { flag: "wx" });
 	writeFileSync(
-		`${out}.pcm`,
+		`${prefix}.pcm`,
 		Buffer.concat(pcm.map((samples) => Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength))),
+		{ flag: "wx" },
 	);
 }
 
@@ -223,16 +228,18 @@ async function subscribe(url: URL, broadcast: string, read: Read) {
 		}
 
 		const renditions = await catalog(bc, (root) => {
-			const [v, a] = [first(root.video), first(root.audio)];
-			return v && a && { video: v, audio: a };
+			const [v, a] = [first(root.video), Object.entries(root.audio?.renditions ?? {})];
+			return v && a.length > 0 ? { video: v, audio: a } : undefined;
 		});
 		const [bytes] = await Promise.all([
 			video(bc, renditions.video),
-			audio(bc, renditions.audio, read.out, read.ms),
+			...renditions.audio.map((rendition) => audio(bc, rendition, read.out, read.ms)),
 		]);
 		// The harness judges success by this marker: the @moq/web-transport addon
 		// can crash during exit teardown after a frame has arrived.
-		console.error(`received ${bytes} bytes and ${read.ms}ms of audio from ${broadcast}`);
+		console.error(
+			`received ${bytes} bytes and ${read.ms}ms of ${renditions.audio.length} audio renditions from ${broadcast}`,
+		);
 	} finally {
 		requested.close();
 		// Wait for the close to reach the relay before exit, so it is not timed out.

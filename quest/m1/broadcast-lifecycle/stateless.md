@@ -30,8 +30,8 @@ Decided with the maintainer on 2026-10-23; see the epic for why.
   max-age only if nothing else needs it). `js/net` drops `hooks.linger` and
   its `CACHE_WINDOW` use there.
 - Update `doc/concept` with one paragraph on the model (online = announced,
-  end of content = track FIN, retention = app policy), plus `doc/lib/*` and
-  every affected package's `MIGRATE.md`.
+  end of content = track FIN, retention = app policy), plus `doc/lib/*`, and
+  the Impact bullet says how to migrate every affected package.
 - Coordinate with [publication owner](/quest/m1/api-audit/announce-owner.md),
   which touches the same handles.
 

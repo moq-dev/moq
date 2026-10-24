@@ -100,7 +100,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Rust releases publish through OIDC](/quest/m2/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [Go module proxy](/quest/m2/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
 - [Go per-platform lib modules](/quest/m2/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
-- [Go first dial failure](/quest/m2/go-first-dial-failure.md) - Go reports why a first dial fails, and the Kotlin and Dart docs name `client.failure()` correctly
 - [Go cancelled results](/quest/m2/go-cancelled-result.md) - a Go call cancelled as it completes destroys the handle it produced instead of leaving it to the finalizer
 - [Dart on iOS](/quest/m2/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture
@@ -139,8 +138,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [JS-only @moq/net](/quest/m2/rs2ts-js.md) - adopt the selected Rust-to-JS route after browser parity and measured tradeoffs are accepted
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
-- [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) - every backend implements moq-net's `transport::poll` traits, and the generic `web_transport_trait` adapters are deleted
-- [QUIC driver poll waits](/quest/m2/driver-poll.md) - the `moq_tokio::quic::driver` stream, datagram, close, and accept waits get leak-free `poll_*` forms, named like moq-uring's driver; `handshake_confirmed` and `Endpoint::wait_idle` stay async
+- [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) - qmux, iroh, wasm, and ffi implement moq-net's `transport::poll` traits, and the generic `web_transport_trait` adapters are deleted
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
