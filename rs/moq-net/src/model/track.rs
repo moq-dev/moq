@@ -16586,6 +16586,37 @@ mod test {
 		}
 	}
 
+	/// A fetched group aborted once its readers left is a hole, not an arrival: the fill asked
+	/// to replace it keeps it wanted.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_aborted_fetched_group_stays_wanted_by_its_replacement_fill() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		let fetch = producer.consume().fetch_group(3, None);
+		let Poll::Ready(Ok(first)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		let mut group = first.accept(3, None).unwrap();
+		drop(fetch);
+		group.abort(Error::Cancel).unwrap();
+		drop(first);
+
+		let mut subscriber = producer.subscribe(replay().with_groups(0..));
+		assert!(
+			subscriber.poll_next_group(&waiter).is_pending(),
+			"group 0 is being filled"
+		);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the aborted group is a miss again");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 10));
+		assert!(fill.is_wanted(3), "the aborted group never arrived");
+	}
+
 	/// An ordered reader taking a filled group leaves the fill at once, so a reader that drops
 	/// the group without reading on stops holding the fill's source.
 	#[test]

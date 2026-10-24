@@ -389,7 +389,12 @@ impl Misses {
 			// one check judges it whole. Groups arrive out of order, so a fresh late group
 			// keeps the stretch below it owed while the ones around it go stale.
 			let mut from = run.start;
-			let cached = state.lookup.range(run.clone()).map(|(&sequence, _)| sequence);
+			// An aborted group is a hole, so a fill still owes it.
+			let cached = state
+				.lookup
+				.range(run.clone())
+				.filter(|(_, slot)| !slot.is_aborted())
+				.map(|(&sequence, _)| sequence);
 			for at in cached.chain(std::iter::once(run.end)) {
 				if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget, waiter) {
 					stale.insert(from..at);
