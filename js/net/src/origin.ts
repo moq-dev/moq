@@ -1165,10 +1165,24 @@ export class Producer implements Table {
 		const thisProducer = this;
 		registerWire(this, {
 			receive: (prefix, route) => this.#receive(prefix, route),
-			interests: (listener) =>
-				this.#state.interests((absolute, wanted) => {
-					for (const prefix of this.#scope.interests(absolute)) listener(prefix, wanted);
-				}),
+			interests: (listener) => {
+				if (this.#borrowed?.closed) return () => {};
+				// What the listener currently wants, so a derived handle's close can retract it
+				// and its session stops asking the peer for announcements nothing will land.
+				const wants = new Map<Path.Valid, number>();
+				const unlisten = this.#state.interests((absolute, wanted) => {
+					for (const prefix of this.#scope.interests(absolute)) {
+						const count = (wants.get(prefix) ?? 0) + (wanted ? 1 : -1);
+						if (count > 0) wants.set(prefix, count);
+						else wants.delete(prefix);
+						listener(prefix, wanted);
+					}
+				});
+				return this.#hold(() => {
+					unlisten();
+					for (const [prefix, count] of wants) for (let i = 0; i < count; i++) listener(prefix, false);
+				});
+			},
 			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),

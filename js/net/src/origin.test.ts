@@ -2171,6 +2171,8 @@ test("closing a derived handle withdraws the sessions and answers attached throu
 	const request = consumer.request(path);
 	const detach = wireOf(scoped).attach(false);
 	const snapshot = wireOf(scoped).snapshot(Path.empty());
+	const interests: string[] = [];
+	const unlisten = wireOf(scoped).interests((prefix, wanted) => interests.push(`${wanted ? "+" : "-"}${prefix}`));
 	const announced = consumer.announced();
 	const upstream = new BroadcastProducer();
 	const withdraw = wireOf(scoped).answer(path, upstream.consume());
@@ -2179,9 +2181,15 @@ test("closing a derived handle withdraws the sessions and answers attached throu
 	expect(request.active.peek()).toBeDefined();
 	expect(request.unroutable.peek()).toBe(false);
 	expect(announced.synced.peek()).toBe(false);
+	expect(interests.splice(0)).toEqual(["+"]);
 
 	scoped.close();
 	await settle();
+
+	// The session stops asking its peer for announcements, now and for later watches.
+	expect(interests.splice(0)).toEqual(["-"]);
+	consumer.request(Path.from("later"), { announced: true }).close();
+	expect(interests).toEqual([]);
 
 	// The answer and the initial set in flight went with the handle, and nothing is left
 	// that could answer instead.
@@ -2202,6 +2210,8 @@ test("closing a derived handle withdraws the sessions and answers attached throu
 	// The session's own teardown afterwards is a no-op.
 	withdraw?.();
 	snapshot();
+	unlisten();
+	expect(interests).toEqual([]);
 	detach();
 	announced.close();
 	retry.close();
