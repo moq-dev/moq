@@ -40,5 +40,4 @@ Public API: breaking in `@moq/net`. Wire: none.
 
 ## Related
 
-- [JS prepared answers](/quest/m1/api-audit/js-prepared.md) - reshapes `Prepared` ownership in the same file; coordinate the order
 - [Claim request type](/quest/m1/api-audit/claim-request-type.md) - splits `accept` off application requests beside `Prepared`

@@ -3,42 +3,52 @@
 ## Goal
 
 A TS import's retained state is bounded by what its source repeats, not by
-how long it runs or by a constant that refuses. Incomplete SI generations
-and SI sub-tables the source stopped sending retire, and a stream revision
-costs O(1) state once its route has ended, so a feed revising its PMT
-indefinitely runs indefinitely.
+how long it runs or by a constant that refuses. SI arriving without program
+clock progress is bounded too, and a stream revision costs O(1) state once
+its route has ended, so a feed revising its PMT indefinitely runs
+indefinitely.
 
 ## Plan
 
-Found in the 2026-10-22 audit:
-
-- `si::Entry::pending` (`rs/moq-mux/src/container/ts/si.rs`) only clears
-  when the same identity commits, and `active` never retires an identity.
-  EIT identities come from the stream, so 4,096 distinct incomplete EIT
-  tables all stayed pending.
-- `Import::MAX_REVISIONS` (`rs/moq-mux/src/container/ts/import.rs`) ends an
-  import after 65,536 revisions, because each reopened route reserves a
-  fresh track name for the broadcast's life.
+SI already retires when not repeated within its table's maximum interval on
+the accepted program clock (`si::Entry::expire`, 30 s for unknown tables), so
+an input stall retires nothing. Two owners remain unbounded.
 
 Decided 2026-10-22 by the maintainer:
 
-- An SI sub-table, pending or active, that the source has not repeated
-  within its table's maximum repetition interval (ETSI EN 300 468 / TR 101
-  211, measured on the program clock so an input stall retires nothing)
-  retires; an active one's retirement cuts a snapshot without it. A
-  `table_id` `catalog::si_interval` does not know has no table maximum, so
-  it retires on the longest one EN 300 468 sets for any SI table (30 s, EIT
-  schedule other and TDT/TOT): every conformant table repeats within it.
-- Replace `MAX_REVISIONS` by making an ended route cost O(1): mint fresh
-  names from a counter so reserving them is a high-water mark, and drop the
-  retired route's entries. Find every per-revision store first (catalog
-  producer, broadcast reservations, `retired_stats`).
-- Rejected: one byte budget shared by SI, PES and staged media. It is
-  another runtime constant; the source's repetition is the bound by design.
+- Replace `Import::MAX_REVISIONS` by making an ended route cost O(1): mint
+  fresh names from a counter so reserving them is a high-water mark, and
+  drop the retired route's entries. Keep the guard until every owner is
+  bounded.
+- Rejected: one byte budget shared by SI, PES and staged media, wall-clock
+  expiry, or any constant that only refuses the source.
 
-Tests: incomplete EIT generations with distinct identities retire after
-their interval, and so do unknown long-form `table_id`s; a sub-table the source stops sending leaves the snapshot; a
-stall in input retires nothing; a fixture revising its PMT past 65,536 times
-keeps running with flat retained state.
+Open, for the maintainer:
 
-Public API: none. Wire: none.
+- **SI without clock progress.** Standalone SI is accepted before any PCR and
+  while PCR stalls, and its sections are not charged to the PES staging
+  owner, so a source sending fresh EIT identities with a frozen clock grows
+  `Entry::pending` forever. Choose an admission or ownership contract for it,
+  or narrow the Goal to sources with clock progress.
+- **Retired route names and archives.** `BroadcastState::unique`
+  (`rs/moq-net/src/model/broadcast.rs`) already is a high-water counter and its track lookup prunes dead entries, but
+  `BroadcastState::sequences` keeps every written name's sequence and
+  timestamp bounds to enforce explicit same-name continuation. MKV, fMP4,
+  C/FFI and GStreamer callers keep `unique_name` strings for a later
+  create/reserve, so a missing name below the counter may be a delayed first
+  creation rather than a retired one. `moq-mux`'s `timeline::Registry::tracks` likewise
+  keeps finished recorders' outputs, numbering and `archive.timelines`
+  discovery after `Recorder` drops. Decide when each may retire while held
+  readers and same-name re-enrollment stay valid; inferring ownership from a
+  name prefix is not enough.
+
+Already bounded, so not per-revision growth: catalog rendition reservations
+(released on drop), `retired_stats`, damage and liveness (keyed by PID), and
+`si::Capture::entries` (four SI PIDs by 256 table IDs, kept for track
+reappearance).
+
+Tests: a fixture revising its PMT past 65,536 times keeps running with flat
+sequence, timeline, catalog and route state, with name continuation and
+delayed creation still covered; the chosen no-clock SI contract.
+
+Public API: none expected. Wire: none.

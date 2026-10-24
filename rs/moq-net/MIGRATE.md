@@ -4,14 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Announcement control belongs to a publication
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
-`origin::Producer::create_broadcast`, `publish`, and `Prepared::publish` return `origin::Publication`.
-Use its `announce`, `unannounce`, and `route` methods to control the origin advertisement.
-Use `publication.broadcast()` for a borrowed `broadcast::Producer` fill surface; `Publication` also forwards fill operations.
-A standalone producer and `Prepared::broadcast()` expose no public announcement methods.
-Cloning a publication shares its broadcast and route. A cloned fill producer or `broadcast::Finish` keeps the publication alive after the control handle drops; call `unannounce` to retract sooner.
-Use `publication.finish()` to preserve finished tracks and their existing linger.
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
 
 ### Published names refuse navigation segments
 
@@ -164,8 +160,8 @@ Treat a failed group read as the loss of that group and keep reading the track, 
 ### A claim answers by publishing (#5678)
 
 `origin::Producer::dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its `origin::Publication`.
-Only `publish` announces the answer: `prepared.broadcast()` exposes fill operations without announcement control.
+Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
+Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
 `Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
 `Request::accept` is no longer part of the public API and panics on a request from `dynamic`.
 Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.
@@ -443,11 +439,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)

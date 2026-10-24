@@ -53,9 +53,8 @@ export class Member {
 			origin: connection.origin,
 			probe: connection.probe,
 			name: path,
-			canvas: this.canvas,
-			muted: this.muted,
-			volume: this.volume,
+			video: { canvas: this.canvas },
+			audio: { muted: this.muted, volume: this.volume },
 		});
 		this.#signals.cleanup(() => this.player.close());
 		this.broadcast = this.player.broadcast;

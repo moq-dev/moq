@@ -11,7 +11,6 @@ mod auth;
 mod complete;
 #[cfg(feature = "capture")]
 mod devices;
-mod duration;
 mod fetch;
 mod hls;
 mod moq;
@@ -95,7 +94,7 @@ async fn spawn_server(
 
 	let window = moq
 		.drain_timeout
-		.map(crate::duration::Duration::into_std)
+		.map(Into::into)
 		.unwrap_or(moq_relay::DEFAULT_DRAIN_TIMEOUT);
 	let (trigger, shutdown) = moq_relay::shutdown::Observer::new(window);
 	let server = net.server(moq.server_config(), shutdown.activity().clone())?;
@@ -709,7 +708,7 @@ fn spawn_import(
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	let max_age = import.max_age.map(crate::duration::Duration::into_std);
+	let max_age = import.max_age.map(Into::into);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
 	let target = |name: String| crate::moq::ImportTarget {
@@ -758,9 +757,9 @@ fn spawn_import(
 				let srt = srt.endpoint;
 				if let Some(addr) = srt.listen {
 					let name = require_broadcast(name, "import srt --listen")?;
-					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std(), program));
+					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into(), program));
 				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std(), program));
+					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into(), program));
 				}
 			}
 			ImportSource::Rtsp(rtsp) => {
@@ -843,7 +842,7 @@ fn spawn_export(
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
-				let max_delay = rtmp.max_delay.into_std();
+				let max_delay = rtmp.max_delay.into();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
 					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_delay));
@@ -1077,14 +1076,14 @@ mod tests {
 		let (client, server) = moq_net::transport::memory::pair(config);
 		let accepting = tokio::spawn(async move {
 			let (session, driver) = moq_net::Server::new()
-				.accept(moq_net::time::now(), server)
+				.accept(moq_net::time::Instant::now(), server)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
 			session
 		});
 		let (_client, client_driver) = moq_net::Client::new()
-			.connect(moq_net::time::now(), client)
+			.connect(moq_net::time::Instant::now(), client)
 			.await
 			.unwrap();
 		// Never dropped, which would close the transport: polled only until the session is served.

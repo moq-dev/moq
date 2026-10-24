@@ -439,7 +439,7 @@ impl Publish {
 	/// unless their caller explicitly identifies the frame as encoder output.
 	pub fn media_flush(&mut self, media: Id, timestamp: hang::container::Timestamp) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-		track.flush(timestamp, moq_net::time::now())?;
+		track.flush(timestamp, moq_net::time::Instant::now())?;
 		Ok(())
 	}
 
