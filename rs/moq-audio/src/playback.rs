@@ -18,7 +18,7 @@
 //! let mut sink = engine.sink(input)?;
 //!
 //! while let Some(event) = audio.read().await? {
-//!     let moq_audio::decode::Read::Frame { frame, .. } = event else { continue };
+//!     let moq_audio::decode::Read::Frame(frame) = event else { continue };
 //!     let write = sink.write(&frame.data)?;
 //!     if write.dropped_sample_frames > 0 {
 //!         eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
