@@ -754,7 +754,7 @@ function dialPlan(plan: (dial: number) => "hang" | "ok", url: URL) {
 
 test("an attempt that outlives the connect timeout is retried after the backoff", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const url = new URL("https://relay.example/room");
 	// Scaled down: the attempt times out before a WebTransport hedge would dial.
 	const plan = dialPlan((dial) => (dial === 0 ? "hang" : "ok"), url);
@@ -781,13 +781,13 @@ test("an attempt that outlives the connect timeout is retried after the backoff"
 		unsubscribe();
 		reload.close();
 		plan.restore();
-		restore();
+		installed.close();
 	}
 });
 
 test("attempts that keep timing out give up at the retry window with ConnectTimeout", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const url = new URL("https://relay.example/room");
 	const plan = dialPlan(() => "hang", url);
 	const reload = new Reload({
@@ -808,7 +808,7 @@ test("attempts that keep timing out give up at the retry window with ConnectTime
 	} finally {
 		reload.close();
 		plan.restore();
-		restore();
+		installed.close();
 	}
 });
 
