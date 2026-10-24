@@ -309,14 +309,6 @@ impl<E: catalog::Catalog> Import<E> {
 		Pid::new(pid).is_ok_and(|pid| self.pmt_sections.contains_key(&pid))
 	}
 
-	/// Fold in an SI section on `pid` the parser completed before this importer started.
-	pub(super) fn si_section(&mut self, pid: u16, section: bytes::Bytes) -> anyhow::Result<()> {
-		if !self.supports_mpegts {
-			return Ok(());
-		}
-		self.si.section(pid, section)
-	}
-
 	/// A reservation on this program's timebase, so every stream shifts by its offset.
 	fn reserve(&self) -> crate::catalog::Reserved<E> {
 		self.timebase.reserve()
