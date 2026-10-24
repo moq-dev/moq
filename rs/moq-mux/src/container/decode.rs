@@ -42,10 +42,6 @@ pub(crate) enum Settle {
 /// once ([`Self::settle`]): a live source's PTS keeps pace with its arrival, so the frames
 /// held stay within what the source sends in that time, like the jitter buffer's.
 ///
-/// That settling, and a delay that only grows, depend on everything read before, so two
-/// exporters that joined or lost frames at different points can clock the same frame apart.
-/// [`Self::pop_counted`] depends on the frames held alone, for exporters that must agree.
-///
 /// Ticks are continuous (unwrapped) 90 kHz, so the clock never wraps mid-stream; the 33-bit
 /// wire wrap happens once at emission.
 pub(crate) struct DecodeClock<T> {
@@ -125,7 +121,12 @@ impl<T> DecodeClock<T> {
 		let slot = self.slots.pop_front()?;
 		let (item, ..) = self.held.pop_front()?;
 		let dts = slot.saturating_sub(self.delay);
-		Some((item, self.after_last(dts)))
+		let dts = match self.last {
+			Some(last) if dts <= last => last + 1,
+			_ => dts,
+		};
+		self.last = Some(dts);
+		Some((item, dts))
 	}
 
 	/// What [`Self::pop`] settles short of a flush: [`Settle::Front`] once the frame held
@@ -142,129 +143,14 @@ impl<T> DecodeClock<T> {
 		}
 	}
 
-	/// The next frame and its DTS, once more than `depth` frames are held, or at once when
-	/// `flush`. `depth` is the most frames the sequence header lets precede one in decode order
-	/// and follow it in output order, so no frame still to come is presented before all of
-	/// them. The delay is `delay` throughout, and a DTS never passes its PTS.
-	pub(crate) fn pop_counted(&mut self, depth: usize, delay: u64, flush: bool) -> Option<(T, u64)> {
-		if !flush && self.held.len() <= depth {
-			return None;
-		}
-		let (item, pts, _) = self.held.pop_front()?;
-		let slot = self.slots.pop_front()?;
-		self.bounded = self.bounded.saturating_sub(1);
-		let dts = slot.saturating_sub(delay).min(pts);
-		Some((item, self.after_last(dts)))
-	}
-
 	/// How many frames are held.
 	#[cfg(test)]
 	pub(crate) fn len(&self) -> usize {
 		self.held.len()
 	}
 
-	/// Forget every held frame, as if it had never been read.
-	pub(crate) fn discard(&mut self) {
-		self.held.clear();
-		self.slots.clear();
-		self.bounded = 0;
-	}
-
 	/// How far past a slot the highest PTS must be to settle it, under `lookahead`.
 	fn lookahead(&self, lookahead: u64) -> u64 {
 		lookahead.max(self.reach).min(MAX_REORDER)
-	}
-
-	fn after_last(&mut self, dts: u64) -> u64 {
-		let dts = match self.last {
-			Some(last) if dts <= last => last + 1,
-			_ => dts,
-		};
-		self.last = Some(dts);
-		dts
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	/// A B-pyramid (`max_num_reorder_frames` 2) in decode order, in 40 ms frames.
-	const PYRAMID: [u64; 9] = [0, 4, 2, 1, 3, 8, 6, 5, 7];
-	const FRAME: u64 = 3_600;
-
-	/// Every frame of `read` with its DTS, popped as each is read: counted at a depth of 2, or
-	/// by the timing rule with the lookahead that depth implies.
-	fn clocked(read: &[u64], counted: bool) -> Vec<(u64, u64)> {
-		let mut clock = DecodeClock::default();
-		let mut out = Vec::new();
-		let pop = |clock: &mut DecodeClock<u64>, flush| match counted {
-			true => clock.pop_counted(2, 2 * FRAME, flush),
-			false => clock.pop(4 * FRAME, 2 * FRAME, if flush { Settle::All } else { Settle::Due }),
-		};
-		for &pts in read {
-			clock.push(pts, pts, Instant::ZERO);
-			out.extend(std::iter::from_fn(|| pop(&mut clock, false)));
-		}
-		out.extend(std::iter::from_fn(|| pop(&mut clock, true)));
-		out
-	}
-
-	#[test]
-	fn counted_slots_are_the_encoders() {
-		let out = clocked(&PYRAMID.map(|i| (i + 2) * FRAME), true);
-		let dts: Vec<u64> = out.iter().map(|&(_, dts)| dts / FRAME).collect();
-		assert_eq!(dts, (0..9).collect::<Vec<_>>());
-	}
-
-	/// Two references spaced wider than the lookahead a depth of 2 implies, then the frames
-	/// presented between them: a conforming depth of 2, which the timing rule settles before
-	/// those frames arrive, and the count waits for.
-	#[test]
-	fn references_far_apart_keep_their_slots() {
-		let read = [0, 6, 10, 1, 2, 3, 4, 5, 7, 8, 9].map(|i| (i + 2) * FRAME);
-		let out = clocked(&read, true);
-		let dts: Vec<u64> = out.iter().map(|&(_, dts)| dts / FRAME).collect();
-		assert_eq!(dts, (0..11).collect::<Vec<_>>());
-		assert_ne!(clocked(&read, false), out);
-	}
-
-	/// A group cut short after a frame presented below one it never received: its held frames
-	/// take slots from an incomplete set, but the next group keeps the DTS it would have had,
-	/// where the timing rule raises its delay for good.
-	#[test]
-	fn a_cut_group_leaves_the_next_alone() {
-		let first = PYRAMID.map(|i| (i + 2) * FRAME);
-		let next = PYRAMID.map(|i| (i + 20) * FRAME);
-		let full: Vec<u64> = first.into_iter().chain(next).collect();
-		let cut: Vec<u64> = first[..8].iter().copied().chain(next).collect();
-		let tail = |out: Vec<(u64, u64)>| out[out.len() - next.len()..].to_vec();
-		assert_eq!(tail(clocked(&full, true)), tail(clocked(&cut, true)));
-		assert_ne!(tail(clocked(&full, false)), tail(clocked(&cut, false)));
-	}
-
-	/// Frames discarded at a cut leave every frame the clock gives out at the DTS it has with
-	/// nothing lost.
-	#[test]
-	fn a_discard_keeps_the_frames_given_out() {
-		let first = PYRAMID.map(|i| (i + 2) * FRAME);
-		let next = PYRAMID.map(|i| (i + 20) * FRAME);
-		let full: Vec<u64> = first.into_iter().chain(next).collect();
-		let full = clocked(&full, true);
-
-		let mut clock = DecodeClock::default();
-		let mut out = Vec::new();
-		for &pts in &first[..8] {
-			clock.push(pts, pts, Instant::ZERO);
-			out.extend(std::iter::from_fn(|| clock.pop_counted(2, 2 * FRAME, false)));
-		}
-		clock.discard();
-		for pts in next {
-			clock.push(pts, pts, Instant::ZERO);
-			out.extend(std::iter::from_fn(|| clock.pop_counted(2, 2 * FRAME, false)));
-		}
-		out.extend(std::iter::from_fn(|| clock.pop_counted(2, 2 * FRAME, true)));
-		assert!(out.iter().all(|frame| full.contains(frame)), "{out:?}");
-		assert_eq!(out.len(), 6 + next.len());
 	}
 }

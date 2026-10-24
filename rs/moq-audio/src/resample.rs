@@ -40,13 +40,13 @@ pub struct Resampler {
 	/// Rate the caller's input arrives at, for walking [`held`](Self::held) over
 	/// the frames each chunk consumes.
 	input_rate: u32,
-	/// Output frames per input frame, for sizing the flushed tail.
-	ratio: f64,
+	/// The exact rate ratio, and progress in caller input and returned output frames.
+	/// Drain computes the remaining duration once rather than rounding each chunk.
+	output_rate: u32,
+	input_frames: u64,
+	output_frames: u64,
 	/// Output frames the sinc filter holds behind what it has already emitted.
 	delay: usize,
-	/// Whether any caller input has gone in, since the filter only owes a tail
-	/// once it has actually run.
-	started: bool,
 	/// Leading output frames still to be dropped: the filter opens by emitting its
 	/// own centring delay as silence, which is not audio anyone sent.
 	skip: usize,
@@ -97,9 +97,10 @@ impl Resampler {
 			resampler,
 			chunk_frames,
 			input_rate,
-			ratio,
+			output_rate,
+			input_frames: 0,
+			output_frames: 0,
 			delay,
-			started: false,
 			skip: delay,
 			channels: channels as usize,
 			input_planar,
@@ -108,15 +109,6 @@ impl Resampler {
 			pending: Vec::new(),
 			held: None,
 		})
-	}
-
-	/// Output frames dropped so far as the filter's startup silence.
-	///
-	/// The output runs that much shorter than the input it was built from, so a
-	/// caller stamping its output has to reach back this far from the buffered
-	/// input's source timestamp.
-	pub fn skipped(&self) -> usize {
-		self.delay - self.skip
 	}
 
 	/// Input frames buffered from earlier calls, waiting for enough to fill a chunk.
@@ -140,6 +132,22 @@ impl Resampler {
 		self.held
 	}
 
+	/// Place the next output relative to the oldest unconsumed input timestamp.
+	/// Rubato's sinc phase can retain fractional progress beyond its advertised
+	/// startup delay, so subtract the duration actually held, not that fixed delay.
+	pub(crate) fn output_at(&self, held: moq_net::Timestamp) -> Result<moq_net::Timestamp, Error> {
+		let consumed = self.input_frames - self.pending_frames() as u64;
+		let held_frames = (consumed as u128 * self.output_rate as u128)
+			.checked_sub(self.output_frames as u128 * self.input_rate as u128)
+			.ok_or_else(|| Error::Resample("output exceeds input duration".into()))?;
+		let held_frames = u64::try_from(held_frames).map_err(|_| Error::Resample("held duration overflow".into()))?;
+		let offset = moq_net::Timestamp::from_scale(held_frames, self.input_rate as u64 * self.output_rate as u64)?
+			.convert(held.scale())?;
+		Ok(held
+			.checked_sub(offset)
+			.unwrap_or(moq_net::Timestamp::new(0, held.scale())?))
+	}
+
 	/// Drop everything held, buffered input and filter state alike, returning to
 	/// the just-constructed state.
 	///
@@ -150,7 +158,8 @@ impl Resampler {
 		self.resampler.reset();
 		self.pending.clear();
 		self.skip = self.delay;
-		self.started = false;
+		self.input_frames = 0;
+		self.output_frames = 0;
 		self.held = None;
 	}
 
@@ -186,24 +195,20 @@ impl Resampler {
 		// Not `pending == 0`: what the filter owes has nothing to do with what is
 		// buffered, so a stream that happens to end on a chunk boundary owes a tail
 		// just the same. Only one that never ran owes nothing.
-		if !self.started {
+		if self.input_frames == 0 {
 			return Ok(Vec::new());
 		}
 
-		let pending = self.pending_frames();
-
-		// The filter runs centred, so every output frame is built from input around
-		// `delay` frames earlier and it still holds that much real audio no amount of
-		// input has pushed out. Ask for that much beyond what the pending input
-		// earns, feeding silence until it arrives, or a track converts its own
-		// ending into frames nobody reads.
-		//
-		// Only as much as `process` actually dropped off the front, though. That is
-		// the whole delay for a stream long enough to have emitted anything, and
-		// nothing at all for one that ended before it filled a chunk, where the skip
-		// still lies ahead and comes out of this call's own output.
-		let repaid = self.delay - self.skip;
-		let wanted = ((pending as f64 * self.ratio).round() as usize + repaid) * self.channels;
+		// The sinc phase can round a full chunk differently from its rate ratio.
+		// Repay the complete input duration, including that fractional progress,
+		// rather than adding a separately rounded pending chunk to a fixed delay.
+		let frames = (self.input_frames as u128 * self.output_rate as u128 + self.input_rate as u128 / 2)
+			/ self.input_rate as u128;
+		let wanted = frames
+			.checked_sub(self.output_frames as u128)
+			.and_then(|frames| usize::try_from(frames).ok())
+			.and_then(|frames| frames.checked_mul(self.channels))
+			.ok_or_else(|| Error::Resample("output duration overflow".into()))?;
 
 		let mut out = Vec::new();
 		while out.len() < wanted {
@@ -244,10 +249,17 @@ impl Resampler {
 			self.held = Some(at);
 		}
 
-		self.started |= !samples.is_empty();
+		self.input_frames = self
+			.input_frames
+			.checked_add((samples.len() / self.channels) as u64)
+			.ok_or_else(|| Error::Resample("input duration overflow".into()))?;
 		self.pending.extend_from_slice(samples);
 		let buffered = self.pending.len();
 		let out = self.convert().map_err(BackendError::into_public)?;
+		self.output_frames = self
+			.output_frames
+			.checked_add((out.len() / self.channels) as u64)
+			.ok_or_else(|| Error::Resample("output duration overflow".into()))?;
 
 		// Earlier calls leave less than one chunk, so consuming any chunk also
 		// consumes all their samples. The remainder belongs to this packet.
@@ -454,6 +466,111 @@ mod tests {
 	fn rejects_zero_chunk_frames() {
 		let r = Resampler::new(48_000, 48_000, 2, 0);
 		assert!(matches!(r, Err(Error::Unsupported(_))));
+	}
+
+	/// Packet boundaries cannot change a stream's samples or rounded duration.
+	#[test]
+	fn duration_and_samples_are_invariant_across_partitions_and_epochs() {
+		for (input_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+			for chunk in [32, 882, 960] {
+				for channels in [1, 2] {
+					// One resampler throughout: only the first run starts fresh, so every
+					// later run checks that drain and reset restore that state exactly.
+					let mut resampler = Resampler::new(input_rate, output_rate, channels, chunk).unwrap();
+					for frames in [0, 1, 20, 441, 882, 960, 2000] {
+						let input: Vec<f32> = (0..frames * channels as usize)
+							.map(|sample| (sample as f32 * 0.1).sin() * 0.25)
+							.collect();
+						let expected = (frames as u64 * output_rate as u64 + input_rate as u64 / 2) / input_rate as u64;
+						let mut reference = None;
+						for packet in [1, chunk - 1, chunk + 1, frames.max(1)] {
+							let mut out = Vec::new();
+							for (index, samples) in input.chunks(packet * channels as usize).enumerate() {
+								out.extend(
+									resampler
+										.process(samples, at((index * packet) as u64, input_rate as u64))
+										.unwrap(),
+								);
+							}
+							out.extend(resampler.drain().unwrap());
+							assert_eq!(
+								out.len() / channels as usize,
+								expected as usize,
+								"{input_rate}->{output_rate}, chunk={chunk}, frames={frames}, channels={channels}, packet={packet}"
+							);
+							assert_eq!(&out, reference.get_or_insert_with(|| out.clone()));
+							assert!(resampler.drain().unwrap().is_empty());
+							// Reset drops a partial epoch entirely.
+							resampler
+								.process(&vec![1.0; (chunk + 1) * channels as usize], at(0, input_rate as u64))
+								.unwrap();
+							resampler.reset();
+						}
+					}
+				}
+			}
+		}
+	}
+
+	/// Duration arithmetic is independent of pointer width and refuses overflow
+	/// before retaining input or allocating a tail for an impossible stream.
+	#[test]
+	fn duration_accounting_is_bounded() {
+		let mut resampler = Resampler::new(48_000, 44_100, 1, 960).unwrap();
+		resampler.input_frames = u64::MAX;
+		assert!(matches!(
+			resampler.process(&[0.0], at(0, 48_000)),
+			Err(Error::Resample(_))
+		));
+		assert!(resampler.pending.is_empty());
+		resampler.output_frames = u64::MAX;
+		assert!(matches!(resampler.drain(), Err(Error::Resample(_))));
+		resampler.reset();
+		assert!(resampler.drain().unwrap().is_empty());
+		// Whole seconds cancel exactly even far beyond a 32-bit frame counter.
+		resampler.input_frames = (1u64 << 32) * 48_000;
+		resampler.output_frames = (1u64 << 32) * 44_100;
+		assert_eq!(resampler.output_at(at(0, 48_000)).unwrap(), at(0, 48_000));
+		assert!(resampler.process(&[0.0; 480], at(0, 48_000)).unwrap().is_empty());
+		assert_eq!(resampler.drain().unwrap().len(), 441);
+	}
+
+	/// Measurement-only: sweep caller packetization and layout without timing gates.
+	#[test]
+	#[ignore = "run with just rs bench-playback"]
+	fn benchmark_resampler() {
+		for (input_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+			for channels in [1, 2, 6] {
+				for packet in [32, 960, 4096] {
+					let frames = input_rate as usize;
+					let input = vec![0.25; frames * channels as usize];
+					let mut resampler =
+						Resampler::new(input_rate, output_rate, channels, input_rate as usize / 50).unwrap();
+					let mut elapsed = std::time::Duration::ZERO;
+					for _ in 0..10 {
+						let start = moq_clock::now();
+						let mut count = 0;
+						for (index, samples) in input.chunks(packet * channels as usize).enumerate() {
+							let at = at((index * packet) as u64, input_rate as u64);
+							let held = if resampler.pending_frames() == 0 {
+								at
+							} else {
+								resampler.held_at().unwrap()
+							};
+							std::hint::black_box(resampler.output_at(held).unwrap());
+							count += std::hint::black_box(resampler.process(samples, at).unwrap()).len();
+						}
+						count += std::hint::black_box(resampler.drain().unwrap()).len();
+						elapsed += start.elapsed();
+						assert_eq!(count, output_rate as usize * channels as usize);
+					}
+					println!(
+						"{input_rate}->{output_rate} channels={channels} packet={packet}: {:.1} ns/input-frame",
+						elapsed.as_nanos() as f64 / (10 * frames) as f64
+					);
+				}
+			}
+		}
 	}
 
 	#[test]

@@ -35,7 +35,6 @@ moq_client_config moq_client_defaults(void);
 int32_t moq_session_close(uint32_t session);
 int32_t moq_session_bandwidth(uint32_t session);
 int32_t moq_bandwidth_reserve(uint32_t bandwidth, uint32_t track, uint64_t max_bps);
-int32_t moq_bandwidth_set_target(uint32_t bandwidth, uint64_t target_bps, bool present);
 int32_t moq_bandwidth_close(uint32_t bandwidth);
 int32_t moq_reservation_grant(uint32_t reservation, uint64_t *bps, bool *present);
 int32_t moq_reservation_update(uint32_t reservation, uint64_t max_bps);

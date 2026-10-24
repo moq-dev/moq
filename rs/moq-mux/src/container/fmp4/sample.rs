@@ -1,4 +1,4 @@
-//! Resolving the per-sample values a `trun` leaves out.
+//! Resolving the per-sample values a `trun` leaves out, and the `mdat` bytes each sample takes.
 //!
 //! Every reader of a CMAF fragment resolves them the same way, and `js/hang`'s CMAF decoder
 //! mirrors it, so a sample is the same size, duration, and keyframe whichever side reads it.
@@ -74,6 +74,30 @@ impl Sample {
 	}
 }
 
+/// The `mdat` bytes a fragment's samples have taken, so no two samples share any.
+///
+/// Each sample's bytes are copied or published once per sample, so runs that all pointed at one
+/// range would turn a small fragment into output as large as its run count times its `mdat`.
+#[derive(Default)]
+pub(crate) struct Claimed(std::collections::BTreeMap<usize, usize>);
+
+impl Claimed {
+	/// Take `range` of the `mdat` payload, or fail if an earlier sample holds any of it.
+	pub fn take(&mut self, range: std::ops::Range<usize>) -> Result<(), super::Error> {
+		if range.is_empty() {
+			return Ok(());
+		}
+		// The taken ranges are disjoint, so the last one starting before `range` ends reaches furthest.
+		if let Some((_, &end)) = self.0.range(..range.end).next_back()
+			&& end > range.start
+		{
+			return Err(super::Error::InvalidDataOffset);
+		}
+		self.0.insert(range.start, range.end);
+		Ok(())
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -139,6 +163,20 @@ mod tests {
 
 		let sample = Defaults::default().resolve(&Default::default(), &entry(None, None, None));
 		assert_eq!(sample.duration, None);
+	}
+
+	/// Adjacent and empty ranges are taken; any shared byte is refused, wherever it falls.
+	#[test]
+	fn claimed_ranges_are_disjoint() {
+		let mut claimed = Claimed::default();
+		claimed.take(10..20).unwrap();
+		claimed.take(20..30).unwrap();
+		claimed.take(0..10).unwrap();
+		claimed.take(15..15).unwrap();
+		for overlap in [10..20, 5..11, 29..40, 12..13, 0..40] {
+			assert!(claimed.take(overlap.clone()).is_err(), "{overlap:?}");
+		}
+		claimed.take(30..31).unwrap();
 	}
 
 	#[test]

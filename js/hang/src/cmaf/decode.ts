@@ -4,77 +4,124 @@
  */
 
 import type { Time } from "@moq/net";
-import {
-	type HandlerReferenceBox,
-	type MediaHeaderBox,
-	type ParsedIsoBox,
-	readAvc1,
-	readHdlr,
-	readHev1,
-	readHvc1,
-	readIsoBoxes,
-	readMdat,
-	readMdhd,
-	readMfhd,
-	readMp4a,
-	readStsd,
-	readTfdt,
-	readTfhd,
-	readTkhd,
-	readTrex,
-	readTrun,
-	type SampleDescriptionBox,
-	type TrackExtendsBox,
-	type TrackFragmentBaseMediaDecodeTimeBox,
-	type TrackFragmentHeaderBox,
-	type TrackRunBox,
-	type TrackRunSample,
-} from "@svta/cml-iso-bmff";
-
-// Configure readers for specific box types we need to parse
-const INIT_READERS = {
-	avc1: readAvc1,
-	avc3: readAvc1, // avc3 has same structure
-	hvc1: readHvc1,
-	hev1: readHev1,
-	mp4a: readMp4a,
-	stsd: readStsd,
-	mdhd: readMdhd,
-	hdlr: readHdlr,
-	tkhd: readTkhd,
-	trex: readTrex,
-};
-
-const DATA_READERS = {
-	mfhd: readMfhd,
-	tfhd: readTfhd,
-	tfdt: readTfdt,
-	trun: readTrun,
-	mdat: readMdat,
-};
 
 /**
- * Recursively find a box by type in the box tree.
- * This is more reliable than the library's findIsoBox which may not traverse all children.
+ * One ISO BMFF box: its four-character type and its payload, a view into the input.
  */
-function findBox<T extends ParsedIsoBox>(
-	boxes: ParsedIsoBox[],
-	predicate: (box: ParsedIsoBox) => box is T,
-): T | undefined {
-	for (const box of boxes) {
-		if (predicate(box)) {
-			return box;
-		}
-		// Recursively search children - boxes may have a 'boxes' property with children
-		// biome-ignore lint/suspicious/noExplicitAny: ISO box structure varies
-		const children = (box as any).boxes;
-		if (children && Array.isArray(children)) {
-			const found = findBox(children, predicate);
-			if (found) return found;
-		}
-	}
-	return undefined;
+interface Box {
+	type: string;
+	/** Where the box starts in the data it was read from. */
+	offset: number;
+	payload: Uint8Array;
 }
+
+/**
+ * The boxes `data` holds back to back, each checked to fit inside it, so a declared size can
+ * neither stall the walk nor reach past its parent.
+ */
+function boxes(data: Uint8Array): Box[] {
+	const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+	const result: Box[] = [];
+	let offset = 0;
+	while (offset < data.byteLength) {
+		const remaining = data.byteLength - offset;
+		if (remaining < 8) throw new Error(`Truncated box header: ${remaining} bytes left`);
+		const type = String.fromCharCode(...data.subarray(offset + 4, offset + 8));
+		let header = 8;
+		let size = view.getUint32(offset);
+		if (size === 1) {
+			if (remaining < 16) throw new Error(`Truncated ${type} box header`);
+			const large = view.getBigUint64(offset + 8);
+			if (large > BigInt(remaining)) throw new Error(`${type} box size ${large} exceeds its ${remaining} bytes`);
+			size = Number(large);
+			header = 16;
+		} else if (size === 0) {
+			// Extends to the end of its parent.
+			size = remaining;
+		}
+		if (type === "uuid") header += 16;
+		if (size < header || size > remaining) {
+			throw new Error(`Invalid ${type} box size ${size}: ${remaining} bytes left, header ${header}`);
+		}
+		result.push({ type, offset, payload: data.subarray(offset + header, offset + size) });
+		offset += size;
+	}
+	return result;
+}
+
+/** The first box of `type` among `list`. */
+function child(list: Box[], type: string): Box | undefined {
+	return list.find((box) => box.type === type);
+}
+
+/** The first box of `type` among `list`, or an error naming where it was missing. */
+function required(list: Box[], type: string, where: string): Box {
+	const box = child(list, type);
+	if (!box) throw new Error(`No ${type} box found in ${where}`);
+	return box;
+}
+
+/** Reads a box payload front to back, refusing to read past its end. */
+class Reader {
+	readonly type: string;
+	readonly #view: DataView;
+	readonly #length: number;
+	#offset = 0;
+
+	constructor(payload: Uint8Array, type: string) {
+		this.type = type;
+		this.#view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+		this.#length = payload.byteLength;
+	}
+
+	get remaining(): number {
+		return this.#length - this.#offset;
+	}
+
+	#take(bytes: number): number {
+		if (bytes > this.remaining) throw new Error(`Truncated ${this.type} box`);
+		const at = this.#offset;
+		this.#offset += bytes;
+		return at;
+	}
+
+	skip(bytes: number): void {
+		this.#take(bytes);
+	}
+
+	u8(): number {
+		return this.#view.getUint8(this.#take(1));
+	}
+
+	u24(): number {
+		const at = this.#take(3);
+		return (this.#view.getUint8(at) << 16) | this.#view.getUint16(at + 1);
+	}
+
+	u32(): number {
+		return this.#view.getUint32(this.#take(4));
+	}
+
+	i32(): number {
+		return this.#view.getInt32(this.#take(4));
+	}
+
+	u64(): number {
+		const value = this.#view.getBigUint64(this.#take(8));
+		if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`${this.type} value ${value} exceeds 2^53`);
+		return Number(value);
+	}
+
+	/** The version and flags of a full box. */
+	full(): { version: number; flags: number } {
+		return { version: this.u8(), flags: this.u24() };
+	}
+}
+
+/** Visual sample entries whose codec configuration this decoder extracts. */
+const VISUAL_ENTRIES = new Set(["avc1", "avc3", "hvc1", "hev1"]);
+/** Audio sample entries whose codec configuration this decoder extracts. */
+const AUDIO_ENTRIES = new Set(["mp4a"]);
 
 /**
  * Result of parsing an init segment.
@@ -116,19 +163,6 @@ export interface Sample {
 	duration: number;
 }
 
-// Helper to convert Uint8Array to ArrayBuffer for the library
-function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-	// Create a new ArrayBuffer and copy data to avoid SharedArrayBuffer issues
-	const buffer = new ArrayBuffer(data.byteLength);
-	new Uint8Array(buffer).set(data);
-	return buffer;
-}
-
-// Type guard for finding boxes by type
-function isBoxType<T extends ParsedIsoBox>(type: string) {
-	return (box: ParsedIsoBox): box is T => box.type === type;
-}
-
 /**
  * Parse an init segment (ftyp + moov) to extract codec description and timescale.
  *
@@ -136,117 +170,95 @@ function isBoxType<T extends ParsedIsoBox>(type: string) {
  * @returns Parsed init segment information
  */
 export function decodeInitSegment(init: Uint8Array): InitSegment {
-	// Cast to ParsedIsoBox[] since the library's return type changes with readers
-	const boxes = readIsoBoxes(toArrayBuffer(init), { readers: INIT_READERS }) as ParsedIsoBox[];
+	const moov = boxes(required(boxes(init), "moov", "init segment").payload);
+	const trak = boxes(required(moov, "trak", "init segment").payload);
+	const mdia = boxes(required(trak, "mdia", "init segment").payload);
 
-	// Find moov > trak > mdia > mdhd for timescale
-	const mdhd = findBox(boxes, isBoxType<MediaHeaderBox & ParsedIsoBox>("mdhd"));
-	if (!mdhd) {
-		throw new Error("No mdhd box found in init segment");
+	// moov > trak > mdia > mdhd for the timescale.
+	const mdhd = new Reader(required(mdia, "mdhd", "init segment").payload, "mdhd");
+	const { version: mdhdVersion } = mdhd.full();
+	mdhd.skip(mdhdVersion === 1 ? 16 : 8);
+	const timescale = mdhd.u32();
+	if (timescale === 0) throw new Error("mdhd timescale is zero");
+
+	// moov > trak > tkhd for the track ID.
+	const tkhdBox = child(trak, "tkhd");
+	let trackId = 1;
+	if (tkhdBox) {
+		const tkhd = new Reader(tkhdBox.payload, "tkhd");
+		const { version } = tkhd.full();
+		tkhd.skip(version === 1 ? 16 : 8);
+		trackId = tkhd.u32();
 	}
 
-	// Find moov > trak > tkhd for track ID
-	// biome-ignore lint/suspicious/noExplicitAny: ISO box traversal
-	const tkhd = findBox(boxes, isBoxType<any>("tkhd"));
-	const trackId = tkhd?.trackId ?? 1;
-
-	// Find moov > trak > mdia > hdlr for the track kind
-	const hdlr = findBox(boxes, isBoxType<HandlerReferenceBox & ParsedIsoBox>("hdlr"));
-	if (!hdlr) {
-		throw new Error("No hdlr box found in init segment");
-	}
-	const kind = hdlr.handlerType === "soun" ? "audio" : hdlr.handlerType === "vide" ? "video" : undefined;
+	// moov > trak > mdia > hdlr for the track kind.
+	const hdlr = new Reader(required(mdia, "hdlr", "init segment").payload, "hdlr");
+	hdlr.full();
+	hdlr.skip(4);
+	const handlerType = String.fromCharCode(hdlr.u8(), hdlr.u8(), hdlr.u8(), hdlr.u8());
+	const kind = handlerType === "soun" ? "audio" : handlerType === "vide" ? "video" : undefined;
 	if (!kind) {
-		throw new Error(`Unsupported track handler: ${hdlr.handlerType}`);
+		throw new Error(`Unsupported track handler: ${handlerType}`);
 	}
 
-	// Find moov > trak > mdia > minf > stbl > stsd for sample description
-	const stsd = findBox(boxes, isBoxType<SampleDescriptionBox & ParsedIsoBox>("stsd"));
-	if (!stsd?.entries || stsd.entries.length === 0) {
+	// moov > trak > mdia > minf > stbl > stsd for the sample description.
+	const minf = boxes(required(mdia, "minf", "init segment").payload);
+	const stbl = boxes(required(minf, "stbl", "init segment").payload);
+	const stsd = new Reader(required(stbl, "stsd", "init segment").payload, "stsd");
+	stsd.full();
+	const entryCount = stsd.u32();
+	const entries = boxes(required(stbl, "stsd", "init segment").payload.subarray(8));
+	if (entryCount === 0 || entries.length === 0) {
 		throw new Error("No stsd box found in init segment");
 	}
 
-	// Extract codec-specific description from the first sample entry
-	const entry = stsd.entries[0];
-	const description = extractDescription(entry);
+	// Extract the codec-specific description from the first sample entry.
+	const description = extractDescription(entries[0]);
 
-	// Find moov > mvex > trex for this track to extract default sample values.
-	// These are the bottom of the fallback chain when tfhd/trun don't specify them.
-	const trex = findBox(
-		boxes,
-		(box): box is TrackExtendsBox & ParsedIsoBox =>
-			box.type === "trex" && (box as TrackExtendsBox).trackId === trackId,
-	);
+	// moov > mvex > trex for this track's default sample values: the bottom of the fallback chain
+	// when tfhd and trun don't specify them.
+	const mvex = child(moov, "mvex");
+	let trex: { duration: number; size: number; flags: number } | undefined;
+	for (const box of mvex ? boxes(mvex.payload) : []) {
+		if (box.type !== "trex") continue;
+		const reader = new Reader(box.payload, "trex");
+		reader.full();
+		if (reader.u32() !== trackId) continue;
+		reader.skip(4);
+		trex = { duration: reader.u32(), size: reader.u32(), flags: reader.u32() };
+		break;
+	}
 
 	return {
 		description,
-		timescale: mdhd.timescale,
+		timescale,
 		trackId,
 		kind,
-		defaultSampleDuration: trex?.defaultSampleDuration ?? 0,
-		defaultSampleSize: trex?.defaultSampleSize ?? 0,
-		defaultSampleFlags: trex?.defaultSampleFlags ?? 0,
+		defaultSampleDuration: trex?.duration ?? 0,
+		defaultSampleSize: trex?.size ?? 0,
+		defaultSampleFlags: trex?.flags ?? 0,
 	};
 }
 
 /**
  * Extract codec-specific description from a sample entry.
- * The description is codec-specific: avcC for H.264, hvcC for H.265, esds for AAC, dOps for Opus.
+ * The description is codec-specific: avcC for H.264, hvcC for H.265, esds for AAC.
  */
-// biome-ignore lint/suspicious/noExplicitAny: ISO box types vary
-function extractDescription(entry: any): Uint8Array | undefined {
-	if (!entry.boxes || !Array.isArray(entry.boxes)) {
-		return undefined;
-	}
+function extractDescription(entry: Box): Uint8Array | undefined {
+	// The SampleEntry and Visual/AudioSampleEntry fields precede the child boxes.
+	let fields: number;
+	if (VISUAL_ENTRIES.has(entry.type)) fields = 78;
+	else if (AUDIO_ENTRIES.has(entry.type)) fields = 28;
+	else return undefined;
+	if (entry.payload.byteLength < fields) throw new Error(`Truncated ${entry.type} sample entry`);
 
-	// Look for codec config boxes in the sample entry
-	for (const box of entry.boxes) {
-		// Handle raw Uint8Array boxes (already serialized)
-		if (box instanceof Uint8Array) {
-			// Extract the payload without the box header (8 bytes: 4 size + 4 type)
-			if (box.length > 8) {
-				// Check if this looks like a codec config box by reading the type
-				const typeBytes = String.fromCharCode(box[4], box[5], box[6], box[7]);
-				if (typeBytes === "avcC" || typeBytes === "hvcC" || typeBytes === "dOps") {
-					return new Uint8Array(box.slice(8));
-				}
-				if (typeBytes === "esds") {
-					// esds payload has nested descriptors; extract the AudioSpecificConfig (tag 0x05).
-					return extractAudioSpecificConfig(new Uint8Array(box.slice(8)));
-				}
-			}
-			continue;
+	for (const box of boxes(entry.payload.subarray(fields))) {
+		if (box.type === "avcC" || box.type === "hvcC") {
+			return new Uint8Array(box.payload);
 		}
-
-		// Check for known codec config box types
-		const boxType = box.type;
-		if (boxType === "avcC" || boxType === "hvcC" || boxType === "dOps") {
-			if (box.view) {
-				const view = box.view;
-				const headerSize = 8;
-				const payloadOffset = view.byteOffset + headerSize;
-				const payloadLength = box.size - headerSize;
-				return new Uint8Array(view.buffer, payloadOffset, payloadLength);
-			}
-			if (box.data instanceof Uint8Array) {
-				return new Uint8Array(box.data);
-			}
-			if (box.raw instanceof Uint8Array) {
-				return new Uint8Array(box.raw.slice(8));
-			}
-		}
-		if (boxType === "esds") {
-			let payload: Uint8Array | undefined;
-			if (box.view) {
-				const view = box.view;
-				const headerSize = 8;
-				payload = new Uint8Array(view.buffer, view.byteOffset + headerSize, box.size - headerSize);
-			} else if (box.data instanceof Uint8Array) {
-				payload = new Uint8Array(box.data);
-			} else if (box.raw instanceof Uint8Array) {
-				payload = new Uint8Array(box.raw.slice(8));
-			}
-			if (payload) return extractAudioSpecificConfig(payload);
+		if (box.type === "esds") {
+			// esds payload has nested descriptors; extract the AudioSpecificConfig (tag 0x05).
+			return extractAudioSpecificConfig(box.payload);
 		}
 	}
 
@@ -336,59 +348,53 @@ export function decodeDataSegment(
 	init: InitSegment,
 	timestamp: Time.Timestamp | undefined,
 ): Sample[] {
-	// Cast to ParsedIsoBox[] since the library's return type changes with readers
-	const boxes = readIsoBoxes(toArrayBuffer(segment), { readers: DATA_READERS }) as ParsedIsoBox[];
+	// moof and mdat at the top level; the moof's first byte is where CMAF data offsets count from.
+	const top = boxes(segment);
+	const moof = required(top, "moof", "data segment");
+	const mdat = required(top, "mdat", "data segment");
 
-	// Find moof > traf > tfdt for base media decode time
-	const tfdt = findBox(boxes, isBoxType<TrackFragmentBaseMediaDecodeTimeBox & ParsedIsoBox>("tfdt"));
-	const baseDecodeTime = tfdt?.baseMediaDecodeTime ?? 0;
+	const traf = boxes(required(boxes(moof.payload), "traf", "data segment").payload);
 
-	// Find moof > traf > tfhd for default sample values, falling back to trex from the init segment.
-	const tfhd = findBox(boxes, isBoxType<TrackFragmentHeaderBox & ParsedIsoBox>("tfhd"));
-	const defaultDuration = tfhd?.defaultSampleDuration ?? init.defaultSampleDuration;
-	const defaultSize = tfhd?.defaultSampleSize ?? init.defaultSampleSize;
-	const defaultFlags = tfhd?.defaultSampleFlags ?? init.defaultSampleFlags;
+	// moof > traf > tfdt for the base media decode time.
+	let baseDecodeTime = 0;
+	const tfdtBox = child(traf, "tfdt");
+	if (tfdtBox) {
+		const tfdt = new Reader(tfdtBox.payload, "tfdt");
+		baseDecodeTime = tfdt.full().version === 1 ? tfdt.u64() : tfdt.u32();
+	}
 
-	// Find moof > traf > trun for sample info. A traf may split its samples across several runs,
+	// moof > traf > tfhd for default sample values, falling back to trex from the init segment.
+	let defaultDuration = init.defaultSampleDuration;
+	let defaultSize = init.defaultSampleSize;
+	let defaultFlags = init.defaultSampleFlags;
+	const tfhdBox = child(traf, "tfhd");
+	if (tfhdBox) {
+		const tfhd = new Reader(tfhdBox.payload, "tfhd");
+		const { flags } = tfhd.full();
+		tfhd.skip(4); // track_ID
+		// Samples are read from the mdat front to back, so each run must start where the previous
+		// one ended. A run's dataOffset counts from the moof's first byte (CMAF's
+		// default-base-is-moof).
+		if (flags & 0x01)
+			throw new Error("tfhd base_data_offset is unsupported: CMAF data offsets count from the moof");
+		if (flags & 0x02) tfhd.skip(4); // sample_description_index
+		if (flags & 0x08) defaultDuration = tfhd.u32();
+		if (flags & 0x10) defaultSize = tfhd.u32();
+		if (flags & 0x20) defaultFlags = tfhd.u32();
+	}
+
+	// moof > traf > trun for sample info. A traf may split its samples across several runs,
 	// which continue one decode timeline and one mdat.
-	const traf = findBox(boxes, isBoxType<ParsedIsoBox>("traf"));
-	// biome-ignore lint/suspicious/noExplicitAny: ISO box structure varies
-	const truns = ((traf as any)?.boxes ?? []).filter(isBoxType<TrackRunBox & ParsedIsoBox>("trun"));
+	const truns = traf.filter((box) => box.type === "trun");
 	if (truns.length === 0) {
 		throw new Error("No trun box found in data segment");
 	}
 
-	// Find mdat for sample data
-	// biome-ignore lint/suspicious/noExplicitAny: mdat box type
-	const mdat = findBox(boxes, isBoxType<any>("mdat"));
-	if (!mdat) {
-		throw new Error("No mdat box found in data segment");
-	}
-
-	// mdat.data contains the raw sample data
-	const mdatData = mdat.data as Uint8Array;
-	if (!mdatData) {
-		throw new Error("No data in mdat box");
-	}
-
-	// Samples are read from the mdat front to back, so each run must start where the previous one
-	// ended. A run's dataOffset counts from the moof's first byte (CMAF's default-base-is-moof).
-	if (tfhd?.baseDataOffset !== undefined) {
-		throw new Error("tfhd base_data_offset is unsupported: CMAF data offsets count from the moof");
-	}
-	let position = 0;
-	let moofStart: number | undefined;
-	let mdatDataStart: number | undefined;
-	for (const box of boxes) {
-		const size = box.largesize ?? box.size;
-		if (box.type === "moof") moofStart ??= position;
-		if (box === mdat) mdatDataStart = position + size - mdatData.byteLength;
-		position += size;
-	}
-	if (moofStart === undefined || mdatDataStart === undefined || mdatDataStart < moofStart) {
+	if (mdat.offset < moof.offset) {
 		throw new Error("mdat must follow the moof");
 	}
-	const dataStart = mdatDataStart - moofStart;
+	const mdatData = mdat.payload;
+	const dataStart = mdatData.byteOffset - segment.byteOffset - moof.offset;
 
 	const samples: Sample[] = [];
 	const ptss: number[] = [];
@@ -396,28 +402,45 @@ export function decodeDataSegment(
 	let dataOffset = 0;
 	let decodeTime = baseDecodeTime;
 
-	for (const trun of truns) {
-		if (trun.dataOffset !== undefined && trun.dataOffset !== dataStart + dataOffset) {
+	for (const box of truns) {
+		const trun = new Reader(box.payload, "trun");
+		const { version, flags } = trun.full();
+		const sampleCount = trun.u32();
+		if (flags & 0x01) {
+			const runOffset = trun.i32();
+			if (runOffset !== dataStart + dataOffset) {
+				throw new Error(
+					`trun data_offset ${runOffset} doesn't start at the next sample (${dataStart + dataOffset})`,
+				);
+			}
+		}
+		const firstSampleFlags = flags & 0x04 ? trun.u32() : undefined;
+
+		// Each sample's table entry is read as it is reached, never materialized up front, so the
+		// count is checked against what backs it before any sample: a table must hold every entry
+		// it declares, and a run sized by the defaults must fit in the mdat left.
+		const entry =
+			4 * ((flags & 0x100 ? 1 : 0) + (flags & 0x200 ? 1 : 0) + (flags & 0x400 ? 1 : 0) + (flags & 0x800 ? 1 : 0));
+		if (entry * sampleCount > trun.remaining) {
 			throw new Error(
-				`trun data_offset ${trun.dataOffset} doesn't start at the next sample (${dataStart + dataOffset})`,
+				`trun declares ${sampleCount} samples but its table holds ${Math.floor(trun.remaining / entry)}`,
+			);
+		}
+		if (!(flags & 0x200) && defaultSize > 0 && sampleCount * defaultSize > mdatData.length - dataOffset) {
+			throw new Error(
+				`trun declares ${sampleCount} samples of ${defaultSize} bytes, past the ${mdatData.length - dataOffset} mdat bytes left`,
 			);
 		}
 
-		for (let i = 0; i < trun.sampleCount; i++) {
-			const sample: TrackRunSample = trun.samples[i] ?? {};
-
-			const sampleSize = sample.sampleSize ?? defaultSize;
-			const sampleDuration = sample.sampleDuration ?? defaultDuration;
+		for (let i = 0; i < sampleCount; i++) {
+			const sampleDuration = flags & 0x100 ? trun.u32() : defaultDuration;
+			const sampleSize = flags & 0x200 ? trun.u32() : defaultSize;
+			const entryFlags = flags & 0x400 ? trun.u32() : undefined;
+			const compositionOffset = flags & 0x800 ? (version === 1 ? trun.i32() : trun.u32()) : 0;
 
 			// Validate sample size - must be positive to produce valid data
 			if (sampleSize <= 0) {
 				throw new Error(`Invalid sample size ${sampleSize} for sample ${i} in trun`);
-			}
-
-			// Duration 0 is valid for single-sample CMAF fragments where duration
-			// is implicit. Negative duration would indicate corrupt data.
-			if (sampleDuration < 0) {
-				throw new Error(`Invalid sample duration ${sampleDuration} for sample ${i} in trun`);
 			}
 
 			// Bounds check before slicing to prevent reading past mdat data
@@ -428,10 +451,7 @@ export function decodeDataSegment(
 			}
 
 			const sampleFlags =
-				i === 0 && trun.firstSampleFlags !== undefined
-					? trun.firstSampleFlags
-					: (sample.sampleFlags ?? defaultFlags);
-			const compositionOffset = sample.sampleCompositionTimeOffset ?? 0;
+				i === 0 && firstSampleFlags !== undefined ? firstSampleFlags : (entryFlags ?? defaultFlags);
 
 			// Extract sample data
 			const data = new Uint8Array(mdatData.slice(dataOffset, dataOffset + sampleSize));
