@@ -596,16 +596,20 @@ fn ts_si_sweep(
 	for retained in retained {
 		for touches in [1, 16, 64] {
 			group.throughput(Throughput::Elements(u64::from(touches)));
-			group.bench_with_input(BenchmarkId::new(retained.to_string(), touches), &touches, |b, &touches| {
-				b.iter_batched_ref(
-					|| setup(retained, touches),
-					|import| {
-						import.tick();
-						import.repeat((0..touches).map(|key| touch(retained, key)));
-					},
-					BatchSize::SmallInput,
-				);
-			});
+			group.bench_with_input(
+				BenchmarkId::new(retained.to_string(), touches),
+				&touches,
+				|b, &touches| {
+					b.iter_batched_ref(
+						|| setup(retained, touches),
+						|import| {
+							import.tick();
+							import.repeat((0..touches).map(|key| touch(retained, key)));
+						},
+						BatchSize::SmallInput,
+					);
+				},
+			);
 		}
 	}
 	group.finish();
