@@ -185,18 +185,21 @@ describe("AudioBuffer", () => {
 		}
 	});
 
-	// Decoded audio can land short of the timestamp its frame was released at (Opus pre-skip), so a
-	// refill that stops at the floor exactly leaves the ring a sample short of un-stalling, with the
-	// gate waiting on the ring.
-	it("refills until a frame reaches the floor", async () => {
-		const { buffer, state, close } = open();
+	// Decoded audio can land short of the timestamp its frame was released at (Opus pre-skip), so the
+	// refill counts the PCM that reaches the ring: stopping at the released frames would leave the
+	// ring short of un-stalling, with the gate waiting on it.
+	it("refills until the ring holds the floor", () => {
+		const { buffer, close } = open();
 		const signal = new AbortController().signal;
 		try {
-			// The ring anchored on a first frame at 6 ms, still short of the floor.
-			await state(6_000, true, 0);
-			expect(Bun.peek.status(buffer.wait(100_000 as Micro, signal))).toBe("fulfilled");
-			expect(Bun.peek.status(buffer.wait(120_000 as Micro, signal))).toBe("fulfilled");
-			expect(Bun.peek.status(buffer.wait(140_000 as Micro, signal))).toBe("pending");
+			for (let t = 0; t <= 100_000; t += 20_000) {
+				expect(Bun.peek.status(buffer.wait(t as Micro, signal))).toBe("fulfilled");
+				// The first output lost 6 ms to pre-skip.
+				const start = Math.max(t, 6_000);
+				buffer.insert(start as Micro, [new Float32Array(((t + 20_000 - start) * 48) / 1000)]);
+				buffer.decoded((t + 20_000) as Micro);
+			}
+			expect(Bun.peek.status(buffer.wait(120_000 as Micro, signal))).toBe("pending");
 		} finally {
 			close();
 		}
@@ -210,7 +213,9 @@ describe("AudioBuffer", () => {
 		try {
 			await state(100_000, true, 0);
 			expect(Bun.peek.status(buffer.wait(10_000_000 as Micro, signal))).toBe("fulfilled");
-			const next = buffer.wait(10_050_000 as Micro, signal);
+			buffer.insert(10_000_000 as Micro, [new Float32Array(960)]);
+			buffer.decoded(10_020_000 as Micro);
+			const next = buffer.wait(10_020_000 as Micro, signal);
 			expect(Bun.peek.status(next)).toBe("pending");
 
 			// The frame past the gap un-stalls the ring, which plays the gap out up to it.
@@ -353,7 +358,7 @@ describe("Backpressure", () => {
 		for (let t = 0; t <= 500; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
 		const wait = gate.wait(ms(520), signal);
 		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.discarded(ms(520));
+		for (let t = 0; t <= 500; t += 20) gate.decoded(ms(t + 20));
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
 		expect(Bun.peek.status(gate.wait(ms(1020), signal))).toBe("fulfilled");
 		expect(Bun.peek.status(gate.wait(ms(1040), signal))).toBe("pending");
@@ -368,10 +373,24 @@ describe("Backpressure", () => {
 		for (let t = 1000; t <= 1500; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
 		const wait = gate.wait(ms(1520), signal);
 		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.discarded(ms(2000));
+		// The decoder may answer several frames with one output.
+		gate.decoded(ms(1500));
+		gate.decoded(ms(1520));
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
-		expect(Bun.peek.status(gate.wait(ms(2500), signal))).toBe("fulfilled");
-		expect(Bun.peek.status(gate.wait(ms(2520), signal))).toBe("pending");
+		expect(Bun.peek.status(gate.wait(ms(2020), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(2040), signal))).toBe("pending");
+	});
+
+	// A replacement rendition keeps the ring, and the decoder it replaced never answers its frames.
+	it("refills past frames a closed decoder dropped", () => {
+		const gate = new Backpressure(1000, true, Milli(2000));
+		gate.queued(ms(60_000));
+		const signal = new AbortController().signal;
+		for (let t = 0; t <= 500; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		const wait = gate.wait(ms(520), signal);
+		expect(Bun.peek.status(wait)).toBe("pending");
+		gate.dropped();
+		expect(Bun.peek.status(wait)).toBe("fulfilled");
 	});
 
 	// An utterance that arrived whole before the reset changes nothing queued, so nothing would

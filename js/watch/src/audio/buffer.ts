@@ -13,8 +13,8 @@ import type { Data, Init, Latency, Reset, State, Truncate } from "./render";
  *
  *   - while the ring is stalled, once the media queued behind it covers the hold, so playback starts
  *     or refills with the whole target ahead of the playhead, decoded or not. A buffered refill also
- *     stops at the first frame that reaches the floor, since the ring plays through and cannot shed
- *     what overflows it;
+ *     stops once the PCM in the ring plus the frames still decoding reach the floor, since the ring
+ *     plays through and cannot shed what overflows it;
  *   - while playing, once the playhead is within the floor of it, keeping the ring on its floor;
  *   - while playing live, also once the media queued behind it covers the hold, so media past the
  *     target reaches the ring, whose skip band catches up to the live edge. Buffered mode plays
@@ -41,22 +41,23 @@ export class Backpressure {
 	// The ring as last observed. The playhead is undefined until one is known on the current timeline.
 	#playhead?: Micro;
 	#stalled = true;
-	// The first frame released on the current timeline, where the ring anchors. It stands in for the
-	// playhead until a report carries one, since the ring may already be playing from it.
+	// The first frame released on the current timeline. Until PCM lands and a report carries a
+	// playhead, it stands in for where the ring anchors, since the ring may already be playing.
 	#anchor?: Micro;
 	// Whether the ring is parked for a hold the queued media does not cover yet. The worklet keeps a
 	// park until the next floor update, so only this decides when it ends: a write of output decoded
 	// before the park cannot.
 	#parked = false;
 
-	// The first and latest frames released since the ring stalled. A stalled ring refills to the
-	// floor from its parked playhead, but releasing it outright would let the whole lookahead through
-	// before the decoder's output reaches the ring and un-stalls it.
-	#first?: Micro;
-	#last?: Micro;
-	// Where output the decoder discarded whole (codec warmup) ends, since the ring stalled. The ring
-	// holds nothing before it, so a refill counts the floor from there.
-	#discarded?: Micro;
+	// A buffered refill counts what reaches the ring, not what it released: output the decoder
+	// discards (warmup, Opus pre-skip, a terminal trim) never lands, so counting released frames would
+	// stop the refill short with the ring stalled and nothing left to decode. Releasing outright would
+	// instead let the whole lookahead through before the output reaches the ring and un-stalls it.
+	//
+	// The frames released and not yet decoded, oldest first, and where the first PCM inserted on this
+	// timeline starts (the ring anchors there) and the newest ends.
+	#decoding: Micro[] = [];
+	#inserted?: { start: Micro; end: Micro };
 
 	#waiters: Array<{ timestamp: Micro; resolve: () => void }> = [];
 
@@ -87,7 +88,7 @@ export class Backpressure {
 
 		// Parks whatever the ring was last reported doing: a report of a stall may be stale, and
 		// parking a ring that is still stalled changes nothing.
-		const playhead = this.#playhead ?? this.#anchor;
+		const playhead = this.#start();
 		this.#parked = (rise || this.#parked) && playhead !== undefined && !this.#covered(playhead + this.#headroom);
 		if (this.#parked) this.#stalled = true;
 		this.#release();
@@ -98,11 +99,6 @@ export class Backpressure {
 	observe(playhead: Micro | undefined, stalled: boolean): void {
 		this.#playhead = playhead;
 		this.#stalled = stalled;
-		if (!stalled) {
-			this.#first = undefined;
-			this.#last = undefined;
-			this.#discarded = undefined;
-		}
 		this.#release();
 	}
 
@@ -112,7 +108,7 @@ export class Backpressure {
 	 */
 	queued(newest: Micro | undefined): boolean {
 		this.#queued = newest;
-		const playhead = this.#playhead ?? this.#anchor;
+		const playhead = this.#start();
 		const resume = this.#parked && playhead !== undefined && this.#covered(playhead + this.#headroom);
 		if (resume) this.#parked = false;
 		this.#release();
@@ -120,16 +116,35 @@ export class Backpressure {
 	}
 
 	/**
-	 * Note that decoded output before `timestamp` was discarded (codec warmup). A refill counts the
-	 * floor from there, or a warmup longer than the floor would use it up before anything reached the
-	 * ring, and a ring that has not reported a playhead anchors no earlier.
+	 * Note that the decoder produced output ending at `end`, kept or discarded. It answers the oldest
+	 * frame still decoding and every one it reaches past: a decoder may emit nothing for a frame.
 	 */
-	discarded(timestamp: Micro): void {
-		if (this.#discarded === undefined || timestamp > this.#discarded) this.#discarded = timestamp;
-		if (this.#playhead === undefined && this.#anchor !== undefined && timestamp > this.#anchor) {
-			this.#anchor = timestamp;
-		}
+	decoded(end: Micro): void {
+		let answered = 0;
+		while (answered < this.#decoding.length && (answered === 0 || this.#decoding[answered] < end)) answered++;
+		this.#decoding.splice(0, answered);
 		this.#release();
+	}
+
+	/** Note that the decoder closed, dropping every frame still decoding. */
+	dropped(): void {
+		this.#decoding = [];
+		this.#release();
+	}
+
+	/** Note that PCM from `start` to `end` reached the ring. */
+	inserted(start: Micro, end: Micro): void {
+		const inserted = this.#inserted;
+		this.#inserted = { start: inserted?.start ?? start, end: inserted && inserted.end > end ? inserted.end : end };
+		this.#release();
+	}
+
+	/** Note that the ring dropped what it held at or after `timestamp`, keeping what is already due. */
+	truncated(timestamp: Micro): void {
+		const inserted = this.#inserted;
+		const start = this.#playhead ?? inserted?.start;
+		if (!inserted || start === undefined || timestamp >= inserted.end) return;
+		this.#inserted = { start: inserted.start, end: (timestamp > start ? timestamp : start) as Micro };
 	}
 
 	wait(timestamp: Micro, signal: AbortSignal): Promise<void> {
@@ -158,9 +173,8 @@ export class Backpressure {
 		this.#anchor = undefined;
 		this.#stalled = true;
 		this.#parked = false;
-		this.#first = undefined;
-		this.#last = undefined;
-		this.#discarded = undefined;
+		this.#decoding = [];
+		this.#inserted = undefined;
 		this.#release();
 	}
 
@@ -187,9 +201,17 @@ export class Backpressure {
 		return this.#queued !== undefined && this.#queued >= timestamp + this.#hold;
 	}
 
+	// Where the ring plays from: its reported playhead, else where it anchored or will anchor.
+	#start(): Micro | undefined {
+		return this.#playhead ?? this.#inserted?.start ?? this.#anchor;
+	}
+
 	#admit(timestamp: Micro): boolean {
 		const due = this.#due(timestamp);
-		if (due) this.#anchor ??= timestamp;
+		if (due) {
+			this.#anchor ??= timestamp;
+			if (this.#buffered) this.#decoding.push(timestamp);
+		}
 		return due;
 	}
 
@@ -204,22 +226,15 @@ export class Backpressure {
 		// A live ring sheds what overflows its floor, so it refills from everything that is due.
 		if (!this.#buffered) return true;
 
-		// Refill from the parked playhead, or from the first frame while the ring has not anchored. The
-		// first frame always goes, so a ring that needs it to anchor, or to see past a gap, never waits
-		// on a playhead that will not move. Frames keep going until one reaches the floor: the ring
-		// only un-stalls once it holds that much, and decoded audio can land a little short of the
-		// timestamp it was released at (Opus pre-skip), so stopping at the floor exactly can leave the
-		// ring stalled with the gate waiting on it.
-		const first = this.#first;
-		const last = this.#last;
-		if (first !== undefined && last !== undefined) {
-			let from: number = playhead ?? first;
-			if (this.#discarded !== undefined && this.#discarded > from) from = this.#discarded;
-			if (timestamp - this.#headroom > from && last - this.#headroom >= from) return false;
-		}
-		this.#first ??= timestamp;
-		this.#last = last === undefined ? timestamp : (Math.max(last, timestamp) as Micro);
-		return true;
+		// Refill while the PCM in the ring past its playhead, plus the span of frames still decoding, is
+		// short of the floor. The ring un-stalls once it holds the floor, and output the decoder
+		// discards never counts, so the refill cannot stop with the ring short of it.
+		const inserted = this.#inserted;
+		const start = playhead ?? inserted?.start;
+		const buffered = inserted && start !== undefined ? Math.max(0, inserted.end - start) : 0;
+		const decoding = this.#decoding;
+		const pending = decoding.length > 0 ? (decoding[decoding.length - 1] as number) - (decoding[0] as number) : 0;
+		return buffered + pending < this.#headroom;
 	}
 }
 
@@ -293,13 +308,20 @@ export class AudioBuffer {
 		return Milli.fromSecond((this.#backpressure.floor / this.rate) as Second);
 	}
 
-	/** Note that decoded output before `timestamp` was discarded, so the ring anchors no earlier. */
-	discarded(timestamp: Micro): void {
-		this.#backpressure.discarded(timestamp);
+	/** Note that the decoder produced output ending at `end` on its own timeline, kept or discarded. */
+	decoded(end: Micro): void {
+		this.#backpressure.decoded(end);
+	}
+
+	/** Note that the decoder closed, dropping every frame still decoding. */
+	dropped(): void {
+		this.#backpressure.dropped();
 	}
 
 	/** Insert audio samples at the given timestamp, transferring their buffers. Handles out-of-order writes. */
 	insert(timestamp: Micro, data: Float32Array[]): void {
+		const end = (timestamp + Micro.fromSecond(((data[0]?.length ?? 0) / this.rate) as Second)) as Micro;
+		this.#backpressure.inserted(timestamp, end);
 		const msg: Data = { type: "data", data, timestamp };
 		// Transfer the ArrayBuffers to avoid a copy: the caller loses access to them.
 		this.#worklet.port.postMessage(
@@ -338,6 +360,7 @@ export class AudioBuffer {
 	 * Unlike `reset()` this keeps playing, so there's no gap at the handover.
 	 */
 	truncate(timestamp: Micro): void {
+		this.#backpressure.truncated(timestamp);
 		const msg: Truncate = { type: "truncate", timestamp };
 		this.#worklet.port.postMessage(msg);
 	}

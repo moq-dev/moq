@@ -195,7 +195,12 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			frame.set(Milli(entry.duration));
 			await gate.wait(timestamp, abort.signal);
 			if (abort.signal.aborted) return;
-			ring.write(timestamp, [new Float32Array(Math.round((entry.duration * rate) / 1000)).fill(0.5)]);
+			const pcm = new Float32Array(Math.round((entry.duration * rate) / 1000)).fill(0.5);
+			ring.write(timestamp, [pcm]);
+			// The decoder reports each output to the gate the way `AudioBuffer` and `Decoder.#emit` do.
+			const end = (timestamp + micros((pcm.length / rate) * 1000)) as Micro;
+			gate.inserted(timestamp, end);
+			gate.decoded(end);
 		}
 	})().catch((error: unknown) => {
 		failure = { error };

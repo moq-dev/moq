@@ -1,4 +1,4 @@
-import { Micro, Milli } from "@moq/clock";
+import { Micro, Milli, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
@@ -459,6 +459,8 @@ export class Decoder {
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
+				// Closing drops what is still decoding, which a refill would otherwise wait on.
+				this.#ring.peek()?.dropped();
 			});
 
 			// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
@@ -552,6 +554,8 @@ export class Decoder {
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
+				// Closing drops what is still decoding, which a refill would otherwise wait on.
+				this.#ring.peek()?.dropped();
 			});
 
 			// Configure decoder with description from catalog
@@ -729,12 +733,22 @@ export class Decoder {
 	}
 
 	#emit(sample: AudioData) {
+		// Whatever becomes of it, the output answers the frames it was decoded from, so the gate counts
+		// only what still decodes. Reported after any insert, so the gate always counts the frame as
+		// either decoding or in the ring.
+		const decoded = (sample.timestamp +
+			Micro.fromSecond((sample.numberOfFrames / sample.sampleRate) as Second)) as Micro;
+		try {
+			this.#place(sample);
+		} finally {
+			this.#ring.peek()?.decoded(decoded);
+		}
+	}
+
+	#place(sample: AudioData) {
 		const { timestamp, frameOffset, frames } = this.#terminal.span(sample);
 		const timestampMilli = Milli.fromMicro(timestamp);
 		if (frames === 0) {
-			// Warmup can discard more than the gate releases toward the floor, so it learns that the
-			// ring anchors no earlier than here.
-			this.#ring.peek()?.discarded(timestamp);
 			sample.close();
 			return;
 		}
