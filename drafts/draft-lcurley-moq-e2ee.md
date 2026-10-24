@@ -199,7 +199,7 @@ physical  = AES-128-GCM-SIV(name_key, zero_nonce, padded)
 ~~~
 
 `semantic_name` is the UTF-8 bytes of the application's track name (`catalog.json`, `video`, and so on).
-`padded` is `semantic_name`, one `0x80` byte, and zero bytes up to `max(16, 2^ceil(log2(len + 1)))` bytes, where `len` is the length of `semantic_name`.
+`padded` is `semantic_name`, one `0x80` byte, and the fewest zero bytes that make its length a multiple of 16.
 AES-128-GCM-SIV is the AEAD of {{RFC8452}} with a nonce of 12 zero bytes and an empty AAD; `physical` is its ciphertext followed by its 16-byte tag.
 The physical track name is the unpadded base64url encoding of `physical` ({{RFC4648}} Section 5), a valid moq-lite track name of at least 43 characters.
 This function may hide any track-shaped name the application wants a relay not to read; it is not limited to media tracks.
@@ -348,7 +348,7 @@ Relays, caches, recorders, and control planes are untrusted for content.
 Authorized endpoints that hold the broadcast secret are trusted.
 Sender authenticity against another endpoint that also holds the secret is not a goal of `moq-e2ee-00`.
 
-A relay can still observe the opaque broadcast path, route epoch, opaque physical names and the padded length of each semantic track name, group and frame structure, timestamps, sizes, and traffic patterns.
+A relay can still observe the opaque broadcast path, route epoch, opaque physical names and the length of each semantic track name rounded up to 16 bytes, group and frame structure, timestamps, sizes, and traffic patterns.
 A subscription for a physical name the publisher does not serve fails as for any missing track, which tells a relay only that the name is not served.
 A relay cannot mint a physical name that opens, so it cannot make a publisher serve, or hold state for, a name no endpoint derived.
 Padding and metadata-flow confidentiality are out of scope.
