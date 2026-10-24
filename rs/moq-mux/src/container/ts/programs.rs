@@ -170,6 +170,10 @@ impl Programs {
 	/// Wait for the PMT of each program the first whole PAT listing one names. A later PAT moves
 	/// a waiting program to the PMT PID it names, and drops one it no longer lists.
 	fn wait(&mut self, pat: &psi::Pat) {
+		// The PAT repeats several times a second, mostly unchanged.
+		if self.pat.as_ref() == Some(pat) {
+			return;
+		}
 		let mut listed = HashMap::new();
 		for entry in &pat.programs {
 			// An importer takes a program's first entry, so a repeated number waits there alone.
