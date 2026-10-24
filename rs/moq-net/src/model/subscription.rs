@@ -113,7 +113,9 @@ pub enum Order {
 ///
 /// A relative or time anchor resolves at the hop that serves it, when it starts serving
 /// and again whenever the subscriber replaces its ranges. Before any group exists a
-/// relative anchor resolves at the first one, so [`Range::live`] starts there.
+/// relative anchor resolves at the first one, so [`Range::live`] starts there. A relay's
+/// copy waiting on a fresh upstream answer counts from the live feed's latest group once
+/// it answers, never from the groups an ended feed left in its cache.
 ///
 /// No published wire carries either yet: upstream, a relative or time start is no floor,
 /// the same request as [`Range::oldest`], and a relative or time end is no end. Behind a
