@@ -717,7 +717,8 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 		return [{ type: "reset_stream", id, code, finalSize }, buffer];
 	}
 
-	// RESET_STREAM_AT (draft-02); see the single-frame decoder for the semantics.
+	// RESET_STREAM_AT (draft-02): a reset that still delivers its first
+	// reliable_size bytes. reliable_size > final_size is a FRAME_ENCODING_ERROR.
 	if (frameType === RESET_STREAM_AT) {
 		[v, buffer] = VarInt.decode(buffer);
 		const id = new Stream.Id(v);
