@@ -878,7 +878,7 @@ impl fmt::Display for Tier {
 /// side statically, so this only surfaces on the aggregate read side.
 ///
 /// This is the direction traffic flowed, not the session role a client advertises
-/// in its SETUP ([`crate::Role`]): one session records on both sides.
+/// in its SETUP ([`crate::setup::Role`]): one session records on both sides.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
 	/// Egress: bytes this node published to a peer.
@@ -1441,13 +1441,10 @@ impl Handle {
 	}
 
 	/// Count one admitted request under `label` and meter its traffic without session presence.
+	///
+	/// A request has no session end to classify, so [`Session::fail`] on it records nothing.
 	pub fn request(&self, label: impl AsPath) -> Session {
 		self.context(label, Context::Request)
-	}
-
-	/// Count an external connection's wire counters under `label` without counting an admission.
-	pub fn wire(&self, label: impl AsPath, counters: crate::transport::Wire) -> Wire {
-		self.context(label, Context::Wire).wire(counters)
 	}
 
 	fn context(&self, label: impl AsPath, context: Context) -> Session {
@@ -1461,7 +1458,6 @@ impl Handle {
 				Context::Request => {
 					presence.requests.fetch_add(1, Ordering::Relaxed);
 				}
-				Context::Wire => {}
 			}
 		}
 		let traffic = Arc::new(SessionTraffic::default());
@@ -1498,7 +1494,6 @@ impl Default for Handle {
 enum Context {
 	Session,
 	Request,
-	Wire,
 }
 
 /// Registered wire counters; dropping this adds their final reading and unregisters them.
@@ -1703,6 +1698,9 @@ impl Session {
 	}
 
 	/// Record the first abnormal end on this connected session, shared across clones.
+	///
+	/// Only a context from [`Handle::session`] has an end to classify: on one from
+	/// [`Handle::request`] this records nothing.
 	pub fn fail(&self, kind: Failure) {
 		let Some(inner) = &self.inner else { return };
 		if !inner.connected {
@@ -2206,37 +2204,10 @@ mod tests {
 	}
 
 	#[test]
-	fn dropping_a_wire_guard_records_once_and_unregisters_without_an_admission() {
-		let registry = test_stats();
-		let bytes = counters(10, 3);
-		let wire = registry.tier(Tier::default()).wire("room", bytes.clone());
-		assert_eq!(drain(&registry).sessions[0].presence.wire_tx, 10);
-		bytes.set_sent_bytes(17);
-		drop(wire);
-		let final_row = drain(&registry).sessions.pop().unwrap();
-		assert!(final_row.closed);
-		assert_eq!((final_row.presence.wire_tx, final_row.presence.wire_rx), (17, 3));
-		assert_eq!(
-			(
-				final_row.presence.requests,
-				final_row.presence.sessions_started,
-				final_row.presence.sessions_ended
-			),
-			(0, 0, 0)
-		);
-		bytes.set_sent_bytes(40);
-		assert!(drain(&registry).sessions.is_empty());
-		assert_eq!(
-			registry.snapshot().sessions()[0].1.wire_tx,
-			17,
-			"a dropped guard is never read again"
-		);
-	}
-
-	#[test]
 	fn disabled_wire_collection_reports_nothing() {
 		let registry = Registry::disabled();
-		let wire = registry.tier(Tier::default()).wire("root", counters(5, 7));
+		let session = registry.tier(Tier::default()).session("root");
+		let wire = session.wire(counters(5, 7));
 		assert!(drain(&registry).sessions.is_empty());
 		drop(wire);
 		assert!(drain(&registry).sessions.is_empty());

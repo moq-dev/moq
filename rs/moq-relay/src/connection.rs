@@ -138,7 +138,7 @@ impl<R: Incoming> Connection<R> {
 		if let Some(publisher) = publisher {
 			request = request.with_subscriber(publisher);
 		}
-		let lease = lease.preparing(request.auth(), request.role())?;
+		let lease = lease.preparing(request.auth(), request.requests(), request.role())?;
 		let serving = lifecycle.shutdown.serve();
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
 		let (session, driver) = lifecycle

@@ -266,19 +266,13 @@ export class Reload {
 		this.publish = props?.publish;
 		this.consume = props?.consume;
 
-		// Requests on the consume origin stay pending across a reconnect, and before the
-		// first session establishes, rather than reading as unroutable the moment no session
-		// is attached. Released only when this loop is disposed: giving up the current URL
-		// is recoverable (a new URL or a disable/re-enable starts another sequence), so a
-		// request must keep waiting rather than go unroutable in the gap.
+		// The consume origin's announcement streams are not synced while no session is there to
+		// deliver an initial set, so an empty table before the first connect, or during a
+		// reconnect, never reads as nothing being announced. The next session takes its own
+		// hold before this one is released. Taken now rather than in the effect, which runs
+		// a microtask later, after a watcher created alongside would already have synced.
 		if (this.consume) {
 			const consume = wireOf(this.consume);
-			this.#signals.cleanup(consume.expect());
-			// Likewise, its announcement streams are not synced while no session is there to
-			// deliver an initial set, so an empty table before the first connect, or during a
-			// reconnect, never reads as nothing being announced. The next session takes its own
-			// hold before this one is released. Taken now rather than in the effect, which runs
-			// a microtask later, after a watcher created alongside would already have synced.
 			let hold = this.enabled.peek() ? consume.snapshot(Path.empty()) : undefined;
 			this.#signals.run((effect) => {
 				if (effect.get(this.enabled) && !effect.get(this.established)) {

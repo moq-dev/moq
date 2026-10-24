@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use moq_net::{Role, SessionError, auth};
+use moq_net::{SessionError, auth, setup::Role};
 
 use super::{Grant, Source, Token, lease};
 
@@ -123,6 +123,7 @@ impl Refresh {
 	pub(super) fn new(
 		lease: &mut super::Lease,
 		handle: auth::Handle,
+		requests: auth::Requests,
 		role: Option<Role>,
 	) -> Result<Self, moq_net::Error> {
 		let mut initial = Credential::new(lease.consumer.clone());
@@ -132,7 +133,6 @@ impl Refresh {
 			return Err(moq_net::Error::Unauthorized);
 		}
 		initial.initial = true;
-		let requests = handle.requests()?;
 		let this = Self {
 			handle,
 			requests,
@@ -523,13 +523,15 @@ mod tests {
 		};
 		let server = async {
 			let origin = moq_tokio::origin::spawn();
-			let request = moq_net::Server::new()
+			let mut request = moq_net::Server::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
 				.accept_request(now, server)
 				.await
 				.unwrap();
-			let lease = lease.preparing(request.auth(), request.role()).unwrap();
+			let lease = lease
+				.preparing(request.auth(), request.requests(), request.role())
+				.unwrap();
 			let (session, driver) = request.ok().await.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
 			(session, lease)
@@ -605,7 +607,7 @@ mod tests {
 			(session, tokio::spawn(moq_net::time::run(driver)))
 		};
 		let refusing = async {
-			let request = moq_net::Server::new()
+			let mut request = moq_net::Server::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
 				.accept_request(now, server)
@@ -614,12 +616,10 @@ mod tests {
 			let mut changed = grant("a/**", 3000);
 			change(&mut changed);
 			producer.update(changed);
-			let handle = request.auth();
 			assert!(matches!(
-				lease.preparing(handle.clone(), request.role()),
+				lease.preparing(request.auth(), request.requests(), request.role()),
 				Err(moq_net::Error::Unauthorized)
 			));
-			handle.requests().expect("refused before taking the request queue");
 			request.close(moq_net::Error::Unauthorized);
 		};
 		let ((session, driver), ()) = tokio::join!(connecting, refusing);
