@@ -2,6 +2,8 @@ use crate::{auth, cluster, incoming::Incoming, refusals::RefusalKind};
 
 use axum::http;
 use tracing::Instrument;
+#[cfg(all(target_os = "linux", feature = "_uring"))]
+use tracing::instrument::WithSubscriber;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -213,7 +215,7 @@ impl Lifecycle {
 		match self.isolate(start).await {
 			Ok(supervise) => {
 				let lifecycle = self.clone();
-				runtime.spawn(async move { lifecycle.run(supervise).await });
+				runtime.spawn(async move { lifecycle.run(supervise).await }.with_current_subscriber());
 			}
 			Err(err) => self.closed(Err(err)),
 		}
@@ -254,7 +256,11 @@ impl Lifecycle {
 			}
 		}
 
-		let task = runtime.spawn(moq_tokio::panic::isolate(task).instrument(self.span.clone()));
+		let task = runtime.spawn(
+			moq_tokio::panic::isolate(task)
+				.instrument(self.span.clone())
+				.with_current_subscriber(),
+		);
 		let _abort = AbortOnDrop(task.abort_handle());
 		task.await
 			.context("connection task failed")?
@@ -427,11 +433,7 @@ pub(crate) fn failure(error: &moq_net::Error) -> Option<moq_net::stats::Failure>
 	use moq_net::stats::Failure;
 	use moq_net::{Error, SessionError};
 	match error {
-		Error::Cancel
-		| Error::Closed
-		| Error::GoingAway
-		| Error::SessionClosed
-		| Error::Session(SessionError::Cancel) => None,
+		Error::Cancel | Error::Closed | Error::GoingAway | Error::Session(SessionError::Cancel) => None,
 		Error::IdleTimeout => Some(Failure::IdleTimeout),
 		Error::Transport(_) => Some(Failure::Transport),
 		_ => Some(Failure::Application),
@@ -468,7 +470,6 @@ mod tests {
 			Error::Cancel,
 			Error::Closed,
 			Error::GoingAway,
-			Error::SessionClosed,
 			Error::Session(SessionError::Cancel),
 		] {
 			assert_eq!(failure(&error), None);

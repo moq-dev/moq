@@ -4215,8 +4215,10 @@ impl Subscriber {
 		let dynamic = request.dynamic();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge. Idle
 		// from the accept, so no reader takes it as live in between.
-		let track = request.idle().accept(accepted_info(&ok.properties, self.version));
+		let track = request.idle().stage(accepted_info(&ok.properties, self.version));
+		// Marked received before any reader sees it, so none resolves an anchor this wire dropped.
 		track.received();
+		let track = track.commit();
 		Some(Idle {
 			demand: track.demand(),
 			track,

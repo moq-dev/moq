@@ -439,7 +439,7 @@ pub enum Error {
 	#[error("unexpected message")]
 	UnexpectedMessage,
 
-	/// The peer asked for a feature this endpoint does not implement.
+	/// A feature was asked for that this endpoint, or the wire to the peer, does not implement.
 	#[error("unsupported")]
 	Unsupported,
 
@@ -520,11 +520,6 @@ pub enum Error {
 	/// The track requires a moq-transport property this endpoint does not understand.
 	#[error("unsupported extension")]
 	UnsupportedExtension,
-
-	/// The stream was torn down because the session closed. The specific reason travels on
-	/// the session close, not here.
-	#[error("session closed")]
-	SessionClosed,
 
 	/// A session-scoped protocol error, with its registry and verbatim code.
 	///
@@ -629,7 +624,7 @@ impl From<&Error> for SessionError {
 			Error::Stream(StreamError::App(app)) => Self::App(*app),
 			// A stream-scoped code has no meaning in this registry; don't forward the number.
 			Error::Stream(_) => Self::Internal,
-			Error::Cancel | Error::Closed | Error::GoingAway | Error::SessionClosed => Self::Cancel,
+			Error::Cancel | Error::Closed | Error::GoingAway => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
 			Error::Expired => Self::Expired,
 			Error::Unsupported => Self::Unsupported,
@@ -691,7 +686,6 @@ impl From<&Error> for StreamError {
 			// this session is fine, and the failed session's code means nothing here.
 			Error::Session(_) | Error::Transport(_) | Error::IdleTimeout => Self::Unroutable,
 			Error::Cancel | Error::Closed => Self::Cancel,
-			Error::SessionClosed => Self::Session(SessionError::Cancel),
 			Error::Decode(coding::DecodeError::Session(err)) => Self::Session(err.clone()),
 			Error::Old => Self::Old,
 			Error::Evicted => Self::Evicted,

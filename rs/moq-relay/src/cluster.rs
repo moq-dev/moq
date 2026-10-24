@@ -750,7 +750,7 @@ pub struct Config {
 
 	/// Connect to one or more other cluster nodes. Each entry is a full URL, e.g.
 	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`, `egress`,
-	/// `token`, and `upstream`; see [`Peer`]. A bare host or `host:port` is refused; pass the
+	/// `token`, and `upstream`. A bare host or `host:port` is refused; pass the
 	/// full URL instead. Accepts a comma-separated list on the CLI or repeat the
 	/// flag; in config files use a TOML array of URLs and/or objects.
 	///
@@ -793,7 +793,7 @@ pub struct Config {
 	pub(crate) removed_api_root: Option<serde::de::IgnoredAny>,
 
 	/// This relay's own externally-reachable URL (identity). Sent to
-	/// [`Self::api`] as a `?node=` query param so the endpoint can return
+	/// `--cluster-api-url` as a `?node=` query param so the endpoint can return
 	/// this node's peers, and advertised over mDNS when LAN discovery is on. On
 	/// its own it neither opens nor accepts a connection.
 	#[usage(
@@ -886,7 +886,7 @@ impl Config {
 pub struct LanConfig {
 	/// Enable mDNS discovery. Boolean flag: pass `--cluster-lan` (or `=true` /
 	/// `=false`). Advertises the listener fingerprint when the certificate was
-	/// generated or supplied in-memory, the [`Config::node`] URL when one
+	/// generated or supplied in-memory, the `--cluster-node` URL when one
 	/// is configured, and needs at least one of them.
 	#[usage(
 		name = "cluster-lan",

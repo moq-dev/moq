@@ -72,7 +72,7 @@ pub struct Config {
 	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
 	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
 	/// announce-scope to just that group rather than slurping every node's full
-	/// stats. See [`moq_stats::produce::Config::depth`].
+	/// stats.
 	#[usage(
 		long = "stats-depth",
 		env = "MOQ_STATS_DEPTH",

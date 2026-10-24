@@ -118,7 +118,7 @@ service; `export ts --passthrough` writes it back out. FLV accepts the same
 legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
 fMP4 import splits each fragment into one frame per sample, so players need no
-MP4 parser. `import fmp4 --passthrough` publishes each fragment whole as
+MP4 parser. `import fmp4 --cmaf` publishes each fragment whole as
 [`cmaf`](/concept/hang#container) instead, keeping the source's exact sample
 timing.
 
@@ -418,7 +418,7 @@ ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
 broadcast at once, and a reconnect, which publishes a newer
 [epoch](/concept/moq-lite#publisher-epochs) at the same path, ends the wait.
 
-`export ts`, `export flv`, and `export mkv` take `--delay` instead, like an SRT
+`export ts`, `export flv`, `export rtmp`, and `export mkv` take `--delay` instead, like an SRT
 receiver's latency, all tracks in decode order, so two exporters of one broadcast
 emit the same order. FLV and MKV mux each frame that long after its decode time
 (default 500 ms). TS output runs that far behind the source (default 1 s): the
@@ -429,7 +429,7 @@ top. A frame arriving after its deadline is dropped, and video resumes at its
 next keyframe. The delay also bounds how stale a group may get, so `--delay 0`
 writes each frame as soon as it is read and drops none as late, but still skips
 a stalled group once a newer one is ready.
-FLV and MKV reject their former `--max-delay` spelling with a migration
+FLV, MKV and RTMP refuse the released `--max-age` spelling with a migration
 message. The output follows the source's clock within what ISO/IEC 13818-1
 allows a TS PCR. A source further off fails the export, naming its rate, once
 it has used half the delay; a brief network stall only drops what it made late.

@@ -1486,6 +1486,7 @@ fn publish_track_invalid_broadcast() {
 	let subscription = moq_subscription {
 		priority: 1,
 		max_delay_us: 0,
+		max_delay_present: false,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -1595,6 +1596,7 @@ fn raw_track_publish_consume() {
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -1817,6 +1819,7 @@ fn raw_track_subscription_options_and_update() {
 	let subscription = moq_subscription {
 		priority: 5,
 		max_delay_us: 25_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -1931,6 +1934,7 @@ fn raw_track_time_anchor() {
 	let subscription = moq_subscription {
 		priority: 5,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2031,6 +2035,7 @@ fn raw_track_update_refuses_time_on_untimed() {
 	let update = moq_subscription {
 		priority: 3,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2089,6 +2094,7 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 	let subscribe = |ranges: &[moq_range]| moq_subscription {
 		priority: 0,
 		max_delay_us: 60_000_000,
+		max_delay_present: true,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2359,6 +2365,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 0,
+		max_delay_present: false,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -5903,6 +5910,7 @@ fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 1_000_000,
+		max_delay_present: true,
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
