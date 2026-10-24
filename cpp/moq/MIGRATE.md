@@ -4,10 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Shutdown requests the drain synchronously
+### Connection state
 
-`session->shutdown()` returns `void` and requests the drain synchronously. Use `session->closed().get()` to wait and report delivery failures, or `session->cancel(0)` to cancel immediately. A shutdown request survives session disposal and discarded waiters.
-When upgrading from the release-line additive async `drain()` backport, replace `session->drain().get()` with `session->shutdown(); session->closed().get()`; `main` has no separate `drain()` method.
+`Client::connect` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `state_changed(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `VideoFrameRate{30000, 1001}` and construct producers with `(catalog, AudioProducerOptions{input, output, track, bandwidth})` or the corresponding `VideoProducerOptions`.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
 
 ### Video rendition preference
 
@@ -156,14 +162,13 @@ auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::k
 ### Native codecs have audio and video types (#5694)
 
 `BroadcastProducer::encode_audio` / `encode_video` are `moq::AudioProducer::init` / `moq::VideoProducer::init`, which take a `moq::MediaCatalogProducer`.
-The audio track name moves into `AudioEncoderOutput::track`, and a zero `frame_duration_us` takes the codec's own frame.
+The audio track name belongs to `AudioProducerOptions::track`, and a zero `frame_duration_us` takes the codec's own frame.
 `BroadcastConsumer::decode_audio` / `decode_video` are `moq::AudioConsumer::subscribe` / `moq::VideoConsumer::subscribe`, taking the broadcast first.
 Producers expose subscriber state only through `demand()`, and a video `gop` is a `moq::VideoGop` keyframe variant.
 `moq::AudioEncoder` / `moq::VideoEncoder` encode without publishing.
 
 ```cpp
 moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
-output.track = "audio";
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
-auto audio = ok(moq::AudioProducer::init(catalog, input, output, nullptr));
+auto audio = ok(moq::AudioProducer::init(catalog, {input, output, "audio", nullptr}));
 ```

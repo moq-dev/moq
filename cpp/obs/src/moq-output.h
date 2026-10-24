@@ -53,7 +53,7 @@ public:
 	};
 	bool TryGetConnectionStats(ConnectionStats *out);
 
-	// Successful (re)connects after the first for this Start(); 0 until connects() >= 2.
+	// Successful (re)connects after the first for this Start(); 0 until state().connects >= 2.
 	int GetReconnectCount();
 
 	// True while the current Start() attempt has an open MoQ session.
@@ -88,10 +88,6 @@ private:
 	friend struct MoQOutputStatsTest;
 	bool CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
 				   ConnectionStats *out);
-	// Between reconnects: name why the session is down, for CopyLastFailure.
-	void RecordReconnectFailure(const std::shared_ptr<moq::Session> &current);
-	// Before the first connect: name why the dial is retrying, for CopyLastFailure.
-	void RecordDialFailure();
 
 	// One Start()'s connection: the client dialing, the session once it connects,
 	// and the pending call whose continuation reports on it. Replaced wholesale by
@@ -104,6 +100,7 @@ private:
 		std::chrono::steady_clock::time_point started;
 		// Whether this attempt ever reached the server, which picks between telling
 		// OBS the connection failed and telling it the stream dropped.
+		uint64_t revision = 0;
 		bool connected = false;
 		// False while the session is between reconnects.
 		bool live = false;
@@ -115,8 +112,8 @@ private:
 	};
 
 	void OnConnect(const std::shared_ptr<Attempt> &attempt, moq::expected<std::shared_ptr<moq::Session>> result);
-	void OnStatus(const std::shared_ptr<Attempt> &attempt, moq::expected<moq::ConnectionStatus> result);
-	void WatchStatus(const std::shared_ptr<Attempt> &attempt);
+	void OnState(const std::shared_ptr<Attempt> &attempt, moq::expected<moq::ConnectionState> result);
+	void WatchState(const std::shared_ptr<Attempt> &attempt);
 	void Fail(const std::shared_ptr<Attempt> &attempt, const moq::Error &error);
 
 	// Runs `callback` on the worker if `attempt` is still the current one once it
@@ -176,8 +173,6 @@ private:
 	// Guards the group below, which the dock reads from the UI thread.
 	std::mutex mutex;
 	std::shared_ptr<moq::Session> session;
-	// The client while its first connect is pending, so the dock can ask why it retries.
-	std::shared_ptr<moq::Client> dialing;
 	std::shared_ptr<moq::BandwidthConsumer> recv_bandwidth;
 	bool connected = false;
 	bool live = false;

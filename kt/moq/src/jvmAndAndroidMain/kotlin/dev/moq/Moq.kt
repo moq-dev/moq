@@ -1,7 +1,7 @@
 package dev.moq
 
 /**
- * A connected MoQ session with publish/subscribe conveniences.
+ * A MoQ session with publish/subscribe conveniences.
  *
  * Build one with [Moq.connect]. The underlying [session] always exposes a
  * publisher and a subscriber (wired from the origins in its [ClientConfig], or
@@ -12,7 +12,7 @@ package dev.moq
  * disposal through `use { ... }` or [close] cancels immediately.
  */
 class Moq internal constructor(
-    /** The established session. Use it for [Session.closed]/[Session.shutdown]. */
+    /** The connecting or connected session. Use it for [Session.closed]/[Session.shutdown]. */
     val session: Session,
     private val client: Client,
 ) : AutoCloseable {
@@ -52,14 +52,6 @@ class Moq internal constructor(
     suspend fun requestBroadcast(path: String): BroadcastConsumer = session.consume().requestBroadcast(path)
 
     /**
-     * How many times this session has connected: 1 for the connect that built it, one more on
-     * each reconnect. A server-accepted session stays at 1.
-     *
-     * Pair it with [Session.status] to log each reconnect by number.
-     */
-    fun connects(): ULong = session.connects()
-
-    /**
      * The session's bandwidth allocator.
      *
      * Every call returns a handle to the same registry. [Bandwidth.reserve] a
@@ -95,7 +87,7 @@ class Moq internal constructor(
 
     companion object {
         /**
-         * Connect to a relay at [url] and return the live [Moq] connection.
+         * Connect to a relay at [url] and return a connecting [Moq] connection.
          *
          * [config] carries the TLS trust, bind address, protocol versions, QUIC and
          * WebSocket tuning, reconnect pacing, and origins; every field has a default.

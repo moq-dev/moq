@@ -328,7 +328,7 @@ type Client struct {
 	closeErr  error
 }
 
-// Dial connects to a MoQ server and returns the established client. Cancel ctx
+// Dial starts a MoQ connection and returns without waiting for its first native dial to succeed. Cancel ctx
 // to abort an in-flight connect.
 func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error) {
 	var cfg clientConfig

@@ -4,10 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Shutdown requests the drain synchronously
+### Connection state
 
-`session.shutdown()` requests a drain synchronously; `await session.closed()` waits for its result. `Moq.close()` returns `Future<void>` and drains before stopping the client, so await it. Use `session.cancel(code: 0)` for immediate cancellation.
-When upgrading from the release-line additive async `drain()` backport, replace `await session.drain()` with `session.shutdown(); await session.closed()`; `main` has no separate `drain()` method.
+`Moq.connect` returns a connecting native session. Replace status, connect-count, and failure polls with `session.state()` and `session.stateChanged(after: state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate(numerator: 30000, denominator: 1001)` and pass `options: ProducerOptions(input: input, output: output, track: track, bandwidth: bandwidth)` to the matching audio/video producer.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
 
 ### Video rendition preference
 

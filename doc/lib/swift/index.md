@@ -76,8 +76,9 @@ try audio.cut() // audio has no keyframes, so this is what gives it groups
 
 let video = try Video.Producer(
     catalog: Media.CatalogProducer(broadcast: broadcast),
-    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
-    output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .auto)
+    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
+    output: VideoEncoderOutput(codec: .h264, kind: .auto),
+    track: "camera"
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
 try broadcast.announce(route: AnnounceRoute(epoch: mintEpoch())) // a fresh epoch per run
@@ -88,6 +89,8 @@ try broadcast.close()
 session.shutdown()
 try await session.closed()
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings.
 
 ## Things to know
 
@@ -100,7 +103,7 @@ shows which module holds each.
 - **Decoded frames hold decoder buffers.** Release each frame from a `Video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `session.shutdown()` requests a drain immediately; `try await session.closed()` waits up to one second and reports its result. `session.cancel(code:)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `try broadcast.finish()`. The returned `BroadcastFinish` keeps the broadcast announced and serving the finished tracks for `lingerUs`, their longest max age, so a subscriber still catching up can drain them. `try await finish.wait()` returns once the linger passes; cancelling its task, or `finish.close()`, closes the broadcast at once. `broadcast.close()` stays the abrupt end.
-- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `nil` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol, and while a client session reconnects `session.failure()` says why. Before the first connect, `client.failure()` says why the dial is retrying. Hold the owned `Bandwidth.Consumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `nil` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `Bandwidth.Consumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `Client(versions:)`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `session.auth().grant()` is the `Grant` the relay sent back, `nil` until it answers and while a client session reconnects; `try await auth.grantChanged()` waits for the next one. `try await auth.add(token:)` presents a fresh token without reconnecting, returns an `AuthToken` whose grant joins the union until `cancel()`, and is presented again on every reconnect. A refusal throws with the relay's code.
 - **Errors.** Diagnostic cases use the `reason:` argument label; match their associated value to inspect it. Protocol errors carry `details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.

@@ -17,8 +17,11 @@ Decided 2026-10-22 (API audit). Known gaps, verify each against
   Verify its entries against `release`, including the additive async `drain()`
   backport mapping, rather than documenting the intermediate async shutdown.
 - Bindings: merge the contradictory `finish` entries ("removed (#4152)" and
-  "the new `finish` lets go (#6157)") into one: `finish()` now returns a
-  linger handle; call `close()` for the old behavior.
+  "the new `finish` lets go (#6157)") into one that names the final API:
+  once [stateless broadcasts](/quest/m1/broadcast-lifecycle/stateless.md)
+  lands, the broadcast `finish()` is gone, so a publisher finishes its tracks
+  and closes the broadcast. If this lands first, leave the entry for that
+  quest to rewrite rather than document the linger handle.
 - Bindings: `rs/moq-ffi/MIGRATE.md` says a raw track is timed by default,
   but `MoqTrackInfo.timescale` defaults to `None` (untimed) while release
   defaulted to microseconds; the net change is timed to untimed by default.

@@ -4,10 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Shutdown requests the drain synchronously
+### Connection state
 
-`session.shutdown()` is synchronous and requests a drain. Follow it with `try await session.closed()` to wait and report delivery failures; use `session.cancel(code: 0)` for immediate cancellation.
-When upgrading from the release-line additive async `drain()` backport, replace `try await session.drain()` with `session.shutdown(); try await session.closed()`; `main` has no separate `drain()` method.
+`Client.connect(to:)` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `stateChanged(after: state.revision)`. Use `ConnectionState.phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `Video.FrameRate(numerator: 30000, denominator: 1001)` and move `track:` from encoder output to `Audio.Producer` / `Video.Producer`.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
 
 ### Video rendition preference
 
@@ -146,7 +152,7 @@ let config = Media.TrackConfig(rendition: .video(id: id, config: video))
 ### Native codecs have `Audio` and `Video` namespaces (#5694)
 
 `BroadcastProducer.encodeAudio` / `encodeVideo` are `Audio.Producer` / `Video.Producer` initializers that take a `Media.CatalogProducer`.
-The audio track name moves into the encoder output's `track`, and a zero frame duration takes the codec's own frame.
+The audio track name belongs to the producer's publication options, and a zero frame duration takes the codec's own frame.
 `BroadcastConsumer.decodeAudio` / `decodeVideo` are `Audio.Consumer.subscribe(broadcast:...)` / `Video.Consumer.subscribe(broadcast:...)`.
 Producers expose subscriber state only through `demand()`, and a video GOP is `Video.Gop.keyframe(interval:)`.
 `Audio.Encoder` / `Video.Encoder` encode without publishing.
@@ -185,7 +191,7 @@ The `Client` setters are `Client(...)` arguments, with `tls`, `quic`, `websocket
 `setReconnect(false)` is `once: true`.
 A value the native side cannot use throws `MoqError.Config`, including a bad bind address.
 `Server` takes its config at init too, and a request takes its origins in `accept(publish:consume:)`, where `nil` inherits the server's origin.
-`Session.shutdown()` requests a drain synchronously; `try await session.closed()` waits for its result.
+`Session.shutdown()` is `async throws` and drains before returning.
 
 ```swift
 let client = try Client(tls: ClientTls(insecure: true), consume: origin)

@@ -4,10 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Shutdown requests the drain synchronously
+### Connection state
 
-`shutdown()` requests a drain synchronously; `try await closed()` waits for its result and reports delivery failures. Regenerate bindings and link the matching native library together. See the [core migration guide](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md) for the core contract.
-When upgrading from the release-line additive async `drain()` backport, replace the release-line async `drain()` with `shutdown()` followed by `try await closed()`; `main` has no separate `drain()` method.
+Generated connection APIs now expose `MoqConnectionState` and `MoqConnectionPhase`, with `state()` and revision-based `state_changed(after)` instead of status, connect-count, and failure polls. Connect returns before its first dial completes. Regenerate bindings from the matching Rust metadata.
+
+### Exact encoder rates and publication options
+
+Encoder configuration is breaking: `MoqVideoEncoderInput.framerate` is now a
+`MoqVideoFrameRate { numerator, denominator }` (use `{30, 1}` for 30 fps or
+`{30000, 1001}` for NTSC). Zero components and rates above 1,000,000 fps are
+refused. `track` moves out of both encoder output records into
+`MoqAudioProducerOptions` / `MoqVideoProducerOptions`, alongside `input`,
+`output`, and optional `bandwidth`. Producers now take `(catalog, options)`;
+codec-only encoders keep their input/output arguments and take no publication
+settings. Regenerate bindings and rebuild the native library together.
 
 ### Video rendition preference
 
