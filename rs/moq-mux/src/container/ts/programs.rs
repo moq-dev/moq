@@ -225,12 +225,11 @@ impl Programs {
 		let read = self.readers[usize::from(packet.pid)]
 			.iter()
 			.any(|&index| self.programs[index].import.reads_pmt(packet.pid));
-		let carried = waiting.sections.assembling();
 		let began = waiting.began_read;
 		let mut sections = Vec::new();
 		waiting.sections.push(packet.pkt, &mut sections);
-		// The section still assembling began in this packet, unless the one before carried on.
-		if waiting.sections.assembling() && (!carried || !sections.is_empty()) {
+		let resumed = waiting.sections.resumed();
+		if waiting.sections.fresh() {
 			waiting.began_read = read;
 		}
 		// Corrupt sections no program read from their start.
@@ -242,7 +241,7 @@ impl Programs {
 				continue;
 			}
 			if !psi::crc_ok(&section) {
-				let read = if index == 0 && carried { began } else { read };
+				let read = if index == 0 && resumed { began } else { read };
 				corrupt += u64::from(!read);
 				continue;
 			}
@@ -679,6 +678,24 @@ mod test {
 		data.extend_from_slice(&split[..188]);
 		data.extend(psi_packets(0, &mut cc, &[], &psi::section(0x00, 1, 1, 0, 0, &moved)));
 		data.extend_from_slice(&split[188..]);
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.stats().crc_error, 1);
+
+		// After that move, a section start abandons the partial for another split corrupt
+		// section, which the moved program reads from its start, so it alone counts it.
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut cc = 0;
+		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100), (2, 0x0200)]));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
+		data.extend_from_slice(&split[..188]);
+		data.extend(psi_packets(0, &mut cc, &[], &psi::section(0x00, 1, 1, 0, 0, &moved)));
+		data.extend(psi_packets(
+			0x0200,
+			&mut 1,
+			&[],
+			&corrupt(pmt_section(2, 0, &[(MP2, 0x0071, &private)])),
+		));
 		programs.decode(&data).unwrap();
 		assert_eq!(programs.stats().crc_error, 1);
 

@@ -2662,12 +2662,21 @@ pub(super) struct SectionReassembler {
 	span: Option<Span>,
 	/// Shared with the PES path: a broken chain drops the partial either way.
 	continuity: Continuity,
+	/// Whether the first section the latest packet completed began in an earlier packet.
+	resumed: bool,
+	/// Whether the partial section left assembling began in the latest packet.
+	fresh: bool,
 }
 
 impl SectionReassembler {
-	/// Whether a section is partway assembled.
-	pub(super) fn assembling(&self) -> bool {
-		!self.acc.is_empty()
+	/// Whether the first section the latest packet completed began in an earlier packet.
+	pub(super) fn resumed(&self) -> bool {
+		self.resumed
+	}
+
+	/// Whether the latest packet began the partial section left assembling.
+	pub(super) fn fresh(&self) -> bool {
+		self.fresh && !self.acc.is_empty()
 	}
 
 	/// Consume one 188-byte TS packet, appending every completed section to `out`.
@@ -2679,6 +2688,8 @@ impl SectionReassembler {
 
 	fn push_at(&mut self, pkt: &[u8], source: Option<(u64, &Placement)>, out: &mut Vec<(Option<Span>, Vec<u8>)>) {
 		let pkt: &[u8; 188] = pkt.try_into().expect("section packet must be 188 bytes");
+		self.resumed = false;
+		self.fresh = false;
 		match self.continuity.observe(pkt) {
 			Continuation::Duplicate => return,
 			// A packet flagged corrupt takes its own payload down with the partial: this is
@@ -2719,7 +2730,9 @@ impl SectionReassembler {
 				// progress (stream just joined, or a reset dropped the partial) these
 				// bytes are an orphaned fragment, so skip straight to the pointer_field.
 				self.acc.extend_from_slice(&payload[1..1 + ptr]);
+				let completed = out.len();
 				self.drain(out, source, end - (payload.len() - 1 - ptr) as u64);
+				self.resumed = out.len() > completed;
 			}
 			// The pointer_field is a hard section boundary: drop any leftover partial
 			// and start the section it points to.
@@ -2727,6 +2740,7 @@ impl SectionReassembler {
 			self.acc.extend_from_slice(&payload[1 + ptr..]);
 			self.span = source.and_then(|(_, placement)| placement.span(end - self.acc.len() as u64));
 			self.drain(out, source, end);
+			self.fresh = true;
 		} else if !self.acc.is_empty() {
 			// Continuation of the section in progress. A non-PUSI packet with nothing
 			// in progress is unaligned (no pointer_field to resync on), so it is
@@ -2734,7 +2748,10 @@ impl SectionReassembler {
 			// discontinuity, or corrupt pointer dropped the partial, rather than
 			// resuming on stray bytes that merely look like a section.
 			self.acc.extend_from_slice(payload);
+			let completed = out.len();
 			self.drain(out, source, end);
+			self.resumed = out.len() > completed;
+			self.fresh = self.resumed;
 		}
 	}
 
