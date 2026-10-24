@@ -144,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
 			}
 			let options = moq_net::track::Subscription::default()
 				.with_max_delay(Duration::from_secs(if drop { 60 } else { 5 }))
-				.with_groups(0..);
+				.with_range(0..);
 			let mut track = remote.subscribe(Some(options)).await?;
 			if datagram {
 				println!("datagram ready");

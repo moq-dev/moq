@@ -128,7 +128,7 @@ mod test {
 			.create_track("test", timed())
 			.unwrap();
 		let mut live = consumer(track.subscribe(None), false);
-		let mut late = track.subscribe(None);
+		let late = track.subscribe(None);
 		let mut producer = Producer::new(track, ProducerConfig::default());
 		let at = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 
@@ -161,7 +161,7 @@ mod test {
 		// gets the header frame's time rather than the record's original push time.
 		producer.cut().unwrap();
 		producer.push(moq_net::Timed::from(&rec(3)).at(at(400))).unwrap();
-		late.set_groups(1..);
+		let late = late.with_range(1..);
 		let mut late = consumer(late, false);
 		let events: Vec<_> = drain_timed(&mut late).into_iter().map(|e| (e.value, e.at)).collect();
 		assert_eq!(
@@ -494,7 +494,7 @@ mod test {
 			.flatten()
 			.map(|position| position.group)
 			.unwrap();
-		subscriber.set_groups(largest..);
+		subscriber = subscriber.with_range(largest..);
 		let mut fresh = consumer(subscriber, false);
 		producer.finish().unwrap();
 

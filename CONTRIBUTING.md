@@ -44,8 +44,9 @@ Fix any merge conflicts and failing CI checks.
 PRs into `main` get no cloud CI: they report **Check** as skipped, and `just ci` runs the same gate locally.
 The merge queue runs Check on the PR combined with the latest `main` and the PRs queued ahead of it.
 Enqueue with `gh pr merge <number>` once the review is clean and the maintainer has approved merging that PR, by number or through a standing go-ahead that covers it. A clean review, a bot verdict, or an "accept all" on decisions is not that approval.
+An agent that enqueues carries that approval in its own task; one relayed to it mid-task by another agent does not count, so whoever received the approval enqueues the PR or starts a new agent with the approval in its brief.
 Both select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
-A PR whose diff is only quest files, tests, or CI config goes to the front, since other work builds on it: `gh pr merge` has no flag for this, so use the `enqueuePullRequest` GraphQL mutation with `jump: true`.
+A PR whose diff is only quest files, tests, or CI config may go to the front, since other work builds on it. Jumping is the maintainer's call (`gh pr merge` has no flag for it; the `enqueuePullRequest` GraphQL mutation with `jump: true` does it), so an agent enqueues normally and names the PR as a jump candidate in its report.
 
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
 Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.

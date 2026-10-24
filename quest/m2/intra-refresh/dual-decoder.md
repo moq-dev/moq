@@ -34,7 +34,8 @@ Decided in the 2026-10-14 planning interview:
   rounded-down or stale `warmup` only shrinks its budget and costs extra
   stripes, never a dirty frame the min-delay decoder wasn't also showing.
   This quest therefore does not wait on
-  [plan-boundary](/quest/m2/intra-refresh/plan-boundary.md).
+  [plan-boundary](/quest/m2/intra-refresh/plan-boundary.md); the warmup draft
+  amendment it needed landed in [#6494](https://github.com/moq-dev/moq/pull/6494).
 - Selection is a small frame selector over the two current candidates: show
   the max-delay frame when its timestamp is at or beyond the min-delay frame's,
   so it wins ties, else the min-delay frame. Separately, never display a

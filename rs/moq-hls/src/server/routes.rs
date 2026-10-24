@@ -45,13 +45,23 @@ impl Server {
 		match &route.resource {
 			Resource::Master => master(self, broadcast, query).await,
 			Resource::Manifest => manifest(self, broadcast, query).await,
-			Resource::Media { kind, rendition } => media(self, broadcast, *kind, rendition, query).await,
-			Resource::Init { kind, rendition, hash } => init(self, broadcast, *kind, rendition, hash).await,
+			Resource::Media {
+				instance,
+				kind,
+				rendition,
+			} => media(self, At::new(broadcast, instance, *kind, rendition), query).await,
+			Resource::Init {
+				instance,
+				kind,
+				rendition,
+				hash,
+			} => init(self, At::new(broadcast, instance, *kind, rendition), hash).await,
 			Resource::Segment {
+				instance,
 				kind,
 				rendition,
 				segment: id,
-			} => segment(self, broadcast, *kind, rendition, id).await,
+			} => segment(self, At::new(broadcast, instance, *kind, rendition), id).await,
 		}
 	}
 }
@@ -90,8 +100,8 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 	}
 }
 
-async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, query: Option<&str>) -> Response {
-	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
+async fn media(server: &Server, at: At<'_>, query: Option<&str>) -> Response {
+	let Some(rendition) = rendition_for(server, at).await else {
 		return not_found();
 	};
 	match moq_clock::timeout(READY_TIMEOUT, rendition.playlist(query)).await {
@@ -101,25 +111,45 @@ async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, qu
 	}
 }
 
-async fn init(server: &Server, broadcast: &str, kind: Kind, rendition: &str, hash: &str) -> Response {
-	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
+async fn init(server: &Server, at: At<'_>, hash: &str) -> Response {
+	let Some(rendition) = rendition_for(server, at).await else {
 		return not_found();
 	};
 	media_result(rendition.init(hash).await, server)
 }
 
-async fn segment(server: &Server, broadcast: &str, kind: Kind, rendition: &str, id: &segments::Id) -> Response {
-	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
+async fn segment(server: &Server, at: At<'_>, id: &segments::Id) -> Response {
+	let Some(rendition) = rendition_for(server, at).await else {
 		return not_found();
 	};
 	media_result(rendition.segment(id).await, server)
 }
 
+/// A rendition of one publisher instance, as an instance-scoped URL names it.
+#[derive(Clone, Copy)]
+struct At<'a> {
+	broadcast: &'a str,
+	instance: &'a str,
+	kind: Kind,
+	rendition: &'a str,
+}
+
+impl<'a> At<'a> {
+	fn new(broadcast: &'a str, instance: &'a str, kind: Kind, rendition: &'a str) -> Self {
+		Self {
+			broadcast,
+			instance,
+			kind,
+			rendition,
+		}
+	}
+}
+
 /// Resolve a rendition, waiting for the catalog to populate.
-async fn rendition_for(server: &Server, broadcast: &str, kind: Kind, rendition: &str) -> Option<Arc<Rendition>> {
-	let broadcaster = server.broadcaster(broadcast).await?;
+async fn rendition_for(server: &Server, at: At<'_>) -> Option<Arc<Rendition>> {
+	let broadcaster = server.instance(at.broadcast, at.instance).await?;
 	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
-	broadcaster.rendition(kind, rendition)
+	broadcaster.rendition(at.kind, at.rendition)
 }
 
 fn m3u8(body: String) -> Response {
@@ -145,11 +175,11 @@ fn media_result(result: crate::Result<Option<Bytes>>, server: &Server) -> Respon
 }
 
 fn media_bytes(body: Bytes, server: &Server) -> Response {
-	// Init/segment bytes never change while their URL is listed, but a segment URL without a
-	// generation is not globally unique: a restarted publisher starts a new timeline whose
-	// segment numbers and pts can repeat the old ones with different media. Cap shared caching
-	// at the playlist window - every concurrent viewer of the live window still hits the cache,
-	// while a stale run's bytes age out as fast as the window that stopped listing them.
+	// Init/segment bytes never change while their URL is listed, but a run spliced into one
+	// instance without a generation (see `Broadcaster::set_generation`) can repeat the old run's
+	// segment numbers and pts with different media. Cap shared caching at the playlist window -
+	// every concurrent viewer of the live window still hits the cache, while a stale run's bytes
+	// age out as fast as the window that stopped listing them.
 	let max_age = server.inner.config.window.as_secs().max(1);
 	(
 		[
@@ -192,6 +222,23 @@ mod tests {
 	}
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
+
+	/// The epoch each test's catalog broadcast announces, and so the instance its URLs name.
+	const RUN: &str = "01920000-0000-7000-8000-000000000000";
+
+	fn run() -> moq_net::origin::Route {
+		moq_net::origin::Route::default().with_epoch(RUN.parse().unwrap())
+	}
+
+	/// The instance `server` lists for `broadcast`, which it mints for a session older than
+	/// lite-07, since those carry no epoch.
+	async fn listed(server: &Server, broadcast: &str) -> String {
+		let broadcaster = tokio::time::timeout(TIMEOUT, server.broadcaster(broadcast))
+			.await
+			.expect("resolve timed out")
+			.expect("announced");
+		broadcaster.instance().to_string()
+	}
 
 	fn vp8_frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
 		let payload = if keyframe {
@@ -356,7 +403,8 @@ mod tests {
 		write_three_gops(&mut media);
 
 		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
-		let mut route = Route::parse("/tenant/live/video/video0/media.m3u8").expect("media route");
+		let run = listed(&server, "live").await;
+		let mut route = Route::parse(&format!("/tenant/live/@{run}/video/video0/media.m3u8")).expect("media route");
 		route.broadcast = route.broadcast.strip_prefix("tenant/").expect("scoped").to_string();
 
 		let deadline = tokio::time::Instant::now() + TIMEOUT;
@@ -470,7 +518,7 @@ mod tests {
 	async fn master_answers_404_until_a_rendition_can_start() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
-		broadcast.announce(Default::default()).expect("announce");
+		broadcast.announce(run()).expect("announce");
 		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 
 		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
@@ -480,13 +528,60 @@ mod tests {
 		wait_listed(&app, "/live/master.m3u8", "video/video0/media.m3u8").await;
 	}
 
+	/// A restarted publisher gets URLs of its own, whose numbering starts over: the master lists
+	/// the replacement, while a player already on the old instance keeps its playlist until that
+	/// instance's broadcast closes.
+	#[tokio::test(start_paused = true)]
+	async fn a_restart_lists_the_replacement_under_its_own_urls() {
+		let origin = moq_tokio::origin::spawn();
+		let mut old = origin.create_broadcast("live").expect("publish");
+		old.announce(run()).expect("announce");
+		let (old_catalog, _, old_track, mut old_media) = publish_video(&mut old, video_config(), timed());
+		write_three_gops(&mut old_media);
+
+		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
+		let old_segment = format!("/live/@{RUN}/video/video0/seg/656e3d1b.0.m4s");
+		wait_listed(&app, "/live/master.m3u8", &format!("@{RUN}/video/video0/media.m3u8")).await;
+		wait_listed(&app, &old_playlist, "seg/656e3d1b.0.m4s").await;
+
+		let next = moq_net::Epoch::mint();
+		let mut new = origin.create_broadcast("live").expect("publish");
+		new.announce(moq_net::origin::Route::default().with_epoch(next.clone()))
+			.expect("announce");
+		let (_new_catalog, _, _new_track, mut new_media) = publish_video(&mut new, video_config(), timed());
+		write_three_gops(&mut new_media);
+		let new_playlist = format!("/live/@{}/video/video0/media.m3u8", next.as_str());
+		wait_listed(
+			&app,
+			"/live/master.m3u8",
+			&format!("@{}/video/video0/media.m3u8", next.as_str()),
+		)
+		.await;
+		wait_listed(&app, &new_playlist, "seg/656e3d1b.0.m4s").await;
+		assert_eq!(status(&app, &old_playlist).await, StatusCode::OK);
+		assert_eq!(status(&app, &old_segment).await, StatusCode::OK);
+
+		drop((old_catalog, old_track, old_media, old));
+		let deadline = tokio::time::Instant::now() + TIMEOUT;
+		while status(&app, &old_playlist).await != StatusCode::NOT_FOUND {
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"the closed instance kept serving"
+			);
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+		assert_eq!(status(&app, &old_segment).await, StatusCode::NOT_FOUND);
+		assert_eq!(status(&app, &new_playlist).await, StatusCode::OK);
+	}
+
 	/// A failed timeline answers every listing, a clip included, with an uncacheable error
 	/// rather than ending it as a complete recording or refusing the range.
 	#[tokio::test(start_paused = true)]
 	async fn a_failed_timeline_answers_an_uncacheable_error() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
-		broadcast.announce(Default::default()).expect("announce");
+		broadcast.announce(run()).expect("announce");
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let name = hang::timeline::default_name("video0");
 		catalog
@@ -511,14 +606,14 @@ mod tests {
 		}
 
 		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
-		wait_listed(&app, "/live/video/video0/media.m3u8", ".2.m4s").await;
+		wait_listed(&app, &format!("/live/@{RUN}/video/video0/media.m3u8"), ".2.m4s").await;
 		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
 
 		drop(timeline);
 		track
 			.abort(moq_net::Error::Transport("connection lost".into()))
 			.unwrap();
-		for uri in ["/live/video/video0/media.m3u8", "/live/manifest.mpd"] {
+		for uri in [&format!("/live/@{RUN}/video/video0/media.m3u8"), "/live/manifest.mpd"] {
 			let deadline = tokio::time::Instant::now() + TIMEOUT;
 			let response = loop {
 				let response = oneshot(app.clone(), uri).await;
@@ -539,17 +634,22 @@ mod tests {
 	async fn serves_only_versioned_media_urls() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
-		broadcast.announce(Default::default()).expect("announce");
+		broadcast.announce(run()).expect("announce");
 		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 		write_three_gops(&mut media);
 
 		let server = Server::new(origin.consume(), crate::export::Config::default());
 		let app = server.router();
-		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
+		wait_listed(
+			&app,
+			&format!("/live/@{RUN}/video/video0/media.m3u8"),
+			"seg/656e3d1b.0.m4s",
+		)
+		.await;
 		let broadcaster = server.broadcaster("live").await.expect("broadcaster");
 		broadcaster.set_generation(Some("run-1")).unwrap();
 
-		let response = oneshot(app.clone(), "/live/video/video0/media.m3u8").await;
+		let response = oneshot(app.clone(), &format!("/live/@{RUN}/video/video0/media.m3u8")).await;
 		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
 		let playlist = String::from_utf8(body.to_vec()).unwrap();
 		assert!(playlist.contains("\nseg/run-1.656e3d1b.0.m4s\n"), "{playlist}");
@@ -561,36 +661,39 @@ mod tests {
 			.unwrap();
 
 		assert_eq!(
-			status(&app, &format!("/live/video/video0/{init}")).await,
+			status(&app, &format!("/live/@{RUN}/video/video0/{init}")).await,
 			StatusCode::OK
 		);
-		assert_eq!(status(&app, "/live/video/video0/init.mp4").await, StatusCode::NOT_FOUND);
 		assert_eq!(
-			status(&app, "/live/video/video0/init.0000000000000000.mp4").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/init.mp4")).await,
+			StatusCode::NOT_FOUND
+		);
+		assert_eq!(
+			status(&app, &format!("/live/@{RUN}/video/video0/init.0000000000000000.mp4")).await,
 			StatusCode::NOT_FOUND
 		);
 
 		assert_eq!(
-			status(&app, "/live/video/video0/seg/run-1.656e3d1b.0.m4s").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.656e3d1b.0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, "/live/video/video0/seg/run-1.656e3d1b.t0.m4s").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.656e3d1b.t0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, "/live/video/video0/seg/656e3d1b.0.m4s").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/656e3d1b.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 		assert_eq!(
-			status(&app, "/live/video/video0/seg/run-0.656e3d1b.0.m4s").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-0.656e3d1b.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 
 		// A new run: the previous generation's URLs are refused even for numbers it reuses.
 		broadcaster.set_generation(Some("run-2")).unwrap();
 		assert_eq!(
-			status(&app, "/live/video/video0/seg/run-1.656e3d1b.0.m4s").await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.656e3d1b.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 	}
@@ -610,10 +713,17 @@ mod tests {
 		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 		write_three_gops(&mut media);
 
-		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
-		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
+		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
+		let run = listed(&server, "live").await;
+		let app = server.router();
+		wait_listed(
+			&app,
+			&format!("/live/@{run}/video/video0/media.m3u8"),
+			"seg/656e3d1b.0.m4s",
+		)
+		.await;
 
-		let response = oneshot(app, "/live/video/video0/seg/656e3d1b.0.m4s").await;
+		let response = oneshot(app, &format!("/live/@{run}/video/video0/seg/656e3d1b.0.m4s")).await;
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
@@ -628,8 +738,15 @@ mod tests {
 		let (catalog, registration, track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 		write_three_gops(&mut media);
 
-		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
-		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
+		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
+		let run = listed(&server, "live").await;
+		let app = server.router();
+		wait_listed(
+			&app,
+			&format!("/live/@{run}/video/video0/media.m3u8"),
+			"seg/656e3d1b.0.m4s",
+		)
+		.await;
 
 		let remote = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("live", None))
 			.await
@@ -640,7 +757,7 @@ mod tests {
 			.await
 			.expect("publisher close timed out");
 
-		let response = oneshot(app, "/live/video/video0/seg/656e3d1b.0.m4s").await;
+		let response = oneshot(app, &format!("/live/@{run}/video/video0/seg/656e3d1b.0.m4s")).await;
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
@@ -716,7 +833,7 @@ mod tests {
 	async fn denied_sibling_media_answers_403_without_poisoning_allowed_siblings() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("room/live").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce(run()).unwrap();
 		let source = origin.create_broadcast("room/source").unwrap();
 		source.announce(Default::default()).unwrap();
 		let secret = origin.create_broadcast("room/secret").unwrap();
@@ -753,14 +870,14 @@ mod tests {
 		let server = Server::new(restricted, Default::default());
 		let broadcaster = server.broadcaster("room/live").await.unwrap();
 		broadcaster.ready().await;
-		let allowed_uri = "/room/live/video/video0/seg/656e3d1b.0.m4s";
-		let denied_uri = "/room/live/video/video1/seg/656e3d1b.0.m4s";
+		let allowed_uri = &format!("/room/live/@{RUN}/video/video0/seg/656e3d1b.0.m4s");
+		let denied_uri = &format!("/room/live/@{RUN}/video/video1/seg/656e3d1b.0.m4s");
 		let app = server.router();
 		assert_eq!(oneshot(app.clone(), allowed_uri).await.status(), StatusCode::OK);
 		for uri in [
 			denied_uri,
-			"/room/live/video/video1/media.m3u8",
-			"/room/live/video/video1/init.unknown.mp4",
+			&format!("/room/live/@{RUN}/video/video1/media.m3u8"),
+			&format!("/room/live/@{RUN}/video/video1/init.unknown.mp4"),
 		] {
 			let response = oneshot(app.clone(), uri).await;
 			assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
@@ -800,7 +917,7 @@ mod tests {
 		assert_eq!(oneshot(app.clone(), denied_uri).await.status(), StatusCode::FORBIDDEN);
 		assert_eq!(oneshot(app.clone(), allowed_uri).await.status(), StatusCode::OK);
 		assert_eq!(
-			oneshot(app, "/room/live/video/video0/seg/656e3d1b.9999.m4s")
+			oneshot(app, &format!("/room/live/@{RUN}/video/video0/seg/656e3d1b.9999.m4s"))
 				.await
 				.status(),
 			StatusCode::NOT_FOUND
@@ -856,8 +973,15 @@ mod tests {
 		drop(reserved);
 		write_three_gops(&mut media);
 
-		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
-		wait_listed(&app, "/room/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
+		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
+		let run = listed(&server, "room/live").await;
+		let app = server.router();
+		wait_listed(
+			&app,
+			&format!("/room/live/@{run}/video/video0/media.m3u8"),
+			"seg/656e3d1b.0.m4s",
+		)
+		.await;
 
 		// Waited on rather than requested once: a client only asks about what it watches.
 		let remote_media = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().routed_broadcast("room/source"))
@@ -871,7 +995,7 @@ mod tests {
 			.await
 			.expect("sibling close timed out");
 
-		let response = oneshot(app, "/room/live/video/video0/seg/656e3d1b.0.m4s").await;
+		let response = oneshot(app, &format!("/room/live/@{run}/video/video0/seg/656e3d1b.0.m4s")).await;
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 

@@ -7,7 +7,8 @@
 //! that skips a span (a gap) or a client that joins mid-window never mis-addresses a segment
 //! the way positional numbering would.
 //!
-//! URIs are relative to the manifest (`/<broadcast>/manifest.mpd`). The rendition name is
+//! URIs are relative to the manifest (`/<broadcast>/manifest.mpd`), under the publisher instance
+//! it lists (`@<instance>/<kind>/<rendition>/...`). The rendition name is
 //! one percent-encoded path segment, using the HLS master's set, and the finished URL is
 //! then XML-escaped, so a name containing `/` still resolves under the broadcast. The
 //! `Representation` id keeps the raw name. The resources are shared byte-for-byte with the
@@ -66,6 +67,8 @@ pub(crate) struct Representation {
 
 /// Everything a manifest render needs; built by `Broadcaster::manifest`.
 pub(crate) struct Manifest {
+	/// The publisher instance every representation's URLs are under.
+	pub instance: Arc<str>,
 	/// The wall-clock time of timeline `pts` 0 (`MPD@availabilityStartTime`). Required while
 	/// live (`type="dynamic"`); ignored once [`finished`](Self::finished).
 	pub availability_start: Option<Wall>,
@@ -136,7 +139,7 @@ fn max_segment_duration<'a>(representations: impl Iterator<Item = &'a Representa
 		.max(1)
 }
 
-fn render_representation(out: &mut String, rep: &Representation, query: Option<&str>) {
+fn render_representation(out: &mut String, instance: &str, rep: &Representation, query: Option<&str>) {
 	let kind = rep.kind.as_str();
 	// The id is the raw name. The URL encodes it first, as one path segment: a slash left
 	// raw would name a different broadcast, and XML-escaping before encoding would turn `&`
@@ -149,9 +152,9 @@ fn render_representation(out: &mut String, rep: &Representation, query: Option<&
 		.map(|generation| format!("{generation}."))
 		.unwrap_or_default();
 	let suffix = query.map(|query| format!("?{query}")).unwrap_or_default();
-	let initialization = escape(&format!("{kind}/{segment}/init.{}.mp4{suffix}", rep.init));
+	let initialization = escape(&format!("@{instance}/{kind}/{segment}/init.{}.mp4{suffix}", rep.init));
 	let media = escape(&format!(
-		"{kind}/{segment}/seg/{generation}{}.t$Time$.m4s{suffix}",
+		"@{instance}/{kind}/{segment}/seg/{generation}{}.t$Time$.m4s{suffix}",
 		rep.tag
 	));
 
@@ -203,6 +206,7 @@ fn render_representation(out: &mut String, rep: &Representation, query: Option<&
 
 fn render_adaptation_sets<'a>(
 	out: &mut String,
+	instance: &str,
 	kind: Kind,
 	representations: impl Iterator<Item = &'a Representation>,
 	query: Option<&str>,
@@ -231,7 +235,7 @@ fn render_adaptation_sets<'a>(
 			"    <AdaptationSet contentType=\"{content}\" mimeType=\"{mime}\" segmentAlignment=\"true\" startWithSAP=\"1\">"
 		);
 		for rep in representations {
-			render_representation(out, rep, query);
+			render_representation(out, instance, rep, query);
 		}
 		let _ = writeln!(out, "    </AdaptationSet>");
 	}
@@ -306,12 +310,14 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		);
 		render_adaptation_sets(
 			&mut out,
+			&manifest.instance,
 			Kind::Video,
 			manifest.video.iter().filter(|rep| rep.period == period),
 			query,
 		);
 		render_adaptation_sets(
 			&mut out,
+			&manifest.instance,
 			Kind::Audio,
 			manifest.audio.iter().filter(|rep| rep.period == period),
 			query,
@@ -354,6 +360,7 @@ mod tests {
 		next.period = moq_net::Timestamp::from_secs(6).unwrap();
 		next.tag = "next".into();
 		let manifest = Manifest {
+			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(4),
@@ -379,6 +386,7 @@ mod tests {
 		next.timescale = 90_000;
 		next.period = moq_net::Timestamp::new(1, scale).unwrap();
 		let manifest = Manifest {
+			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(16),
@@ -414,6 +422,7 @@ mod tests {
 	#[test]
 	fn renders_dynamic_manifest() {
 		let manifest = Manifest {
+			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
 			publish: Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_410_000),
 			window: Duration::from_secs(16),
@@ -444,7 +453,7 @@ mod tests {
 			"<AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"2\"/>"
 		));
 		assert!(out.contains(
-			"<SegmentTemplate timescale=\"1000\" initialization=\"video/video0/init.0123abcd.mp4\" media=\"video/video0/seg/ab12cd34.t$Time$.m4s\">"
+			"<SegmentTemplate timescale=\"1000\" initialization=\"@run/video/video0/init.0123abcd.mp4\" media=\"@run/video/video0/seg/ab12cd34.t$Time$.m4s\">"
 		));
 		assert!(out.contains("<S t=\"0\" d=\"2000\"/>"));
 		assert!(out.contains("<S t=\"2000\" d=\"2000\"/>"));
@@ -454,6 +463,7 @@ mod tests {
 	#[test]
 	fn renders_static_manifest_when_finished() {
 		let manifest = Manifest {
+			instance: "run".into(),
 			availability_start: None,
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(16),
@@ -478,6 +488,7 @@ mod tests {
 	#[test]
 	fn query_rides_child_urls_escaped() {
 		let manifest = Manifest {
+			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(16),
@@ -487,8 +498,8 @@ mod tests {
 		};
 
 		let out = render_manifest(&manifest, Some("jwt=abc.def&x=1"));
-		assert!(out.contains("initialization=\"video/video0/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""));
-		assert!(out.contains("media=\"video/video0/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""));
+		assert!(out.contains("initialization=\"@run/video/video0/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""));
+		assert!(out.contains("media=\"@run/video/video0/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""));
 	}
 
 	#[test]
@@ -496,6 +507,7 @@ mod tests {
 		let mut rep = video(vec![(0, 2_000)], false);
 		rep.generation = Some("run-7".into());
 		let manifest = Manifest {
+			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(16),
@@ -505,8 +517,8 @@ mod tests {
 		};
 
 		let out = render_manifest(&manifest, None);
-		assert!(out.contains("initialization=\"video/video0/init.0123abcd.mp4\""));
-		assert!(out.contains("media=\"video/video0/seg/run-7.ab12cd34.t$Time$.m4s\""));
+		assert!(out.contains("initialization=\"@run/video/video0/init.0123abcd.mp4\""));
+		assert!(out.contains("media=\"@run/video/video0/seg/run-7.ab12cd34.t$Time$.m4s\""));
 	}
 
 	#[test]
@@ -519,6 +531,7 @@ mod tests {
 	#[test]
 	fn empty_and_gap_only_representations_are_omitted() {
 		let manifest = Manifest {
+			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(16),
@@ -537,6 +550,7 @@ mod tests {
 		rep.name = name.into();
 		render_manifest(
 			&Manifest {
+				instance: "run".into(),
 				availability_start: Some(Wall::UNIX_EPOCH),
 				publish: Wall::UNIX_EPOCH,
 				window: Duration::from_secs(16),
@@ -555,14 +569,14 @@ mod tests {
 		let out = render_named("video/1080p", Some("jwt=abc.def&x=1"));
 		assert!(out.contains("id=\"video/video/1080p\""), "{out}");
 		assert!(
-			out.contains("initialization=\"video/video%2F1080p/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""),
+			out.contains("initialization=\"@run/video/video%2F1080p/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""),
 			"{out}"
 		);
 		assert!(
-			out.contains("media=\"video/video%2F1080p/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""),
+			out.contains("media=\"@run/video/video%2F1080p/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""),
 			"{out}"
 		);
-		assert!(!out.contains("initialization=\"video/video/1080p/"), "{out}");
+		assert!(!out.contains("initialization=\"@run/video/video/1080p/"), "{out}");
 
 		let cases = [
 			("cam?1", "cam%3F1"),
@@ -577,11 +591,11 @@ mod tests {
 				"id stays raw for {name}: {out}"
 			);
 			assert!(
-				out.contains(&format!("initialization=\"video/{segment}/init.0123abcd.mp4\"")),
+				out.contains(&format!("initialization=\"@run/video/{segment}/init.0123abcd.mp4\"")),
 				"init for {name}: {out}"
 			);
 			assert!(
-				out.contains(&format!("media=\"video/{segment}/seg/ab12cd34.t$Time$.m4s\"")),
+				out.contains(&format!("media=\"@run/video/{segment}/seg/ab12cd34.t$Time$.m4s\"")),
 				"media for {name}: {out}"
 			);
 		}
@@ -592,11 +606,11 @@ mod tests {
 		let out = render_named("a&b\"c", Some("x=1&y=2"));
 		assert!(out.contains("id=\"video/a&amp;b&quot;c\""), "{out}");
 		assert!(
-			out.contains("initialization=\"video/a%26b%22c/init.0123abcd.mp4?x=1&amp;y=2\""),
+			out.contains("initialization=\"@run/video/a%26b%22c/init.0123abcd.mp4?x=1&amp;y=2\""),
 			"{out}"
 		);
 		assert!(
-			out.contains("media=\"video/a%26b%22c/seg/ab12cd34.t$Time$.m4s?x=1&amp;y=2\""),
+			out.contains("media=\"@run/video/a%26b%22c/seg/ab12cd34.t$Time$.m4s?x=1&amp;y=2\""),
 			"{out}"
 		);
 		assert!(!out.contains("&amp;amp;"), "{out}");

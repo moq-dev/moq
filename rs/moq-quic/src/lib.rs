@@ -53,8 +53,8 @@ mod connection;
 pub use crate::connection::{
     Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, CreditStats,
     Datagrams, Event, FinishError, FrameStats, LeaseError, Leased, PathStats, ReadError,
-    ReadableError, RecvStream, RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions,
-    SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
+    ReadableError, RecvStream, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
+    ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "mux")]
 #[doc(hidden)]
@@ -99,7 +99,7 @@ pub use crate::shared::{ConnectionEvent, ConnectionId, EcnCodepoint, EndpointEve
 mod transport_error;
 pub use crate::transport_error::{Code as TransportErrorCode, Error as TransportError};
 
-pub mod congestion;
+use moq_congestion as congestion;
 
 mod cid_generator;
 pub use crate::cid_generator::{

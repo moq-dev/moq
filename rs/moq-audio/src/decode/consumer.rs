@@ -207,7 +207,7 @@ impl Consumer {
 			&& warmup.is_zero()
 			&& let Some(live_edge) = subscriber.largest().await
 		{
-			subscriber.set_groups(live_edge.group..);
+			subscriber = subscriber.with_range(live_edge.group..);
 		}
 		let track = subscriber;
 		let retention = track.info().max_age;

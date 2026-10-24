@@ -602,7 +602,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		24 => roundtrip::<ietf::SubscribeNamespaceLegacy<'static>, _>(rest, version),
 		25 => roundtrip::<ietf::SubscribeNamespaceOk, _>(rest, version),
 		26 => roundtrip::<ietf::SubscribeNamespaceError<'static>, _>(rest, version),
-		27 => roundtrip::<ietf::UnsubscribeNamespace, _>(rest, version),
+		27 => roundtrip::<ietf::UnsubscribeNamespace<'static>, _>(rest, version),
 		28 => roundtrip::<ietf::Namespace<'static>, _>(rest, version),
 		29 => roundtrip::<ietf::NamespaceDone<'static>, _>(rest, version),
 		30 => roundtrip::<ietf::MaxRequestId, _>(rest, version),

@@ -70,10 +70,9 @@ struct Serve {
 	/// The moq ALPNs this listener speaks, for the WebTransport subprotocol
 	/// pick.
 	alpns: Arc<Vec<String>>,
-	/// The negotiated-version restriction, when the operator set one.
-	versions: moq_net::Versions,
-	/// `listen.implementation`, the value this listener advertises in SETUP.
-	implementation: Option<String>,
+	/// The moq handshake every connection runs: the listener's versions and
+	/// the extensions and implementation it offers in SETUP.
+	moq: moq_net::Server,
 	/// The address every worker socket shares, reported as a session's `local`.
 	local: SocketAddr,
 	/// `listen.timeout`, which each worker's endpoint starts at a connection's
@@ -111,8 +110,7 @@ pub struct Workers {
 	udp: moq_uring::udp::Config,
 	pin: bool,
 	alpns: Arc<Vec<String>>,
-	versions: moq_net::Versions,
-	implementation: Option<String>,
+	moq: moq_net::Server,
 	timeout: Option<std::time::Duration>,
 	reset_secret: Option<[u8; 32]>,
 
@@ -204,10 +202,7 @@ impl Workers {
 		// Every configured version's ALPN, as the tokio listener advertises.
 		// `h3` rides along for browsers, which negotiate the moq version as a
 		// WebTransport subprotocol instead.
-		let versions: moq_net::Versions = match listen.version.is_empty() {
-			true => Default::default(),
-			false => listen.version.clone().into(),
-		};
+		let versions = listen.versions();
 		let alpns: Vec<String> = versions.alpns().into_iter().map(str::to_owned).collect();
 
 		let alpn = alpns
@@ -250,8 +245,15 @@ impl Workers {
 			udp,
 			pin: config.pin,
 			alpns: Arc::new(alpns),
-			versions,
-			implementation: listen.implementation.clone(),
+			moq: {
+				let mut moq = moq_net::Server::new()
+					.with_versions(versions)
+					.with_extensions(listen.extensions);
+				if let Some(implementation) = &listen.implementation {
+					moq = moq.with_implementation(implementation);
+				}
+				moq
+			},
 			timeout: listen.resolved_timeout(),
 			reset_secret,
 			threads: Vec::new(),
@@ -305,8 +307,7 @@ impl Workers {
 			sessions,
 			tokio: tokio::runtime::Handle::current(),
 			alpns: self.alpns.clone(),
-			versions: self.versions.clone(),
-			implementation: self.implementation.clone(),
+			moq: self.moq.clone(),
 			local: self.addr,
 			timeout: self.timeout,
 			reset_secret: self.reset_secret,
@@ -753,10 +754,7 @@ async fn serve_connection(
 
 	deadline.close = Some(transport.clone());
 	let conn = transport.clone();
-	let mut server = moq_net::Server::new().with_versions(serve.versions.clone());
-	if let Some(implementation) = &serve.implementation {
-		server = server.with_implementation(implementation);
-	}
+	let server = serve.moq.clone();
 	let binding = match url {
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,
@@ -898,7 +896,8 @@ async fn serve_request(
 	let serving = serve.shutdown.serve();
 	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
 	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the
-	// shared runtime, and dropping it aborts the task.
+	// shared runtime, and dropping it aborts the task. Dropping the reply refuses the
+	// session with the timeout code, which its stats count.
 	let shutdown = serve.shutdown.clone();
 	let expired = std::pin::pin!(lifecycle.shared(&serve.tokio, async move { shutdown.expired().await }));
 	let reply = std::pin::pin!(request.ok());

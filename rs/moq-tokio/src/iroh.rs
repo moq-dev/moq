@@ -29,7 +29,7 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::Cont
 
 /// No congestion control: a window that never shrinks, too large for noq to pace.
 ///
-/// noq has no such controller, so this mirrors moq-quic's `congestion::Unlimited`.
+/// noq has no such controller, so this mirrors `moq_congestion::Unlimited`.
 #[derive(Clone, Copy, Debug)]
 struct Unlimited;
 
