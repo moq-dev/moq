@@ -548,6 +548,10 @@ pub enum Error {
 	/// The underlying connection reached its transport idle deadline.
 	#[error("transport idle timeout")]
 	IdleTimeout,
+
+	/// The transport refused a request because the peer granted no stream credit.
+	#[error("no stream credit")]
+	NoStreamCredit,
 }
 
 impl Error {
@@ -651,7 +655,7 @@ impl From<&Error> for SessionError {
 			// says an unrecognized code is an unspecified error. Send that instead.
 			Error::Remote(_) => Self::Internal,
 			// Our own transport failed: there is no code to say so.
-			Error::Transport(_) | Error::IdleTimeout => Self::Internal,
+			Error::Transport(_) | Error::IdleTimeout | Error::NoStreamCredit => Self::Internal,
 			// Stream-scoped conditions have no session code.
 			Error::Old
 			| Error::Evicted
@@ -717,7 +721,7 @@ impl From<&Error> for StreamError {
 			// Session-scoped: the peer learns the detail from the session close.
 			// A stream refused on its own is not a session failure, so it does not claim
 			// SESSION_CLOSED; there is no stream-scoped PROTOCOL_VIOLATION to send instead.
-			Error::UnexpectedStream => Self::Internal,
+			Error::UnexpectedStream | Error::NoStreamCredit => Self::Internal,
 			Error::Version
 			| Error::UnknownAlpn(_)
 			| Error::TooManyParameters
