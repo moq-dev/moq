@@ -982,20 +982,7 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
-	/// Record a locally encoded frame's handoff for catalog jitter measurement.
-	///
-	/// `timestamp_us` is on the broadcast media clock. Call this after `write_frame` only for
-	/// encoder output; imported files, pipes, and network media stay clock-free.
-	pub fn flush(&self, timestamp_us: u64) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
-		let mut guard = self.inner.lock().unwrap();
-		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media.import.flush(timestamp, moq_clock::Instant::now())?;
-		Ok(())
-	}
-
-	/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
+	/// Mark a timeline break without lowering the advertised jitter or delay.
 	///
 	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock,
 	/// and video must resume on a keyframe.

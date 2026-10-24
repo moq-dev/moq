@@ -400,14 +400,6 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Record a locally encoded frame's transport handoff. Generic imports remain clock-free
-	/// unless their caller explicitly identifies the frame as encoder output.
-	pub fn media_flush(&mut self, media: Id, timestamp: hang::container::Timestamp) -> Result<(), Error> {
-		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-		track.flush(timestamp, moq_net::time::Instant::now())?;
-		Ok(())
-	}
-
 	/// Mark a timeline break on this media importer.
 	pub fn media_discontinuity(&mut self, media: Id) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;

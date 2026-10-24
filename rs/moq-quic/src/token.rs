@@ -8,7 +8,7 @@ use bytes::{Buf, BufMut, Bytes};
 use rand::{Rng, RngExt};
 
 use crate::{
-    Duration, RESET_TOKEN_SIZE, ServerConfig, SystemTime, UNIX_EPOCH,
+    Duration, RESET_TOKEN_SIZE, ServerConfig, UNIX_EPOCH, Wall,
     coding::{BufExt, BufMutExt},
     crypto::{HandshakeTokenKey, HmacKey},
     packet::InitialHeader,
@@ -58,7 +58,7 @@ pub trait TokenLog: Send + Sync {
     fn check_and_insert(
         &self,
         nonce: u128,
-        issued: SystemTime,
+        issued: Wall,
         lifetime: Duration,
     ) -> Result<(), TokenReuseError>;
 }
@@ -70,7 +70,7 @@ pub struct TokenReuseError;
 pub struct NoneTokenLog;
 
 impl TokenLog for NoneTokenLog {
-    fn check_and_insert(&self, _: u128, _: SystemTime, _: Duration) -> Result<(), TokenReuseError> {
+    fn check_and_insert(&self, _: u128, _: Wall, _: Duration) -> Result<(), TokenReuseError> {
         Err(TokenReuseError)
     }
 }
@@ -152,7 +152,10 @@ impl IncomingToken {
                 if address != remote_address {
                     return Err(InvalidRetryTokenError);
                 }
-                if issued + server_config.retry_token_lifetime < server_config.time_source.now() {
+                if issued
+                    .checked_add(server_config.retry_token_lifetime)
+                    .is_none_or(|expires| expires < server_config.time_source.now())
+                {
                     return Err(InvalidRetryTokenError);
                 }
 
@@ -166,8 +169,9 @@ impl IncomingToken {
                 if ip != remote_address.ip() {
                     return Ok(unvalidated);
                 }
-                if issued + server_config.validation_token.lifetime
-                    < server_config.time_source.now()
+                if issued
+                    .checked_add(server_config.validation_token.lifetime)
+                    .is_none_or(|expires| expires < server_config.time_source.now())
                 {
                     return Ok(unvalidated);
                 }
@@ -288,14 +292,14 @@ pub(crate) enum TokenPayload {
         /// The destination connection ID set in the very first packet from the client
         orig_dst_cid: ConnectionId,
         /// The time at which this token was issued
-        issued: SystemTime,
+        issued: Wall,
     },
     /// Token originating from a NEW_TOKEN frame
     Validation {
         /// The client's IP address (its port is likely to change between sessions)
         ip: IpAddr,
         /// The time at which this token was issued
-        issued: SystemTime,
+        issued: Wall,
     },
 }
 
@@ -346,16 +350,12 @@ fn decode_ip<B: Buf>(buf: &mut B) -> Option<IpAddr> {
     }
 }
 
-fn encode_unix_secs(buf: &mut Vec<u8>, time: SystemTime) {
-    buf.write::<u64>(
-        time.duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    );
+fn encode_unix_secs(buf: &mut Vec<u8>, time: Wall) {
+    buf.write::<u64>(time.saturating_duration_since(UNIX_EPOCH).as_secs());
 }
 
-fn decode_unix_secs<B: Buf>(buf: &mut B) -> Option<SystemTime> {
-    Some(UNIX_EPOCH + Duration::from_secs(buf.get::<u64>().ok()?))
+fn decode_unix_secs<B: Buf>(buf: &mut B) -> Option<Wall> {
+    UNIX_EPOCH.checked_add(Duration::from_secs(buf.get::<u64>().ok()?))
 }
 
 /// Stateless reset token
@@ -430,10 +430,25 @@ mod test {
     }
 
     #[test]
+    fn timestamp_decoder_refuses_out_of_range_seconds() {
+        for seconds in [18_446_744_074, u64::MAX] {
+            let mut buf = Vec::new();
+            buf.write::<u64>(seconds);
+            assert!(decode_unix_secs(&mut buf.as_slice()).is_none());
+        }
+        let mut buf = Vec::new();
+        buf.write::<u64>(18_446_744_073);
+        assert_eq!(
+            decode_unix_secs(&mut buf.as_slice()),
+            Some(UNIX_EPOCH + Duration::from_secs(18_446_744_073))
+        );
+    }
+
+    #[test]
     fn retry_token_sanity() {
+        use crate::Duration;
         use crate::MAX_CID_SIZE;
         use crate::cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator};
-        use crate::{Duration, UNIX_EPOCH};
 
         use std::net::Ipv6Addr;
 
@@ -461,7 +476,7 @@ mod test {
 
     #[test]
     fn validation_token_sanity() {
-        use crate::{Duration, UNIX_EPOCH};
+        use crate::Duration;
 
         use std::net::Ipv6Addr;
 

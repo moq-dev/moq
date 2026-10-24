@@ -639,14 +639,8 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 	// Audio has no keyframes, so it has no group boundary of its own: without this the whole
 	// stream is one group. Cut per frame, which is one QUIC stream per packet forwarded without
 	// waiting for the next, the right trade for live. Video groups at its own keyframes.
-	// Cut before observing the flush so a failed observation never leaves the group open.
 	if (auto result = track.producer->cut(); !result) {
 		LOG_ERROR("Failed to cut audio group: %s", result.error().to_string().c_str());
-		return;
-	}
-
-	if (auto result = track.producer->flush(*timestamp); !result) {
-		LOG_ERROR("Failed to observe audio encoder flush: %s", result.error().to_string().c_str());
 		return;
 	}
 
@@ -683,11 +677,6 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 
 	if (auto result = track.producer->write_frame(PacketFrame(packet, *timestamp)); !result) {
 		LOG_ERROR("Failed to write video frame: %s", result.error().to_string().c_str());
-		return;
-	}
-
-	if (auto result = track.producer->flush(*timestamp); !result) {
-		LOG_ERROR("Failed to observe video encoder flush: %s", result.error().to_string().c_str());
 		return;
 	}
 

@@ -18,6 +18,12 @@ tags follow this cut. This planning PR cuts and publishes nothing.
 After publication, re-measure the planned wire-compat breaks against the
 published versions, as CONTRIBUTING.md's release procedure describes.
 
+This cut carries stats epochs, so it drops
+[#4810](https://github.com/moq-dev/moq/pull/4810)'s release-only wall-clock
+group seed: the merge of release into main keeps main's `rs/moq-stats` and
+`doc/concept/stats.md`. MoQ Pro's VOD `storage.json` moves from the same
+seed to its own epoch.
+
 Recurs once per major release (decided 2026-10-19). The PR that finishes the
 cut shifts the milestones up, as the root [questline](/quest/README.md)
 describes. This epic's remaining publication and adoption quests move to m0,

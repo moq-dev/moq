@@ -9,6 +9,5 @@ replays bit-exact.
 
 ## Plan
 
-Decided 2026-10-10: out of [controlled time](/quest/m1/time/README.md); with
-controlled time a test advances past the largest jitter, so seeding only adds
-exact replay. Production keeps its OS randomness.
+Decided 2026-10-10: with controlled time a test advances past the largest
+jitter, so seeding only adds exact replay. Production keeps its OS randomness.

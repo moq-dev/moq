@@ -4,6 +4,7 @@
  * @module
  */
 export {
+	ConnectTimeout,
 	FrameTooLarge,
 	GroupTooLarge,
 	NoStreamCredit,

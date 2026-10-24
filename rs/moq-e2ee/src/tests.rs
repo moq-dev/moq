@@ -907,6 +907,49 @@ fn bad_datagram_is_event() {
 }
 
 #[test]
+fn unsealable_datagram_is_a_bad_datagram() {
+	let mut pair = pair("audio");
+	let name: Name = pair.net.name().parse().unwrap();
+	let sealed = datagram_ciphertext(&pair.generation, &name, 0, b"x");
+	pair.net
+		.insert_datagram(1, ms(1), vec![0u8; MAX_DATAGRAM_PAYLOAD + 1])
+		.unwrap();
+	pair.net.insert_datagram(2, ms(2), sealed.slice(..3)).unwrap();
+	pair.net.insert_datagram(MAX_U53 + 1, ms(3), sealed).unwrap();
+	pair.producer.insert_datagram(MAX_U53, ms(4), b"last").unwrap();
+
+	assert_eq!(recv_datagram(&mut pair.consumer), Event::Authentication { sequence: 1 });
+	assert_eq!(recv_datagram(&mut pair.consumer), Event::Authentication { sequence: 2 });
+	assert_eq!(
+		recv_datagram(&mut pair.consumer),
+		Event::Authentication { sequence: MAX_U53 + 1 }
+	);
+	match recv_datagram(&mut pair.consumer) {
+		Event::Datagram(d) => assert_eq!(&d.plaintext[..], b"last"),
+		other => panic!("{other:?}"),
+	}
+}
+
+#[test]
+fn resubscribing_shares_a_keys_budget() {
+	let mut pair = pair("audio");
+	let name: Name = pair.net.name().parse().unwrap();
+	pair.producer.append_datagram(ms(1), b"one").unwrap();
+	assert!(matches!(recv_datagram(&mut pair.consumer), Event::Datagram(_)));
+	drop(pair.consumer);
+	let keys = pair.generation.keys(name).unwrap();
+	assert_eq!(keys.datagram.lock().unwrap().invocations(), 1);
+	keys.datagram.lock().unwrap().set_usage(MAX_INVOCATIONS, 0);
+
+	let mut again = pair.generation.consume(pair.net.subscribe(subscribe_all())).unwrap();
+	pair.producer.append_datagram(ms(2), b"two").unwrap();
+	assert!(matches!(
+		again.poll_recv_datagram(&kio::Waiter::noop()),
+		Poll::Ready(Err(Error::Exhausted))
+	));
+}
+
+#[test]
 fn forged_datagram_does_not_burn_identity() {
 	let mut pair = pair("audio");
 	let name: Name = pair.net.name().parse().unwrap();
@@ -1000,6 +1043,36 @@ fn failed_group_write_does_not_burn_nonce() {
 
 	let mut group = recv_group(&mut pair.consumer);
 	assert_eq!(read_frame(&mut group).plaintext, &b"ok"[..]);
+}
+
+#[test]
+fn failed_net_write_after_encryption_aborts_the_group() {
+	let mut pair = pair("video");
+	let mut first = pair.producer.append_group().unwrap();
+	first.write_frame(ms(10), b"start").unwrap();
+	first.finish().unwrap();
+
+	// The net track refuses a group start that rewinds past the one before it, only after
+	// the frame was encrypted, so the group can no longer line its transport index up with
+	// the nonce.
+	let mut group = pair.producer.append_group().unwrap();
+	let err = group.write_frame(ms(5), b"rewind").unwrap_err();
+	assert!(matches!(err, Error::Net(moq_net::Error::TimestampMismatch)), "{err:?}");
+	// The track's grouped key: one frame in each group.
+	assert_eq!(group.invocations(), 2);
+	let after = group.write_frame(ms(20), b"after").unwrap_err();
+	assert_eq!(after.to_string(), err.to_string());
+	assert_eq!(group.invocations(), 2);
+	assert_eq!(group.finish().unwrap_err().to_string(), err.to_string());
+
+	// Subscribers see the group end with the failure instead of waiting on it.
+	let mut start = recv_group(&mut pair.consumer);
+	assert_eq!(read_frame(&mut start).plaintext, &b"start"[..]);
+	let mut aborted = recv_group(&mut pair.consumer);
+	assert!(matches!(
+		aborted.poll_read_frame(&kio::Waiter::noop()),
+		Poll::Ready(Err(Error::Net(moq_net::Error::TimestampMismatch)))
+	));
 }
 
 #[test]
