@@ -1556,7 +1556,7 @@ export default class Session implements WebTransport {
 		this.#endSend(streamId);
 	}
 
-	/** End a stream's send half once its FIN or RESET_STREAM is written. */
+	/** End a stream's send half once its FIN or RESET_STREAM is sent. */
 	#endSend(streamId: bigint) {
 		if (!this.#sendStreams.delete(streamId)) return;
 		this.#streamFlow.get(streamId)?.onSendEnd?.();
