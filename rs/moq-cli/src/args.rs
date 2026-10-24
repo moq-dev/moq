@@ -1342,7 +1342,11 @@ mod tests {
 		assert!(err.to_string().contains("--linger -> --follow"), "{err}");
 		for format in ["fmp4", "mkv", "flv", "h264", "h265"] {
 			assert!(parse(format, "--follow", "10s").is_err(), "{format} takes no --follow");
-			let err = parse(format, "--linger", "10s").unwrap().validate().unwrap_err().to_string();
+			let err = parse(format, "--linger", "10s")
+				.unwrap()
+				.validate()
+				.unwrap_err()
+				.to_string();
 			assert!(err.contains("export ts --follow"), "{format}: {err}");
 			assert!(
 				parse(format, "--linger", "0s").unwrap().validate().is_ok(),

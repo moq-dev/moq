@@ -9779,7 +9779,10 @@ async fn a_midstream_stitch_awaits_the_replacement_catalog() {
 				.is_err(),
 			"nothing to mux, follow={follow:?}"
 		);
-		assert!(follower.export().cataloged(), "the late snapshot switches, follow={follow:?}");
+		assert!(
+			follower.export().cataloged(),
+			"the late snapshot switches, follow={follow:?}"
+		);
 		assert_eq!(follower.export().instance(), Some(&epoch));
 	}
 }
@@ -9863,7 +9866,10 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 			.is_err(),
 		"nothing to mux"
 	);
-	assert!(follower.export().cataloged(), "the second replacement served its catalog");
+	assert!(
+		follower.export().cataloged(),
+		"the second replacement served its catalog"
+	);
 	assert_eq!(follower.export().instance(), Some(&epoch));
 }
 

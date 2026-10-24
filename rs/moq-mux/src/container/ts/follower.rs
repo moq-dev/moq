@@ -292,7 +292,10 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				return Ok(false);
 			}
 		};
-		if !switching.as_ref().is_some_and(|switching| switching.target.is_clone(target)) {
+		if !switching
+			.as_ref()
+			.is_some_and(|switching| switching.target.is_clone(target))
+		{
 			tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
 			*switching = Some(self.subscribe(target.clone()));
 		}
@@ -343,6 +346,8 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						// An epochless route has no instance to match, so only the broadcast
 						// being exported is its own.
 						None if broadcast.is_clone(&self.export.source().broadcast()) => Serving::Ours,
+						// Even the same broadcast handed out again is a return: the origin hands
+						// one out only for an announcement that brings it.
 						Some(epoch) if broadcast.info().epoch.as_ref() == Some(epoch) => match self.priming {
 							true => Serving::Ours,
 							false => Serving::Return(broadcast),
@@ -376,7 +381,9 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		match missing {
 			Missing::Ended { end, deadline } => State::Settling { end, deadline },
 			Missing::Switch => State::Settling {
-				end: Err(anyhow::anyhow!("replacement broadcast `{}` ended before serving its catalog", self.path).into()),
+				end: Err(
+					anyhow::anyhow!("replacement broadcast `{}` ended before serving its catalog", self.path).into(),
+				),
 				deadline: moq_clock::now() + self.follow,
 			},
 		}
