@@ -296,6 +296,19 @@ test("a track is produced once per generation", async () => {
 	consuming.consume(subscribe(net), "video");
 });
 
+test("a lone surrogate is refused rather than aliasing U+FFFD", async () => {
+	const generation = credential().produce();
+	expect(await failure(generation.name("\ud800"))).toBe("identity");
+	expect(await failure(generation.credential.path("\ud800"))).toBe("identity");
+	const producer = new Protected.Producer(new Broadcast.Producer(), generation);
+	await producer.createTrack("�");
+	expect(await failure(producer.createTrack("\ud800"))).toBe("identity");
+	// Its UTF-8 would be U+FFFD's, so claiming it would share that track's key and nonces.
+	const aliased = netTrack(await generation.name("�"));
+	expect(await failure(generation.produce(aliased, "\ud800"))).toBe("identity");
+	expect(aliased.closed.peek()).toBeInstanceOf(Failure);
+});
+
 test("recovering a name claims nothing", async () => {
 	const generation = credential().produce();
 	const name = await generation.name("video");

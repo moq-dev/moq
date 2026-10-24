@@ -35,6 +35,17 @@ function checkU32(value: number): void {
 	if (!Number.isInteger(value) || value < 0 || value > MAX_U32) throw new Failure("identity");
 }
 
+/**
+ * The UTF-8 bytes of `text`, refusing a lone surrogate with {@link Failure} `identity`.
+ *
+ * `TextEncoder` maps a lone surrogate to U+FFFD, so two distinct strings would share one name
+ * and one payload key while claims and budgets, keyed by string, told them apart.
+ */
+export function utf8(text: string): Uint8Array<ArrayBuffer> {
+	if (!text.isWellFormed()) throw new Failure("identity");
+	return encoder.encode(text);
+}
+
 /** Refuse a `bytes` field longer than 65535 bytes. */
 export function checkBytes(length: number): void {
 	if (length > MAX_BYTES) throw new Failure("identity");
@@ -58,7 +69,7 @@ class Info {
 	}
 
 	text(text: string): this {
-		return this.bytes(encoder.encode(text));
+		return this.bytes(utf8(text));
 	}
 
 	u64(value: number): this {
@@ -119,7 +130,7 @@ export function keyInfo(
 
 /** `semantic || 0x80 || 0x00...`, with the fewest zeros that reach a multiple of 16 bytes. */
 export function pad(semantic: string): Uint8Array<ArrayBuffer> {
-	const bytes = encoder.encode(semantic);
+	const bytes = utf8(semantic);
 	checkBytes(bytes.byteLength);
 	const out = new Uint8Array((Math.floor(bytes.byteLength / NAME_BLOCK) + 1) * NAME_BLOCK);
 	out.set(bytes);
