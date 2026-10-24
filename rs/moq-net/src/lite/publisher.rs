@@ -109,7 +109,7 @@ fn serving_max_delay(version: Version, requested: Duration) -> Duration {
 	}
 }
 
-/// Position a subscription's read cursor for the wire serving it.
+/// The floor of a subscription's read cursor for the wire serving it.
 ///
 /// On lite-06 there is nothing to do: `Consumer::subscribe` resolves the cursor from the
 /// subscription itself, at the oldest group its own max delay still considers fresh, floored
@@ -123,14 +123,11 @@ fn serving_max_delay(version: Version, requested: Duration) -> Duration {
 ///
 /// `latest` is the newest group when the SUBSCRIBE arrived, not once the subscription
 /// resolved: anything written in between is newer, so it is delivered.
-fn position_cursor(track: &mut track::Subscriber, version: Version, start_group: Option<u64>, latest: Option<u64>) {
+fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>) -> u64 {
 	if version.resolves_start() || start_group.is_some() {
-		return;
+		return 0;
 	}
-
-	if let Some(latest) = latest {
-		track.start_at(latest);
-	}
+	latest.unwrap_or(0)
 }
 
 impl Shared {
@@ -1925,7 +1922,7 @@ enum SubscribeServe {
 		/// Boxed: the request is far larger than the other states' handles.
 		msg: Box<lite::Subscribe<'static>>,
 		subscribing: track::Subscribing,
-		/// The newest group when the SUBSCRIBE arrived; see [`position_cursor`].
+		/// The newest group when the SUBSCRIBE arrived; see [`cursor_floor`].
 		latest: Option<u64>,
 		update: Option<lite::SubscribeUpdate>,
 	},
@@ -2000,7 +1997,7 @@ impl Request for SubscribeServe {
 			match self {
 				Self::Confirm { subscribing, .. } => {
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-					let mut track = ready!(subscribing.poll_ok(waiter))?;
+					let track = ready!(subscribing.poll_ok(waiter))?;
 					crate::ietf::flate::egress(track.info(), shared.version.has_compression())?;
 					let Self::Confirm {
 						msg, latest, update, ..
@@ -2064,8 +2061,8 @@ impl Request for SubscribeServe {
 					};
 
 					let bounds = Bounds::from(msg.as_ref());
-					position_cursor(&mut track, shared.version, bounds.start_group, latest);
-					let mut run = TrackRun::new(sub, track, bounds, steer_tx);
+					let floor = cursor_floor(shared.version, bounds.start_group, latest);
+					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
 					if let Some(update) = update {
 						run.update(update);
 					}
@@ -2178,7 +2175,7 @@ impl Request for FetchServe {
 				Self::Fetch { msg, fetching } => {
 					// Before the group: a fetched group polled while this waited would be lost.
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-					let mut group = ready!(kio::Task::poll(fetching, waiter))?;
+					let group = ready!(kio::Task::poll(fetching, waiter))?;
 
 					// The response carries no header, so a short run is indistinguishable
 					// from one that started elsewhere: only serve a range we can cover
@@ -2189,8 +2186,9 @@ impl Request for FetchServe {
 					}
 					// The end is a serving cap only: the cached group runs to the end of
 					// the group so it stays usable for anyone else (see
-					// `group::Fetch::frame_start`).
-					group.end_at(msg.end_frame.map_or(Bound::Unbounded, Bound::Included));
+					// `group::Fetch::frame_start`). Only the end, so the start stays where
+					// the check above found it.
+					let mut group = group.with_end(msg.end_frame.and_then(|end| end.checked_add(1)));
 
 					// Matches the timescale TRACK_INFO declared for the track.
 					let stamp = Stamp::new(shared.version, group.lite_timescale(ietf));
@@ -2351,21 +2349,21 @@ mod test {
 			"the unbounded budget alone resolves to the whole cache"
 		);
 
-		let mut legacy = served(Version::Lite01);
-		position_cursor(&mut legacy, Version::Lite01, None, producer.latest_sequence());
+		let legacy = served(Version::Lite01);
+		let mut legacy = legacy.with_range(cursor_floor(Version::Lite01, None, producer.latest_sequence())..);
 		assert_eq!(drain(&mut legacy), vec![2]);
 
 		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
 		// and an absent start as the latest group, so they are pinned all the same.
-		let mut tolerant =
+		let tolerant =
 			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
-		position_cursor(&mut tolerant, Version::Lite05, None, producer.latest_sequence());
+		let mut tolerant = tolerant.with_range(cursor_floor(Version::Lite05, None, producer.latest_sequence())..);
 		assert_eq!(drain(&mut tolerant), vec![2]);
 
 		// On lite-06 the declared budget is what resolves the start, so it stands.
-		let mut declared =
+		let declared =
 			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
-		position_cursor(&mut declared, Version::Lite06, None, producer.latest_sequence());
+		let mut declared = declared.with_range(cursor_floor(Version::Lite06, None, producer.latest_sequence())..);
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
@@ -2393,7 +2391,7 @@ mod test {
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
 			Recv::Group(group) => {
 				assert_eq!(group.sequence, 7);
-				subscriber.start_at(group.sequence);
+				subscriber.set_range(group.sequence..);
 			}
 			_ => panic!("expected the first group"),
 		}
@@ -3394,33 +3392,31 @@ async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary
 	kio::wait(|waiter| poll_recv_next(track, true, datagrams, emit_boundary, waiter)).await
 }
 
-/// Bound `group` to what this subscription asked for, reporting whether it can be served
+/// Bound `group` to what this subscription asked for, or `None` when it cannot be served
 /// at all.
 ///
 /// Frame bounds qualify the start and end group only; everything in between is served
-/// whole. `false` means the group's head is missing and the subscriber never asked for a
+/// whole. `None` means the group's head is missing and the subscriber never asked for a
 /// partial group, so it must be skipped: a group is the unit of decodability, and only
 /// the subscriber knows whether a partial one is any use to it.
-fn position_group(group: &mut group::Consumer, start: Option<(u64, u64)>, end: Option<(u64, u64)>) -> bool {
+fn position_group(
+	group: group::Consumer,
+	start: Option<(u64, u64)>,
+	end: Option<(u64, u64)>,
+) -> Option<group::Consumer> {
 	let expected = match start {
 		Some((sequence, frame)) if sequence == group.sequence => frame,
 		_ => 0,
 	};
+	let end = match end {
+		Some((sequence, frame)) if sequence == group.sequence => Bound::Included(frame),
+		_ => Bound::Unbounded,
+	};
 
-	// `start_at` clamps up to the first frame the group still holds, so landing higher
+	// The start clamps up to the first frame the group still holds, so landing higher
 	// than asked means the frames below it are gone.
-	group.start_at(expected);
-	if group.index() != expected {
-		return false;
-	}
-
-	if let Some((sequence, frame)) = end
-		&& sequence == group.sequence
-	{
-		group.end_at(Bound::Included(frame));
-	}
-
-	true
+	let group = group.with_range((Bound::Included(expected), end));
+	(group.index() == expected).then_some(group)
 }
 
 /// A subscription's requested delivery range, exactly as it arrived on the wire.
@@ -3694,6 +3690,9 @@ impl Subscription {
 struct TrackRun {
 	ctx: Subscription,
 	track: track::Subscriber,
+	// The read cursor's floor and cap, assigned together on every move.
+	floor: u64,
+	cap: Bound<u64>,
 	/// Broadcasts SUBSCRIBE_UPDATE priorities to the in-flight group machines.
 	steer_tx: kio::Producer<Steer>,
 	// Frame bounds qualify the start and end group only; everything in between is
@@ -3732,10 +3731,17 @@ struct TrackRun {
 }
 
 impl TrackRun {
-	fn new(ctx: Subscription, mut track: track::Subscriber, bounds: Bounds, steer_tx: kio::Producer<Steer>) -> Self {
+	fn new(
+		ctx: Subscription,
+		track: track::Subscriber,
+		bounds: Bounds,
+		floor: u64,
+		steer_tx: kio::Producer<Steer>,
+	) -> Self {
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SUBSCRIBE_UPDATE arm below.
-		track.end_at(bounds.end_group.map_or(Bound::Unbounded, Bound::Included));
+		let cap = bounds.end_group.map_or(Bound::Unbounded, Bound::Included);
+		let track = track.with_range((Bound::Included(floor), cap));
 
 		let emit_range = ctx.version.has_track_stream();
 		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
@@ -3747,6 +3753,8 @@ impl TrackRun {
 			end_frame: bounds.end_frame(),
 			ctx,
 			track,
+			floor,
+			cap,
 			steer_tx,
 			emit_range,
 			start: None,
@@ -3827,7 +3835,7 @@ impl TrackRun {
 			floor => floor,
 		};
 		if let Some(start) = floor {
-			self.track.start_at(start);
+			self.floor = start;
 			// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
 			if let Some(resolved) = self.start {
 				// A lowered floor owes the groups it newly asks for, so the end sweep covers them.
@@ -3836,10 +3844,23 @@ impl TrackRun {
 				self.start = Some(resolved.min(start));
 			}
 		}
-		self.track
-			.end_at(upd.end_group.map_or(Bound::Unbounded, Bound::Included));
+		self.cap = upd.end_group.map_or(Bound::Unbounded, Bound::Included);
+		self.move_cursor();
 		self.start_frame = bounds.start_frame();
 		self.end_frame = bounds.end_frame();
+	}
+
+	/// Apply [`Self::floor`] and [`Self::cap`] to the read cursor.
+	fn move_cursor(&mut self) {
+		self.track.set_range((Bound::Included(self.floor), self.cap));
+	}
+
+	/// Raise the read cursor's floor to `start`, keeping any higher floor already set.
+	fn raise_floor(&mut self, start: u64) {
+		if start > self.floor {
+			self.floor = start;
+			self.move_cursor();
+		}
 	}
 
 	/// Serve until the live edge reaches the track's boundary.
@@ -3934,7 +3955,7 @@ impl TrackRun {
 				group: start.group,
 				largest: Some(largest),
 			}))?;
-			self.track.raise_start_to(start.group);
+			self.raise_floor(start.group);
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
@@ -3946,7 +3967,7 @@ impl TrackRun {
 		let groups = self.opening.is_none();
 		if let Poll::Ready(res) = poll_recv_next(&mut self.track, groups, self.datagrams, emit_boundary, waiter) {
 			match res? {
-				Recv::Group(mut group) => {
+				Recv::Group(group) => {
 					// Never a second stream for a sequence this subscription already accounted
 					// for (served, sent as a datagram, or dropped): a group re-created after its
 					// DROP stays dropped, since the subscriber may settle before it arrives.
@@ -3957,24 +3978,25 @@ impl TrackRun {
 					{
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
-					if !position_group(&mut group, self.start_frame, self.end_frame) {
+					let sequence = group.sequence;
+					let Some(group) = position_group(group, self.start_frame, self.end_frame) else {
 						// Its head is gone, and this subscriber didn't ask for a
 						// partial group. Skip it rather than open a stream that can
 						// only be reset; the next servable group resolves the start.
-						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
+						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "skipping group with a missing head");
 						if self.emit_range && self.start.is_none() {
 							// At u64::MAX no later group can resolve a start past this one.
-							if let Some(end) = group.sequence.checked_add(1) {
-								self.skipped.insert(group.sequence..end, StreamError::NotFound);
+							if let Some(end) = sequence.checked_add(1) {
+								self.skipped.insert(sequence..end, StreamError::NotFound);
 							}
 						} else if self.start.is_some()
-							&& let Some(end) = group.sequence.checked_add(1)
+							&& let Some(end) = sequence.checked_add(1)
 						{
 							// Lite-05+ names it now; a no-op on other versions.
-							self.drop_range(group.sequence..end, &StreamError::NotFound, writer)?;
+							self.drop_range(sequence..end, &StreamError::NotFound, writer)?;
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
-					}
+					};
 					match self.emit_range && self.start.is_none() {
 						true => self.first = Some(group),
 						false => self.serve(group),
@@ -4158,7 +4180,7 @@ impl TrackRun {
 		// that 0 is group 0, so it is not pinned. Raised, not assigned: an update that
 		// landed while the group was held may already have raised it past.
 		if self.track.subscription().start().is_none() && !self.ctx.version.resolves_start() {
-			self.track.raise_start_to(start);
+			self.raise_floor(start);
 		}
 		self.serve(group);
 		Ok(())
@@ -4207,6 +4229,22 @@ enum Rank {
 	Group,
 	/// In the session-wide queue, on a transport without send groups.
 	Queue(PriorityHandle),
+}
+
+/// Why to stop writing `group` while the transport parks it: the subscription's budget gave
+/// it up, or the frames this cursor has yet to read are gone with no route to continue them.
+/// A clean finish is no reason.
+///
+/// Waking on every frame written to a parked group costs what a reader parked at the live
+/// edge already pays: each of its pending reads judges the budget too.
+fn poll_given_up(group: &mut group::Consumer, waiter: &kio::Waiter) -> Option<Error> {
+	if group.poll_expired(waiter) {
+		return Some(Error::Old);
+	}
+	match group.poll_finished(waiter) {
+		Poll::Ready(Err(err)) => Some(err),
+		_ => None,
+	}
 }
 
 /// Serves one group on its own unidirectional stream: the header, then every
@@ -4304,7 +4342,7 @@ impl GroupServe {
 		if !matches!(self.state, GroupState::Open) {
 			return Poll::Ready(Ok(()));
 		}
-		if let Some(err) = self.group.poll_abandoned(waiter, false) {
+		if let Some(err) = poll_given_up(&mut self.group, waiter) {
 			self.settle_open(false);
 			self.state = GroupState::Done;
 			return Poll::Ready(Err(err));
@@ -4431,10 +4469,9 @@ impl GroupServe {
 								// Parking on the transport is the one stall the group cursor cannot
 								// see, and the only place a served group applies the drift budget:
 								// flow control must not pin a stream that has gone stale, or one
-								// whose unread rest the cache evicted. `true` because the transport
-								// still owns bytes the cursor has released.
+								// whose unread rest the cache evicted.
 								Poll::Pending => {
-									if let Some(err) = self.group.poll_abandoned(waiter, true) {
+									if let Some(err) = poll_given_up(&mut self.group, waiter) {
 										break 'serve Err(err);
 									}
 									return Poll::Pending;
@@ -4451,10 +4488,9 @@ impl GroupServe {
 									// Parking on the transport is the one stall the group cursor cannot
 									// see, and the only place a served group applies the drift budget:
 									// flow control must not pin a stream that has gone stale, or one
-									// whose unread rest the cache evicted. `true` because the transport
-									// still owns bytes the cursor has released.
+									// whose unread rest the cache evicted.
 									Poll::Pending => {
-										if let Some(err) = self.group.poll_abandoned(waiter, true) {
+										if let Some(err) = poll_given_up(&mut self.group, waiter) {
 											break 'serve Err(err);
 										}
 										return Poll::Pending;
@@ -4597,7 +4633,7 @@ impl GroupServe {
 						Poll::Ready(res) => res,
 						// Those bytes still hold the connection until acknowledged, so a
 						// group gone stale meanwhile releases them like one still serving.
-						Poll::Pending if self.group.poll_expired_while_pending(waiter, true) => {
+						Poll::Pending if self.group.poll_expired(waiter) => {
 							let GroupState::Closed { writer } = std::mem::replace(&mut self.state, GroupState::Done)
 							else {
 								unreachable!()
@@ -4707,23 +4743,19 @@ mod serve_group_test {
 		group.write_frame(Timestamp::ZERO, b"tail".to_vec()).unwrap();
 
 		// Asked for whole groups, so the missing frames 0..5 make this unservable.
-		let mut consumer = group.consume();
-		assert!(!position_group(&mut consumer, None, None));
+		assert!(position_group(group.consume(), None, None).is_none());
 
 		// Asked for exactly where it starts: servable, and positioned there.
-		let mut consumer = group.consume();
-		assert!(position_group(&mut consumer, Some((3, 5)), None));
+		let consumer = position_group(group.consume(), Some((3, 5)), None).unwrap();
 		assert_eq!(consumer.index(), 5);
 
 		// Asked for an earlier frame than the group holds: still a hole, still skipped.
-		let mut consumer = group.consume();
-		assert!(!position_group(&mut consumer, Some((3, 2)), None));
+		assert!(position_group(group.consume(), Some((3, 2)), None).is_none());
 
 		// The offset belongs to the start group only; a later group is served whole.
 		let mut other = track.create_group(group::Info { sequence: 4 }).unwrap();
 		other.write_frame(Timestamp::ZERO, b"whole".to_vec()).unwrap();
-		let mut consumer = other.consume();
-		assert!(position_group(&mut consumer, Some((3, 5)), None));
+		let consumer = position_group(other.consume(), Some((3, 5)), None).unwrap();
 		assert_eq!(consumer.index(), 0);
 	}
 
@@ -4741,8 +4773,7 @@ mod serve_group_test {
 		}
 		group.finish().unwrap();
 
-		let mut consumer = group.consume();
-		assert!(position_group(&mut consumer, None, Some((7, 1))));
+		let mut consumer = position_group(group.consume(), None, Some((7, 1))).unwrap();
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			0
@@ -4757,8 +4788,7 @@ mod serve_group_test {
 		);
 
 		// A cap naming another group leaves this one uncapped.
-		let mut consumer = group.consume();
-		assert!(position_group(&mut consumer, None, Some((8, 1))));
+		let mut consumer = position_group(group.consume(), None, Some((8, 1))).unwrap();
 		for i in 0..4u8 {
 			assert_eq!(
 				consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
@@ -5449,7 +5479,7 @@ mod serve_group_test {
 			end_group: None,
 			end_frame: None,
 		};
-		(TrackRun::new(ctx, track, bounds, steer), writer, log)
+		(TrackRun::new(ctx, track, bounds, 0, steer), writer, log)
 	}
 
 	#[moq_clock::test]
@@ -6129,7 +6159,7 @@ mod serve_group_test {
 							.unwrap()
 							.subscribe(
 								track::Subscription::default()
-									.with_groups(0..)
+									.with_range(0..)
 									.with_max_delay(Duration::from_secs(60)),
 							)
 							.await
@@ -6150,7 +6180,7 @@ mod serve_group_test {
 				let mut live = remote
 					.track("test")
 					.unwrap()
-					.subscribe(track::Subscription::default().with_groups(0..))
+					.subscribe(track::Subscription::default().with_range(0..))
 					.await
 					.unwrap();
 				assert_eq!(live.recv_group().await.unwrap().unwrap().sequence, 2);
@@ -6594,7 +6624,7 @@ mod serve_group_test {
 				end_frame: None,
 			};
 			Self {
-				run: TrackRun::new(ctx, subscriber, bounds, steer),
+				run: TrackRun::new(ctx, subscriber, bounds, 0, steer),
 				writer,
 				session,
 				outcomes,

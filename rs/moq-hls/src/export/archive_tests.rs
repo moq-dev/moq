@@ -815,7 +815,7 @@ impl Expired {
 			.pool
 			.gc(now + Duration::from_secs(31), &kio::Waiter::noop());
 		let subscription = moq_net::track::Subscription::default()
-			.with_groups(0..)
+			.with_range(0..)
 			.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
 		let mut retained = broadcast
 			.consume()

@@ -1353,7 +1353,7 @@ async fn fetch(
 	match track.fetch_group(start.group, options).await {
 		Ok(mut group) => {
 			if let Some(end) = end {
-				group.set_frames(..end);
+				group = group.with_range(..end);
 			}
 			Ok(Ok(group))
 		}

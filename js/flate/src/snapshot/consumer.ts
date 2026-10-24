@@ -5,6 +5,14 @@ import { Decoder as Flate } from "../codec.ts";
 import { isDeflate } from "../compression.ts";
 import type { Config as CodecConfig } from "./producer.ts";
 
+// Group errors that lose only that group, matching the JSON snapshot consumer.
+const GAPS: Moq.StreamCode[] = [
+	Moq.StreamCode.TooFarBehind,
+	Moq.StreamCode.Old,
+	Moq.StreamCode.Evicted,
+	Moq.StreamCode.GroupTooLarge,
+];
+
 /**
  * Consumes an opaque value from a track, yielding each with the timestamp of its frame.
  *
@@ -17,8 +25,8 @@ export class Consumer {
 	#track: Moq.Track.Ordered;
 	#decompress: boolean;
 
-	// The group the current window belongs to, so a boundary restarts it.
-	#group?: number;
+	// The group being read.
+	#group?: Moq.Group.Consumer;
 	// The DEFLATE window for the current group, present while decompressing. A snapshot group is
 	// normally one frame, but the window is per group either way.
 	#flate?: Flate;
@@ -44,9 +52,9 @@ export class Consumer {
 	/**
 	 * Get the newest value, or `undefined` once the track ends.
 	 *
-	 * Every group is a complete value, so any older group is already superseded. Raising the read
-	 * floor to the newest sequence before each read does two things: it discards a backlog instead
-	 * of decoding every superseded value in turn, and it abandons a group a newer one has
+	 * Every group is a complete value, so any older group is already superseded. Jumping to the
+	 * newest group the reader holds before each read does two things: it discards a backlog
+	 * instead of decoding every superseded value in turn, and it abandons a group a newer one has
 	 * superseded rather than waiting out its close. A reader's latency therefore never grows with
 	 * the queue, and never depends on a stale group's FIN arriving.
 	 */
@@ -57,33 +65,51 @@ export class Consumer {
 	async #read(skip: boolean): Promise<Timed<Uint8Array> | undefined> {
 		for (;;) {
 			if (skip) {
-				const latest = await this.#track.largest();
-				if (latest !== undefined) this.#track.setGroups({ start: { included: latest.group } });
+				// Jump to the newest group the reader already has; a newer one supersedes the rest.
+				// Taking groups, not the track's largest position, ignores datagrams (which share
+				// the sequence space) and stays inside any range the caller set on the reader.
+				// Mirrors the Rust consumer.
+				for (let group = this.#track.tryNextGroup(); group; group = this.#track.tryNextGroup()) {
+					this.#open(group);
+				}
 			}
 
-			let next: Awaited<ReturnType<Moq.Track.Ordered["readFrame"]>>;
+			if (!this.#group) {
+				const group = await this.#track.nextGroup();
+				if (!group) return undefined;
+				this.#open(group);
+			}
+			const group = this.#group;
+			if (!group) continue;
+
+			let next: Moq.Group.Frame | undefined;
 			try {
-				next = await this.#track.readFrame();
+				next = await group.readFrame();
 			} catch (err) {
-				// Falling behind a group's eviction window is recoverable: the next group carries a
-				// complete value of its own, so resync there rather than surfacing a partial read.
-				// Anything else is the track's terminal error, which every later read would throw
-				// again; swallowing it would spin here instead of telling the caller the
-				// subscription died.
-				if (!(err instanceof Moq.Error.TooFarBehind)) throw err;
+				// Losing one group (reset, or fallen behind its eviction window) is recoverable: the
+				// next group carries a complete value of its own, so resync there rather than
+				// surfacing a partial read. Anything else is the track's terminal error, which every
+				// later read would throw again; swallowing it would spin here instead of telling the
+				// caller the subscription died.
+				if (!(err instanceof Moq.Error.Stream && GAPS.includes(err.code))) throw err;
+				this.#group = undefined;
 				continue;
 			}
 
-			if (!next) return undefined;
-
-			// Each group is its own compressed stream, so a boundary starts a cold window.
-			if (next.group !== this.#group) {
-				this.#group = next.group;
-				this.#flate = this.#decompress ? new Flate() : undefined;
+			if (!next) {
+				this.#group = undefined;
+				continue;
 			}
 
 			return { value: this.#flate ? this.#flate.frame(next.payload) : next.payload, at: next.timestamp };
 		}
+	}
+
+	// Each group is its own compressed stream, so a boundary starts a cold window.
+	#open(group: Moq.Group.Consumer): void {
+		this.#group?.close();
+		this.#group = group;
+		this.#flate = this.#decompress ? new Flate() : undefined;
 	}
 
 	/** Iterate over every value in group order, as {@link next} yields them, until the track ends. */
