@@ -116,7 +116,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 const LITE_KINDS: u8 = 22;
 
 /// How many types [`ietf_wire`] dispatches over.
-const IETF_KINDS: u8 = 41;
+const IETF_KINDS: u8 = 44;
 
 /// Split the two selector bytes off the input: a version and a type.
 fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
@@ -616,6 +616,33 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version),
 		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version),
 		40 => roundtrip::<ietf::SubscribeTracks<'static>, _>(rest, version),
+		41 => {
+			if matches!(
+				version,
+				ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
+			) {
+				return false;
+			}
+			let outer = crate::Version::Ietf(version);
+			if let Ok((setup, _)) = crate::setup::Setup::decode_slice(rest, outer) {
+				let _ = ietf::Parameters::decode_slice(&setup.parameters, version);
+			}
+			roundtrip::<crate::setup::Setup, _>(rest, outer)
+		}
+		42 => {
+			let outer = crate::Version::Ietf(version);
+			if let Ok((setup, _)) = crate::setup::Client::decode_slice(rest, outer) {
+				let _ = ietf::Parameters::decode_slice(&setup.parameters, version);
+			}
+			roundtrip::<crate::setup::Client, _>(rest, outer)
+		}
+		43 => {
+			let outer = crate::Version::Ietf(version);
+			if let Ok((setup, _)) = crate::setup::Server::decode_slice(rest, outer) {
+				let _ = ietf::Parameters::decode_slice(&setup.parameters, version);
+			}
+			roundtrip::<crate::setup::Server, _>(rest, outer)
+		}
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
 }
@@ -1031,6 +1058,44 @@ pub fn seeds() -> Vec<Seed> {
 					});
 				}
 			}
+		}
+	}
+
+	// SETUP has its own type prefix, which uniform bodies cannot synthesize.
+	for (index, version) in IETF_VERSIONS.iter().enumerate() {
+		let outer = crate::Version::Ietf(*version);
+		let parameters = ietf::Parameters::default().encode_bytes(*version).unwrap();
+		let messages = match version {
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => vec![
+				(
+					42,
+					crate::setup::Client {
+						versions: coding::Versions::from([outer.into()]),
+						parameters: parameters.clone(),
+					}
+					.encode_bytes(outer)
+					.unwrap(),
+				),
+				(
+					43,
+					crate::setup::Server {
+						version: outer.into(),
+						parameters,
+					}
+					.encode_bytes(outer)
+					.unwrap(),
+				),
+			],
+			_ => vec![(41, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())],
+		};
+		for (kind, message) in messages {
+			let mut data = vec![index as u8, kind];
+			data.extend(message);
+			seeds.push(Seed {
+				target: "ietf",
+				kind,
+				data,
+			});
 		}
 	}
 

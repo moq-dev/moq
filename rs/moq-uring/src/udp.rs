@@ -1923,6 +1923,24 @@ mod tests {
 		assert_eq!(RecvMeta::parse(&gro(0)).stride, None);
 	}
 
+	#[test]
+	fn malformed_control_lengths_preserve_valid_prefix() {
+		let prefix = gro(1200);
+		let suffix = gro(900);
+		let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
+		for length in [0, header_len - 1, suffix.len() + 1, usize::MAX] {
+			let mut control = [prefix.as_slice(), suffix.as_slice()].concat();
+			// SAFETY: the suffix contains a complete header, written without assuming alignment.
+			unsafe {
+				let pointer = control.as_mut_ptr().add(prefix.len()).cast::<libc::cmsghdr>();
+				let mut header = pointer.read_unaligned();
+				header.cmsg_len = length;
+				pointer.write_unaligned(header);
+			}
+			assert_eq!(RecvMeta::parse(&control).stride, Some(1200));
+		}
+	}
+
 	/// Round-trip an address through the kernel wire encoding.
 	fn roundtrip(addr: SocketAddr) -> Option<SocketAddr> {
 		// SAFETY: all-zero is a valid sockaddr_storage.
