@@ -135,6 +135,17 @@ impl Followed {
 		instances.current = broadcaster;
 	}
 
+	/// Keep serving every instance of `replaced` still open, unless this one lists its id.
+	fn adopt(&self, replaced: &Followed) {
+		let replaced = replaced.instances.lock().unwrap();
+		let mut instances = self.instances.lock().unwrap();
+		for (id, broadcaster) in &replaced.by_id {
+			if !broadcaster.is_closed() {
+				instances.by_id.entry(id.clone()).or_insert_with(|| broadcaster.clone());
+			}
+		}
+	}
+
 	/// Forget every instance whose broadcast closed, registering `waiter` on the rest.
 	fn forget_closed(&self, waiter: &kio::Waiter) {
 		let mut instances = self.instances.lock().unwrap();
@@ -187,8 +198,12 @@ impl Server {
 
 	/// Follow `name` from the instance serving it now, unless it is followed already.
 	async fn followed(&self, name: &str) -> Option<Arc<Followed>> {
-		if let Some(followed) = self.cached(name) {
-			return Some(followed);
+		// Once the listed instance closes, its follower is about to move on or forget the path, so
+		// resolve whatever serves the path now instead.
+		if let Some(followed) = self.inner.broadcasts.lock().unwrap().get(name)
+			&& !followed.current().is_closed()
+		{
+			return Some(followed.clone());
 		}
 
 		// Confirm a route covers the broadcast (and it is in scope) before resolving it. The
@@ -226,10 +241,13 @@ impl Server {
 
 		{
 			let mut broadcasts = self.inner.broadcasts.lock().unwrap();
-			if let Some(existing) = broadcasts.get(name)
-				&& !existing.current().is_closed()
-			{
-				return Some(existing.clone());
+			if let Some(existing) = broadcasts.get(name) {
+				if !existing.current().is_closed() {
+					return Some(existing.clone());
+				}
+				// A player may still be on a replaced instance, and an epochless one would not get
+				// its id back.
+				followed.adopt(existing);
 			}
 			broadcasts.insert(name.to_string(), followed.clone());
 		}
@@ -242,18 +260,6 @@ impl Server {
 		));
 		*followed.task.lock().unwrap() = Some(task);
 		Some(followed)
-	}
-
-	/// The followed `name`, unless its current instance closed. Its follower is about to forget
-	/// it then, so resolve whatever serves the path now instead.
-	fn cached(&self, name: &str) -> Option<Arc<Followed>> {
-		let mut broadcasts = self.inner.broadcasts.lock().unwrap();
-		let followed = broadcasts.get(name)?;
-		if followed.current().is_closed() {
-			broadcasts.remove(name);
-			return None;
-		}
-		Some(followed.clone())
 	}
 }
 
@@ -519,5 +525,37 @@ mod tests {
 
 		drop(new);
 		eventually(async || server.inner.broadcasts.lock().unwrap().is_empty()).await;
+	}
+
+	/// A request that finds the listed instance closed before the follower does resolves the path
+	/// afresh, yet a replaced instance still open keeps its URLs. An epochless one gets a new id
+	/// when resolved again, so its old URLs would never serve otherwise.
+	#[tokio::test]
+	async fn a_closed_current_instance_keeps_the_open_ones() {
+		let origin = produce_origin();
+		let server = Server::new(origin.consume(), Config::default());
+		let _old = origin
+			.publish("live", moq_net::origin::Route::default())
+			.expect("publish allowed");
+		settle().await;
+		let open = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+
+		// The follower has not yet seen the takeover instance close.
+		let followed = Followed::new(open.clone());
+		followed.start(closed_broadcaster().await);
+		server
+			.inner
+			.broadcasts
+			.lock()
+			.unwrap()
+			.insert("live".to_string(), Arc::new(followed));
+
+		let current = server.broadcaster("live").await.expect("broadcast announced");
+		assert!(!current.is_closed());
+		let kept = server.instance("live", open.instance()).await;
+		assert!(
+			kept.is_some_and(|kept| Arc::ptr_eq(&kept, &open)),
+			"the open instance lost its URLs"
+		);
 	}
 }
