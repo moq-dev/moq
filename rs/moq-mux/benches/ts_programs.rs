@@ -1,6 +1,7 @@
 //! `--program all` TS ingest across program count and per-program bitrate, over one second of
 //! a generated multiplex. Throughput is the whole input, so a parse that repeats per program
-//! shows as a falling rate with program count.
+//! shows as a falling rate with program count. A PAT that also names programs no PMT
+//! describes shows what a program costs before it starts.
 
 use std::time::Duration;
 
@@ -32,12 +33,13 @@ fn crc32(data: &[u8]) -> u32 {
 	crc
 }
 
-/// A long-form PSI section: `table_id`, the 16-bit extension, version 0, one section.
-fn section(table_id: u8, extension: u16, body: &[u8]) -> Vec<u8> {
+/// A long-form PSI section: `table_id`, the 16-bit extension, version 0, section `number` of
+/// `last`.
+fn section(table_id: u8, extension: u16, number: u8, last: u8, body: &[u8]) -> Vec<u8> {
 	let length = 5 + body.len() + 4;
 	let mut section = vec![table_id, 0xb0 | (length >> 8) as u8, length as u8];
 	section.extend_from_slice(&extension.to_be_bytes());
-	section.extend_from_slice(&[0xc1, 0, 0]);
+	section.extend_from_slice(&[0xc1, number, last]);
 	section.extend_from_slice(body);
 	section.extend_from_slice(&crc32(&section).to_be_bytes());
 	section
@@ -49,6 +51,11 @@ fn pmt_pid(program: u16) -> u16 {
 
 fn video_pid(program: u16) -> u16 {
 	0x0200 + program
+}
+
+/// The PMT PID a PAT names for an undescribed program, clear of every PID that carries data.
+fn undescribed_pid(program: u16) -> u16 {
+	0x1000 + program
 }
 
 #[derive(Default)]
@@ -70,12 +77,14 @@ impl Mux {
 	}
 
 	fn psi(&mut self, pid: u16, section: &[u8]) {
-		assert!(section.len() < 184, "one packet per section");
-		self.header(pid, true, false);
-		let end = self.out.len() + 184;
-		self.out.push(0);
-		self.out.extend_from_slice(section);
-		self.out.resize(end, 0xff);
+		let mut payload = vec![0];
+		payload.extend_from_slice(section);
+		for (i, chunk) in payload.chunks(184).enumerate() {
+			self.header(pid, i == 0, false);
+			let end = self.out.len() + 184;
+			self.out.extend_from_slice(chunk);
+			self.out.resize(end, 0xff);
+		}
 	}
 
 	/// One access unit on `pid` in `packets` packets, its first carrying `pcr` (27 MHz) and a
@@ -123,16 +132,27 @@ impl Mux {
 }
 
 /// One second of `programs` H.264 programs at `bitrate` bits per second each, interleaved
-/// frame by frame, each program carrying its PCR on its video PID.
-fn multiplex(programs: u16, bitrate: u64) -> Vec<u8> {
+/// frame by frame, each program carrying its PCR on its video PID. The PAT also names
+/// `undescribed` programs whose PMT never arrives.
+fn multiplex(programs: u16, undescribed: u16, bitrate: u64) -> Vec<u8> {
 	let packets = (bitrate / FPS / 8).div_ceil(188) as usize;
 	let mut mux = Mux::default();
-	let mut pat = Vec::new();
-	for program in 1..=programs {
-		pat.extend_from_slice(&program.to_be_bytes());
-		pat.extend_from_slice(&(0xe000 | pmt_pid(program)).to_be_bytes());
-	}
-	let pat = section(0x00, 1, &pat);
+	let entries: Vec<u8> = (1..=programs)
+		.map(|program| (program, pmt_pid(program)))
+		.chain((programs + 1..=programs + undescribed).map(|program| (program, undescribed_pid(program))))
+		.flat_map(|(program, pid)| {
+			let [a, b] = program.to_be_bytes();
+			let [c, d] = (0xe000 | pid).to_be_bytes();
+			[a, b, c, d]
+		})
+		.collect();
+	// A section holds at most 1021 bytes, so a long PAT spans several.
+	let chunks: Vec<_> = entries.chunks(250 * 4).collect();
+	let last = (chunks.len() - 1) as u8;
+	let pat: Vec<_> = (0..)
+		.zip(&chunks)
+		.map(|(number, chunk)| section(0x00, 1, number, last, chunk))
+		.collect();
 	let pmts: Vec<_> = (1..=programs)
 		.map(|program| {
 			let video = video_pid(program);
@@ -140,12 +160,14 @@ fn multiplex(programs: u16, bitrate: u64) -> Vec<u8> {
 			body.extend_from_slice(&[0xf0, 0x00, 0x1b]);
 			body.extend_from_slice(&(0xe000 | video).to_be_bytes());
 			body.extend_from_slice(&[0xf0, 0x00]);
-			section(0x02, program, &body)
+			section(0x02, program, 0, 0, &body)
 		})
 		.collect();
 	for frame in 0..FPS {
 		if frame % PSI_EVERY == 0 {
-			mux.psi(0, &pat);
+			for pat in &pat {
+				mux.psi(0, pat);
+			}
 			for (program, pmt) in (1..=programs).zip(&pmts) {
 				mux.psi(pmt_pid(program), pmt);
 			}
@@ -180,26 +202,32 @@ fn programs(c: &mut Criterion) {
 	group.warm_up_time(Duration::from_millis(300));
 	group.sample_size(10);
 	for programs in [1u16, 4, 16] {
-		for mbps in [1u64, 4] {
-			let input = multiplex(programs, mbps * 1_000_000);
-			let (stats, _driver) = ingest(programs, &input);
-			assert!(
-				stats.streams.len() == usize::from(programs) && stats.streams.values().all(|s| s.units == FPS),
-				"every program delivers every frame"
-			);
-			group.throughput(Throughput::Bytes(input.len() as u64));
-			group.bench_function(BenchmarkId::new(format!("{programs}"), format!("{mbps}mbps")), |b| {
-				b.iter_batched(
-					setup,
-					|(mut programs, driver)| {
-						for chunk in input.chunks(188 * 7) {
-							programs.decode(chunk).unwrap();
-						}
-						(programs, driver)
-					},
-					BatchSize::PerIteration,
-				)
-			});
+		for undescribed in [0u16, 1000] {
+			for mbps in [1u64, 4] {
+				let input = multiplex(programs, undescribed, mbps * 1_000_000);
+				let (stats, _driver) = ingest(programs, &input);
+				assert!(
+					stats.streams.len() == usize::from(programs) && stats.streams.values().all(|s| s.units == FPS),
+					"every program delivers every frame"
+				);
+				group.throughput(Throughput::Bytes(input.len() as u64));
+				let name = match undescribed {
+					0 => format!("{programs}"),
+					_ => format!("{programs}+{undescribed}"),
+				};
+				group.bench_function(BenchmarkId::new(name, format!("{mbps}mbps")), |b| {
+					b.iter_batched(
+						setup,
+						|(mut programs, driver)| {
+							for chunk in input.chunks(188 * 7) {
+								programs.decode(chunk).unwrap();
+							}
+							(programs, driver)
+						},
+						BatchSize::PerIteration,
+					)
+				});
+			}
 		}
 	}
 	group.finish();

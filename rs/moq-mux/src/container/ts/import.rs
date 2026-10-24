@@ -297,6 +297,18 @@ impl<E: catalog::Catalog> Import<E> {
 		self
 	}
 
+	/// Carry on the PMT `sections` began on `pid`, for an importer that starts mid-stream on the
+	/// packet after the ones `sections` read.
+	pub(super) fn with_pmt(mut self, pid: Pid, sections: SectionReassembler) -> Self {
+		self.pmt_sections.insert(pid, sections);
+		self
+	}
+
+	/// Whether this importer reassembles the PMT sections on `pid`, and counts their CRC errors.
+	pub(super) fn reads_pmt(&self, pid: u16) -> bool {
+		Pid::new(pid).is_ok_and(|pid| self.pmt_sections.contains_key(&pid))
+	}
+
 	/// A reservation on this program's timebase, so every stream shifts by its offset.
 	fn reserve(&self) -> crate::catalog::Reserved<E> {
 		self.timebase.reserve()
@@ -2640,7 +2652,7 @@ pub(super) fn payload(pkt: &[u8; TsPacket::SIZE]) -> Payload<'_> {
 /// header split, where section_length is not yet known), continuity-counter
 /// gaps, and adaptation-field discontinuities. Deliberately minimal: just enough to
 /// recover whole sections verbatim.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct SectionReassembler {
 	/// Bytes of the section currently being reassembled. Its 3-byte header (and
 	/// thus section_length) may not all be present yet, so completeness is
@@ -2650,9 +2662,23 @@ pub(super) struct SectionReassembler {
 	span: Option<Span>,
 	/// Shared with the PES path: a broken chain drops the partial either way.
 	continuity: Continuity,
+	/// Whether the first section the latest packet completed began in an earlier packet.
+	resumed: bool,
+	/// Whether the partial section left assembling began in the latest packet.
+	fresh: bool,
 }
 
 impl SectionReassembler {
+	/// Whether the first section the latest packet completed began in an earlier packet.
+	pub(super) fn resumed(&self) -> bool {
+		self.resumed
+	}
+
+	/// Whether the latest packet began the partial section left assembling.
+	pub(super) fn fresh(&self) -> bool {
+		self.fresh && !self.acc.is_empty()
+	}
+
 	/// Consume one 188-byte TS packet, appending every completed section to `out`.
 	pub(super) fn push(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
 		let mut completed = Vec::new();
@@ -2662,6 +2688,8 @@ impl SectionReassembler {
 
 	fn push_at(&mut self, pkt: &[u8], source: Option<(u64, &Placement)>, out: &mut Vec<(Option<Span>, Vec<u8>)>) {
 		let pkt: &[u8; 188] = pkt.try_into().expect("section packet must be 188 bytes");
+		self.resumed = false;
+		self.fresh = false;
 		match self.continuity.observe(pkt) {
 			Continuation::Duplicate => return,
 			// A packet flagged corrupt takes its own payload down with the partial: this is
@@ -2702,7 +2730,9 @@ impl SectionReassembler {
 				// progress (stream just joined, or a reset dropped the partial) these
 				// bytes are an orphaned fragment, so skip straight to the pointer_field.
 				self.acc.extend_from_slice(&payload[1..1 + ptr]);
+				let completed = out.len();
 				self.drain(out, source, end - (payload.len() - 1 - ptr) as u64);
+				self.resumed = out.len() > completed;
 			}
 			// The pointer_field is a hard section boundary: drop any leftover partial
 			// and start the section it points to.
@@ -2710,6 +2740,7 @@ impl SectionReassembler {
 			self.acc.extend_from_slice(&payload[1 + ptr..]);
 			self.span = source.and_then(|(_, placement)| placement.span(end - self.acc.len() as u64));
 			self.drain(out, source, end);
+			self.fresh = true;
 		} else if !self.acc.is_empty() {
 			// Continuation of the section in progress. A non-PUSI packet with nothing
 			// in progress is unaligned (no pointer_field to resync on), so it is
@@ -2717,7 +2748,10 @@ impl SectionReassembler {
 			// discontinuity, or corrupt pointer dropped the partial, rather than
 			// resuming on stray bytes that merely look like a section.
 			self.acc.extend_from_slice(payload);
+			let completed = out.len();
 			self.drain(out, source, end);
+			self.resumed = out.len() > completed;
+			self.fresh = self.resumed;
 		}
 	}
 
@@ -7084,7 +7118,7 @@ pub(super) mod test {
 
 	/// One PES on `pid` carrying two whole MP2 frames: enough for the second to confirm the
 	/// first, which is what the legacy path publishes on.
-	fn mp2_pes(pid: u16, cc: u8, pts: u64, fills: [u8; 2]) -> Vec<u8> {
+	pub(in crate::container::ts) fn mp2_pes(pid: u16, cc: u8, pts: u64, fills: [u8; 2]) -> Vec<u8> {
 		let mut payload = mp2_frame(fills[0]);
 		payload.extend_from_slice(&mp2_frame(fills[1]));
 		audio_pes_packet(pid, cc, pts, &payload)
@@ -7260,7 +7294,7 @@ pub(super) mod test {
 		section
 	}
 
-	const MP2: u8 = StreamType::Mpeg1Audio as u8;
+	pub(in crate::container::ts) const MP2: u8 = StreamType::Mpeg1Audio as u8;
 
 	/// A PAT listing fifty programs, which takes two packets, then program 50's PMT (one
 	/// MP2 stream on `0x0061`) and one PES on it.

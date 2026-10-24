@@ -1,19 +1,16 @@
 import { Instant, Nano, now, wall } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
-import {
-	type Auth,
-	type Grant,
-	grantsEqual,
-	type Handle,
-	type Issued,
-	type Request,
-	type Requests,
-	Unsupported,
-} from "./auth.ts";
+import { type Auth, type Grant, type Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Stream } from "./stream.ts";
 import { nextTask } from "./util/yield.ts";
+
+/** Whether two grants allow the same paths and lapse together. */
+function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
+	if (a === undefined || b === undefined) return a === b;
+	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && a.expires === b.expires;
+}
 
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
 export interface WireGrant {
