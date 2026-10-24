@@ -4411,6 +4411,7 @@ version = "0.5.17"
 dependencies = [
  "axum",
  "bytes",
+ "futures",
  "hang",
  "humantime",
  "kio 0.6.3",

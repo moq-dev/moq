@@ -57,18 +57,23 @@ const MAX_RENDITION_FAILURES: usize = 3;
 #[non_exhaustive]
 pub struct Config {
 	/// The master or media playlist URL to import. Local files use a `file://` URL.
+	/// Every resource and redirect hop must share its scheme, host, and port.
 	pub playlist: Url,
 
 	/// HTTP client used to fetch the playlist and segments, for example one carrying
 	/// credentials for an authenticated origin. Defaults to a plain client with a 30
-	/// second per-request timeout.
+	/// second per-request timeout that follows only redirects on the playlist's origin.
+	///
+	/// A supplied client keeps its own redirect policy, so it decides which hops are
+	/// requested. The import still refuses a resource, or a response that ends, off the
+	/// playlist's origin.
 	///
 	/// This is a [`reqwest::Client`].
 	pub client: Option<Client>,
 }
 
 impl Config {
-	/// Create an import configuration for `playlist` using the default HTTP client.
+	/// Create an import configuration for `playlist`.
 	pub fn new(playlist: Url) -> Self {
 		Self { playlist, client: None }
 	}
@@ -170,23 +175,54 @@ fn resolve_map(url: Url, range: Option<&ByteRange>) -> Result<Resource> {
 	RangeCursor::default().resolve(url, range)
 }
 
+/// Whether `url` shares `entry`'s scheme, host, and port.
+///
+/// `file:` URLs have opaque origins in [`Url::origin`], so compare the parts directly.
+fn same_origin(entry: &Url, url: &Url) -> bool {
+	entry.scheme() == url.scheme()
+		&& entry.host() == url.host()
+		&& entry.port_or_known_default() == url.port_or_known_default()
+}
+
 /// Fetches playlists and segments over HTTP or from the filesystem, applying HLS byte
 /// ranges (and validating that the server honored them).
 struct Fetcher {
 	client: Client,
+	/// The caller's playlist URL. A playlist is untrusted, so every fetch stays on its origin.
+	entry: Url,
 }
 
 impl Fetcher {
-	fn new(client: Option<Client>) -> Result<Self> {
-		let client = match client {
-			Some(client) => client,
-			None => Client::builder()
-				.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
-				// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
-				.timeout(REQUEST_TIMEOUT)
-				.build()?,
+	fn new(config: &Config) -> Result<Self> {
+		let entry = config.playlist.clone();
+		if !matches!(entry.scheme(), "file" | "http" | "https") {
+			return Err(Error::ResourceRefused);
+		}
+
+		let client = match &config.client {
+			Some(client) => client.clone(),
+			None => {
+				// An intermediate hop is already a request to its origin, so check each one before
+				// following it. A stopped hop reaches `fetch` as a redirect response, refused there.
+				let origin = entry.clone();
+				let follow = reqwest::redirect::Policy::default();
+				let redirect = reqwest::redirect::Policy::custom(move |attempt| {
+					if same_origin(&origin, attempt.url()) {
+						follow.redirect(attempt)
+					} else {
+						attempt.stop()
+					}
+				});
+
+				Client::builder()
+					.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+					// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
+					.timeout(REQUEST_TIMEOUT)
+					.redirect(redirect)
+					.build()?
+			}
 		};
-		Ok(Self { client })
+		Ok(Self { client, entry })
 	}
 
 	async fn media_playlist(&self, url: Url) -> Result<MediaPlaylist> {
@@ -204,6 +240,9 @@ impl Fetcher {
 
 	async fn fetch(&self, resource: &Resource) -> Result<Bytes> {
 		let url = &resource.url;
+		if !same_origin(&self.entry, url) {
+			return Err(Error::ResourceRefused);
+		}
 		if url.scheme() == "file" {
 			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
 			let Some(range) = resource.range else {
@@ -220,6 +259,10 @@ impl Fetcher {
 			self.validate_range_length(resource, Bytes::from(bytes))
 		} else {
 			let response = self.request(resource).send().await.map_err(Error::from)?;
+			// A caller's client follows redirects under its own policy, so check where it landed too.
+			if response.status().is_redirection() || !same_origin(&self.entry, response.url()) {
+				return Err(Error::ResourceRefused);
+			}
 			let response = response.error_for_status().map_err(Error::from)?;
 			let partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
 			if partial {
@@ -592,10 +635,11 @@ pub struct Import {
 impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
+		let fetcher = Fetcher::new(&cfg)?;
 		let base_url = cfg.playlist;
 		Ok(Self {
 			sink: Sink { broadcast, catalog },
-			fetcher: Fetcher::new(cfg.client)?,
+			fetcher,
 			base_url,
 			video: Vec::new(),
 			audio: None,
@@ -654,6 +698,7 @@ impl Import {
 					deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
 					outcome
 				}
+				Err(err @ Error::ResourceRefused) => return Err(err),
 				// A status the origin actually sent is its answer: a 404 playlist is not going to
 				// become a 200 on the next pass. Everything else rides the backoff budget.
 				Err(err) if err.status().is_some_and(|status| !crate::status_retryable(status)) => {
@@ -736,6 +781,8 @@ impl Import {
 					wrote_segments += count;
 					ok += 1;
 				}
+				// Admission is settled by the caller's input policy, not rendition health.
+				Err(err @ Error::ResourceRefused) => return Err(err),
 				Err(err) => match on_error {
 					OnError::Fail => return Err(err),
 					// Keep the other renditions going: one bad variant or segment shouldn't
@@ -1067,13 +1114,7 @@ mod tests {
 		(init, fragments)
 	}
 
-	async fn serve_response(
-		status: &str,
-		headers: &[(&str, &str)],
-		body: &[u8],
-	) -> (Url, tokio::task::JoinHandle<Vec<u8>>) {
-		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let address = listener.local_addr().unwrap();
+	fn http_response(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
 		let mut response = format!(
 			"HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
 			body.len()
@@ -1084,24 +1125,42 @@ mod tests {
 		response.push_str("\r\n");
 		let mut response = response.into_bytes();
 		response.extend_from_slice(body);
+		response
+	}
 
-		let server = tokio::spawn(async move {
-			let (mut stream, _) = listener.accept().await.unwrap();
-			let mut request = Vec::new();
-			loop {
-				let mut chunk = [0; 1024];
-				let read = stream.read(&mut chunk).await.unwrap();
-				if read == 0 {
-					break;
+	/// Answer one connection per canned response, in order, returning each request.
+	fn serve(listener: TcpListener, responses: Vec<Vec<u8>>) -> tokio::task::JoinHandle<Vec<Vec<u8>>> {
+		tokio::spawn(async move {
+			let mut requests = Vec::new();
+			for response in responses {
+				let (mut stream, _) = listener.accept().await.unwrap();
+				let mut request = Vec::new();
+				loop {
+					let mut chunk = [0; 1024];
+					let read = stream.read(&mut chunk).await.unwrap();
+					if read == 0 {
+						break;
+					}
+					request.extend_from_slice(&chunk[..read]);
+					if request.windows(4).any(|window| window == b"\r\n\r\n") {
+						break;
+					}
 				}
-				request.extend_from_slice(&chunk[..read]);
-				if request.windows(4).any(|window| window == b"\r\n\r\n") {
-					break;
-				}
+				stream.write_all(&response).await.unwrap();
+				requests.push(request);
 			}
-			stream.write_all(&response).await.unwrap();
-			request
-		});
+			requests
+		})
+	}
+
+	async fn serve_response(
+		status: &str,
+		headers: &[(&str, &str)],
+		body: &[u8],
+	) -> (Url, tokio::task::JoinHandle<Vec<Vec<u8>>>) {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let server = serve(listener, vec![http_response(status, headers, body)]);
 		(Url::parse(&format!("http://{address}/media.mp4")).unwrap(), server)
 	}
 
@@ -1120,8 +1179,172 @@ mod tests {
 		)
 	}
 
-	fn fetcher() -> Fetcher {
-		Fetcher::new(None).unwrap()
+	fn fetcher(entry: &Url) -> Fetcher {
+		Fetcher::new(&Config::new(entry.clone())).unwrap()
+	}
+
+	#[test]
+	fn same_origin_references_are_admitted() {
+		let entry = Url::parse("https://example.com/live/master.m3u8").unwrap();
+		for reference in [
+			"video.m3u8",
+			"../a.mp4",
+			"/a.mp4",
+			"//example.com/a.mp4",
+			"https://example.com:443/a.mp4",
+			"HTTPS://EXAMPLE.COM/a.mp4",
+		] {
+			let url = resolve_uri(&entry, reference).unwrap();
+			assert!(same_origin(&entry, &url), "{reference}");
+		}
+	}
+
+	#[tokio::test]
+	async fn cross_origin_references_are_refused() {
+		let dir = temp_dir();
+		let path = dir.join("resource");
+		std::fs::write(&path, b"sentinel").unwrap();
+		let local = Url::from_file_path(dir.join("media.m3u8")).unwrap();
+		let remote = Url::parse("https://example.com/live/media.m3u8").unwrap();
+		let file = Url::from_file_path(&path).unwrap();
+		let mut downgraded = remote.clone();
+		downgraded.set_scheme("http").unwrap();
+		for (entry, reference) in [
+			(&remote, "https://other.example/live/a.mp4"),
+			(&remote, "//other.example/live/a.mp4"),
+			(&remote, downgraded.as_str()),
+			(&remote, "https://example.com:8443/live/a.mp4"),
+			(&remote, file.as_str()),
+			(&local, "https://example.com/live/a.mp4"),
+			(&local, "//example.com/live/a.mp4"),
+		] {
+			// Refused before any I/O: none of these hosts resolve, and the file exists.
+			let url = resolve_uri(entry, reference).unwrap();
+			let fetcher = fetcher(entry);
+			assert!(
+				matches!(fetcher.fetch_url(url.clone()).await, Err(Error::ResourceRefused)),
+				"{reference} from {entry}"
+			);
+			assert!(matches!(
+				fetcher.fetch(&ranged_resource(url)).await,
+				Err(Error::ResourceRefused)
+			));
+		}
+	}
+
+	#[tokio::test]
+	async fn redirect_hops_stay_on_the_playlist_origin() {
+		// A same-origin hop is followed.
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let entry = Url::parse(&format!("http://{}/media.m3u8", listener.local_addr().unwrap())).unwrap();
+		let server = serve(
+			listener,
+			vec![
+				http_response("302 Found", &[("Location", "/moved.m3u8")], b""),
+				http_response("200 OK", &[], b"moved"),
+			],
+		);
+		assert_eq!(fetcher(&entry).fetch_url(entry.clone()).await.unwrap(), b"moved"[..]);
+		server.await.unwrap();
+
+		// A later hop to another origin is refused before it is requested.
+		let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		other.set_nonblocking(true).unwrap();
+		let location = format!("http://{}/media.m3u8", other.local_addr().unwrap());
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let entry = Url::parse(&format!("http://{}/media.m3u8", listener.local_addr().unwrap())).unwrap();
+		let server = serve(
+			listener,
+			vec![
+				http_response("302 Found", &[("Location", "/hop.m3u8")], b""),
+				http_response("302 Found", &[("Location", &location)], b""),
+			],
+		);
+		assert!(matches!(
+			fetcher(&entry).fetch_url(entry.clone()).await,
+			Err(Error::ResourceRefused)
+		));
+		server.await.unwrap();
+		assert_eq!(other.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+	}
+
+	#[tokio::test]
+	async fn caller_client_stays_on_the_playlist_origin() {
+		// The caller's client follows a cross-origin redirect under its own policy, but the body
+		// it lands on is refused rather than imported.
+		let other = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let location = format!("http://{}/media.m3u8", other.local_addr().unwrap());
+		let other = serve(other, vec![http_response("200 OK", &[], b"other")]);
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let entry = Url::parse(&format!("http://{}/media.m3u8", listener.local_addr().unwrap())).unwrap();
+		let server = serve(
+			listener,
+			vec![http_response("302 Found", &[("Location", &location)], b"")],
+		);
+		let mut config = Config::new(entry.clone());
+		config.client = Some(Client::new());
+		let fetcher = Fetcher::new(&config).unwrap();
+		assert!(matches!(
+			fetcher.fetch_url(entry.clone()).await,
+			Err(Error::ResourceRefused)
+		));
+		server.await.unwrap();
+		other.await.unwrap();
+
+		// A cross-origin reference is still refused before any I/O.
+		let reference = resolve_uri(&entry, &location).unwrap();
+		assert!(matches!(
+			fetcher.fetch_url(reference).await,
+			Err(Error::ResourceRefused)
+		));
+	}
+
+	#[tokio::test]
+	async fn admission_failure_ends_import_without_retrying() {
+		tokio::time::pause();
+		let sink = sink();
+		let mut import = Import::new(
+			sink.broadcast.clone(),
+			sink.catalog.clone(),
+			Config::new(Url::parse("https://example.com/master.m3u8").unwrap()),
+		)
+		.unwrap();
+		import.video.push(TrackState::new(
+			"video[0]".to_string(),
+			Url::parse("file:///refused.m3u8").unwrap(),
+			select_muxed(),
+			sink,
+		));
+		assert!(matches!(
+			futures::FutureExt::now_or_never(import.run()),
+			Some(Err(Error::ResourceRefused))
+		));
+	}
+
+	#[tokio::test]
+	async fn local_import_allows_local_resources() {
+		let dir = temp_dir();
+		let path = dir.join("resource");
+		std::fs::write(&path, b"sentinel").unwrap();
+		let url = Url::from_file_path(&path).unwrap();
+		let fetcher = Fetcher::new(&Config::new(url.clone())).unwrap();
+		assert_eq!(fetcher.fetch_url(url.clone()).await.unwrap(), b"sentinel"[..]);
+		assert_eq!(fetcher.fetch(&ranged_resource(url)).await.unwrap(), b"nti"[..]);
+	}
+
+	#[tokio::test]
+	async fn unsupported_resources_are_refused() {
+		let entry = Url::parse("https://example.com/master.m3u8").unwrap();
+		for scheme in ["ftp", "data", "custom"] {
+			let url = Url::parse(&format!("{scheme}://example.com/resource?token=secret")).unwrap();
+			assert!(matches!(
+				Fetcher::new(&Config::new(url.clone())),
+				Err(Error::ResourceRefused)
+			));
+			let error = fetcher(&entry).fetch_url(url).await.unwrap_err();
+			assert!(matches!(error, Error::ResourceRefused));
+			assert!(!format!("{error} {error:?}").contains("secret"));
+		}
 	}
 
 	fn ranged_resource(url: Url) -> Resource {
@@ -1312,9 +1535,9 @@ mod tests {
 	#[test]
 	fn ranged_resource_builds_http_range_request() {
 		let url = Url::parse("https://example.com/media.mp4").unwrap();
-		let request = fetcher()
+		let request = fetcher(&url)
 			.request(&Resource {
-				url,
+				url: url.clone(),
 				range: Some(ResolvedRange { start: 2, length: 3 }),
 			})
 			.build()
@@ -1327,8 +1550,8 @@ mod tests {
 	async fn ranged_http_resource_accepts_matching_partial_response() {
 		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 2-4/6")], b"cde").await;
 
-		let bytes = fetcher().fetch(&ranged_resource(url)).await.unwrap();
-		let request = String::from_utf8(server.await.unwrap()).unwrap();
+		let bytes = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap();
+		let request = String::from_utf8(server.await.unwrap().remove(0)).unwrap();
 
 		assert_eq!(bytes, b"cde".as_slice());
 		assert!(
@@ -1342,7 +1565,7 @@ mod tests {
 	async fn ranged_http_resource_slices_full_response() {
 		let (url, server) = serve_response("200 OK", &[], b"abcdef").await;
 
-		let bytes = fetcher().fetch(&ranged_resource(url)).await.unwrap();
+		let bytes = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap();
 		server.await.unwrap();
 
 		assert_eq!(bytes, b"cde".as_slice());
@@ -1352,7 +1575,7 @@ mod tests {
 	async fn ranged_http_resource_rejects_wrong_response_length() {
 		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 2-4/6")], b"cd").await;
 
-		let err = fetcher().fetch(&ranged_resource(url)).await.unwrap_err();
+		let err = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap_err();
 		server.await.unwrap();
 
 		assert!(matches!(
@@ -1369,7 +1592,7 @@ mod tests {
 	async fn ranged_http_resource_rejects_mismatched_content_range() {
 		let (url, server) = serve_response("206 Partial Content", &[("Content-Range", "bytes 3-5/6")], b"def").await;
 
-		let err = fetcher().fetch(&ranged_resource(url)).await.unwrap_err();
+		let err = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap_err();
 		server.await.unwrap();
 
 		assert!(matches!(err, Error::ByteRangeResponseMismatch { start: 2, end: 4, .. }));

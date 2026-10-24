@@ -39,6 +39,10 @@ pub enum Error {
 	#[error("mux: {0}")]
 	Mux(#[from] moq_mux::Error),
 
+	/// An import resource or redirect hop left the playlist's origin, or the playlist uses an unsupported scheme.
+	#[error("resource is outside the playlist's origin")]
+	ResourceRefused,
+
 	/// A `file://` URL could not be turned back into a filesystem path.
 	#[error("invalid file URL")]
 	InvalidFileUrl,
