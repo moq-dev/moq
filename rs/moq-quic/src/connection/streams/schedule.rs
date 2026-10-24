@@ -413,7 +413,10 @@ impl<K: Copy, D> Schedule<K, D> {
         self.recency -= 1;
         let moved = (priority, false, self.recency);
         let queue = self.queue(slot.group);
-        let item = queue.items.remove(&key).expect("queued stream is in its queue");
+        let item = queue
+            .items
+            .remove(&key)
+            .expect("queued stream is in its queue");
         queue.items.insert(moved, item);
         slot.queued = Some(Queued::At(moved));
     }

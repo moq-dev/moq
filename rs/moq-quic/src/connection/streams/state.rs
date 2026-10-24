@@ -2259,7 +2259,9 @@ mod tests {
         let mut buf = Vec::with_capacity(1000);
         for _ in 0..4 {
             let start = buf.len();
-            let meta = server.write_frames(&mut buf, start..start + 40, true).streams;
+            let meta = server
+                .write_frames(&mut buf, start..start + 40, true)
+                .streams;
             assert!(busy.contains(&meta[0].id), "{meta:?}");
         }
 
@@ -2272,7 +2274,9 @@ mod tests {
         .set_priority(10)
         .unwrap();
         let start = buf.len();
-        let meta = server.write_frames(&mut buf, start..start + 40, true).streams;
+        let meta = server
+            .write_frames(&mut buf, start..start + 40, true)
+            .streams;
         assert_eq!(meta[0].id, starved);
     }
 
