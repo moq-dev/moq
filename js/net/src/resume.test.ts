@@ -1823,7 +1823,7 @@ test.each(["lands", "dropped", "expired"])(
 );
 
 test("a group read whole still expires once the reader lets go of its copy", async () => {
-	const { clock, restore } = manual();
+	const { clock, installed } = manual();
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
@@ -1870,7 +1870,7 @@ test("a group read whole still expires once the reader lets go of its copy", asy
 		front.consumer.close();
 		a.close();
 		b.close();
-		restore();
+		installed.close();
 	}
 });
 

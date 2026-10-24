@@ -1116,7 +1116,7 @@ test("a fully read group still reports its expiry", async () => {
 		expect(group.expired.peek()).toMatchObject({ code: StreamCode.Old });
 	} finally {
 		producer.close();
-		clock.restore();
+		clock.installed.close();
 	}
 });
 

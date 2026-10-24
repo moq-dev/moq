@@ -151,7 +151,7 @@ for (const protocol of protocols) {
 for (const protocol of protocols) {
 	test(`${protocol.alpn}: a blocked group write ends when eviction takes what it has yet to read`, async () => {
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		const pair = createMockTransportPair(protocol.alpn);
 		const origin = new Origin();
 		const broadcast = origin.createBroadcast(Path.from("parked"));
@@ -239,7 +239,7 @@ for (const protocol of protocols) {
 			origin.close();
 			await running;
 			opening.mockRestore();
-			restore();
+			installed.close();
 		}
 	});
 }
