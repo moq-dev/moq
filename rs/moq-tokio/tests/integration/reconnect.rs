@@ -429,7 +429,7 @@ async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
 }
 
 /// How long each session on a bouncing fleet lives before its relay sends the GOAWAY. Twice
-/// the 50ms initial backoff these tests use, so every session counts as healthy.
+/// the 50ms healthy bar these tests use, so every session counts as healthy.
 const LIFE: Duration = Duration::from_millis(100);
 
 /// Send every session `sessions` yields the GOAWAY `uri(n)` once it has lived [`LIFE`], `n`
@@ -483,10 +483,12 @@ async fn ping_pong(
 	(url, accepts, tasks)
 }
 
-/// A backoff starting at 50ms that doubles up to `max`, giving up after `timeout`.
+/// A backoff starting at 50ms that doubles up to `max`, giving up after `timeout`, and that
+/// counts a session as healthy once it outlives the initial delay.
 fn bounced_backoff(max: Duration, timeout: Duration) -> moq_tokio::Backoff {
 	let mut backoff = moq_tokio::Backoff::default();
 	backoff.initial = Some((Duration::from_millis(50)).into());
+	backoff.healthy = Some((Duration::from_millis(50)).into());
 	backoff.multiplier = 2;
 	backoff.max = Some((max).into());
 	backoff.timeout = Some((timeout).into());
