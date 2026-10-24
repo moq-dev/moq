@@ -67,6 +67,9 @@ interface Waiter {
 }
 
 export interface SchedulerOptions {
+	/** The connection's opening frame, written before anything else. A close
+	 *  never drops it, since the peer rejects any other frame first. */
+	first?: Uint8Array;
 	/** Called after each frame is actually written (to track send activity). */
 	onActivity?: () => void;
 	/** Called once if the sink fails, after which nothing more is sent. */
@@ -114,13 +117,15 @@ export class SendScheduler {
 
 	// Resolver for the loop when it's parked with no work.
 	#wake?: () => void;
+	// Settles when the writer loop exits.
+	#done = Promise.withResolvers<void>();
 
 	constructor(sink: SendSink, options?: SchedulerOptions) {
 		this.#sink = sink;
 		this.#onActivity = options?.onActivity ?? (() => {});
 		this.#onFail = options?.onFail ?? (() => {});
 		// Start the writer loop. It never rejects — failures are captured by #fail.
-		void this.#run();
+		void this.#run(options?.first);
 	}
 
 	/** Queue a pre-encoded control frame. Preempts all stream data. */
@@ -194,18 +199,23 @@ export class SendScheduler {
 		this.#sendOrders.delete(streamId);
 	}
 
-	/** Close the scheduler: reject all pending stream frames, but let the loop
-	 *  flush any already-queued control frames (e.g. CONNECTION_CLOSE). */
-	close(err: Error): void {
-		if (this.#closed) return;
+	/** Close the scheduler: drop everything still queued and reject pending
+	 *  stream frames, then send `final` (the session's close frame) next.
+	 *  Resolves once the loop has nothing left to write: `final` was handed to
+	 *  the sink, or the sink failed. A write already in flight finishes first. */
+	close(err: Error, final?: Uint8Array): Promise<void> {
+		if (this.#closed) return this.#done.promise;
 		this.#closed = err;
 		for (const waiter of this.#ready.values()) waiter.reject(err);
 		this.#ready.clear();
 		this.#sendOrders.clear();
-		// Drop any queued pings and datagrams: neither means anything once closed.
+		// Nothing queued means anything once closed, so the close frame goes next.
+		this.#control.length = 0;
 		this.#latest.clear();
 		this.#datagrams.length = 0;
+		if (final) this.#control.push(final);
 		this.#signal();
+		return this.#done.promise;
 	}
 
 	#signal(): void {
@@ -234,8 +244,14 @@ export class SendScheduler {
 		return bestId as bigint;
 	}
 
-	async #run(): Promise<void> {
+	async #run(first?: Uint8Array): Promise<void> {
 		try {
+			if (first) {
+				await this.#sink.ready();
+				await this.#sink.write(first);
+				this.#onActivity();
+			}
+
 			while (true) {
 				if (
 					this.#control.length === 0 &&
@@ -296,6 +312,8 @@ export class SendScheduler {
 			}
 		} catch (err) {
 			this.#fail(err instanceof Error ? err : new Error(String(err)));
+		} finally {
+			this.#done.resolve();
 		}
 	}
 

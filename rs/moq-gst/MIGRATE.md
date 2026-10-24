@@ -4,14 +4,6 @@ How to update your pipelines for each breaking change, newest first.
 
 ## Unreleased
 
-### Keylog files must be private ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-The existing boolean keylog setting still opts into `SSLKEYLOGFILE`; no ABI or
-property name changes. Its destination is captured when configuration is adapted.
-Native QUIC initialization now refuses group/other-accessible existing Unix files
-(for example mode 0644), without changing permissions; newly created logs use 0600.
-Make an existing log private before enabling key logging.
-
 ### `moqsrc` audio caps are the standard ones
 
 `moqsrc` audio pads now carry `rate` and `channels` as `int`, and Opus pads the mapping fields (`channel-mapping-family`, `stream-count`, `coupled-count`, plus `channel-mapping` beyond stereo) with the OpusHead and an empty OpusTags as `streamheader`, so `decodebin` and `opusdec` accept them and `opusdec` applies the output gain.

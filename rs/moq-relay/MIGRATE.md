@@ -5,21 +5,6 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
-### Each `[connect.backoff]` knob does one job ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-`initial` is only the first retry delay, where zero now retries at once, and `max` is only
-the cap, where zero now leaves the delay uncapped. A session counts as healthy once it
-outlives the new `healthy` (`--backoff-healthy`, `MOQ_BACKOFF_HEALTHY`), 1s by default,
-instead of `initial`; zero is refused. If you raised `initial` to slow redials after
-flapping sessions, set `healthy` to the same value.
-
-### Embedder durations use the shared adapter ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-Set `drain_timeout` with `Some(std_duration.into())`; `None` uses the default.
-ACME `timeout`, stats `interval` and `linger`, and cache `duration` use the same `moq_tokio::cli::Duration`
-adapter. TOML and CLI duration strings retain their names. Later Rust assignments
-replace parsed values directly; there are no hidden CLI shadow fields.
-
 ### Auth `server_name` is the SNI only (#6509)
 
 The auth request's `server_name` no longer falls back to the HTTP `Host` header, `:authority`, or the WebTransport CONNECT host: it is absent over plain `http://` and `ws://` and for an IP-literal dial, while HTTPS and `wss://` report the SNI.
@@ -34,7 +19,7 @@ Have the auth server mark cluster peers as `peer` (`moq auth serve --mtls-peer`)
 
 `stats.interval`, `--stats-interval`, and `MOQ_STATS_INTERVAL` take a duration such as `"1s"` or `"500ms"` instead of a bare number of seconds, and a zero interval refuses to start.
 Write `interval = 5` as `interval = "5s"`.
-In Rust, `stats::Config::build` returns a `Result`.
+In Rust, `stats::Config::interval` is a `Duration`, and `stats::Config::build` returns a `Result`.
 
 ### `receive_window` has a floor (#5878)
 
@@ -93,13 +78,10 @@ A CLI that flattens them depends on `usage-rs = "7"` under its own name: the der
 Pass `auth::Error::Refused(moq_auth::Refusal::default())` to `Admission::refuse` for an unattributed refusal, or set its `reason`, optional verified `root`, and `tier`.
 Match `auth::Error::Refused(refusal)` to inspect it; never use the dialed path as refusal attribution.
 
-### Key logging names its file ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+### Key logging is opt-in (#5907)
 
-Replace `SSLKEYLOGFILE` and boolean `[quic] keylog` with `keylog = "/private/keys.log"`,
-`--quic-keylog /private/keys.log`, or `MOQ_QUIC_KEYLOG=/private/keys.log`.
-Tokio and io\_uring share this logger. Initialization refuses an inaccessible path
-or a group/other-accessible existing Unix file, such as mode 0644; new files are mode 0600.
-Iroh currently refuses an explicit keylog path when enabled.
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = true`) to capture them; without `SSLKEYLOGFILE` it stops startup.
 
 ### Cluster dials build from a template (#5674)
 
@@ -139,9 +121,9 @@ A qlog directory gets one file per endpoint instead of one per connection.
 
 ### A QUIC load-balancer nonce needs its server id (#5114)
 
-Move `listen.lb_id` / `listen.lb_nonce` or `listen.load_balancer` into `[listen.lb]`
-with `id` and optional `nonce` (default 8). Existing `--listen-quic-lb-*` flags keep
-their names and override that same table. A nonce without an ID stops startup.
+`listen.lb_nonce` (`--listen-quic-lb-nonce`, `MOQ_LISTEN_QUIC_LB_NONCE`) without `lb_id` stops startup.
+Setting `lb_id` or `lb_nonce` together with `load_balancer` also stops; `lb_id` used to win.
+Set `load_balancer`, or `lb_id` alone (nonce 8), or `lb_id` with `lb_nonce`.
 
 ### Settings no listener reads stop startup (#5006)
 
@@ -203,7 +185,7 @@ Environment variables follow the flag (`MOQ_SERVER_BIND` is `MOQ_LISTEN`), and a
 | `--client-connect` | `--connect` |
 | `--client-*` | `--connect-*` |
 | `--client-failover-delay` | `--connect-race` |
-| `--client-reconnect=false` | Removed; CLI dials reconnect. Native callers use `Client::with_reconnect(false)`. |
+| `--client-reconnect=false` | `--connect-once` |
 | `--tls-disable-verify`, `--client-tls-disable-verify` | `--connect-tls-insecure` |
 | `--server-quic-*`, `--client-quic-*` | `--quic-*`, applied to both directions |
 | TOML `[server]`, `[client]` | `[listen]`, `[connect]` |

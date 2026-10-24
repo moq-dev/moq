@@ -384,11 +384,9 @@ mod tests {
 	fn session_limits_merge_without_crossing_peer_policy() {
 		if !test_env::Env::without(&[
 			"MOQ_SESSION_ANNOUNCES",
-			"MOQ_SESSION_SUBSCRIPTIONS",
-			"MOQ_SESSION_FETCHES",
-			"MOQ_PEER_FETCHES",
+			"MOQ_SESSION_REQUESTS",
 			"MOQ_PEER_ANNOUNCES",
-			"MOQ_PEER_SUBSCRIPTIONS",
+			"MOQ_PEER_REQUESTS",
 		])
 		.isolate()
 		{
@@ -398,31 +396,25 @@ mod tests {
 		let path = dir.path().join("limits.toml");
 		std::fs::write(
 			&path,
-			"[session]\nannounces = 7\nsubscriptions = 8\nfetches = 9\n[peer]\nannounces = 90\nsubscriptions = 91\nfetches = 92\n",
+			"[session]\nannounces = 7\nrequests = 8\n[peer]\nannounces = 90\nrequests = 91\n",
 		)
 		.unwrap();
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
 		assert_eq!(config.session.resolve().announces, 7);
-		assert_eq!(config.session.resolve().subscriptions, 8);
+		assert_eq!(config.session.resolve().requests, 8);
 		assert_eq!(config.peer.resolve().announces, 90);
-		assert_eq!(config.peer.resolve().subscriptions, 91);
-		assert_eq!(config.session.resolve().fetches, 9);
-		assert_eq!(config.peer.resolve().fetches, 92);
+		assert_eq!(config.peer.resolve().requests, 91);
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-relay"),
 			path.into(),
 			"--session-announces=0".into(),
-			"--peer-subscriptions=1000".into(),
-			"--session-fetches=0".into(),
-			"--peer-fetches=2000".into(),
+			"--peer-requests=1000".into(),
 		])
 		.unwrap();
 		assert_eq!(config.session.resolve().announces, 0);
-		assert_eq!(config.session.resolve().subscriptions, 8);
+		assert_eq!(config.session.resolve().requests, 8);
 		assert_eq!(config.peer.resolve().announces, 90);
-		assert_eq!(config.peer.resolve().subscriptions, 1000);
-		assert_eq!(config.session.resolve().fetches, 0);
-		assert_eq!(config.peer.resolve().fetches, 2000);
+		assert_eq!(config.peer.resolve().requests, 1000);
 	}
 
 	/// `[peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.

@@ -5,8 +5,8 @@
 //! `parse()` is expected to take them first. A binary that parses more than once
 //! never reaches that code, so it has to answer them itself. Both shapes exist here:
 //! a TOML merge that layers CLI, env, and file with recorded provenance, and
-//! moq-cli's repeated `--` stage grammar. One duration adapter parses the
-//! human-readable values used by those flags and TOML keys.
+//! moq-cli's repeated `--` stage grammar. [`Duration`] parses the human-readable
+//! values used by those flags and TOML keys.
 
 #[path = "deprecated.rs"]
 mod deprecated;

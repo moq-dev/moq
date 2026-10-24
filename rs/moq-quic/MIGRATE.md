@@ -4,17 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Crypto and token-log features are consolidated ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-Use `ring` instead of `rustls-ring` or `rustls`. `aws-lc-rs` and `rustls-aws-lc-rs`
-select AWS-LC and both providers re-export `rustls`. Remove `tracing-log`, `bloom`,
-`platform-verifier`, `rustls-log`, `aws-lc-rs-fips`, and `rustls-aws-lc-rs-fips` from dependencies.
-Build a custom rustls client config instead of `ClientConfig::try_with_platform_verifier`.
-`BloomTokenLog` is always available and the default sends two validation tokens,
-including `default-features = false` builds which previously used `NoneTokenLog` and sent zero.
-To preserve that explicit policy use `validation_token.log(Arc::new(NoneTokenLog)).sent(0)`.
-Normal defaults and moq-tokio's existing Bloom behavior are unchanged.
-
 ### `mux` is an internal integration surface
 
 The `mux` module is hidden from public API documentation; use the `qmux` crate for reliable-transport sessions. It remains public only so qmux can share the stream state machine.

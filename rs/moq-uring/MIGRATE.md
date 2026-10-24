@@ -4,11 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### The manual-clock hook is private ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-The testing-only `manual` feature is `_manual`. Production consumers should remove it;
-tests installing a moq-clock manual clock can enable the internal hook.
-
 ### `udp::Transmit` is built with `Transmit::new` (#6400)
 
 `udp::Transmit` gains `src_ip`, the local address a send leaves from, and is `#[non_exhaustive]`.

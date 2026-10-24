@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Connection state
+
+`Dial` returns a connecting native client. Replace `Session.Status`, `Connects`, and `Failure` with `State()` and `StateChanged(ctx, state.Revision)`. `ConnectionState` carries `Phase`, `Connects`, `Failure`, and `Version`; `ConnectionPhase` replaces `ConnectionStatus`. Cancelling a state wait only cancels that wait. Cancel the session itself to stop its dial.
+
 ### Exact encoder rates and publication options
 
 Raw video input framerates are exact numerator/denominator records, not integers.
@@ -114,11 +118,6 @@ A `switch` that handles every value needs one more case.
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
 Pass `WithQUICKeylog(true)` to `Dial` or `WithServerQUICKeylog(true)` to `Listen` as well to capture them; without `SSLKEYLOGFILE` the dial or listen fails.
-
-The boolean opt-in remains unchanged. Native QUIC captures `SSLKEYLOGFILE` when
-configuration is adapted, creates new Unix logs with mode 0600, and refuses an
-existing group/other-accessible file (for example mode 0644) without changing it.
-Make an existing log private before enabling key logging.
 
 ### Subscriptions carry group ranges (#5732)
 

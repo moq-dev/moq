@@ -4,13 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Keylog files must be private ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+### Sessions report a lifecycle snapshot
 
-The existing boolean keylog setting still opts into `SSLKEYLOGFILE`; no ABI or
-property name changes. Its destination is captured when configuration is adapted.
-Native QUIC initialization now refuses group/other-accessible existing Unix files
-(for example mode 0644), without changing permissions; newly created logs use 0600.
-Make an existing log private before enabling key logging.
+`moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
+Each change delivers a `moq_connection_state` with `phase`, `connects`, `failure`, and the live `protocol`; copy what you keep, since it is valid only during the callback.
+Read `state->connects` where you read a positive status code. A failed dial or dropped connection now fires the callback with a negative `failure`, so drop your `moq_session_failure` polling; `moq_error()` describes it during the callback.
+The terminal call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after a requested close or the error that ended the session, where the terminal status code used to be. Release `user_data` there, as before.
 
 ### Exact encoder rates and publication options
 

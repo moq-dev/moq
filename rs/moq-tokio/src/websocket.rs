@@ -433,6 +433,7 @@ pub(crate) async fn connect(
 				let url = &url;
 				async move {
 					let stream = tokio::net::TcpStream::connect(addr).await?;
+					stream.set_nodelay(true)?;
 					connect_tls_override(tls, name, url, stream, alpns).await
 				}
 			})
@@ -735,9 +736,15 @@ impl Listener {
 	async fn accept_socket(&self) -> (tokio::net::TcpStream, net::SocketAddr) {
 		loop {
 			match self.listener.accept().await {
-				Ok(accepted) => {
+				Ok((stream, addr)) => {
+					// qmux already batches records, so Nagle would only hold a batch's
+					// tail for the peer's delayed ACK. Only a reset socket refuses it.
+					if let Err(err) = stream.set_nodelay(true) {
+						tracing::debug!(%addr, %err, "dropped a connection that refused TCP_NODELAY");
+						continue;
+					}
 					self.health.accepted();
-					return accepted;
+					return (stream, addr);
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
@@ -831,6 +838,15 @@ mod tests {
 			"got {err:?}"
 		);
 		assert!(accepted.await.unwrap().is_err());
+	}
+
+	#[tokio::test]
+	async fn listener_disables_nagle() {
+		let listener = Listener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+		let (stream, _) = listener.accept_socket().await;
+		assert!(stream.nodelay().unwrap());
 	}
 
 	#[tokio::test]

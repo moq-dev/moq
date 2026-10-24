@@ -251,10 +251,8 @@ struct Internal {
 struct Session {
 	#[usage(env = "MOQ_SESSION_ANNOUNCES", cli("--session-announces"))]
 	announces: Option<usize>,
-	#[usage(env = "MOQ_SESSION_SUBSCRIPTIONS", cli("--session-subscriptions"))]
-	subscriptions: Option<usize>,
-	#[usage(env = "MOQ_SESSION_FETCHES", cli("--session-fetches"))]
-	fetches: Option<usize>,
+	#[usage(env = "MOQ_SESSION_REQUESTS", cli("--session-requests"))]
+	requests: Option<usize>,
 }
 
 #[derive(usage_rs::Config)]
@@ -262,10 +260,8 @@ struct Session {
 struct Peer {
 	#[usage(env = "MOQ_PEER_ANNOUNCES", cli("--peer-announces"))]
 	announces: Option<usize>,
-	#[usage(env = "MOQ_PEER_SUBSCRIPTIONS", cli("--peer-subscriptions"))]
-	subscriptions: Option<usize>,
-	#[usage(env = "MOQ_PEER_FETCHES", cli("--peer-fetches"))]
-	fetches: Option<usize>,
+	#[usage(env = "MOQ_PEER_REQUESTS", cli("--peer-requests"))]
+	requests: Option<usize>,
 	#[usage(flatten)]
 	quic: PeerQuic,
 }

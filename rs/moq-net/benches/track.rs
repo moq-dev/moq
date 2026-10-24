@@ -51,6 +51,13 @@
 //! `track_fetch_expiry` polls budgeted fetched readers over independent fanout and
 //! retained-history axes, so expiry work that scans either table appears as a slope.
 //!
+//! `track_fetch_budgets` writes the frame that crosses every budgeted fetch's deadline, over
+//! live readers and finished fetches with budgets of their own: deadlines the finished
+//! fetches left indexed show up as a slope over them.
+//!
+//! `track_fetch_park` parks one more budgeted fetch beside live readers on deadlines of their
+//! own, so a park that sweeps the whole index shows up as a slope over the readers.
+//!
 //! `track_range_demand` moves one reader between ranges nobody else holds, over readers
 //! holding a given number of distinct overlapping ranges: both axes must stay flat, since
 //! a change touches only the moved range, never the rest of the audience's.
@@ -595,6 +602,105 @@ fn bench_fanout_frame(c: &mut Criterion) {
 				});
 			},
 		);
+	}
+	group.finish();
+}
+
+/// A track with groups presenting at 0..4 s and the last still open, `readers` budgeted
+/// fetches of group 2 parked on its expiry, and `history` finished fetches of it, each with
+/// its own budget, so each indexed a deadline of its own.
+struct FetchBudgets {
+	_broadcast: broadcast::Producer,
+	_track: track::Producer,
+	consumer: track::Consumer,
+	open: moq_net::group::Producer,
+	/// The live fetches' waiters, which keep their deadlines registered.
+	_readers: Vec<kio::Waiter>,
+}
+
+impl FetchBudgets {
+	fn new(readers: usize, history: usize) -> Self {
+		let broadcast = broadcast::Producer::new(broadcast::Info::default());
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		for second in 0..4u64 {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(Timestamp::from_secs(second).unwrap(), Bytes::from_static(b"f"))
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let mut open = track.append_group().unwrap();
+		open.write_frame(Timestamp::from_secs(4).unwrap(), Bytes::from_static(b"f"))
+			.unwrap();
+
+		let mut fetched = Self {
+			_broadcast: broadcast,
+			consumer: track.consume(),
+			_track: track,
+			open,
+			_readers: Vec::with_capacity(readers),
+		};
+		for i in 0..history {
+			drop(fetched.fetch(readers + i));
+		}
+		fetched._readers = (0..readers).map(|i| fetched.fetch(i)).collect();
+		fetched
+	}
+
+	/// Fetch group 2 with budget `i`, distinct from every other, returning the waiter that
+	/// keeps its deadlines registered.
+	fn fetch(&self, i: usize) -> kio::Waiter {
+		let waiter = kio::Waiter::noop();
+		let budget = Duration::from_millis(1_500) + Duration::from_micros(i as u64);
+		let options = moq_net::group::Fetch::default().with_max_delay(budget);
+		let mut pending = self.consumer.fetch_group(2, options);
+		assert!(matches!(kio::Task::poll(&mut *pending, &waiter), Poll::Ready(Ok(_))));
+		waiter
+	}
+}
+
+/// One more budgeted fetch, with a budget of its own, beside `readers` live ones: parking it
+/// must not scan the deadlines the live readers hold, so a sweep per park shows up as a slope.
+fn bench_fetch_park(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_fetch_park");
+	for readers in [1, 64, 1_024] {
+		group.bench_with_input(BenchmarkId::from_parameter(readers), &readers, |b, &readers| {
+			let fetched = FetchBudgets::new(readers, 0);
+			let mut next = readers;
+			b.iter(|| {
+				next += 1;
+				fetched.fetch(next)
+			});
+		});
+	}
+	group.finish();
+}
+
+/// The write that crosses every budgeted fetch's deadline, beside live readers and the
+/// finished fetches before them: the write must cost what the live readers do, so deadlines
+/// left indexed by fetches that already finished show up as a slope over the history.
+fn bench_fetch_budgets(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_fetch_budgets");
+	for history in [0, 1_024, 16_384] {
+		for readers in [1, 64] {
+			group.bench_with_input(
+				BenchmarkId::new(format!("history_{history}"), readers),
+				&(readers, history),
+				|b, &(readers, history)| {
+					b.iter_batched(
+						|| FetchBudgets::new(readers, history),
+						|mut fetched| {
+							fetched
+								.open
+								.write_frame(Timestamp::from_secs(10).unwrap(), Bytes::from_static(b"f"))
+								.unwrap();
+							fetched
+						},
+						BatchSize::PerIteration,
+					);
+				},
+			);
+		}
 	}
 	group.finish();
 }
@@ -1540,6 +1646,8 @@ criterion_group!(
 	bench_fanout,
 	bench_fanout_frame,
 	bench_fetch_expiry,
+	bench_fetch_budgets,
+	bench_fetch_park,
 	bench_parallel_write,
 	bench_aborted_scan,
 	bench_gc,

@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Connection state
+
+`Client.connect(to:)` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `stateChanged(after: state.revision)`. Use `ConnectionState.phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
 ### Exact encoder rates and publication options
 
 Raw video input framerates are exact numerator/denominator records, not integers.
@@ -110,11 +114,6 @@ Spell it out as `CongestionControl.none` when assigning to `QuicConfig.congestio
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
 Set `QuicConfig.keylog` to `true` as well to capture them; without `SSLKEYLOGFILE` the client or server refuses to build.
-
-The boolean opt-in remains unchanged. Native QUIC captures `SSLKEYLOGFILE` when
-configuration is adapted, creates new Unix logs with mode 0600, and refuses an
-existing group/other-accessible file (for example mode 0644) without changing it.
-Make an existing log private before enabling key logging.
 
 ### Subscriptions carry group ranges (#5732)
 

@@ -5,13 +5,9 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### Keylog files must be private ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
+### Connection state
 
-The existing boolean keylog setting still opts into `SSLKEYLOGFILE`; no ABI or
-property name changes. Its destination is captured when configuration is adapted.
-Native QUIC initialization now refuses group/other-accessible existing Unix files
-(for example mode 0644), without changing permissions; newly created logs use 0600.
-Make an existing log private before enabling key logging.
+`MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.
 
 ### Exact encoder rates and publication options
 

@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Connection state
+
+Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
+
 ### Exact encoder rates and publication options
 
 Raw video input framerates are exact numerator/denominator records, not integers.
@@ -108,11 +112,6 @@ Code that handles every value needs one more case.
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
 Pass `keylog=True` to `Client`, `connect`, or `Server` as well to capture them; without `SSLKEYLOGFILE` the client refuses to build and the server refuses to listen.
-
-The boolean opt-in remains unchanged. Native QUIC captures `SSLKEYLOGFILE` when
-configuration is adapted, creates new Unix logs with mode 0600, and refuses an
-existing group/other-accessible file (for example mode 0644) without changing it.
-Make an existing log private before enabling key logging.
 
 ### Subscriptions carry group ranges (#5732)
 

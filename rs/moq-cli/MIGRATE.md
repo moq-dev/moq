@@ -4,16 +4,6 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
-### Key logging names its file, and `--connect-once` is removed ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529))
-
-`SSLKEYLOGFILE` alone no longer writes session secrets: pass `--quic-keylog /private/keys.log`
-(`MOQ_QUIC_KEYLOG`, `[quic] keylog`). New Unix files are mode 0600, and an existing file
-readable by group or others is refused; with Iroh enabled, a keylog path is refused.
-`--connect-once` (`MOQ_CONNECT_ONCE`) is removed: `moq` dials always reconnect.
-`--backoff-initial 0` now retries at once and `--backoff-max 0` leaves the delay uncapped.
-A session counts as healthy once it outlives the new `--backoff-healthy` (1s by default)
-instead of `--backoff-initial`.
-
 ### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
 Enable `nvidia` instead; the old names were aliases for it.

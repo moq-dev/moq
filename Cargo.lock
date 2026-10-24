@@ -5311,6 +5311,7 @@ dependencies = [
  "hmac 0.13.0",
  "http",
  "humantime",
+ "humantime-serde",
  "if-addrs",
  "jni 0.22.4",
  "kio 0.6.2",

@@ -19,4 +19,4 @@ the reload loop never passes them to `connect()`. Decided 2026-10-23
 [moq-net exports](/quest/m1/api-audit/net-exports.md) makes it `@internal`,
 unless that quest lands keeping it public, in which case forward it.
 
-Public API: breaking JS option change, with a `MIGRATE.md` entry. Wire: none.
+Public API: breaking JS option change; the Impact bullet says how to migrate. Wire: none.
