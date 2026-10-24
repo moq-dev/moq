@@ -1,4 +1,4 @@
-import { Epoch, Path } from "@moq/net";
+import { type Epoch, Path } from "@moq/net";
 import { checkBytes, checkU53, encode, pathInfo } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import * as Generation from "./generation.ts";
@@ -55,17 +55,12 @@ export class Credential {
 
 	/** Mint a fresh epoch and a producing generation. */
 	produce(): Generation.Producer {
-		return Generation.Producer.make(this, Epoch.mint());
+		return new Generation.Producer(this);
 	}
 
 	/** Bind a discovered epoch as a consume-only generation; throws {@link Failure} `identity` if it is not canonical. */
 	consume(epoch: Epoch.Valid): Generation.Consumer {
-		try {
-			Epoch.parse(epoch);
-		} catch {
-			throw new Failure("identity");
-		}
-		return Generation.Consumer.make(this, epoch);
+		return new Generation.Consumer(this, epoch);
 	}
 }
 

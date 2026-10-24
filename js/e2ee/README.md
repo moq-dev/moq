@@ -16,7 +16,9 @@ Relays forward ciphertext. Content keys never enter `@moq/net`.
 The application distributes a `Credential { context, kid, secret }` over its own
 authenticated channel. `credential.produce()` mints a fresh epoch and returns a
 `Generation.Producer`, which derives opaque track names and keys for that instance alone.
-It accepts no explicit epoch, and claims each track it produces for good.
+It accepts no explicit epoch, and claims each track it produces for good. `Generation` exports
+types only, so nothing in the package can open a producer under a chosen epoch; see the draft's
+[epoch rules](https://doc.moq.dev/draft/draft-lcurley-moq-e2ee#epoch).
 
 The application names tracks by their semantic names. `Broadcast.Producer` wraps the
 `@moq/net` broadcast and creates each track under its physical name, so only physical names
@@ -56,5 +58,6 @@ backpressure. Consumer reads wait for the network outside the pump, so a stalled
 never holds up another group's opens.
 
 A grouped authentication failure ends the track with `Failure` code `authentication`; a
-bad datagram is an `authentication` event and the track continues. A consumer keeps a
+bad datagram is an `authentication` event and the track continues. Every subscription through
+one consuming generation shares each key's AEAD budget, so resubscribing cannot reset it. A consumer keeps a
 1024-bit datagram duplicate window below the greatest sequence it opened.
