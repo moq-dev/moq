@@ -23,4 +23,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [moq-relay on graviola](/quest/m2/pure-crypto/relay-graviola.md) - carries the patched copy until this lands
-- [ACME renewal budget](/quest/m1/acme-renewal-budget.md) - also works around rustls-acme's order loop
