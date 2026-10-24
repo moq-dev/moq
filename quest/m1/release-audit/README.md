@@ -85,12 +85,6 @@ The 2026-10-22 binding and OBS audit at main
 rate recovery child. Its two OBS findings went to m2 next to the other OBS
 work, because obs-moq ships on its own schedule.
 
-## Required
-
-The entries comprise reproduced or source-confirmed findings
-and contract/lifetime investigations. Each
-child records whether its behavior is new on main or inherited from release.
-
 ## Related
 
 - [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - range lists and frame offsets build on the bounds fixed here
