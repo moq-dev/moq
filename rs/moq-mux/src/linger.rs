@@ -1,6 +1,6 @@
 //! Keeping a cleanly ended broadcast up for subscribers that arrive late.
 
-use std::time::Duration;
+use std::{pin::Pin, task::Poll, time::Duration};
 
 /// Keeps cleanly ended broadcasts announced, serving their finished tracks, for a fixed
 /// duration, then closes them.
@@ -11,10 +11,10 @@ use std::time::Duration;
 /// `owner`, whatever holds their track producers: a finished track stops being served once
 /// its producers drop, so the owner drops only after the broadcasts close.
 ///
-/// The deadline is fixed at [`new`](Self::new), however late [`wait`](Self::wait) is polled.
-/// Dropping the handle closes the broadcasts at once, which is how an interrupt ends it. A
-/// newer publisher announced at the same path does not end it: that one wins the path while
-/// it is up, and readers that come back here find the finished catalog.
+/// The deadline is fixed at [`new`](Self::new), however late [`poll_wait`](Self::poll_wait) is
+/// first polled. Dropping the handle closes the broadcasts at once, which is how an interrupt
+/// ends it. A newer publisher announced at the same path does not end it: that one wins the
+/// path while it is up, and readers that come back here find the finished catalog.
 #[must_use = "dropping a Linger closes its broadcasts at once"]
 pub struct Linger<T> {
 	broadcasts: Vec<moq_net::broadcast::Producer>,
@@ -22,6 +22,8 @@ pub struct Linger<T> {
 	_owner: T,
 	// `None` when the duration overflows the clock, so only an interrupt ends it.
 	deadline: Option<moq_clock::Instant>,
+	// Armed at the deadline, created on first poll.
+	timer: Option<moq_clock::Sleep>,
 }
 
 impl Linger<()> {
@@ -34,7 +36,7 @@ impl Linger<()> {
 impl<T> Linger<T> {
 	/// Keep `broadcasts` up for `duration` from now, holding `owner` until they close.
 	///
-	/// A zero `duration` closes them on the first poll of [`wait`](Self::wait).
+	/// A zero `duration` is due on the first poll.
 	pub fn new(
 		broadcasts: impl IntoIterator<Item = moq_net::broadcast::Producer>,
 		owner: T,
@@ -44,15 +46,23 @@ impl<T> Linger<T> {
 			broadcasts: broadcasts.into_iter().collect(),
 			_owner: owner,
 			deadline: moq_clock::now().checked_add(duration),
+			timer: None,
 		}
 	}
 
+	/// Poll until the deadline passes on the ambient clock; drop the handle then to close the
+	/// broadcasts.
+	pub fn poll_wait(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let Some(deadline) = self.deadline else {
+			return Poll::Pending;
+		};
+		let timer = self.timer.get_or_insert_with(|| moq_clock::sleep_until(deadline));
+		waiter.poll_future(Pin::new(timer))
+	}
+
 	/// Wait for the deadline on the ambient clock, then close the broadcasts.
-	pub async fn wait(self) {
-		match self.deadline {
-			Some(deadline) => moq_clock::sleep_until(deadline).await,
-			None => std::future::pending().await,
-		}
+	pub async fn wait(mut self) {
+		kio::wait(|waiter| self.poll_wait(waiter)).await
 	}
 }
 
