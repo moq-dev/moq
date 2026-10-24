@@ -157,11 +157,12 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, gate.floor) });
 	const observe = () => gate.observe(ring.timestamp, ring.stalled);
 
-	// Arrived but not yet decoded media is what covers the part of the target held encoded.
+	// Arrived media, read or still in the consumer, is what covers the part of the target held encoded.
+	const read = new Signal<Micro | undefined>(undefined);
 	signals.run((effect) => {
-		let newest: number | undefined;
-		for (const { end } of effect.get(consumer.buffered)) newest = Math.max(newest ?? end, end);
-		gate.queued(newest === undefined ? undefined : micros(newest));
+		let newest = effect.get(read);
+		for (const { end } of effect.get(consumer.buffered)) newest = Math.max(newest ?? 0, micros(end)) as Micro;
+		gate.received(newest);
 	});
 
 	// The decoder's read loop, with the codec taken out. A failure is rethrown at the next quantum.
@@ -184,6 +185,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			if (next.kind !== "frame") continue;
 
 			const { timestamp, arrival } = next.frame;
+			read.set(timestamp);
 			const media = Milli.fromMicro(timestamp);
 			const late = sync.received(media, arrival);
 			arrivals.push({ kind: "frame", timestamp: media, arrival, late });

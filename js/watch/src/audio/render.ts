@@ -1,7 +1,7 @@
 import type { Micro, Milli } from "@moq/clock";
 
 /** Everything the main thread sends the render worklet over its port. */
-export type Message = Init | Data | Latency | Park | Reset | Truncate;
+export type Message = Init | Data | Latency | Reset | Truncate;
 
 /** Create the worklet's ring. */
 export interface Init {
@@ -18,13 +18,6 @@ export interface Init {
 export interface Reset {
 	type: "reset";
 	// Echoed in every later state message, so the main thread can tell state from before the reset.
-	epoch: number;
-}
-
-/** Hold playback until the next data message, keeping what is buffered. */
-export interface Park {
-	type: "park";
-	// Echoed like a reset's, so state from before the park cannot report the ring playing.
 	epoch: number;
 }
 
@@ -45,6 +38,9 @@ export interface Data {
 export interface Latency {
 	type: "latency";
 	latency: Milli;
+	// When set, also hold playback until the next data message, keeping what is buffered. Echoed like
+	// a reset's epoch, so state from before the park cannot report the ring playing.
+	park?: number;
 }
 
 /** State update from the worklet back to the main thread. */

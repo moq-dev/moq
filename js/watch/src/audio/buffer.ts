@@ -1,7 +1,7 @@
 import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { ringHold, ringSamples } from "./latency";
-import type { Data, Init, Latency, Park, Reset, State, Truncate } from "./render";
+import type { Data, Init, Latency, Reset, State, Truncate } from "./render";
 
 /**
  * Decides when the decode loop may decode a frame, which is how the target delay is split between
@@ -35,12 +35,15 @@ export class Backpressure {
 	#headroom = 0 as Micro;
 	#hold = 0 as Micro;
 
-	// The newest media timestamp queued upstream of the decoder, unset while nothing is.
-	#queued?: Micro;
+	// The newest media timestamp received, decoded or not, unset until one is.
+	#received?: Micro;
 
 	// The ring as last observed. The playhead is undefined until one is known on the current timeline.
 	#playhead?: Micro;
 	#stalled = true;
+	// Whether the ring is parked for a hold the queued media does not cover yet. Only a write or a
+	// floor update releases a park, so a floor update has to carry it while the hold stays uncovered.
+	#parked = false;
 
 	// The first and latest frames released since the ring stalled. A stalled ring refills to the
 	// floor from its parked playhead, but releasing it outright would let the whole lookahead through
@@ -62,9 +65,10 @@ export class Backpressure {
 	}
 
 	/**
-	 * Split `delay` between the floor and the hold. Returns true when the ring must park: a rise in the
-	 * hold that the queued media does not cover yet holds playback until it does, the way a deeper
-	 * floor parks the ring until it refills, since video holds the extra delay on its own.
+	 * Split `delay` between the floor and the hold. Returns true when the ring must park with the new
+	 * floor: a rise in the hold that the queued media does not cover yet holds playback until it does,
+	 * the way a deeper floor parks the ring until it refills, since video holds the extra delay on its
+	 * own. A ring already parked stays parked while the remaining hold is uncovered.
 	 */
 	setLatency(delay: Milli): boolean {
 		this.#floor = ringSamples(this.#rate, delay);
@@ -76,10 +80,10 @@ export class Backpressure {
 		// Parks whatever the ring was last reported doing: a report of a stall may be stale, and
 		// parking a ring that is still stalled changes nothing.
 		const playhead = this.#playhead;
-		const park = rise && playhead !== undefined && !this.#covered(playhead + this.#headroom);
-		if (park) this.#stalled = true;
+		this.#parked = (rise || this.#parked) && playhead !== undefined && !this.#covered(playhead + this.#headroom);
+		if (this.#parked) this.#stalled = true;
 		this.#release();
-		return park;
+		return this.#parked;
 	}
 
 	/** Note the ring's playhead and whether it is stalled, and release every frame now due. */
@@ -87,15 +91,16 @@ export class Backpressure {
 		this.#playhead = playhead;
 		this.#stalled = stalled;
 		if (!stalled) {
+			this.#parked = false;
 			this.#first = undefined;
 			this.#last = undefined;
 		}
 		this.#release();
 	}
 
-	/** Note the newest media timestamp queued upstream of the decoder, or undefined once none is. */
-	queued(newest: Micro | undefined): void {
-		this.#queued = newest;
+	/** Note the newest media timestamp received, decoded or not, or undefined until one is. */
+	received(newest: Micro | undefined): void {
+		this.#received = newest;
 		this.#release();
 	}
 
@@ -123,6 +128,7 @@ export class Backpressure {
 	reset(): void {
 		this.#playhead = undefined;
 		this.#stalled = true;
+		this.#parked = false;
 		this.#first = undefined;
 		this.#last = undefined;
 		this.#release();
@@ -148,7 +154,7 @@ export class Backpressure {
 	// Whether the queued media reaches the hold past `timestamp`.
 	#covered(timestamp: number): boolean {
 		if (this.#hold === 0) return true;
-		return this.#queued !== undefined && this.#queued >= timestamp + this.#hold;
+		return this.#received !== undefined && this.#received >= timestamp + this.#hold;
 	}
 
 	#admit(timestamp: Micro): boolean {
@@ -266,22 +272,18 @@ export class AudioBuffer {
 	 */
 	setLatency(delay: Milli): void {
 		const park = this.#backpressure.setLatency(delay);
-
 		const msg: Latency = { type: "latency", latency: this.#latency() };
+		// One message, so the worklet never plays a quantum between the new floor and the park.
+		if (park) msg.park = ++this.#epoch;
 		this.#worklet.port.postMessage(msg);
-		if (park) {
-			this.#epoch++;
-			const msg: Park = { type: "park", epoch: this.#epoch };
-			this.#worklet.port.postMessage(msg);
-		}
 	}
 
 	/**
-	 * Note the newest media timestamp queued upstream of the decoder, or undefined once none is. The
-	 * queue is what covers the part of the target held encoded.
+	 * Note the newest media timestamp received, decoded or not, or undefined until one is. The
+	 * media is what covers the part of the target held encoded.
 	 */
-	queued(newest: Micro | undefined): void {
-		this.#backpressure.queued(newest);
+	received(newest: Micro | undefined): void {
+		this.#backpressure.received(newest);
 	}
 
 	/**

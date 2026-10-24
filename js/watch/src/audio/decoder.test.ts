@@ -64,12 +64,14 @@ class FakeWorklet {
 		postMessage: (msg: Message) => {
 			if (msg.type === "init") this.ring = new AudioRingBuffer(msg);
 			else if (msg.type === "data") this.ring?.write(msg.timestamp, msg.data);
-			else if (msg.type === "latency") this.ring?.setLatency(msg.latency);
-			else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
-			else if (msg.type === "park") {
-				this.ring?.park();
-				this.#epoch = msg.epoch;
-			} else if (msg.type === "reset") {
+			else if (msg.type === "latency") {
+				this.ring?.setLatency(msg.latency);
+				if (msg.park !== undefined) {
+					this.ring?.park();
+					this.#epoch = msg.park;
+				}
+			} else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
+			else if (msg.type === "reset") {
 				this.ring?.reset();
 				this.#epoch = msg.epoch;
 			}
@@ -340,6 +342,8 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			consumer = producer.consume();
 			frameTimestamp = 0;
 		},
+		// The resolved playout target.
+		target: () => sync.out.delay.peek(),
 		// The rings written to, and the timestamps of every frame that reached one.
 		rings: () => worklets.filter((worklet) => worklet.ring && insert.mock.contexts.includes(worklet.ring)),
 		inserted: () => insert.mock.calls.map(([timestamp]) => timestamp as number),
@@ -402,6 +406,24 @@ for (const cmaf of [false, true]) {
 			playback.push({ ...frame(), group: 8 });
 			await microtasks();
 			expect(playback.inserted()).toEqual([0, 20_000, 40_000, 60_000, 80_000, 100_000]);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
+	// A buffered head above the decoded floor waits in the reorder buffer, not the consumer, until it
+	// runs past the target. Those frames are what cover the part of the target held encoded.
+	it(`starts a ${cmaf ? "CMAF" : "legacy"} buffered head held past a target above the floor`, async () => {
+		const playback = await play(Milli(1000), true, cmaf);
+		try {
+			const target = playback.target();
+			expect(target).toBeGreaterThan(500);
+			while (frameTimestamp <= target * 1000 + 20_000) {
+				playback.push(frame());
+				await microtasks();
+			}
+			expect(playback.inserted()[0]).toBe(20_000);
 		} finally {
 			playback.close();
 			await microtasks();
