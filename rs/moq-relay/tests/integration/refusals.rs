@@ -228,7 +228,7 @@ async fn unavailable_auth_server_is_counted() {
 /// A refusal creates the root stats group even when no session was ever admitted.
 #[tokio::test]
 async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metrics() {
-	use moq_net::stats::{Refusal, Tier};
+	use moq_net::stats::{RefusalKind, Tier};
 	let dir = tempfile::tempdir().unwrap();
 	let mut config = config(dir.path(), false);
 	config.auth.public = vec!["anon/**".parse().unwrap()];
@@ -268,7 +268,7 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 	relay
 		.stats
 		.tier(Tier::new("gateway"))
-		.refuse("tenant", Refusal::Forbidden);
+		.refuse("tenant", RefusalKind::Forbidden);
 	assert_eq!(
 		relay.refused("forbidden").await,
 		1,

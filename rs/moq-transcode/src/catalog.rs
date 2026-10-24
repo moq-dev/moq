@@ -1029,9 +1029,9 @@ mod tests {
 
 		// A minute in, the source's mapping is far from the one a fresh clock would advertise.
 		let ago = Duration::from_secs(60);
-		let _ = moq_net::time::now();
+		let _ = moq_net::time::Instant::now();
 		tokio::time::advance(ago).await;
-		let clock = moq_mux::Clock::at(moq_net::time::now() - ago, moq_clock::wall() - ago).unwrap();
+		let clock = moq_mux::Clock::at(moq_net::time::Instant::now() - ago, moq_clock::wall() - ago).unwrap();
 		let mut input = moq_net::broadcast::Info::default().produce();
 		let source =
 			moq_mux::catalog::Producer::new(&mut input, moq_mux::catalog::Config::default().with_clock(clock)).unwrap();

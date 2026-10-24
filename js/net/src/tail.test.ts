@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { type Installed, Manual, Milli, Nano } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -110,13 +110,13 @@ test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_20])(
 describe("Tail", () => {
 	const GRACE = Milli(1000);
 
-	let restore: (() => void) | undefined;
-	afterEach(() => restore?.());
+	let installed: Installed | undefined;
+	afterEach(() => installed?.close());
 
 	// A tail on a manual clock, with `at(ms)` moving the clock to an absolute time.
 	function tail(grace = GRACE) {
 		const clock = new Manual();
-		restore = clock.install();
+		installed = clock.install();
 		const at = (ms: number) => clock.jump(Nano(Nano.fromMilli(Milli(ms)) - clock.now()));
 		return { at, clock, tail: new Tail({ grace: () => grace }) };
 	}
