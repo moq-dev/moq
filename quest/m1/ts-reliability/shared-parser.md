@@ -18,7 +18,10 @@ Decided 2026-10-22 by the maintainer: this lands before
 [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md), whose plans work
 around per-program reparsing (multiplex-wide PID rows moving between owners,
 a removed program's `handle_pat` error stopping the whole ingest). Revisit
-both plans once it lands.
+both plans once it lands. Re-confirmed 2026-10-22 after drafts of both opened
+first: they rebase onto this and drop the accounting it replaces, such as the
+`max()` merges in `Programs::stats` and PID rows moving between owners,
+rather than landing ahead of it.
 
 Add a benchmark in `rs/moq-mux/benches` that feeds `Programs` a generated
 MPTS and sweeps program count and input rate independently; land it first

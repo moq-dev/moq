@@ -503,7 +503,13 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 	}
 }
 
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+	target_pointer_width = "64",
+	expect(
+		clippy::large_enum_variant,
+		reason = "one per stream, so boxing a variant would add an allocation per stream to save bytes nothing holds in bulk"
+	)
+)]
 pub enum AdapterRecv<S: crate::transport::poll::Session> {
 	Real(S::RecvStream),
 	Virtual(crate::transport::poll::Buffered<VirtualRecvStream>),
@@ -849,6 +855,7 @@ impl Shared {
 
 #[derive(Clone)]
 pub struct ControlStreamAdapter<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	inner: S,
 	shared: Arc<Shared>,
 	control: Control,
@@ -860,12 +867,18 @@ pub struct ControlStreamAdapter<S: crate::transport::poll::Session> {
 impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	pub fn new(inner: S, control: Control, version: Version) -> Self {
 		Self {
+			stats: Default::default(),
 			inner,
 			shared: Arc::new(Shared::default()),
 			control,
 			version,
 			park: kio::Park::default(),
 		}
+	}
+
+	pub(super) fn with_stats(mut self, stats: &crate::stats::Session) -> Self {
+		self.stats = stats.clone();
+		self
 	}
 
 	/// Open a real (non-virtual) bidi stream, bypassing control stream multiplexing.
@@ -924,39 +937,22 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	/// message. Best-effort: an encode failure or a closed control stream is
 	/// logged and dropped, since the session is tearing down anyway.
 	pub(super) fn send_goaway(&self, uri: &str, timeout_ms: u64, version: Version) {
-		use crate::coding::Encode;
-
 		let msg = crate::ietf::GoAway {
 			new_session_uri: std::borrow::Cow::Borrowed(uri),
 			timeout: timeout_ms,
 			request_id: None,
 		};
 
-		// The size prefix is a u16 on a stream shared with every other request, so the
-		// encode refuses a body that would wrap it and desynchronize the framing for all.
-		let mut raw = Vec::new();
-		let mut w = Encoder::new(&mut raw, version.into());
-		if let Err(err) = w
-			.varint(crate::ietf::GoAway::ID)
-			.and_then(|()| msg.encode(&mut w, version))
-		{
+		if let Err(err) = self.queue_message(&msg, version) {
 			tracing::warn!(%err, "failed to encode goaway");
-			return;
-		}
-
-		if !self.shared.control.push(raw.into()) {
-			tracing::debug!("control stream closed; goaway not sent");
 		}
 	}
 
-	/// Refuse an update no request here can apply, naming its own Request ID. Draft 14
-	/// answers no update.
+	/// Refuse an update no request here can apply, naming its own Request ID.
 	fn refuse_update(&self, request_id: RequestId) {
 		if self.version == Version::Draft14 {
 			return;
 		}
-		let mut raw = Vec::new();
-		let mut w = crate::coding::Encoder::new(&mut raw, self.version.into());
 		let msg = ietf::RequestError {
 			request_id: Some(request_id),
 			error_code: super::error::request::to_code(
@@ -967,31 +963,31 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 			reason_phrase: "update not supported".into(),
 			retry_interval: 0,
 		};
-		if let Err(err) = w
-			.varint(ietf::RequestError::ID)
-			.and_then(|()| crate::coding::Encode::encode(&msg, &mut w, self.version))
-		{
+		if let Err(err) = self.queue_message(&msg, self.version) {
 			tracing::warn!(%err, "failed to encode REQUEST_ERROR");
-			return;
 		}
-		// A closed control stream means the session is ending; there is no one to answer.
-		let _ = self.shared.control.push(raw.into());
 	}
 
 	/// Queue a MAX_REQUEST_ID granting the peer room up to `max`.
 	fn send_max_request_id(&self, max: RequestId) {
-		let mut raw = Vec::new();
-		let mut w = crate::coding::Encoder::new(&mut raw, self.version.into());
-		let msg = ietf::MaxRequestId { request_id: max };
-		if let Err(err) = w
-			.varint(ietf::MaxRequestId::ID)
-			.and_then(|()| crate::coding::Encode::encode(&msg, &mut w, self.version))
-		{
+		if let Err(err) = self.queue_message(&ietf::MaxRequestId { request_id: max }, self.version) {
 			tracing::warn!(%err, "failed to encode MAX_REQUEST_ID");
-			return;
 		}
-		// A closed control stream means the session is ending; there is no one to grant.
-		let _ = self.shared.control.push(raw.into());
+	}
+
+	fn queue_message<T: Message>(&self, msg: &T, version: Version) -> Result<(), Error> {
+		use crate::coding::Encode;
+		let mut raw = Vec::new();
+		let mut encoder = Encoder::new(&mut raw, version.into());
+		encoder.varint(T::ID)?;
+		msg.encode(&mut encoder, version)?;
+		let selector = crate::coding::varint::size(T::ID, version.into()).map_err(crate::coding::EncodeError::from)?;
+		self.stats
+			.control(super::message::control(T::ID, version), raw.len() - selector, false);
+		if !self.shared.control.push(raw.into()) {
+			tracing::debug!("control stream closed; message not sent");
+		}
+		Ok(())
 	}
 
 	/// Writer task: drains the queue and writes to the control stream. The peer's
@@ -1040,6 +1036,9 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 				.await
 				.map_err(super::session::control_stream_error)?
 				.0;
+
+			self.stats
+				.control(super::message::control(type_id, self.version), body.len() + 2, true);
 
 			// Reconstruct raw message bytes: [type_id][size][body]
 			let raw = encode_raw(type_id, &body, self.version);
@@ -2177,6 +2176,68 @@ mod tests {
 		let log = Log::default();
 		let writer = Writer::new(SinkSend::new(log.clone()), VERSION);
 		(adapter, Reader::new(recv, VERSION), writer, log)
+	}
+
+	#[moq_clock::test]
+	async fn legacy_multiplexing_counts_a_control_body_once() {
+		use crate::{
+			coding::{Encode, Stream},
+			lite::test_transport::{Log, ScriptedSession, SinkSend},
+			stats::{Bytes, Control as Class, Registry, Tier},
+		};
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let registry = Registry::new(Default::default());
+			let stats = registry.tier(Tier::default()).session("");
+			let msg = ietf::FetchCancel {
+				request_id: RequestId(0),
+			};
+			let body = msg.encode_bytes(version).unwrap();
+			let raw_response = encode_raw(ietf::FetchCancel::ID, &body.slice(2..), version);
+			let mut session = ScriptedSession::new(raw_response.to_vec());
+			let (_, recv) = crate::transport::poll::Session::open_bi(&mut session, Default::default())
+				.await
+				.unwrap();
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version).with_stats(&stats);
+			let mut virtual_stream = super::super::request_stream::with_stats(
+				Stream::open(&mut adapter.clone(), version).await.unwrap(),
+				&stats,
+				version,
+			);
+			let msg = ietf::FetchCancel {
+				request_id: RequestId(0),
+			};
+			let size = msg.encode_bytes(version).unwrap().len() as u64;
+			virtual_stream.writer.encode_message(&msg).await.unwrap();
+			let raw = adapter.shared.control.pop().await.unwrap();
+			let log = Log::default();
+			let mut physical = Writer::new(SinkSend::new(log.clone()), version);
+			physical.write_all(&mut raw.clone()).await.unwrap();
+			assert_eq!(
+				registry.snapshot().control(),
+				vec![(Tier::default(), Class::Fetch, Bytes { tx: size, rx: 0 })],
+				"{version:?}"
+			);
+			assert_eq!(*log.writes.lock().unwrap(), raw);
+			let (_, goaway) = crate::goaway::Handle::new(false);
+			let mut reading = std::pin::pin!(adapter.run_read(Reader::new(recv, version), goaway));
+			assert!(futures::poll!(reading.as_mut()).is_pending());
+			assert_eq!(virtual_stream.reader.varint().await.unwrap(), ietf::FetchCancel::ID);
+			virtual_stream.reader.decode::<ietf::FetchCancel>().await.unwrap();
+			assert_eq!(
+				registry.snapshot().control(),
+				vec![(Tier::default(), Class::Fetch, Bytes { tx: size, rx: size })],
+				"virtual decode counted a physical frame twice: {version:?}"
+			);
+			adapter.send_max_request_id(RequestId(123));
+			assert!(
+				registry
+					.snapshot()
+					.control()
+					.iter()
+					.any(|(_, class, bytes)| *class == Class::Other && bytes.tx > 0),
+				"adapter-generated messages bypassed the typed writer"
+			);
+		}
 	}
 
 	#[moq_clock::test]
