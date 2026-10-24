@@ -58,6 +58,10 @@ pub struct Request {
 	/// The direction the client declared at SETUP; absent means both.
 	pub role: Option<Role>,
 
+	/// The implementation the client declared at SETUP, as space-separated `name/version`
+	/// product tokens (`moq-net-js/0.4.2`). Client-chosen; absent when it declared none.
+	pub implementation: Option<String>,
+
 	/// The verified client certificate, when one was presented.
 	pub tls: Option<Peer>,
 }
@@ -84,6 +88,7 @@ impl Request {
 			query: None,
 			token: None,
 			role: None,
+			implementation: None,
 			tls: None,
 		}
 	}
@@ -310,6 +315,7 @@ mod tests {
 		request.id = "00ff".into();
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request.query = Some("jwt=abc".into());
+		request.implementation = Some("moq-net-js/0.4.2".into());
 		request.event = Event::End {
 			reason: Reason::Expired,
 			duration: Duration::from_millis(1500),
@@ -317,7 +323,7 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&request).unwrap(),
-			r#"{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}"#
+			r#"{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}"#
 		);
 
 		request.event = Event::End {
@@ -327,7 +333,7 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&request).unwrap(),
-			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}"#
+			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}"#
 		);
 	}
 

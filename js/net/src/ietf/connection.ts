@@ -107,6 +107,9 @@ export class Connection implements Established {
 	// Just to avoid logging when `close()` is called.
 	#closed = false;
 
+	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
+	readonly peerImplementation: Promise<string | undefined>;
+
 	/**
 	 * Creates a new Connection instance.
 	 * @param url - The URL of the connection
@@ -138,6 +141,7 @@ export class Connection implements Established {
 		early = [],
 		requestWindow,
 		extensions,
+		peerImplementation,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -174,12 +178,15 @@ export class Connection implements Established {
 		requestWindow?: bigint;
 		/** What our own SETUP offered; every extension when omitted. */
 		extensions?: { solicit: boolean };
+		/** The implementation the peer's SETUP advertised, read before the session starts. */
+		peerImplementation?: string;
 	}) {
 		this.url = url;
 		this.version = versionName(version);
 		this.transport = transportOf(quic);
 		this.#quic = quic;
 		this.#client = client;
+		this.peerImplementation = Promise.resolve(peerImplementation);
 
 		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams
 		if (version >= Version.DRAFT_17) {

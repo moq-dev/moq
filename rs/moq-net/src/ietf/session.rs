@@ -90,6 +90,14 @@ pub struct Config {
 	/// The extensions our SETUP offers. Drafts 14-16 already sent it, so there this only
 	/// records what it said. MoQ Auth is offered only while [`Self::auth`] supports it too.
 	pub extensions: crate::setup::Extensions,
+
+	/// The Implementation our SETUP advertises (draft-17+), or `None` to omit it. Drafts
+	/// 14-16 already sent theirs on the bidi SETUP.
+	pub implementation: Option<String>,
+
+	/// Where the implementation the peer's SETUP advertises is published, once the uni loop
+	/// reads it. A caller that pre-read the SETUP has already filled it.
+	pub peer_implementation: crate::setup::PeerImplementation,
 }
 
 pub(crate) struct Driver {
@@ -135,6 +143,8 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 		auth,
 		early_unis,
 		extensions,
+		implementation,
+		peer_implementation,
 	} = config;
 
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
@@ -180,7 +190,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 	// What the peer declared in its SETUP. Seeded now when that stream was already
 	// read (the legacy handshake, or a gated server accept), and filled by the uni
 	// loop otherwise.
-	let peer_setup = peer::PeerSetup::new(extensions);
+	let peer_setup = peer::PeerSetup::new(extensions).with_implementation(peer_implementation);
 	let setup_read = peer_declared.is_some();
 	match peer_declared {
 		Some(declared) => peer_setup.set(declared),
@@ -432,6 +442,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 					version,
 					path,
 					authority,
+					implementation,
 					self_origin,
 					cost,
 					crate::setup::Extensions {
@@ -707,6 +718,9 @@ pub struct PeerSetup {
 	/// The credential the peer presented in its `AUTHORIZATION TOKEN` option.
 	pub token: Option<crate::setup::Token>,
 
+	/// The implementation the peer advertised in its `IMPLEMENTATION` option.
+	pub implementation: Option<String>,
+
 	/// The Setup Options it declared (see [`cluster`] and [`solicit`]).
 	pub declared: peer::Peer,
 
@@ -769,6 +783,8 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 			None => None,
 		};
 		let token = super::token::from_setup(&params, version)?;
+		let implementation =
+			crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
 		let declared = peer_from_params(&params, version)?;
 
 		return Ok(PeerSetup {
@@ -776,6 +792,7 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 			size,
 			path,
 			token,
+			implementation,
 			declared,
 			early,
 		});
@@ -784,7 +801,11 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 
 /// Parse the Setup Options we act on out of a raw SETUP parameter block, refusing any the
 /// peer's role may not send.
-fn decode_peer_setup(parameters: bytes::Bytes, version: Version, client: bool) -> Result<peer::Peer, Error> {
+fn decode_peer_setup(
+	parameters: bytes::Bytes,
+	version: Version,
+	client: bool,
+) -> Result<(peer::Peer, Option<String>), Error> {
 	let (params, _) = ietf::Parameters::decode_slice(&parameters, version)?;
 	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
 	if client && params.get_bytes(ietf::ParameterBytes::Path).is_some() {
@@ -796,7 +817,8 @@ fn decode_peer_setup(parameters: bytes::Bytes, version: Version, client: bool) -
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
 	// session (draft-21 section 8.9).
 	super::token::from_setup(&params, version)?;
-	Ok(peer_from_params(&params, version)?)
+	let implementation = crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
+	Ok((peer_from_params(&params, version)?, implementation))
 }
 
 /// The Setup Options we act on, out of an already-decoded parameter block. One place, so
@@ -830,6 +852,7 @@ async fn run_setup(
 	version: Version,
 	path: Option<String>,
 	authority: Option<String>,
+	implementation: Option<String>,
 	self_origin: Hop,
 	cost: Option<u64>,
 	extensions: crate::setup::Extensions,
@@ -847,7 +870,9 @@ async fn run_setup(
 		Writer::new(send, outer_version).with_stats(&stats);
 
 	let mut parameters = ietf::Parameters::default();
-	parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+	if let Some(implementation) = implementation {
+		parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
+	}
 	if let Some(path) = path {
 		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
 	}
@@ -1148,7 +1173,9 @@ impl Uni {
 				reader.set_priority(crate::priority::RECV_CONTROL);
 				let msg = reader.decode::<setup::Setup>().await?;
 				if let Some(peer_setup) = peer_setup {
-					peer_setup.set(decode_peer_setup(msg.parameters, version, client)?);
+					let (declared, implementation) = decode_peer_setup(msg.parameters, version, client)?;
+					peer_setup.set(declared);
+					peer_setup.set_implementation(implementation);
 				}
 
 				// Monitor for GOAWAY after setup completes.
@@ -1572,6 +1599,26 @@ mod tests {
 	use super::*;
 	use crate::model::ProduceTest;
 
+	/// The peer's IMPLEMENTATION option is read alongside what it declared, and one that
+	/// is not UTF-8 refuses the SETUP.
+	#[test]
+	fn peer_setup_reads_the_implementation() {
+		for version in [Version::Draft17, Version::Draft22] {
+			let encode = |value: Option<&[u8]>| {
+				let mut params = ietf::Parameters::default();
+				if let Some(value) = value {
+					params.set_bytes(ietf::ParameterBytes::Implementation, value.to_vec());
+				}
+				params.encode_bytes(version).unwrap()
+			};
+			let (_, implementation) = decode_peer_setup(encode(Some(b"moq-net-rs/1")), version, true).unwrap();
+			assert_eq!(implementation.as_deref(), Some("moq-net-rs/1"));
+			let (_, implementation) = decode_peer_setup(encode(None), version, true).unwrap();
+			assert_eq!(implementation, None);
+			assert!(decode_peer_setup(encode(Some(&[0xff])), version, true).is_err());
+		}
+	}
+
 	#[moq_clock::test]
 	async fn announce_interest_without_credit_keeps_the_session_alive() {
 		use std::sync::atomic::Ordering;
@@ -1612,6 +1659,8 @@ mod tests {
 				}),
 				auth: crate::auth::Handle::new(false),
 				early_unis: Vec::new(),
+				implementation: None,
+				peer_implementation: Default::default(),
 				extensions: Default::default(),
 			})
 			.unwrap();
@@ -1713,6 +1762,8 @@ mod tests {
 						}),
 						auth: crate::auth::Handle::new(true),
 						early_unis: Vec::new(),
+						implementation: None,
+						peer_implementation: Default::default(),
 						extensions: Default::default(),
 					})
 					.unwrap();
@@ -1769,6 +1820,8 @@ mod tests {
 					}),
 					auth: crate::auth::Handle::new(true),
 					early_unis: Vec::new(),
+					implementation: None,
+					peer_implementation: Default::default(),
 					extensions: Default::default(),
 				})
 				.unwrap();
@@ -1816,6 +1869,8 @@ mod tests {
 					}),
 					auth: crate::auth::Handle::new(true),
 					early_unis: Vec::new(),
+					implementation: None,
+					peer_implementation: Default::default(),
 					extensions: Default::default(),
 				})
 				.unwrap();
@@ -1923,6 +1978,8 @@ mod tests {
 			}),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -1980,6 +2037,8 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -2060,6 +2119,8 @@ mod tests {
 			}),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -2146,6 +2207,8 @@ mod tests {
 			peer_declared,
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -2253,6 +2316,8 @@ mod tests {
 			}),
 			auth: handle.clone(),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -2335,6 +2400,8 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth,
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions,
 		})
 		.expect("start the session");
@@ -2439,6 +2506,8 @@ mod tests {
 			// As `Server` builds it: offered by the client, so supported iff we offer it.
 			auth: crate::auth::Handle::new(offered),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: crate::setup::Extensions::default(),
 		})
 		.expect("start the session");
@@ -2527,6 +2596,8 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -2569,6 +2640,8 @@ mod tests {
 				peer_declared: Some(peer::Peer::default()),
 				auth: crate::auth::Handle::new(false),
 				early_unis: Vec::new(),
+				implementation: None,
+				peer_implementation: Default::default(),
 				extensions: Default::default(),
 			})
 			.expect("start the session");
@@ -2839,6 +2912,8 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.unwrap()
@@ -2985,6 +3060,8 @@ mod tests {
 					peer_declared: Some(peer::Peer::default()),
 					auth: crate::auth::Handle::new(false),
 					early_unis: Vec::new(),
+					implementation: None,
+					peer_implementation: Default::default(),
 					extensions: Default::default(),
 				})
 				.unwrap();
@@ -3053,6 +3130,8 @@ mod tests {
 					peer_declared: Some(peer::Peer::default()),
 					auth: crate::auth::Handle::new(false),
 					early_unis: Vec::new(),
+					implementation: None,
+					peer_implementation: Default::default(),
 					extensions: Default::default(),
 					limits: Default::default(),
 				})
@@ -3161,6 +3240,8 @@ mod tests {
 			peer_declared: None,
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.expect("start the session");
@@ -3289,6 +3370,8 @@ mod tests {
 					peer_declared: Some(peer::Peer::default()),
 					auth: crate::auth::Handle::new(false),
 					early_unis: Vec::new(),
+					implementation: None,
+					peer_implementation: Default::default(),
 					extensions: Default::default(),
 				})
 				.unwrap();
@@ -3528,6 +3611,8 @@ mod tests {
 			peer_declared: None,
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.unwrap();
@@ -3586,6 +3671,7 @@ mod tests {
 				VERSION,
 				None,
 				None,
+				None,
 				Hop::new(1).unwrap(),
 				None,
 				Default::default(),
@@ -3631,6 +3717,8 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
 			extensions: Default::default(),
 		})
 		.unwrap();

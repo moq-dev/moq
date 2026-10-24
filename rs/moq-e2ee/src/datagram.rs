@@ -18,7 +18,8 @@ pub struct Datagram {
 pub enum Event {
 	/// Authenticated plaintext.
 	Datagram(Datagram),
-	/// AEAD open failed; the datagram was dropped and the track continues.
+	/// The datagram failed to authenticate, or had a sequence or size no publisher could seal;
+	/// it was dropped and the track continues.
 	Authentication {
 		/// Sequence of the rejected datagram.
 		sequence: u64,

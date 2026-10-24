@@ -1,6 +1,7 @@
 //! Producing generations mint an epoch; consuming generations bind a discovered one.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -22,9 +23,16 @@ pub(crate) enum Domain {
 struct Inner {
 	credential: Credential,
 	epoch: Epoch,
+	// Never evicted: re-deriving a key would reset its budget. Bounded by the semantic
+	// names the application produces or subscribes to, for as long as it holds the generation.
+	keys: Mutex<HashMap<Name, track::Keys>>,
 }
 
 /// A consume-only generation bound to a discovered epoch.
+///
+/// Every subscription through it and its clones shares each key's AEAD budget, so
+/// resubscribing cannot reset it. The budget lives as long as the generation; binding
+/// the epoch again with [`Credential::consume`] starts another.
 ///
 /// A discovered epoch cannot produce tracks:
 ///
@@ -47,7 +55,11 @@ impl fmt::Debug for Consumer {
 
 impl Consumer {
 	pub(crate) fn new(credential: Credential, epoch: Epoch) -> Self {
-		Self(Arc::new(Inner { credential, epoch }))
+		Self(Arc::new(Inner {
+			credential,
+			epoch,
+			keys: Mutex::default(),
+		}))
 	}
 
 	/// The credential this generation derives from.
@@ -77,10 +89,28 @@ impl Consumer {
 	/// [`Error::Identity`] if the track name is not a physical name.
 	pub(crate) fn consume(&self, track: moq_net::track::Subscriber) -> Result<track::Consumer> {
 		let name: Name = track.name().parse()?;
-		Ok(track::Consumer::new(
-			track,
-			self.key(&name, Domain::Group)?,
-			self.key(&name, Domain::Datagram)?,
+		let keys = self.keys(name)?;
+		Ok(track::Consumer::new(track, keys))
+	}
+
+	/// The keys for `name`, shared with every earlier subscription to it.
+	pub(crate) fn keys(&self, name: Name) -> Result<track::Keys> {
+		let mut keys = self.0.keys.lock().expect("generation keys");
+		let entry = match keys.entry(name) {
+			Entry::Occupied(entry) => entry.into_mut(),
+			Entry::Vacant(entry) => {
+				let derived = self.derive(entry.key())?;
+				entry.insert(derived)
+			}
+		};
+		Ok(entry.clone())
+	}
+
+	/// Derive fresh keys for `name`, with their own accounting.
+	fn derive(&self, name: &Name) -> Result<track::Keys> {
+		Ok(track::Keys::new(
+			self.key(name, Domain::Group)?,
+			self.key(name, Domain::Datagram)?,
 		))
 	}
 
@@ -119,26 +149,16 @@ impl Consumer {
 }
 
 /// A publisher-minted generation whose clones share permanent track claims.
-///
-/// Explicit epochs cannot construct a producing generation:
-///
-/// ```compile_fail
-/// fn reopen(credential: moq_e2ee::Credential, epoch: moq_net::Epoch) {
-///     let _ = moq_e2ee::generation::Producer::new(credential, epoch);
-/// }
-/// ```
 #[derive(Clone, Debug)]
 pub struct Producer {
+	// Its keys are the claims: never released, since reopening a track would restart its nonce counters.
 	consumer: Consumer,
-	// Never release a claim: reopening a track would restart its nonce counters.
-	claims: Arc<Mutex<HashSet<Name>>>,
 }
 
 impl Producer {
 	pub(crate) fn new(credential: Credential, epoch: Epoch) -> Self {
 		Self {
 			consumer: Consumer::new(credential, epoch),
-			claims: Arc::new(Mutex::new(HashSet::new())),
 		}
 	}
 
@@ -182,12 +202,11 @@ impl Producer {
 	/// generation already claimed it.
 	pub(crate) fn claim(&self, name: &str) -> Result<track::Keys> {
 		let name: Name = name.parse()?;
-		if !self.claims.lock().expect("claims").insert(name) {
+		let mut keys = self.consumer.0.keys.lock().expect("generation keys");
+		let Entry::Vacant(entry) = keys.entry(name) else {
 			return Err(Error::Reuse);
-		}
-		Ok(track::Keys {
-			group: self.consumer.key(&name, Domain::Group)?,
-			datagram: self.consumer.key(&name, Domain::Datagram)?,
-		})
+		};
+		let derived = self.consumer.derive(entry.key())?;
+		Ok(entry.insert(derived).clone())
 	}
 }

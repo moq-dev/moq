@@ -1,7 +1,7 @@
 import { Unsupported } from "../auth.ts";
-import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
+import { type AuthWire, decodePatterns, encodePatterns, type WireGrant, type WireReply } from "../auth_session.ts";
 import { ProtocolViolation, SessionCode, SessionError } from "../error.ts";
-import * as Path from "../path.ts";
+import type * as Path from "../path.ts";
 import { type Reader, Stream, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import { closeViolation } from "./error.ts";
@@ -43,26 +43,6 @@ export class AuthMessage {
 		guardAuth(version);
 		return Message.decode(r, AuthMessage.#decode);
 	}
-}
-
-// Each pattern travels as its canonical text.
-async function encodePatterns(w: Writer, patterns: Path.Patterns) {
-	await w.u53(patterns.size);
-	for (const pattern of patterns) await w.string(pattern.text);
-}
-
-async function decodePatterns(r: Reader): Promise<Path.Patterns> {
-	const count = await r.u53();
-	const patterns: Path.Pattern[] = [];
-	for (let i = 0; i < count; i++) {
-		const text = await r.string();
-		const pattern = Path.Pattern.parse(text);
-		// Only the canonical spelling is valid, so each pattern has one encoding.
-		if (pattern.text !== text) throw new Error(`non-canonical pattern: ${text}`);
-		patterns.push(pattern);
-	}
-	// Reduce once, so a peer's count never turns into quadratic work.
-	return new Path.Patterns(patterns);
 }
 
 /** The grant a token earns, as the acceptor writes it. Encodes its own type. */
