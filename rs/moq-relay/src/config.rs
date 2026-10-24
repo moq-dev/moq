@@ -553,6 +553,7 @@ mod tests {
 		assert!(error.to_string().contains("MOQ_STUN_BIND requires"), "{error}");
 	}
 
+	#[cfg(feature = "stun")]
 	#[test]
 	fn stun_binding_merges_the_environment() {
 		if !test_env::Env::default().set("MOQ_STUN_BIND", "[::1]:3478").isolate() {
