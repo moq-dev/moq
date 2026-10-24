@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate{Numerator: 30000, Denominator: 1001}` and construct producers with `(catalog, ProducerOptions{Input: input, Output: output, Track: track, Bandwidth: bandwidth})` under the matching audio/video package.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
+### Video rendition preference
+
+`media.Video` gains `Preference int32`. Update unkeyed struct literals or use keyed fields, leaving `Preference: 0` for the default ranking. Upgrade the matching FFI module too. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `Announce` takes an `AnnounceRoute`
 
 `BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
@@ -140,14 +151,14 @@ config := media.TrackConfig{Rendition: media.VideoRendition(id, video)}
 ### Native codecs have `audio` and `video` packages (#5694)
 
 `BroadcastProducer.EncodeAudio` / `EncodeVideo` are `audio.NewProducer` / `video.NewProducer` (`moq.dev/moq/audio`, `moq.dev/moq/video`), built from a `media.CatalogProducer`.
-The audio track name moves into `EncoderOutput.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `audio.Frame.Timestamp`, `video.Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
+The audio track name belongs to `ProducerOptions.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `audio.Frame.Timestamp`, `video.Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
 `BroadcastConsumer.DecodeAudio` / `DecodeVideo` are `audio.Subscribe` / `video.Subscribe`, taking the broadcast after the context.
 Producers expose subscriber state only through `Demand()`, and a video GOP is `video.Keyframe(interval)`.
 `audio.NewEncoder` / `video.NewEncoder` encode without publishing.
 
 ```go
 catalog, err := moqmedia.NewCatalogProducer(broadcast)
-video, err := moqvideo.NewProducer(catalog, moqvideo.EncoderInput{...}, moqvideo.EncoderOutput{...}, nil)
+video, err := moqvideo.NewProducer(catalog, moqvideo.ProducerOptions{Input: input, Output: output})
 err = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 frames, err := moqvideo.Subscribe(ctx, consumer, name, rendition, output)
 ```

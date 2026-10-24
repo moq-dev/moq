@@ -813,7 +813,7 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 				.map(|version| format!("{}{alpn}", version.prefix())),
 		);
 	}
-	protocols.extend(qmux::ALPNS.iter().map(|protocol| (*protocol).to_string()));
+	protocols.extend(qmux::Version::ALL.iter().map(|version| version.alpn().to_string()));
 	protocols
 }
 

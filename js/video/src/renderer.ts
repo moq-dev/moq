@@ -7,19 +7,10 @@ import { Gpu, probe } from "./webgpu";
  * Which graphics API draws the frames.
  *
  * - `"auto"`: WebGPU where it can render a `VideoFrame`, else Canvas2D. Logs the choice.
- * - `"webgpu"`: WebGPU only; refuses with the `"unsupported"` error where it is missing.
+ * - `"webgpu"`: WebGPU only; reports a `NotSupportedError` where it is missing.
  * - `"2d"`: Canvas2D only.
  */
 export type Backend = "auto" | "webgpu" | "2d";
-
-/**
- * Why the renderer stopped drawing.
- *
- * - `"unsupported"`: `"webgpu"` was requested where WebGPU cannot render a `VideoFrame`.
- * - `"surface-lost"`: the canvas cannot be drawn to anymore, because the GPU went away with no
- *   replacement or the canvas already holds another kind of context. Pass a fresh canvas to recover.
- */
-export type RendererError = "unsupported" | "surface-lost";
 
 /** A canvas the renderer can draw into, on the main thread or in a worker. */
 export type Canvas = HTMLCanvasElement | OffscreenCanvas;
@@ -45,8 +36,14 @@ export type RendererProps = Inputs<RendererInput>;
 export type RendererOutput = {
 	/** The most recently painted frame, owned by the renderer and closed when replaced. */
 	frame: Signal<VideoFrame | undefined>;
-	/** Why drawing stopped, or undefined while healthy. */
-	error: Signal<RendererError | undefined>;
+	/**
+	 * Why drawing stopped, or undefined while healthy. Branch on its `name`:
+	 *
+	 * - `"NotSupportedError"`: `"webgpu"` was requested where WebGPU cannot render a `VideoFrame`.
+	 * - `"InvalidStateError"`: the canvas cannot be drawn to anymore, because the GPU went away with
+	 *   no replacement or the canvas already holds another kind of context. Pass a fresh canvas to recover.
+	 */
+	error: Signal<Error | undefined>;
 };
 
 type Surface = Gpu | Canvas2D;
@@ -56,7 +53,7 @@ type Surface = Gpu | Canvas2D;
  *
  * The graphics API is chosen once per canvas, before touching it, since a canvas keeps the first
  * kind of context it hands out. A lost GPU device is replaced; with no replacement the renderer
- * stops and reports `"surface-lost"` rather than switching APIs on a canvas it already drew to.
+ * stops and reports an `InvalidStateError` rather than switching APIs on a canvas it already drew to.
  */
 export class Renderer {
 	/** Inputs wired into the renderer. */
@@ -64,7 +61,7 @@ export class Renderer {
 
 	readonly #out: RendererOutput = {
 		frame: new Signal<VideoFrame | undefined>(undefined),
-		error: new Signal<RendererError | undefined>(undefined),
+		error: new Signal<Error | undefined>(undefined),
 	};
 	/** The painted frame and error state. */
 	readonly out = readonlys(this.#out);
@@ -108,7 +105,9 @@ export class Renderer {
 			if (typeof device === "string") {
 				if (backend === "webgpu") {
 					console.error(`[video] backend="webgpu" is unsupported: ${device}`);
-					this.#out.error.set("unsupported");
+					this.#out.error.set(
+						new DOMException(`WebGPU cannot render a VideoFrame: ${device}`, "NotSupportedError"),
+					);
 					return;
 				}
 
@@ -129,7 +128,7 @@ export class Renderer {
 					return;
 				}
 
-				this.#out.error.set("surface-lost");
+				this.#out.error.set(new DOMException("canvas holds another kind of context", "InvalidStateError"));
 				return;
 			}
 
@@ -141,7 +140,7 @@ export class Renderer {
 	#use2d(effect: Effect, canvas: Canvas): void {
 		const ctx = canvas.getContext("2d") as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
 		if (!ctx) {
-			this.#out.error.set("surface-lost");
+			this.#out.error.set(new DOMException("canvas holds another kind of context", "InvalidStateError"));
 			return;
 		}
 
@@ -181,7 +180,9 @@ export class Renderer {
 			// nothing to fall back to on this canvas.
 			if (typeof next === "string") {
 				console.error(`[video] WebGPU device lost with no replacement: ${next}`);
-				this.#out.error.set("surface-lost");
+				this.#out.error.set(
+					new DOMException(`WebGPU device lost with no replacement: ${next}`, "InvalidStateError"),
+				);
 				return;
 			}
 

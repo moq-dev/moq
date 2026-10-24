@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `Video.FrameRate(numerator: 30000, denominator: 1001)` and move `track:` from encoder output to `Audio.Producer` / `Video.Producer`.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
+### Video rendition preference
+
+`Media.Video` gains `preference: Int32`, defaulting to `0`. Rebuild with the matching MoqFFI package. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### `announce` takes an `AnnounceRoute`
 
 `BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:epoch:)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
@@ -137,7 +148,7 @@ let config = Media.TrackConfig(rendition: .video(id: id, config: video))
 ### Native codecs have `Audio` and `Video` namespaces (#5694)
 
 `BroadcastProducer.encodeAudio` / `encodeVideo` are `Audio.Producer` / `Video.Producer` initializers that take a `Media.CatalogProducer`.
-The audio track name moves into the encoder output's `track`, and a zero frame duration takes the codec's own frame.
+The audio track name belongs to the producer's publication options, and a zero frame duration takes the codec's own frame.
 `BroadcastConsumer.decodeAudio` / `decodeVideo` are `Audio.Consumer.subscribe(broadcast:...)` / `Video.Consumer.subscribe(broadcast:...)`.
 Producers expose subscriber state only through `demand()`, and a video GOP is `Video.Gop.keyframe(interval:)`.
 `Audio.Encoder` / `Video.Encoder` encode without publishing.

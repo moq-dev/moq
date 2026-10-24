@@ -6,7 +6,7 @@ kio exports an append-only log channel whose consumers read committed entries
 by cursor without taking a lock, and the hottest moq-net channels the
 [epic](/quest/m2/perf/kio-channel-contention/README.md)'s baseline names
 (expected: `TrackState` arrival order, and `GroupState` frames if the
-[group storage benchmark](/quest/m2/group-storage-bench.md) picks the log)
+[group storage benchmark](/quest/m1/group-storage-bench.md) picks the log)
 move onto it.
 Lands with the contended bench (`rs/kio/benches/contended.rs`) and `just bench-profile lock` before and after; a
 measured no-win abandons it.
@@ -55,17 +55,17 @@ measured no-win abandons it.
 - Breaking moq-net's model internals is allowed; check whether any public
   moq-net API changes and sync `js/net` if so.
 - Decided 2026-10-20 (maintainer): `GroupState` storage is chosen by the
-  [group storage benchmark](/quest/m2/group-storage-bench.md) against
-  [Front eviction](/quest/m2/unbounded-groups/front-eviction.md)'s sorted
+  [group storage benchmark](/quest/m1/group-storage-bench.md) against
+  [Front eviction](/quest/m1/unbounded-groups/front-eviction.md)'s sorted
   runs before either lands. The maintainer leans toward this log, or a ring
   buffer, because performance matters more than middle eviction.
 
 ## Required
 
-- [Group storage benchmark](/quest/m2/group-storage-bench.md) - picks the log, a ring buffer, or sorted runs for `GroupState` frames
+- [Group storage benchmark](/quest/m1/group-storage-bench.md) - picks the log, a ring buffer, or sorted runs for `GroupState` frames
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - if per-worker replicas win, each channel's cross-core readers collapse to one flow-controlled stream per worker and this log is likely abandoned
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - the same question with nothing shared
 
 ## Related
 
-- [Front eviction](/quest/m2/unbounded-groups/front-eviction.md) - the other proposal for `GroupState` storage, decided by the same benchmark
+- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - the other proposal for `GroupState` storage, decided by the same benchmark

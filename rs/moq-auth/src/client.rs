@@ -12,6 +12,11 @@ use crate::{Bytes, Error, Event, Grant, Request};
 /// Every request is bounded so a hung server refuses rather than parks the session.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The largest reply read from the auth server. Each one is held whole before it is
+/// parsed, once per admission in flight, so the size bounds that memory; a grant
+/// with thousands of patterns still fits.
+const MAX_REPLY: usize = 1 << 20;
+
 /// The HTTP side of the contract: one JSON POST per event to an auth server.
 ///
 /// `connect` admits a session and hands back the [`lease::Consumer`] it holds; a task
@@ -273,10 +278,15 @@ impl Post for Client {
 		let response = self.http.post(self.url.clone()).json(request).send().await?;
 		let status = response.status();
 		if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-			return Err(Error::Refused(response.json().await.unwrap_or_default()));
+			let refusal = reply(response)
+				.await
+				.ok()
+				.and_then(|body| serde_json::from_slice(&body).ok());
+			return Err(Error::Refused(refusal.unwrap_or_default()));
 		}
 		check(status)?;
-		Ok(response.json().await?)
+		serde_json::from_slice(&reply(response).await?)
+			.map_err(|err| Error::Unavailable(format!("auth server answered an invalid grant: {err}")))
 	}
 
 	async fn post_end(&self, request: &Request) -> crate::Result<()> {
@@ -296,6 +306,20 @@ fn check(status: reqwest::StatusCode) -> crate::Result<()> {
 		return Err(Error::Unavailable(format!("auth server answered {status}")));
 	}
 	Ok(())
+}
+
+/// Read a reply body of at most [`MAX_REPLY`] bytes, refusing a longer one as it arrives.
+async fn reply(mut response: reqwest::Response) -> crate::Result<Vec<u8>> {
+	let mut body = Vec::new();
+	while let Some(chunk) = response.chunk().await? {
+		if body.len() + chunk.len() > MAX_REPLY {
+			return Err(Error::Unavailable(format!(
+				"auth server reply exceeds {MAX_REPLY} bytes"
+			)));
+		}
+		body.extend_from_slice(&chunk);
+	}
+	Ok(body)
 }
 
 /// Admit a session through `server` and spawn the driver behind its lease.
@@ -1009,6 +1033,42 @@ mod tests {
 		.await;
 		let err = client(&nothing).connect(request()).await.unwrap_err();
 		assert!(matches!(err, Error::Refused(_)), "{err}");
+	}
+
+	/// A reply of exactly `MAX_REPLY` bytes admits; one byte more is an outage, or a
+	/// plain refusal on a 403, never read whole.
+	#[tokio::test]
+	async fn replies_are_bounded() {
+		let padded = |status: u16, body: &str, len: usize| {
+			// JSON allows trailing whitespace, so the padded reply still parses.
+			let body = format!("{body}{}", " ".repeat(len - body.len()));
+			ResponseTemplate::new(status).set_body_raw(body, "application/json")
+		};
+		let grant = serde_json::to_string(&grant(None, None)).unwrap();
+		let refusal = r#"{"reason":"expired","root":"tenant"}"#;
+
+		let fits = server(Log::default(), {
+			let grant = grant.clone();
+			move |_| padded(200, &grant, MAX_REPLY)
+		})
+		.await;
+		client(&fits)
+			.connect(request())
+			.await
+			.expect("a reply at the bound admits");
+
+		let over = server(Log::default(), move |_| padded(200, &grant, MAX_REPLY + 1)).await;
+		let err = client(&over).connect(request()).await.unwrap_err();
+		assert!(
+			matches!(&err, Error::Unavailable(message) if message.contains("exceeds")),
+			"{err}"
+		);
+
+		let refused = server(Log::default(), move |_| padded(403, refusal, MAX_REPLY + 1)).await;
+		let Error::Refused(actual) = client(&refused).connect(request()).await.unwrap_err() else {
+			panic!("expected refusal")
+		};
+		assert_eq!(actual, crate::Refusal::default());
 	}
 
 	#[tokio::test]
