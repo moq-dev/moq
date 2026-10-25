@@ -3390,7 +3390,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 	let group_cb = Callback::new();
-	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
 	// The live feed ran from 10 and ended, so only a fill can serve group 6.
 	{
@@ -3443,7 +3443,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 	assert_eq!(group.sequence, 6);
 
 	drop(reader);
-	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
