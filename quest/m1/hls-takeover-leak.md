@@ -207,5 +207,5 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 ## Related
 
 - [HLS restart drain cutoff](/quest/m2/hls-restart-drain-cutoff.md) - changes what a replaced run's cursor drains; update the takeover scenario with it
-- [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - the recorder that would write the leaked segment
+- `export hls --output` (`rs/moq-cli/src/hls/record.rs`) - the recorder that would write the leaked segment
 - moq-hls's `moq-tokio` dev-dependency features (`tcp`, `quic`, `aws-lc-rs`) now serve only `origin::spawn`. Trimming them to `net` first needs moq-tokio's `Backoff::validate` fixed, since it is dead code under `net` alone.
