@@ -84,7 +84,7 @@ function reports(dir: string): Map<string, string> {
 			additionalEntryPoints: entries.map(({ entrypoint }) => entrypoint),
 		});
 		const named = nameable(
-			compilerState.program,
+			compilerState.program as Program,
 			entries.map(({ entrypoint }) => entrypoint),
 		);
 
@@ -124,10 +124,35 @@ function installation(dir: string, name: string): string | undefined {
 	}
 }
 
-type Program = CompilerState["program"];
-type Checker = ReturnType<Program["getTypeChecker"]>;
-type Node = Parameters<Checker["getSymbolAtLocation"]>[0];
-type Symbol = NonNullable<ReturnType<Checker["getSymbolAtLocation"]>>;
+// The parts of the TypeScript compiler API used here. API Extractor types its program `unknown`
+// rather than expose the TypeScript it bundles.
+interface Program {
+	getTypeChecker(): Checker;
+	getSourceFile(path: string): SourceFile | undefined;
+}
+interface Checker {
+	getSymbolAtLocation(node: Node): Symbol | undefined;
+	getAliasedSymbol(symbol: Symbol): Symbol;
+	getExportsOfModule(symbol: Symbol): Symbol[];
+}
+interface Node {
+	kind: number;
+	end: number;
+	parent: Node;
+	getChildren(): Node[];
+	getStart(): number;
+	getText(): string;
+	getSourceFile(): SourceFile;
+}
+interface SourceFile extends Node {
+	fileName: string;
+	getPositionOfLineAndCharacter(line: number, character: number): number;
+}
+interface Symbol {
+	flags: number;
+	name: string;
+	declarations?: Node[];
+}
 
 // The TypeScript that API Extractor bundles and built the program with.
 const ts: {
@@ -358,7 +383,7 @@ function extract(
 				name &&
 				line &&
 				column &&
-				nameableReference(compilerState.program, root, named, path, line, column, name)
+				nameableReference(compilerState.program as Program, root, named, path, line, column, name)
 			) {
 				message.logLevel = ExtractorLogLevel.None;
 			}
