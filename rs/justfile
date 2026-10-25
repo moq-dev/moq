@@ -346,7 +346,7 @@ cli-export *args:
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
 
-# Render CPU frames through wgpu on Mesa's software Vulkan driver, so no GPU is needed.
+# Render CPU frames and composite scenes through wgpu on Mesa's software Vulkan driver, so no GPU is needed.
 render-sw:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -356,6 +356,8 @@ render-sw:
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
         just rs test -p moq-video --features render --lib --run-ignored only \
         -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size)$/)'
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:
