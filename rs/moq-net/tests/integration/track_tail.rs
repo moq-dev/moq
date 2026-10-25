@@ -116,7 +116,7 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 	} = connect(version).await;
 
 	let reader = moq_clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_groups(0..);
+		let subscription = moq_net::track::Subscription::default().with_range(0..);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -279,7 +279,7 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 			_keep,
 		} = connect(version).await;
 
-		let subscription = moq_net::track::Subscription::default().with_groups(0..);
+		let subscription = moq_net::track::Subscription::default().with_range(0..);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -335,7 +335,7 @@ async fn a_lost_datagram_delays_the_end() {
 		} = connect(version).await;
 
 		let reader = moq_clock::sim::spawn(async move {
-			let subscription = moq_net::track::Subscription::default().with_groups(0..);
+			let subscription = moq_net::track::Subscription::default().with_range(0..);
 			let mut sub = remote
 				.track("video")
 				.unwrap()
@@ -395,7 +395,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 
 		let reader = moq_clock::sim::spawn(async move {
 			let subscription = moq_net::track::Subscription::default()
-				.with_groups(0..)
+				.with_range(0..)
 				.with_max_delay(TIMEOUT);
 			let mut sub = remote
 				.track("video")

@@ -29,6 +29,23 @@ the matching generated bindings and native library.
 Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel the coroutine or wrap it in `withTimeout`.
 
+### Shutdown drains
+
+`session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling.
+Await the suspending `session.closed()` to wait for the drain and catch delivery failures.
+`Moq.close()` now cancels at once; to drain a `Moq`, call `moq.shutdown()`, await `moq.session.closed()`, then close it.
+If you adopted the release line's async `drain()`, call `shutdown()` and then await `closed()` instead.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast `finish` is removed
+
+`BroadcastProducer.finish()`, a deprecated alias for `end()`, is removed.
+Call `BroadcastProducer.end()` where you called `finish()`.
+To end the content first, call `CatalogProducer.finish()`; the broadcast stays up until `end()`.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio: UInt` is replaced by `deltas: Boolean` (default `true`).
@@ -67,7 +84,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends or the new `BroadcastProducer.finish()` lets go.
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
 ### A claim answers by publishing (#5678)
@@ -226,6 +243,8 @@ val stream = ContainerProducer(broadcast, ContainerInit(ContainerFormat.FMP4, by
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 `Frame.timestamp` and `Datagram.timestamp` are `Duration?`, null on a frame read from an untimed track.
 A raw write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `CatalogProducer.now()` samples the broadcast clock for local-event stamps.
@@ -260,10 +279,6 @@ Replace `!video.stalled` with `video.enabled`.
 `VideoDecodedFrame` is a closeable handle with `width()`, `height()`, `pixels(format)`, and `surface()`.
 `VideoDecoderOutput.format` is gone; set `surface = true` to keep the decoder's native surface.
 Replace `frame.data` with `frame.use { it.pixels(VideoPixelFormat.RGBA) }`.
-
-### `BroadcastProducer.finish()` is removed (#4152)
-
-Call `end()` to finish the broadcast and keep the handle, or `close()` to release it.
 
 ## 0.4 -> 0.5
 

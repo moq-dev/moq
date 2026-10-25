@@ -53,9 +53,16 @@ val QuicConfig.idleTimeout: Duration?
 val QuicConfig.keepAlive: Duration?
     get() = keepAliveUs?.toLong()?.microseconds
 
-/** Upper bound on buffering before a stalled group is skipped, or null for the default. */
+/** Upper bound on buffering before a stalled group is skipped, or null for the publisher's max age alone. */
 val Subscription.maxDelay: Duration?
-    get() = maxDelayUs?.toLong()?.microseconds
+    get() = maxDelayUs?.let(::saturatingMicros)
+
+/** The most tolerant age budget among a fill's readers, or null for the publisher's max age alone. */
+val Fill.maxDelay: Duration?
+    get() = maxDelayUs()?.let(::saturatingMicros)
+
+// A peer's delay can pass Long.MAX_VALUE microseconds, which toLong() would wrap negative.
+private fun saturatingMicros(us: ULong): Duration = minOf(us, Long.MAX_VALUE.toULong()).toLong().microseconds
 
 /** Maximum age of a non-latest group before the publisher evicts it, or null for the default. */
 val TrackInfo.maxAge: Duration?
@@ -68,10 +75,6 @@ val AudioDecoderOutput.maxDelay: Duration?
 /** Fixed playout delay to hold ahead of the playhead, or null to estimate it from arrival timing. */
 val AudioDecoderOutput.delay: Duration?
     get() = delayUs?.toLong()?.microseconds
-
-/** How long to keep a finished broadcast: the longest max age of the tracks it holds. */
-val BroadcastFinish.linger: Duration
-    get() = lingerUs().coerceAtMost(Long.MAX_VALUE.toULong()).toLong().microseconds
 
 /** Playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far. */
 val dev.moq.audio.Consumer.delay: Duration

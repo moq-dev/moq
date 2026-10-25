@@ -16,9 +16,6 @@ from moq_ffi import (
     MoqAudioEncoderInput as AudioEncoderInput,
 )
 from moq_ffi import (
-    MoqAudioPreset as AudioPreset,
-)
-from moq_ffi import (
     MoqAudioSampleFormat as AudioSampleFormat,
 )
 from moq_ffi import (
@@ -88,7 +85,6 @@ __all__ = [
     "Anchor",
     "AudioCodec",
     "AudioEncoderInput",
-    "AudioPreset",
     "AudioSampleFormat",
     "Backoff",
     "ClientTls",

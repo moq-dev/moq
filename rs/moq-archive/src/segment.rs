@@ -1,4 +1,6 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
+#[cfg(test)]
+use bytes::{BufMut, BytesMut};
 use hang::timeline::Position;
 use moq_net::varint;
 
@@ -35,6 +37,7 @@ pub struct Object {
 
 impl Object {
 	/// An object whose first group starts at frame zero.
+	#[cfg(test)]
 	pub fn new(groups: Vec<Group>) -> Self {
 		Self { frame_start: 0, groups }
 	}
@@ -75,6 +78,7 @@ impl Object {
 	/// Encode the binary envelope. The first sequence is absolute; later ones are `current - previous - 1`.
 	///
 	/// Frame timestamps are stored only when the frames have them, so every frame must agree.
+	#[cfg(test)]
 	pub fn encode(&self) -> Result<Bytes> {
 		validate(&self.groups)?;
 
@@ -235,6 +239,7 @@ fn validate(groups: &[Group]) -> Result<()> {
 	Ok(())
 }
 
+#[cfg(test)]
 fn write_varint(buf: &mut impl BufMut, value: u64) -> Result<()> {
 	varint::encode_quic(value, buf).map_err(|_| Error::Overflow)
 }
