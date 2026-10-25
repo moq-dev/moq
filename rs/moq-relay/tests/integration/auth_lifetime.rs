@@ -39,6 +39,8 @@ enum Answer {
 	Grant(Grant),
 	Status(u16),
 	Token(Grant, moq_auth::Token),
+	/// A 403 carrying a typed refusal.
+	Refuse(moq_auth::refusal::Reason),
 }
 
 /// A server whose answers the test changes mid-session, recording every request.
@@ -122,6 +124,11 @@ impl Script {
 			Answer::Token(grant, token) if request.token.as_ref() == Some(&token) => Json(grant).into_response(),
 			Answer::Token(..) => StatusCode::UNAUTHORIZED.into_response(),
 			Answer::Status(code) => StatusCode::from_u16(code).unwrap().into_response(),
+			Answer::Refuse(reason) => {
+				let mut refusal = moq_auth::Refusal::default();
+				refusal.reason = reason;
+				(StatusCode::FORBIDDEN, Json(refusal)).into_response()
+			}
 		}
 	}
 
@@ -1865,17 +1872,24 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 /// Browser-visible policy refusals happen after the WebSocket upgrade, in MoQ's close registry.
 #[tokio::test]
 async fn websocket_refusal_is_in_band() {
+	use moq_auth::refusal::Reason;
 	use moq_net::transport::{
 		Error as _,
 		poll::{SendStream as _, Session as _},
 	};
-	for (status, code) in [
-		(401, moq_net::SessionError::Unauthorized),
-		(403, moq_net::SessionError::Unauthorized),
-		(502, moq_net::SessionError::App(502)),
+	for (answer, code) in [
+		(Answer::Status(401), moq_net::SessionError::Unauthorized),
+		(Answer::Status(403), moq_net::SessionError::Unauthorized),
+		(Answer::Status(502), moq_net::SessionError::App(502)),
+		(Answer::Refuse(Reason::Forbidden), moq_net::SessionError::Unauthorized),
+		(Answer::Refuse(Reason::Expired), moq_net::SessionError::Expired),
+		(
+			Answer::Refuse(Reason::Malformed),
+			moq_net::SessionError::MalformedAuthToken,
+		),
 	] {
 		let script = Script::new(grant(Duration::from_secs(3600)));
-		script.on_connect(Answer::Status(status));
+		script.on_connect(answer);
 		let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 		let mut session = qmux::ws::Client::new()
 			.with_protocol("moq-lite-06", &[qmux::Version::QMux01])

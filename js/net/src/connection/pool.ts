@@ -44,15 +44,6 @@ export interface ConnectionProps {
 	enabled?: boolean | Signal<boolean>;
 
 	/**
-	 * How long the underlying connection outlives its last handle (default: 2000ms).
-	 *
-	 * The window is what makes moving an element around the DOM free: the connection and
-	 * everything it discovered are still warm when the new owner asks for them. The longest
-	 * linger requested by any handle sharing the connection wins.
-	 */
-	linger?: Milli;
-
-	/**
 	 * Share a pooled transport keyed on the URL and ordered versions. By default, options specific to this
 	 * handle use a private reconnect loop; otherwise connections share by URL and versions.
 	 * Explicit `true` refuses options a pool cannot honor.
@@ -115,9 +106,8 @@ export interface ConnectionProps {
  * lands in it, a publish into it is announced to the relay, and a page that publishes and
  * watches the same path resolves it locally with no round trip.
  *
- * {@link close} releases this handle; the connection survives its last handle by a short
- * linger window (see {@link ConnectionProps.linger}), so a component torn down and rebuilt
- * reuses the warm connection instead of redialing.
+ * {@link close} releases this handle; the connection survives its last handle by a two-second
+ * linger window, so a component torn down and rebuilt reuses the warm connection instead of redialing.
  *
  * The loop reconnects for as long as a handle holds it, so an outage of any length recovers
  * on its own. An auth rejection stops retrying those credentials and retires the shared
@@ -259,8 +249,6 @@ export class Connection {
 		this.auth = this.#auth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
 
-		const linger = props?.linger;
-
 		// Key on the serialized URL: URL objects use identity equality, and an equivalent
 		// instance must not release and redial.
 		const href = this.#signals.computed((effect) => effect.get(this.url)?.href);
@@ -280,7 +268,7 @@ export class Connection {
 				return;
 			}
 
-			const lease = acquire(key, versions, linger);
+			const lease = acquire(key, versions);
 			effect.cleanup(lease.release);
 
 			effect.set(this.#origin, lease.origin, undefined);
@@ -384,8 +372,8 @@ export class Connection {
 	}
 
 	/**
-	 * Release this handle. The shared connection closes once its last handle is gone and
-	 * the linger window passes; other handles on the URL are unaffected. Idempotent.
+	 * Release this handle. The shared connection drains and closes once its last handle is
+	 * gone and the linger window passes; other handles on the URL are unaffected. Idempotent.
 	 */
 	close(abort?: Error): void {
 		this.#signals.close();
@@ -499,7 +487,6 @@ interface Entry {
 	origin: Origin.Producer;
 	connection: Reload;
 	refs: number;
-	linger: Milli;
 	timer?: () => void;
 }
 
@@ -512,7 +499,7 @@ function poolKey(url: string, versions?: readonly string[]): string {
 }
 
 /** Take a reference on the shared entry, creating it on first use. */
-function acquire(url: string, versions?: readonly string[], linger?: Milli): Entry & { release: () => void } {
+function acquire(url: string, versions?: readonly string[]): Entry & { release: () => void } {
 	const key = poolKey(url, versions);
 	let entry = pool.get(key);
 	if (!entry) {
@@ -525,7 +512,7 @@ function acquire(url: string, versions?: readonly string[], linger?: Milli): Ent
 			consume: origin,
 		});
 
-		const created: Entry = { key, origin, connection, refs: 0, linger: linger ?? LINGER_MS };
+		const created: Entry = { key, origin, connection, refs: 0 };
 
 		// The loop only stops on a peer saying these credentials will never work, or on a
 		// GOAWAY redirect it refused. Drop the entry so a later handle dials fresh rather
@@ -553,7 +540,6 @@ function acquire(url: string, versions?: readonly string[], linger?: Milli): Ent
 	}
 
 	const taken = entry;
-	taken.linger = Milli(Math.max(taken.linger, linger ?? LINGER_MS));
 	taken.refs += 1;
 	if (taken.timer !== undefined) {
 		taken.timer();
@@ -572,7 +558,7 @@ function acquire(url: string, versions?: readonly string[], linger?: Milli): Ent
 
 			// Don't hold a Node process open for a connection nobody is using.
 			taken.timer = after(
-				Nano.fromMilli(taken.linger),
+				Nano.fromMilli(LINGER_MS),
 				() => {
 					if (pool.get(taken.key) === taken) pool.delete(taken.key);
 					taken.connection.close();

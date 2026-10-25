@@ -48,6 +48,12 @@ pub(crate) struct Params {
 	pps: Vec<Bytes>,
 }
 
+impl Params {
+	pub(crate) fn nals(&self) -> impl Iterator<Item = &Bytes> {
+		self.sps.iter().chain(&self.pps)
+	}
+}
+
 #[derive(Default)]
 struct Avc3Frame {
 	chunks: BytesMut,

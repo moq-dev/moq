@@ -5,7 +5,7 @@
 //! pure function of the timeline records, and media bytes move only when an HTTP client requests
 //! a segment, which FETCHes exactly the frames that segment covers from the relay cache and
 //! transmuxes them to CMAF. A broadcast whose catalog advertises no timelines can't be served this
-//! way and is skipped, and a rendition is served only once its own timeline is advertised. A `moq-archive` recording replayed onto a broadcast is served the same way:
+//! way and is skipped, and a rendition is served only once its own timeline is advertised. A `moq-archive` recording served by its `Consumer` is served the same way:
 //! its playlists read only the stored timelines, and a segment GETs only its rendition's objects.
 //!
 //! Segment boundaries come from one reference rendition's records, numbered by record sequence,
@@ -28,6 +28,9 @@
 //!   yield every rendition and every finalized segment in order, for mirroring a broadcast to
 //!   storage.
 
+#[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
+mod archive_tests;
 pub(crate) mod master;
 mod mpd;
 mod playlist;
@@ -3288,8 +3291,7 @@ mod tests {
 		moq_net::origin::Route::default().with_hops(hops(&[first]))
 	}
 
-	/// A standalone media publisher (not an origin leaf), so the sibling is served through a
-	/// routed front.
+	/// Write three keyframes of `payload` into `broadcast`'s `video0` track, recording each.
 	fn write_routed_media(
 		broadcast: &mut moq_net::broadcast::Producer,
 		payload: &'static [u8],
@@ -3310,14 +3312,6 @@ mod tests {
 			.write(payload_frame(start_micros + 4_000_000, true, payload))
 			.unwrap();
 		media
-	}
-
-	async fn accept_sibling(server: &moq_net::origin::Dynamic, broadcast: &moq_net::broadcast::Producer) {
-		let request = tokio::time::timeout(Duration::from_secs(5), server.requested_broadcast())
-			.await
-			.expect("the sibling path is requested")
-			.expect("the handler is open");
-		request.accept(broadcast);
 	}
 
 	async fn until_finished(rendition: &Rendition) {
@@ -3348,9 +3342,8 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
 		let recorder = catalog.enroll_test("video0").unwrap();
 
-		let mut old_media = moq_net::broadcast::Info::new().produce();
+		let mut old_media = origin.create_broadcast("media").unwrap();
 		let _old_track = write_routed_media(&mut old_media, OLD, recorder, 0);
-		let old_server = origin.dynamic_route("media", sibling_route(10)).unwrap();
 		settle().await;
 
 		let upstream = crate::resolved(&origin, "live").await;
@@ -3367,7 +3360,7 @@ mod tests {
 		let reference = Arc::new((Kind::Video, "video0".to_string(), "video0".to_string()));
 		let watcher = tokio::spawn(watch_timeline(upstream.broadcast(), archive, reference, fanout.clone()));
 		let rendition = renditions.get(Kind::Video, "video0").unwrap();
-		accept_sibling(&old_server, &old_media).await;
+		old_media.announce(sibling_route(10)).unwrap();
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the timeline reaches the rendition");
@@ -3381,7 +3374,7 @@ mod tests {
 		let mut early = rendition.segments();
 		assert_eq!(early.next().await.unwrap().unwrap().discontinuity, 0);
 
-		drop((old_server, old_media, _old_track));
+		drop((old_media, _old_track));
 		until_finished(&rendition).await;
 		let served = rendition
 			.listed_segment(0)
@@ -3395,24 +3388,18 @@ mod tests {
 		}
 
 		// A publisher serving the path afterwards, with rows recorded for it, is never bound.
-		let new_server = origin.dynamic_route("media", sibling_route(11)).unwrap();
+		let mut new_media = origin.create_broadcast("media").unwrap();
+		new_media.announce(sibling_route(11)).unwrap();
 		let _ = rendition.snapshot();
-		assert!(
-			tokio::time::timeout(Duration::from_secs(1), new_server.requested_broadcast())
-				.await
-				.is_err(),
-			"the replacement is never requested"
-		);
 		let recorder = catalog.enroll_test("video0").unwrap();
 		fanout.skip(None);
-		let mut new_media = moq_net::broadcast::Info::new().produce();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
 		tokio::time::sleep(Duration::from_secs(1)).await;
 		let snapshot = rendition.snapshot();
 		assert!(snapshot.segments.is_empty(), "nothing of the replacement is listed");
 		assert!(snapshot.finished);
 		watcher.abort();
-		drop((new_media, _new_track, new_server, catalog, live));
+		drop((new_media, _new_track, catalog, live));
 	}
 
 	// A restart can land while a segment request waits for its media broadcast. The init
@@ -3429,9 +3416,8 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
 		let recorder = catalog.enroll_test("video0").unwrap();
 
-		let mut media = moq_net::broadcast::Info::new().produce();
+		let mut media = origin.create_broadcast("media").unwrap();
 		let _track = write_routed_media(&mut media, KEYFRAME, recorder, 0);
-		let server = origin.dynamic_route("media", sibling_route(10)).unwrap();
 		settle().await;
 
 		let upstream = crate::resolved(&origin, "live").await;
@@ -3452,7 +3438,7 @@ mod tests {
 			.await
 			.expect("the timeline reaches the rendition");
 
-		// The sibling request is unanswered, so the segment waits for its media broadcast.
+		// The sibling is unannounced, so the segment waits for its media broadcast.
 		let mut segment = std::pin::pin!(rendition.listed_segment(0));
 		assert!(
 			tokio::time::timeout(Duration::from_millis(10), segment.as_mut())
@@ -3462,7 +3448,7 @@ mod tests {
 		fanout.set_generation(Some("run-1".into()));
 		fanout.set_generation(Some("run-2".into()));
 
-		accept_sibling(&server, &media).await;
+		media.announce(sibling_route(10)).unwrap();
 		segment
 			.await
 			.unwrap()
@@ -3486,9 +3472,9 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
 		let recorder = catalog.enroll_test("video0").unwrap();
 
-		let mut media = moq_net::broadcast::Info::new().produce();
+		let mut media = origin.create_broadcast("media").unwrap();
 		let _track = write_routed_media(&mut media, NEW, recorder, 0);
-		let server = origin.dynamic_route("media", sibling_route(11)).unwrap();
+		media.announce(sibling_route(11)).unwrap();
 		settle().await;
 
 		let upstream = crate::resolved(&origin, "live").await;
@@ -3496,7 +3482,6 @@ mod tests {
 		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
 		let (rendition, watcher) = export(&upstream, &config);
-		accept_sibling(&server, &media).await;
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the timeline reaches the rendition");
@@ -3507,7 +3492,7 @@ mod tests {
 			.expect("the sibling present at export start is servable");
 		assert!(contains(&served, NEW));
 		watcher.abort();
-		drop((media, _track, server, catalog, live));
+		drop((media, _track, catalog, live));
 	}
 
 	// The replacement is often announced after the incumbent is already gone. Nothing serves
@@ -3525,9 +3510,8 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
 		let recorder = catalog.enroll_test("video0").unwrap();
 
-		let mut old_media = moq_net::broadcast::Info::new().produce();
+		let mut old_media = origin.create_broadcast("media").unwrap();
 		let _old_track = write_routed_media(&mut old_media, OLD, recorder, 0);
-		let old_server = origin.dynamic_route("media", sibling_route(10)).unwrap();
 		settle().await;
 
 		let upstream = crate::resolved(&origin, "live").await;
@@ -3535,13 +3519,13 @@ mod tests {
 		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
 		let (rendition, watcher) = export(&upstream, &config);
-		accept_sibling(&old_server, &old_media).await;
+		old_media.announce(sibling_route(10)).unwrap();
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the timeline reaches the rendition");
 		assert!(rendition.listed_segment(0).await.unwrap().is_some());
 
-		drop((old_server, old_media, _old_track));
+		drop((old_media, _old_track));
 		until_finished(&rendition).await;
 		let before = rendition.snapshot().segments.len();
 		assert!(before > 0);
@@ -3552,17 +3536,12 @@ mod tests {
 			.expect("the old retained segment drains");
 		assert!(contains(&served, OLD));
 
-		let new_server = origin.dynamic_route("media", sibling_route(11)).unwrap();
-		let mut new_media = moq_net::broadcast::Info::new().produce();
+		let mut new_media = origin.create_broadcast("media").unwrap();
 		let recorder = catalog.enroll_test("video0").unwrap();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
+		new_media.announce(sibling_route(11)).unwrap();
 		let _ = rendition.snapshot();
-		assert!(
-			tokio::time::timeout(Duration::from_secs(1), new_server.requested_broadcast())
-				.await
-				.is_err(),
-			"the replacement is never requested"
-		);
+		tokio::time::sleep(Duration::from_secs(1)).await;
 		let snapshot = rendition.snapshot();
 		assert_eq!(snapshot.segments.len(), before, "only the old rows remain listed");
 		assert!(snapshot.finished, "the playlist ended with its sibling");
@@ -3574,7 +3553,7 @@ mod tests {
 		assert!(contains(&served, OLD));
 		assert!(!contains(&served, NEW));
 		watcher.abort();
-		drop((new_media, _new_track, new_server, catalog, live));
+		drop((new_media, _new_track, catalog, live));
 	}
 
 	// A recorder waiting at the live edge ends when the bound sibling ends, with nothing else
@@ -3589,16 +3568,15 @@ mod tests {
 		live.announce(Default::default()).expect("publish allowed");
 		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
 		let recorder = catalog.enroll_test("video0").unwrap();
-		let mut media = moq_net::broadcast::Info::new().produce();
+		let mut media = origin.create_broadcast("media").unwrap();
 		let track = write_routed_media(&mut media, OLD, recorder, 0);
-		let server = origin.dynamic_route("media", sibling_route(10)).unwrap();
 		settle().await;
 
 		let upstream = crate::resolved(&origin, "live").await;
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 		let (rendition, watcher) = export(&upstream, &config);
-		accept_sibling(&server, &media).await;
+		media.announce(sibling_route(10)).unwrap();
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the timeline reaches the rendition");
@@ -3616,7 +3594,7 @@ mod tests {
 		}
 
 		// Only the sibling broadcast goes: its recorder stays, so the timeline stays quiet.
-		drop((server, media));
+		drop(media);
 		let end = tokio::time::timeout(Duration::from_secs(5), cursor.next())
 			.await
 			.expect("the cursor wakes when its sibling ends")
@@ -3638,7 +3616,7 @@ mod tests {
 		live.announce(Default::default()).expect("publish allowed");
 		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
 		let recorder = catalog.enroll_test("video0").unwrap();
-		let mut media = moq_net::broadcast::Info::new().produce();
+		let mut media = origin.create_broadcast("media").unwrap();
 		let _track = write_routed_media(&mut media, OLD, recorder, 0);
 		settle().await;
 
@@ -3651,9 +3629,8 @@ mod tests {
 			.await
 			.expect("the catalog's rows are listed before the sibling resolves");
 
-		let server = origin.dynamic_route("media", sibling_route(10)).unwrap();
 		let _ = rendition.snapshot();
-		accept_sibling(&server, &media).await;
+		media.announce(sibling_route(10)).unwrap();
 		let served = rendition
 			.listed_segment(0)
 			.await
@@ -3661,7 +3638,7 @@ mod tests {
 			.expect("the late sibling is servable");
 		assert!(contains(&served, OLD));
 		watcher.abort();
-		drop((media, _track, server, catalog, live));
+		drop((media, _track, catalog, live));
 	}
 
 	// A rendition the catalog drops must end its segment cursors. The cursor holds an

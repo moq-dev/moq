@@ -58,7 +58,7 @@ async fn serve(version: &str, refused: &'static str) -> Server {
 			tokio::spawn(async move {
 				if rejected {
 					notify.notified().await;
-					request.reject(moq_tokio::server::Reject::Unauthorized).await.ok();
+					request.reject(moq_net::SessionError::Unauthorized).await.ok();
 					return;
 				}
 				let Ok(_session) = request.ok().await else {

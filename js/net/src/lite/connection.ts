@@ -196,7 +196,7 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#goaway.peek() !== undefined,
+			draining: () => this.#goaway.peek() !== undefined || this.#closing !== undefined,
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.

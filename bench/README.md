@@ -491,3 +491,23 @@ nix develop --command just gh benchmark-report gate target/bench/nightly/rust-be
 Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
 `paired.json`.
+
+## Local check capacity
+
+Prepare the same warm dependencies and artifacts in each isolated checkout, then
+compare solo and concurrent suites with their actual worker counts:
+
+```bash
+just bench-local --checkout "$PWD" --checkout /path/to/another/checkout \
+  --workers 1 4 8 24 --samples 3 --cache warm -- \
+  cargo nextest run --locked -p moq-net --lib
+```
+
+Each JSON record retains host load, configured workers and lanes, admission
+delay, work wall time, total wall time, and child CPU time. Logs stay under each
+checkout's `.scratch/local-bench/`. To compare Bun workspace fanout, repeat with
+the same `bun run --filter=... test` command, then add `--sequential`. To compare
+the module lanes `just check` runs at once, sweep `--jobs 1 3` over
+`bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.
+Admission remains outside the suite's timeout clocks. Use separate checkouts to
+avoid measuring Cargo's artifact lock instead of competing work.

@@ -4569,10 +4569,8 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
- "hang",
  "kio 0.6.2",
  "moq-clock",
- "moq-json",
  "moq-net",
  "object_store",
  "percent-encoding",
@@ -4925,6 +4923,7 @@ dependencies = [
 name = "moq-hls"
 version = "0.5.11"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "futures",
@@ -4932,6 +4931,7 @@ dependencies = [
  "humantime",
  "kio 0.6.2",
  "m3u8-rs",
+ "moq-archive",
  "moq-clock",
  "moq-json",
  "moq-mux",
@@ -5008,6 +5008,7 @@ dependencies = [
  "criterion",
  "futures",
  "h264-parser",
+ "h264-reader 0.9.0",
  "hang",
  "kio 0.6.2",
  "memchr",
@@ -5054,6 +5055,7 @@ dependencies = [
  "loom",
  "moq-clock",
  "moq-json",
+ "moq-net",
  "moq-pattern 0.1.2",
  "num_enum",
  "rand 0.10.3",

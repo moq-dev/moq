@@ -87,14 +87,20 @@ export function routeFailed(err: Error): boolean {
 	return err instanceof SessionError || sessionClosed(err);
 }
 
-/** Two copies claiming the same content must agree on what it is. */
+// Every `track.Info` field, so one added later fails to compile until it is listed here.
+const INFO_FIELDS = Object.keys({
+	compress: true,
+	timescale: true,
+	maxAge: true,
+	priority: true,
+	refresh: true,
+	ietf: true,
+} satisfies Record<keyof track.Info, true>) as (keyof track.Info)[];
+
+/** Two copies claiming the same content must agree on all of it, like Rust's `Info` equality. */
 function compatible(a: track.Info, b: track.Info): boolean {
-	return (
-		a.timescale === b.timescale &&
-		a.maxAge === b.maxAge &&
-		a.priority === b.priority &&
-		!!a.compress === !!b.compress
-	);
+	const [x, y] = [track.infoDefaults(a), track.infoDefaults(b)];
+	return INFO_FIELDS.every((field) => x[field] === y[field]);
 }
 
 /**
