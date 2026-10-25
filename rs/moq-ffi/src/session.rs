@@ -975,12 +975,12 @@ impl MoqSession {
 			// Persistent across reconnects: `None` while disconnected, then a grant
 			// again on the next connection. Reservations survive the gap.
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => connection.bandwidth(),
+			Inner::Connection(connection) => connection.allocator(),
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Session(session) => session.bandwidth(),
+			Inner::Session(session) => session.allocator(),
 			// Persistent from before the handshake, so a reservation made while dialing counts.
 			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(dial) => dial.bandwidth(),
+			Inner::Dial(dial) => dial.allocator(),
 		}
 	}
 

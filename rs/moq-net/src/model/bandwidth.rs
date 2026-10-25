@@ -205,7 +205,7 @@ impl Weak {
 /// The reservations also set the session's probe target: the sum of every live
 /// reservation's ceiling, demanded or not, so a sender that stopped for lack of
 /// bandwidth keeps asking the connection for its room. A session probes for its own
-/// allocator, so take it from `Session::bandwidth` (with the `async` feature) rather
+/// allocator, so take it from `Session::allocator` (with the `async` feature) rather
 /// than building one: an allocator from [`new`](Self::new) divides an estimate but
 /// probes for nothing.
 ///
@@ -221,7 +221,7 @@ impl Allocator {
 	///
 	/// For an estimate that is not a session's, such as a test's or another
 	/// reservation's slice. A session's own comes from
-	/// `Session::bandwidth` with the `async` feature.
+	/// `Session::allocator` with the `async` feature.
 	pub fn new(estimate: Consumer) -> Self {
 		Self {
 			estimate,

@@ -23,7 +23,7 @@ pub struct Client {
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
 	auth: Option<crate::auth::Handle>,
-	bandwidth: Option<crate::bandwidth::Allocator>,
+	allocator: Option<crate::bandwidth::Allocator>,
 	implementation: Option<String>,
 }
 
@@ -72,20 +72,20 @@ impl Client {
 		self
 	}
 
-	/// Share `bandwidth`'s reservations with every session this client dials.
+	/// Share `allocator`'s reservations with every session this client dials.
 	///
 	/// Each session probes for what they add up to, and its
-	/// [`Session::bandwidth`](crate::Session::bandwidth) reserves into the same registry,
+	/// [`Session::allocator`](crate::Session::allocator) reserves into the same registry,
 	/// so a reservation taken on one session still counts after a reconnect. Without
 	/// one, each session starts an empty registry of its own.
-	pub fn with_bandwidth(mut self, bandwidth: crate::bandwidth::Allocator) -> Self {
-		self.bandwidth = Some(bandwidth);
+	pub fn with_allocator(mut self, allocator: crate::bandwidth::Allocator) -> Self {
+		self.allocator = Some(allocator);
 		self
 	}
 
 	/// The registry the next session probes for.
-	fn bandwidth(&self) -> crate::bandwidth::Allocator {
-		self.bandwidth.clone().unwrap_or_default()
+	fn allocator(&self) -> crate::bandwidth::Allocator {
+		self.allocator.clone().unwrap_or_default()
 	}
 
 	/// Restrict which protocol versions to offer, in preference order.
@@ -289,7 +289,7 @@ impl Client {
 				goaway: start.goaway,
 				auth: start.auth,
 				estimate: Some(start.estimate),
-				bandwidth: self.bandwidth(),
+				bandwidth: self.allocator(),
 				peer_implementation: start.peer_implementation,
 			},
 		))
@@ -369,7 +369,7 @@ impl Client {
 						goaway,
 						auth,
 						estimate: None,
-						bandwidth: self.bandwidth(),
+						bandwidth: self.allocator(),
 						peer_implementation,
 					},
 				));
@@ -568,7 +568,7 @@ impl Client {
 				goaway,
 				auth,
 				estimate,
-				bandwidth: self.bandwidth(),
+				bandwidth: self.allocator(),
 				peer_implementation,
 			},
 		))
@@ -1268,7 +1268,7 @@ mod tests {
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
 		moq_clock::sim::spawn(crate::time::run(driver));
-		let bandwidth = session.bandwidth();
+		let bandwidth = session.allocator();
 
 		let (_watched_broadcast, watched) = reservable();
 		let _sub = watched.subscribe(None);
@@ -1296,7 +1296,7 @@ mod tests {
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
 		moq_clock::sim::spawn(crate::time::run(driver));
-		let bandwidth = session.bandwidth();
+		let bandwidth = session.allocator();
 
 		let (_broadcast, track) = reservable();
 		let _reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));
@@ -1319,7 +1319,7 @@ mod tests {
 		let bandwidth = crate::bandwidth::Allocator::default();
 		let client = Client::new()
 			.with_versions(Version::Lite(lite::Version::Lite04).into())
-			.with_bandwidth(bandwidth.clone());
+			.with_allocator(bandwidth.clone());
 
 		let (_broadcast, track) = reservable();
 		let reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));

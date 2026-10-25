@@ -220,10 +220,10 @@ impl Session {
 	/// The session probes up to what the reservations add up to, through its
 	/// transport's [`Probe`](crate::transport::Probe) when it has one, so reserve
 	/// here rather than on an allocator of your own. Clones share one registry: a
-	/// [`Client::with_bandwidth`](crate::Client::with_bandwidth) allocator's when the
+	/// [`Client::with_allocator`](crate::Client::with_allocator) allocator's when the
 	/// session was dialed with one, so reservations outlive a reconnect. Reservations
 	/// report `None` when the transport has no estimate.
-	pub fn bandwidth(&self) -> bandwidth::Allocator {
+	pub fn allocator(&self) -> bandwidth::Allocator {
 		self.bandwidth.with_estimate(self.send_bandwidth())
 	}
 

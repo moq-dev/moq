@@ -236,9 +236,9 @@ impl Client {
 		self
 	}
 
-	/// Share `bandwidth`'s reservations with every session this client dials.
-	pub(crate) fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
-		self.moq = self.moq.with_bandwidth(bandwidth);
+	/// Share `allocator`'s reservations with every session this client dials.
+	pub(crate) fn with_allocator(mut self, allocator: moq_net::bandwidth::Allocator) -> Self {
+		self.moq = self.moq.with_allocator(allocator);
 		self
 	}
 
