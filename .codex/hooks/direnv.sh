@@ -29,16 +29,9 @@ trap 'rm -f "$env_tmp"' EXIT
 # Codex only needs the flake dev shell environment, so avoid depending on
 # nix-direnv's remote bootstrap when Nix can emit the shell exports directly.
 if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then
-    if dev_env=$(nix --extra-experimental-features 'nix-command flakes' --accept-flake-config \
+    if nix --extra-experimental-features 'nix-command flakes' --accept-flake-config \
         print-dev-env --profile "$PWD/.direnv/codex-profile" .#default \
-        2>"$PWD/.direnv/codex-hook.log"); then
-        # Point TMPDIR at the checkout's .tmp/ as .envrc does. The dev shell's
-        # hook keeps it there rather than in a nix-shell.* dir of its own.
-        # shellcheck disable=SC2016 # expands when sourced, not here
-        {
-            printf 'export TMPDIR=%q\nmkdir -p "$TMPDIR"\n' "$PWD/.tmp"
-            printf '%s\n' "$dev_env"
-        } >"$env_tmp"
+        >"$env_tmp" 2>"$PWD/.direnv/codex-hook.log"; then
         mv "$env_tmp" "$env_file"
         exit 0
     fi
