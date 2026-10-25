@@ -16,7 +16,7 @@ This questline adds an AUTH exchange to both wires: one stream per token, a
 grant per token, the union of every accepted token as the session's scope,
 and a loud failure when a publish can never be honored. It ends with extra
 credentials able to travel in band, while the first rides SETUP, or the URL
-for peers that predate the SETUP token. Node-bound peer grants for direct sessions belong to
+for peers that predate the SETUP token. Key-bound peer grants for direct sessions belong to
 [P2P](/quest/m2/p2p/peer-grant.md), their only consumer.
 
 ## Plan
@@ -145,7 +145,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 ## Required
 
 - [Binding auth polish](/quest/m1/auth/bindings-polish.md) - OBS reconnects with the presented token, Swift grant sequences
-- [Re-present a lost token](/quest/m1/auth/token-represent.md) - a token whose AUTH stream ended without a verdict is presented again on the live session
 
 ## Related
 
@@ -164,7 +163,7 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
   session with PROTOCOL_VIOLATION in Rust and JS
 - [JS fetch grant watch](https://github.com/moq-dev/moq/pull/5260) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 
-- [Peer grants](/quest/m2/p2p/peer-grant.md) - P2P's node-bound credential,
+- [Peer grants](/quest/m2/p2p/peer-grant.md) - P2P's key-bound credential,
   built on this line's relay tokens
 
 - [#5269](https://github.com/moq-dev/moq/pull/5269) - explicit Lite AUTH NOT_SUPPORTED, including grant updates

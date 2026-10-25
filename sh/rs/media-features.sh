@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
 fi
 
@@ -13,9 +13,12 @@ elif [[ $# != 0 ]]; then
     exit 2
 fi
 
+targets=(--tests)
+if ((all)); then targets=(--all-targets); fi
+
 check() {
     echo "media features: cargo check $*"
-    cargo check --locked --all-targets "$@"
+    cargo check --locked "${targets[@]}" "$@"
 }
 
 # Resolved for Linux, the platform every asserted dependency targets: moq-nvenc

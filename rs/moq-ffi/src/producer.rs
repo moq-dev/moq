@@ -20,11 +20,11 @@ pub struct MoqTrackInfo {
 	/// Higher is more urgent; the default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age of a non-latest group before the publisher evicts it, in
-	/// microseconds. Null imposes no publisher age limit. This is the publisher-side half of
-	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us).
+	/// Maximum age of a non-latest group before the publisher evicts it. Null imposes no
+	/// publisher age limit. This is the publisher-side half of
+	/// [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay).
 	#[uniffi(default = None)]
-	pub max_age_us: Option<u64>,
+	pub max_age: Option<std::time::Duration>,
 	/// How many times its first frame a group's later bytes may grow before a joining
 	/// subscriber asks for a new group, or null to never ask. See
 	/// [`MoqTrackDemand::wanted`](crate::demand::MoqTrackDemand::wanted).
@@ -46,8 +46,8 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 		let mut out = moq_net::track::Info::default()
 			.with_priority(info.priority)
 			.with_refresh(info.refresh);
-		if let Some(us) = info.max_age_us {
-			out = out.with_max_age(std::time::Duration::from_micros(us));
+		if let Some(max_age) = info.max_age {
+			out = out.with_max_age(max_age);
 		}
 		if let Some(ticks) = info.timescale {
 			let scale = moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec {
@@ -65,24 +65,15 @@ fn raw_track_info(info: Option<MoqTrackInfo>) -> Result<moq_net::track::Info, Mo
 		.map(|info| info.unwrap_or_default())
 }
 
-impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
-	type Error = MoqError;
-
-	fn try_from(info: &moq_net::track::Info) -> Result<Self, MoqError> {
-		let max_age_us = info
-			.max_age
-			.map(|age| u64::try_from(age.as_micros()))
-			.transpose()
-			.map_err(|_| MoqError::Codec {
-				reason: "track max_age duration overflow".into(),
-			})?;
-		Ok(Self {
+impl From<&moq_net::track::Info> for MoqTrackInfo {
+	fn from(info: &moq_net::track::Info) -> Self {
+		Self {
 			priority: info.priority,
-			max_age_us,
+			max_age: info.max_age.map(crate::ffi::duration),
 			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
 			compress: info.compress,
-		})
+		}
 	}
 }
 
@@ -90,6 +81,7 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 
 pub(crate) struct BroadcastProducer {
 	pub(crate) broadcast: moq_net::broadcast::Producer,
+	pub(crate) publication: Option<moq_net::origin::Publication>,
 	// Carries the untyped `Extra` extension so callers can attach application catalog
 	// sections by name (the only extension shape that crosses the FFI boundary).
 	pub(crate) catalog: moq_mux::catalog::Producer<Extra>,
@@ -207,6 +199,7 @@ impl MoqBroadcastProducer {
 		Ok(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer {
 				broadcast,
+				publication: None,
 				catalog,
 				timebases: Default::default(),
 				driver,
@@ -214,6 +207,19 @@ impl MoqBroadcastProducer {
 				ended: false,
 			})),
 		})
+	}
+
+	/// Retain the native publication capability alongside the binding's fill handle.
+	pub(crate) fn from_publication(
+		publication: moq_net::origin::Publication,
+		driver: Background,
+	) -> Result<Self, MoqError> {
+		let result = Self::from_inner(publication.broadcast().clone(), driver)?;
+		result.with_state(|state| {
+			state.publication = Some(publication);
+			Ok(())
+		})?;
+		Ok(result)
 	}
 
 	#[cfg(test)]
@@ -290,7 +296,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		let route: moq_net::origin::Route = route.try_into()?;
 		self.with_state(|state| {
-			state.broadcast.announce(route)?;
+			state.publication.as_ref().ok_or(MoqError::Closed)?.announce(route)?;
 			Ok(())
 		})
 	}
@@ -303,7 +309,9 @@ impl MoqBroadcastProducer {
 	pub fn unannounce(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			state.broadcast.unannounce();
+			if let Some(publication) = &state.publication {
+				publication.unannounce();
+			}
 			Ok(())
 		})
 	}
@@ -433,12 +441,10 @@ impl MoqFill {
 		self.inner.priority()
 	}
 
-	/// The most tolerant age budget among the readers waiting on it, in microseconds, or null
-	/// for the publisher's max age alone.
-	pub fn max_delay_us(&self) -> Option<u64> {
-		self.inner
-			.max_delay()
-			.map(|max_delay| u64::try_from(max_delay.as_micros()).unwrap_or(u64::MAX))
+	/// The most tolerant age budget among the readers waiting on it, or null for the
+	/// publisher's max age alone.
+	pub fn max_delay(&self) -> Option<std::time::Duration> {
+		self.inner.max_delay().map(crate::ffi::duration)
 	}
 
 	/// Which end to fill first.
@@ -841,24 +847,36 @@ mod metadata_tests {
 	#[test]
 	fn untimed_info_round_trips_through_the_binding() {
 		let original = moq_net::track::Info::default();
-		let info = MoqTrackInfo::try_from(&original).unwrap();
+		let info = MoqTrackInfo::from(&original);
 		assert_eq!(moq_net::track::Info::try_from(info).unwrap().timescale, None);
 		assert_eq!(raw_track_info(None).unwrap().timescale, None);
 	}
 
 	#[test]
 	fn optional_retention_survives_binding_conversion() {
-		for max_age_us in [None, Some(0), Some(30_000_000)] {
+		for max_age in [
+			None,
+			Some(std::time::Duration::ZERO),
+			Some(std::time::Duration::from_secs(30)),
+		] {
 			let info = MoqTrackInfo {
 				priority: 0,
-				max_age_us,
+				max_age,
 				refresh: None,
 				timescale: None,
 				compress: false,
 			};
 			let model = moq_net::track::Info::try_from(info).unwrap();
-			assert_eq!(model.max_age, max_age_us.map(std::time::Duration::from_micros));
-			assert_eq!(MoqTrackInfo::try_from(&model).unwrap().max_age_us, max_age_us);
+			assert_eq!(model.max_age, max_age);
+			assert_eq!(MoqTrackInfo::from(&model).max_age, max_age);
 		}
+	}
+
+	/// C and C++ abort on a duration past `i64::MAX` nanoseconds, so a peer's longer age saturates.
+	#[test]
+	fn oversized_retention_saturates_for_the_bindings() {
+		let model = moq_net::track::Info::default().with_max_age(std::time::Duration::MAX);
+		let max_age = MoqTrackInfo::from(&model).max_age.unwrap();
+		assert_eq!(max_age, std::time::Duration::from_nanos(i64::MAX as u64));
 	}
 }

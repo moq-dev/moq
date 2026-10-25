@@ -1,22 +1,34 @@
 package audio
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"moq.dev/moq/media"
 )
 
-func TestEncoderOutputRejectsOverflowingFrameDuration(t *testing.T) {
-	out := EncoderOutput{FrameDuration: (1<<32 + 20_000) * time.Microsecond}
-	if _, err := out.ffi(); err == nil {
-		t.Fatal("a frame duration past uint32 microseconds must fail, not truncate")
+// Go's zero FrameDuration is the native null, the codec's own frame, and a
+// negative one is refused before the generated converter would panic on it.
+func TestEncoderOutputFrameDuration(t *testing.T) {
+	raw, err := EncoderOutput{}.ffi()
+	if err != nil || raw.FrameDuration != nil {
+		t.Fatalf("zero frame duration = %v, %v; want nil", raw.FrameDuration, err)
 	}
 
-	out.FrameDuration = 20 * time.Millisecond
-	raw, err := out.ffi()
-	if err != nil {
-		t.Fatal(err)
+	raw, err = EncoderOutput{FrameDuration: 20 * time.Millisecond}.ffi()
+	if err != nil || raw.FrameDuration == nil || *raw.FrameDuration != 20*time.Millisecond {
+		t.Fatalf("frame duration = %v, %v; want 20ms", raw.FrameDuration, err)
 	}
-	if raw.FrameDurationUs != 20_000 {
-		t.Fatalf("frame duration = %d us, want 20000", raw.FrameDurationUs)
+
+	if _, err := (EncoderOutput{FrameDuration: -time.Millisecond}).ffi(); err == nil {
+		t.Fatal("a negative frame duration converted, want an error")
+	}
+}
+
+func TestSubscribeRefusesNegativeJitter(t *testing.T) {
+	negative := -time.Millisecond
+	if _, err := Subscribe(context.Background(), nil, "audio", media.Audio{Jitter: &negative}, DecoderOutput{}); err == nil {
+		t.Fatal("a negative jitter was subscribed, want an error")
 	}
 }

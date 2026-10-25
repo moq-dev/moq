@@ -1148,7 +1148,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	// Keep the deadline from racing the client receiving GOAWAY under load.
 	tokio::time::pause();
 	trigger.start();
-	tokio::time::timeout(TIMEOUT, client.draining().recv())
+	tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| client.draining().poll(waiter)))
 		.await
 		.expect("GOAWAY timeout")
 		.expect("a GOAWAY");

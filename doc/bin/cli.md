@@ -22,7 +22,7 @@ Docker; see [Install](/setup/install).
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
-| `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
+| `export` | `hls --listen`, `hls --output <dir>` | Serve the broadcast as HLS over HTTP, record it to a directory, or both. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `export` | `archive <url>` | Record every broadcast under the prefix into an object store. |
 | `play` | | Decode and play in a native window with sound. |
@@ -63,7 +63,9 @@ the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission withou
 a deadline.
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
-one; every flag is documented there. Flags renamed between releases are listed in
+one; every flag is documented there. A `MOQ_*` environment variable `moq` does
+not read, such as a misspelling or one meant for `moq-relay`, stops it at startup
+with the variable named. Flags renamed between releases are listed in
 [MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md).
 
 ```bash

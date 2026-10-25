@@ -4,7 +4,7 @@ import asyncio
 import json
 import struct
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any, cast
 
 import moq
@@ -384,8 +384,6 @@ async def test_announced_epoch_restarts():
     broadcast = origin.create_broadcast("epoch")
 
     first = moq.mint_epoch()
-    fixed = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
-    assert moq.epoch_time("018bcfe5-6800-7000-8000-000000000000") == fixed
     broadcast.announce(moq.AnnounceRoute(epoch=first))
     start = await next_route(announced)
     assert isinstance(start, moq.AnnounceEventStart)
@@ -398,9 +396,7 @@ async def test_announced_epoch_restarts():
     assert restart.announce.route.epoch == second
 
     with pytest.raises(moq.Error.InvalidEpoch):
-        moq.epoch_time(first.upper())
-    with pytest.raises(OverflowError):
-        moq.epoch_time("ffffffff-ffff-7000-8000-000000000000")
+        broadcast.announce(moq.AnnounceRoute(epoch=first.upper()))
     with pytest.raises(moq.Error.InvalidEpoch):
         broadcast.announce(moq.AnnounceRoute(epoch="not-an-epoch"))
     broadcast.close()

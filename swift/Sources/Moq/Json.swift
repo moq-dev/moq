@@ -79,7 +79,7 @@ extension Json {
 
     /// Read side of a JSON snapshot track (lossy latest-value). Iterating yields each state in
     /// order with its timestamp: `for try await state in json { ... }`. Groups older than the
-    /// subscription's `maxDelayUs` are skipped; `latest()` skips to the newest state instead.
+    /// subscription's `maxDelay` are skipped; `latest()` skips to the newest state instead.
     public final class SnapshotConsumer<Value: Decodable & Sendable>: AsyncSequence, Sendable {
         /// The decoded snapshot state emitted by this sequence.
         public typealias Element = Timed<Value>

@@ -3,6 +3,14 @@ use std::sync::Arc;
 
 use crate::error::MoqError;
 
+/// Saturate a duration handed to a binding at `i64::MAX` nanoseconds, about 292 years.
+///
+/// C and C++ carry a duration as `int64_t` nanoseconds and abort past that, and Go's
+/// `time.Duration` wraps negative, so a peer's oversized value must not reach them.
+pub(crate) fn duration(duration: std::time::Duration) -> std::time::Duration {
+	duration.min(std::time::Duration::from_nanos(i64::MAX as u64))
+}
+
 /// A worker runtime driving I/O, timers, and background work beside host-polled calls.
 ///
 /// wasm32 has neither threads nor a tokio driver. uniffi's `RustFuture` is polled by the

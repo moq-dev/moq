@@ -1,4 +1,4 @@
-//! The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-21 section 9.1.4) and
+//! The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-22 section 9.1.4) and
 //! Message Parameter.
 //!
 //! The value is the Token structure of section 8.9: an Alias Type, then fields that
@@ -212,15 +212,12 @@ mod tests {
 		));
 	}
 
-	const VERSIONS: [Version; 9] = [
+	const VERSIONS: [Version; 6] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
 		Version::Draft22,
 	];
 

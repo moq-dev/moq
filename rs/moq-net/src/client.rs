@@ -3,8 +3,8 @@ use crate::origin;
 use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
-	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
+	ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -16,8 +16,7 @@ pub struct Client {
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
 	versions: Versions,
-	setup_path: Option<String>,
-	setup_authority: Option<String>,
+	url: Option<url::Url>,
 	setup_token: Option<setup::Token>,
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
@@ -96,26 +95,65 @@ impl Client {
 		self
 	}
 
-	/// Set the request path to advertise in SETUP (moq-lite-05 and newer, and
-	/// every moq-transport draft we speak).
+	/// Name the URL each session is dialed at, so the server learns the request target.
 	///
-	/// Only for transports that carry no request URI of their own (native QUIC, qmux
-	/// over TCP/TLS, unix sockets), so the server learns which path the client wants.
-	/// Append `?` and the URI query when there is one: that is how a credential in the
-	/// query (`?jwt=`) reaches the server.
-	/// Bindings that already carry a URI (WebTransport, qmux over WebSocket) convey
-	/// the path there and MUST NOT send this; a server is entitled to treat it as a
-	/// protocol violation. An empty path is equivalent to omitting it. Ignored by
-	/// versions with no in-band request path (lite 01-04).
-	pub fn with_path(mut self, path: impl Into<String>) -> Self {
-		self.setup_path = Some(path.into());
+	/// A transport whose request URI already reaches the server
+	/// ([`Address::Uri`](crate::transport::Address::Uri)) sends nothing more. Otherwise
+	/// SETUP carries the path and query (moq-lite-05 and newer, every moq-transport
+	/// draft), which is how a credential in the query (`?jwt=`) arrives, and for
+	/// `moqt://` the authority (moq-transport only). A `unix://` URL names its target in
+	/// its `?path=` query, since its path is the socket file.
+	pub fn with_url(mut self, url: url::Url) -> Self {
+		self.url = Some(url);
 		self
 	}
 
-	/// Set the URI authority to advertise in SETUP (moq-transport only)
-	pub fn with_authority(mut self, authority: impl Into<String>) -> Self {
-		self.setup_authority = Some(authority.into());
-		self
+	/// The request target our SETUP carries: the dialed URL's path, plus `?` and the
+	/// query when there is one (draft-ietf-moq-transport-22, section 9.1.2).
+	///
+	/// `None` on a transport that carries its own request URI, where a SETUP path is a
+	/// protocol violation, and when the target is empty, which means the server's
+	/// default path: a peer on published lite-05 rejects an empty value outright.
+	fn setup_path(&self, address: crate::transport::Address) -> Option<String> {
+		let url = self
+			.url
+			.as_ref()
+			.filter(|_| address == crate::transport::Address::Setup)?;
+
+		let target = match url.scheme() {
+			// One form-encoded value, so a target with its own `?query` arrives percent-encoded.
+			"unix" => url.query_pairs().find(|(k, _)| k == "path")?.1.into_owned(),
+			// A trailing `?` parses as an empty query, which is not a query: appending it
+			// would spell one target two ways.
+			_ => match url.query().filter(|query| !query.is_empty()) {
+				Some(query) => format!("{}?{}", url.path(), query),
+				None => url.path().to_owned(),
+			},
+		};
+
+		(!target.is_empty()).then_some(target)
+	}
+
+	/// The URI authority our SETUP carries, which a raw-QUIC `moqt://` client must send
+	/// (draft-ietf-moq-transport-22, 9.1.1).
+	///
+	/// Built from the host and port so URL userinfo never goes on the wire. `None` for
+	/// every other scheme, on a transport that carries its own request URI, and when the
+	/// URL has no host.
+	fn setup_authority(&self, address: crate::transport::Address) -> Option<String> {
+		let url = self
+			.url
+			.as_ref()
+			.filter(|_| address == crate::transport::Address::Setup)?;
+		if url.scheme() != "moqt" {
+			return None;
+		}
+
+		let host = url.host_str().filter(|host| !host.is_empty())?;
+		Some(match url.port() {
+			Some(port) => format!("{host}:{port}"),
+			None => host.to_owned(),
+		})
 	}
 
 	/// Present `token` as the connection credential in SETUP, on versions that carry one
@@ -264,7 +302,7 @@ impl Client {
 		let our_setup = if version.has_setup_stream() {
 			lite::Setup {
 				probe: lite::ProbeLevel::detect(&session),
-				path: self.setup_path.clone(),
+				path: self.setup_path(session.address()),
 				role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
@@ -331,12 +369,9 @@ impl Client {
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
-			Some(alpn @ (ALPN_22 | ALPN_21 | ALPN_20 | ALPN_19 | ALPN_18 | ALPN_17)) => {
+			Some(alpn @ (ALPN_22 | ALPN_18 | ALPN_17)) => {
 				let draft = match alpn {
 					ALPN_22 => ietf::Version::Draft22,
-					ALPN_21 => ietf::Version::Draft21,
-					ALPN_20 => ietf::Version::Draft20,
-					ALPN_19 => ietf::Version::Draft19,
 					ALPN_18 => ietf::Version::Draft18,
 					_ => ietf::Version::Draft17,
 				};
@@ -362,8 +397,8 @@ impl Client {
 					peer_hop: Some(peer_hop),
 					cost: self.cost,
 					version: draft,
-					path: self.setup_path.clone(),
-					authority: self.setup_authority.clone(),
+					path: self.setup_path(session.address()),
+					authority: self.setup_authority(session.address()),
 					token: self.setup_token.clone(),
 					peer_setup_stream: None,
 					peer_declared: None,
@@ -455,11 +490,11 @@ impl Client {
 			parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
 		}
 		// Advertise the request path in-band (draft 14-16), same as the lite-05 SETUP.
-		if let Some(path) = &self.setup_path {
-			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
+		if let Some(path) = self.setup_path(session.address()) {
+			parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
 		}
-		if let Some(authority) = &self.setup_authority {
-			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.clone().into_bytes());
+		if let Some(authority) = self.setup_authority(session.address()) {
+			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.into_bytes());
 		}
 		if let Some(token) = &self.setup_token {
 			ietf::token::into_setup(&mut parameters, token, ietf_encoding)?;
@@ -774,8 +809,8 @@ mod tests {
 			1200
 		}
 
-		fn binding(&self) -> crate::transport::Binding {
-			crate::transport::Binding::InBand
+		fn address(&self) -> crate::transport::Address {
+			crate::transport::Address::Setup
 		}
 		fn protocol(&self) -> Option<&str> {
 			self.state.protocol
@@ -989,8 +1024,7 @@ mod tests {
 				]
 				.into(),
 			)
-			.with_path("/anon")
-			.with_authority("relay.example.com:4443")
+			.with_url("moqt://relay.example.com:4443/anon".parse().unwrap())
 			.with_token(token.clone());
 
 		let (_session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
@@ -1011,6 +1045,80 @@ mod tests {
 			ietf::token::from_setup(&parameters, ietf::Version::Draft14).unwrap(),
 			Some(token)
 		);
+	}
+
+	fn dialed(url: &str) -> Client {
+		Client::new().with_url(url.parse().unwrap())
+	}
+
+	#[test]
+	fn setup_path_is_the_request_target() {
+		// An empty path and an absent one both mean the server's default, so we send
+		// neither. A peer on published lite-05 rejects an empty value outright.
+		let cases = [
+			("unix:///run/moq.sock?path=/room", Some("/room")),
+			// The whole resource path is one form-encoded value, so a `?query` inside it
+			// arrives percent-encoded and comes back out whole.
+			("unix:///run/moq.sock?path=/room%3Fjwt%3Dabc", Some("/room?jwt=abc")),
+			("unix:///run/moq.sock?path=", None),
+			("unix:///run/moq.sock", None),
+			("tcp://localhost:4443/room?jwt=abc", Some("/room?jwt=abc")),
+			("tcp://localhost:4443", None),
+			("moqt://relay.example.com/anon?jwt=abc", Some("/anon?jwt=abc")),
+			("moql://relay.example.com/anon", Some("/anon")),
+			("moqt://relay.example.com", None),
+			(
+				"iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa/",
+				Some("/"),
+			),
+			// The fragment is processed by the client and never sent (draft-22 6.1.1).
+			("moqt://relay.example.com/anon?jwt=abc#pos:12", Some("/anon?jwt=abc")),
+			// A trailing `?` is an empty query, not a query.
+			("moqt://relay.example.com/anon?", Some("/anon")),
+			("moqt://relay.example.com?", None),
+		];
+
+		for (url, want) in cases {
+			let client = dialed(url);
+			assert_eq!(
+				client.setup_path(crate::transport::Address::Setup).as_deref(),
+				want,
+				"{url}"
+			);
+			// The transport's own request URI carries the target: a SETUP path is a violation.
+			assert_eq!(client.setup_path(crate::transport::Address::Uri), None, "{url}");
+		}
+		assert_eq!(Client::new().setup_path(crate::transport::Address::Setup), None);
+	}
+
+	#[test]
+	fn setup_authority_is_only_for_moqt() {
+		let cases = [
+			("moqt://relay.example.com/anon?jwt=abc", Some("relay.example.com")),
+			("moqt://relay.example.com:4443/anon", Some("relay.example.com:4443")),
+			("moqt://[::1]:4443", Some("[::1]:4443")),
+			// Userinfo is a credential, and never goes on the wire.
+			(
+				"moqt://user:pass@relay.example.com:4443",
+				Some("relay.example.com:4443"),
+			),
+			// A hostless URL has no authority to send.
+			("moqt:///anon", None),
+			// Only the draft's `moqt://` scheme is required to send it.
+			("moql://relay.example.com", None),
+			("tcp://relay.example.com:4443", None),
+			("iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa", None),
+		];
+
+		for (url, want) in cases {
+			let client = dialed(url);
+			assert_eq!(
+				client.setup_authority(crate::transport::Address::Setup).as_deref(),
+				want,
+				"{url}"
+			);
+			assert_eq!(client.setup_authority(crate::transport::Address::Uri), None, "{url}");
+		}
 	}
 
 	#[moq_clock::test]

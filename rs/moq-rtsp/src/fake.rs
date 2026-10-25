@@ -152,6 +152,9 @@ impl Server {
 	/// `rtptime`.
 	pub async fn accept(&self, rtptime: u32) -> Session {
 		let (socket, _) = self.listener.accept().await.expect("accept");
+		// Each write reaches the client before it returns, rather than waiting on an ACK, so a
+		// test can order its writes against the clock.
+		socket.set_nodelay(true).expect("nodelay");
 		let (read, write) = socket.into_split();
 		let mut read = BufReader::new(read);
 		let write = Arc::new(Mutex::new(write));

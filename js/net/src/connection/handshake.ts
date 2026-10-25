@@ -146,7 +146,7 @@ async function receiveSetup(
 	await reader.u53(); // the SETUP type, peeked above
 	const setup = await Ietf.Setup.decode(reader, version);
 
-	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
+	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Path) !== undefined) {
 		throw new ProtocolViolation("server SETUP carries PATH", { code: SessionCode.InvalidPath });
 	}
@@ -154,7 +154,7 @@ async function receiveSetup(
 		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: SessionCode.InvalidAuthority });
 	}
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
-	// session (draft-21 section 8.9).
+	// session (draft-22 section 8.9).
 	Ietf.tokenFromSetup(setup.parameters, version);
 
 	return {

@@ -650,7 +650,7 @@ mod tests {
 		assert_eq!(msg.hops, Some(hop_path(&[7, 11])));
 		assert_eq!(msg.cost, None, "an unchanged cost is omitted");
 		let decoded: PublishNamespaceUpdate =
-			decode_message(&encode_message(&msg, Version::Draft19), Version::Draft19).unwrap();
+			decode_message(&encode_message(&msg, Version::Draft18), Version::Draft18).unwrap();
 		assert_eq!(decoded.apply(&held), rerouted);
 	}
 

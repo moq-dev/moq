@@ -230,6 +230,7 @@ export class Connection implements Established {
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
 			goaway: this.#goaway,
+			exclusive: false,
 			auth: this.#auth,
 		});
 

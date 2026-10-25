@@ -110,7 +110,7 @@ class Moq internal constructor(
          * two directions.
          */
         suspend fun connect(url: String, config: ClientConfig = ClientConfig()): Moq {
-            val client = Client(config)
+            val client = Client(config.copy(implementation = implementation(config.implementation)))
             try {
                 return Moq(client.connect(url), client)
             } catch (e: Throwable) {

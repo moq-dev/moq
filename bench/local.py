@@ -24,7 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkout", action="append", type=Path, required=True)
     parser.add_argument("--workers", nargs="+", type=int, required=True)
-    parser.add_argument("--jobs", nargs="+", type=int, help="MOQ_CHECK_JOBS lane counts to sweep")
+    parser.add_argument("--jobs", nargs="+", type=int, help="CHECK_JOBS lane counts to sweep")
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--cache", required=True, help="Describe the prepared cache state")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -51,18 +51,18 @@ def main():
                 load = os.getloadavg()
                 try:
                     for checkout in group:
-                        directory = checkout / ".scratch/local-bench"
+                        directory = checkout / ".tmp/local-bench"
                         directory.mkdir(parents=True, exist_ok=True)
                         stem = directory / str(uuid.uuid4())
                         stamp = stem.with_suffix(".started")
                         with stem.with_suffix(".log").open("w") as log:
                             env = dict(os.environ, NEXTEST_TEST_THREADS=str(workers))
                             # Without --jobs, the record's null means sh/dispatch.sh's default.
-                            env.pop("MOQ_CHECK_JOBS", None)
+                            env.pop("CHECK_JOBS", None)
                             if jobs:
-                                env["MOQ_CHECK_JOBS"] = str(jobs)
+                                env["CHECK_JOBS"] = str(jobs)
                             env.pop("QUEST_GATE_ADMITTED", None)
-                            env.pop("MOQ_LOCAL_SUPERVISED", None)
+                            env.pop("LOCAL_SUPERVISED", None)
                             env.pop("GITHUB_ACTIONS", None)
                             began = time.monotonic()
                             process = subprocess.Popen(["bash", str(ROOT / "sh/local.sh"), sys.executable,

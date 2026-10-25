@@ -170,9 +170,9 @@ pub struct Setup {
 	/// The request path, for transports that carry no request URI (native QUIC,
 	/// qmux over TCP/TLS, unix sockets), with `?` and the URI query appended when
 	/// there is one. Sent only by the client; a server never sends one and a relay
-	/// never forwards it. `None` on URI-carrying bindings, where it would be a
-	/// protocol violation. On an in-band binding an empty path selects the root, like `None`;
-	/// a URI binding forbids even an empty Path parameter.
+	/// never forwards it. `None` when the transport URI carries the target, where it would
+	/// be a protocol violation, even empty. Otherwise an empty path selects the root, like
+	/// `None`.
 	pub path: Option<String>,
 	/// The single direction the client intends to use, or `None` for a bidirectional
 	/// session. `None` is sent as the absence of the parameter, which is also how a
@@ -344,7 +344,7 @@ pub(crate) struct PeerSetup(kio::Shared<PeerSetupState>);
 
 struct PeerSetupState {
 	client: bool,
-	binding: crate::transport::Binding,
+	address: crate::transport::Address,
 	/// Whether our own SETUP offers the `ietf` extension.
 	ietf: bool,
 	seen: bool,
@@ -354,10 +354,10 @@ struct PeerSetupState {
 }
 
 impl PeerSetup {
-	pub fn new(client: bool, binding: crate::transport::Binding) -> Self {
+	pub fn new(client: bool, address: crate::transport::Address) -> Self {
 		Self(kio::Shared::new(PeerSetupState {
 			client,
-			binding,
+			address,
 			ietf: false,
 			seen: false,
 			setup: None,
@@ -373,7 +373,7 @@ impl PeerSetup {
 
 	pub(super) fn receive(&self, received: ReceivedSetup) -> Result<(), crate::Error> {
 		let mut state = self.0.lock();
-		if ((state.client || state.binding == crate::transport::Binding::Uri) && received.setup.path.is_some())
+		if ((state.client || state.address == crate::transport::Address::Uri) && received.setup.path.is_some())
 			|| (state.client && (received.role_present || received.setup.token.is_some()))
 		{
 			return Err(crate::Error::ProtocolViolation);
@@ -626,7 +626,8 @@ mod tests {
 
 		for unsendable in [
 			crate::setup::Token {
-				kind: crate::setup::Token::CAT,
+				// Any registered type but out-of-band, which moq-lite cannot carry.
+				kind: 0x1,
 				..token.clone()
 			},
 			crate::setup::Token {
@@ -661,12 +662,12 @@ mod tests {
 		let buf = setup.encode_bytes(Version::Lite07).unwrap();
 		let received = |buf: &[u8]| ReceivedSetup::decode_slice(buf, Version::Lite07).unwrap().0;
 
-		let client = PeerSetup::new(true, crate::transport::Binding::InBand);
+		let client = PeerSetup::new(true, crate::transport::Address::Setup);
 		assert!(matches!(
 			client.receive(received(&buf)),
 			Err(crate::Error::ProtocolViolation)
 		));
-		let server = PeerSetup::new(false, crate::transport::Binding::InBand);
+		let server = PeerSetup::new(false, crate::transport::Address::Setup);
 		server.receive(received(&buf)).unwrap();
 	}
 

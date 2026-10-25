@@ -1142,7 +1142,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 /// Connect on `version` and wait for a client announcement to reach the server. Each
 /// driver presents its setup token before it handles any other stream, so by then a
 /// version with AUTH has opened its Auth Stream on both sides.
-async fn connect_announced(version: &'static str) -> (Pair, moq_net::broadcast::Producer) {
+async fn connect_announced(version: &'static str) -> (Pair, moq_net::origin::Publication) {
 	let client_origin = produce_origin(2);
 	let broadcast = client_origin.create_broadcast("room/x").unwrap();
 	broadcast.announce(Default::default()).unwrap();
@@ -1997,7 +1997,9 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 		assert!(matches!(concurrent, Err(Error::Duplicate)), "{:?}", concurrent.err());
 
 		first.server.drain().send(moq_net::goaway::Goaway::new()).unwrap();
-		first.client.draining().recv().await.expect("the GOAWAY");
+		support::Draining::recv(&first.client.draining())
+			.await
+			.expect("the GOAWAY");
 		let mut second = connect(options()).await;
 		let mut second_tokens = serve(second.requests.take().unwrap(), |_| Some(Grant::all()));
 		let _second_issued = presented(&mut second_tokens).await;

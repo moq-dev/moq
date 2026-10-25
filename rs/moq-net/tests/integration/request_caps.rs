@@ -34,7 +34,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Setup {
 	client: moq_net::origin::Producer,
 	_server: moq_net::origin::Producer,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	tracks: Vec<moq_net::track::Producer>,
 	_pair: MockPair,
 }

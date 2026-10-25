@@ -246,8 +246,8 @@ std::string Configure(obs_data_t *, moq::ClientConfig &config)
 {
 	if (!g_settings_ok)
 		config.bind = "not an address";
-	config.backoff.initial_us = 10'000;
-	config.backoff.max_us = 50'000;
+	config.backoff.initial = std::chrono::milliseconds(10);
+	config.backoff.max = std::chrono::milliseconds(50);
 	return g_settings_error;
 }
 } // namespace MoQSettings
@@ -461,6 +461,8 @@ int main()
 		CHECK(first.has_value());
 		CHECK(first == output.GetEpoch());
 		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
+		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
+		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
 		CHECK(MoQOutputStatsTest::Epoch(output) == first);
