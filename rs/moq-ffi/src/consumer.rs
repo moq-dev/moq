@@ -32,12 +32,13 @@ pub struct MoqSubscription {
 	#[uniffi(default = 0)]
 	pub priority: i8,
 	/// Maximum age of a non-latest group before it is skipped, in microseconds.
-	/// `0` skips immediately; a larger value tolerates that much reordering.
+	/// `0` skips immediately; a larger value tolerates that much reordering; null leaves
+	/// the publisher's max age alone to bound it.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	#[uniffi(default = 0)]
-	pub max_delay_us: u64,
+	#[uniffi(default = Some(0))]
+	pub max_delay_us: Option<u64>,
 	/// The spans of the track to deliver, or null for everything `max_delay_us` still
 	/// considers fresh. An empty list asks for nothing.
 	///
@@ -66,12 +67,10 @@ pub struct MoqRange {
 /// Where one end of a [`MoqRange`] falls, mirroring [`moq_net::track::Anchor`].
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqAnchor {
-	/// This exact group and frame.
+	/// This group, delivered from its first frame.
 	Absolute {
 		/// The absolute group sequence number.
 		group: u64,
-		/// The zero-based frame index within the group.
-		frame: u64,
 	},
 	/// The group this many before the latest, clamped to group 0: `0` is the latest group.
 	Relative {
@@ -100,7 +99,7 @@ impl TryFrom<MoqAnchor> for moq_net::track::Anchor {
 
 	fn try_from(anchor: MoqAnchor) -> Result<Self, MoqError> {
 		Ok(match anchor {
-			MoqAnchor::Absolute { group, frame } => Self::Absolute(moq_net::track::Position { group, frame }),
+			MoqAnchor::Absolute { group } => Self::Absolute(group),
 			MoqAnchor::Relative { groups } => Self::Relative(groups),
 			MoqAnchor::Time { timestamp_us } => {
 				Self::Time(moq_net::Timestamp::from_micros(timestamp_us).map_err(|_| MoqError::TimeOverflow)?)
@@ -125,6 +124,15 @@ impl From<MoqOrder> for moq_net::track::Order {
 		match order {
 			MoqOrder::Ascending => Self::Ascending,
 			MoqOrder::Descending => Self::Descending,
+		}
+	}
+}
+
+impl From<moq_net::track::Order> for MoqOrder {
+	fn from(order: moq_net::track::Order) -> Self {
+		match order {
+			moq_net::track::Order::Ascending => Self::Ascending,
+			moq_net::track::Order::Descending => Self::Descending,
 		}
 	}
 }
@@ -157,7 +165,7 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
 		let mut subscription = moq_net::track::Subscription::default()
 			.with_priority(s.priority)
-			.with_max_delay(std::time::Duration::from_micros(s.max_delay_us));
+			.with_max_delay(s.max_delay_us.map(std::time::Duration::from_micros));
 		if let Some(ranges) = s.ranges {
 			subscription = subscription.with_ranges(
 				ranges

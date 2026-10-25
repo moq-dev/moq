@@ -319,10 +319,18 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await respond({ end: new SubscribeEnd(2) });
 		expect(await reader.finished()).toEqual({ group: 2, frame: 0 });
 
-		await groupStream(subscriber, 2).handled;
+		const handled = groupStream(subscriber, 2).handled;
 		if (version === Version.DRAFT_05) {
+			await handled;
 			expect(await settlesWithin(Promise.resolve(reader.closed), 50)).toBe(false);
 		} else {
+			// The violation escapes to the connection, which closes the session on it.
+			expect(
+				await handled.then(
+					() => undefined,
+					(err: unknown) => err,
+				),
+			).toBeInstanceOf(ProtocolViolation);
 			expect(await reader.closed).toBeInstanceOf(ProtocolViolation);
 		}
 	});

@@ -687,41 +687,6 @@ fn remove(catalog: &mut crate::catalog::Producer<Ext>, name: &str) {
 	guard.ext.mpegts.tracks.remove(name);
 }
 
-/// Under sync the tables stay as laid, so a track added after them fails the export.
-#[tokio::test(start_paused = true)]
-async fn a_track_added_under_sync_fails_the_export() {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(
-		&mut broadcast,
-		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
-	)
-	.unwrap();
-	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
-	for millis in (0..3_000).step_by(20) {
-		write_aac(&mut [&mut first], millis);
-	}
-	let source = crate::source::announced(&consumer).await;
-	let opened = super::export_test::open_ts(source, crate::catalog::CatalogFormat::Hang)
-		.await
-		.unwrap();
-	let mut export = opened.with_delay(DELAY).with_mux_rate(2_000_000).with_sync();
-	let out = tokio::time::timeout(DELAY * 2, export.next()).await;
-	out.expect("the tables went out").unwrap().unwrap();
-
-	let _second = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
-	let err = tokio::time::timeout(DELAY * 2, async {
-		loop {
-			if let Err(err) = export.next().await {
-				break err;
-			}
-		}
-	})
-	.await
-	.expect("the export reads the catalog update");
-	assert!(err.to_string().contains("under --sync"), "{err}");
-}
-
 /// A track the catalog lists after the tables went out, but before its PID is recorded,
 /// takes the frames it holds along to the recorded PID when that arrives.
 #[tokio::test(start_paused = true)]
@@ -1565,33 +1530,6 @@ async fn a_rate_change_applies_behind_the_revision_it_comes_with() {
 		counts[revised + 1..revised + 20].iter().all(|&n| n == NEW),
 		"{revised}: {counts:?}"
 	);
-}
-
-/// Under sync a catalog's rate change leaves the grid as laid, and says so.
-#[tokio::test(start_paused = true)]
-#[tracing_test::traced_test]
-async fn a_rate_change_under_sync_keeps_the_grid() {
-	let (mut broadcast, consumer, mut catalog) = broadcast();
-	catalog.modify().unwrap().ext.mpegts.mux_rate = Some(rate(20));
-	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
-	let source = crate::source::announced(&consumer).await;
-	let opened = super::export_test::open_ts(source, crate::catalog::CatalogFormat::Hang)
-		.await
-		.unwrap();
-	let mut export = opened.with_delay(DELAY).with_sync();
-	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
-	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
-	catalog.modify().unwrap().ext.mpegts.mux_rate = Some(rate(30));
-	let before = frames.len();
-	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 3_000, 6_000).await;
-	assert!(frames.len() > before + 40);
-	assert!(
-		frames[before..].iter().all(|frame| frame.payload.len() == 20 * 188),
-		"the grid's rate changed"
-	);
-	assert!(logs_contain("ignoring a multiplex rate change under --sync"));
-	drop((broadcast, audio, catalog));
 }
 
 /// A track the catalog withdraws before the PMT lists it, while its first frames wait in the

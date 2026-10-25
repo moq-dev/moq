@@ -112,6 +112,20 @@ pkg.jsr = undefined; // JSR opt-out flag, not part of the npm package
 // Write the rewritten package.json
 writeFileSync("dist/package.json", JSON.stringify(pkg, null, 2));
 
+// A package that reports its own version keeps it in src/version.ts as "dev", since the
+// workspace runs src/ unbuilt; the published build gets the real one.
+if (existsSync("src/version.ts")) {
+	console.log(`🏷️  Stamping version ${pkg.version}...`);
+	const file = join("dist", "version.js");
+	const body = readFileSync(file, "utf8");
+	const placeholder = 'VERSION = "dev";';
+	if (body.split(placeholder).length !== 2) {
+		console.error(`${file} must contain exactly one \`${placeholder}\``);
+		process.exit(1);
+	}
+	writeFileSync(file, body.replace(placeholder, `VERSION = ${JSON.stringify(pkg.version)};`));
+}
+
 // Copy static files
 console.log("📄 Copying README.md...");
 copyFileSync("README.md", join("dist", "README.md"));

@@ -25,8 +25,6 @@
 //!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /
 //!   VideoToolbox / Media Foundation / NVENC / VAAPI / V4L2) or H.265
 //!   (VideoToolbox / Media Foundation / NVENC). Entry points:
-//!   - `encode::Control::new` returns a `Control` handle (ask for a keyframe
-//!     with `cut`) and the `Driver` that captures and publishes the webcam.
 //!   - `encode::publish_capture` captures a webcam and publishes it (turnkey).
 //!     It encodes strictly on demand: the track and catalog are advertised up
 //!     front (the camera opens once at startup so they can be exact), and the
@@ -58,7 +56,7 @@
 //! The public API is codec-agnostic: no public type, signature, or error
 //! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC / VAAPI / V4L2) or a
 //! codec implementation. [`encode::Encoder`] takes a [`Frame`],
-//! [`decode::Consumer`] and `capture::Stream` return one (CPU I420 on demand,
+//! [`decode::Read::Frame`] and `capture::Stream` carry one (CPU I420 on demand,
 //! GPU-resident when hardware decoded). So swapping
 //! or bumping any backend crate is not a breaking change for consumers. Config
 //! structs are `#[non_exhaustive]`: build them via `default()`/`new()` and set
@@ -103,7 +101,7 @@ mod v4l2;
 pub use color::Color;
 pub use error::Error;
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
-pub use frame::{DmaBuf, DmaBufExport, DmaBufLayout, DmaBufPlane, DrmFormat};
+pub use frame::{DmaBuf, DmaBufExport, DmaBufPlane, DrmFormat};
 pub use frame::{Frame, I420, Surface};
 pub use output::Output;
 pub use rate::{MAX_FRAMES_PER_SECOND, Rate, RateError};

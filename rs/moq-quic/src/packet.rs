@@ -899,6 +899,27 @@ impl SpaceId {
     }
 }
 
+impl From<SpaceId> for moq_congestion::SpaceId {
+    fn from(space: SpaceId) -> Self {
+        match space {
+            SpaceId::Initial => Self::Initial,
+            SpaceId::Handshake => Self::Handshake,
+            SpaceId::Data => Self::Data,
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<moq_congestion::SpaceId> for SpaceId {
+    fn from(space: moq_congestion::SpaceId) -> Self {
+        match space {
+            moq_congestion::SpaceId::Initial => Self::Initial,
+            moq_congestion::SpaceId::Handshake => Self::Handshake,
+            moq_congestion::SpaceId::Data => Self::Data,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -938,14 +959,14 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+    #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
     #[test]
     fn header_encoding() {
         use crate::Side;
         use crate::crypto::rustls::{initial_keys, initial_suite_from_provider};
-        #[cfg(all(feature = "rustls-aws-lc-rs", not(feature = "rustls-ring")))]
+        #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
         use rustls::crypto::aws_lc_rs::default_provider;
-        #[cfg(feature = "rustls-ring")]
+        #[cfg(feature = "ring")]
         use rustls::crypto::ring::default_provider;
         use rustls::quic::Version;
 

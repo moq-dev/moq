@@ -50,8 +50,8 @@ async fn pair(version: Version, origins: Option<Origins<'_>>) -> Pair {
 		if let Some(origins) = &origins {
 			config = config.with_subscriber(origins.subscribe.clone());
 		}
-		let request = config.accept_request(harness::now(), server).await.unwrap();
-		let requests = request.auth().requests().unwrap();
+		let mut request = config.accept_request(harness::now(), server).await.unwrap();
+		let requests = request.requests();
 		let (session, driver) = request.ok().await.unwrap();
 		harness::spawn(driver);
 		(session, requests)
@@ -140,14 +140,14 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 		session
 	};
 	let server = async {
-		let request = moq_net::Server::new()
+		let mut request = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_extensions(server_extensions)
 			.with_subscriber(subscribe)
 			.accept_request(harness::now(), server)
 			.await
 			.unwrap();
-		let requests = request.auth().requests().unwrap();
+		let requests = request.requests();
 		let (session, driver) = request.ok().await.unwrap();
 		harness::spawn(driver);
 		(session, requests)
@@ -184,7 +184,7 @@ fn renewal(c: &mut Criterion) {
 						let (session, _, requests) = &mut publishers[0];
 						let handle = session.auth();
 						let auths = runtime
-							.block_on(async { [handle.add("a").await.unwrap(), handle.add("b").await.unwrap()] });
+							.block_on(async { [handle.add("a").await.unwrap().0, handle.add("b").await.unwrap().0] });
 						let broadcasts: Vec<_> = (0..routes)
 							.map(|route| origin.create_broadcast(format!("room/{route}").as_str()).unwrap())
 							.collect();

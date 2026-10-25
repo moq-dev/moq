@@ -14,9 +14,9 @@
 //!
 //! A caller cannot reopen an explicit epoch for production:
 //!
-//! ```compile_fail
-//! fn reopen(credential: &moq_e2ee::Credential, epoch: moq_net::Epoch) {
-//!     let _ = credential.generation(epoch);
+//! ```compile_fail,E0624
+//! fn reopen(credential: moq_e2ee::Credential, epoch: moq_net::Epoch) {
+//!     let _ = moq_e2ee::generation::Producer::new(credential, epoch);
 //! }
 //! ```
 //!

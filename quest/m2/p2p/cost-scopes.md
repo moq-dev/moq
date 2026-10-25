@@ -22,7 +22,8 @@ Decided 2026-10-13, replacing the unconditional direct-first policy:
   authorized content when the application turns on the connection's local
   `proxy` preference (decided 2026-10-14): on for redundancy, such as reaching
   the CDN through a peer whose uplink died, off for conference offload.
-  Browser tabs stay off until the [Rust-to-TypeScript](/quest/m2/rs2ts/README.md) port. A neighboring watcher is not a source of its received
+  Browser tabs never relay, whatever the backend (decided 2026-10-22,
+  maintainer). A neighboring watcher is not a source of its received
   media. The authenticated origin identity maps announcements to roster peers.
 - Matching explicit epochs permit shared logical-track resume. Different or
   missing epochs require Restart and fresh resolution. Keep CDN control and

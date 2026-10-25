@@ -1,5 +1,7 @@
+use crate::driver::Transport;
+use crate::transport::poll::Session as _;
 use std::{
-	collections::{HashMap, VecDeque},
+	collections::{HashMap, HashSet, VecDeque},
 	sync::{Arc, Mutex, Weak},
 	task::{Context, Poll},
 };
@@ -39,12 +41,18 @@ impl<T> Queue<T> {
 	/// Enqueue a message. Returns false once the queue is closed (the message is
 	/// dropped), matching a write to a stream whose reader is gone.
 	fn push(&self, item: T) -> bool {
+		self.offer(item).is_none()
+	}
+
+	/// Enqueue a message, handing it back once the queue is closed, for a caller that
+	/// must not drop it where it is.
+	fn offer(&self, item: T) -> Option<T> {
 		let mut state = self.0.lock();
 		if state.closed {
-			return false;
+			return Some(item);
 		}
 		state.messages.push_back(item);
-		true
+		None
 	}
 
 	/// Dequeue the next message, waiting while the queue is open and empty.
@@ -443,14 +451,14 @@ impl<E: crate::transport::Error> crate::transport::Error for AdapterError<E> {
 	}
 }
 
-pub enum AdapterSend<S: crate::transport::poll::Session> {
-	Real(S::SendStream),
+pub(crate) enum AdapterSend {
+	Real(crate::transport::boxed::SendStream),
 	Virtual(VirtualSendStream),
 }
 
-impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
-	type Error = AdapterError<<S::SendStream as crate::transport::poll::SendStream>::Error>;
-	type Group = <S::SendStream as crate::transport::poll::SendStream>::Group;
+impl crate::transport::poll::SendStream for AdapterSend {
+	type Error = AdapterError<<crate::transport::boxed::SendStream as crate::transport::poll::SendStream>::Error>;
+	type Group = <crate::transport::boxed::SendStream as crate::transport::poll::SendStream>::Group;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		match self {
@@ -510,19 +518,16 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 		reason = "one per stream, so boxing a variant would add an allocation per stream to save bytes nothing holds in bulk"
 	)
 )]
-pub enum AdapterRecv<S: crate::transport::poll::Session> {
-	Real(S::RecvStream),
+pub(crate) enum AdapterRecv {
+	Real(crate::transport::boxed::RecvStream),
 	Virtual(crate::transport::poll::Buffered<VirtualRecvStream>),
 }
 
-impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
-	type Error = AdapterError<<S::RecvStream as crate::transport::poll::RecvStream>::Error>;
-	type Lease<'a>
-		= AdapterLease<'a, S>
-	where
-		S: 'a;
+impl crate::transport::poll::RecvStream for AdapterRecv {
+	type Error = AdapterError<<crate::transport::boxed::RecvStream as crate::transport::poll::RecvStream>::Error>;
+	type Lease<'a> = AdapterLease<'a>;
 
-	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<AdapterLease<'_, S>, Self::Error>> {
+	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<AdapterLease<'_>, Self::Error>> {
 		match self {
 			Self::Real(s) => s
 				.poll_lease(cx, want)
@@ -550,12 +555,12 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 }
 
 /// A [`Lease`](crate::transport::poll::Lease) of an [`AdapterRecv`].
-pub enum AdapterLease<'a, S: crate::transport::poll::Session + 'a> {
-	Real(<S::RecvStream as crate::transport::poll::RecvStream>::Lease<'a>),
+pub(crate) enum AdapterLease<'a> {
+	Real(<crate::transport::boxed::RecvStream as crate::transport::poll::RecvStream>::Lease<'a>),
 	Virtual(crate::transport::poll::BufferedLease<'a>),
 }
 
-impl<S: crate::transport::poll::Session> Buf for AdapterLease<'_, S> {
+impl Buf for AdapterLease<'_> {
 	fn remaining(&self) -> usize {
 		match self {
 			Self::Real(l) => l.remaining(),
@@ -585,7 +590,7 @@ impl<S: crate::transport::poll::Session> Buf for AdapterLease<'_, S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> crate::transport::poll::Lease for AdapterLease<'_, S> {
+impl crate::transport::poll::Lease for AdapterLease<'_> {
 	fn is_fin(&self) -> bool {
 		match self {
 			Self::Real(l) => l.is_fin(),
@@ -611,13 +616,17 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Lease for Adapt
 
 // === Control Stream Adapter ===
 
-/// Which side of the session advertised a namespace.
+/// Which request a namespace names: an advertisement, by the side that made it, or the
+/// peer's namespace subscription.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Direction {
 	/// We advertised it to the peer, on a stream from `open_bi`.
 	Outgoing,
 	/// The peer advertised it to us, on a stream handed to `accept_bi`.
 	Incoming,
+	/// The peer subscribed to it with SUBSCRIBE_NAMESPACE, on a stream handed to
+	/// `accept_bi`. Only draft-14's UNSUBSCRIBE_NAMESPACE names one.
+	Subscribed,
 }
 
 /// Namespace → request_id reverse lookup for the v14/v15 messages that name a
@@ -627,6 +636,8 @@ enum Direction {
 /// advertising the same namespace to each other. One map would let the second
 /// advertisement overwrite the first, and a terminal message would then tear
 /// down the stream travelling the other way while its real target stayed open.
+/// A subscription keeps a map of its own for the same reason: a peer may both
+/// advertise a namespace and subscribe to it.
 #[derive(Default)]
 struct Namespaces {
 	state: Mutex<NamespacesState>,
@@ -636,6 +647,7 @@ struct Namespaces {
 struct NamespacesState {
 	outgoing: HashMap<PathOwned, NamespaceRequests>,
 	incoming: HashMap<PathOwned, NamespaceRequests>,
+	subscribed: HashMap<PathOwned, NamespaceRequests>,
 
 	/// request_id → the namespace that request advertised, one entry per request
 	/// including queued duplicates, so [`Namespaces::forget`] removes only that
@@ -661,6 +673,7 @@ impl NamespacesState {
 		match direction {
 			Direction::Outgoing => &mut self.outgoing,
 			Direction::Incoming => &mut self.incoming,
+			Direction::Subscribed => &mut self.subscribed,
 		}
 	}
 }
@@ -701,6 +714,13 @@ impl Namespaces {
 				next: None,
 			},
 		);
+	}
+
+	/// The namespace the peer's request `request_id` advertises, if it is a PUBLISH_NAMESPACE.
+	fn incoming(&self, request_id: RequestId) -> Option<PathOwned> {
+		let state = self.state.lock().unwrap();
+		let registration = state.by_request.get(&request_id)?;
+		(registration.direction == Direction::Incoming).then(|| registration.namespace.clone())
 	}
 
 	fn get(&self, direction: Direction, namespace: &PathOwned) -> Option<RequestId> {
@@ -761,6 +781,39 @@ struct Shared {
 
 	/// Namespace → request_id reverse lookup (for v14/v15 namespace-keyed messages).
 	namespaces: Namespaces,
+
+	/// The peer's advertisements held back behind a withdrawal still being handled.
+	readvertised: Mutex<Readvertised>,
+}
+
+/// Keeps the peer's withdrawal and re-advertisement of a namespace in wire order.
+///
+/// Each request is served by its own handler, so a PUBLISH_NAMESPACE that follows a
+/// PUBLISH_NAMESPACE_DONE for the same namespace could otherwise be handled first. It
+/// would then read as a second advertisement of a namespace still advertised, and the
+/// withdrawal as the end of the first, so the route never ends and starts again. The
+/// re-advertisement reaches `accept_bi` only once the withdrawn request's handler drops
+/// its stream, which it does after releasing the route. Bounded by the peer's requests.
+#[derive(Default)]
+struct Readvertised {
+	namespaces: HashMap<PathOwned, Withdrawing>,
+	/// Each withdrawn request a handler still holds, to the namespace it advertised.
+	withdrawn: HashMap<RequestId, PathOwned>,
+}
+
+#[derive(Default)]
+struct Withdrawing {
+	/// Withdrawn requests whose handlers still hold their streams.
+	handling: HashSet<RequestId>,
+	/// The advertisements behind them, in wire order.
+	held: VecDeque<HeldRequest>,
+}
+
+struct HeldRequest {
+	request_id: RequestId,
+	stream: (VirtualSendStream, VirtualRecvStream),
+	/// Withdrawn while held, so the advertisements behind it wait for its handler too.
+	withdrawn: bool,
 }
 
 impl Shared {
@@ -800,6 +853,17 @@ impl Shared {
 		recv._permit = permit;
 		let send = VirtualSendStream::new(self.control.clone());
 		self.streams.lock().unwrap().insert(request_id, follow.writer());
+		if let Some(namespace) = self.namespaces.incoming(request_id) {
+			let mut readvertised = self.readvertised.lock().unwrap();
+			if let Some(withdrawing) = readvertised.namespaces.get_mut(&namespace) {
+				withdrawing.held.push_back(HeldRequest {
+					request_id,
+					stream: (send, recv),
+					withdrawn: false,
+				});
+				return Ok(());
+			}
+		}
 		if !self.incoming.push((send, recv)) {
 			return Err(Error::Closed);
 		}
@@ -826,9 +890,27 @@ impl Shared {
 			return;
 		}
 		let tx = self.streams.lock().unwrap().remove(&request_id);
+		let namespace = self.namespaces.incoming(request_id);
 		self.namespaces.forget(request_id);
-		if let Some(tx) = tx {
+		let Some(tx) = tx else { return };
+		let Some(namespace) = namespace else {
 			tx.push(raw);
+			return;
+		};
+
+		// Under the lock, so a handler dropping its stream either refuses the push or
+		// finds the withdrawal recorded.
+		let mut readvertised = self.readvertised.lock().unwrap();
+		if !tx.push(raw) {
+			return;
+		}
+		let withdrawing = readvertised.namespaces.entry(namespace.clone()).or_default();
+		match withdrawing.held.iter_mut().find(|held| held.request_id == request_id) {
+			Some(held) => held.withdrawn = true,
+			None => {
+				withdrawing.handling.insert(request_id);
+				readvertised.withdrawn.insert(request_id, namespace);
+			}
 		}
 	}
 
@@ -850,13 +932,51 @@ impl Shared {
 		}
 		drop((updates, streams));
 		self.namespaces.forget(request_id);
+		self.handled(request_id);
+	}
+
+	/// A withdrawn request's handler is done with it: once none of the namespace's
+	/// withdrawals is still being handled, hand over what was held behind them, up to and
+	/// including the next one withdrawn.
+	fn handled(&self, request_id: RequestId) {
+		// What a closed session refused, dropped only once the lock is released, since
+		// dropping a stream lands back here.
+		let mut refused = Vec::new();
+		let mut readvertised = self.readvertised.lock().unwrap();
+		let Some(namespace) = readvertised.withdrawn.remove(&request_id) else {
+			return;
+		};
+		let Readvertised { namespaces, withdrawn } = &mut *readvertised;
+		let Some(withdrawing) = namespaces.get_mut(&namespace) else {
+			return;
+		};
+		withdrawing.handling.remove(&request_id);
+		while withdrawing.handling.is_empty() {
+			let Some(held) = withdrawing.held.pop_front() else {
+				namespaces.remove(&namespace);
+				break;
+			};
+			if let Some(stream) = self.incoming.offer(held.stream) {
+				// The session is gone, so nothing held behind this one is accepted either.
+				refused.push(stream);
+				refused.extend(withdrawing.held.drain(..).map(|held| held.stream));
+				namespaces.remove(&namespace);
+				break;
+			}
+			if held.withdrawn {
+				withdrawing.handling.insert(held.request_id);
+				withdrawn.insert(held.request_id, namespace.clone());
+			}
+		}
+		drop(readvertised);
+		drop(refused);
 	}
 }
 
 #[derive(Clone)]
-pub struct ControlStreamAdapter<S: crate::transport::poll::Session> {
+pub(crate) struct ControlStreamAdapter {
 	stats: crate::stats::Session,
-	inner: S,
+	inner: Transport,
 	shared: Arc<Shared>,
 	control: Control,
 	version: Version,
@@ -864,8 +984,8 @@ pub struct ControlStreamAdapter<S: crate::transport::poll::Session> {
 	park: kio::Park,
 }
 
-impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
-	pub fn new(inner: S, control: Control, version: Version) -> Self {
+impl ControlStreamAdapter {
+	pub fn new(inner: Transport, control: Control, version: Version) -> Self {
 		Self {
 			stats: Default::default(),
 			inner,
@@ -883,12 +1003,11 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 
 	/// Open a real (non-virtual) bidi stream, bypassing control stream multiplexing.
 	/// Used for v16 SubscribeNamespace which moved to its own bidi stream.
-	pub async fn open_native_bi(&mut self) -> Result<(AdapterSend<S>, AdapterRecv<S>), crate::Error> {
-		let (send, recv) = self
-			.inner
-			.open_bi(Default::default())
+	pub async fn open_native_bi(&mut self) -> Result<(AdapterSend, AdapterRecv), crate::Error> {
+		let (send, recv) = kio::wait(|waiter| self.inner.poll_open_request(&mut waiter.context(), Default::default()))
 			.await
-			.map_err(|_| crate::Error::Closed)?;
+			.map_err(crate::Error::from_transport)?
+			.ok_or(crate::Error::NoStreamCredit)?;
 		Ok((AdapterSend::Real(send), AdapterRecv::Real(recv)))
 	}
 
@@ -899,8 +1018,8 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	/// instead of the session tearing down.
 	pub async fn run(
 		&self,
-		reader: Reader<S::RecvStream, Version>,
-		writer: Writer<S::SendStream, Version>,
+		reader: Reader<crate::transport::boxed::RecvStream, Version>,
+		writer: Writer<crate::transport::boxed::SendStream, Version>,
 		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		let res = {
@@ -992,7 +1111,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 
 	/// Writer task: drains the queue and writes to the control stream. The peer's
 	/// STOP_SENDING, seen while idle or as a failed write, is a protocol violation.
-	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
+	async fn run_write(&self, mut writer: Writer<crate::transport::boxed::SendStream, Version>) -> Result<(), Error> {
 		loop {
 			let msg = kio::wait(|waiter| {
 				// Never finished, so any end is the peer's or the session's.
@@ -1018,7 +1137,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	/// Dispatcher loop that reads control stream messages and routes them.
 	async fn run_read(
 		&self,
-		mut reader: Reader<S::RecvStream, Version>,
+		mut reader: Reader<crate::transport::boxed::RecvStream, Version>,
 		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		loop {
@@ -1118,7 +1237,16 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 		}
 		// SubscribeNamespace on control stream (v14/v15 only)
 		ietf::SubscribeNamespaceLegacy::ID => match version {
-			Version::Draft14 | Version::Draft15 => {
+			// Draft-14's UNSUBSCRIBE_NAMESPACE names the prefix rather than the request.
+			Version::Draft14 => {
+				let mut r = Decoder::new(body, version.into());
+				let id = RequestId::decode(&mut r, version)?;
+				if let Ok(prefix) = crate::ietf::namespace::decode_namespace(&mut r) {
+					namespaces.register(Direction::Subscribed, prefix.into_owned(), id);
+				}
+				Ok(Route::NewRequest(id))
+			}
+			Version::Draft15 => {
 				let id = decode_request_id(body, version)?;
 				Ok(Route::NewRequest(id))
 			}
@@ -1266,7 +1394,11 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 			_ => Err(Error::UnexpectedMessage),
 		},
 		ietf::UnsubscribeNamespace::ID => match version {
-			Version::Draft14 | Version::Draft15 => {
+			Version::Draft14 => match lookup_namespace_request_id(body, version, namespaces, Direction::Subscribed)? {
+				Some(id) => Ok(Route::CloseStream(id)),
+				None => Ok(Route::Ignore),
+			},
+			Version::Draft15 => {
 				let id = decode_request_id(body, version)?;
 				Ok(Route::CloseStream(id))
 			}
@@ -1305,9 +1437,9 @@ fn lookup_namespace_request_id(
 	Ok(namespaces.get(direction, &ns))
 }
 
-impl<S: crate::transport::poll::Session> crate::transport::poll::Session for ControlStreamAdapter<S> {
-	type SendStream = AdapterSend<S>;
-	type RecvStream = AdapterRecv<S>;
+impl crate::transport::poll::Session for ControlStreamAdapter {
+	type SendStream = AdapterSend;
+	type RecvStream = AdapterRecv;
 	type Error = crate::Error;
 
 	fn poll_accept_bi(
@@ -1349,6 +1481,17 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 			AdapterSend::Virtual(send),
 			AdapterRecv::Virtual(crate::transport::poll::Buffered::new(recv)),
 		)))
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
 	}
 
 	fn poll_open_uni(
@@ -1904,6 +2047,7 @@ mod tests {
 				let ours = advertise(&shared, namespace, version, RequestId(4)).await;
 				(ours, receive(&shared, namespace, version, RequestId(7)).await)
 			}
+			Direction::Subscribed => unreachable!("a mesh only advertises"),
 		};
 
 		(shared, ours, theirs)
@@ -2067,12 +2211,105 @@ mod tests {
 		shared.close(RequestId(7), encode_msg(&msg, version));
 		assert!(drained(&mut theirs, 4).await);
 		assert!(!shared.streams.lock().unwrap().contains_key(&RequestId(7)));
+		drop(theirs);
 
 		let _again = receive(&shared, "cluster/ns", version, RequestId(11)).await;
 		assert!(matches!(
 			done(&shared, "cluster/ns", version),
 			Route::CloseStream(RequestId(11))
 		));
+	}
+
+	/// The peer's next request on `namespace`, advertising it, as the read loop routes it.
+	fn readvertise(shared: &Arc<Shared>, namespace: &str, version: Version, request_id: RequestId) {
+		let msg = publish_namespace(request_id, namespace);
+		let route = classify(
+			ietf::PublishNamespace::ID,
+			&encode_body(&msg, version),
+			version,
+			&shared.namespaces,
+		)
+		.unwrap();
+		assert!(matches!(route, Route::NewRequest(id) if id == request_id));
+		shared
+			.open_incoming(request_id, encode_msg(&msg, version), None)
+			.unwrap();
+	}
+
+	/// The peer withdrawing `namespace` on `request_id`, as the read loop routes it.
+	fn withdraw(shared: &Arc<Shared>, namespace: &str, version: Version, request_id: RequestId) {
+		let msg = ietf::PublishNamespaceDone {
+			track_namespace: crate::Path::new(namespace),
+			request_id,
+		};
+		let route = classify(
+			ietf::PublishNamespaceDone::ID,
+			&encode_body(&msg, version),
+			version,
+			&shared.namespaces,
+		)
+		.unwrap();
+		assert!(matches!(route, Route::CloseStream(id) if id == request_id));
+		shared.close(request_id, encode_msg(&msg, version));
+	}
+
+	/// The request of the next stream `accept_bi` would hand out, if one is ready.
+	fn accepted(shared: &Arc<Shared>) -> Option<(RequestId, VirtualRecvStream)> {
+		let (_, recv) = shared.incoming.pop().now_or_never()??;
+		let request_id = recv.request_id.lock().unwrap().unwrap();
+		Some((request_id, recv))
+	}
+
+	#[moq_clock::test]
+	async fn a_readvertisement_waits_for_the_withdrawal_to_be_handled() {
+		// Each request has its own handler, so a re-advertisement handed out beside the
+		// withdrawal before it could be handled first and read as a second advertisement.
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let shared = Arc::new(Shared::default());
+			let first = receive(&shared, "live/media", version, RequestId(3)).await;
+			let other = receive(&shared, "live/other", version, RequestId(5)).await;
+
+			withdraw(&shared, "live/media", version, RequestId(3));
+			readvertise(&shared, "live/media", version, RequestId(7));
+			withdraw(&shared, "live/media", version, RequestId(7));
+			readvertise(&shared, "live/media", version, RequestId(9));
+			// Another namespace is not held up.
+			withdraw(&shared, "live/other", version, RequestId(5));
+			drop(other);
+			readvertise(&shared, "live/other", version, RequestId(11));
+			assert!(matches!(accepted(&shared), Some((RequestId(11), _))), "{version:?}");
+			assert!(accepted(&shared).is_none(), "{version:?}");
+
+			// Handling the first withdrawal hands over the next advertisement, which was
+			// withdrawn too, so the one after it waits for that withdrawal in turn.
+			drop(first);
+			let (id, mut second) = accepted(&shared).expect("released");
+			assert_eq!(id, RequestId(7), "{version:?}");
+			assert!(accepted(&shared).is_none(), "{version:?}");
+			assert!(drained(&mut second, 4).await, "{version:?}");
+			drop(second);
+			assert!(matches!(accepted(&shared), Some((RequestId(9), _))), "{version:?}");
+			assert!(shared.readvertised.lock().unwrap().namespaces.is_empty(), "{version:?}");
+		}
+	}
+
+	#[moq_clock::test]
+	async fn a_session_closed_behind_a_withdrawal_drops_what_it_held() {
+		// Dropping a refused stream re-enters the release, which must not still hold its lock.
+		let version = Version::Draft14;
+		let shared = Arc::new(Shared::default());
+		let first = receive(&shared, "live/media", version, RequestId(3)).await;
+		withdraw(&shared, "live/media", version, RequestId(3));
+		readvertise(&shared, "live/media", version, RequestId(7));
+		withdraw(&shared, "live/media", version, RequestId(7));
+		readvertise(&shared, "live/media", version, RequestId(9));
+		shared.incoming.close();
+
+		drop(first);
+		let readvertised = shared.readvertised.lock().unwrap();
+		assert!(readvertised.namespaces.is_empty() && readvertised.withdrawn.is_empty());
+		drop(readvertised);
+		assert!(shared.streams.lock().unwrap().is_empty());
 	}
 
 	#[moq_clock::test]
@@ -2117,7 +2354,7 @@ mod tests {
 
 	#[test]
 	fn namespace_removal_preserves_links_in_every_order() {
-		for direction in [Direction::Incoming, Direction::Outgoing] {
+		for direction in [Direction::Incoming, Direction::Outgoing, Direction::Subscribed] {
 			for first in 0..4 {
 				for second in 0..4 {
 					for third in 0..4 {
@@ -2139,7 +2376,7 @@ mod tests {
 						}
 						let state = namespaces.state.lock().unwrap();
 						assert!(state.by_request.is_empty());
-						assert!(state.incoming.is_empty() && state.outgoing.is_empty());
+						assert!(state.incoming.is_empty() && state.outgoing.is_empty() && state.subscribed.is_empty());
 					}
 				}
 			}
@@ -2153,9 +2390,9 @@ mod tests {
 		ids: &[u64],
 		then: &[u8],
 	) -> (
-		ControlStreamAdapter<crate::lite::test_transport::ScriptedSession>,
-		Reader<crate::lite::test_transport::ScriptedRecv, Version>,
-		Writer<crate::lite::test_transport::SinkSend, Version>,
+		ControlStreamAdapter,
+		Reader<crate::transport::boxed::RecvStream, Version>,
+		Writer<crate::transport::boxed::SendStream, Version>,
 		crate::lite::test_transport::Log,
 	) {
 		use crate::lite::test_transport::{Log, ScriptedSession, SinkSend};
@@ -2172,10 +2409,18 @@ mod tests {
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		// We are the server, so the client's request IDs are even.
 		let control = Control::new(None, false).with_window(window, false, VERSION);
-		let adapter = ControlStreamAdapter::new(session, control, VERSION);
+		let adapter = ControlStreamAdapter::new(Transport::new(session.clone()), control, VERSION);
 		let log = Log::default();
-		let writer = Writer::new(SinkSend::new(log.clone()), VERSION);
-		(adapter, Reader::new(recv, VERSION), writer, log)
+		let writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log.clone())),
+			VERSION,
+		);
+		(
+			adapter,
+			Reader::new(crate::transport::boxed::RecvStream::new(recv), VERSION),
+			writer,
+			log,
+		)
 	}
 
 	#[moq_clock::test]
@@ -2197,9 +2442,12 @@ mod tests {
 			let (_, recv) = crate::transport::poll::Session::open_bi(&mut session, Default::default())
 				.await
 				.unwrap();
-			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version).with_stats(&stats);
+			let adapter = ControlStreamAdapter::new(Transport::new(session.clone()), Control::new(None, true), version)
+				.with_stats(&stats);
 			let mut virtual_stream = super::super::request_stream::with_stats(
-				Stream::open(&mut adapter.clone(), version).await.unwrap(),
+				Stream::open(&mut crate::driver::Transport::new(adapter.clone()), version)
+					.await
+					.unwrap(),
 				&stats,
 				version,
 			);
@@ -2207,11 +2455,13 @@ mod tests {
 				request_id: RequestId(0),
 			};
 			let size = msg.encode_bytes(version).unwrap().len() as u64;
-			virtual_stream.writer.buffer_varint(ietf::FetchCancel::ID).unwrap();
-			virtual_stream.writer.encode(&msg).await.unwrap();
+			virtual_stream.writer.encode_message(&msg).await.unwrap();
 			let raw = adapter.shared.control.pop().await.unwrap();
 			let log = Log::default();
-			let mut physical = Writer::new(SinkSend::new(log.clone()), version);
+			let mut physical = Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log.clone())),
+				version,
+			);
 			physical.write_all(&mut raw.clone()).await.unwrap();
 			assert_eq!(
 				registry.snapshot().control(),
@@ -2220,7 +2470,10 @@ mod tests {
 			);
 			assert_eq!(*log.writes.lock().unwrap(), raw);
 			let (_, goaway) = crate::goaway::Handle::new(false);
-			let mut reading = std::pin::pin!(adapter.run_read(Reader::new(recv, version), goaway));
+			let mut reading = std::pin::pin!(adapter.run_read(
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+				goaway
+			));
 			assert!(futures::poll!(reading.as_mut()).is_pending());
 			assert_eq!(virtual_stream.reader.varint().await.unwrap(), ietf::FetchCancel::ID);
 			virtual_stream.reader.decode::<ietf::FetchCancel>().await.unwrap();
@@ -2245,16 +2498,20 @@ mod tests {
 	async fn a_legacy_control_stream_fin_or_reset_is_a_protocol_violation() {
 		use crate::lite::test_transport::{DeadStreamSession, ScriptedSession};
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-			let mut session = ScriptedSession::eof(Vec::new());
-			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
-			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let session = ScriptedSession::eof(Vec::new());
+			let stream = crate::coding::Stream::open(&mut Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let adapter = ControlStreamAdapter::new(Transport::new(session.clone()), Control::new(None, true), version);
 			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
 
-			let mut session = DeadStreamSession::bis(0);
-			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
-			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let session = DeadStreamSession::bis(0);
+			let stream = crate::coding::Stream::open(&mut Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let adapter = ControlStreamAdapter::new(Transport::new(session.clone()), Control::new(None, true), version);
 			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
@@ -2267,11 +2524,13 @@ mod tests {
 	async fn a_legacy_control_stream_stopped_while_idle_is_a_protocol_violation() {
 		use crate::transport::memory;
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-			let (mut session, mut peer) = memory::pair(memory::Config::default());
-			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let (session, mut peer) = memory::pair(memory::Config::default());
+			let stream = crate::coding::Stream::open(&mut Transport::new(session.clone()), version)
+				.await
+				.unwrap();
 			let mut remote = crate::coding::Stream::accept(&mut peer, version).await.unwrap();
 			remote.reader.abort(&Error::Cancel);
-			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let adapter = ControlStreamAdapter::new(Transport::new(session.clone()), Control::new(None, true), version);
 			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let res = moq_clock::timeout(
 				std::time::Duration::from_secs(10),
@@ -2342,11 +2601,19 @@ mod tests {
 			let script = encode_raw(ietf::SubscribeUpdate::ID, &Bytes::copy_from_slice(body), version);
 			let mut session = ScriptedSession::new(script.to_vec());
 			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-			let adapter = ControlStreamAdapter::new(session, Control::new(None, false), version);
+			let adapter =
+				ControlStreamAdapter::new(Transport::new(session.clone()), Control::new(None, false), version);
 			let log = Log::default();
-			let writer = Writer::new(SinkSend::new(log.clone()), version);
+			let writer = Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log.clone())),
+				version,
+			);
 			let (_, goaway) = crate::goaway::Handle::new(true);
-			let mut run = std::pin::pin!(adapter.run(Reader::new(recv, version), writer, goaway));
+			let mut run = std::pin::pin!(adapter.run(
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+				writer,
+				goaway
+			));
 			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}");
 
 			let written = log.writes.lock().unwrap().clone();

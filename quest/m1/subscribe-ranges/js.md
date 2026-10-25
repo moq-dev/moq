@@ -10,11 +10,16 @@ publisher serves requested ranges that are no longer in its live cache.
 ## Plan
 
 Mirror the Rust names, including `Time(pts)` ends and their refusal on an untimed track.
+Also mirror Rust's optional `Subscription::max_delay`
+([moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)): a `null`
+`maxDelay` asks for the publisher's max age alone, dominates when subscriptions
+combine, and goes out as the largest delay the wire allows, where today an
+omitted one means the live edge only.
 
 Decided in the 2026-10-05 audit: the producer half of
 [JavaScript FETCH](/quest/m1/js-fetch.md) folds in here, so `@moq/net`'s
 on-demand request surface takes range requests from the start instead of the
-per-group `requested_group` shape Rust is replacing. That quest keeps only
+per-group `requested_group` shape Rust replaced with `requested_fill`. That quest keeps only
 IETF FETCH dispatch. Resized from [M] to [L] for it.
 
 - Expose an owned request handle rather than a storage callback; dropping a
@@ -28,16 +33,12 @@ IETF FETCH dispatch. Resized from [M] to [L] for it.
   was never cached, covering exact replay, empty and missing groups,
   concurrent requests, and cancellation while awaiting a reply.
 
-When ranges add frame bounds, the group model carries a lite group's
-`frameStart` instead of refusing a nonzero one, as
-[partial lite groups](/quest/m1/release-audit/js-partial-group.md) does until
-then. Preserve the per-reader group-bound rule for reliable reads, live-edge
-selection, subscription updates, and publisher datagrams.
+Ranges stay whole groups ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)),
+so the group model keeps refusing a nonzero lite `frameStart` as a protocol
+violation, as `lite/subscriber.ts` `runGroup` does. Preserve the per-reader
+group-bound rule for reliable reads, live-edge selection, subscription
+updates, and publisher datagrams.
 
 ## Required
 
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the wire this speaks
-
-## Related
-
-- [Partial lite groups](/quest/m1/release-audit/js-partial-group.md) - refuses a nonzero `frameStart` until this models it

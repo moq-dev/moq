@@ -2,7 +2,7 @@ import type * as Epoch from "../epoch.ts";
 import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import type { Location, Order } from "../track.ts";
+import type { Order, Position } from "../track.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
@@ -156,7 +156,7 @@ async function encodeOrder(w: Writer, version: Version, order: Order) {
 /**
  * Exclusive model/local cap from a decoded inclusive last group.
  *
- * The wire's `Group End` is inclusive once decoded; the track model and `setGroups` are
+ * The wire's `Group End` is inclusive once decoded; the track model and `withRange` are
  * exclusive. `undefined` stays unbounded.
  */
 export function exclusiveGroupEnd(inclusive?: number): number | undefined {
@@ -516,9 +516,9 @@ export class SubscribeStart {
 	 * The publisher's largest (group, frame) when it answered, or `undefined` for a track
 	 * with nothing yet. Draft-07+ only; not on the wire before, where it decodes as `undefined`.
 	 */
-	largest?: Location;
+	largest?: Position;
 
-	constructor(group: number, largest?: Location) {
+	constructor(group: number, largest?: Position) {
 		this.group = group;
 		this.largest = largest;
 	}

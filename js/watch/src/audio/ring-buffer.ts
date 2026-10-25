@@ -1,4 +1,5 @@
 import { Micro, type Milli, Second } from "@moq/clock";
+import { ringCapacity } from "./latency";
 
 export class AudioRingBuffer {
 	#buffer: Float32Array[];
@@ -8,6 +9,8 @@ export class AudioRingBuffer {
 	readonly rate: number;
 	readonly channels: number;
 	#stalled = true;
+	// Held stalled for the part of the target above the floor, until the next floor update.
+	#parked = false;
 	#underruns = 0;
 
 	// Samples in the most recent write, i.e. one decoded chunk. The overflow band tolerates this
@@ -40,21 +43,17 @@ export class AudioRingBuffer {
 		this.channels = props.channels;
 		this.#buffered = props.buffered ?? false;
 
-		// The ring holds the latency floor as PCM, with headroom above it. Sizing capacity to the
-		// floor exactly makes the ring physically incapable of holding the slack the overflow band
-		// wants, so every chunk that arrives while the ring is on target drops the oldest samples.
-		// In buffered mode the headroom is also what keeps the backpressure-paced decode loop (on
-		// the main thread) from overflow-dropping; the rest of the lookahead stays encoded upstream.
-		const capacity = this.#capacityFor(this.#latencySamples);
+		// The ring holds the latency floor as PCM, with headroom above it, at a capacity the receiver
+		// fixes rather than the target: whatever of the target is above the floor stays encoded
+		// upstream (the main thread holds it back). The headroom tolerates a chunk above the floor in
+		// live mode, and in buffered mode keeps the paced decode loop from overflow-dropping.
+		const capacity = ringCapacity(this.rate);
+		if (this.#latencySamples > capacity) throw new Error("latency exceeds capacity");
 
 		this.#buffer = [];
 		for (let i = 0; i < this.channels; i++) {
 			this.#buffer[i] = new Float32Array(capacity);
 		}
-	}
-
-	#capacityFor(latencySamples: number): number {
-		return latencySamples * 2;
 	}
 
 	get stalled(): boolean {
@@ -70,6 +69,11 @@ export class AudioRingBuffer {
 		return Micro.fromSecond((this.#readIndex / this.rate) as Second);
 	}
 
+	/** Whether an insert has anchored the indices since creation or the last reset. */
+	get anchored(): boolean {
+		return this.#anchored;
+	}
+
 	get length(): number {
 		return this.#writeIndex - this.#readIndex;
 	}
@@ -78,8 +82,11 @@ export class AudioRingBuffer {
 		return this.#buffer[0]?.length;
 	}
 
-	resize(latency: Milli): void {
+	/** Move the floor, which never exceeds the fixed capacity, and end a park. */
+	setLatency(latency: Milli): void {
 		const latencySamples = Math.ceil(this.rate * Second.fromMilli(latency));
+		if (latencySamples <= 0) throw new Error("empty buffer");
+		if (latencySamples > this.capacity) throw new Error("latency exceeds capacity");
 
 		// A deeper floor parks playback until it refills. Video holds the extra delay on its own, so
 		// audio that kept draining at the old depth would run ahead by the difference. Parking keeps
@@ -87,46 +94,23 @@ export class AudioRingBuffer {
 		// already covers the new floor.
 		if (latencySamples > this.#latencySamples) this.#stalled = true;
 		this.#latencySamples = latencySamples;
-
-		// A live ring sheds what a lower floor no longer covers, keeping the newest. Buffered mode
-		// plays through everything, so its ring keeps the whole unread span; backpressure holds new
-		// frames until playback drains it below the new floor.
-		const newCapacity = Math.max(this.#capacityFor(this.#latencySamples), this.#buffered ? this.length : 0);
-		if (newCapacity !== this.capacity) this.#reallocate(newCapacity);
+		this.#parked = false;
 
 		// Resume a refill that the buffer already covers, which `write` would only notice on the
 		// next frame, never for a source that has stopped.
-		if (latencySamples > 0 && this.length >= latencySamples) this.#stalled = false;
+		if (this.length >= latencySamples) this.#stalled = false;
 	}
 
-	#reallocate(newCapacity: number): void {
-		if (newCapacity === 0) throw new Error("empty buffer");
-
-		const newBuffer: Float32Array[] = [];
-		for (let i = 0; i < this.channels; i++) {
-			newBuffer[i] = new Float32Array(newCapacity);
-		}
-
-		// Copy existing data, preserving the most recent samples
-		const samplesToKeep = Math.min(this.length, newCapacity);
-		if (samplesToKeep > 0) {
-			// Copy the most recent samples (closest to writeIndex)
-			const copyStart = this.#writeIndex - samplesToKeep;
-			for (let channel = 0; channel < this.channels; channel++) {
-				const src = this.#buffer[channel];
-				const dst = newBuffer[channel];
-				for (let i = 0; i < samplesToKeep; i++) {
-					const srcPos = (copyStart + i) % src.length;
-					const dstPos = (copyStart + i) % dst.length;
-					dst[dstPos] = src[srcPos];
-				}
-			}
-		}
-
-		// Update state for the new buffer, only stall if empty.
-		this.#buffer = newBuffer;
-		this.#readIndex = this.#writeIndex - samplesToKeep;
-		if (samplesToKeep === 0) this.#stalled = true;
+	/**
+	 * Hold playback until the next floor update, keeping what is buffered.
+	 *
+	 * For a rise in the part of the target held encoded upstream: the ring already covers its floor,
+	 * so only the main thread knows when the received media covers the rest. A write does not resume
+	 * it, since output decoded before the park may still land.
+	 */
+	park(): void {
+		this.#stalled = true;
+		this.#parked = true;
 	}
 
 	write(timestamp: Micro, data: Float32Array[]): void {
@@ -208,9 +192,9 @@ export class AudioRingBuffer {
 		}
 
 		// Start playback once we've buffered the latency target. This is the only way out of a
-		// stall, so an underrun mid-playback refills to the target before resuming rather than
-		// playing the next chunk on an empty cushion.
-		if (this.length >= this.#latencySamples) {
+		// stall but a park, so an underrun mid-playback refills to the target before resuming rather
+		// than playing the next chunk on an empty cushion.
+		if (!this.#parked && this.length >= this.#latencySamples) {
 			this.#stalled = false;
 		}
 	}
@@ -233,6 +217,7 @@ export class AudioRingBuffer {
 		this.#readIndex = 0;
 		this.#writeIndex = 0;
 		this.#stalled = true;
+		this.#parked = false;
 		this.#anchored = false;
 	}
 

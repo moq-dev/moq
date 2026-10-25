@@ -1,9 +1,10 @@
+use moq_clock::Wall;
 use serde::{Deserialize, Serialize};
 use serde_with::base64::{Base64, UrlSafe};
 use serde_with::formats::Unpadded;
-use serde_with::{DurationSecondsWithFrac, TimestampSeconds, serde_as};
+use serde_with::{DurationSecondsWithFrac, serde_as};
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use crate::lease::Reason;
 
@@ -57,6 +58,10 @@ pub struct Request {
 	/// The direction the client declared at SETUP; absent means both.
 	pub role: Option<Role>,
 
+	/// The implementation the client declared at SETUP, as space-separated `name/version`
+	/// product tokens (`moq-net-js/0.4.2`). Client-chosen; absent when it declared none.
+	pub implementation: Option<String>,
+
 	/// The verified client certificate, when one was presented.
 	pub tls: Option<Peer>,
 }
@@ -83,6 +88,7 @@ impl Request {
 			query: None,
 			token: None,
 			role: None,
+			implementation: None,
 			tls: None,
 		}
 	}
@@ -207,8 +213,8 @@ pub struct Peer {
 	/// SHA-256 of the leaf certificate, hex.
 	pub fingerprint: String,
 	/// The certificate's notAfter.
-	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
-	pub expires: Option<SystemTime>,
+	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
+	pub expires: Option<Wall>,
 	/// The issuer's distinguished name.
 	pub issuer: String,
 }
@@ -238,7 +244,7 @@ mod tests {
 		request.tls = Some(Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
-			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
+			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			issuer: "CN=cluster".into(),
 		});
 		request
@@ -309,6 +315,7 @@ mod tests {
 		request.id = "00ff".into();
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request.query = Some("jwt=abc".into());
+		request.implementation = Some("moq-net-js/0.4.2".into());
 		request.event = Event::End {
 			reason: Reason::Expired,
 			duration: Duration::from_millis(1500),
@@ -316,7 +323,7 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&request).unwrap(),
-			r#"{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}"#
+			r#"{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}"#
 		);
 
 		request.event = Event::End {
@@ -326,7 +333,7 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&request).unwrap(),
-			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}"#
+			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}"#
 		);
 	}
 

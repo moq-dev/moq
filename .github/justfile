@@ -1,5 +1,9 @@
 set working-directory := '..'
 
+# Build and publish the development environment to nix.moq.dev.
+cache:
+    bash sh/gh/cache.sh
+
 # Build the runner image with a temporary policy on a disposable hosted runner.
 runner-vm-ci:
     #!/usr/bin/env bash
@@ -25,8 +29,9 @@ check:
     bun sh/gh/check-runs.ts
     python3 bench/relay.test.py
 
-# Tests of repository tooling; nightly, not on every pull request.
+# Tests of repository tooling; every `just check` and `just ci` runs them.
 test:
+    python3 test/smoke/runner.test.py
     python3 sh/coverage.test.py
     python3 sh/size/report.test.py
     python3 sh/size/release.test.py
@@ -37,6 +42,7 @@ test:
     python3 bench/ffi.test.py
     python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
+    python3 sh/large-files.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/dispatch-query.test.py --bench
     bun test sh/gh/setup.test.ts

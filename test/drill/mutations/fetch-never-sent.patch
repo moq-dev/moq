@@ -20,6 +20,6 @@ index 55006c5f7..93f2f9677 100644
 +						return Poll::Pending;
 +					}
 +
- 					let mut stream = match ready!(Stream::poll_open(
+ 					let mut stream = match ready!(Stream::poll_open_request(
  						&mut self.session,
  						self.serve.subscriber.version,

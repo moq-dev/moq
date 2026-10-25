@@ -130,7 +130,8 @@ export class Producer {
  * Subscriber for one physical track.
  *
  * Grouped authentication failure ends the track and rejects pending reads with {@link Failure}
- * `authentication`. A bad datagram is an `authentication` {@link Event} until that key is exhausted.
+ * `authentication`. A datagram that fails to open is dropped as an `identity`, `oversize`, or
+ * `authentication` {@link Event} until that key is exhausted.
  */
 export class Consumer {
 	/** The physical track name. */
@@ -179,9 +180,10 @@ export class Consumer {
 	/**
 	 * Receive the next datagram event, or `undefined` once the track ends.
 	 *
-	 * A bad tag and a duplicate are events, not track-ending errors. Rejects with
-	 * {@link Failure} `authentication` only if a grouped frame already failed, `oversize` or
-	 * `exhausted` from opening, or a net error.
+	 * A datagram that fails to open (a sequence out of range, a bad size, or a forged tag) and a
+	 * duplicate are events, not track-ending errors. Rejects with {@link Failure}
+	 * `authentication` only if a grouped frame already failed, `exhausted` from opening, or a
+	 * net error.
 	 */
 	recvDatagram(): Promise<Event | undefined> {
 		const result = this.#datagrams.then(() => this.#recvDatagram());
@@ -203,9 +205,9 @@ export class Consumer {
 
 		const { sequence, timestamp, payload } = datagram;
 		if (this.#window.isDuplicate(sequence)) return { kind: "duplicate", sequence };
-		const iv = this.#datagramKey.admitOpen(sequence, 0, payload.byteLength, MAX_DATAGRAM_PAYLOAD);
 		let plaintext: Uint8Array;
 		try {
+			const iv = this.#datagramKey.admitOpen(sequence, 0, payload.byteLength, MAX_DATAGRAM_PAYLOAD);
 			plaintext = await this.#reader.pump.run(() => {
 				this.#reader.terminal.check();
 				return this.#datagramKey.decrypt(iv, payload);
@@ -215,7 +217,9 @@ export class Consumer {
 			this.#reader.terminal.check();
 			// A bad datagram is not grouped failure: the track, its demand, and any parked grouped
 			// read stay up. `exhausted` is this key's own limit.
-			if (err instanceof Failure && err.code === "authentication") return { kind: "authentication", sequence };
+			if (!(err instanceof Failure)) throw err;
+			const kind = err.code;
+			if (kind === "authentication" || kind === "identity" || kind === "oversize") return { kind, sequence };
 			throw err;
 		}
 		this.#reader.terminal.check();

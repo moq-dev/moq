@@ -11,9 +11,8 @@ chosen after weighing its cost against today's.
 
 ## Plan
 
-Starts after [moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)
-merges (open on 2026-10-22). Re-read the landed code before designing, since
-the lease API may still move.
+[moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878) merged on
+2026-10-22; re-read the landed lease API before designing.
 
 State with #5878: qmux's `RecvStream` wraps its reader in moq-net's
 `poll::Buffered`, which returns connection credit as it reads. `max_data`
@@ -38,7 +37,7 @@ Bring the options to the maintainer with a recommendation before building:
 - **The native floor.** Lease at `MIN_RECEIVE_WINDOW` or native's 128 MiB.
   Simplest, and one behavior across transports, at the largest allowance.
 - **A smaller qmux floor.** Only lite-01/02 needs the 64 MiB term, and
-  [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) removes
+  [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) removes
   the frame term. MAX_DATA can only grow, so a session can start at the floor
   its version needs and extend once SETUP (or a WebSocket subprotocol) names a
   legacy version. A floor below some supported unit must refuse it loudly.
@@ -59,11 +58,13 @@ Measure retained bytes per session and throughput across many sessions for
 the chosen window.
 
 Public API: qmux's `RecvStream` leases natively instead of through
-`Buffered`, and its window defaults or validation change (MIGRATE.md). Wire:
+`Buffered`, and its window defaults or validation change (with a migration note). Wire:
 QMux MAX_DATA and STOP_SENDING only, no MoQ format change.
+
 
 ## Related
 
-- [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) - frame credit returns per segment, shrinking the floor's frame term
+- [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - frame credit returns per segment, shrinking the floor's frame term
 - [WebSocket caps](/quest/m2/rate-websocket.md) - paced reads on the same sessions, inside the window
 - [Transport x version benches](/quest/m2/bench-transport-sweep.md) - where a per-session memory and throughput sweep belongs
+- [qmux drives its own socket](/quest/m2/perf/stream/driver.md) - replaces qmux's reader and writer tasks and its constructors' return type

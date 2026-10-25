@@ -17,7 +17,7 @@ Docker; see [Install](/setup/install).
 | --- | --- | --- |
 | `import` | `ts`, `fmp4`, `flv`, `avc3` | Read a container from stdin (usually FFmpeg). |
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
-| `import` | `hls <url>` | Pull a remote HLS playlist. |
+| `import` | `hls <url>` | Follow a remote live HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
@@ -118,7 +118,7 @@ service; `export ts --passthrough` writes it back out. FLV accepts the same
 legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
 fMP4 import splits each fragment into one frame per sample, so players need no
-MP4 parser. `import fmp4 --passthrough` publishes each fragment whole as
+MP4 parser. `import fmp4 --cmaf` publishes each fragment whole as
 [`cmaf`](/concept/hang#container) instead, keeping the source's exact sample
 timing.
 
@@ -209,7 +209,8 @@ closes. Playback starts when the name is announced. A
 [restarted publisher](#publisher-runs) starts it over on the new run, with a
 fresh catalog, decoders, and clock. When the announcement ends, what is playing
 finishes and the player waits for the name to return. The log names each run's
-epoch. A catalog with nothing this build can play still ends the player.
+epoch. A refused broadcast request or a catalog with nothing this build can
+play ends the player.
 
 Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
@@ -269,6 +270,10 @@ from H.264 rather than a larger H.265 or AV1 one. When the source changes
 resolution, rungs are resolved again: one that no longer fits finishes, and
 one whose size changed comes back under a new name (`video/360p.2`). Requires
 the `transcode` feature, plus `openh264` on a host without a hardware encoder.
+A restarted source retires the old ladder and publishes a fresh derivative
+instance at the same output path. A clean end waits for the source to return;
+stop the command to finish following. A refused source request or an encoding
+failure ends the command.
 
 ## Announced
 
@@ -381,7 +386,7 @@ MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
 so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
-`--cluster-connect-api`) share `--connect-bind` with `--connect`, and each binds
+`--cluster-api-url`) share `--connect-bind` with `--connect`, and each binds
 it, while LAN dials take an ephemeral port. So a fixed `--connect-bind` port with
 both `--connect` and a WAN cluster peer is refused at startup: use port 0, or drop
 `--connect` (unset `MOQ_CONNECT` if it supplies the URL).
@@ -410,15 +415,20 @@ fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export 
 and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.
-At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
-subscriber still catching up can drain it; Ctrl-C ends that early. A gateway
+At stdin EOF, `import` keeps the finished broadcast announced for
+`--linger` (default 30 s) from the end, so a subscriber that arrives late, such
+as a player that read the final catalog after the end, still gets the tail;
+`--linger 0s` closes it at once, and Ctrl-C ends the wait early. A gateway
 import does the same at a clean end: an RTMP unpublish (`deleteStream`) or
 completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS playlist
 ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
-broadcast at once, and a reconnect, which publishes a newer
-[epoch](/concept/moq-lite#publisher-epochs) at the same path, ends the wait.
+broadcast at once. A reconnect publishes a newer
+[epoch](/concept/moq-lite#publisher-epochs) at the same path, which takes over
+the path while the old broadcast finishes its linger. `import rtsp` redials
+after every session, so it closes each run at once and refuses `--linger`, as
+do `import archive`, `import capture`, and a WHEP pull (`import rtc --connect`).
 
-`export ts`, `export flv`, and `export mkv` take `--delay` instead, like an SRT
+`export ts`, `export flv`, `export rtmp`, and `export mkv` take `--delay` instead, like an SRT
 receiver's latency, all tracks in decode order, so two exporters of one broadcast
 emit the same order. FLV and MKV mux each frame that long after its decode time
 (default 500 ms). TS output runs that far behind the source (default 1 s): the
@@ -429,7 +439,7 @@ top. A frame arriving after its deadline is dropped, and video resumes at its
 next keyframe. The delay also bounds how stale a group may get, so `--delay 0`
 writes each frame as soon as it is read and drops none as late, but still skips
 a stalled group once a newer one is ready.
-FLV and MKV reject their former `--max-delay` spelling with a migration
+FLV, MKV and RTMP refuse the released `--max-age` spelling with a migration
 message. The output follows the source's clock within what ISO/IEC 13818-1
 allows a TS PCR. A source further off fails the export, naming its rate, once
 it has used half the delay; a brief network stall only drops what it made late.
@@ -439,43 +449,27 @@ and writes its packets back out unchanged, from its first group on, each run
 between two PCRs `--delay` after the first one's time on the source clock. The
 output is exactly as conformant as the source, and two exporters emit the same
 bytes. A run that arrives after its deadline is dropped and counted, leaving a
-continuity error, and the rest carry on. It takes neither `--linger`,
+continuity error, and the rest carry on. It takes neither `--follow`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-`export ts --sync` renders every packet from the broadcast alone, so two exports
-of it, joined at different moments and fed with different skew, emit identical
-TS for the content both receive, continuity counters included, as the legs of a
-1+1 pair must; an SMPTE ST 2022-7 pair also needs identical RTP framing around
-it, which this command does not write. Each PID gets a fixed lane of the constant rate, sized
-for its codec's most, with video taking the rest; content one leg lacks leaves
-its packets as stuffing there. The PCR rides a PID of its own, and each PID's
-continuity counter restarts at every group with the break flagged. It needs a
-constant rate, the same on every leg since the lanes follow from it
-(`--mux-rate`, or the catalog's), costing headroom over the
-source's (a 10 Mb/s channel needs about 12), and takes neither `--stitch` nor
-`--passthrough`. A group that starts behind the one before it, on a lane too
-narrow to absorb that one, is logged and counted in `overruns`: the legs can
-differ there. So can reordered video whose SPS declares no reorder depth
-(`max_num_reorder_frames`), which is logged, and SI while one leg holds an older
-revision than the other or around an SI table the catalog adds or drops, which
-each leg takes up when its catalog update arrives.
-
-A stdout export ends with the broadcast. `export ts --linger 10s` waits that
+A stdout export ends with the broadcast. `export ts --follow 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
-stream. A return that cannot be read yet, such as one still routed through a
-dead session, keeps it waiting for the next announcement; if the linger runs
-out first, it exits 1 with that error. A replacement (a restarted publisher, under a new
+stream. A return that refuses its catalog keeps it waiting for the next
+announcement; if the follow runs out first, it exits 1 with that refusal. One
+that goes before serving, such as one still routed through a dead session, is
+no return. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
-the break. `--linger` also bounds a mid-stream stitch from the replacement
-announcement through its first catalog snapshot; expiry exits 1. The default
-`--linger 0s` follows only a replacement whose catalog is already available.
-Without `--stitch` the export stays on the old publisher while it is
+the break. A stitch waits for the replacement's first catalog snapshot until it
+arrives or the replacement goes, keeping the old publisher playing meanwhile,
+so even the default `--follow 0s` switches to a replacement that is still
+starting. Without `--stitch` the export stays on the old publisher while it is
 up. Only lite-07 and moq-transport draft 17+ sessions carry epochs, so on the
-default version every return is a replacement. An export that fails while the broadcast stays up, such as on
-a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
-so the other formats refuse `--linger`.
+default version every return is a replacement. A failure other than the
+publisher leaving, such as a codec TS cannot carry, exits 1 at once. Only `ts`
+can mark a break, so the other formats refuse `--linger`, the released spelling
+of `--follow`.
 
 ## Reports and feedback
 
