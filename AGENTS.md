@@ -85,8 +85,7 @@ Wire changes should be backwards compatible for any *published* drafts/versions.
 An unpublished `-wip` version changes freely, so never defer a better wire design to keep it compatible.
 
 Pass PR bodies to `gh` on stdin (`--body-file -`); never write to a directory other agents share.
-Put every temp or scratch file (PR bodies, logs, helper scripts, temporary clones, benchmark output) in the checkout's `.tmp/`, never `/tmp`, `target/`, or a sibling of the checkout.
-The dev shell points `TMPDIR` there, so it disappears with the worktree.
+Scratch lives in the checkout's ignored `.tmp/`, where the dev shell points `TMPDIR`, not `target/`: build output may live outside the checkout and gets wiped.
 
 Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.
@@ -99,7 +98,7 @@ just fix          # Auto-fix lint/formatting, same scope
 
 These diff the branch against its base and only run the affected packages.
 
-Quests: when work mentions a quest, run `quest guide` and follow it.
+Quests: before starting work, run `quest guide` and follow it.
 The `quest` binary comes from the kixelated/quest flake input and serves the quest skills; change them upstream and bump the input.
 
 # Cross-Package Sync
