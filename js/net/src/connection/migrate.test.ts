@@ -423,8 +423,8 @@ test.each([
 		url,
 		websocket: { enabled: false },
 		goaway: { handover },
-		// Every session outlives the initial delay, so the immediate-redirect damping never applies.
-		delay: { initial: Milli(10), multiplier: 4, max: Milli(1000) },
+		// Every session outlives the healthy bar, so the immediate-redirect damping never applies.
+		delay: { initial: Milli(10), multiplier: 4, max: Milli(1000), healthy: Milli(10) },
 	});
 
 	try {
@@ -484,7 +484,7 @@ test("a redirect loop stops at the retry window", async () => {
 		url,
 		websocket: { enabled: false },
 		goaway: { handover },
-		delay: { initial: Milli(10), multiplier: 4, max: Milli(1000), timeout: Milli(150) },
+		delay: { initial: Milli(10), multiplier: 4, max: Milli(1000), healthy: Milli(10), timeout: Milli(150) },
 	});
 
 	try {
@@ -510,7 +510,7 @@ test("a loop no faster than the capped delay migrates without backing off", asyn
 		websocket: { enabled: false },
 		goaway: { handover },
 		// Each session lives exactly the cap, so it already redials no faster than the backoff would.
-		delay: { initial: Milli(10), max: life },
+		delay: { initial: Milli(10), max: life, healthy: Milli(10) },
 	});
 
 	try {
@@ -538,7 +538,7 @@ test("a one-way rolling restart migrates without backing off", async () => {
 
 	try {
 		await waitUntil(() => reload.status.peek() === "connected");
-		// Outlive the initial delay so only loop detection could slow this down.
+		// Outlive the default healthy bar (1000ms) so only loop detection could slow this down.
 		await clock.advance(Nano.fromMilli(Milli(1100)));
 		await goaway(dials[0]?.server as WebTransport, moved.href);
 		expect(await elapse(clock, () => dials.length === 2)).toBe(Milli(0));
@@ -557,13 +557,13 @@ test("repeated GOAWAYs back to the same place are restarts, not a loop", async (
 		websocket: { enabled: false },
 		goaway: { handover },
 		// Long enough that any backoff would be visible.
-		delay: { initial: Milli(300) },
+		delay: { initial: Milli(300), healthy: Milli(300) },
 	});
 
 	try {
 		for (let i = 1; i <= 3; i++) {
 			await waitUntil(() => dials.length === i && reload.status.peek() === "connected");
-			// Outlive the initial delay so only loop detection could slow this down.
+			// Outlive the healthy bar so only loop detection could slow this down.
 			await clock.advance(Nano.fromMilli(Milli(350)));
 			await goaway(dials[i - 1]?.server as WebTransport, "");
 			expect(await elapse(clock, () => dials.length === i + 1), `restart ${i}`).toBe(Milli(0));

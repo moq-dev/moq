@@ -1200,3 +1200,55 @@ test("an invalid timeout is refused when the loop is built, not by every attempt
 		);
 	}
 });
+
+// Each session lives 100 ms, well past `initial`. Only `healthy` decides whether its end is a
+// failed attempt that escalates the backoff or a healthy drop that resets it.
+for (const [healthy, gaps] of [
+	[undefined, [10, 20, 40]],
+	[Milli(50), [10, 10, 10]],
+] as const) {
+	test(`a 100 ms session with healthy ${healthy ?? "default"} waits ${gaps.join(", ")} ms`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		// Full delay every time, so the waits are exact.
+		const random = spyOn(Math, "random").mockReturnValue(1);
+		const warned = spyOn(console, "warn").mockImplementation(() => {});
+		const original = globalThis.WebTransport;
+		const url = new URL("https://relay.example/room");
+		const servers: Promise<{ abort(): void }>[] = [];
+		globalThis.WebTransport = function StubWebTransport() {
+			const pair = createMockTransportPair(Lite.ALPN_06);
+			servers.push(accept(pair.server, url));
+			return pair.client;
+		} as unknown as typeof WebTransport;
+		const reload = new Reload({
+			url,
+			websocket: { enabled: false },
+			delay: { initial: Milli(10), multiplier: 2, max: Milli(1000), healthy },
+		});
+		try {
+			const waited: number[] = [];
+			for (let session = 0; session < gaps.length; session++) {
+				await waitUntil(() => reload.status.peek() === "connected");
+				await clock.advance(Nano.fromMilli(Milli(100)));
+				(await servers[session])?.abort();
+				waited.push(await elapse(clock, () => servers.length === session + 2));
+			}
+			expect(waited).toEqual([...gaps]);
+		} finally {
+			reload.close();
+			globalThis.WebTransport = original;
+			warned.mockRestore();
+			random.mockRestore();
+			installed.close();
+		}
+	});
+}
+
+test("a non-positive healthy bar is refused when the loop is built", () => {
+	for (const healthy of [0, -1, Number.NaN]) {
+		expect(
+			() => new Reload({ url: new URL("https://example.com/"), delay: { healthy: healthy as Milli } }),
+		).toThrow(RangeError);
+	}
+});

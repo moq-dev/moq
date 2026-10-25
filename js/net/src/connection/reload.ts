@@ -30,7 +30,7 @@ import type { Probe, Stats } from "./stats.ts";
  * rejection or a refused GOAWAY redirect stops the current URL sooner. A new URL or a
  * disable/re-enable starts another sequence.
  *
- * A GOAWAY off a session that outlived {@link ReloadDelay.initial} migrates at once, unless it
+ * A GOAWAY off a session that outlived {@link ReloadDelay.healthy} migrates at once, unless it
  * sends the connection back to an endpoint that already redirected it elsewhere and the
  * session lived less than {@link ReloadDelay.max}. Two peers redirecting to each other thus
  * wait out this backoff and count against the timeout.
@@ -44,6 +44,15 @@ export type ReloadDelay = {
 
 	/** The maximum delay (default: 5000ms). */
 	max?: Milli;
+
+	/**
+	 * How long a session must stay up to count as healthy (default: 1000ms; must be positive).
+	 *
+	 * A healthy session's end resets the delay and the timeout. One that ends sooner is a
+	 * failed attempt, so a peer that accepts and then drops every session still escalates the
+	 * delay and exhausts the timeout.
+	 */
+	healthy?: Milli;
 
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
@@ -61,11 +70,11 @@ export type ReloadDelay = {
  * {@link ConnectProps.transport} is excluded: a supplied session is good for exactly one
  * connection, so the reconnect loop has nothing to reuse once that session drops. Call
  * {@link connect} directly when you have a session to hand over. Every attempt advertises
- * the default {@link ConnectProps.implementation}.
+ * the default {@link ConnectProps.implementation} and {@link ConnectProps.extensions}.
  *
  * @internal
  */
-export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport" | "implementation"> & {
+export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport" | "implementation" | "extensions"> & {
 	/** A reload owns the abort signal for each connection attempt. */
 	signal?: never;
 
@@ -98,6 +107,7 @@ const DEFAULT_DELAY: Required<ReloadDelay> = {
 	initial: Milli(1000),
 	multiplier: 2,
 	max: Milli(5000),
+	healthy: Milli(1000),
 	timeout: Milli(0),
 };
 
@@ -275,6 +285,10 @@ export class Reload {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.delay = props?.delay ?? {};
+		// Zero would count every session as healthy, resetting the retry window forever under a
+		// peer that drops each one on sight.
+		const healthy = this.delay.healthy;
+		if (healthy !== undefined && !(Milli(healthy) > 0)) throw new RangeError("delay.healthy must be positive");
 		this.goaway = props?.goaway ?? {};
 		this.redirect = this.#redirect;
 		this.versions = normalizeVersions(props);
@@ -485,7 +499,7 @@ export class Reload {
 					if (!this.#migrate(connection, at, ended)) return;
 					const after = this.#redirect.peek();
 
-					// Two peers that each outlive the initial delay can still bounce us between
+					// Two peers that each hold a session past the healthy bar can still bounce us between
 					// them forever. Returning to an endpoint that already sent us elsewhere in this
 					// run of migrations escalates the backoff, which never resets mid-loop, so the
 					// retry window still applies. A one-way rolling restart never revisits one, and
@@ -504,10 +518,10 @@ export class Reload {
 						return;
 					}
 
-					// A session that outlived the initial delay was healthy, so its handover is not a
-					// failure. One redirected almost at once still migrates, but through the backoff,
-					// so two peers bouncing us between them escalate to the capped delay.
-					if (lived < Nano.fromMilli(this.#initial())) {
+					// A healthy session's handover is not a failure. One redirected sooner still
+					// migrates, but through the backoff, so two peers bouncing us between them
+					// escalate to the capped delay.
+					if (lived < Nano.fromMilli(this.#healthy())) {
 						this.#retry(effect, connected, new Error("peer redirected immediately"));
 						return;
 					}
@@ -599,8 +613,8 @@ export class Reload {
 		if (draining) this.#end(draining);
 	}
 
-	#initial(): Milli {
-		return this.delay?.initial ?? DEFAULT_DELAY.initial;
+	#healthy(): Milli {
+		return this.delay?.healthy ?? DEFAULT_DELAY.healthy;
 	}
 
 	/**
@@ -615,7 +629,7 @@ export class Reload {
 		// optional value passes an explicit undefined, which a spread would take as the
 		// answer, turning the backoff into NaN or the window into forever.
 		const delay = this.delay ?? {};
-		const initial = this.#initial();
+		const initial = delay.initial ?? DEFAULT_DELAY.initial;
 		const multiplier = delay.multiplier ?? DEFAULT_DELAY.multiplier;
 		const max = delay.max ?? DEFAULT_DELAY.max;
 		const timeout = delay.timeout ?? DEFAULT_DELAY.timeout;
@@ -624,11 +638,10 @@ export class Reload {
 		// effect, unless a drained predecessor still serves until it retires.
 		if (this.established.peek() === undefined) this.status.set("disconnected");
 
-		// A session that outlived the initial delay was healthy, so clear the backoff and
-		// start a fresh retry window: a one-off drop should reconnect promptly. Anything
-		// shorter is a peer that accepts and immediately severs, which has to keep
-		// escalating or we hammer it forever at the initial delay.
-		if (connected !== undefined && Instant.durationSince(now(), connected) >= Nano.fromMilli(initial)) {
+		// A healthy session's end clears the backoff and starts a fresh retry window: a one-off
+		// drop should reconnect promptly. Anything shorter is a peer that accepts and soon
+		// severs, which has to keep escalating or we hammer it forever at the initial delay.
+		if (connected !== undefined && Instant.durationSince(now(), connected) >= Nano.fromMilli(this.#healthy())) {
 			this.#delay = undefined;
 			this.#deadline = undefined;
 		}
