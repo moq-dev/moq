@@ -73,8 +73,8 @@ struct Waiting {
 struct Program {
 	/// The PAT's program number.
 	number: u16,
-	/// Keeps the origin-created broadcast alive; the importer's clone doesn't.
-	broadcast: moq_net::broadcast::Producer,
+	/// Owns announcement control while the importer holds a fill clone.
+	broadcast: moq_net::origin::Publication,
 	import: Import<Ext>,
 	catalog: catalog::Producer<Ext>,
 	/// The route and catalog track until the catalog first names a servable track: announced any
@@ -343,7 +343,7 @@ impl Programs {
 		self.holdouts.remove(&number);
 		let pat = self.pat.as_ref().expect("a program waits on its PAT");
 		let name = program_broadcast(self.name.as_str(), number);
-		let mut broadcast = self
+		let broadcast = self
 			.origin
 			.create_broadcast(&name)
 			.with_context(|| format!("failed to create broadcast {name}"))?;
@@ -353,9 +353,9 @@ impl Programs {
 			.config
 			.clone()
 			.with_catalog(catalog::hang::Catalog::<Ext>::default());
-		let catalog = catalog::Producer::new(&mut broadcast, config)?;
+		let catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let pmt_pid = Pid::new(pmt_pid).expect("a packet's PID fits 13 bits");
-		let mut import = Import::new(broadcast.clone(), catalog.reserve())
+		let mut import = Import::new(broadcast.broadcast().clone(), catalog.reserve())
 			.with_program(number)
 			.with_pmt(pmt_pid, sections);
 		import.handle_pat(pat)?;
@@ -434,7 +434,11 @@ impl Programs {
 			program.catalog.finish()?;
 		}
 		anyhow::ensure!(announced, "input ended before any program declared a track");
-		Ok(self.programs.iter().map(|program| program.broadcast.clone()).collect())
+		Ok(self
+			.programs
+			.iter()
+			.map(|program| program.broadcast.broadcast().clone())
+			.collect())
 	}
 
 	/// Abort every program's catalog and media tracks with `err`. Consumes the importer.

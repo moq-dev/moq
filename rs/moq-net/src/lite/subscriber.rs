@@ -631,8 +631,9 @@ impl SubscriberDriver {
 		self.cleanup.close();
 	}
 
-	/// Read only the closed transport's buffered uni streams. Control machines
-	/// stay owned, so their cancellation guards cannot remove subscription state.
+	/// Read what the closed transport already delivered: the buffered uni streams, then
+	/// the subscribe responses. Serve machines wait for the group streams, since ending a
+	/// subscription removes the state their tails are delivered into.
 	pub fn poll_drain(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let closed = self.uni.poll(waiter).is_ready();
 		let _ = self.uni.children.poll(waiter);
@@ -640,11 +641,14 @@ impl SubscriberDriver {
 		// them can deliver it: the peer can open no more.
 		let stuck = self.subscriber.peer_setup.ietf().is_none()
 			&& self.uni.children.len() == self.subscriber.setup_waits.load(atomic::Ordering::Relaxed);
-		if closed && (self.uni.children.is_empty() || stuck) {
-			Poll::Ready(())
-		} else {
-			Poll::Pending
+		if !closed || !(self.uni.children.is_empty() || stuck) {
+			return Poll::Pending;
 		}
+		// The peer's close can win the race against a SUBSCRIBE FIN it sent first, and on
+		// Lite03/04 that FIN is the only end: read it, so the track finishes rather than
+		// aborts. Each source reads its streams once, then retires on the closed session.
+		let _ = self.sources.poll(waiter);
+		Poll::Ready(())
 	}
 
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -3853,6 +3857,58 @@ mod tests {
 		}
 	}
 
+	#[moq_clock::test]
+	async fn a_claimed_fetch_waits_only_while_wanted() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for end in ["credit", "unused", "retired"] {
+				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
+				let subscriber = Subscriber::new(SubscriberConfig {
+					runtime: crate::time::sim(),
+					session: crate::driver::Transport::new(session.clone()),
+					origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+					recv_bandwidth: None,
+					version,
+					peer_setup: lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+					peer_hop: None,
+					cost: None,
+					going_away: Default::default(),
+					auth: crate::auth::Link::new(false),
+				});
+				let route = kio::Producer::new(());
+				let serve = TrackServe {
+					validity: crate::model::broadcast::RequestValidity::token(Some(route.consume())),
+					route: None,
+					subscriber,
+					path: Path::new("room").to_owned(),
+					epoch: None,
+					name: "video".into(),
+				};
+				let info = track::Info::default().with_timescale(None);
+				let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info.clone());
+				let dynamic = track.dynamic();
+				let fetch = track.consume().fetch_group(4, None);
+				let request = dynamic.requested_fill_group().await.unwrap();
+				let mut run = FetchServeRun::new(serve, request, info);
+				let waiter = kio::Waiter::noop();
+				assert!(kio::Task::poll(&mut run, &waiter).is_pending(), "{version}: {end}");
+				assert_eq!(session.log.bi_opens(), 0);
+				if end == "credit" {
+					session.grant_credit();
+					assert!(kio::Task::poll(&mut run, &waiter).is_pending());
+					assert_eq!(session.log.bi_opens(), 1, "credit releases the FETCH");
+				}
+				if end == "retired" {
+					drop(route);
+					assert!(kio::Task::poll(&mut run, &waiter).is_ready());
+					assert!(matches!(fetch.await, Err(Error::Unroutable)));
+				} else {
+					drop(fetch);
+					assert!(kio::Task::poll(&mut run, &waiter).is_ready(), "{version}: {end}");
+				}
+			}
+		}
+	}
+
 	/// A track still waiting on TRACK_INFO ends once nobody wants it, whether its TRACK
 	/// transport header never finished, its request is stuck in
 	/// send, or its peer never answers.
@@ -6618,7 +6674,18 @@ impl kio::Task for TrackServeRun {
 		}
 		ready!(self.gate.poll_ready(waiter));
 		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
-		if !matches!(self.state, TrackRunState::Finish(_)) && self.gate.poll_denied(waiter).is_ready() {
+		// Nor on a closed session, whose grants end with it: the session's end decides how
+		// its tracks end.
+		if !matches!(self.state, TrackRunState::Finish(_))
+			&& self.gate.poll_denied(waiter).is_ready()
+			&& self
+				.serve
+				.subscriber
+				.session
+				.clone()
+				.poll_closed(&mut waiter.context())
+				.is_pending()
+		{
 			self.revoke();
 			return Poll::Ready(());
 		}
@@ -7643,7 +7710,9 @@ impl kio::Task for FetchServeRun {
 			match &mut self.state {
 				FetchRunState::Open { request } => {
 					ready!(self.gate.poll_ready(waiter));
-					let mut stream = match ready!(Stream::poll_open_request(
+					// The fill already has readers holding its demand. Backpressure keeps their
+					// owned request alive; abandoning it above releases this wait too.
+					let mut stream = match ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,
 						&mut cx
@@ -7657,7 +7726,7 @@ impl kio::Task for FetchServeRun {
 						}
 					};
 
-					// Only once the stream opens: its header can wait for send capacity and
+					// Only once the stream opens: credit and its header can wait, and
 					// re-polls this state, so logging before it repeats per poll.
 					tracing::debug!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
 
