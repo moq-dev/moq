@@ -20,8 +20,11 @@ decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left an
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
 fragmented MP4, as both an Opus and an AAC rendition, so AAC import and decode cross
 every subscriber (the wire-compat lanes send Opus alone; see
-[Released wire compatibility](#released-wire-compatibility)). The browser encodes its fake microphone playing the tone from a WAV
-file, and the Python, Go, and C++ clients encode it through `moq-ffi` at a 2.5 ms
+[Released wire compatibility](#released-wire-compatibility)). The browser decodes the picture
+and the tone from a looping file through `<moq-publish>`'s file source and encodes both, rather
+than capturing Chromium's fake camera and microphone: those run on timers that skip a late tick,
+so a runner short of CPU splices the captured tone with no timestamp gap. The Python, Go, and
+C++ clients encode it through `moq-ffi` at a 2.5 ms
 frame duration, so the matrix covers the FFI audio path with a non-default codec config.
 Each subscriber decodes every audio rendition with what it already has: moq-audio for Rust (the
 `interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
@@ -31,13 +34,19 @@ Go, and C++, `moq-c` for C, `decodebin` on each `audio_N` pad for GStreamer, and
 [`tone.py`](tone.py), which requires the
 publisher's channel count, contiguous timestamps, and each channel's tone carrying
 most of its energy by a Goertzel filter. A garbled decode (wrong channel order or
-sample rate), silence, a timestamp gap, or a rendition left undecoded fails the cell;
-a misapplied pre-skip or AAC priming only shifts the tone's phase, which this does not
-check. The browser plays each rendition in a page of its own, the player pinned to it
-by `controls.audio.target`, and runs the same filter on each channel of the player's
-audio graph. A negative control then has the Rust CLI swap its channels' tones, and
-every subscriber must refuse every rendition as the wrong tone, not fail some other
-way. `interop.sh` is the one place the tones and each publisher's codecs are chosen.
+sample rate), silence, a timestamp gap, or a rendition left undecoded fails the cell.
+Each publisher's tone starts at timestamp zero, so `--phase` also holds every Opus
+rendition's tone to its timestamps within a sample, which fails a decoder that keeps
+or drops the wrong pre-skip. It skips the browser publisher, which stamps its file
+from its own page clock, and the native-JS subscriber, which leaves the pre-skip to the
+player as WebCodecs does and stamps milliseconds. AAC is skipped until the fMP4
+importer applies the edit list holding ffmpeg's priming
+([quest](/quest/m1/fmp4-edit-lists.md)). The browser plays each rendition in a page
+of its own, the player pinned to it by `controls.audio.target`, and runs the same
+filter on each channel of the player's audio graph. A negative control then has the
+Rust CLI swap its channels' tones, and every subscriber must refuse every rendition
+as the wrong tone, not fail some other way. `interop.sh` is the one place the tones
+and each publisher's codecs are chosen.
 
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,

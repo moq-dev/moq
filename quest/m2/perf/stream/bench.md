@@ -22,13 +22,20 @@ and the micro-bench isolates qmux.
   per message and per Gbps in the same machine-readable form
   `bench/compare.py` already reads. `just bench-profile` then gives the
   flamegraph per transport.
-- **qmux micro-bench.** A Criterion target in `rs/qmux/benches` over loopback
-  TCP, swept over sessions × record size (the fan-out rule in `AGENTS.md`),
-  for tcp, tls, ws, and wss. Use the same CPU-time mode as moq-net's
-  `session` bench, not wall clock.
+- **qmux micro-bench.** A local profiling tool, not a regression series:
+  [transport sweep](/quest/m2/bench-transport-sweep.md) owns qmux's series
+  (decided 2026-10-22, maintainer). An example binary in `rs/qmux/examples`,
+  not a Cargo bench target, since Nightly runs and reports every bench target
+  (`sh/gh/nightly.test.py`). It drives loopback TCP, swept over sessions ×
+  record size (the fan-out rule in `AGENTS.md`), for tcp, tls, ws, and wss,
+  and reports process CPU time, not wall clock, so it runs under a profiler.
 
 Record the attribution in the epic README: shares for tungstenite, the
 split/pump/channel/mutex hops, per-record allocations, and TLS. Those shares
 decide whether the [codec](/quest/m2/perf/stream/codec.md) goes ahead. The
 [ablation](/quest/m2/perf/stream/ablation.md) adds a ring backend to this
 same harness.
+
+## Related
+
+- [Transport x version benches](/quest/m2/bench-transport-sweep.md) - adds qmux as a transport axis of the moq-net session bench

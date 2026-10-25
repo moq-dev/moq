@@ -158,6 +158,13 @@ func (c *CatalogProducer) SetSection(name string, value any) error {
 // RemoveSection removes an application catalog section if present.
 func (c *CatalogProducer) RemoveSection(name string) error { return c.inner.RemoveSection(name) }
 
+// Finish finishes the catalog, which ends the broadcast's content.
+//
+// Finish every track first. The broadcast stays announced and keeps serving its
+// finished tracks to late subscribers until [moq.BroadcastProducer.Close] takes it
+// offline; how long to keep it up is yours to decide.
+func (c *CatalogProducer) Finish() error { return c.inner.Finish() }
+
 // NewAudioTrackProducer imports encoded audio frames on target.
 func NewAudioTrackProducer(broadcast *moq.BroadcastProducer, target Target, init AudioInit) (*TrackProducer, error) {
 	resolved, err := targetFFI(target)
@@ -330,8 +337,6 @@ const (
 const (
 	// ContainerFormatFmp4 is fragmented MP4 / CMAF, split into one frame per sample.
 	ContainerFormatFmp4 = ffi.MoqContainerFormatFmp4
-	// ContainerFormatCmaf is fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	ContainerFormatCmaf = ffi.MoqContainerFormatCmaf
 	// ContainerFormatMkv is Matroska / WebM.
 	ContainerFormatMkv = ffi.MoqContainerFormatMkv
 	// ContainerFormatTs is an MPEG-2 transport stream.
@@ -364,17 +369,7 @@ func (m *TrackProducer) WriteFrame(frame moq.Frame) error {
 	return m.inner.WriteFrame(f)
 }
 
-// Flush records a local encoder's frame handoff on the broadcast media clock.
-// Call after WriteFrame only for local encoder output, not file or network imports.
-func (m *TrackProducer) Flush(timestamp time.Duration) error {
-	us, err := bridge.Duration(timestamp, "timestamp")
-	if err != nil {
-		return err
-	}
-	return m.inner.Flush(us)
-}
-
-// Discontinuity marks a timeline break and restarts handoff measurement, preserving advertised jitter.
+// Discontinuity marks a timeline break, preserving the advertised jitter and delay.
 func (m *TrackProducer) Discontinuity() error {
 	return m.inner.Discontinuity()
 }

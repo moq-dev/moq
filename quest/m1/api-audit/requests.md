@@ -28,4 +28,3 @@ Public API: moq-net, `@moq/net`, moq-ffi and wrappers renamed. Wire: none.
 ## Related
 
 - [Claim request type](/quest/m1/api-audit/claim-request-type.md) - reshapes the origin claim this renames
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - adds `requested_fill` to the track handle this renames

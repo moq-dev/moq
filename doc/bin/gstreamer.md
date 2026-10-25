@@ -21,7 +21,7 @@ nix shell github:moq-dev/moq/release#moq-gst --command gst-launch-1.0 -e \
 # Publish a test pattern
 gst-launch-1.0 -e videotestsrc is-live=true ! x264enc tune=zerolatency ! h264parse \
   ! video/x-h264,stream-format=byte-stream,alignment=au ! mux.sink_0 \
-  moqsink name=mux url=https://cdn.moq.dev/anon broadcast=<your-name>.hang sink_0::encoder=true
+  moqsink name=mux url=https://cdn.moq.dev/anon broadcast=<your-name>.hang
 ```
 
 Install via `apt install gstreamer1.0-moq` or `dnf install gstreamer1-moq`
@@ -49,6 +49,10 @@ and stereo use a family 0 head, and three to eight channels need
 `channel-mapping-family`, `stream-count`, `coupled-count`, and
 `channel-mapping`. Caps that omit that mapping, or that contradict the header,
 are refused. `opusenc` supplies both, so a 5.1 encode plays as six channels.
+Opus buffers are read the way `opusenc` and `moqsrc` stamp them: at the time
+their first kept sample plays, with `GstAudioClippingMeta` clipping the
+pre-skip. Each is published the pre-skip, less its own clipping, later, since
+a frame timestamp counts the pre-skip.
 
 A `text/x-raw` pad is how captions get in: ffmpeg cannot mux a subtitle track
 into fragmented MP4, so `moq import fmp4` can't carry one, while a demuxer that
@@ -58,14 +62,17 @@ directly. A cue with no duration is dropped rather than left on screen.
 Audio packets share groups of at least 20 ms while forwarding as they arrive.
 Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
-[LOC](/concept/standard#loc) instead of the legacy hang container,
-`encoder=true` marks it as fed by a local encoder, and
+[LOC](/concept/standard#loc) instead of the legacy hang container, and
 `track-status`/`track-error` report its lifecycle. Element properties:
-`url`, `broadcast`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
-`quic-keep-alive`, `linger`, and read-only `status`, `connected`, `moq-version`, and
+`url`, `broadcast`, `linger`, `connect-version`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
+`quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. The sink reconnects for as long as the pipeline runs and only
 reports `failed` on an answer redialing can't change, such as a rejected token.
+Both elements accept the same connection properties. `connect-version` is a
+comma-separated list, matching the CLI's repeatable `--connect-version`;
+unknown versions fail startup. QUIC durations are milliseconds, with zero
+disabling the local idle timeout or keep-alive.
 Each run from `READY` publishes under a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
 or moq-transport draft 17 and later, viewers switch to a restarted pipeline at once instead of stalling on the old
@@ -77,12 +84,10 @@ it is released, reaches EOS, or fails; a flush or new stream after that EOS
 holds it back again. Opaque data pads are not listed. Later
 catalog updates do not wait for newly requested pads.
 
-Once every pad reaches EOS, the sink finishes the broadcast and posts EOS.
-With `linger=true` it first keeps serving the finished broadcast until its
-media is stale (30 seconds for audio and video), so a viewer still catching up
-gets the tail, and posts EOS only then, which is when `gst-launch-1.0 -e`
-exits. Stopping the pipeline, such as a second Ctrl-C under `-e`, closes the
-broadcast at once.
+Once every pad reaches EOS, the sink keeps the finished broadcast announced
+for `linger` milliseconds (default 30000), so a subscriber that arrives late
+still gets the tail, then closes it and posts EOS. `linger=0` closes it at once,
+and stopping the pipeline (`READY` or `NULL`) during the wait closes it early.
 
 All pads share one media timeline on one wall clock. The first timed buffer places
 it using UNIX or NTP reference timestamp metadata; other clock domains use the
@@ -100,19 +105,14 @@ in the same shape as the relay's sessions track. One read returns both from
 the same instant, so their difference is 1 while connected. Unlike `status`, a
 drop you did not poll still moves both counters.
 
-Set `encoder=true` on audio and video pads a local encoder feeds
-(`x264enc`, `opusenc`, ...). The pad then measures how late each frame reaches
-the sink behind its running time and raises the catalog `jitter` by the spread,
-and `delay` by how far it trails the earliest such pad, so players buffer for an
-encoder that delivers irregularly or behind the others. Leave it off, the
-default, for file, demuxed, and network media: their arrival reflects the disk
-or the network, not the original encoder, and a GStreamer segment cannot tell
-the two apart. Text and opaque pads refuse it.
+The catalog `delay` of each pad is how far its buffers' timestamps trail ones
+the other pads already pushed, so players buffer for an encoder that delivers
+behind the others. Arrival time is never measured, so file, demuxed, and network
+media advertise the same values as a live encoder.
 
-After a pause, flush, or changed TIME segment, the next media buffer resets
-the handoff measurement baseline. The pause does not inflate
-advertised jitter, and previously measured maxima remain. Resumed timestamps
-must continue forward on the broadcast media clock.
+After a pause, flush, or changed TIME segment, the pad stops holding the others
+back until its next buffer, and previously measured maxima remain. Resumed
+timestamps must continue forward on the broadcast media clock.
 
 A video pad joining mid-GOP drops delta frames until its first keyframe. If a
 source rewinds below the producer's live edge without signalling a break, the
@@ -134,7 +134,10 @@ every returning rendition; one it omits gets EOS instead of keeping its old pad.
 Within each run, the first media frame fixes one timestamp reference and segment
 base for every pad. Audio and video keep their relative broadcast timing, even
 when their tracks use different timescales or arrive at different times. Frames
-before that reference keep an earlier PTS for downstream to clip. A new broadcast
+before that reference keep an earlier PTS for downstream to clip. Opus packets
+covering the OpusHead pre-skip carry `GstAudioClippingMeta` for it, and each
+Opus packet that keeps samples is stamped where the first one plays, so `opusdec`
+drops the priming samples and the audio lines up with video. A new broadcast
 chooses a fresh reference on the same pads; playback does not require a wall clock.
 A rendition that leaves the catalog
 gets EOS once its track ends. A broadcast that ends or loses its publisher holds
@@ -143,13 +146,13 @@ on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A refused
 connection, refused path or catalog, or malformed protocol input or catalog posts
 an error. Properties: `url`,
-`broadcast`, `versions` (comma-separated protocol versions to offer, most
+`broadcast`, `connect-version` (comma-separated protocol versions to offer, most
 preferred first; every stable version by default), `tls-disable-verify`,
-`quic-keylog`.
+`quic-idle-timeout`, `quic-keep-alive`, and `quic-keylog`.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
 To decrypt a capture, set `quic-keylog=true` on either element along with
 `SSLKEYLOGFILE`; the variable alone writes nothing, and the flag without it fails
-the start.
+the start. Existing Unix log files must be private (mode 0600); files accessible to group or others are refused.
 
 `moqsrc` creates source pads only for enabled renditions. Disabling a rendition stops its media and holds its pad idle without EOS; enabling it again resumes on the same pad.

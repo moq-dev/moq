@@ -117,19 +117,13 @@ pub struct Agent {
 }
 
 impl Agent {
-	/// Drive `rtc` over `socket`, which must have a host candidate.
+	/// Drive `rtc` over `socket`.
 	pub fn new(rtc: Rtc, socket: Socket) -> std::io::Result<Self> {
 		let Socket {
 			udp: socket,
 			locals,
 			inbound,
 		} = socket;
-		if locals.is_empty() {
-			return Err(std::io::Error::new(
-				std::io::ErrorKind::InvalidInput,
-				"no host candidate to receive on",
-			));
-		}
 		let socket_v6 = socket.local_addr()?.is_ipv6();
 		let now = Instant::now();
 		let mut agent = Self {
@@ -481,11 +475,7 @@ mod tests {
 		let local = socket.local_addr().unwrap();
 		let inbound = crate::reader(socket.clone());
 		let wire = inbound.wire.clone();
-		let socket = Socket {
-			udp: socket,
-			locals: vec![local],
-			inbound,
-		};
+		let socket = Socket::new(socket, vec![local], inbound).unwrap();
 		let mut agent = Agent::new(Rtc::builder().build(Instant::now().into_std()), socket).unwrap();
 
 		// Until tokio has seen the socket writable, a send waits in the outbox.
@@ -509,11 +499,7 @@ mod tests {
 		socket.set_nonblocking(true).unwrap();
 		let socket = Arc::new(UdpSocket::from_std(socket).unwrap());
 		let local = socket.local_addr().unwrap();
-		let socket = Socket {
-			inbound: crate::reader(socket.clone()),
-			udp: socket,
-			locals: vec![local],
-		};
+		let socket = Socket::new(socket.clone(), vec![local], crate::reader(socket)).unwrap();
 		Agent::new(Rtc::builder().build(Instant::now().into_std()), socket).unwrap()
 	}
 

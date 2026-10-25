@@ -91,9 +91,11 @@ fn uring_config(cert: &std::path::Path, key: &std::path::Path) -> Config {
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 async fn connect(client: moq_tokio::Client, url: url::Url) -> moq_tokio::Connection {
@@ -116,7 +118,10 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 
 	// The stock loop serves everything: the uring workers own QUIC, the shared
@@ -208,15 +213,23 @@ async fn uring_workers_serve_every_configured_version() {
 		let version: moq_net::Version = version.parse().expect("known version");
 		let mut config = moq_tokio::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.once = Some(true);
 		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 		config.version = vec![version];
-		(version, config.init(Default::default()).expect("client init"))
+		(
+			version,
+			config
+				.init(Default::default())
+				.expect("client init")
+				.with_reconnect(false),
+		)
 	};
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let running = tokio::spawn(relay.run());
 
@@ -302,7 +315,10 @@ async fn uring_workers_report_link_facts() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let local = relay.addr().expect("bound address");
 	let port = local.port();
 	let sessions = relay.sessions().clone();
@@ -363,7 +379,7 @@ async fn uring_workers_drain_on_the_trigger() {
 	let (cert, key) = certificate(dir.path());
 
 	let mut config = uring_config(&cert, &key);
-	config.drain_timeout = DRAIN;
+	config.drain_timeout = Some((DRAIN).into());
 	config.auth.public.clear();
 	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
@@ -478,9 +494,11 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 				for scheme in ["moql", "https"] {
 					let mut dial = moq_tokio::connect::Config::default();
 					dial.tls.fingerprint = vec![expected.clone()];
-					dial.once = Some(true);
 					dial.bind = Some("127.0.0.1:0".parse().unwrap());
-					let client = dial.init(Default::default()).expect("pinned client");
+					let client = dial
+						.init(Default::default())
+						.expect("pinned client")
+						.with_reconnect(false);
 					let url = format!("{scheme}://localhost:{port}/rotation").parse().unwrap();
 					let connection = connect(client, url).await;
 					drop(connection);
@@ -529,10 +547,9 @@ async fn workers_share_a_generated_identity() {
 		let fingerprint = http_get(addr, "/certificate.sha256").await;
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.fingerprint = vec![fingerprint];
-		dial.once = Some(true);
 		dial.bind = Some("127.0.0.1:0".parse().unwrap());
 		let url = format!("https://localhost:{port}/generated").parse().unwrap();
-		let connection = connect(dial.init(Default::default()).unwrap(), url).await;
+		let connection = connect(dial.init(Default::default()).unwrap().with_reconnect(false), url).await;
 		drop(connection);
 		trigger.start();
 		tokio::time::timeout(TIMEOUT, running)
@@ -566,18 +583,19 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	config.auth.url = Some(spawn_auth_server(mtls_only()).await);
 	config.listen.tls.root = vec![root];
 
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let running = tokio::spawn(relay.run());
 
 	let client = || {
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.insecure = Some(true);
-		dial.once = Some(true);
 		dial.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 		dial.tls.cert = Some(client_cert.clone());
 		dial.tls.key = Some(client_key.clone());
-		dial.init(Default::default()).expect("client init")
+		dial.init(Default::default())
+			.expect("client init")
+			.with_reconnect(false)
 	};
 
 	// The server grants a certificate everything, so one certificate covers
@@ -657,7 +675,7 @@ async fn uring_workers_write_qlog_traces() {
 	std::fs::create_dir(&traces).expect("create qlog dir");
 	let mut config = uring_config(&cert, &key);
 	config.quic.qlog = Some(traces.clone());
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let running = tokio::spawn(relay.run());
 
@@ -742,7 +760,7 @@ async fn uring_refusals_reach_metrics() {
 	let mut config = uring_config(&cert, &key);
 	config.auth.public = vec!["anon/**".parse().unwrap()];
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let internal = relay.internal().addr().expect("internal listener bound");
 	let running = tokio::spawn(relay.run());
@@ -829,7 +847,7 @@ async fn uring_forwards_the_setup_token() {
 	let (cert, key) = certificate(dir.path());
 	let mut config = uring_config(&cert, &key);
 	config.auth.public.clear();
-	let mut relay = Relay::load(config).await.unwrap();
+	let mut relay = Relay::load(config).await.unwrap().with_signals(false);
 	let addr = relay.addr().unwrap();
 	let mut admissions = relay.admissions().expect("embedded auth");
 	let token = moq_auth::Token {
@@ -916,7 +934,7 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 	let (cert, key) = certificate(dir.path());
 	let mut config = uring_config(&cert, &key);
 	config.auth.public.clear();
-	let mut relay = Relay::load(config).await.unwrap();
+	let mut relay = Relay::load(config).await.unwrap().with_signals(false);
 	let port = relay.addr().unwrap().port();
 	let mut admissions = relay.admissions().expect("embedded auth");
 	let deciding = tokio::spawn(async move {
@@ -952,6 +970,71 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 	let _ = running.await;
 }
 
+/// `listen.extensions` reaches the workers' SETUP, as it does the tokio listener's.
+/// A moq-transport client's connection token reaches the decider while the relay
+/// offers MoQ Auth, and is refused as unsupported once it is turned off, since no
+/// request would carry it.
+#[tokio::test]
+async fn uring_workers_offer_the_configured_extensions() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+	let grant = || moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all.clone()));
+	for offered in [true, false] {
+		let mut config = uring_config(&cert, &key);
+		config.auth.public.clear();
+		config.listen.extensions.auth = offered;
+		let mut relay = Relay::load(config).await.unwrap().with_signals(false);
+		let port = relay.addr().unwrap().port();
+		let mut admissions = relay.admissions().expect("embedded auth");
+		let running = tokio::spawn(relay.run());
+
+		let mut dial = moq_tokio::connect::Config::default();
+		dial.tls.insecure = Some(true);
+		dial.bind = Some("127.0.0.1:0".parse().unwrap());
+		dial.version = vec!["moq-transport-22".parse().unwrap()];
+		let client = dial.init(Default::default()).unwrap();
+		let url = format!("moql://127.0.0.1:{port}/extensions").parse().unwrap();
+		let (connection, ()) = tokio::join!(connect(client, url), async {
+			let admission = tokio::time::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+			assert!(!admission.attached(), "offered {offered}: the session arrived attached");
+			admission.grant(grant());
+		});
+
+		let auth = connection.auth();
+		let presented = tokio::time::timeout(TIMEOUT, auth.add("token"));
+		match offered {
+			true => {
+				let (token, ()) = tokio::join!(presented, async {
+					let admission = tokio::time::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+					assert!(admission.attached(), "an AUTH token arrived as a new session");
+					admission.grant(grant());
+				});
+				let (_, answer) = token
+					.expect("the token was never answered")
+					.expect("the token was refused");
+				assert_eq!(answer, moq_net::auth::Answer::Granted);
+			}
+			false => {
+				// Without MoQ Auth no AUTH stream carries it: only a request naming it does.
+				let (_, answer) = presented
+					.await
+					.expect("the token was never answered")
+					.expect("a moq-transport request can carry the token");
+				assert_eq!(answer, moq_net::auth::Answer::Requests, "a token without MoQ Auth");
+			}
+		}
+
+		drop(connection);
+		running.abort();
+		let _ = running.await;
+	}
+}
+
 /// `listen.timeout` bounds every handshake phase from the first packet: TLS,
 /// HTTP/3 before CONNECT, and MoQ SETUP over raw QUIC and WebTransport. Each
 /// phase closes in its own error space.
@@ -980,9 +1063,9 @@ fn uring_workers_bound_stalled_handshakes() {
 		let dir = tempfile::tempdir().expect("tempdir");
 		let (cert, key) = certificate(dir.path());
 		let mut config = uring_config(&cert, &key);
-		config.listen.timeout = Some(LISTEN);
+		config.listen.timeout = Some(LISTEN.into());
 		config.quic.congestion_control = Some(moq_tokio::quic::CongestionControl::None);
-		let relay = Relay::load(config).await.expect("load relay");
+		let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 		let port = relay.addr().expect("workers bound an address").port();
 		let addr = SocketAddr::from(([127, 0, 0, 1], port));
 		let running = tokio::spawn(relay.run());
@@ -995,7 +1078,7 @@ fn uring_workers_bound_stalled_handshakes() {
 			tls.alpn_protocols = vec![alpn.to_vec()];
 			let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
 			let mut transport = driver::TransportConfig::default();
-			transport.congestion_controller_factory(std::sync::Arc::new(driver::congestion::Unlimited));
+			transport.congestion_controller_factory(std::sync::Arc::new(moq_congestion::Unlimited));
 			let mut config = driver::ClientConfig::new(std::sync::Arc::new(crypto));
 			config.transport_config(std::sync::Arc::new(transport));
 			config
@@ -1096,20 +1179,14 @@ async fn stall_after_hello(server: SocketAddr) -> (SocketAddr, tokio::sync::ones
 /// The harness keeps only the connection target, including its span on worker and shared tasks.
 #[tokio::test]
 async fn uring_sessions_log_their_close_under_a_connection_span() {
-	use tracing_subscriber::layer::SubscriberExt;
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	if !supported() {
 		return;
 	}
 	let logs = Logs::default();
-	let subscriber = tracing_subscriber::fmt()
-		.with_ansi(false)
-		.with_writer(logs.clone())
-		.finish()
-		.with(tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO));
-	// Worker threads need the same dispatcher as the shared runtime. Global is
-	// safe because nextest runs each test in its own process.
-	tracing::subscriber::set_global_default(subscriber).expect("test owns the global subscriber");
+	let _logging = logs.capture();
+	let parent = tracing::info_span!(target: "moq_relay::connection", "embedder");
+	let _parent = parent.enter();
 	let dir = tempfile::tempdir().unwrap();
 	let (cert, key) = certificate(dir.path());
 	let relay = Relay::load(uring_config(&cert, &key))
@@ -1144,6 +1221,13 @@ async fn uring_sessions_log_their_close_under_a_connection_span() {
 	let closed: Vec<_> = text.lines().filter(|line| line.contains("connection closed")).collect();
 	assert_eq!(negotiated.len(), 2, "{text}");
 	assert_eq!(closed.len(), 2, "{text}");
+	assert!(
+		negotiated
+			.iter()
+			.chain(&closed)
+			.all(|line| line.contains("embedder:conn{")),
+		"worker and shared-runtime logs must keep their embedder parent: {text}"
+	);
 	for id in 0..2 {
 		for lines in [&negotiated, &closed] {
 			assert!(

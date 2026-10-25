@@ -30,7 +30,7 @@ key = "/var/lib/moq-relay/key.pem"
 # [acme]
 # domains = ["relay.example.com"]
 # contact = ["mailto:ops@example.com"]
-# dir = "/var/lib/moq-relay/acme"
+# cache = "/var/lib/moq-relay/acme"
 
 # Uncomment to also serve plain HTTP/WebSocket on port 80.
 # [web.http]
