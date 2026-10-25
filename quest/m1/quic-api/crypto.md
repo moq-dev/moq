@@ -39,7 +39,3 @@ that a crypto-provider-agnostic surface no longer needs.
 
 Mirror the accessors in both drivers. The Impact bullet says how
 to migrate in moq-quic, moq-tokio, and moq-uring.
-
-## Required
-
-- [Trim](/quest/m1/quic-api/trim.md) - removes the unused crypto accessors first

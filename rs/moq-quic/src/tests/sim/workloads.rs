@@ -104,15 +104,12 @@ impl Transfer {
 	fn receive(&mut self, conn: &mut Connection, id: StreamId, key: usize) -> TestCaseResult {
 		if self.received {
 			if matches!(self.end, End::Stop) {
-				prop_assert!(matches!(
-					conn.recv_stream(id).read(true),
-					Err(ReadableError::ClosedStream)
-				));
+				prop_assert!(matches!(conn.recv_stream(id).read(), Err(ReadableError::ClosedStream)));
 			}
 			return Ok(());
 		}
 		let mut stream = conn.recv_stream(id);
-		let mut chunks = stream.read(true).unwrap();
+		let mut chunks = stream.read().unwrap();
 		loop {
 			// Stop inside a chunk too, so a fully buffered stream cannot skip the stop path.
 			let max = match self.end {
@@ -121,7 +118,6 @@ impl Transfer {
 			};
 			match chunks.next(max) {
 				Ok(Some(chunk)) => {
-					prop_assert_eq!(chunk.offset, self.read as u64);
 					let end = self.read + chunk.bytes.len();
 					prop_assert!(end <= self.len);
 					prop_assert_eq!(chunk.bytes.as_ref(), payload(key, self.read..end));
