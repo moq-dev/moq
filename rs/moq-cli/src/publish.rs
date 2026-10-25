@@ -1509,7 +1509,13 @@ pub(crate) mod tests {
 		};
 		assert!(!published(), "a catalog went out before the input declared a track");
 
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
