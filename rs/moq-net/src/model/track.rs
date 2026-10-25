@@ -6165,8 +6165,10 @@ impl Cursor {
 				{
 					drops.pending.insert(consumer.sequence..end, StreamError::Old);
 				}
-				if !drift.bounded {
-					self.skip(consumer.sequence, drift.budget);
+				match drift.bounded {
+					// A re-offered group stale at the bound is final.
+					true => self.skipped.remove(consumer.sequence),
+					false => self.skip(consumer.sequence, drift.budget),
 				}
 				continue;
 			}
@@ -18619,6 +18621,36 @@ mod test {
 			.update(narrow.with_max_delay(Duration::from_secs(10)))
 			.unwrap();
 		assert_eq!(drain(&mut subscriber), vec![0, 1]);
+	}
+
+	/// A widening that covers only the newer of two skipped groups hands it out without
+	/// folding the older one into the delivered floor: a further widening still owes it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_partial_widening_keeps_the_older_skip_owed() {
+		let mut producer = track_producer("test", Info::timed());
+		let narrow = Subscription::default().with_max_delay(Duration::from_millis(1500));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		append_at(&mut producer, 0);
+		assert_eq!(drain(&mut subscriber), vec![0]);
+		for millis in [1000, 2000, 4000] {
+			append_at(&mut producer, millis);
+		}
+		assert_eq!(drain(&mut subscriber), vec![2, 3]);
+		for millis in [5000, 6000, 9000] {
+			append_at(&mut producer, millis);
+		}
+		assert_eq!(drain(&mut subscriber), vec![5, 6]);
+
+		// Group 4 reaches 6s, 3s behind the 9s edge; group 1 reaches 2s, 7s behind.
+		subscriber
+			.update(narrow.clone().with_max_delay(Duration::from_secs(4)))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![4]);
+		subscriber
+			.update(narrow.with_max_delay(Duration::from_secs(10)))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![1]);
 	}
 
 	/// How many runs of skipped groups `subscriber` holds.

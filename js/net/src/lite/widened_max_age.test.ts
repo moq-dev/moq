@@ -4,7 +4,6 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
-import type { Consumer as GroupConsumer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -15,22 +14,15 @@ import { ALPN_07_WIP, Version } from "./version.ts";
 
 const url = new URL("https://localhost:4443/test");
 
-/** Every group `reader` hands out until it goes quiet, and the read still waiting. */
-async function received(
-	reader: TrackSubscriber,
-	waiting?: Promise<GroupConsumer | undefined>,
-): Promise<{ got: number[]; waiting: Promise<GroupConsumer | undefined> }> {
+/** The next `count` groups `reader` hands out, in sequence order. */
+async function received(reader: TrackSubscriber, count: number): Promise<number[]> {
 	const got: number[] = [];
-	for (;;) {
-		const next = waiting ?? reader.recvGroup();
-		waiting = next;
-		const quiet = new Promise<"quiet">((resolve) => setTimeout(() => resolve("quiet"), 100));
-		const group = await Promise.race([next, quiet]);
-		if (group === "quiet") return { got: got.sort((a, b) => a - b), waiting: next };
-		waiting = undefined;
+	while (got.length < count) {
+		const group = await reader.recvGroup();
 		if (!group) throw new Error("the track ended");
 		got.push(group.sequence);
 	}
+	return got.sort((a, b) => a - b);
 }
 
 test("a widened maxDelay re-offers what the publisher skipped below the start", async () => {
@@ -53,12 +45,13 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	const remote = wireOf(client).consume(Path.from("room"));
 	// Group 5 ends at 6s, a full 3s behind the 9s edge.
 	const reader = remote.track("video").subscribe({ maxDelay: Milli(2500) });
-	const first = await received(reader);
-	expect(first.got).toEqual([6, 7, 8, 9]);
+	expect(await received(reader, 4)).toEqual([6, 7, 8, 9]);
 
 	reader.update({ maxDelay: Milli(6500) });
-	const widened = await received(reader, first.waiting);
-	expect(widened.got).toEqual([2, 3, 4, 5]);
+	expect(await received(reader, 4)).toEqual([2, 3, 4, 5]);
+	// Ending the track flushes anything else the publisher would send: nothing, not even a repeat.
+	producer.close();
+	expect(await reader.recvGroup()).toBeUndefined();
 
 	reader.close();
 	remote.close();

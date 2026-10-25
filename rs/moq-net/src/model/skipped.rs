@@ -43,7 +43,9 @@ impl Skipped {
 		}
 	}
 
-	/// Take the runs judged under a budget narrower than `budget`, lowest first.
+	/// The runs judged under a budget narrower than `budget`, lowest first, now judged
+	/// under `budget`: each stays until its group is handed out or skipped again, so a
+	/// newer group handed out first never folds it into the delivered floor.
 	pub fn widened(&mut self, budget: Duration) -> Vec<RangeInclusive<u64>> {
 		let Some(skipped) = self.0.as_mut().filter(|skipped| !skipped.runs.is_empty()) else {
 			return Vec::new();
@@ -51,18 +53,17 @@ impl Skipped {
 		if budget <= skipped.narrowest {
 			return Vec::new();
 		}
-		let mut widened = Vec::new();
-		let mut narrowest = None::<Duration>;
-		for (run, judged) in skipped.runs.iter() {
-			match *judged < budget {
-				true => widened.push(run.clone()),
-				false => narrowest = Some(narrowest.map_or(*judged, |narrowest| narrowest.min(*judged))),
-			}
-		}
+		let widened: Vec<_> = skipped
+			.runs
+			.iter()
+			.filter(|(_, judged)| **judged < budget)
+			.map(|(run, _)| run.clone())
+			.collect();
 		for run in &widened {
-			skipped.runs.remove(run.clone());
+			skipped.runs.insert(run.clone(), budget);
 		}
-		skipped.narrowest = narrowest.unwrap_or_default();
+		// Every run left was judged under `budget` or wider.
+		skipped.narrowest = budget;
 		widened
 	}
 
@@ -125,8 +126,12 @@ mod test {
 		assert!(skipped.widened(NARROW).is_empty(), "the same budget reverses nothing");
 		assert_eq!(skipped.widened(WIDE), vec![1..=2]);
 		assert!(skipped.widened(WIDE).is_empty(), "a run judged at the budget stays");
-		assert_eq!(skipped.widened(WIDE * 2), vec![4..=4]);
-		assert_eq!(skipped.lowest(), None);
+		assert_eq!(skipped.lowest(), Some(1), "a widened run stays until it is handed out");
+		// Rejudged under WIDE, the widened run now merges with the run already judged there.
+		assert_eq!(skipped.widened(WIDE * 2), vec![1..=2, 4..=4]);
+		skipped.remove(1);
+		skipped.remove(2);
+		assert_eq!(skipped.lowest(), Some(4));
 	}
 
 	#[test]

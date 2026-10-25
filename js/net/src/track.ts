@@ -2046,7 +2046,9 @@ export class Subscriber {
 	}
 
 	// Offer again the cached groups skipped as stale under a budget narrower than `budget`, now
-	// that it widened. Costs the skipped groups, never the cache.
+	// that it widened. Each stays recorded, judged under `budget`, until it is handed out or
+	// skipped again, so a newer one handed out first never folds it into #delivered. Costs the
+	// skipped groups, never the cache.
 	#reoffer(budget: number): void {
 		if (this.#skipped.size === 0 || budget <= this.#narrowest) return;
 		const sequences: number[] = [];
@@ -2056,9 +2058,14 @@ export class Subscriber {
 				narrowest = Math.min(narrowest, judged);
 				continue;
 			}
-			this.#skipped.delete(sequence);
 			// A sequence already reported dropped stays dropped.
-			if (runGaps(this.#reported, sequence, sequence + 1).length > 0) sequences.push(sequence);
+			if (runGaps(this.#reported, sequence, sequence + 1).length === 0) {
+				this.#skipped.delete(sequence);
+				continue;
+			}
+			this.#skipped.set(sequence, budget);
+			narrowest = budget;
+			sequences.push(sequence);
 		}
 		this.#narrowest = narrowest;
 		const producer = this.#state.producer;
@@ -2474,9 +2481,6 @@ export class Subscriber {
 		};
 		const old = () => new StreamError(StreamCode.Old, { message: "group is past the budget" });
 
-		// Keep unread groups below the floor until cache eviction: replacing the
-		// subscription can lower it, just as raising the cap re-offers held groups.
-		const index = timelineIndex(groups, start);
 		if (dispositions) {
 			// Rescanned only after it changed, so an idle poll costs nothing per drop held.
 			// Out-of-window runs were skipped, so a moved window rescans too.
@@ -2496,6 +2500,10 @@ export class Subscriber {
 		}
 		const drift = this.#drift();
 		this.#reoffer(drift.budget);
+		// Keep unread groups below the floor until cache eviction: replacing the
+		// subscription can lower it, just as raising the cap re-offers held groups. Found
+		// after the re-offer, which may insert below the floor.
+		const index = timelineIndex(groups, start);
 
 		for (;;) {
 			// The buffer is sequence-sorted, so an in-range group that arrives behind a
@@ -2521,7 +2529,9 @@ export class Subscriber {
 			}
 			if (this.#staleAt(group.sequence, drift)) {
 				group.close();
-				if (!drift.bounded) this.#skip(group.sequence, drift.budget);
+				// A re-offered group stale at the bound is final.
+				if (drift.bounded) this.#skipped.delete(group.sequence);
+				else this.#skip(group.sequence, drift.budget);
 				const dropped = report(group.sequence, group.sequence + 1, old());
 				if (dropped) return dropped;
 				continue;
