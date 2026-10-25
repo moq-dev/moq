@@ -47,6 +47,11 @@ impl VarInt {
 		self.0
 	}
 
+	/// Append this integer's QUIC variable-length encoding.
+	pub fn encode(self, output: &mut impl BufMut) {
+		Codec::encode(&self, output);
+	}
+
 	/// Compute the number of bytes needed to encode this value
 	pub(crate) const fn size(self) -> usize {
 		let x = self.0;

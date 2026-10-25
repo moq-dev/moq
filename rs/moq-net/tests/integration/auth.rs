@@ -1941,7 +1941,9 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 		assert!(matches!(concurrent, Err(Error::Duplicate)), "{:?}", concurrent.err());
 
 		first.server.drain().send(moq_net::goaway::Goaway::new()).unwrap();
-		first.client.draining().recv().await.expect("the GOAWAY");
+		support::Draining::recv(&first.client.draining())
+			.await
+			.expect("the GOAWAY");
 		let mut second = connect(options()).await;
 		let mut second_tokens = serve(second.requests.take().unwrap(), |_| Some(Grant::all()));
 		let _second_issued = presented(&mut second_tokens).await;

@@ -409,7 +409,7 @@ impl std::error::Error for NoInitialCipherSuite {}
 
 /// A QUIC-compatible TLS server configuration
 ///
-/// Quinn implicitly constructs a `QuicServerConfig` with reasonable defaults within
+/// The transport constructs a `QuicServerConfig` with reasonable defaults within
 /// [`ServerConfig::with_single_cert()`][single]. Alternatively, `QuicServerConfig`'s [`TryFrom`]
 /// implementation or `with_initial` method can be used to wrap around a custom
 /// [`rustls::ServerConfig`], in which case care should be taken around certain points:

@@ -13,6 +13,9 @@
 //! clone-able handles, bounded or unbounded, with separate wake lists for the
 //! push and pop sides.
 //!
+//! [`log`] is an append-only log whose readers take committed entries by index
+//! without a lock, for fan-out state paired with a channel that parks them.
+//!
 //! [`coop`] bounds the passes a loop makes per poll, so one that always finds
 //! work ready still yields.
 
@@ -30,6 +33,7 @@ mod sync;
 mod waiter;
 
 pub mod coop;
+pub mod log;
 
 mod consumer;
 mod pending;

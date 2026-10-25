@@ -1239,6 +1239,12 @@ pub struct moq_client_config {
 	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
 	/// decrypting a capture. Off when false; on without `SSLKEYLOGFILE` fails the dial.
 	pub quic_keylog: bool,
+
+	/// Your own `name/version` product tokens, space-separated, advertised in SETUP
+	/// ahead of this library's (`my-app/1.0 moq-c/0.7.0 moq-net-rs/0.3.10`), or NULL for none.
+	pub implementation: *const c_char,
+	/// The length in bytes of `implementation`.
+	pub implementation_len: usize,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.
@@ -1507,6 +1513,12 @@ pub struct moq_server_config {
 	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
 	/// decrypting a capture. Off when false; on without `SSLKEYLOGFILE` fails the listen.
 	pub quic_keylog: bool,
+
+	/// Your own `name/version` product tokens, advertised in SETUP ahead of this
+	/// library's, like [moq_client_config]'s `implementation`. NULL for none.
+	pub implementation: *const c_char,
+	/// The length in bytes of `implementation`.
+	pub implementation_len: usize,
 }
 
 /// Build the listener `config` describes, binding its socket.
@@ -1515,6 +1527,8 @@ pub struct moq_server_config {
 /// - Every non-NULL pointer in `config` must be valid for its length.
 unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, Error> {
 	let mut listen = moq_tokio::listen::Config::default();
+	let prefix = unsafe { ffi::parse_str_optional(config.implementation, config.implementation_len)? };
+	listen.implementation = Some(crate::client::implementation(prefix)?);
 	if let Some(bind) = unsafe { ffi::parse_str_optional(config.bind, config.bind_len)? } {
 		let bind = moq_tokio::listen::Bind::from_str(bind)
 			.map_err(|_| Error::InvalidConfig(format!("invalid bind address: {bind}")))?;
@@ -1655,6 +1669,24 @@ pub unsafe extern "C" fn moq_session_request_query(request: u32, dst: *mut moq_s
 		let request = ffi::parse_id(request)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().server.request_query(request, dst)
+	})
+}
+
+/// The implementation the client advertised in its SETUP, such as
+/// `moq-c/0.7.0 moq-net-rs/0.3.10`, or a NULL `data` if it advertised none.
+///
+/// Peer-controlled: use it for logs and rollout counts, never to authorize. The
+/// destination borrows the request's storage, like [moq_session_request_path].
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_string].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_session_request_peer_implementation(request: u32, dst: *mut moq_string) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().server.request_peer_implementation(request, dst)
 	})
 }
 

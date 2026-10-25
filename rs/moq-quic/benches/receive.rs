@@ -286,7 +286,9 @@ fn bench_reset_debt(c: &mut Criterion<ThreadCpu>) {
 						let mut busy = Duration::ZERO;
 						for _ in 0..iters {
 							let shrunk = VarInt::from_u64((window - debt) as u64).unwrap();
-							pair.server.conn().set_receive_window(shrunk);
+							let mut limits = moq_quic::Limits::default();
+							limits.receive_window = std::num::NonZeroU64::new(shrunk.into_inner());
+							pair.server.conn().set_limits(limits).unwrap();
 							let conn = pair.client();
 							let ids: Vec<_> = (0..resets)
 								.map(|_| {
@@ -309,11 +311,13 @@ fn bench_reset_debt(c: &mut Criterion<ThreadCpu>) {
 							let conn = pair.server.conn();
 							while let Some(id) = conn.streams().accept(Dir::Uni) {
 								let mut stream = conn.recv_stream(id);
-								let mut chunks = stream.read(true).unwrap();
+								let mut chunks = stream.read().unwrap();
 								assert!(matches!(chunks.next(usize::MAX), Err(ReadError::Reset(_))));
 								let _ = chunks.finalize();
 							}
-							conn.set_receive_window(VarInt::from_u64(window as u64).unwrap());
+							let mut limits = moq_quic::Limits::default();
+							limits.receive_window = std::num::NonZeroU64::new(window as u64);
+							conn.set_limits(limits).unwrap();
 							pair.settle();
 						}
 						busy

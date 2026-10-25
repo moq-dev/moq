@@ -50,6 +50,7 @@ public final class Client: Sendable {
             websocket: websocket,
             once: once,
             backoff: backoff,
+            implementation: implementation,
             publish: publish?.ffi,
             consume: consume?.ffi
         ))
