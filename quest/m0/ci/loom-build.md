@@ -7,17 +7,25 @@ build fails its own gate instead of the next Nightly.
 
 ## Plan
 
-Found 2026-10-25: `RUSTFLAGS="--cfg loom" cargo test -p moq-net --test loom
---no-run` fails on main with E0599 at `rs/moq-net/tests/loom.rs:621`:
-`Subscription::with_groups` was replaced by `with_range` in
-[moq-dev/moq#6138](https://github.com/moq-dev/moq/pull/6138), which missed the
-loom test because nothing on the PR gate builds with `--cfg loom`.
+Current main already ports the old `Subscription::with_groups` call to
+`with_range`. The first local CI run with the new compile gate exposed two
+`broadcast::Producer::route` calls made private by
+[moq-dev/moq#6744](https://github.com/moq-dev/moq/pull/6744); the model now
+observes the route through the public origin consumer instead.
 
-- Port the call to `with_range`, then run the full `just rs loom`.
-- Add a compile-only `--cfg loom` step (`--no-run`) to the changed-Rust check
-  when `kio` or `moq-net` changes, so the build break fails the PR.
-- The Loom models that exceed their branch limit or run past the job timeout
-  are tracked in [CI audit](/quest/m2/audit-ci.md); this quest only restores
-  the build.
+The implementation reuses `just rs loom --no-run` in the selected Rust
+check/lint lane when kio or moq-net changes. Selection tests cover those
+owners, unrelated crates, and avoiding duplicate work in the test lane.
+
+Remaining validation:
+
+- Complete compilation of all three Loom targets with the existing recipe.
+- Run the full `just rs loom`, recording the known execution failures separately.
+- Re-run `just ci` after the stale model is ported. The first run passed the
+  script checks and failed only on the private-method compile errors above.
+
+The Loom models that exceed their branch limit or run past the job timeout
+are tracked in [CI audit](/quest/m2/audit-ci.md); this quest restores the build
+and prevents another compile regression.
 
 Public API: none. Wire: none.
