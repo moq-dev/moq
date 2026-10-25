@@ -84,7 +84,8 @@ impl Endpoint {
 	/// Replace the server configuration, affecting new incoming connections only
 	///
 	/// Pending incoming connections retain the configuration active when they first arrived.
-	pub fn set_server_config(&mut self, server_config: Option<Arc<ServerConfig>>) {
+	#[cfg(test)]
+	pub(crate) fn set_server_config(&mut self, server_config: Option<Arc<ServerConfig>>) {
 		self.server_config = server_config;
 	}
 
@@ -808,7 +809,7 @@ impl Endpoint {
 		let payload = TokenPayload::Retry {
 			address: incoming.addresses.remote,
 			orig_dst_cid: incoming.packet.header.dst_cid,
-			issued: server_config.time_source.now(),
+			issued: moq_clock::wall(),
 		};
 		let token = Token::new(payload, &mut self.rng).encode(&*server_config.token_key);
 
@@ -1006,7 +1007,8 @@ impl Endpoint {
 	/// Counter for the number of bytes currently used
 	/// in the buffers for Initial and 0-RTT messages for pending incoming connections
 	/// and accepts that are still being finalized
-	pub fn incoming_buffer_bytes(&self) -> u64 {
+	#[cfg(test)]
+	pub(crate) fn incoming_buffer_bytes(&self) -> u64 {
 		self.all_incoming_buffers_total_bytes
 	}
 
@@ -1257,7 +1259,7 @@ pub struct Incoming {
 impl Incoming {
 	/// The local IP address which was used when the peer established the connection
 	///
-	/// This has the same behavior as [`Connection::local_ip`].
+	/// Returns `None` when the receiving socket did not report a local address.
 	pub fn local_ip(&self) -> Option<IpAddr> {
 		self.addresses.local_ip
 	}
@@ -1284,11 +1286,6 @@ impl Incoming {
 	/// The inverse is not guaranteed.
 	pub fn may_retry(&self) -> bool {
 		self.token.retry_src_cid.is_none()
-	}
-
-	/// The original destination connection ID sent by the client
-	pub fn orig_dst_cid(&self) -> ConnectionId {
-		self.token.orig_dst_cid
 	}
 }
 

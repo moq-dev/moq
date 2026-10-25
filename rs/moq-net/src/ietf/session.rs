@@ -3818,7 +3818,10 @@ mod tests {
 			.expect_err("a second GOAWAY is fatal");
 			assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation, "{version:?}");
 			assert!(
-				handle.consumer().peek().is_none(),
+				!matches!(
+					handle.consumer().poll(&kio::Waiter::noop()),
+					std::task::Poll::Ready(Ok(_))
+				),
 				"{version:?}: the first GOAWAY surfaced"
 			);
 		}

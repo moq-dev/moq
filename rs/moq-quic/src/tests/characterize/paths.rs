@@ -163,7 +163,7 @@ fn duplicate_packet_is_discarded() {
 	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.stream, before + 1);
 	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
 	assert_eq!(chunks.next(usize::MAX), Err(ReadError::Blocked));
 	let _ = chunks.finalize();
@@ -316,7 +316,7 @@ fn zero_rtt_retransmit_after_retry() {
 	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.stream, 2);
 	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
 	let _ = chunks.finalize();
 }

@@ -33,5 +33,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Feature shapes in the gate](/quest/m0/nightly/feature-shapes.md) - feature-gated dead code fails the PR that adds it, not the next Nightly
 - [Nightly's base in a shallow checkout](/quest/m0/nightly/shallow-base.md) - `sh/gh/nightly.test.py` passes in Nightly's depth-1 checkout
