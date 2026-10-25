@@ -2508,6 +2508,8 @@ test.each([
 ])(
 	"a lowered floor asks the serving route for a released copy's groups (cached=%p, ordered=%p)",
 	async (cached, ordered) => {
+		const clock = new Manual();
+		const installed = clock.install();
 		const front = new Front();
 		const a = new BroadcastProducer();
 		const b = new BroadcastProducer();
@@ -2528,21 +2530,21 @@ test.each([
 		const asked = () => tb.producer.subscription.peek()?.groups?.start?.included;
 		try {
 			sub.withRange({ start: { included: 4 } });
-			await settle();
+			await clock.advance(Nano.zero);
 			for (let sequence = 0; sequence < 6; sequence++) ta.write(sequence);
 			expect(read()).toEqual([4, 5]);
 
 			if (cached) for (let sequence = 0; sequence < 6; sequence++) tb.write(sequence);
 			front.serve(b.consume());
-			await settle();
+			await clock.advance(Nano.zero);
 			tb.write(6);
 			expect(read()).toEqual([6]);
-			await settle();
+			await clock.advance(Nano.zero);
 			expect(ta.producer.demand().wanted.peek()).toBeUndefined();
 			expect(asked()).toBe(5);
 
 			sub.withRange({ start: { included: 1 } });
-			await settle();
+			await clock.advance(Nano.zero);
 			expect(asked()).toBe(ordered ? 5 : 1);
 			if (!cached) {
 				expect(read()).toEqual([]);
@@ -2556,6 +2558,7 @@ test.each([
 			front.consumer.close();
 			a.close();
 			b.close();
+			installed.close();
 		}
 	},
 );
