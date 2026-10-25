@@ -110,7 +110,8 @@ and rank its links. Do not start a second importer to create the second copy.
 
 When the serving route fails or another route with the same epoch wins, the
 subscription resumes from the first frame it lacks. This needs an explicit
-matching epoch across every hop and a surviving route that can still serve
+matching epoch across every hop, routes whose copies report identical track
+info (so the same protocol and draft on each), and a surviving route that can still serve
 those frames within the broadcast's retention. It preserves broadcast
 continuity, but a late recovery can still miss playback deadlines. Losing the
 only publisher cannot be repaired by adding routes to it.

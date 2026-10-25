@@ -107,7 +107,7 @@ impl Config {
 	}
 
 	/// The linger after command-line overrides; `None` keeps the producer's default.
-	pub(crate) fn linger(&self) -> Option<Duration> {
+	pub fn linger(&self) -> Option<Duration> {
 		self.linger.map(Into::into)
 	}
 
