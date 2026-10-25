@@ -4,6 +4,7 @@
 
 ```ts
 
+import type { Epoch } from '@moq/net';
 import { Getter } from '@moq/signals';
 import { GetterInit } from '@moq/signals';
 import * as Json_2 from '@moq/json';
@@ -412,6 +413,14 @@ const CompressionSchema: z_2.ZodMiniString<string>;
 
 function compressionSupported(compression: Compression): compression is KnownCompression;
 
+interface Connection {
+    evidence: Evidence[];
+    lostBytes?: number;
+    lostPackets?: number;
+    stale?: true;
+    verdict: Verdict;
+}
+
 class Consumer {
     constructor(track: Net.Track.Subscriber, props: ConsumerProps);
     readonly buffered: Getter<BufferedRanges>;
@@ -477,6 +486,8 @@ function containerSupported(container: Container_2): boolean;
 
 const DEFAULT_FORMAT: Format;
 
+function defaultThresholds(): Thresholds;
+
 function detectFormat(name: string): Format | undefined;
 
 class DuplicateRendition extends Error {
@@ -531,6 +542,12 @@ type Event_2 = {
     skip: Json_2.Window.Span;
 };
 
+interface Evidence {
+    input: Input;
+    value?: number;
+    verdict: Verdict;
+}
+
 type Format = (typeof FORMATS)[number];
 
 interface Format_2 {
@@ -556,9 +573,43 @@ interface Frame {
     timestamp: Micro;
 }
 
+declare namespace Health {
+    export {
+        defaultThresholds,
+        publisher,
+        viewer,
+        Verdict,
+        Role,
+        Observer,
+        Report_2 as Report,
+        Sample,
+        Limits,
+        Thresholds,
+        Reset,
+        Input,
+        Evidence,
+        Connection,
+        Rendition_3 as Rendition,
+        Health_2 as Health
+    }
+}
+
+interface Health_2 {
+    interval?: number;
+    observer: Observer;
+    renditions: Record<string, Rendition_3>;
+    reset?: Reset;
+    role: Role;
+    stale?: true;
+    transport: Connection;
+    verdict: Verdict;
+}
+
 type Hex = z.infer<typeof hexSchema>;
 
 const hexSchema: z.ZodMiniString<string>;
+
+type Input = "rtt" | "loss" | "headroom" | "skipped" | "late" | "errors" | "stalled";
 
 function isEcho(path: Path.Valid): boolean;
 
@@ -608,6 +659,11 @@ declare namespace Legacy {
     }
 }
 
+interface Limits {
+    degraded: number;
+    unhealthy: number;
+}
+
 const MAX_RENDITIONS = 64;
 
 function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
@@ -623,6 +679,11 @@ const MOQ_EPOCH_UNIX_MILLIS = 1577836800000;
 export { Net }
 
 const nonzeroU53Schema: z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">;
+
+interface Observer {
+    epoch?: Epoch.Valid;
+    path: Path.Valid;
+}
 
 interface Position_2 {
     frame?: number;
@@ -662,6 +723,8 @@ const ProjectionSchema: z.ZodMiniUnion<readonly [z.ZodMiniDiscriminatedUnion<[z.
     [x: string]: unknown;
     kind: string;
 }>>]>;
+
+function publisher(sample: Sample<Stats_3.Snapshot>, thresholds?: Thresholds): Health_2;
 
 type Read =
 /** A media frame from `group`. Only group equality means anything: numbers may skip. */
@@ -722,6 +785,14 @@ type Rendition = z.infer<typeof RenditionSchema>;
 
 type Rendition_2 = z.infer<typeof RenditionSchema_2>;
 
+interface Rendition_3 {
+    bitrate?: number;
+    bytes?: number;
+    evidence: Evidence[];
+    frames?: number;
+    verdict: Verdict;
+}
+
 const RenditionSchema: z.ZodMiniObject<{
     frames: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
     bytes: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
@@ -751,6 +822,15 @@ const RenditionSchema_2: z.ZodMiniObject<{
     skipped: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
     bitrate: z.ZodMiniOptional<z.ZodMiniPipe<z.ZodMiniNullable<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>, z.ZodMiniTransform<(number & z.$brand<"u53">) | undefined, (number & z.$brand<"u53">) | null>>>;
 }, z.core.$strip>;
+
+interface Report_2<S> {
+    observer: Observer;
+    snapshot: S;
+}
+
+type Reset = "decrease" | "replaced";
+
+type Role = "publisher" | "viewer";
 
 type Root = z.infer<typeof RootSchema>;
 
@@ -1347,6 +1427,13 @@ const RootSchema: z.ZodMiniObject<{
     }, z.core.$strip>, z.ZodMiniPipe<z.ZodMiniCustom<unknown, unknown>, z.ZodMiniTransform<undefined, unknown>>]>>;
 }, z.core.$loose>;
 
+interface Sample<S> {
+    age: number;
+    current: Report_2<S>;
+    interval: number;
+    previous?: Report_2<S>;
+}
+
 export { Signals }
 
 type Snapshot = z.infer<typeof SnapshotSchema>;
@@ -1501,6 +1588,23 @@ const TextSchema: z_2.ZodMiniObject<{
     }, z_2.core.$strip>>;
 }, z_2.core.$strip>;
 
+interface Thresholds {
+    publisher: {
+        skipped: Limits;
+    };
+    stale: number;
+    transport: {
+        rtt: Limits;
+        loss: Limits;
+        headroom: Limits;
+    };
+    viewer: {
+        late: Limits;
+        errors: Limits;
+        stalled: Limits;
+    };
+}
+
 declare namespace Timeline {
     export {
         Position_2 as Position,
@@ -1579,6 +1683,8 @@ class UnsupportedVersion extends Error {
     constructor(version: number);
     readonly version: number;
 }
+
+type Verdict = "unknown" | "healthy" | "degraded" | "unhealthy";
 
 const VERSION = 4;
 
@@ -2048,6 +2154,8 @@ const VideoSchema: z.ZodMiniUnion<readonly [z.ZodMiniObject<{
         delay?: (number & z.$brand<"u53">) | undefined;
     };
 }[]>>]>;
+
+function viewer(sample: Sample<Echo_3.Snapshot>, thresholds?: Thresholds): Health_2;
 
 function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): Date;
 
