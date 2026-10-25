@@ -82,13 +82,6 @@ extension VideoDecodedFrameDuration on MoqVideoDecodedFrame {
   Duration get timestamp => Duration(microseconds: timestampUs());
 }
 
-/// Duration view over a decoder's latency bound.
-extension VideoDecoderOutputDuration on MoqVideoDecoderOutput {
-  /// Upper bound on buffering before a stalled group is skipped, or null for the default.
-  Duration? get maxDelay =>
-      maxDelayUs == null ? null : Duration(microseconds: maxDelayUs!);
-}
-
 /// Input, codec settings, and publication ownership for a producer.
 typedef ProducerOptions = MoqVideoProducerOptions;
 

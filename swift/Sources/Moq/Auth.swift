@@ -1,7 +1,7 @@
 import MoqFFI
 
 /// What the peer lets this side do, in this side's own paths: the broadcast
-/// patterns it may publish and subscribe to, and `expiresUs` until it lapses.
+/// patterns it may publish and subscribe to, and `expires` until it lapses.
 /// An empty pattern list grants nothing in that direction; `**` grants everything.
 public typealias Grant = MoqFFI.MoqGrant
 

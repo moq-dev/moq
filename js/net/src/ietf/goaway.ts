@@ -13,7 +13,7 @@ export class GoAway {
 	/**
 	 * Draft-18 only (#1559): required on the control stream, absent on a request stream.
 	 * It names the receiver's Request IDs, so a client sends an odd one and a server an even one.
-	 * Draft-19 removed the field again (#1623).
+	 * Draft-22 removed the field again (#1623).
 	 */
 	requestId?: bigint;
 
