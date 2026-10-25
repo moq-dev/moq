@@ -46,7 +46,7 @@ const GOAWAY = [0x10, 0, 2, 0, 0];
 
 test("an oversized or truncated request stream message type is a protocol violation", async () => {
 	// Both drafts use leading-ones varints.
-	for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 		const oversized = Varint.encodeLeadingOnes(2n ** 53n);
 		// A two-byte varint prefix with its second byte missing.
 		const truncated = Uint8Array.of(0x80);
@@ -59,7 +59,7 @@ test("an oversized or truncated request stream message type is a protocol violat
 });
 
 test("namespace update framing refuses duplicate prefix parameters", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 		const body = [2, 2, 0x34, 1, 1, 97, 0, 1, 1, 98];
 		const reader = new Reader(undefined, Uint8Array.from([0, body.length, ...body]), version);
 		await expect(namespaceUpdate({ type: 2, reader }, version)).rejects.toBeInstanceOf(ProtocolViolation);
@@ -67,7 +67,7 @@ test("namespace update framing refuses duplicate prefix parameters", async () =>
 });
 
 test("a repeated namespace update token is a request refusal", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 		const body = [2, 2, 3, 3, 3, 0, 170, 0, 3, 3, 0, 170];
 		const reader = new Reader(undefined, Uint8Array.from([0, body.length, ...body]), version);
 		expect(await namespaceUpdate({ type: 2, reader }, version)).toEqual({
@@ -77,7 +77,7 @@ test("a repeated namespace update token is a request refusal", async () => {
 	}
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 	test(`${versionName(version)} a request nobody reads yet still refuses a second GOAWAY`, async () => {
 		const { request, closes } = requested(version, Uint8Array.of(...GOAWAY, ...GOAWAY));
 		await request.ended;
@@ -98,7 +98,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
 		expect(framed?.type).toBe(7);
 		expect(await framed?.reader.u16()).toBe(0);
 		expect(await request.next()).toBeUndefined();
-		// FIN cancels a draft-18 request; a draft-21 one lasts until reset.
+		// FIN cancels a draft-18 request; a draft-22 one lasts until reset.
 		const ended = await Promise.race([request.ended.then(() => true), Bun.sleep(10).then(() => false)]);
 		expect(ended).toBe(version === Version.DRAFT_18);
 		expect(closes).toEqual([]);
@@ -116,7 +116,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
 	});
 }
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_21, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 	test(`${versionName(version)} keeps GOAWAY state across request response phases`, async () => {
 		// GOAWAY, an empty REQUEST_OK, and another GOAWAY on the same stream.
 		const reader = new Reader(undefined, Uint8Array.of(0x10, 0, 2, 0, 0, 7, 0, 0, 0x10, 0, 2, 0, 0), version);
@@ -183,7 +183,7 @@ test("draft 14 refuses each request kind with its own error message and REQUEST_
 });
 
 test("a refusal names its Request ID on drafts 15 and 16 only", async () => {
-	for (const version of [Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_21]) {
+	for (const version of [Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_22]) {
 		const { stream, wire } = recording(version);
 		await refuse(stream, version, "fetch", refusal);
 		const r = wire();

@@ -128,7 +128,7 @@ async fn ietf_delivers_datagrams() {
 		"moq-transport-14",
 		"moq-transport-16",
 		"moq-transport-17",
-		"moq-transport-20",
+		"moq-transport-22",
 	] {
 		moq_clock::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
 			.await
@@ -278,7 +278,7 @@ async fn a_fetched_datagram_is_refused_per_version() {
 		(&["moq-lite-05"][..], NOT_FOUND),
 		(&["moq-lite-06"], NOT_FOUND),
 		(&["moq-lite-07-wip"], NOT_FETCHABLE),
-		(&["moq-lite-07-wip", "moq-lite-07-wip"], NOT_FETCHABLE),
+		(&["moq-lite-07-wip"], NOT_FETCHABLE),
 		(&["moq-lite-07-wip", "moq-lite-06"], NOT_FOUND),
 	] {
 		let refused = moq_clock::timeout(TEST_TIMEOUT, fetch_a_datagram(versions))

@@ -44,10 +44,6 @@ timer on main at 1582fdc07d:
   export-side wait becomes `--follow`.
 - Docs change inline in each quest; no separate lifecycle page.
 
-## Required
-
-- [lite-03/04 close FIN](/quest/m1/broadcast-lifecycle/lite-close-fin.md) - a graceful relay close delivers pending SUBSCRIBE FINs on lite-03 and lite-04
-
 ## Related
 
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - an SRT ingest whose peer goes silent aborts instead of finishing as if it had shut down

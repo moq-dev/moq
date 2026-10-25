@@ -548,7 +548,7 @@ just test interop-report /tmp/results.jsonl /tmp/interop-report
 `just test bare-fin` exchanges encoded subscription responses between Rust and
 JS, then feeds them into each implementation's subscriber over an in-memory
 transport. It checks bare FIN before and after SUBSCRIBE\_START on lite-05/06/07,
-and FIN without PUBLISH\_DONE on IETF draft-19. Clean-end controls use the same
+and FIN without PUBLISH\_DONE on IETF draft-18. Clean-end controls use the same
 path. This tests response interoperability, not network delivery or relay behavior.
 The interop workflow runs it alongside the real-transport matrix.
 
@@ -579,12 +579,12 @@ range is per version: JS writes lite-07's 64-bit values, which Rust reads back,
 and JS refuses them on lite-06.
 
 `ietf_datagram_interop` does the same for moq-transport's `OBJECT_DATAGRAM` on
-drafts 14 through 22: `ietf-datagram.ts` decodes Rust's datagrams and their
+each supported draft: `ietf-datagram.ts` decodes Rust's datagrams and their
 Timestamps and re-encodes them byte for byte, and Rust decodes the datagram the
 JS publisher sends.
 
 `ietf_track_status_interop` sends Rust's `TRACK_STATUS` to the JS publisher on
-drafts 14 through 22 through `track-status.ts`, and Rust decodes each
+each supported draft through `track-status.ts`, and Rust decodes each
 `TRACK_STATUS_OK` and the refusal for a missing broadcast the way its
 subscriber reads them.
 

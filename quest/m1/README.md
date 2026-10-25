@@ -128,7 +128,7 @@ Catalog HLS field.
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) - iroh, wasm, and ffi implement moq-net's `transport::poll` traits, and the remaining `web_transport_trait` adapters are deleted
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
-- [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
+- [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18 and 22, alongside local content-age enforcement
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
 - [IETF takeover](/quest/m1/ietf-takeover.md) - carry the shared takeover contract through the negotiated IETF epoch extension
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explain pinned catalogs, lazy jobs, takeover, restart and version compatibility
@@ -140,7 +140,6 @@ Catalog HLS field.
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
 - [JS reload config](/quest/m1/js-reload-config.md) - `@moq/net` reload takes Rust's `healthy` backoff and no ignored `extensions`
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
-- [JS resume reports drops](/quest/m1/resume-drops.md) - a routed JS subscriber reports its copies' dropped groups, so publishers forward SUBSCRIBE_DROP
 - [Lowered resume floor](/quest/m1/resume-floor.md) - lowering a resumed reader's floor re-offers groups only a released copy cached
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
@@ -153,13 +152,11 @@ Catalog HLS field.
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - JS moq-transport sessions never hold overlapping SUBSCRIBE_NAMESPACE requests at a peer that refuses them
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [AMF0 exact reads](/quest/m1/rtmp-amf0-exact-reads.md) - a truncated RTMP string fails with `UnexpectedEof` instead of parsing NUL padding
-- [HLS import arithmetic](/quest/m1/hls-variant-area.md) - a hostile `RESOLUTION` or media sequence cannot panic, wrap, or misorder the import
 - [HLS URL redaction](/quest/m1/hls-url-redaction.md) - no moq-hls error prints a signed URL's query or userinfo
 - [HLS redirect base](/quest/m1/hls-redirect-base.md) - relative playlist URIs resolve against a same-origin redirect's final URL
 - [DASH init readiness](/quest/m1/dash-init-ready.md) - a DASH manifest lists the renditions whose init exists instead of waiting on one that is stuck
 - [HLS dot-only names](/quest/m1/hls-dot-names.md) - a `.` or `..` rendition is refused instead of advertising a URL outside its directory
 - [MSF duplicate init](/quest/m1/msf-duplicate-init.md) - an MSF catalog refuses a repeated `initDataList` id instead of resolving it last-wins
-- [Image hardening](/quest/m1/image-hardening.md) - the relay image runs unprivileged and its builder stage is pinned
 - [Binding peer version](/quest/m1/binding-peer-version.md) - every binding names itself ahead of the Rust core in the SETUP Implementation parameter
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [HLS export tests over a session](/quest/m1/hls-session-tests.md) - an integration suite records and serves through a real moq-net session, so a publisher disconnect, finish, or takeover ends the cursor and playlists as specified
