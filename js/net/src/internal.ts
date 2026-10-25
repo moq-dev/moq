@@ -411,6 +411,11 @@ export const hooks: {
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
 	/** Re-evaluate a live-edge join at this subscriber's copy. */
+	/**
+	 * The track's exclusive end as this subscriber's copy knows it now, for a publisher
+	 * forwarding it. Readers await `finished()` instead. Assigned by `track.ts`.
+	 */
+	subscriberEnd: (subscriber: Subscriber) => Position | undefined;
 	joinSubscriber: (subscriber: Subscriber) => void;
 	/** Re-evaluate a live-edge join at a producer. */
 	joinProducer: (producer: Producer) => void;
@@ -583,6 +588,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	joinProducer: () => {
+		throw new Error("track.ts not loaded");
+	},
+	subscriberEnd: () => {
 		throw new Error("track.ts not loaded");
 	},
 	joinSubscriber: () => {

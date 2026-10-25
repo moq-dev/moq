@@ -2167,14 +2167,14 @@ test("an end a replaced copy declared holds across a swap", async () => {
 	// b serves before its subscription learns the end.
 	front.serve(b.consume());
 	await settle();
-	expect(sub.end()).toEqual({ group: 2, frame: 0 });
+	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2, frame: 0 });
 	expect(await sub.finished()).toEqual({ group: 2, frame: 0 });
 
 	// A copy declaring another end claims different content.
 	tb.producer.finishAt({ group: 3, frame: 0 });
 	await settle();
 	expect(sub.closed.peek()).toBeInstanceOf(Error);
-	expect(sub.end()).toEqual({ group: 2, frame: 0 });
+	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2, frame: 0 });
 	// Refused, the reader holds no copy.
 	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
 	expect(tb.producer.demand().wanted.peek()).toBeUndefined();
@@ -2199,7 +2199,7 @@ test("an end a replaced copy declared holds once the copy is let go in the same 
 	// A datagram read lets go of the replaced copy before its end is reported.
 	ta.producer.finishAt({ group: 2, frame: 0 });
 	expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-	expect(sub.end()).toEqual({ group: 2, frame: 0 });
+	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2, frame: 0 });
 
 	tb.producer.finishAt({ group: 3, frame: 0 });
 	await settle();
@@ -2231,7 +2231,7 @@ test("a replaced copy whose session closed locally binds no end", async () => {
 	tb.write(1);
 	await settle();
 	expect(drain(sub)).toEqual([1]);
-	expect(sub.end()).toBeUndefined();
+	expect(hooks.subscriberEnd(sub)).toBeUndefined();
 	expect(sub.closed.peek()).toBeUndefined();
 
 	sub.close();
@@ -2440,7 +2440,7 @@ test("a retained copy declaring another end after a clean end fails the reads", 
 		// The copy still holding group 1 claims another end: its content is refused.
 		ta.producer.finishAt({ group: 5, frame: 0 });
 		await settle();
-		expect(sub.end()).toEqual({ group: 3, frame: 0 });
+		expect(hooks.subscriberEnd(sub)).toEqual({ group: 3, frame: 0 });
 		await expect(sub.recvGroup()).rejects.toThrow("changed its properties");
 	} finally {
 		sub.close();

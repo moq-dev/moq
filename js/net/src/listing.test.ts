@@ -404,5 +404,5 @@ test("a lister sees the broadcast end", async () => {
 	const broadcast = new BroadcastProducer();
 	const lister = wireOf(broadcast).lister();
 	broadcast.close();
-	expect(lister.ended.peek()).toBeNull();
+	expect(lister.closed.peek()).toBeNull();
 });

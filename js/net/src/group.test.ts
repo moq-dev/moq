@@ -29,6 +29,20 @@ test("used reflects mirror demand and unused resolves when the last reader leave
 	expect(producer.demand().used.peek()).toBe(false);
 });
 
+test("unused rejects once the group closes, even while read", async () => {
+	const producer = new Producer(0);
+	const reader = producer.mirror();
+	const pending = producer.demand().unused();
+	const abort = new Error("boom");
+	producer.abort(abort);
+	await expect(pending).rejects.toBe(abort);
+
+	const finished = new Producer(1);
+	finished.finish();
+	await expect(finished.demand().unused()).rejects.toThrow("group is closed");
+	reader.close();
+});
+
 function pair(sequence: number) {
 	const producer = new Producer(sequence);
 	return { producer, consumer: producer.consume() };

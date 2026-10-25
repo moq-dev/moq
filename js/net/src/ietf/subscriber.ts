@@ -745,8 +745,8 @@ export class Subscriber {
 		try {
 			for (;;) {
 				while (!lister.used.peek()) {
-					if (lister.ended.peek() !== undefined) return;
-					await race([Signal.race(lister.used, lister.ended)]);
+					if (lister.closed.peek() !== undefined) return;
+					await race([Signal.race(lister.used, lister.closed)]);
 				}
 				lister.abort(new Error("track listing requires moq-lite-07 or newer"));
 			}

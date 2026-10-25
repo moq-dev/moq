@@ -138,9 +138,12 @@ export class Demand {
 		return this.#used;
 	}
 
-	/** Wait until all mirror readers leave or the group closes. */
+	/** Wait until all mirror readers leave. Throws once the group closes: its abort error, or a clean-close error. */
 	async unused(): Promise<void> {
-		while (this.#used.peek() && this.#state.closed.peek() === undefined) {
+		for (;;) {
+			const closed = this.#state.closed.peek();
+			if (closed !== undefined) throw closed ?? new Error("group is closed");
+			if (!this.#used.peek()) return;
 			await Signal.race(this.#used, this.#state.closed);
 		}
 	}

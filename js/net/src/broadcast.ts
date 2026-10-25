@@ -346,9 +346,11 @@ export class Demand {
 		return this.#state.used;
 	}
 
-	/** Wait until every track becomes unused or the broadcast closes. */
+	/** Wait until every track becomes unused. Throws once the broadcast closes. */
 	async unused(): Promise<void> {
-		while (this.#state.used.peek() && this.#state.closed.peek() === undefined) {
+		for (;;) {
+			if (this.#state.closed.peek() !== undefined) throw new Error("broadcast is closed");
+			if (!this.#state.used.peek()) return;
 			await Signal.race(this.#state.used, this.#state.closed);
 		}
 	}

@@ -2098,13 +2098,13 @@ test("a closed track still delivers a group parked above the cap once the cap is
 test("end reports the head after the highest produced sequence, datagrams included", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
-	expect(track.end()).toBeUndefined();
+	expect(hooks.subscriberEnd(track)).toBeUndefined();
 
 	producer.writeGroup(new GroupProducer(0));
 	producer.appendDatagram(Timestamp.fromMillis(1), enc.encode("x"));
 	producer.finish();
 	producer.close();
-	expect(track.end()).toEqual({ group: 2, frame: 0 });
+	expect(hooks.subscriberEnd(track)).toEqual({ group: 2, frame: 0 });
 });
 
 // 0 is the only encoding for "nothing produced"; an abort declares no boundary at all.
@@ -2113,12 +2113,12 @@ test("end is group 0 for an empty track and undefined after an abort", async () 
 	const emptyTrack = empty.subscribe();
 	empty.finish();
 	empty.close();
-	expect(emptyTrack.end()).toEqual({ group: 0, frame: 0 });
+	expect(hooks.subscriberEnd(emptyTrack)).toEqual({ group: 0, frame: 0 });
 
 	const aborted = new TrackProducer("test");
 	const abortedTrack = aborted.subscribe();
 	aborted.abort(new Error("boom"));
-	expect(abortedTrack.end()).toBeUndefined();
+	expect(hooks.subscriberEnd(abortedTrack)).toBeUndefined();
 });
 
 test("readFrame does not livelock when a sole group finishes before the next arrives", async () => {
@@ -2531,7 +2531,7 @@ test("finishAt declares an end ahead of the live edge without ending the track",
 	expect(first?.sequence).toBe(5);
 
 	producer.finishAt({ group: 8, frame: 0 });
-	expect(track.end()).toEqual({ group: 8, frame: 0 });
+	expect(hooks.subscriberEnd(track)).toEqual({ group: 8, frame: 0 });
 	expect(await track.finished()).toEqual({ group: 8, frame: 0 });
 
 	// Not terminal: groups below the end still arrive, including a straggler.
@@ -2548,10 +2548,10 @@ test("finishAt declares an end ahead of the live edge without ending the track",
 	producer.finish();
 	producer.close();
 	expect(await track.recvGroup()).toBeUndefined();
-	expect(track.end()).toEqual({ group: 8, frame: 0 });
+	expect(hooks.subscriberEnd(track)).toEqual({ group: 8, frame: 0 });
 
 	// A late subscriber sees the same end.
-	expect(producer.subscribe().end()).toEqual({ group: 8, frame: 0 });
+	expect(hooks.subscriberEnd(producer.subscribe())).toEqual({ group: 8, frame: 0 });
 });
 
 for (const ordered of [false, true]) {
@@ -3225,7 +3225,7 @@ test("a mid-group end survives eviction and a filtered late reader", async () =>
 		// The cap excludes the only group, so nothing is within it.
 		const reader = producer.subscribe().withRange({ end: { excluded: 5 } });
 		expect(await reader.largest()).toBeUndefined();
-		expect(reader.end()).toEqual({ group: 5, frame: 5 });
+		expect(hooks.subscriberEnd(reader)).toEqual({ group: 5, frame: 5 });
 		reader.close();
 	} finally {
 		producer.finish();
@@ -3240,7 +3240,7 @@ test("a wire end repeats or refines but never moves", () => {
 	hooks.endTrack(producer, { group: 6, frame: 0 });
 	hooks.endTrack(producer, { group: 5, frame: 5 });
 	hooks.endTrack(producer, { group: 5, frame: 5 });
-	expect(producer.subscribe().end()).toEqual({ group: 5, frame: 5 });
+	expect(hooks.subscriberEnd(producer.subscribe())).toEqual({ group: 5, frame: 5 });
 	for (const moved of [
 		{ group: 5, frame: 4 },
 		{ group: 6, frame: 0 },
@@ -3260,7 +3260,7 @@ test("a mid-group end refuses to cut existing frames", () => {
 	producer.writeGroup(group);
 	for (let i = 0; i < 6; i++) group.writeFrame({ payload: new Uint8Array([i]) });
 	expect(() => producer.finishAt({ group: 5, frame: 5 })).toThrow(ProtocolViolation);
-	expect(producer.subscribe().end()).toBeUndefined();
+	expect(hooks.subscriberEnd(producer.subscribe())).toBeUndefined();
 	producer.finishAt({ group: 5, frame: 6 });
 	producer.finish();
 	producer.close();

@@ -429,8 +429,8 @@ export class Lister {
 		return this.#listing.used;
 	}
 
-	/** Settles once the broadcast ended. */
-	get ended(): GetPromise<null> {
+	/** Settles once the broadcast ended, as every listing of it does. */
+	get closed(): GetPromise<null> {
 		return this.#listing.closed;
 	}
 

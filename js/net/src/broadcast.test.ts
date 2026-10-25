@@ -925,7 +925,8 @@ test("broadcast closure clears active demand and subscriptions", async () => {
 	expect(demand.used.peek()).toBe(true);
 	broadcast.close();
 	expect(demand.used.peek()).toBe(false);
-	await demand.unused();
+	// Like Rust, a closed broadcast rejects rather than reporting it unused.
+	await expect(demand.unused()).rejects.toThrow("broadcast is closed");
 	subscriber.close();
 	track.finish();
 	track.close();

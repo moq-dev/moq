@@ -2820,7 +2820,11 @@ async function runSessionDeath(
 	client.abort();
 	server.abort();
 	origin.close();
-	return [closed, await withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended"), track.end()];
+	return [
+		closed,
+		await withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended"),
+		hooks.subscriberEnd(track),
+	];
 }
 
 for (const [name, protocol, version] of [

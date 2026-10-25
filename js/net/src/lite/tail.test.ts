@@ -139,7 +139,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(await readAll(await reader.recvGroup())).toEqual(["1.0"]);
 		expect(await reader.recvGroup()).toBeUndefined();
 		expect(await reader.closed).toBeNull();
-		expect(reader.end()).toEqual({ group: 2, frame: 0 });
+		expect(hooks.subscriberEnd(reader)).toEqual({ group: 2, frame: 0 });
 	});
 
 	test("a group read across the subscribe stream's FIN is delivered whole", async () => {
@@ -221,7 +221,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			await settle();
 			expect(ended).toBe(false);
 			expect(reader.closed.peek()).toBeUndefined();
-			expect(reader.end()).toEqual({ group: 2, frame: 0 });
+			expect(hooks.subscriberEnd(reader)).toEqual({ group: 2, frame: 0 });
 
 			// The grace gives up on group 0, and the settled subscription ends the reader.
 			now = GRACE;
@@ -309,7 +309,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 		expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
 		expect(await reader.closed).toBeNull();
-		expect(reader.end()).toEqual({ group: 0, frame: 0 });
+		expect(hooks.subscriberEnd(reader)).toEqual({ group: 0, frame: 0 });
 	});
 
 	// lite-05 specified an inclusive end, so there the group costs only its own stream.
@@ -436,7 +436,7 @@ test("lite-07 settles a dropped range without grace", async () => {
 
 	expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
 	expect(await reader.closed).toBeNull();
-	expect(reader.end()).toEqual({ group: 3, frame: 0 });
+	expect(hooks.subscriberEnd(reader)).toEqual({ group: 3, frame: 0 });
 });
 
 for (const started of [false, true]) {
@@ -474,7 +474,7 @@ test("lite-07 FIN waits for the skipped and reset final range to settle", async 
 		finished = true;
 	});
 	// Wait for SUBSCRIBE_END to be decoded without advancing any timers.
-	while (reader.end()?.group !== 3) await Promise.resolve();
+	while (hooks.subscriberEnd(reader)?.group !== 3) await Promise.resolve();
 	expect(finished).toBe(false);
 	last.reset();
 	await last.handled;

@@ -666,9 +666,9 @@ export class Subscriber {
 	async #runListing(broadcast: Path.Valid, consumed: Consumed, lister: Lister) {
 		try {
 			for (;;) {
-				if (lister.ended.peek() !== undefined || this.#closed.signal.aborted) return;
+				if (lister.closed.peek() !== undefined || this.#closed.signal.aborted) return;
 				if (!lister.used.peek()) {
-					await untilAborted(race([Signal.race(lister.used, lister.ended)]), this.#closed.signal).catch(
+					await untilAborted(race([Signal.race(lister.used, lister.closed)]), this.#closed.signal).catch(
 						() => {},
 					);
 					continue;
@@ -703,8 +703,8 @@ export class Subscriber {
 			?.ready(broadcast, "subscribe", {
 				signal: setup,
 				until: async () => {
-					while (lister.used.peek() && lister.ended.peek() === undefined) {
-						await Signal.race(lister.used, lister.ended);
+					while (lister.used.peek() && lister.closed.peek() === undefined) {
+						await Signal.race(lister.used, lister.closed);
 					}
 				},
 			})
@@ -1349,7 +1349,10 @@ export class Subscriber {
 			let unused = group
 				.demand()
 				.unused()
-				.then((): typeof idle => idle);
+				.then(
+					(): typeof idle => idle,
+					(): typeof idle => idle,
+				);
 			// A decode consumes its frame whenever it lands, so one outstanding across a re-arm is
 			// kept and awaited again rather than abandoned with its frame.
 			let pending: Promise<WireFrame | undefined> | undefined;
@@ -1365,7 +1368,10 @@ export class Subscriber {
 							unused = group
 								.demand()
 								.unused()
-								.then((): typeof idle => idle);
+								.then(
+									(): typeof idle => idle,
+									(): typeof idle => idle,
+								);
 							continue;
 						}
 						// Abandoned mid-group: the truncated group must never end clean.
@@ -1838,7 +1844,10 @@ async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Pr
 				group
 					.demand()
 					.unused()
-					.then((): typeof idle => idle),
+					.then(
+						(): typeof idle => idle,
+						(): typeof idle => idle,
+					),
 			]),
 		);
 		if (value !== idle) return value as T;

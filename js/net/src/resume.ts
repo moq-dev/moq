@@ -890,7 +890,7 @@ class Reader implements ResumeSource {
 	// refuses an end below what it received.
 	#learnEnd(): track.Position | undefined {
 		for (const copy of this.#copies) {
-			const end = copy.sub.end();
+			const end = hooks.subscriberEnd(copy.sub);
 			if (end) this.#declare(end);
 		}
 		const declared = this.#declared;

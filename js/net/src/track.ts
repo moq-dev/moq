@@ -2144,6 +2144,8 @@ export class Subscriber {
 
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
+		hooks.subscriberEnd = (subscriber) =>
+			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek();
 		hooks.joinSubscriber = (subscriber) => {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
@@ -2315,17 +2317,6 @@ export class Subscriber {
 	/** This subscriber's current options, including defaults and the last {@link update}. */
 	get subscription(): Getter<Subscription | undefined> {
 		return this.#state.update;
-	}
-
-	/**
-	 * The track's exclusive end: the one {@link Producer.finishAt} declared, which can be
-	 * ahead of the live edge, or the head of the sequence after the highest produced once the
-	 * producer closes cleanly (`{ group: 0, frame: 0 }` for a track that produced none).
-	 * Groups and datagrams share the sequence namespace, so it can sit past the last group.
-	 * Undefined until declared, and after an abort that declared none. Mirrors the Rust `end`.
-	 */
-	end(): Position | undefined {
-		return this.#resume ? this.#resume.end() : this.#state.end.peek();
 	}
 
 	/**
@@ -2957,11 +2948,6 @@ export class Ordered {
 	/** The largest location within {@link withRange}; see {@link Subscriber.largest}. */
 	largest(): Promise<Position | undefined> {
 		return this.#subscriber.largest();
-	}
-
-	/** The track's exclusive end; see {@link Subscriber.end}. */
-	end(): Position | undefined {
-		return this.#subscriber.end();
 	}
 
 	/** Resolve with the track's exclusive end once known; see {@link Subscriber.finished}. */

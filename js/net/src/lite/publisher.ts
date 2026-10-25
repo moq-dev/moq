@@ -1177,7 +1177,7 @@ export class Publisher {
 		// Lite cannot name a frame, so a mid-group end rounds up past its group, whose own
 		// stream FIN says where it stops.
 		const boundary = () => {
-			const end = track.end();
+			const end = hooks.subscriberEnd(track);
 			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1) + 1;
 		};
 
@@ -1320,7 +1320,7 @@ export class Publisher {
 							}
 						}
 						// A declared end goes out while lower groups are still being produced.
-						if (!endSent && track.end() !== undefined) {
+						if (!endSent && hooks.subscriberEnd(track) !== undefined) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
