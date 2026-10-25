@@ -11,7 +11,8 @@
 # --deny exits 1 on any break, for backports into `release`. Without it the run
 # only reports, as the cut PR does: release-plz bumps Rust versions after the cut
 # lands, so a break there is expected and needs a MIGRATE.md entry instead.
-# For JS and FFI, any removed or changed line is a break; additions are not.
+# For JS and FFI, a removed or changed line is a break, and so is a line added
+# inside an existing declaration; only new declarations are additions.
 set -euo pipefail
 
 usage="usage: sh/api-diff/run.sh [--deny] [rust|js|ffi]..."
@@ -49,10 +50,31 @@ row() {
     printf '\n### %s\n\n%s%s\n%s\n%s\n' "$surface" '```' "$lang" "$body" '```' >>"$details"
 }
 
-# Diff a baseline file against its current one. A removed line, which includes a
-# changed one, is a break; only added lines are an addition.
+# Whether a full-context diff on stdin breaks the baseline: it removes a line,
+# which includes changing one, or adds a line inside a declaration the baseline
+# has, such as a required field on an input interface or a C struct, since a line
+# diff cannot tell which of those break callers. A line's declaration is the
+# nearest line above it indented less, so only whole new declarations are
+# additions.
+breaks() {
+    awk '
+        /^(@@|\\)/ { next }
+        { mark = substr($0, 1, 1); line = substr($0, 2) }
+        mark == "-" { broke = 1; exit }
+        line ~ /^[[:space:]]*$/ { next }
+        {
+            match(line, /^[[:space:]]*/)
+            while (depth && indent[depth] >= RLENGTH) depth--
+            if (mark == "+" && depth && parent[depth] == " ") { broke = 1; exit }
+            indent[++depth] = RLENGTH
+            parent[depth] = mark
+        }
+        END { exit !broke }'
+}
+
+# Diff a baseline file against its current one, as a break, additions, or unchanged.
 compare() {
-    local surface=$1 baseline=$2 old=$3 new=$4 body
+    local surface=$1 baseline=$2 old=$3 new=$4 body full
     if [[ ! -f "$new" ]]; then
         row "$surface" "$baseline" break "(removed)"
         return
@@ -63,9 +85,11 @@ compare() {
     fi
     # Exit 1 means the files differ; anything above that is an error.
     body=$(git diff --no-index --no-color --no-prefix -U3 "$old" "$new" | tail -n +5) || [[ $? == 1 ]]
+    # The whole file as context, so every added line has its declaration above it.
+    full=$(git diff --no-index --no-color -U"$(($(wc -l <"$old") + $(wc -l <"$new")))" "$old" "$new" | tail -n +5) || [[ $? == 1 ]]
     if [[ -z "$body" ]]; then
         row "$surface" "$baseline" unchanged
-    elif grep -q '^-' <<<"$body"; then
+    elif breaks <<<"$full"; then
         row "$surface" "$baseline" break "$body"
     else
         row "$surface" "$baseline" additions "$body"
