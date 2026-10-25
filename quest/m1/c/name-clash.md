@@ -1,40 +1,45 @@
-# [S] One C name per moq-ffi item
+# [XS] One C name per moq-ffi item
 
 ## Goal
 
 The generated C header gives every moq-ffi item its own name. Today the method
 `MoqAudioEncoder::finish` and the record `MoqAudioEncoderFinish` both map to
-`moq_audio_encoder_finish`.
+`moq_audio_encoder_finish`. Waiting on [kixelated/rust2#66](https://github.com/kixelated/rust2/pull/66), which implements the rule
+below; delete this quest once it merges.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-24: fix the C generator, not moq-ffi. The
-generator derives collision-free names, for example by qualifying a method with
-its type, so no moq-ffi item is renamed.
+Decided with the maintainer on 2026-10-24: fix the C generator, not moq-ffi, so
+no moq-ffi item is renamed. Decided 2026-10-25: the fix lands in rust2's UniFFI
+fork (`uniffi/cpp/bindgen/src/bindings/c/gen_c.rs`), not in a
+`kixelated/uniffi-bindgen-cpp` release, and the rule is an explicit method
+namespace rather than a uniform type naming change, so types keep the short
+names C users write most.
 
-The generator lives in [kixelated/rust2](https://github.com/kixelated/rust2)'s
-UniFFI fork (`uniffi/`), so the work lands there. This quest stands in for it
-until moq builds from a fork that ships the fix.
+The rule:
 
-The implementation is in
-`uniffi/cpp/bindgen/src/bindings/c/gen_c.rs` in rust2. `Gen::render` reserves
-all type names first, `render_object` then names each method
-`<type>_<method>`, and `claim` refuses a duplicate rather than generating an
-invalid header. The same ambiguity reaches constructors, generated `_free`
-functions, and async `_callback` typedefs; changing only `finish` leaves the
-naming rule ambiguous.
+- Types keep `<namespace>_<type>`.
+- Methods and named constructors are `<type>_method_<name>`:
+  `moq_audio_encoder_method_finish`, beside the record
+  `moq_audio_encoder_finish`.
+- The generator's fixed names stay: the primary constructor `<type>_new`, the
+  release functions `<type>_free`, `<record>_default`, and `<error>_message`.
+- An async call's callback typedef is its function's name plus `_callback`, so
+  a method's moves with it.
+- Top-level functions keep `<namespace>_<name>`, and data-enum variant structs
+  keep `<enum>_<variant>`.
+- Two items that still normalize to one name (`MoqFoo` and `Foo`, a function
+  and a type, a type named `<Type>Free`) are refused at generation with both
+  items named, and the Rust author renames one.
 
-Open maintainer decision: choose the generated C naming rule before changing
-symbols. Recommendation: put methods under an explicit method namespace, for
-example `moq_audio_encoder_method_finish`, while preserving record names.
-Alternative: change generated type names uniformly and preserve the short
-function names. Check the chosen rule against constructors, release functions,
-async callbacks, and normalized-name collisions, with a compiled C fixture in
-rust2. No moq-ffi item should be renamed.
+Under the old rule moq-ffi had exactly that one clash; under this rule it has
+none, and its header compiles as C11. That check stubbed `Duration`, which
+moq-ffi now uses and the C backend still refuses, another drift the generated C
+line must close.
 
-After the generator fix lands, update moq's generator pin to a revision that
-contains it and prove that the moq-ffi header generates and compiles. Today
-`flake.nix` still consumes the separate `kixelated/uniffi-bindgen-cpp` fork;
-the fix must reach the generator moq actually builds.
+moq still builds C++ from `kixelated/uniffi-bindgen-cpp`; the rule reaches
+moq's build through [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md), which
+owns the pin, and the generated C line's CI build checks the header.
 
-Public API: the generated C symbols changed by the chosen naming rule. Wire: none.
+Public API: the generated C names of methods and named constructors gain
+`_method_`. Wire: none.
