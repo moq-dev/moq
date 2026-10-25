@@ -66,7 +66,7 @@ pub use moq_quic::{
     InvalidCid, MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore, PathStats, ServerConfig, Side,
     StdSystemTime, StreamId, TimeSource, TokenLog, TokenMemoryCache, TokenReuseError, TokenStore,
     Transmit, TransportConfig, TransportErrorCode, UdpStats, ValidationTokenConfig, VarInt,
-    VarIntBoundsExceeded, Written, congestion, crypto,
+    VarIntBoundsExceeded, Written, crypto,
 };
 #[cfg(feature = "qlog")]
 pub use moq_quic::{QlogConfig, QlogStream};

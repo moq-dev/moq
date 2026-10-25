@@ -39,8 +39,8 @@ fun TrackConsumer.datagrams(): Flow<Datagram> = pull({ cancel() }) { recvDatagra
 /** Stream of tracks requested by subscribers. */
 fun BroadcastDynamic.requestedTracks(): Flow<TrackRequest> = pull({ cancel() }) { requestedTrack() }
 
-/** Stream of uncached group requests for one track. */
-fun TrackDynamic.requestedGroups(): Flow<GroupRequest> = pull({ cancel() }) { requestedGroup() }
+/** Stream of the fills readers of one track need. */
+fun TrackDynamic.requestedFills(): Flow<Fill> = pull({ cancel() }) { requestedFill() }
 
 /** Stream of broadcasts requested by consumers. */
 fun OriginDynamic.requestedBroadcasts(): Flow<BroadcastRequest> = pull({ cancel() }) { requestedBroadcast() }

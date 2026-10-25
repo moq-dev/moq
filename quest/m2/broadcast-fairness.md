@@ -86,7 +86,7 @@ good plan here". Open questions it left:
 - Subscriber aggregate forwarding: under a fair schedule the downstream max
   should stop being forwarded upstream at its source, not just be ignored by
   the next fair hop.
-- Transports without send domains (WebSocket, iroh, today's qmux) and
+- Transports without send domains (iroh, the browser backend) and
   moq-transport sessions: refuse, or degrade to strict.
 - A cheaper capability probe than opening and dropping a domain.
 

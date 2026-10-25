@@ -22,6 +22,119 @@ use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
 /// completeness has to be asked for, exactly as a real recorder does.
 const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// An AVC rendition that declares a reorder depth of two.
+fn declared_avc() -> Live {
+	Live::new(".avc1", |catalog, name| {
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			profile: 100,
+			constraints: 0,
+			level: 10,
+			inline: false,
+		});
+		config.coded_width = Some(64);
+		config.coded_height = Some(64);
+		config.reorder = Some(2);
+		config.container = hang::catalog::Container::Legacy;
+		config.description = Some(
+			crate::codec::h264::build_avcc(
+				&[Bytes::from_static(crate::codec::h264::fixtures::SPS_PYRAMID)],
+				&[Bytes::from_static(PPS)],
+			)
+			.unwrap(),
+		);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
+	})
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_declared_depth_bounds_malformed_video_by_count_and_payload() {
+	for backwards in [false, true] {
+		for count in [16, 128, 1024] {
+			for size in [256, 16_384] {
+				let mut live = declared_avc();
+				for index in 0..count {
+					let mut frame = raw_frame(1_000_000 - if backwards { index } else { 0 }, b"", index == 0);
+					let mut bytes = vec![0; size];
+					bytes[..4].copy_from_slice(&((size - 4) as u32).to_be_bytes());
+					bytes[4] = if index == 0 { 0x65 } else { 0x41 };
+					frame.payload = bytes.into();
+					live.track.write(frame).unwrap();
+				}
+				live.track.finish().unwrap();
+				live.catalog.finish().unwrap();
+				let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+					.with_fragment_duration(std::time::Duration::ZERO)
+					.with_replay();
+				export.next().await.unwrap().unwrap();
+				let mut refused = false;
+				loop {
+					match export.next().await {
+						Err(err) => {
+							assert!(err.to_string().contains("video"), "{err}");
+							refused = true;
+							break;
+						}
+						Ok(None) => break,
+						Ok(Some(_)) => {}
+					}
+					assert!(export.held() <= 2, "a depth-two clock");
+				}
+				assert!(refused, "backwards={backwards} count={count} size={size}");
+				assert!(export.held() <= 2 && export.buffered() <= 4);
+			}
+		}
+	}
+}
+
+/// MKV retains PTS while signed, group-local DTS orders video against audio.
+#[tokio::test(start_paused = true)]
+async fn declared_reorder_starts_before_zero_and_resets_each_group() {
+	let mut live = declared_avc();
+	let mut audio = live.add_track("audio", |catalog, name| {
+		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		config.container = hang::catalog::Container::Legacy;
+		catalog.modify().unwrap().audio.renditions.insert(name, config);
+	});
+	for start in [0, 400_000] {
+		for (index, offset) in [0, 160_000, 80_000, 40_000, 120_000].into_iter().enumerate() {
+			let payload = if index == 0 {
+				&b"\x00\x00\x00\x01\x65"[..]
+			} else {
+				&b"\x00\x00\x00\x01\x41"[..]
+			};
+			live.track
+				.write(raw_frame(start + offset, payload, index == 0))
+				.unwrap();
+		}
+		audio.write(raw_frame(start, b"audio", true)).unwrap();
+	}
+	live.track.finish().unwrap();
+	audio.finish().unwrap();
+	live.catalog.finish().unwrap();
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+		.with_delay(std::time::Duration::from_secs(5))
+		.with_fragment_duration(std::time::Duration::ZERO)
+		.with_replay();
+	export.next().await.unwrap().unwrap();
+	let mut timestamps = Vec::new();
+	while let Some(chunk) = export.next().await.unwrap() {
+		let mut cursor = Cursor::new(chunk);
+		let mut base = 0;
+		for tag in WebmIterator::new(&mut cursor, &[]) {
+			match tag.unwrap() {
+				MatroskaSpec::Timestamp(timestamp) => base = timestamp as i64,
+				MatroskaSpec::SimpleBlock(bytes) => {
+					let block = SimpleBlock::try_from(bytes.as_slice()).unwrap();
+					timestamps.push(base + i64::from(block.timestamp));
+				}
+				_ => {}
+			}
+		}
+	}
+	assert_eq!(timestamps, [0, 160, 80, 0, 40, 120, 400, 560, 480, 400, 440, 520]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn export_header_roundtrip_vp9_opus() {
 	// Build a tiny synthetic WebM with one VP9 video track and one Opus audio track.

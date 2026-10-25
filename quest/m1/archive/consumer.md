@@ -58,15 +58,16 @@ Guidance:
 
 - An absent group below the newest stored one is a gap and reports as dropped.
   A group below the oldest stored key was pruned or never stored and reports
-  the same way; history-mode callers rely on the start answering with what
-  remains ([History from the retained floor](/quest/m1/archive/history-floor.md)).
+  the same way.
 - Keep a byte-bounded object LRU so neighbouring groups come from one GET.
-- When [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) lands, the
-  `track::Dynamic` handler resolves a `Time(pts)` end by picking the object
-  from the key listing, then the group containing pts from that object's
-  group timestamps, whichever quest lands second.
-- Move `rs/moq-hls/src/export/archive_tests.rs` onto a consumer broadcast with
-  its archived catalog, deleting the hand-built catalog.
+- A `track::Fill` names group positions only, so a `Time(pts)` end the cache
+  can't resolve never reaches the handler. Resolving one from the key listing
+  (the object, then the group containing pts from its group timestamps) needs
+  a fill that carries the anchor.
+- Cover HLS export over a consumer broadcast with its archived catalog:
+  playlists read only the timelines, and a segment GETs only its own
+  rendition's objects. The Reader-based `moq-hls` archive tests went with
+  `moq-archive`'s public segment API.
 - Update `doc/bin/cli.md` and `doc/bin/hls.md` inline with an export, import,
   and HLS example.
 

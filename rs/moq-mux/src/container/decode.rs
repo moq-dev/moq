@@ -1,3 +1,5 @@
+//! The bench `decode_clock` compiles this file on its own, so it names nothing else in the crate.
+
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -41,6 +43,10 @@ pub(crate) enum Settle {
 /// has waited longer than its lookahead plus the export's delay is overdue, and settled at
 /// once ([`Self::settle`]): a live source's PTS keeps pace with its arrival, so the frames
 /// held stay within what the source sends in that time, like the jitter buffer's.
+///
+/// That settling, and a delay that only grows, depend on everything read before, so two
+/// exporters that joined or lost frames at different points can clock the same frame apart.
+/// A rendition that declares its catalog `reorder` gets a [`DeclaredClock`] instead.
 ///
 /// Ticks are continuous (unwrapped) 90 kHz, so the clock never wraps mid-stream; the 33-bit
 /// wire wrap happens once at emission.

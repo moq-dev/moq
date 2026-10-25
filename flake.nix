@@ -408,16 +408,16 @@
         # Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
-          version = "0.11.0-kixelated.6+v0.32.2";
+          version = "0.11.0-kixelated.7+v0.32.2";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             rev = "v${version}";
-            hash = "sha256-r0O/iAad2Z82KhG+6AOvqESAktaR7THQQVoR2CyP+ok=";
+            hash = "sha256-nErLn2hQus5omIaFheJWy06wKQS9HiKNtksxaJm9Z8k=";
           };
 
-          cargoHash = "sha256-0YWQF8eSUsemU0Y3jgZh7Kgtno/58zBAxPYpcBwPRuk=";
+          cargoHash = "sha256-fz7fn6D12zmFFSVSdySDfNRtQe+n4KCB9bXAsuvq/QY=";
 
           # The workspace's other member is the fixture crate, which pulls the
           # uniffi examples in from git; build only the generator.

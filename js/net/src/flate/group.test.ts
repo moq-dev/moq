@@ -21,10 +21,9 @@ test("synchronous writers store slices; plain readers share one charged inflated
 	expect(stored).toBeLessThan(payload.length);
 	const inflating = spyOn(Decoder.prototype, "frame");
 	try {
-		const slice = await hooks.readGroupFrame(raw, undefined, true);
+		const slice = await hooks.readGroupFrame(raw, true);
 		expect(slice?.inflated).toBe(payload.length);
 		expect(inflating).toHaveBeenCalledTimes(0);
-		slice?.complete();
 		const a = await first.readFrame();
 		const b = await second.readFrame();
 		expect(a?.payload).toBe(b?.payload);
@@ -46,9 +45,8 @@ test("received slices are forwarded byte-for-byte and exact declarations fail al
 	const slice = new Encoder().frame(payload);
 	hooks.writeGroupFrame(group, { payload: slice }, payload.length + 1);
 	group.close();
-	const raw = await hooks.readGroupFrame(group.mirror(), undefined, true);
+	const raw = await hooks.readGroupFrame(group.mirror(), true);
 	expect(raw?.frame.payload).toBe(slice);
-	raw?.complete();
 	const bad = group.mirror();
 	await expect(bad.readFrame()).rejects.toThrow(/declared size/);
 	expect(bad.closed.peek()).toBeInstanceOf(Error);

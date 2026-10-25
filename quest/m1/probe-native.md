@@ -90,4 +90,4 @@ maintainer instead of falling back to it.
 ## Related
 
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - decides when in-flight data has expired
-- [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
+- [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - separate ProbeRTT policy change

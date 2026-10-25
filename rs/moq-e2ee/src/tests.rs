@@ -11,13 +11,14 @@ use serde_json::Value;
 use crate::credential::{Config, Credential};
 use crate::datagram::Event;
 use crate::error::Error;
-use crate::generation::{Consumer, Domain, Producer};
+use crate::generation::{Consumer, Domain, Producer, name_key_info, name_mac_info};
 use crate::limits::{
 	DATAGRAM_WINDOW, KEY_LABEL, KEY_LEN, MAX_DATAGRAM_BODY, MAX_DATAGRAM_HEADER, MAX_DATAGRAM_PAYLOAD,
 	MAX_DATAGRAM_PLAINTEXT, MAX_GROUPED_PAYLOAD, MAX_GROUPED_PLAINTEXT, MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, MAX_U53,
-	NAME_LABEL, NAME_LEN, PATH_LABEL, PROFILE, SECRET_LEN, TAG_LEN,
+	NAME_BLOCK, NAME_KEY_LABEL, NAME_MAC_LABEL, NAME_MAC_LEN, NAME_NONCE_LEN, PATH_LABEL, PATH_LEN, PROFILE,
+	SECRET_LEN, TAG_LEN,
 };
-use crate::name::Name;
+use crate::name::{Name, pad};
 use crate::protect::{nonce, open, protect};
 use crate::{group, track};
 use moq_net::Epoch;
@@ -50,14 +51,21 @@ fn credential_from(row: &Value) -> Result<Credential, String> {
 	Credential::new(Config { context, kid, secret }).map_err(|err| code(&err))
 }
 
-fn generation_from(row: &Value) -> Result<Consumer, String> {
-	let credential = credential_from(row)?;
-	let epoch: Epoch = row["epoch"]
+fn epoch_from(row: &Value) -> Result<Epoch, String> {
+	row["epoch"]
 		.as_str()
 		.unwrap_or("")
 		.parse()
-		.map_err(|_| "identity".to_string())?;
-	Ok(credential.consume(epoch))
+		.map_err(|_| "identity".to_string())
+}
+
+fn generation_from(row: &Value) -> Result<Consumer, String> {
+	Ok(credential_from(row)?.consume(epoch_from(row)?))
+}
+
+/// A producing generation under a vector's epoch, which only tests may choose.
+fn producer_from(row: &Value) -> Producer {
+	Producer::new(credential_from(row).unwrap(), epoch_from(row).unwrap())
 }
 
 fn domain_from(row: &Value) -> Domain {
@@ -83,11 +91,10 @@ fn identity_u64(value: &Value) -> Result<u64, Error> {
 	}
 }
 
-fn decode_material(text: &str) -> [u8; NAME_LEN] {
-	let mut material = [0u8; NAME_LEN];
-	let n = URL_SAFE_NO_PAD.decode_slice(text.as_bytes(), &mut material).unwrap();
-	assert_eq!(n, NAME_LEN);
-	material
+fn semantic_from(row: &Value) -> String {
+	let bytes = unhex(row["semantic_name_bytes"].as_str().unwrap());
+	assert_eq!(bytes, row["semantic_name"].as_str().unwrap().as_bytes());
+	String::from_utf8(bytes).unwrap()
 }
 
 #[test]
@@ -97,13 +104,17 @@ fn constants_match_vectors() {
 	let c = &v["constants"];
 	assert_eq!(c["salt"], hex::encode(PROFILE));
 	assert_eq!(c["path_label"], hex::encode(PATH_LABEL));
-	assert_eq!(c["name_label"], hex::encode(NAME_LABEL));
+	assert_eq!(c["name_mac_label"], hex::encode(NAME_MAC_LABEL));
+	assert_eq!(c["name_key_label"], hex::encode(NAME_KEY_LABEL));
 	assert_eq!(c["key_label"], hex::encode(KEY_LABEL));
 	assert_eq!(c["domain_group"], Domain::Group as u8);
 	assert_eq!(c["domain_datagram"], Domain::Datagram as u8);
 	assert_eq!(c["tag_len"], TAG_LEN);
 	assert_eq!(c["key_len"], KEY_LEN);
-	assert_eq!(c["name_len"], NAME_LEN);
+	assert_eq!(c["path_len"], PATH_LEN);
+	assert_eq!(c["name_mac_len"], NAME_MAC_LEN);
+	assert_eq!(c["name_nonce_len"], NAME_NONCE_LEN);
+	assert_eq!(c["name_block"], NAME_BLOCK);
 	assert_eq!(c["max_u53"], MAX_U53);
 	assert_eq!(c["max_u32"], u32::MAX);
 	assert_eq!(c["max_invocations"], MAX_INVOCATIONS);
@@ -120,60 +131,77 @@ fn constants_match_vectors() {
 fn path_vectors() {
 	for row in vectors()["paths"].as_array().unwrap() {
 		let cred = credential_from(row).unwrap();
-		let semantic = row["semantic_name"].as_str().unwrap();
-		assert_eq!(unhex(row["semantic_name_bytes"].as_str().unwrap()), semantic.as_bytes());
+		let semantic = semantic_from(row);
 		assert_eq!(hex::encode(cred.prk_bytes()), row["prk"], "{}", row["id"]);
-		assert_eq!(hex::encode(cred.path_info(semantic).unwrap()), row["path_info"]);
-		let path = cred.path(semantic).unwrap();
+		assert_eq!(hex::encode(cred.path_info(&semantic).unwrap()), row["path_info"]);
+		let path = cred.path(&semantic).unwrap();
 		assert_eq!(path.as_str(), row["opaque"]);
-		assert_eq!(hex::encode(decode_material(path.as_str())), row["path_material"]);
+		assert_eq!(
+			hex::encode(URL_SAFE_NO_PAD.decode(path.as_str()).unwrap()),
+			row["path_material"]
+		);
 	}
 }
 
 #[test]
 fn derivation_vectors() {
 	for row in vectors()["derivation"].as_array().unwrap() {
+		let id = &row["id"];
 		let generation = generation_from(row).unwrap();
-		let semantic = row["semantic_name"].as_str().unwrap();
-		assert_eq!(unhex(row["semantic_name_bytes"].as_str().unwrap()), semantic.as_bytes());
+		let (cred, epoch) = (generation.credential(), generation.epoch());
+		let semantic = semantic_from(row);
+		assert_eq!(hex::encode(cred.prk_bytes()), row["prk"], "{id}");
+		let mac_info = name_mac_info(cred, epoch);
+		assert_eq!(hex::encode(&mac_info), row["name_mac_info"], "{id}");
 		assert_eq!(
-			hex::encode(generation.credential().prk_bytes()),
-			row["prk"],
-			"{}",
-			row["id"]
+			hex::encode(cred.expand::<NAME_MAC_LEN>(&mac_info)),
+			row["name_mac"],
+			"{id}"
 		);
-		assert_eq!(hex::encode(generation.name_info(semantic).unwrap()), row["name_info"]);
-		let name = generation.name(semantic).unwrap();
-		assert_eq!(name.as_str(), row["physical_name"]);
-		assert_eq!(hex::encode(decode_material(name.as_str())), row["name_material"]);
+		let key_info = name_key_info(cred, epoch);
+		assert_eq!(hex::encode(&key_info), row["name_key_info"], "{id}");
+		assert_eq!(hex::encode(cred.expand::<KEY_LEN>(&key_info)), row["name_key"], "{id}");
+		assert_eq!(hex::encode(pad(semantic.as_bytes()).unwrap()), row["padded"], "{id}");
+		let name = generation.name(&semantic).unwrap();
+		assert_eq!(name.as_str(), row["physical_name"], "{id}");
+		let material = URL_SAFE_NO_PAD.decode(name.as_str()).unwrap();
+		assert_eq!(hex::encode(&material[..NAME_NONCE_LEN]), row["name_nonce"], "{id}");
 		let domain = domain_from(row);
 		assert_eq!(
-			hex::encode(generation.key_info(&name, domain).unwrap()),
+			hex::encode(generation.key_info(&semantic, domain).unwrap()),
 			row["key_info"]
 		);
-		assert_eq!(hex::encode(generation.key_bytes(&name, domain).unwrap()), row["key"]);
+		assert_eq!(
+			hex::encode(generation.key_bytes(&semantic, domain).unwrap()),
+			row["key"]
+		);
 	}
 }
 
 #[test]
 fn naming_vectors() {
 	let v = vectors();
-	let cred = credential_from(&v["generation"]).unwrap();
 	for row in v["naming"].as_array().unwrap() {
-		let epoch: Epoch = row["epoch"].as_str().unwrap().parse().unwrap();
-		let name = cred
-			.consume(epoch)
-			.name(row["semantic_name"].as_str().unwrap())
-			.unwrap();
-		assert_eq!(name.as_str(), row["physical_name"], "{}", row["id"]);
+		let id = &row["id"];
+		let semantic = semantic_from(row);
+		let mut generation = v["generation"].clone();
+		generation["epoch"] = row["epoch"].clone();
+		let producer = producer_from(&generation);
+		assert_eq!(hex::encode(pad(semantic.as_bytes()).unwrap()), row["padded"], "{id}");
+		let name = producer.name(&semantic).unwrap();
+		assert_eq!(name.as_str(), row["physical_name"], "{id}");
+		// The producer recovers the semantic name from the physical one alone.
+		let parsed: Name = row["physical_name"].as_str().unwrap().parse().unwrap();
+		assert_eq!(producer.open(&parsed).unwrap(), semantic, "{id}");
 	}
 }
 
 fn payload_row(row: &Value) {
 	let generation = generation_from(row).unwrap();
-	let name = generation.name(row["semantic_name"].as_str().unwrap()).unwrap();
+	let semantic = row["semantic_name"].as_str().unwrap();
+	let name = generation.name(semantic).unwrap();
 	assert_eq!(name.as_str(), row["physical_name"]);
-	let key = generation.key_bytes(&name, domain_from(row)).unwrap();
+	let key = generation.key_bytes(semantic, domain_from(row)).unwrap();
 	assert_eq!(hex::encode(key), row["key"]);
 	let group = row["group"].as_u64().unwrap();
 	let frame = row["frame"].as_u64().unwrap();
@@ -212,8 +240,8 @@ fn negative_vectors() {
 		let got = match row["operation"].as_str().unwrap() {
 			"open" => {
 				let generation = generation_from(&row["generation"]).unwrap();
-				let name: Name = row["physical_name"].as_str().unwrap().parse().unwrap();
-				let key = generation.key_bytes(&name, domain_from(row)).unwrap();
+				let semantic = row["semantic_name"].as_str().unwrap();
+				let key = generation.key_bytes(semantic, domain_from(row)).unwrap();
 				assert_eq!(hex::encode(key), row["key"]);
 				let group = row["group"].as_u64().unwrap();
 				let frame = row["frame"].as_u64().unwrap();
@@ -226,7 +254,15 @@ fn negative_vectors() {
 				(Err(e), _) | (_, Err(e)) => code(&e),
 			},
 			"generation" => generation_from(&row["generation"]).map(|_| ()).unwrap_err(),
-			"key" => code(&row["physical_name"].as_str().unwrap().parse::<Name>().unwrap_err()),
+			"name" => {
+				let producer = producer_from(&row["generation"]);
+				let opened = row["physical_name"]
+					.as_str()
+					.unwrap()
+					.parse::<Name>()
+					.and_then(|name| producer.open(&name));
+				code(&opened.unwrap_err())
+			}
 			"bytes" => {
 				let len = row["length"].as_u64().unwrap() as usize;
 				let data = vec![b'a'; len];
@@ -300,6 +336,7 @@ fn net_track(name: &Name) -> moq_net::track::Producer {
 }
 
 struct Pair {
+	semantic: String,
 	generation: Consumer,
 	net: moq_net::track::Producer,
 	producer: track::Producer,
@@ -309,10 +346,11 @@ struct Pair {
 fn pair(semantic: &str) -> Pair {
 	let generation = test_generation();
 	let net = net_track(&generation.name(semantic).unwrap());
-	let producer = generation.produce(net.clone()).unwrap();
+	let producer = generation.produce(net.clone(), semantic).unwrap();
 	let consuming = consume(&generation);
-	let consumer = consuming.consume(net.subscribe(subscribe_all())).unwrap();
+	let consumer = consuming.consume(net.subscribe(subscribe_all()), semantic).unwrap();
 	Pair {
+		semantic: semantic.to_string(),
 		generation: consuming,
 		net,
 		producer,
@@ -345,8 +383,8 @@ fn recv_datagram(consumer: &mut track::Consumer) -> Event {
 	}
 }
 
-fn datagram_ciphertext(generation: &Consumer, name: &Name, sequence: u64, plaintext: &[u8]) -> Bytes {
-	let key = generation.key_bytes(name, Domain::Datagram).unwrap();
+fn datagram_ciphertext(generation: &Consumer, semantic: &str, sequence: u64, plaintext: &[u8]) -> Bytes {
+	let key = generation.key_bytes(semantic, Domain::Datagram).unwrap();
 	protect(&key, sequence, 0, plaintext, MAX_DATAGRAM_PAYLOAD).unwrap()
 }
 
@@ -444,28 +482,41 @@ fn track_produced_once_per_generation() {
 	let generation = test_generation();
 	let name = generation.name("video").unwrap();
 	let net = net_track(&name);
-	let producer = generation.produce(net.clone()).unwrap();
+	let producer = generation.produce(net.clone(), "video").unwrap();
 	assert_eq!(producer.name(), name.as_str());
 	drop(producer);
 	let again = generation.clone();
-	assert_eq!(again.produce(net.clone()).map(|_| ()).unwrap_err().to_string(), "reuse");
+	assert_eq!(
+		again.produce(net.clone(), "video").map(|_| ()).unwrap_err().to_string(),
+		"reuse"
+	);
 	// A new epoch is a new publisher instance.
 	let fresh = generation.credential().produce();
-	fresh.produce(net_track(&fresh.name("video").unwrap())).unwrap();
+	fresh
+		.produce(net_track(&fresh.name("video").unwrap()), "video")
+		.unwrap();
 	// Consuming never claims.
-	consume(&generation).consume(net.subscribe(subscribe_all())).unwrap();
-	consume(&generation).consume(net.subscribe(subscribe_all())).unwrap();
+	consume(&generation)
+		.consume(net.subscribe(subscribe_all()), "video")
+		.unwrap();
+	consume(&generation)
+		.consume(net.subscribe(subscribe_all()), "video")
+		.unwrap();
 }
 
 #[test]
 fn refused_track_is_aborted() {
 	let generation = test_generation();
 	let name = generation.name("video").unwrap();
-	drop(generation.produce(net_track(&name)).unwrap());
+	drop(generation.produce(net_track(&name), "video").unwrap());
 	// The same physical name on another output, as a clone of the generation would claim it.
 	let net = net_track(&name);
 	assert_eq!(
-		generation.produce(net.clone()).map(|_| ()).unwrap_err().to_string(),
+		generation
+			.produce(net.clone(), "video")
+			.map(|_| ())
+			.unwrap_err()
+			.to_string(),
 		"reuse"
 	);
 	assert!(matches!(
@@ -563,24 +614,15 @@ fn broadcast_claims_span_outputs() {
 }
 
 #[test]
-fn wrong_track_name_is_identity() {
+fn recovery_claims_nothing() {
 	let generation = test_generation();
-	let net = moq_net::broadcast::Info::new()
-		.produce()
-		.create_track("not-a-physical-name", timed())
-		.unwrap();
-	assert_eq!(
-		generation.produce(net.clone()).map(|_| ()).unwrap_err().to_string(),
-		"identity"
-	);
-	assert_eq!(
-		consume(&generation)
-			.consume(net.subscribe(subscribe_all()))
-			.map(|_| ())
-			.unwrap_err()
-			.to_string(),
-		"identity"
-	);
+	let name = generation.name("video").unwrap();
+	assert_eq!(generation.open(&name).unwrap(), "video");
+	// Opening a name neither claims it nor derives its payload keys.
+	generation.produce(net_track(&name), "video").unwrap();
+	// The same semantic name under another epoch of the same credential does not open.
+	let other = test_credential().produce().name("video").unwrap();
+	assert_eq!(generation.open(&other).unwrap_err().to_string(), "authentication");
 }
 
 #[test]
@@ -591,16 +633,16 @@ fn new_epoch_authenticates_old_does_not() {
 	assert_ne!(old.name("video").unwrap(), new.name("video").unwrap());
 
 	let net = net_track(&new.name("video").unwrap());
-	let mut producer = new.produce(net.clone()).unwrap();
+	let mut producer = new.produce(net.clone(), "video").unwrap();
 	let mut group = producer.append_group().unwrap();
 	group.write_frame(ms(1), b"fresh").unwrap();
 	group.finish().unwrap();
 
-	let mut consumer = consume(&new).consume(net.subscribe(subscribe_all())).unwrap();
+	let mut consumer = consume(&new).consume(net.subscribe(subscribe_all()), "video").unwrap();
 	assert_eq!(read_frame(&mut recv_group(&mut consumer)).plaintext, &b"fresh"[..]);
 
-	// The old generation derives a different key for the same physical name.
-	let mut stale = old.consume(net.subscribe(subscribe_all())).unwrap();
+	// The old generation derives a different key for the same semantic name.
+	let mut stale = old.consume(net.subscribe(subscribe_all()), "video").unwrap();
 	let mut group = recv_group(&mut stale);
 	assert_eq!(
 		group
@@ -613,9 +655,7 @@ fn new_epoch_authenticates_old_does_not() {
 #[test]
 fn invocation_exhaustion() {
 	let generation = test_generation();
-	let mut key = consume(&generation)
-		.key(&generation.name("video").unwrap(), Domain::Group)
-		.unwrap();
+	let mut key = consume(&generation).key("video", Domain::Group).unwrap();
 	key.set_usage(MAX_INVOCATIONS - 1, 0);
 	key.protect(0, 0, b"last", MAX_GROUPED_PAYLOAD).unwrap();
 	assert_eq!(
@@ -627,9 +667,7 @@ fn invocation_exhaustion() {
 #[test]
 fn plaintext_byte_exhaustion() {
 	let generation = test_generation();
-	let mut key = consume(&generation)
-		.key(&generation.name("video").unwrap(), Domain::Group)
-		.unwrap();
+	let mut key = consume(&generation).key("video", Domain::Group).unwrap();
 	key.set_usage(0, MAX_PLAINTEXT_BYTES - 3);
 	key.protect(0, 0, b"ab", MAX_GROUPED_PAYLOAD).unwrap();
 	assert_eq!(
@@ -641,8 +679,7 @@ fn plaintext_byte_exhaustion() {
 #[test]
 fn failed_opens_spend_the_key() {
 	let generation = test_generation();
-	let name = generation.name("video").unwrap();
-	let mut key = consume(&generation).key(&name, Domain::Group).unwrap();
+	let mut key = consume(&generation).key("video", Domain::Group).unwrap();
 	let mut good = key.protect(0, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
 	let mut forged = good.clone();
 	forged[0] ^= 1;
@@ -657,7 +694,7 @@ fn failed_opens_spend_the_key() {
 		"exhausted"
 	);
 	// Refusals before AEAD spend nothing.
-	let mut key = consume(&generation).key(&name, Domain::Group).unwrap();
+	let mut key = consume(&generation).key("video", Domain::Group).unwrap();
 	assert_eq!(
 		key.open(0, 0, &good[..3], MAX_GROUPED_PAYLOAD).unwrap_err().to_string(),
 		"oversize"
@@ -680,8 +717,8 @@ fn grouped_authentication_ends_track() {
 	group.finish().unwrap();
 
 	// Tamper with a second group by writing ciphertext directly.
-	let name: Name = pair.net.name().parse().unwrap();
-	let key = pair.generation.key_bytes(&name, Domain::Group).unwrap();
+	let semantic = pair.semantic.as_str();
+	let key = pair.generation.key_bytes(semantic, Domain::Group).unwrap();
 	let mut payload = protect(&key, 1, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
 	payload[0] ^= 1;
 	let mut bad = pair.net.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
@@ -755,8 +792,8 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	assert!(demand.wanted().is_some());
 
 	// One authentic frame, then silence. The group and the track stay open.
-	let name: Name = pair.net.name().parse().unwrap();
-	let key = pair.generation.key_bytes(&name, Domain::Group).unwrap();
+	let semantic = pair.semantic.as_str();
+	let key = pair.generation.key_bytes(semantic, Domain::Group).unwrap();
 	let mut open = pair.net.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 	let open_demand = open.demand();
 	open.write_frame(ms(1), protect(&key, 0, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap())
@@ -859,8 +896,8 @@ fn bad_datagram_stays_an_event_and_keeps_demand() {
 	let mut open = pair.producer.append_group().unwrap();
 	open.write_frame(ms(1), b"ok").unwrap();
 
-	let name: Name = pair.net.name().parse().unwrap();
-	let mut forged = datagram_ciphertext(&pair.generation, &name, 0, b"nope").to_vec();
+	let semantic = pair.semantic.as_str();
+	let mut forged = datagram_ciphertext(&pair.generation, semantic, 0, b"nope").to_vec();
 	forged[0] ^= 1;
 	pair.net.insert_datagram(0, ms(2), forged).unwrap();
 
@@ -891,9 +928,9 @@ fn bad_datagram_stays_an_event_and_keeps_demand() {
 #[test]
 fn bad_datagram_is_event() {
 	let mut pair = pair("audio");
-	let name: Name = pair.net.name().parse().unwrap();
+	let semantic = pair.semantic.as_str();
 	pair.producer.append_datagram(ms(1), b"one").unwrap();
-	let mut forged = datagram_ciphertext(&pair.generation, &name, 1, b"two").to_vec();
+	let mut forged = datagram_ciphertext(&pair.generation, semantic, 1, b"two").to_vec();
 	forged[0] ^= 1;
 	pair.net.insert_datagram(1, ms(2), forged).unwrap();
 	pair.producer.insert_datagram(2, ms(3), b"three").unwrap();
@@ -907,11 +944,63 @@ fn bad_datagram_is_event() {
 }
 
 #[test]
+fn unsealable_datagram_is_dropped_with_its_code() {
+	let mut pair = pair("audio");
+	let semantic = pair.semantic.as_str();
+	let sealed = datagram_ciphertext(&pair.generation, semantic, 0, b"x");
+	pair.net
+		.insert_datagram(1, ms(1), vec![0u8; MAX_DATAGRAM_PAYLOAD + 1])
+		.unwrap();
+	pair.net.insert_datagram(2, ms(2), sealed.slice(..3)).unwrap();
+	pair.net.insert_datagram(MAX_U53 + 1, ms(3), sealed.clone()).unwrap();
+	pair.net.insert_datagram(MAX_U53 + 2, ms(3), sealed.slice(..3)).unwrap();
+	pair.producer.insert_datagram(MAX_U53, ms(4), b"last").unwrap();
+
+	assert_eq!(recv_datagram(&mut pair.consumer), Event::Oversize { sequence: 1 });
+	assert_eq!(recv_datagram(&mut pair.consumer), Event::Oversize { sequence: 2 });
+	assert_eq!(
+		recv_datagram(&mut pair.consumer),
+		Event::Identity { sequence: MAX_U53 + 1 }
+	);
+	// Identity is checked before size, as in every core.
+	assert_eq!(
+		recv_datagram(&mut pair.consumer),
+		Event::Identity { sequence: MAX_U53 + 2 }
+	);
+	match recv_datagram(&mut pair.consumer) {
+		Event::Datagram(d) => assert_eq!(&d.plaintext[..], b"last"),
+		other => panic!("{other:?}"),
+	}
+}
+
+#[test]
+fn resubscribing_shares_a_keys_budget() {
+	let mut pair = pair("audio");
+	let semantic = pair.semantic.as_str();
+	pair.producer.append_datagram(ms(1), b"one").unwrap();
+	assert!(matches!(recv_datagram(&mut pair.consumer), Event::Datagram(_)));
+	drop(pair.consumer);
+	let keys = pair.generation.keys(semantic).unwrap();
+	assert_eq!(keys.datagram.lock().unwrap().invocations(), 1);
+	keys.datagram.lock().unwrap().set_usage(MAX_INVOCATIONS, 0);
+
+	let mut again = pair
+		.generation
+		.consume(pair.net.subscribe(subscribe_all()), semantic)
+		.unwrap();
+	pair.producer.append_datagram(ms(2), b"two").unwrap();
+	assert!(matches!(
+		again.poll_recv_datagram(&kio::Waiter::noop()),
+		Poll::Ready(Err(Error::Exhausted))
+	));
+}
+
+#[test]
 fn forged_datagram_does_not_burn_identity() {
 	let mut pair = pair("audio");
-	let name: Name = pair.net.name().parse().unwrap();
+	let semantic = pair.semantic.as_str();
 	pair.producer.append_datagram(ms(1), b"one").unwrap();
-	let mut forged = datagram_ciphertext(&pair.generation, &name, 1, b"two").to_vec();
+	let mut forged = datagram_ciphertext(&pair.generation, semantic, 1, b"two").to_vec();
 	forged[0] ^= 1;
 	pair.net.insert_datagram(1, ms(2), forged).unwrap();
 	pair.producer.insert_datagram(1, ms(2), b"two").unwrap();
@@ -930,8 +1019,8 @@ fn forged_datagram_does_not_burn_identity() {
 #[test]
 fn duplicate_datagram_is_bounded() {
 	let mut pair = pair("audio");
-	let name: Name = pair.net.name().parse().unwrap();
-	let replay = datagram_ciphertext(&pair.generation, &name, 0, b"once");
+	let semantic = pair.semantic.as_str();
+	let replay = datagram_ciphertext(&pair.generation, semantic, 0, b"once");
 	pair.net.insert_datagram(0, ms(1), replay.clone()).unwrap();
 	pair.net.insert_datagram(0, ms(1), replay.clone()).unwrap();
 	assert!(matches!(recv_datagram(&mut pair.consumer), Event::Datagram(_)));
@@ -943,7 +1032,7 @@ fn duplicate_datagram_is_bounded() {
 			.insert_datagram(
 				sequence,
 				ms(sequence),
-				datagram_ciphertext(&pair.generation, &name, sequence, b"x"),
+				datagram_ciphertext(&pair.generation, semantic, sequence, b"x"),
 			)
 			.unwrap();
 		assert!(matches!(recv_datagram(&mut pair.consumer), Event::Datagram(_)));
@@ -976,9 +1065,7 @@ fn secrets_stay_out_of_debug() {
 	assert!(text.contains("<redacted>"));
 	assert!(!text.contains(&hex::encode(test_secret())));
 	assert!(!text.contains(std::str::from_utf8(&test_secret()).unwrap()));
-	let key = consume(&generation)
-		.key(&generation.name("video").unwrap(), Domain::Group)
-		.unwrap();
+	let key = consume(&generation).key("video", Domain::Group).unwrap();
 	assert!(format!("{key:?}").contains("<redacted>"));
 }
 
@@ -1003,6 +1090,36 @@ fn failed_group_write_does_not_burn_nonce() {
 }
 
 #[test]
+fn failed_net_write_after_encryption_aborts_the_group() {
+	let mut pair = pair("video");
+	let mut first = pair.producer.append_group().unwrap();
+	first.write_frame(ms(10), b"start").unwrap();
+	first.finish().unwrap();
+
+	// The net track refuses a group start that rewinds past the one before it, only after
+	// the frame was encrypted, so the group can no longer line its transport index up with
+	// the nonce.
+	let mut group = pair.producer.append_group().unwrap();
+	let err = group.write_frame(ms(5), b"rewind").unwrap_err();
+	assert!(matches!(err, Error::Net(moq_net::Error::TimestampMismatch)), "{err:?}");
+	// The track's grouped key: one frame in each group.
+	assert_eq!(group.invocations(), 2);
+	let after = group.write_frame(ms(20), b"after").unwrap_err();
+	assert_eq!(after.to_string(), err.to_string());
+	assert_eq!(group.invocations(), 2);
+	assert_eq!(group.finish().unwrap_err().to_string(), err.to_string());
+
+	// Subscribers see the group end with the failure instead of waiting on it.
+	let mut start = recv_group(&mut pair.consumer);
+	assert_eq!(read_frame(&mut start).plaintext, &b"start"[..]);
+	let mut aborted = recv_group(&mut pair.consumer);
+	assert!(matches!(
+		aborted.poll_read_frame(&kio::Waiter::noop()),
+		Poll::Ready(Err(Error::Net(moq_net::Error::TimestampMismatch)))
+	));
+}
+
+#[test]
 fn resumed_group_opens_at_transport_index() {
 	use std::sync::{Arc, Mutex};
 
@@ -1010,7 +1127,7 @@ fn resumed_group_opens_at_transport_index() {
 	let name = generation.name("video").unwrap();
 	let net = net_track(&name);
 	let mut subscriber = net.subscribe(subscribe_all());
-	let mut producer = generation.produce(net).unwrap();
+	let mut producer = generation.produce(net, "video").unwrap();
 
 	let mut group = producer.append_group().unwrap();
 	group.write_frame(ms(1), b"zero").unwrap();
@@ -1022,7 +1139,7 @@ fn resumed_group_opens_at_transport_index() {
 		panic!("net group not ready");
 	};
 	net_group.skip_to(1);
-	let key = Arc::new(Mutex::new(consume(&generation).key(&name, Domain::Group).unwrap()));
+	let key = Arc::new(Mutex::new(consume(&generation).key("video", Domain::Group).unwrap()));
 	let mut group = group::Consumer::new(net_group, key, crate::terminal::Terminal::new(None));
 	assert_eq!(read_frame(&mut group).plaintext, &b"one"[..]);
 }

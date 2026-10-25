@@ -22,7 +22,9 @@ pub struct Client {
 	peer_hop: Option<crate::Hop>,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
+	auth: Option<crate::auth::Handle>,
 	bandwidth: Option<crate::bandwidth::Allocator>,
+	implementation: Option<String>,
 }
 
 impl Client {
@@ -115,11 +117,36 @@ impl Client {
 		self
 	}
 
+	/// Build every session on `auth`, so each presents the tokens it holds and a route
+	/// naming one of its [`Auth`](crate::auth::Auth)s keeps it across a reconnect. Omit to
+	/// give each session a handle of its own, which ends with it.
+	///
+	/// The handle backs one active session at a time, plus the ones draining after a
+	/// GOAWAY: connecting another while one is still active fails with
+	/// [`Error::Duplicate`].
+	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
+		self.auth = Some(auth);
+		self
+	}
+
 	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
 	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
 	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
 		self.extensions = extensions;
 		self
+	}
+
+	/// Set the implementation to advertise in SETUP, as space-separated `name/version`
+	/// product tokens, outermost first. Defaults to [`IMPLEMENTATION`](crate::IMPLEMENTATION);
+	/// an empty string advertises nothing.
+	pub fn with_implementation(mut self, implementation: impl Into<String>) -> Self {
+		self.implementation = Some(implementation.into());
+		self
+	}
+
+	/// The Implementation our SETUP carries, or `None` to omit it.
+	fn implementation(&self) -> Option<String> {
+		setup::implementation(self.implementation.as_deref().unwrap_or(crate::IMPLEMENTATION))
 	}
 
 	/// Price this link, in the units the rest of the mesh uses (moq-lite-06+, and
@@ -171,6 +198,16 @@ impl Client {
 		self.peer_hop.unwrap_or_else(crate::Hop::random)
 	}
 
+	/// The new session's side of its auth handle: the one from [`with_auth`](Self::with_auth),
+	/// or one of its own. `requests` for moq-transport, where a request carries a token.
+	fn link(&self, supported: bool, requests: bool) -> Result<crate::auth::Link, Error> {
+		match &self.auth {
+			Some(handle) => crate::auth::Link::attach(handle, supported, requests),
+			None if requests => Ok(crate::auth::Link::ietf(supported)),
+			None => Ok(crate::auth::Link::new(supported)),
+		}
+	}
+
 	/// The origin pair a session attaches, tagged and filtered.
 	///
 	/// Reads through the publish (egress) consumer and writes through the
@@ -219,6 +256,7 @@ impl Client {
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
+				implementation: self.implementation(),
 			}
 		} else {
 			lite::Setup::default()
@@ -237,7 +275,7 @@ impl Client {
 			version,
 			our_setup,
 			peer_setup: None,
-			auth: crate::auth::Handle::new(version.has_auth()),
+			auth: self.link(version.has_auth(), false)?,
 		})?;
 
 		Ok(Session::new(
@@ -252,6 +290,7 @@ impl Client {
 				auth: start.auth,
 				estimate: Some(start.estimate),
 				bandwidth: self.bandwidth(),
+				peer_implementation: start.peer_implementation,
 			},
 		))
 	}
@@ -292,7 +331,8 @@ impl Client {
 				// We advertise the request path in our SETUP for URL-less transports.
 				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
 				// offer it keeps the option out of our SETUP and presents no credential.
-				let auth = crate::auth::Handle::ietf(self.extensions.auth);
+				let auth = self.link(self.extensions.auth, true)?;
+				let peer_implementation = setup::PeerImplementation::default();
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					stats: self.stats.clone(),
@@ -313,6 +353,8 @@ impl Client {
 					auth: auth.clone(),
 					early_unis: Vec::new(),
 					extensions: self.extensions,
+					implementation: self.implementation(),
+					peer_implementation: peer_implementation.clone(),
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -328,6 +370,7 @@ impl Client {
 						auth,
 						estimate: None,
 						bandwidth: self.bandwidth(),
+						peer_implementation,
 					},
 				));
 			}
@@ -391,7 +434,9 @@ impl Client {
 			ietf::ParameterVarInt::MaxRequestId,
 			ietf::initial_max_request_id(self.limits.window(), false),
 		);
-		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+		if let Some(implementation) = self.implementation() {
+			parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
+		}
 		// Advertise the request path in-band (draft 14-16), same as the lite-05 SETUP.
 		if let Some(path) = &self.setup_path {
 			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
@@ -423,7 +468,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, goaway, auth, estimate) = match version {
+		let (recv_bw, protocol, goaway, auth, estimate, peer_implementation) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -442,7 +487,7 @@ impl Client {
 					our_setup: lite::Setup::default(),
 					peer_setup: None,
 					// Negotiated over the bidi SETUP: lite 01/02, which carry no AUTH.
-					auth: crate::auth::Handle::new(v.has_auth()),
+					auth: self.link(v.has_auth(), false)?,
 				})?;
 
 				(
@@ -451,6 +496,7 @@ impl Client {
 					start.goaway,
 					start.auth,
 					Some(start.estimate),
+					start.peer_implementation,
 				)
 			}
 			Version::Ietf(v) => {
@@ -468,10 +514,13 @@ impl Client {
 					flate: ietf::flate::from_setup(&parameters, v)?,
 					..Default::default()
 				};
+				let peer_implementation = setup::PeerImplementation::known(setup::decode_implementation(
+					parameters.get_bytes(ietf::ParameterBytes::Implementation),
+				)?);
 
 				let stream = stream.with_version(v);
 				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
-				let auth = crate::auth::Handle::ietf(false);
+				let auth = self.link(false, true)?;
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
@@ -493,8 +542,18 @@ impl Client {
 					auth: auth.clone(),
 					early_unis: Vec::new(),
 					extensions: self.extensions,
+					// Already sent on the bidi SETUP above.
+					implementation: None,
+					peer_implementation: peer_implementation.clone(),
 				})?;
-				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, None)
+				(
+					None,
+					crate::driver::Protocol::Ietf(protocol),
+					goaway,
+					auth,
+					None,
+					peer_implementation,
+				)
 			}
 		};
 
@@ -510,6 +569,7 @@ impl Client {
 				auth,
 				estimate,
 				bandwidth: self.bandwidth(),
+				peer_implementation,
 			},
 		))
 	}
@@ -562,6 +622,7 @@ mod tests {
 
 	#[derive(Default)]
 	struct FakeSessionState {
+		panic_on_poll: std::sync::atomic::AtomicBool,
 		protocol: Option<&'static str>,
 		control_stream: Mutex<Option<(FakeSendStream, FakeRecvStream)>>,
 		close_events: kio::Shared<Vec<(u32, String)>>,
@@ -585,6 +646,7 @@ mod tests {
 				data: VecDeque::from(server_control_bytes),
 			});
 			let state = FakeSessionState {
+				panic_on_poll: Default::default(),
 				protocol,
 				control_stream: Mutex::new(Some((send, recv))),
 				close_events: kio::Shared::default(),
@@ -703,6 +765,13 @@ mod tests {
 		}
 
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+			assert!(
+				!self
+					.state
+					.panic_on_poll
+					.swap(false, std::sync::atomic::Ordering::Relaxed),
+				"injected driver poll panic"
+			);
 			let _ = std::task::ready!(self.state.close_events.poll(self.park.hold(cx), any_close));
 			Poll::Ready(FakeError)
 		}
@@ -1012,19 +1081,80 @@ mod tests {
 		assert_eq!(failed, Failures::default());
 	}
 
+	/// A task that closes the transport itself, as a protocol violation on one request does,
+	/// is the session's reason even when the transport reports only a local close, and it
+	/// wins over whatever closes it after.
+	#[test]
+	fn a_task_close_is_the_sessions_reason() {
+		use crate::stats::{Failure, Registry, Tier};
+		use crate::transport::poll::Session as _;
+		let registry = Registry::new(Default::default());
+		let client = Client::new()
+			.with_versions(Version::Lite(lite::Version::Lite04).into())
+			.with_stats(registry.tier(Tier::default()).session("root"));
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
+		let mut task = Transport::new(FakeSession::new(Some(ALPN_LITE_04), Vec::new()));
+		let (session, mut driver) =
+			futures::executor::block_on(client.connect_boxed(runtime.now(), task.clone())).unwrap();
+		task.close(SessionError::ProtocolViolation.to_code(), "malformed");
+		session.abort(Error::App(7));
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+		let err = futures::executor::block_on(session.closed());
+		assert!(
+			matches!(err, Error::Session(SessionError::ProtocolViolation)),
+			"{err:?}"
+		);
+		drop((client, session, driver));
+		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
+		assert_eq!(failed.count(Failure::Application), 1, "{failed:?}");
+	}
+
 	// Dropping the driver instead of running it tears the session
 	// down: the machine was the only transport holder, and `closed()` resolves
 	// rather than parking forever on a machine nobody polls.
 	#[test]
 	fn dropped_driver_resolves_closed() {
+		for polled in [false, true] {
+			let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+			let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+			let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
+			let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake)).unwrap();
+			if polled {
+				assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
+			}
+			drop(driver);
+			assert!(matches!(futures::executor::block_on(session.closed()), Error::Cancel));
+		}
+	}
+
+	#[test]
+	fn driver_panic_is_published_before_the_executor_drops_it() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
-		let (session, driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
-
-		drop(driver);
-		assert!(matches!(futures::executor::block_on(session.closed()), Error::Cancel));
+		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
+		fake.state
+			.panic_on_poll
+			.store(true, std::sync::atomic::Ordering::Relaxed);
+		let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+		}));
+		assert!(panic.is_err(), "the owner must still receive the panic");
+		assert!(matches!(
+			futures::FutureExt::now_or_never(session.closed()),
+			Some(Error::Transport(message)) if message == "session driver panicked"
+		));
+		// Even a caller that catches the panic cannot resume the damaged session.
+		assert!(matches!(
+			driver.poll(runtime.now(), &kio::Waiter::noop()),
+			Err(Error::Transport(_))
+		));
+		drop(driver); // outside unwinding, as an executor's catch_unwind drops a failed future
+		assert!(matches!(
+			futures::executor::block_on(session.closed()),
+			Error::Transport(_)
+		));
 	}
 
 	// `stats()` reads the machine's latest sample and primes the sampler, so a
@@ -1095,9 +1225,14 @@ mod tests {
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
+		assert_eq!(
+			bandwidth.peek(),
+			Some(crate::bandwidth::Rate::from_bps(1_000_000)),
+			"the estimate is readable before the sampler first runs"
+		);
 		moq_clock::sim::spawn(crate::time::run(driver));
 
-		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(
 			bandwidth.changed().await.unwrap(),
 			Some(crate::bandwidth::Rate::from_bps(1_000_000))

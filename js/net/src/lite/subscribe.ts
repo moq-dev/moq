@@ -156,7 +156,7 @@ async function encodeOrder(w: Writer, version: Version, order: Order) {
 /**
  * Exclusive model/local cap from a decoded inclusive last group.
  *
- * The wire's `Group End` is inclusive once decoded; the track model and `setGroups` are
+ * The wire's `Group End` is inclusive once decoded; the track model and `withRange` are
  * exclusive. `undefined` stays unbounded.
  */
 export function exclusiveGroupEnd(inclusive?: number): number | undefined {

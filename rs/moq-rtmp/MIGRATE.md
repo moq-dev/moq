@@ -24,7 +24,7 @@ The default FLV release delay drops from 2 s to 500 ms, matching the `moq` CLI; 
 
 ### A clean end lingers
 
-`Publish::accept` and `Client::pull` now resolve only after a clean end's finished broadcast goes stale: an unpublish (`deleteStream`), or a remote's `NetStream.Play.Complete` or `NetStream.Play.Stop`.
+`Publish::accept` and `Client::pull` now resolve only after a clean end's finished broadcast has stayed up for `with_linger` (default 30 s): an unpublish (`deleteStream`), or a remote's `NetStream.Play.Complete` or `NetStream.Play.Stop`.
 Drop the future to close the broadcast early. A connection that drops without one still closes at once.
 `Client::publish` sends `deleteStream` when its broadcast finishes, so the server ingesting it sees a clean end.
 

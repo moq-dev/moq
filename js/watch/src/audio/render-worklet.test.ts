@@ -114,3 +114,19 @@ describe("render dispatch", () => {
 		expect([...output.slice(80)]).toEqual(Array(20).fill(2));
 	});
 });
+
+it("holds PCM without consuming it until the shared startup gate opens", () => {
+	const { send, read, sent } = renderer();
+	send({ type: "playing", playing: false, epoch: 0 });
+	send({ type: "data", timestamp: Micro(500_000), data: [new Float32Array(200).fill(1)] });
+	for (let i = 0; i < 5; i++) expect([...read(20)]).toEqual(Array(20).fill(0));
+	expect(sent[0]).toMatchObject({ timestamp: Micro(500_000), underruns: 0 });
+	send({ type: "playing", playing: true, epoch: 0 });
+	expect(read(100)[99]).toBe(1);
+	send({ type: "reset", epoch: 1, playing: false });
+	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(2)] });
+	send({ type: "playing", playing: true, epoch: 0 });
+	expect([...read(20)]).toEqual(Array(20).fill(0));
+	send({ type: "playing", playing: true, epoch: 1 });
+	expect(read(100)[99]).toBe(2);
+});

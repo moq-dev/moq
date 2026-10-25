@@ -41,7 +41,7 @@ impl Config {
 /// Create via [`crate::connect::Config::init`] or [`Client::new`].
 #[derive(Clone)]
 pub struct Client {
-	moq: moq_net::Client,
+	pub(crate) moq: moq_net::Client,
 	/// The single resolved set of protocol versions, used to advertise moq ALPNs across
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
@@ -84,7 +84,16 @@ pub struct Client {
 	iroh: Option<crate::iroh::Endpoint>,
 	#[cfg(feature = "iroh")]
 	iroh_addrs: Vec<std::net::SocketAddr>,
+	/// Replaces the transport dial in tests, so the reconnect loop can run over
+	/// in-memory sessions on a paused clock.
+	#[cfg(test)]
+	pub(crate) dialer: Option<std::sync::Arc<Dialer>>,
 }
+
+/// A test stand-in for [`Client::dial`].
+#[cfg(test)]
+pub(crate) type Dialer =
+	dyn Fn(crate::connect::Addr) -> std::pin::Pin<Box<dyn Future<Output = crate::Result<Dialed>> + Send>> + Send + Sync;
 
 impl Client {
 	/// Build a client from its config.
@@ -113,6 +122,7 @@ impl Client {
 		}
 
 		quic.validate()?;
+		config.backoff.validate()?;
 
 		// Only the rustls-backed transports use this. Iroh and the plaintext
 		// qmux transports must not require a rustls crypto provider.
@@ -135,14 +145,19 @@ impl Client {
 		let tls_host_name = config.tls.host_name.clone();
 		let timeout = resolved.timeout;
 
+		let mut moq = moq_net::Client::new()
+			.with_versions(versions.clone())
+			.with_extensions(config.extensions);
+		if let Some(implementation) = &config.implementation {
+			moq = moq.with_implementation(implementation);
+		}
+
 		Ok(Self {
-			moq: moq_net::Client::new()
-				.with_versions(versions.clone())
-				.with_extensions(config.extensions),
+			moq,
 			versions,
 			connect: config.url,
 			timeout,
-			reconnect: !config.once.unwrap_or(false),
+			reconnect: true,
 			backoff: config.backoff,
 			goaway: config.goaway,
 			restart: Restart::default(),
@@ -165,6 +180,8 @@ impl Client {
 			iroh: None,
 			#[cfg(feature = "iroh")]
 			iroh_addrs: Vec::new(),
+			#[cfg(test)]
+			dialer: None,
 		})
 	}
 
@@ -240,7 +257,7 @@ impl Client {
 
 	/// Override whether this client redials after a session drop.
 	///
-	/// Defaults to true, unless [`crate::connect::Config::once`] turned it off.
+	/// Defaults to true. Each clone can choose its own reconnect policy.
 	pub fn with_reconnect(mut self, reconnect: bool) -> Self {
 		self.reconnect = reconnect;
 		self
@@ -258,7 +275,7 @@ impl Client {
 	/// redials with exponential backoff whenever the session drops. Wait for the
 	/// first session with [`Connection::established`] and for the loop to stop
 	/// with [`Connection::closed`]; drop the last clone to stop it. Disable the
-	/// redialing with [`crate::connect::Config::once`] / [`Self::with_reconnect`] for
+	/// redialing with [`Self::with_reconnect`] for
 	/// a one-shot dial.
 	///
 	/// Takes a [`Url`] for the usual case of a peer at a known address. Pass
@@ -373,6 +390,11 @@ impl Client {
 		feature = "uds"
 	))]
 	pub(crate) async fn dial(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
+		#[cfg(test)]
+		if let Some(dialer) = &self.dialer {
+			return dialer(addr).await;
+		}
+
 		// Each compiled backend adds state to this dispatch future. Keep it off the
 		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
 		let attempt = Box::pin(self.connect_inner(addr));
@@ -831,13 +853,16 @@ mod tests {
 			let request = server.accept().await.unwrap();
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=secret"));
-			let (session, _driver) = request.with_publisher(&server_origin).ok().await.unwrap();
+			let session = request.with_publisher(&server_origin).ok().await.unwrap();
 			(server, session)
 		});
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.once = Some(once);
-		let client = config.init(Default::default()).unwrap().with_publisher(&origin);
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(!once)
+			.with_publisher(&origin);
 		let url: url::Url = format!("https://relay.invalid:{}/room?jwt=secret", peer.port())
 			.parse()
 			.unwrap();
@@ -1017,7 +1042,6 @@ mod tests {
 			r#"tls.fingerprint = ["abcd1234", "ef567890"]"#,
 			r#"version = ["moq-lite-02"]"#,
 			r#"url = "https://relay.example.com/anon""#,
-			"once = true",
 			r#"bind = "127.0.0.1:1234""#,
 			r#"tls.host_name = "example.host""#,
 		] {
@@ -1077,14 +1101,13 @@ mod tests {
 		);
 	}
 
-	/// `--client-reconnect` means the opposite of the flag that replaced it, so the
-	/// line has to say so: carried across unchanged it would silently invert.
+	/// A removed CLI policy points embedders at the per-clone API.
 	#[test]
-	fn an_inverted_replacement_says_so() {
+	fn removed_reconnect_names_the_native_policy() {
 		let config = Cli::config_from(["test", "--client-reconnect=false"]);
 		let reported = config.deprecated().to_string();
-		assert!(reported.contains("--connect-once"), "{reported}");
-		assert!(reported.contains("inverted"), "{reported}");
+		assert!(reported.contains("Client::with_reconnect(bool)"), "{reported}");
+		assert!(reported.contains("native API only"), "{reported}");
 	}
 
 	/// Building a client is the backstop: a caller that skipped its own check must
@@ -1106,7 +1129,7 @@ mod tests {
 	#[test]
 	fn test_cli_resolution_delay() {
 		let config = Cli::config_from(["test", "--connect-resolution-delay", "0s"]);
-		assert_eq!(config.resolution_delay, None);
+		assert_eq!(config.resolution_delay, Some(std::time::Duration::ZERO.into()));
 		assert_eq!(config.resolve().resolution_delay, std::time::Duration::ZERO);
 	}
 
@@ -1128,19 +1151,17 @@ mod tests {
 		}
 	}
 
-	/// The released TOML said `reconnect = false`; `once` says the opposite thing.
-	///
-	/// Still parsed, because `deny_unknown_fields` would otherwise reject the file
-	/// with no hint of what to write instead, and the inversion is the whole reason
-	/// this can't be a rename someone applies mechanically.
+	/// A removed TOML policy still parses so it can name the per-clone native API.
 	#[test]
-	fn test_toml_reconnect_is_reported_not_inverted() {
+	fn test_toml_reconnect_is_reported_as_native_policy() {
 		let config: crate::connect::Config = toml::from_str("reconnect = false").unwrap();
-		assert_eq!(config.once, None);
 
 		let reported = config.deprecated().to_string();
-		assert!(reported.contains("reconnect -> once"), "{reported}");
-		assert!(reported.contains("inverted"), "{reported}");
+		assert!(
+			reported.contains("reconnect -> Client::with_reconnect(bool)"),
+			"{reported}"
+		);
+		assert!(reported.contains("native API only"), "{reported}");
 	}
 
 	/// An explicit canonical bind remains distinguishable from an omitted bind.
@@ -1175,18 +1196,6 @@ mod tests {
 				"moq-lite-02".parse::<moq_net::Version>().unwrap()
 			]
 		);
-	}
-
-	#[test]
-	fn test_cli_once_flag() {
-		let config = Cli::config_from(["test"]);
-		assert_eq!(config.once, None, "unset means the default (reconnect)");
-
-		let config = Cli::config_from(["test", "--connect-once"]);
-		assert_eq!(config.once, Some(true));
-
-		let config = Cli::config_from(["test", "--connect-once=false"]);
-		assert_eq!(config.once, Some(false));
 	}
 
 	#[test]
@@ -1272,7 +1281,7 @@ mod tests {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
 		// No head start, so the fallback dials while QUIC waits on the 403.
-		config.websocket.delay = Some(std::time::Duration::ZERO);
+		config.websocket.delay = Some((std::time::Duration::ZERO).into());
 		let client = config.init(Default::default()).unwrap();
 
 		// The same race `connect_inner` runs, except the fallback dials its own port,
@@ -1349,7 +1358,7 @@ mod tests {
 		let mut client_config = crate::connect::Config::default();
 		client_config.tls.insecure = Some(true);
 		// Dial both arms immediately; the fallback handshake is gated by QUIC.
-		client_config.websocket.delay = Some(std::time::Duration::ZERO);
+		client_config.websocket.delay = Some((std::time::Duration::ZERO).into());
 
 		let client = client_config.init(Default::default()).expect("failed to init client");
 		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
@@ -1365,7 +1374,7 @@ mod tests {
 				crate::Transport::WebTransport,
 				"expected the QUIC listener",
 			);
-			let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
+			let session = request.with_publisher(&pub_origin).ok().await?;
 			assert_eq!(session.version(), expected_version, "server negotiated stale version");
 			let _broadcast = broadcast;
 			let _track = track;
@@ -1579,10 +1588,10 @@ mod tests {
 
 		let timeout = crate::connect::DEFAULT_TIMEOUT;
 		let mut config = crate::connect::Config {
-			timeout: Some(timeout),
+			timeout: Some((timeout).into()),
 			..Default::default()
 		};
-		config.websocket.delay = Some(std::time::Duration::ZERO);
+		config.websocket.delay = Some((std::time::Duration::ZERO).into());
 		let client = config.init(Default::default()).unwrap();
 
 		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket

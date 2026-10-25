@@ -336,7 +336,7 @@ quic-sim:
 send-depth:
     bash sh/rs/send-depth.sh
 
-# Run moq-cli's `moq export` process tests, which feed a real relay and wait out lingers in real time.
+# Run moq-cli's `moq export` process tests, which feed a real relay and wait out follows in real time.
 [positional-arguments]
 cli-export *args:
     just rs test -p moq-cli --test integration --run-ignored only -E 'test(/^export::/)' "$@"

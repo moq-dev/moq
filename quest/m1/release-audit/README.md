@@ -75,7 +75,7 @@ server state after final drop, idle Dart stream cancellation, empty expiry
 indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
 reordered-frame timestamps and missing EOF output. Each owning quest records
 the reproduction's limits. JS reader and publisher datagram paths now enforce
-subscription bounds; the OBS quest retains ownership of its findings.
+subscription bounds; the OBS defects moved to an m1 child (2026-10-22, maintainer).
 Go reservation disposal remains an investigation.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
@@ -91,13 +91,13 @@ The entries comprise reproduced or source-confirmed findings
 and contract/lifetime investigations. Each
 child records whether its behavior is new on main or inherited from release.
 
-- [Decode order](/quest/m1/ts-reliability/decode-order.md) - the exporters' decode clock holds at most the declared reorder depth, so flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
+- [OBS decode timing](/quest/m1/release-audit/obs-decode-timing.md) - the shipping OBS source stamps each reordered picture with its own timestamp and drains at clean EOF
 
 ## Related
 
 - [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - range lists and frame offsets build on the bounds fixed here
-- [OBS video source](/quest/m2/obs-moq-video/source.md) - reproduced inherited timing and EOF defects remain with the decoder replacement owner
-- [Compressed tracks](/quest/m1/compress/README.md) - mid-group widening and application migration have existing owners
+- [OBS video source](/quest/m2/obs-moq-video/source.md) - the decoder replacement keeps the timing and EOF behavior fixed here
+- [Compressed tracks](/quest/m1/compress/README.md) - application migration has an existing owner
 - [Archive consumer](/quest/m1/archive/consumer.md) - current producer and CLI reader still need the new-format roundtrip
 - [Measured release performance](/quest/m1/release-perf/README.md) - existing paired benchmark regressions and their confirmation runs
 - [Transport performance audit](/quest/m2/audit-perf.md) - congestion-control coverage remains outstanding
