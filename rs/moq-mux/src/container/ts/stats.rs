@@ -52,6 +52,7 @@ pub struct Report {
 pub struct Snapshot {
 	/// One row per elementary stream PID the importer carries, ordered by PID. A PID the
 	/// importer drops (an undecoded stream without the `mpegts` catalog section) has none.
+	/// An SI PID has a `.si` row only once it counts [`Stream::unplaced`] sections.
 	// Keys read from strings: a flattened section loses JSON's integer-key parsing.
 	#[serde_as(as = "BTreeMap<serde_with::DisplayFromStr, _>")]
 	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -160,7 +161,7 @@ pub struct Stream {
 	/// Damaged packets, PES, or access units refused whole on this PID. Export stays zero.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub damaged: u64,
-	/// Whole PES or sections dropped because the program clock could not place
+	/// Whole PES or sections, SI included, dropped because the program clock could not place
 	/// them: before the first PCR, after the last with no interval to extrapolate from, or
 	/// before the broadcast clock's zero. Any PES lands before that zero while its stream is
 	/// still behind a wrap the import's first PTS already crossed. Export stays zero.

@@ -1384,9 +1384,9 @@ mod tests {
 	async fn disabling_a_live_high_rendition_plays_the_lower_one() {
 		tokio::time::pause();
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("room").unwrap();
+		let broadcast = origin.create_broadcast("room").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let mut catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let mut high = rendition(&broadcast, &catalog, "high");
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
@@ -1430,9 +1430,9 @@ mod tests {
 		let delay = Duration::from_millis(500);
 
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("room").unwrap();
+		let broadcast = origin.create_broadcast("room").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let mut catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, delay, recorder.clone()).run());
@@ -1495,9 +1495,9 @@ mod tests {
 		let delay = Duration::from_millis(500);
 
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("room").unwrap();
+		let broadcast = origin.create_broadcast("room").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let mut catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let track = |name: &str| {
 			let track = broadcast
 				.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.audio))
@@ -1583,12 +1583,12 @@ mod tests {
 		origin: &moq_net::origin::Producer,
 		route: moq_net::origin::Route,
 	) -> (
-		moq_net::broadcast::Producer,
+		moq_net::origin::Publication,
 		catalog::Producer,
 		moq_mux::container::Producer<Container, AudioConfig>,
 	) {
-		let mut broadcast = origin.create_broadcast("room").unwrap();
-		let catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		let catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let audio = rendition(&broadcast, &catalog, "audio");
 		broadcast.announce(route).unwrap();
 		(broadcast, catalog, audio)
@@ -1599,7 +1599,7 @@ mod tests {
 		claim: &moq_net::origin::Dynamic,
 		route: &moq_net::origin::Route,
 	) -> (
-		moq_net::broadcast::Producer,
+		moq_net::origin::Publication,
 		catalog::Producer,
 		moq_mux::container::Producer<Container, AudioConfig>,
 	) {
@@ -1933,9 +1933,9 @@ mod tests {
 	async fn a_finite_audio_track_plays_its_final_samples() {
 		tokio::time::pause();
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("room").unwrap();
+		let broadcast = origin.create_broadcast("room").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let mut catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		let mut audio = rendition(&broadcast, &catalog, "audio");

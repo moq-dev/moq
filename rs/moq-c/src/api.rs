@@ -1762,7 +1762,7 @@ pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c
 
 		let mut state = State::lock();
 		let broadcast = state.origin.create_broadcast(origin, path)?;
-		state.publish.create(broadcast)
+		state.publish.create_publication(broadcast)
 	})
 }
 
@@ -1857,7 +1857,7 @@ pub unsafe extern "C" fn moq_broadcast_request_prepare(
 		let (pending, driver) = state.origin.broadcast_request_take(request)?;
 		let prepared = pending.prepare(epoch)?;
 		let broadcast = state.publish.create((prepared.broadcast().clone(), driver.clone()))?;
-		let id = state.origin.prepared_insert(prepared, driver)?;
+		let id = state.origin.prepared_insert(prepared, driver, broadcast)?;
 		*broadcast_out = broadcast.into();
 		Ok(id)
 	})
@@ -1871,12 +1871,12 @@ pub unsafe extern "C" fn moq_broadcast_request_prepare(
 pub extern "C" fn moq_broadcast_prepared_publish(prepared: u32) -> i32 {
 	ffi::enter(move || {
 		let prepared = ffi::parse_id(prepared)?;
-		let (prepared, driver) = State::lock().origin.prepared_take(prepared)?;
+		let mut state = State::lock();
+		let (prepared, driver, broadcast) = state.origin.prepared_take(prepared)?;
 		driver.check()?;
-		let result = prepared.publish();
+		let result = state.publish.admit(broadcast, prepared);
 		driver.check()?;
-		result?;
-		Ok(())
+		result
 	})
 }
 
@@ -3145,10 +3145,10 @@ pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 	})
 }
 
-/// Reject a group request, failing the waiting fetches as not found.
+/// Reject a group request, failing the readers waiting on it now as not found.
 ///
-/// The error code is not delivered. Consumes the request handle. Returns a zero on success,
-/// or a negative code on failure.
+/// A later reader of the group asks again. The error code is not delivered. Consumes the
+/// request handle. Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
@@ -3157,7 +3157,7 @@ pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 
 	})
 }
 
-/// Free a group request without accepting it, which rejects it.
+/// Free a group request without accepting it, which rejects it like [moq_group_request_abort].
 ///
 /// Returns a zero on success, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
@@ -3234,10 +3234,9 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let producer = moq_mux::json::Config::default()
-			.with_compression(config.compression)
-			.with_deltas(config.deltas);
-		State::lock().publish.json_snapshot(broadcast, name, producer)
+		let entry = moq_mux::json::Config::default().with_compression(config.compression);
+		let options = moq_mux::json::Options::default().with_deltas(config.deltas);
+		State::lock().publish.json_snapshot(broadcast, name, entry, options)
 	})
 }
 

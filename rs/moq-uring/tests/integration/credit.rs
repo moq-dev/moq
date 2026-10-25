@@ -3,7 +3,7 @@
 //! write takes no more from its buffer than the peer's window admits, and a tiny
 //! frame keeps no more memory than its own bytes.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "quic"))]
 
@@ -25,7 +25,7 @@ const WINDOW: usize = 32 * 1024;
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring credit test: {reason}");
 			None
 		}
