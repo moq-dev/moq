@@ -290,6 +290,13 @@ impl AnnounceWriter {
 	}
 }
 
+/// Fill the `groups` of `track` its cache misses, a run per FETCH, as a publisher answers a
+/// range FETCH, for the session bench. The returned guard keeps the filled groups cached.
+pub async fn fill_groups(track: &track::Consumer, groups: std::ops::Range<u64>) -> crate::Result<impl Sized> {
+	track.query().await?;
+	Ok(track.fill_groups(groups, 0).await)
+}
+
 /// `origin` as a session connected to `peer` serves it, for the viewers bench.
 pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
 	origin.excluding(peer)
@@ -504,10 +511,7 @@ impl LiteSample {
 				track: "video".into(),
 				priority: 2,
 				max_delay: std::time::Duration::from_secs(10),
-				start_group: None,
-				end_group: None,
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range::OLDEST],
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -732,20 +736,20 @@ impl Default for Messages {
 				track: "video".into(),
 				priority: 3,
 				max_delay: Duration::from_millis(500),
-				start_group: Some(1_000),
-				end_group: None,
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range {
+					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
+					end: None,
+				}],
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
-				start_group: Some(1_000),
-				end_group: Some(2_000),
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range {
+					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
+					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
+				}],
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				group: 1_234,

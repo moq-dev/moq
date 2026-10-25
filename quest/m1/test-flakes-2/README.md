@@ -42,5 +42,3 @@ Public API: none. Wire: none.
 
 - [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
 - [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
-- [moq-rtsp stall timers](/quest/m1/test-flakes-2/rtsp-stall-timers.md) - the 200 ms stall and keyframe tests run on a mocked clock
-- [moq-gst pinned replay](/quest/m1/test-flakes-2/gst-pinned-replay.md) - the pinned-instance finish test waits on events instead of sleep loops
