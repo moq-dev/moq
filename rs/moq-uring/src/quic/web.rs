@@ -450,6 +450,11 @@ impl Session {
 		self.conn.wire()
 	}
 
+	/// The target the connection probes up to, or `None` when it cannot probe.
+	pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
+		self.conn.probe()
+	}
+
 	/// Receive streams evicted to free a stuck receive window.
 	pub(crate) fn streams_evicted(&self) -> u64 {
 		self.conn.streams_evicted()

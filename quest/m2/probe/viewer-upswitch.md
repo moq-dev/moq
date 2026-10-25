@@ -22,10 +22,8 @@ Decided with the maintainer on 2026-10-17: this joined the
 set the viewer target, the [session](/quest/m2/probe/viewer-target.md) sends it as
 its PROBE target, and the relay's sender probes the downlink up to it; this
 quest makes selection act on the estimate that rises. The relay runs
-moq-quic, so it requires [native probing](/quest/m1/probe-native.md). If that
-ends in a measured no-go, take this back to the maintainer rather than
-leaving it blocked: [padding](/quest/m2/probe/padding.md) is browser-only
-since 2026-10-20, so the relay has no other sender.
+moq-quic, whose native probing ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)) is that
+sender.
 
 Selection reads its broadcast's viewer grant from the
 [viewer targets](/quest/m2/probe/viewer-target.md) quest, not the connection's whole
@@ -40,7 +38,6 @@ and audio, or selection stops discounting a probed estimate.
 ## Required
 
 - [Viewer targets](/quest/m2/probe/viewer-target.md) - the viewer handle the session sends as its PROBE target, and the relay probing up to it
-- [Native probing](/quest/m1/probe-native.md) - the relay validates headroom above the media it sends
 - [Players set viewer targets](/quest/m2/probe/players.md) - `@moq/watch` asks for its highest enabled rendition
 
 ## Closes

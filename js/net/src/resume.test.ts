@@ -40,7 +40,7 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
 	const handle = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost }));
 	void (async () => {
-		for await (const request of handle.requested()) request.accept(source.consume());
+		for await (const request of handle.requested()) hooks.acceptRequest(request, source.consume());
 	})();
 	return () => handle.close();
 }
@@ -823,7 +823,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([1]);
 
 	const { value: pending } = await asked.next();
-	pending?.accept(b.consume());
+	hooks.acceptRequest(pending, b.consume());
 	await settle();
 	await settle();
 	tb.write(1);
@@ -1035,6 +1035,7 @@ for (const fails of [true, false]) {
 for (const [field, first, second] of [
 	["priority", { priority: 1 }, { priority: 2 }],
 	["compression", { compress: true }, { compress: false }],
+	["refresh", { refresh: 4 }, {}],
 ] as const) {
 	test(`track info keeps one ${field} answer across routes`, async () => {
 		const front = new Front();

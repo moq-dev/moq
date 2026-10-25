@@ -1646,28 +1646,11 @@ pub struct Request {
 	deadline: Option<Deadline>,
 }
 
-/// Why an incoming session was rejected.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum Reject {
-	/// The request supplied no acceptable credentials.
-	Unauthorized,
-	/// The credentials do not grant the requested operation.
-	Forbidden,
-	/// An application-defined HTTP-style status code.
-	App(u16),
-}
-
 impl Request {
 	/// Reject the session. The transport is already accepted, so this closes the
-	/// just-established MoQ session rather than answering the transport handshake:
-	/// the `code` (an HTTP-style status the caller passes) maps to a MoQ close reason.
-	pub async fn reject(self, reject: Reject) -> crate::Result<()> {
-		let err = match reject {
-			Reject::Unauthorized | Reject::Forbidden => moq_net::Error::Unauthorized,
-			Reject::App(code) => moq_net::Error::App(code),
-		};
-		self.handshake.close(err);
+	/// just-established MoQ session with `code` rather than answering the transport handshake.
+	pub async fn reject(self, code: moq_net::SessionError) -> crate::Result<()> {
+		self.handshake.close(code.into());
 		Ok(())
 	}
 

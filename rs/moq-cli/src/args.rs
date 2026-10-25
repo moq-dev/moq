@@ -154,6 +154,12 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// The `MOQ_*` variables read outside the command-line spec.
+#[cfg(any(feature = "capture", feature = "transcode", feature = "play"))]
+const DIRECT_ENV: &[&str] = moq_video::ENV;
+#[cfg(not(any(feature = "capture", feature = "transcode", feature = "play")))]
+const DIRECT_ENV: &[&str] = &[];
+
 /// Whether `flag` is one of the flags `T` declares.
 fn owns<T: usage_rs::spec::CommandArgs>(flag: &usage_rs::Flag<'_>) -> bool {
 	T::COMMAND.flags.iter().any(|own| own.key == flag.key)
@@ -174,7 +180,13 @@ impl Invocation {
 			print!("{reply}");
 			std::process::exit(0);
 		}
-		match Self::try_parse_from(args) {
+		match Self::try_parse_from(args).and_then(|parsed| {
+			// Here rather than in `try_parse_from`, which tests drive under whatever
+			// environment the test runner has.
+			moq_tokio::cli::check_env(&[Cli::spec(), Stage::spec()], DIRECT_ENV)
+				.map_err(|err| ParseError::new(ParseErrorKind::ValueValidation, format!("error: {err}\n")))?;
+			Ok(parsed)
+		}) {
 			Ok(parsed) => parsed,
 			Err(err) => err.exit(),
 		}
@@ -317,6 +329,27 @@ impl Invocation {
 				&& let Some(reason) = import.source.report_refusal()
 			{
 				anyhow::bail!("--report names a track in the catalog the import builds, but {reason}");
+			}
+			if let Command::Import(import) = command
+				&& let Some(path) = &import.echo_path
+			{
+				if let Some(reason) = import.source.catalog_refusal() {
+					anyhow::bail!("--echo-path solicits feedback in the catalog the import builds, but {reason}");
+				}
+				// A reader refuses the whole catalog over a path it cannot resolve.
+				let broadcast = command.broadcast(&self.moq);
+				let rel = hang::moq_net::path::Relative::new(path);
+				let Some(prefix) = hang::moq_net::Path::new(&broadcast).try_resolve(&rel) else {
+					anyhow::bail!("--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`");
+				};
+				// An origin refuses a broadcast a pattern could not name, so no viewer could
+				// publish its `<NAME>.echo` beneath this.
+				let feedback = prefix.join("viewer.echo");
+				if let Err(err) = hang::moq_net::Pattern::literal(feedback.as_str()) {
+					anyhow::bail!(
+						"--echo-path `{path}` resolves to `{prefix}`, where no viewer can publish its feedback: {err}"
+					);
+				}
 			}
 			if let Command::Import(import) = command
 				&& import.linger.is_some()
@@ -774,6 +807,12 @@ pub struct Import {
 	#[usage(long)]
 	pub report: bool,
 
+	/// Solicit viewer feedback in the catalog: `export --echo <NAME>` publishes `<NAME>.echo`
+	/// under this prefix, resolved against the broadcast like a relative URL (`viewers` from
+	/// `room/event` is `room/viewers`). The stdin imports only.
+	#[usage(long, value_name = "PATH")]
+	pub echo_path: Option<String>,
+
 	/// The single source feeding the Origin.
 	#[usage(subcommand)]
 	pub source: ImportSource,
@@ -841,9 +880,9 @@ impl ImportSource {
 		})
 	}
 
-	/// Why `--report` can't report this source, or `None` when it can: the CLI builds the one
-	/// catalog of a stdin import, whose tracks `moq-mux` counts.
-	fn report_refusal(&self) -> Option<&'static str> {
+	/// Why the CLI can't add a section to this source's first catalog, or `None` when it can:
+	/// a stdin import's one catalog waits for its importer's tracks.
+	fn catalog_refusal(&self) -> Option<&'static str> {
 		match self {
 			Self::Ts(args) if args.program == Some(TsProgram::All) => {
 				Some("`import ts --program all` builds a catalog per program")
@@ -852,9 +891,19 @@ impl ImportSource {
 				Some("the gateway and archive imports build their own catalogs")
 			}
 			#[cfg(feature = "capture")]
-			Self::Capture(_) => Some("`import capture` encodes, and its encoders do not count yet"),
+			Self::Capture(_) => Some("`import capture` publishes its catalog as its encoders start"),
 			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
 		}
+	}
+
+	/// Why `--report` can't report this source, or `None` when it can: the CLI builds the one
+	/// catalog of a stdin import, whose tracks `moq-mux` counts.
+	fn report_refusal(&self) -> Option<&'static str> {
+		#[cfg(feature = "capture")]
+		if matches!(self, Self::Capture(_)) {
+			return Some("`import capture` encodes, and its encoders do not count yet");
+		}
+		self.catalog_refusal()
 	}
 
 	/// Why `--linger` can't apply to this source, or `None` when it can: only a source with a
@@ -1642,38 +1691,77 @@ mod tests {
 		}
 	}
 
-	/// `--report` goes where the CLI builds the one catalog it names a track in.
+	/// `--report` and `--echo-path` go where the CLI builds the one catalog they add a section to.
 	#[test]
-	fn report_needs_a_catalog_the_cli_builds() {
-		let import = |source: &[&str]| {
+	fn catalog_sections_need_a_catalog_the_cli_builds() {
+		let import = |flags: &[&str], source: &[&str]| {
+			let argv = ["moq", "--connect", "http://relay", "--broadcast", "room", "import"];
+			Invocation::try_parse_from(argv.iter().chain(flags).chain(source).copied()).unwrap()
+		};
+		for flags in [["--report"].as_slice(), &["--echo-path", "viewers"]] {
+			for source in [
+				["ts"].as_slice(),
+				&["fmp4"],
+				&["flv"],
+				&["avc3"],
+				&["ts", "--program", "1"],
+			] {
+				import(flags, source).validate().unwrap();
+			}
+			for source in [
+				["ts", "--program", "all"].as_slice(),
+				&["hls", "http://origin/master.m3u8"],
+				&["rtmp", "--listen", "127.0.0.1:1935"],
+				&["rtsp", "--connect", "rtsp://camera/stream"],
+			] {
+				let err = import(flags, source).validate().unwrap_err().to_string();
+				assert!(err.contains(flags[0]), "{flags:?} {source:?}: {err}");
+			}
+		}
+	}
+
+	/// `--echo-path` resolves against the broadcast. A path above the connection root, which
+	/// every reader would refuse the catalog over, or one no viewer could publish its `.echo`
+	/// beneath, is refused before dialing.
+	#[test]
+	fn echo_path_names_where_viewers_can_publish() {
+		let import = |broadcast: &str, path: &str| {
 			let argv = [
 				"moq",
 				"--connect",
 				"http://relay",
 				"--broadcast",
-				"room",
+				broadcast,
 				"import",
-				"--report",
+				"--echo-path",
+				path,
+				"ts",
 			];
-			Invocation::try_parse_from(argv.iter().chain(source).copied()).unwrap()
+			Invocation::try_parse_from(argv).unwrap().validate()
 		};
-		for source in [
-			["ts"].as_slice(),
-			&["fmp4"],
-			&["flv"],
-			&["avc3"],
-			&["ts", "--program", "1"],
+		// `viewers` from `<n parts>` resolves to n parts, and the feedback sits one beneath.
+		let deep = |parts: usize| (0..parts).map(|i| format!("p{i}")).collect::<Vec<_>>().join("/");
+		let (fits, too_deep) = (
+			deep(hang::moq_net::Path::MAX_PARTS - 1),
+			deep(hang::moq_net::Path::MAX_PARTS),
+		);
+		for (broadcast, path) in [
+			("room", "viewers"),
+			("room/live", "../viewers"),
+			(fits.as_str(), "viewers"),
 		] {
-			import(source).validate().unwrap();
+			import(broadcast, path).unwrap();
 		}
-		for source in [
-			["ts", "--program", "all"].as_slice(),
-			&["hls", "http://origin/master.m3u8"],
-			&["rtmp", "--listen", "127.0.0.1:1935"],
-			&["rtsp", "--connect", "rtsp://camera/stream"],
+		for (broadcast, path) in [
+			("room", "../viewers"),
+			("room/live", "../../viewers"),
+			("room", "*"),
+			("room", "viewers/**"),
+			("room", "view*"),
+			(too_deep.as_str(), "viewers"),
 		] {
-			let err = import(source).validate().unwrap_err().to_string();
-			assert!(err.contains("--report"), "{source:?}: {err}");
+			let err = import(broadcast, path).unwrap_err().to_string();
+			assert!(err.contains("--echo-path"), "{broadcast} {path}: {err}");
 		}
 	}
 

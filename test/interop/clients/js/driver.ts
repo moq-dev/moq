@@ -39,6 +39,7 @@ import {
 	waitForWatch,
 } from "./harness";
 import { type Sample, TONE_CHECK } from "./src/contract";
+import { ToneCheck } from "./tone";
 
 /** Remove the page's players, which closes their sessions, and wait until every transport has. */
 async function closeSessions(page: Page): Promise<void> {
@@ -96,24 +97,7 @@ if (
 	process.exit(2);
 }
 
-/**
- * Whether every channel the player outputs carries its own tone, judged as tone.py judges a native
- * subscriber, from the `codec` rendition.
- */
-function toneHeard(state: Sample, codec: string): boolean {
-	return (
-		state.audioCodec?.split(".")[0] === codec &&
-		state.audioContext === "running" &&
-		state.audioChannels === tones.length &&
-		state.tones?.length === tones.length &&
-		state.tones.every(({ rms, share }) => rms >= TONE_CHECK.minRms && share >= TONE_CHECK.minShare)
-	);
-}
-
 const PAUSE_STABILITY_MS = 750;
-
-/** How long audible audio may play before it has to carry the tone: the analyser's window, several times over. */
-const TONE_GRACE_MS = 3000;
 
 async function waitForStablePause(page: Page, errors: BrowserErrors, deadline: number): Promise<Sample> {
 	let previous = await readPlayerState(page);
@@ -184,18 +168,20 @@ async function watch(codec: string): Promise<boolean> {
 	}
 
 	const interactionDeadline = Date.now() + timeoutMs;
+	const tone = new ToneCheck({ codec, channels: tones.length });
+	let failedAudio: Sample | undefined;
 	try {
-		// Once audio plays, the tone gets a bounded grace rather than the whole timeout, so a
-		// wrong tone fails as fast as it does in the native subscribers.
-		await waitForState(page, errors, {
-			deadline: interactionDeadline,
-			description: "audible audio",
-			predicate: (state) => state.audioContext === "running" && (state.rms ?? 0) >= TONE_CHECK.minRms,
-		});
 		playing = await waitForState(page, errors, {
-			deadline: Math.min(interactionDeadline, Date.now() + TONE_GRACE_MS),
+			deadline: interactionDeadline,
 			description: "the audio tone",
-			predicate: (state) => toneHeard(state, codec),
+			predicate: (state) => {
+				const result = tone.read(state);
+				if (result === "failed") {
+					failedAudio = state;
+					throw new Failure("audio tone", `after 3 s of playback: ${JSON.stringify(state)}`);
+				}
+				return result === "heard";
+			},
 		});
 	} catch (err) {
 		// Only a tone wait that ran out is an audio check failure; a page error reports as itself.
@@ -203,10 +189,11 @@ async function watch(codec: string): Promise<boolean> {
 		// `wrong tone` is the marker the harness's control requires: audible audio from the pinned
 		// rendition, in the publisher's layout, that does not carry its tones. Anything else failing is
 		// a plain audio failure.
-		const state = await readPlayerState(page);
+		const state = failedAudio ?? (await readPlayerState(page));
 		const wrongTone =
 			state.audioCodec?.split(".")[0] === codec &&
 			state.audioContext === "running" &&
+			!state.audioStalled &&
 			state.audioChannels === tones.length &&
 			state.tones?.length === tones.length &&
 			state.tones.every(({ rms }) => rms >= TONE_CHECK.minRms);

@@ -2503,7 +2503,7 @@ test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", as
 		const request = await requests.next();
 		if (request.done) throw new Error("the handler never saw the request");
 		grant.set(grantOf("other"));
-		request.value.accept(produced);
+		hooks.acceptRequest(request.value, produced);
 		await serving;
 
 		expect(unauthorizedResets(resets)).toContain("unauthorized: live/cam");
@@ -2559,7 +2559,7 @@ test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it"
 		const serving = publisher.runTrackInfo(new TrackMessage(Path.from("live/cam"), "video"), stream);
 		const request = await requests.next();
 		if (request.done) throw new Error("the handler never saw the request");
-		request.value.accept(produced);
+		hooks.acceptRequest(request.value, produced);
 		await writing;
 
 		grant.set(grantOf("other"));
@@ -2608,7 +2608,7 @@ test("lite draft-06: a grant that shrinks while the broadcast resolves resets th
 		if (request.done) throw new Error("the handler never saw the request");
 		grant.set(grantOf("other"));
 		await Promise.resolve();
-		request.value.accept(produced);
+		hooks.acceptRequest(request.value, produced);
 		await serving;
 
 		expect(unauthorizedResets(resets)).toContain("unauthorized: live/cam");

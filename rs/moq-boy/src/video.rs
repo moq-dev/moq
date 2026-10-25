@@ -50,7 +50,8 @@ impl VideoEncoder {
 
 		// Game Boy is 160x144; force the openh264 software encoder since hardware
 		// encoders can reject such tiny resolutions.
-		let mut config = moq_video::encode::Config::new(WIDTH, HEIGHT, moq_video::Rate::new(FRAMERATE, 1).unwrap());
+		let mut config =
+			moq_video::encode::Config::new(WIDTH, HEIGHT, moq_video::FrameRate::new(FRAMERATE, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 
 		// Probed from a throwaway encoder, before the emulator has run a frame, so a

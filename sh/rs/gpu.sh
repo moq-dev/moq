@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Hardware tests are opt-in; a detected GPU must have its driver and pass its tests.
 set -euo pipefail
+
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
 cd "$(git rev-parse --show-toplevel)"
 
 declare -A vendors=()

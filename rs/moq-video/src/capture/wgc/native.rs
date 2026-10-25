@@ -37,7 +37,7 @@ use super::super::settle::{Settle, Settled};
 use super::super::{Config, Display, FrameChannel, Source, Stream, Window};
 use super::{Delivery, Event, Signal, Startup, display_index, window_handle};
 use crate::frame::{Surface, d3d11};
-use crate::{Error, Rate, Size};
+use crate::{Error, FrameRate, Size};
 
 const BUFFERS: i32 = 2;
 
@@ -45,7 +45,7 @@ pub(in crate::capture) async fn open(config: &Config) -> Result<Stream, Error> {
 	let chan = FrameChannel::new();
 	let signal = Arc::new(Signal::default());
 	let label = config.source.label();
-	let rate = config.framerate.unwrap_or(Rate::integer(30));
+	let rate = config.framerate.unwrap_or(FrameRate::integer(30));
 	let handle = std::thread::Builder::new()
 		.name("moq-wgc".into())
 		.spawn({
@@ -272,7 +272,7 @@ impl Capture {
 			.StartCapture()
 			.map_err(|e| error("start WGC", e))?;
 		let mut startup = Startup::new(Instant::now());
-		let rate = config.framerate.unwrap_or(Rate::integer(30));
+		let rate = config.framerate.unwrap_or(FrameRate::integer(30));
 		let interval =
 			Duration::from_nanos(1_000_000_000 * u64::from(rate.denominator()) / u64::from(rate.numerator()));
 		let mut opened = None;

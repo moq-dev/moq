@@ -1,7 +1,7 @@
 //! Broadcast archives on any [`object_store::ObjectStore`].
 //!
 //! A [`Producer`] stores every track of one broadcast under a key prefix the host picks, and a
-//! [`Reader`] serves a recording back through a `moq_net` broadcast. Callers that need runtime
+//! [`Consumer`] serves that prefix back as an ordinary `moq_net` broadcast. Callers that need runtime
 //! dispatch supply `Arc<dyn ObjectStore>`; the archive API itself stays generic.
 //!
 //! # Layout
@@ -59,6 +59,7 @@
 
 pub use object_store;
 
+pub mod consumer;
 mod error;
 /// The `.info` object holding a track's immutable properties.
 pub mod info;
@@ -67,29 +68,24 @@ mod layout;
 mod mock;
 mod path;
 pub mod producer;
-pub mod reader;
-/// The binary segment object holding a record's groups and frames.
-mod segment;
-/// Recording objects on an object store.
+/// The object store and key prefix an archive lives under.
 mod store;
 
+pub use consumer::Consumer;
 pub use error::{Error, Result};
 pub use info::Info;
-pub(crate) use path::Key;
 pub use producer::Producer;
-pub use reader::Reader;
-pub(crate) use segment::Object;
 pub use store::Store;
 
 /// Recording format version written into `.info` and the binary envelope.
 pub const VERSION: u64 = 3;
 
-/// The oldest recording format version [`Reader`] accepts. Version 2 stored `.info`'s
+/// The oldest recording format version a [`Consumer`] accepts. Version 2 stored `.info`'s
 /// priority as its moq-lite byte and is otherwise identical.
 pub(crate) const VERSION_MIN: u64 = 2;
 
-/// Largest group, segment, or timestamp value the format allows (`2^53 - 1`).
+/// Largest sequence, frame index, or timestamp value the format allows (`2^53 - 1`).
 pub const ID_MAX: u64 = (1 << 53) - 1;
 
-/// Decimal width of segment ID filename fields.
+/// Decimal width of each object key field.
 pub(crate) const ID_WIDTH: usize = 19;
