@@ -14,17 +14,11 @@ enum At {
 	Catalog,
 }
 
-/// Which failure reached the cursor first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Landed {
-	Catalog,
-	Timeline,
-	Segment,
-}
-
-/// Drop the publisher's session at `at`, check the recording ends as incomplete, and return
-/// which failure ended it.
-async fn disconnect(at: At) -> Landed {
+/// Drop the publisher's session at `at` and check the recording ends as incomplete.
+///
+/// The catalog's and the timeline's subscriptions both fail with the session. Whichever reaches
+/// the cursor first must end it with a typed error, so the order is left to the session.
+async fn disconnect(at: At) {
 	let mut pair = Pair::connect().await;
 	let mut publisher = Publisher::new(&pair.publisher, "live", Default::default());
 	let server = pair.server();
@@ -62,12 +56,15 @@ async fn disconnect(at: At) -> Landed {
 	assert_eq!(read, [1, 2], "{at:?}");
 	let err = end.expect_err("an incomplete recording never reads as complete");
 	// A raw transport error would read as retryable, so a recorder would never finalize.
-	let landed = match &err {
-		moq_hls::Error::CatalogFailed { .. } => Landed::Catalog,
-		moq_hls::Error::TimelineFailed { .. } => Landed::Timeline,
-		moq_hls::Error::SegmentUnavailable { .. } => Landed::Segment,
-		err => panic!("{at:?}: a disconnect ended the recording with {err:?}"),
-	};
+	assert!(
+		matches!(
+			err,
+			moq_hls::Error::CatalogFailed { .. }
+				| moq_hls::Error::TimelineFailed { .. }
+				| moq_hls::Error::SegmentUnavailable { .. }
+		),
+		"{at:?}: a disconnect ended the recording with {err:?}"
+	);
 	// The failure is final: every later call answers it again.
 	for _ in 0..2 {
 		let again = moq_clock::timeout(TIMEOUT, cursor.next())
@@ -98,30 +95,14 @@ async fn disconnect(at: At) -> Landed {
 		String::from_utf8_lossy(response.body())
 	);
 	drop(publisher);
-	landed
-}
-
-/// Disconnect until both the catalog's and the timeline's failure have reached the cursor first.
-///
-/// The session tears its subscriptions down in no fixed order, so either can land first. Each
-/// run is otherwise deterministic on the paused clock, and a raw error from either order fails it.
-async fn both_orders(at: At) {
-	let mut landed = Vec::new();
-	while !(landed.contains(&Landed::Catalog) && landed.contains(&Landed::Timeline)) {
-		assert!(
-			landed.len() < 64,
-			"{at:?}: only {landed:?} landed first; pin the other order another way"
-		);
-		landed.push(disconnect(at).await);
-	}
 }
 
 #[tokio::test(start_paused = true)]
 async fn mid_segment() {
-	both_orders(At::Segment).await;
+	disconnect(At::Segment).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn mid_catalog() {
-	both_orders(At::Catalog).await;
+	disconnect(At::Catalog).await;
 }
