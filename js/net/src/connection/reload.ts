@@ -32,7 +32,8 @@ import type { Probe, Stats } from "./stats.ts";
  *
  * A GOAWAY off a session that outlived {@link ReloadDelay.healthy} migrates at once, unless it
  * sends the connection back to an endpoint that already redirected it elsewhere and the
- * session lived less than {@link ReloadDelay.max}. Two peers redirecting to each other thus
+ * session lived less than {@link ReloadDelay.max} (or {@link ReloadDelay.healthy} when
+ * uncapped). Two peers redirecting to each other thus
  * wait out this backoff and count against the timeout.
  */
 export type ReloadDelay = {
@@ -42,7 +43,7 @@ export type ReloadDelay = {
 	/** The multiplier for the delay (default: 2). */
 	multiplier?: number;
 
-	/** The maximum delay (default: 5000ms). */
+	/** The maximum delay (default: 5000ms; zero leaves it uncapped). A cap below `initial` caps the first delay too. */
 	max?: Milli;
 
 	/**
@@ -506,9 +507,9 @@ export class Reload {
 					// a GOAWAY back to the same place is a restart, not a move, so it never counts.
 					// A session that outlived the capped delay already redials no faster than the
 					// backoff would allow, so it starts a new run: rolling restarts days apart
-					// never add up to a loop.
+					// never add up to a loop. Uncapped, the healthy bar is the only rate the config names.
 					const lived = Instant.durationSince(now(), connected);
-					if (lived >= Nano.fromMilli(this.delay?.max ?? DEFAULT_DELAY.max)) this.#redirects.reset();
+					if (lived >= Nano.fromMilli(this.#cap() ?? this.#healthy())) this.#redirects.reset();
 					// Only a redirect this GOAWAY named is a move. An empty or ignored one reconnects
 					// in place, even when that reruns the race a WebSocket fallback won.
 					const from = endpoint(at);
@@ -617,6 +618,12 @@ export class Reload {
 		return this.delay?.healthy ?? DEFAULT_DELAY.healthy;
 	}
 
+	// The delay cap, or undefined when a zero `max` leaves it uncapped.
+	#cap(): Milli | undefined {
+		const max = this.delay?.max ?? DEFAULT_DELAY.max;
+		return max > 0 ? max : undefined;
+	}
+
 	/**
 	 * Schedule the next connect attempt after the current backoff, or stop once the retry window
 	 * has expired. `connected` is when the dead session was established, if it ever was, and
@@ -631,7 +638,7 @@ export class Reload {
 		const delay = this.delay ?? {};
 		const initial = delay.initial ?? DEFAULT_DELAY.initial;
 		const multiplier = delay.multiplier ?? DEFAULT_DELAY.multiplier;
-		const max = delay.max ?? DEFAULT_DELAY.max;
+		const cap = this.#cap();
 		const timeout = delay.timeout ?? DEFAULT_DELAY.timeout;
 
 		// Report disconnected during the backoff rather than when the retry reruns the
@@ -668,7 +675,7 @@ export class Reload {
 		}
 
 		const at = now();
-		this.#delay ??= initial;
+		this.#delay ??= cap === undefined ? initial : Milli(Math.min(initial, cap));
 		this.#deadline ??= timeout > 0 ? Instant.add(at, Nano.fromMilli(timeout)) : Number.POSITIVE_INFINITY;
 
 		if (at >= this.#deadline) {
@@ -681,7 +688,8 @@ export class Reload {
 		// Equal jitter, so a fleet of tabs knocked offline together doesn't reconnect on the same
 		// tick, and never past the deadline the retry window promised.
 		const wait = Math.min(Nano.fromMilli(this.#delay) * (0.5 + Math.random() / 2), this.#deadline - at);
-		this.#delay = Milli(Math.min(this.#delay * multiplier, max));
+		const next = this.#delay * multiplier;
+		this.#delay = Milli(cap === undefined ? next : Math.min(next, cap));
 
 		const tick = this.#tick.peek() + 1;
 		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), Nano(wait));

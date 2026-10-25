@@ -17,7 +17,7 @@ import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
-import { pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
+import { pumpAnnounced, Redirects, Reload, type ReloadDelay, type ReloadProps } from "./reload.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -1201,13 +1201,21 @@ test("an invalid timeout is refused when the loop is built, not by every attempt
 	}
 });
 
-// Each session lives 100 ms, well past `initial`. Only `healthy` decides whether its end is a
-// failed attempt that escalates the backoff or a healthy drop that resets it.
-for (const [healthy, gaps] of [
-	[undefined, [10, 20, 40]],
-	[Milli(50), [10, 10, 10]],
-] as const) {
-	test(`a 100 ms session with healthy ${healthy ?? "default"} waits ${gaps.join(", ")} ms`, async () => {
+// Each session lives 100 ms, so the backoff between them shows how `healthy` scores its end and
+// how `max` caps the delay, matching moq-tokio's `connect.backoff`.
+const backoffs: [string, ReloadDelay, number[]][] = [
+	// Past `initial` but short of the default bar, so each end is a failed attempt.
+	["a session short of the default healthy bar escalates", {}, [10, 20, 40]],
+	["a session past the healthy bar resets", { healthy: Milli(50) }, [10, 10, 10]],
+	[
+		"a zero max leaves the delay uncapped",
+		{ initial: Milli(1000), multiplier: 4, max: Milli(0) },
+		[1000, 4000, 16000],
+	],
+	["a max below initial caps the first delay too", { max: Milli(5) }, [5, 5, 5]],
+];
+for (const [name, delay, gaps] of backoffs) {
+	test(`backoff: ${name}`, async () => {
 		const clock = new Manual();
 		const installed = clock.install();
 		// Full delay every time, so the waits are exact.
@@ -1224,7 +1232,7 @@ for (const [healthy, gaps] of [
 		const reload = new Reload({
 			url,
 			websocket: { enabled: false },
-			delay: { initial: Milli(10), multiplier: 2, max: Milli(1000), healthy },
+			delay: { initial: Milli(10), multiplier: 2, max: Milli(1000), ...delay },
 		});
 		try {
 			const waited: number[] = [];
