@@ -19,7 +19,7 @@ records".
 See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
 - Storage is the lock-free
-  [append-only log](/quest/m1/unbounded-groups/log.md) (decided 2026-10-24
+  append-only log (`kio::log`) (decided 2026-10-24
   by the maintainer over the group storage benchmark,
   [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627): land the
   end-state storage now rather than a mutex layout swapped later; numbers in
@@ -103,4 +103,3 @@ groups. A reader that used to see `GroupTooLarge` now refills or sees
 ## Required
 
 - [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - frame storage the cache can account for without whole-frame preallocation
-- [Append-only log](/quest/m1/unbounded-groups/log.md) - `GroupState`'s frames in a lock-free kio log with an advancing base, the tail run this builds on

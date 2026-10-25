@@ -36,10 +36,10 @@ pub trait Transport: Send + 'static {
 		None
 	}
 
-	/// How the session's endpoint was bound. Most transports know the peer only by its
-	/// socket, so the default is [`Binding::InBand`](moq_net::transport::Binding::InBand).
-	fn binding(&self) -> moq_net::transport::Binding {
-		moq_net::transport::Binding::InBand
+	/// Where the session's request target travels. Most transports carry no request URI,
+	/// so the default is [`Address::Setup`](moq_net::transport::Address::Setup).
+	fn address(&self) -> moq_net::transport::Address {
+		moq_net::transport::Address::Setup
 	}
 }
 
@@ -861,16 +861,16 @@ mod ws_transport {
 		ws: T,
 		keep_alive: Option<KeepAlive>,
 		socket_stats: Option<crate::SharedSocketStats>,
-		binding: moq_net::transport::Binding,
+		address: moq_net::transport::Address,
 	}
 
 	impl<T> WsTransport<T> {
-		pub fn new(ws: T, binding: moq_net::transport::Binding) -> Self {
+		pub fn new(ws: T, address: moq_net::transport::Address) -> Self {
 			Self {
 				ws,
 				keep_alive: None,
 				socket_stats: None,
-				binding,
+				address,
 			}
 		}
 
@@ -964,8 +964,8 @@ mod ws_transport {
 			self.socket_stats.clone()
 		}
 
-		fn binding(&self) -> moq_net::transport::Binding {
-			self.binding
+		fn address(&self) -> moq_net::transport::Address {
+			self.address
 		}
 
 		fn split(self, config: &crate::Config) -> (WsWriter<T>, WsReader) {
