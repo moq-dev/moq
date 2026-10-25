@@ -30,7 +30,7 @@ class TestLints(unittest.TestCase):
                 '#[test]\nfn runs() { assert!(empty(&[])); }\n'
             )
             toolchain = Path(shutil.which("clippy-driver")).parent
-            env = dict(os.environ, MOQ_LOCAL_SUPERVISED="1", CARGO_TARGET_DIR=str(root / "target"),
+            env = dict(os.environ, LOCAL_SUPERVISED="1", CARGO_TARGET_DIR=str(root / "target"),
                        PATH=f"{toolchain}:{os.environ['PATH']}",
                        NEXTEST_PROFILE="default")
             subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=root,

@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{announce, broadcast, origin, stats};
+use moq_net::{announce, origin, stats};
 use moq_stats::produce::bench::{Driver, FrameBytes};
 
 struct Counter;
@@ -93,7 +93,7 @@ struct Relay {
 	driver: Driver,
 	_origin: origin::Producer,
 	_origin_driver: origin::Driver,
-	_publishers: Vec<broadcast::Producer>,
+	_publishers: Vec<origin::Publication>,
 	_cursors: Vec<announce::Consumer>,
 	_sessions: Vec<stats::Session>,
 	_held: Vec<moq_net::track::Subscriber>,
