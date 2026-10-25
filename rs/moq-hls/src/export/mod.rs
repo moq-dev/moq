@@ -1636,10 +1636,11 @@ mod tests {
 		let refused = [(Kind::Video, ""), (Kind::Video, "."), (Kind::Audio, "..")];
 		let tracks = ["", ".", "..", "video0"];
 		let origin = produce_origin();
-		let mut broadcast = origin.create_broadcast("live").unwrap();
+		let broadcast = origin.create_broadcast("live").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		settle().await;
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
 			.mutate(|catalog| {
 				for (kind, name) in refused.into_iter().chain([(Kind::Video, "video0")]) {
