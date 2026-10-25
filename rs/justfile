@@ -49,8 +49,6 @@ lint *args:
     # clock lint's test allowances also silence clippy's disallowed_methods.
     git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs'; [ $? -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
     cargo fmt --all --check
-    # quinn-udp and quinn keep quinn's formatting; cargo fmt skips them (see moq-sock's lib.rs, moq-tokio's quic.rs).
-    rustfmt --edition 2024 --check rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps "$@"
     cargo shear
     cargo sort --workspace --check --no-format
@@ -60,7 +58,6 @@ lint *args:
 fix *args:
     cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets "$@"
     cargo fmt --all
-    rustfmt --edition 2024 rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs
     cargo shear --fix
     cargo sort --workspace --no-format
 
