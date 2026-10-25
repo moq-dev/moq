@@ -31,22 +31,32 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	el.setAttribute("url", url);
 	if (versions) el.setAttribute("versions", versions);
 	el.setAttribute("name", broadcast);
-	// Chromium's --use-fake-device-for-media-stream feeds getUserMedia fake
-	// camera and microphone input. Audio is encoded lazily when a player asks.
-	el.setAttribute("source", "camera");
-	// The microphone plays the driver's test tone. Keep Chromium's voice processing off it: that
-	// mixes stereo to mono and suppresses a steady tone as noise.
-	el.signals.run((effect) => {
-		const mic = effect.get(el.sources.audio);
-		if (mic && "constraints" in mic) {
-			mic.constraints.set({
-				channelCount: 2,
-				echoCancellation: false,
-				noiseSuppression: false,
-				autoGainControl: false,
-			});
-		}
-	});
+	// Media is encoded lazily when a player asks.
+	const media = params.get("media");
+	if (media) {
+		// The interop driver's file of the picture and test tone, decoded and looped rather than
+		// captured: a fake device splices the tone whenever the machine is short of CPU.
+		const response = await fetch(media);
+		if (!response.ok) throw new Error(`no publisher media at ${media}: ${response.status}`);
+		el.controls.source.set(new File([await response.blob()], "interop-media"));
+	} else {
+		// Chromium's --use-fake-device-for-media-stream feeds getUserMedia fake camera and microphone
+		// input, for the capture checks in media.ts.
+		el.setAttribute("source", "camera");
+		// Keep Chromium's voice processing off the microphone: that mixes stereo to mono and
+		// suppresses a steady tone as noise.
+		el.signals.run((effect) => {
+			const mic = effect.get(el.sources.audio);
+			if (mic && "constraints" in mic) {
+				mic.constraints.set({
+					channelCount: 2,
+					echoCancellation: false,
+					noiseSuppression: false,
+					autoGainControl: false,
+				});
+			}
+		});
+	}
 	document.body.appendChild(el);
 	// So the driver can wait for the session to close before closing the browser.
 	watchResources();

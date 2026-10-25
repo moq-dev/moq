@@ -362,7 +362,7 @@ publisher_codecs() {
 }
 # phase_checked <round> <subscriber> <codec>: whether tone.py also holds the tone's phase to the
 # decode's timestamps, which fails a misapplied pre-skip. Every publisher's tone starts at
-# timestamp zero except the browser's, whose capture clock is not tied to its WAV. The native-JS
+# timestamp zero except the browser's, which stamps its file from its own page clock. The native-JS
 # subscriber hands WebCodecs raw Opus without the OpusHead, as the player does, which keeps the
 # pre-skip for the player to trim, and its libav fallback stamps milliseconds. AAC waits on the
 # fMP4 importer applying the edit list that carries ffmpeg's 1024 priming samples
@@ -981,14 +981,19 @@ ffmpeg_fmp4() {
         -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 -
 }
 
-# The browser's microphone: <tone> as a WAV Chromium loops. Ten seconds is a whole number of
-# cycles of any whole-Hz tone, so the loop is seamless.
+# The browser's input: the picture and <tone> as a file it decodes and loops, H.264 beside 16-bit
+# PCM so decoding it loses nothing. Not Chromium's fake devices: their timers skip a late 10 ms
+# tick, and Web Audio then splices the tone without a timestamp gap whenever the runner is short
+# of CPU. Ten seconds is a whole number of cycles of any whole-Hz tone and of video frames, so the
+# loop is seamless.
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
-tone_wav() {
-    local wav
-    wav="$HARNESS_RUN/tone-${1//,/-}.wav"
-    [[ -f "$wav" ]] || ffmpeg -hide_banner -loglevel error -f lavfi -i "$(tone_source "$1"):d=10" -c:a pcm_s16le "$wav"
-    printf '%s' "$wav"
+tone_media() {
+    local media
+    media="$HARNESS_RUN/tone-${1//,/-}.mov"
+    [[ -f "$media" ]] || ffmpeg -hide_banner -loglevel error -f lavfi -i "testsrc=size=${SIZE}:rate=${FPS}:duration=10" \
+        -f lavfi -i "$(tone_source "$1"):d=10" -c:v libx264 -profile:v baseline -preset ultrafast -pix_fmt yuv420p \
+        -x264-params "keyint=${FPS}:min-keyint=${FPS}:scenecut=0" -c:a pcm_s16le "$media"
+    printf '%s' "$media"
 }
 
 # The publisher pipeline, run in a process group of its own by `harness_spawn`
@@ -1031,14 +1036,13 @@ run_publisher() {
             exec bun "$INTEROP_COMPAT_CLIENT/client.ts" publish "$url" "$broadcast"
             ;;
         js)
-            # Headless Chromium encodes its own H.264 from a fake camera, and Opus from a
-            # fake microphone playing the tone, via WebCodecs (lazily, once a subscriber
-            # creates demand). exec, so the driver leads the group and `stop_publisher`
-            # waits for its own close.
-            local wav
-            wav=$(tone_wav "$tone")
+            # Headless Chromium decodes the tone file and encodes its own H.264 and Opus
+            # via WebCodecs (lazily, once a subscriber creates demand). exec, so the driver
+            # leads the group and `stop_publisher` waits for its own close.
+            local media
+            media=$(tone_media "$tone")
             cd "$CLIENTS/js" && exec bun driver.ts publish \
-                --url "$url" --broadcast "$broadcast" --audio-file "$wav" ${FLAGS[@]+"${FLAGS[@]}"}
+                --url "$url" --broadcast "$broadcast" --media "$media" ${FLAGS[@]+"${FLAGS[@]}"}
             ;;
         *)
             echo "unknown publisher: $lang" >&2
