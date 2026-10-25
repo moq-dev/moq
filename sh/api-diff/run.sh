@@ -114,6 +114,12 @@ rust() {
     # Its own workspace, so the repository's does not claim it.
     printf '[package]\nname = "api-diff-baseline"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n\n[workspace]\n\n[dependencies]\n' >"$manifest"
 
+    # Each metadata query is captured before it is read, since a process
+    # substitution's failure would not stop the run and would leave crates unchecked.
+    local packages
+    packages=$(cargo metadata --locked --no-deps --format-version 1 |
+        jq -r '.packages[] | select(.publish != []) |
+            "\(.name) \([.targets[].kind[]] | unique | join(",")) \([.targets[] | select(.kind | index("lib") or index("rlib")) | .name][0] // "-") \(.id)"')
     while read -r name kinds lib id; do
         # A binary or a C library has no Rust API; moq-c and moq-ffi are diffed as FFI.
         [[ ",$kinds," == *,lib,* || ",$kinds," == *,rlib,* ]] || continue
@@ -145,17 +151,16 @@ rust() {
         libs+=("$lib")
         versions+=("$version")
         current+=(-p "$id")
-    done < <(cargo metadata --locked --no-deps --format-version 1 |
-        jq -r '.packages[] | select(.publish != []) |
-            "\(.name) \([.targets[].kind[]] | unique | join(",")) \([.targets[] | select(.kind | index("lib") or index("rlib")) | .name][0] // "-") \(.id)"')
+    done <<<"$packages"
 
     # The baseline resolves its own lockfile, as a consumer of those releases
     # would. A release without a library, or with another name for it, shows here.
-    while read -r name version lib; do
-        released["$name $version"]=$lib
-    done < <(cargo metadata --manifest-path "$manifest" --format-version 1 |
+    packages=$(cargo metadata --manifest-path "$manifest" --format-version 1 |
         jq -r '.packages[] | select(.source != null) |
             "\(.name) \(.version) \([.targets[] | select(.kind | index("lib") or index("rlib")) | .name][0] // "-")"')
+    while read -r name version lib; do
+        released["$name $version"]=$lib
+    done <<<"$packages"
     for i in "${!crates[@]}"; do
         if [[ "${released["${crates[$i]} ${versions[$i]}"]:--}" == - ]]; then
             row "${crates[$i]}" "${versions[$i]} (no library)" new
