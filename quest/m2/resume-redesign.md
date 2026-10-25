@@ -37,8 +37,8 @@ in several owners, which must be kept in agreement by hand:
 Every `track::Consumer`/`Subscriber` method has two implementations (26
 `Inner::Resume` arms, 11 `serving()` delegations), so each feature (ranges,
 anchors, fills, compression, largest, drops, start, live) is written twice
-and drifts. `js/net/src/resume.ts` (1,786 lines) mirrors it, and the
-[resume-floor](/quest/m1/resume-floor.md) quest, the resumed JS drops fix
+and drifts. `js/net/src/resume.ts` (1,786 lines) mirrors it, and the resume floor fix
+[moq-dev/moq#6759](https://github.com/moq-dev/moq/pull/6759), the resumed JS drops fix
 [moq-dev/moq#6758](https://github.com/moq-dev/moq/pull/6758), and the compress check
 [moq-dev/moq#6460](https://github.com/moq-dev/moq/pull/6460) are each a place the two
 paths diverged.
