@@ -16,7 +16,8 @@ also bounds its own worker fanout so it does not overwhelm the desktop.
   should remain cheap. Verify cancellation leaves no owned workload running.
 - Reuse mbx for Rust compilation. Measure nextest thread/group limits and Bun
   workspace fanout for local runs, and the module lanes `sh/dispatch.sh`
-  runs at once (`MOQ_CHECK_JOBS`); do not blindly enable mbx test scheduling
+  runs at once (`MOQ_CHECK_JOBS`, which also bounds the sources
+  `sh/obs/compile.sh` checks at once); do not blindly enable mbx test scheduling
   where queued time would consume nextest's timeout budget.
 - Benchmark representative solo and concurrent checkouts, recording wall time,
   CPU time, worker counts, cache state, and other host load. Compare total work

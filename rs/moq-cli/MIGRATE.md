@@ -79,13 +79,14 @@ Rename `--max-age` to `--max-delay` on those exports.
 Each frame is written that long after its decode time; the older staleness spellings are refused with `--delay` named.
 Rename `--max-age` to `--delay`.
 
-### `moq export ts --linger` follows only the same publisher instance
+### `moq export ts --linger` is `--follow`, and follows only the same publisher instance
 
-A restarted publisher exits 1 unless `--stitch` follows it as a program switch.
-`moq export srt` takes the same two flags.
+Rename `export ts --linger` to `--follow`; the old spelling stops the run naming it. `export srt` takes the same `--follow`.
+A restarted publisher exits 1 unless `--stitch` follows it as a program switch, and a stitched replacement's first catalog is awaited until it arrives or the replacement goes, so `--follow 0s` no longer refuses a cold one.
+A failure other than the publisher leaving, such as a codec TS cannot carry, exits at once rather than after a 1 s grace.
 
 ```bash
-moq export ts --linger 10s --stitch ...
+moq export ts --follow 10s --stitch ...
 ```
 
 ### `moq export fmp4` fixes its track set at the init segment

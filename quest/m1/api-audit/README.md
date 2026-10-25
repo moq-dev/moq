@@ -61,8 +61,7 @@ Rejected in planning:
   `close` collides with `AutoCloseable`, and no single verb fits every
   language's reserved names.
 - A follow policy enum folding `linger` and `stitch`: one name per meaning
-  ([TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md)
-  renames the export wait `--follow`) fixes the confusion more cheaply.
+  (the export wait is `--follow`) fixes the confusion more cheaply.
 
 ## Required
 
