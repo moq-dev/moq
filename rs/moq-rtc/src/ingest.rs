@@ -69,6 +69,7 @@ impl session::MediaSink for IngestSink {
 	}
 
 	fn abort(&mut self, err: moq_net::Error) {
+		self.catalog.clone().abort(err.clone());
 		self.bridges.abort(err);
 	}
 

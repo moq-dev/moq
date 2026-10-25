@@ -1,6 +1,6 @@
 /**
  * Drives a headless Chromium against the vite-built page (see `serve`) for the interop matrix. publish
- * streams a fake camera and a microphone playing `--audio-file` until killed; subscribe verifies,
+ * streams the picture and tone decoded from `--media`, looping, until killed; subscribe verifies,
  * once per `--codecs` audio rendition with the player pinned to it, rendered playback, that each
  * audio channel the player outputs carries its `--tone`, and pause/resume.
  *
@@ -8,7 +8,7 @@
  * so this driver tolerates a slow announcement with one reload. `media.ts` is the strict path: it
  * waits on an explicit publisher-ready state and never reloads.
  *
- *     bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang --audio-file tone.wav [--version V]
+ *     bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang --media tone.mov [--version V]
  *     bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20 --tone 440,660 \
  *         --codecs opus,mp4a [--version V]
  *
@@ -67,7 +67,7 @@ const { positionals, values } = parseArgs({
 		"finish-ack": { type: "string" },
 		frames: { type: "string", default: "10" },
 		timeout: { type: "string", default: "20" },
-		"audio-file": { type: "string" },
+		media: { type: "string" },
 		tone: { type: "string" },
 		codecs: { type: "string" },
 	},
@@ -78,7 +78,7 @@ const url = values.url;
 const broadcast = values.broadcast;
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
 const finishing = values.finish || values["finish-ack"] !== undefined;
-const audioFile = values["audio-file"];
+const media = values.media;
 const tones = (values.tone ?? "").split(",").filter(Boolean).map(Number);
 // Each audio rendition by codec: the catalog's up to its first `.`.
 const codecs = (values.codecs ?? "").split(",").filter(Boolean);
@@ -88,11 +88,11 @@ if (
 	!broadcast ||
 	!Number.isFinite(timeoutMs) ||
 	timeoutMs <= 0 ||
-	(!finishing && role === "publish" && !audioFile) ||
+	(!finishing && role === "publish" && !media) ||
 	(!finishing && role === "subscribe" && (!tones.length || tones.some((hz) => !(hz > 0)) || !codecs.length))
 ) {
 	console.error(
-		"usage: driver.ts publish --url U --broadcast B (--audio-file WAV | --finish-ack FIFO) | subscribe --url U --broadcast B (--tone HZ,... --codecs CODEC,... | --finish [--frames N]) [--version V] [--timeout S>0]",
+		"usage: driver.ts publish --url U --broadcast B (--media FILE | --finish-ack FIFO) | subscribe --url U --broadcast B (--tone HZ,... --codecs CODEC,... | --finish [--frames N]) [--version V] [--timeout S>0]",
 	);
 	process.exit(2);
 }
@@ -118,14 +118,10 @@ async function waitForStablePause(page: Page, errors: BrowserErrors, deadline: n
 	throw new Error(`playback did not stop after pause: ${JSON.stringify(previous)}`);
 }
 
-const server = serve();
-const browser = await launch([
-	"--use-fake-device-for-media-stream",
-	"--use-fake-ui-for-media-stream",
-	"--autoplay-policy=no-user-gesture-required",
-	// The fake microphone loops this file instead of its default beeps.
-	...(audioFile ? [`--use-file-for-fake-audio-capture=${audioFile}`] : []),
-]);
+// The page fetches the publisher's file from here.
+const MEDIA_PATH = "/interop-media";
+const server = serve(media ? { [MEDIA_PATH]: media } : {});
+const browser = await launch(["--autoplay-policy=no-user-gesture-required"]);
 
 /**
  * Play the broadcast in a page of its own, pinned to its `codec` audio rendition: rendered video, the
@@ -308,10 +304,15 @@ try {
 	} else {
 		await open(
 			browser,
-			pageUrl(server.origin, role, { url, broadcast, ...(values.version ? { versions: values.version } : {}) }),
+			pageUrl(server.origin, role, {
+				url,
+				broadcast,
+				...(media ? { media: MEDIA_PATH } : {}),
+				...(values.version ? { versions: values.version } : {}),
+			}),
 			role,
 		);
-		console.error(`publishing ${broadcast} (fake camera + ${audioFile} as the microphone) to ${url}`);
+		console.error(`publishing ${broadcast} (${media}) to ${url}`);
 		// Stream until the orchestrator stops us.
 		await new Promise((resolve) => process.once("SIGTERM", resolve));
 		code = 0;

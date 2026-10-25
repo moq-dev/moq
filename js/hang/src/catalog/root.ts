@@ -59,7 +59,7 @@ const VersionSchema = z.number().check(
  *
  * The root `version` is the oldest moq-hang draft that reads the catalog correctly, absent while
  * that is 3. Parsing throws {@link UnsupportedVersion} when it is above {@link VERSION}; a
- * publisher sets it with {@link minVersion}.
+ * publisher sets it with {@link encode}.
  */
 export const RootSchema = z.looseObject({
 	// First, so it is checked before any section.
@@ -93,7 +93,7 @@ export type Root = z.infer<typeof RootSchema>;
  *
  * Only a field an older reader would misread raises it; one it would merely ignore does not.
  */
-export function minVersion(root: Root): number | undefined {
+function minVersion(root: Root): number | undefined {
 	// moq-hang-04: a reader that ignores `track` subscribes to the ID, a different track.
 	const renamed = [
 		root.video?.renditions,
@@ -148,6 +148,21 @@ export function checkRenditions(root: Root): Root {
 	const duplicate = Object.keys(root.video?.renditions ?? {}).find((id) => Object.hasOwn(audio, id));
 	if (duplicate !== undefined) throw new DuplicateRendition(duplicate);
 	return root;
+}
+
+/**
+ * The catalog as a publisher writes it: refused as every reader refuses it, with the root
+ * `version` computed rather than carried, so an edit can't claim less than the catalog uses.
+ *
+ * Throws {@link TooManyRenditions} or {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
+ */
+export function encode(root: Root): Root {
+	checkRenditions(root);
+	const value = { ...root };
+	delete value.version;
+	const version = minVersion(root);
+	if (version !== undefined) value.version = version;
+	return value;
 }
 
 /** A catalog update carried a `broadcast` reference that walks above its reader's root. */

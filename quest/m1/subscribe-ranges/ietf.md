@@ -48,10 +48,6 @@ moq-transport has no time filter, so a downstream `Time(pts)` end is
 resolved against the relay's cache before it goes upstream as a group range,
 or refused when the cache cannot resolve it.
 
-## Required
-
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the range requests this answers
-
 ## Related
 
 - [Pipelined first FETCH](/quest/m2/pipeline-requests/fetch.md) - sends TRACK_STATUS alongside the FETCH in adjacent code (`ietf/subscriber.rs`, `model/origin.rs`); an independent m2 optimization that adapts to these ranges and does not gate them

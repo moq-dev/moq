@@ -37,7 +37,7 @@ Rules every child follows:
   this release breaks anyway. Otherwise it joins the later quest that
   reshapes it (the ordered track reader joins
   [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md); binding durations get
-  [their own m2 quest](/quest/m2/ffi-durations.md)).
+  [their own quest](/quest/m1/ffi-durations.md)).
 - Each child lists its public API and wire impact in its PR, and its Impact
   bullet says how to migrate.
 
@@ -61,24 +61,18 @@ Rejected in planning:
   `close` collides with `AutoCloseable`, and no single verb fits every
   language's reserved names.
 - A follow policy enum folding `linger` and `stitch`: one name per meaning
-  ([TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md)
-  renames the export wait `--follow`) fixes the confusion more cheaply.
+  (the export wait is `--follow`) fixes the confusion more cheaply.
 
 ## Required
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
 - [The origin announces](/quest/m1/api-audit/announce-owner.md) - a broadcast producer cannot announce; the origin hands out the announcement, so `Prepared` and standalone broadcasts lose methods that always fail
-- [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - the dead and test-only moq-net, `@moq/net`, and moq-ffi items the follow-up audit found go private or away
-- [Derived origins borrow](/quest/m1/api-audit/derived-origin-close.md) - closing a JS `scope()` handle releases only that handle
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
-- [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
 - [One frame rate name](/quest/m1/api-audit/frame-rate.md) - core `moq_video::Rate` becomes `FrameRate`, as the bindings name it
 - [Pinned consumers adopt the CLI flag names](/quest/m1/api-audit/cli-flags-consumers.md) - pinned downstream deployments move past the flag rename and use its spellings
-- [Transport config](/quest/m1/api-audit/transport-config.md) - moq-tokio and moq-quic configs have one meaning for unset, enums for modes, no order-dependent setters, and no leftover features
 - [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
 - [Only sessions accept a request](/quest/m1/api-audit/claim-request-type.md) - accepting an application claim's request fails to compile, and the peer-route hatches are crate-private
-- [One range setter](/quest/m1/api-audit/serve.md) - `with_range` replaces seven cursor setters and nothing else of the serving cursor goes public
 - [A request's source enforces its validity](/quest/m1/api-audit/answer.md) - a stale source refuses new track requests by itself, with no public additions
 - [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) - no public moq-net item exists only for moq-transport, and a client names its request target once as a URL
 - [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
@@ -88,6 +82,5 @@ Rejected in planning:
 ## Related
 
 - [Claim request type](/quest/m1/api-audit/claim-request-type.md) - removes `accept` from application requests; [the origin announces](/quest/m1/api-audit/announce-owner.md) narrows `Prepared` beside it
-- [Readers follow restarts](/quest/m1/sink-restart-follow.md) - moves readers onto the follow operation that [two broadcast resolutions](/quest/m1/api-audit/resolve.md) names
 - [API-diff check on release PRs](/quest/m1/api-diff.md) - the backstop that catches breaks this epic misses
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - the other release-readiness check

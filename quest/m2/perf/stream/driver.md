@@ -51,3 +51,9 @@ binding that starts a qmux session. The Impact bullet says how to migrate.
 ## Required
 
 - [Bench](/quest/m2/perf/stream/bench.md) - the baseline this is measured against
+
+## Related
+
+- [qmux byte counters](/quest/m2/wire-stats/qmux.md) - refreshes `Wire` counters on qmux's read/write path
+- [tls:// peers authenticate by certificate](/quest/m2/tls-listener-mtls.md) - changes `qmux::tls::Server::accept`
+- [qmux leases receive memory](/quest/m2/qmux-receive-lease.md) - changes qmux's `RecvStream` and window defaults

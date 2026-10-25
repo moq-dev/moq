@@ -130,13 +130,6 @@ Public entry points:
 - `encode::publish_capture(...)` captures a webcam, encodes it, and publishes on
   demand: the track and catalog are advertised up front, but the camera opens
   only while a subscriber is watching and is released when the last one leaves.
-- `encode::Control::new(...)` does the same but returns a `Control` handle with
-  the `Driver` that runs it, like `moq-audio`'s. `Control::cut()` asks for a
-  keyframe: requests coalesce, any keyframe serves them (the GOP cadence
-  included), and a forced one lands at least 500ms after any other. On a
-  backend that cannot force one it returns `Error::CutUnsupported` and the
-  publish carries on. Dropping the last `Control` ends the `Driver` promptly,
-  even mid-open.
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 
@@ -173,9 +166,6 @@ encode: an unconsumed or failed frame fails completion and loses its slot for
 good, since nothing signalled its timeline, so drop excess captures before
 publishing. Non-exportable application images need a GPU copy into an exportable
 slot. External Vulkan images have no CPU mapping or download fallback.
-
-External DMA-BUF producers use `DmaBuf::new` with an owned FD, `DmaBufLayout`,
-and a release guard; their buffers also refuse CPU download.
 
 Run `just rs gpu` for the opt-in native hardware exercise. It creates a
 Vulkan image independently of Unreal, imports it once into CUDA, checks repeated

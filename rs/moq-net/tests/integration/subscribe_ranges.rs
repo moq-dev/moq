@@ -105,7 +105,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 		}
 	};
 
-	let mut ahead = subscribe(&remote, Subscription::default().with_groups(4..)).await;
+	let mut ahead = subscribe(&remote, Subscription::default().with_range(4..)).await;
 	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")

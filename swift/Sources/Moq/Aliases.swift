@@ -16,7 +16,7 @@ public typealias AudioFrame = MoqFFI.MoqAudioFrame
 /// The PCM layout (format, sample rate, channels) written to an `Audio.Producer`.
 public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The codec-side audio encoder settings: codec, rate, channels,
-/// bitrate, frame duration, and preset.
+/// bitrate, and frame duration.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
 /// What a `VideoConsumer` decodes to: an optional resize, a max delay, and
 /// whether frames keep the decoder's native surface.
@@ -121,7 +121,7 @@ public typealias ProtocolError = MoqFFI.MoqProtocolError
 extension Subscription {
     /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
     public typealias Range = MoqFFI.MoqRange
-    /// Where one end of a `Range` falls: `.absolute(group:frame:)`, `.relative(groups:)`
+    /// Where one end of a `Range` falls: `.absolute(group:)`, `.relative(groups:)`
     /// back from the latest group, or `.time(timestampUs:)` for the group containing it.
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.

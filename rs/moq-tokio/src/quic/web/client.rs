@@ -32,7 +32,7 @@ pub enum CongestionControl {
 #[derive(Clone)]
 pub struct ClientBuilder {
 	provider: crypto::Provider,
-	congestion_controller: Option<Arc<dyn crate::quic::driver::congestion::ControllerFactory + Send + Sync + 'static>>,
+	congestion_controller: Option<Arc<dyn moq_congestion::ControllerFactory + Send + Sync + 'static>>,
 }
 
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
@@ -48,9 +48,9 @@ impl ClientBuilder {
 	/// Enable the specified congestion controller.
 	pub fn with_congestion_control(mut self, algorithm: CongestionControl) -> Self {
 		self.congestion_controller = match algorithm {
-			CongestionControl::LowLatency => Some(Arc::new(crate::quic::driver::congestion::Bbr3Config::default())),
+			CongestionControl::LowLatency => Some(Arc::new(moq_congestion::Bbr3Config::default())),
 			// TODO BBR is also higher throughput in theory.
-			CongestionControl::Throughput => Some(Arc::new(crate::quic::driver::congestion::CubicConfig::default())),
+			CongestionControl::Throughput => Some(Arc::new(moq_congestion::CubicConfig::default())),
 			CongestionControl::Default => None,
 		};
 

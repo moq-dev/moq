@@ -70,10 +70,9 @@ struct Serve {
 	/// The moq ALPNs this listener speaks, for the WebTransport subprotocol
 	/// pick.
 	alpns: Arc<Vec<String>>,
-	/// The negotiated-version restriction, when the operator set one.
-	versions: moq_net::Versions,
-	/// `listen.implementation`, the value this listener advertises in SETUP.
-	implementation: Option<String>,
+	/// The moq handshake every connection runs: the listener's versions and
+	/// the extensions and implementation it offers in SETUP.
+	moq: moq_net::Server,
 	/// The address every worker socket shares, reported as a session's `local`.
 	local: SocketAddr,
 	/// `listen.timeout`, which each worker's endpoint starts at a connection's
@@ -111,8 +110,7 @@ pub struct Workers {
 	udp: moq_uring::udp::Config,
 	pin: bool,
 	alpns: Arc<Vec<String>>,
-	versions: moq_net::Versions,
-	implementation: Option<String>,
+	moq: moq_net::Server,
 	timeout: Option<std::time::Duration>,
 	reset_secret: Option<[u8; 32]>,
 
@@ -148,7 +146,6 @@ impl Workers {
 						&& listen.tls.generate.is_empty()
 						&& listen.tls.root.is_empty()
 						&& listen.tls.identity.is_none()
-						&& listen.tls.resolver.is_none()
 						&& listen.tls.peers.is_none(),
 					"a shared TLS policy cannot be combined with listen.tls settings"
 				);
@@ -162,10 +159,10 @@ impl Workers {
 		// beats starting and quietly behaving differently from what the
 		// operator configured, which is the whole failure mode this mode is
 		// most likely to produce.
-		if listen.load_balancer().is_some() {
+		if listen.lb.id.is_some() {
 			anyhow::bail!(
 				"io_uring workers issue shard-steered connection ids and cannot also carry a \
-				 QUIC-LB server id (listen.lb_id)"
+				 QUIC-LB server id (listen.lb.id)"
 			);
 		}
 		// One resolution for the whole group, so a DNS answer that rotates
@@ -204,10 +201,7 @@ impl Workers {
 		// Every configured version's ALPN, as the tokio listener advertises.
 		// `h3` rides along for browsers, which negotiate the moq version as a
 		// WebTransport subprotocol instead.
-		let versions: moq_net::Versions = match listen.version.is_empty() {
-			true => Default::default(),
-			false => listen.version.clone().into(),
-		};
+		let versions = listen.versions();
 		let alpns: Vec<String> = versions.alpns().into_iter().map(str::to_owned).collect();
 
 		let alpn = alpns
@@ -217,9 +211,9 @@ impl Workers {
 			.collect();
 		let quic = quic.resolve();
 		let mut tls = tls.config(alpn)?;
-		if quic.keylog {
+		if let Some(path) = &quic.keylog {
 			let tls = Arc::make_mut(&mut tls);
-			tls.key_log = Arc::new(rustls::KeyLogFile::new());
+			tls.key_log = Arc::new(moq_tokio::tls::KeyLog::open(path)?);
 		}
 		let mut server = moq_uring::quic::server::Config::new(tls);
 		server.transport = transport(&quic)?;
@@ -250,8 +244,15 @@ impl Workers {
 			udp,
 			pin: config.pin,
 			alpns: Arc::new(alpns),
-			versions,
-			implementation: listen.implementation.clone(),
+			moq: {
+				let mut moq = moq_net::Server::new()
+					.with_versions(versions)
+					.with_extensions(listen.extensions);
+				if let Some(implementation) = &listen.implementation {
+					moq = moq.with_implementation(implementation);
+				}
+				moq
+			},
 			timeout: listen.resolved_timeout(),
 			reset_secret,
 			threads: Vec::new(),
@@ -305,8 +306,7 @@ impl Workers {
 			sessions,
 			tokio: tokio::runtime::Handle::current(),
 			alpns: self.alpns.clone(),
-			versions: self.versions.clone(),
-			implementation: self.implementation.clone(),
+			moq: self.moq.clone(),
 			local: self.addr,
 			timeout: self.timeout,
 			reset_secret: self.reset_secret,
@@ -753,10 +753,7 @@ async fn serve_connection(
 
 	deadline.close = Some(transport.clone());
 	let conn = transport.clone();
-	let mut server = moq_net::Server::new().with_versions(serve.versions.clone());
-	if let Some(implementation) = &serve.implementation {
-		server = server.with_implementation(implementation);
-	}
+	let server = serve.moq.clone();
 	let binding = match url {
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,
@@ -898,7 +895,8 @@ async fn serve_request(
 	let serving = serve.shutdown.serve();
 	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
 	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the
-	// shared runtime, and dropping it aborts the task.
+	// shared runtime, and dropping it aborts the task. Dropping the reply refuses the
+	// session with the timeout code, which its stats count.
 	let shutdown = serve.shutdown.clone();
 	let expired = std::pin::pin!(lifecycle.shared(&serve.tokio, async move { shutdown.expired().await }));
 	let reply = std::pin::pin!(request.ok());
@@ -1010,14 +1008,11 @@ mod tests {
 	/// A direct `bind` validates `[quic]` too, so a key log nobody can read back fails
 	/// instead of binding and logging nothing.
 	#[test]
-	fn bind_refuses_a_keylog_without_sslkeylogfile() {
-		if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
-			return;
-		}
+	fn bind_refuses_an_empty_keylog_path() {
 		let mut server = moq_tokio::server::Config::default();
-		server.quic.keylog = Some(true);
-		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
-			.expect_err("a keylog without SSLKEYLOGFILE must be refused");
+		server.quic.keylog = Some(std::path::PathBuf::new());
+		let err =
+			Workers::bind(server, moq_tokio::worker::Config::new(1)).expect_err("an empty keylog path must be refused");
 		assert!(
 			matches!(err.downcast_ref(), Some(moq_tokio::Error::KeylogUnset)),
 			"{err:#}"
@@ -1081,7 +1076,7 @@ mod tests {
 		config.runtime.workers = Some(1);
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
-		config.drain_timeout = window;
+		config.drain_timeout = Some(window.into());
 		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let port = relay.addr().unwrap().port();
 		let mut admissions = relay.admissions().unwrap();
@@ -1090,7 +1085,7 @@ mod tests {
 
 		let mut client = moq_tokio::connect::Config::default();
 		client.tls.insecure = Some(true);
-		client.once = Some(true);
+
 		client.bind = Some("127.0.0.1:0".parse().unwrap());
 		let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().unwrap();
 		let client = client.init(Default::default()).unwrap();
@@ -1135,11 +1130,11 @@ mod tests {
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.cert = vec![cert_path];
 		config.listen.tls.key = vec![key_path];
-		config.listen.timeout = Some(timeout);
+		config.listen.timeout = Some(timeout.into());
 		config.runtime.workers = Some(1);
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
-		config.drain_timeout = std::time::Duration::from_millis(100);
+		config.drain_timeout = Some(std::time::Duration::from_millis(100).into());
 		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let port = relay.addr().unwrap().port();
 		let mut admissions = relay.admissions().unwrap();
@@ -1148,7 +1143,7 @@ mod tests {
 
 		let mut client = moq_tokio::connect::Config::default();
 		client.tls.insecure = Some(true);
-		client.once = Some(true);
+
 		client.bind = Some("127.0.0.1:0".parse().unwrap());
 		let url: url::Url = format!("moql://127.0.0.1:{port}/deadline").parse().unwrap();
 		let client = client.init(Default::default()).unwrap();
