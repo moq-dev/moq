@@ -160,6 +160,7 @@ target_sources(
     src/obs-moq.cpp
     src/moq-audio-encoder.cpp
     src/moq-audio-encoder.h
+    src/moq-implementation.h
     src/moq-worker.h
     src/moq-output.h
     src/moq-service.h
@@ -170,16 +171,15 @@ target_sources(
     src/moq-source.cpp
     src/moq-source.h
 )
+# Sessions advertise it in SETUP (moq-implementation.h); the dock also displays it.
+target_compile_definitions(obs-moq PRIVATE PLUGIN_VERSION_STRING="${PLUGIN_VERSION}")
 
 # The dock requires both the frontend API (to register it) and Qt (to build it).
 # The advanced settings dialog is Qt-only, so it ships with the dock that opens it;
 # without Qt the same settings are still reachable through the service properties.
 if(ENABLE_FRONTEND_API AND ENABLE_QT)
   target_sources(obs-moq PRIVATE src/moq-dock.cpp src/moq-dock.h src/moq-advanced-dialog.cpp src/moq-advanced-dialog.h)
-  target_compile_definitions(
-    obs-moq
-    PRIVATE MOQ_FRONTEND_ENABLED MOQ_VERSION_STRING="${_moq_link_version}" PLUGIN_VERSION_STRING="${PLUGIN_VERSION}"
-  )
+  target_compile_definitions(obs-moq PRIVATE MOQ_FRONTEND_ENABLED MOQ_VERSION_STRING="${_moq_link_version}")
 endif()
 
 if(${BUILD_PLUGIN})

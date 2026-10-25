@@ -461,6 +461,8 @@ int main()
 		CHECK(first.has_value());
 		CHECK(first == output.GetEpoch());
 		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
+		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
+		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
 		CHECK(MoQOutputStatsTest::Epoch(output) == first);

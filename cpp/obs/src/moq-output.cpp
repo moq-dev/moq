@@ -3,6 +3,7 @@
 
 #include "moq-output.h"
 #include "moq-error.h"
+#include "moq-implementation.h"
 #include "moq-settings.h"
 #include "moq-url.h"
 #include "logger.h"
@@ -186,6 +187,7 @@ bool MoQOutput::Start()
 	// switched off the client keeps the library defaults.
 	moq::ClientConfig config;
 	config.publish = next_origin;
+	config.implementation = MoQImplementation();
 	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
 	std::string invalid = MoQSettings::Configure(service_settings, config);
 	std::shared_ptr<moq::Client> client;
