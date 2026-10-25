@@ -581,7 +581,9 @@ impl GroupState {
 	fn entry(&self, index: usize) -> Option<&Entry> {
 		let index = index as u64;
 		if index < self.log.base() {
-			return self.front.get(usize::try_from(index.checked_sub(self.offset as u64)?).ok()?);
+			return self
+				.front
+				.get(usize::try_from(index.checked_sub(self.offset as u64)?).ok()?);
 		}
 		self.log.get(index)
 	}
@@ -1606,7 +1608,11 @@ impl Producer {
 		};
 		// The slot was reserved and charged by `charge_partial` above.
 		state.push(entry);
-		debug_assert_eq!(state.committed(), state.next_index, "the in-flight frame was the last opened");
+		debug_assert_eq!(
+			state.committed(),
+			state.next_index,
+			"the in-flight frame was the last opened"
+		);
 		self.advance_largest(&state);
 		drop(state);
 
@@ -1805,7 +1811,11 @@ impl Handle {
 			(Timeline::Timed { latest, .. }, Some(start)) => Timeline::Timed { start, latest },
 			(Timeline::Empty, Some(start)) => Timeline::Timed {
 				start,
-				latest: entries.iter().rev().find_map(|entry| entry.frame.timestamp).unwrap_or(start),
+				latest: entries
+					.iter()
+					.rev()
+					.find_map(|entry| entry.frame.timestamp)
+					.unwrap_or(start),
 			},
 			(Timeline::Empty, None) => Timeline::Untimed,
 			(timeline, _) => timeline,
@@ -3100,7 +3110,12 @@ impl Cursor {
 		// A committed frame comes from the log without the lock, unless a plain read of a
 		// compressed group has to inflate it under the lock.
 		let committed = match !self.compressed || raw {
-			true => self.log.get(index as u64).ok().flatten().map(|entry| entry.read(self.compressed)),
+			true => self
+				.log
+				.get(index as u64)
+				.ok()
+				.flatten()
+				.map(|entry| entry.read(self.compressed)),
 			false => None,
 		};
 		let (info, source) = match committed {
@@ -3416,7 +3431,13 @@ mod test {
 			// Segments double from one slot: the first is in the fixed overhead, and the
 			// second and fourth frames each allocate the next.
 			for _ in 0..5 {
-				let heap = group.handle.state.read().log.heap().max(kio::log::Writer::<Entry>::HEAP);
+				let heap = group
+					.handle
+					.state
+					.read()
+					.log
+					.heap()
+					.max(kio::log::Writer::<Entry>::HEAP);
 				let before = pool.used();
 				match mode {
 					0 => group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap(),
@@ -3443,7 +3464,10 @@ mod test {
 			let consumer = group.consume();
 			let before = consumer.cursor.state.read().log.heap();
 			group.abort(Error::Cancel).unwrap();
-			assert!(consumer.cursor.state.read().log.heap() < before, "the segments are freed");
+			assert!(
+				consumer.cursor.state.read().log.heap() < before,
+				"the segments are freed"
+			);
 			assert!(consumer.cursor.state.read().is_empty());
 		}
 	}
@@ -4529,7 +4553,10 @@ mod test {
 		// Re-declaring before the first frame is fine; the shape isn't committed yet.
 		producer.start_at(2).unwrap();
 		producer.start_at(3).unwrap();
-		assert!(matches!(producer.start_at(2), Err(Error::Closed)), "the start never moves back");
+		assert!(
+			matches!(producer.start_at(2), Err(Error::Closed)),
+			"the start never moves back"
+		);
 
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
 		assert!(matches!(producer.start_at(4), Err(Error::Closed)));

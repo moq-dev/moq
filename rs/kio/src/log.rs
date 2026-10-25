@@ -15,13 +15,14 @@
 //! the next by `Weak`, so a reader that stops reading pins only its own segment.
 
 use std::{
-	collections::VecDeque,
 	fmt,
 	mem::MaybeUninit,
 	panic::{RefUnwindSafe, UnwindSafe},
-	sync::{Arc as StdArc, OnceLock, PoisonError, Weak},
 	sync::atomic::Ordering,
+	sync::{Arc as StdArc, OnceLock, PoisonError, Weak},
 };
+
+use smallvec::SmallVec;
 
 use crate::sync::{Arc, AtomicU64, AtomicUsize, Mutex, UnsafeCell};
 
@@ -174,8 +175,9 @@ struct Shared<T> {
 pub struct Writer<T> {
 	shared: Arc<Shared<T>>,
 	/// The live segments, oldest first, holding the only strong references the log keeps.
-	/// The last is the one the next entry goes into, until it fills.
-	segments: VecDeque<StdArc<Segment<T>>>,
+	/// The last is the one the next entry goes into, until it fills. Inline while there is
+	/// one, which is all most logs hold.
+	segments: SmallVec<[StdArc<Segment<T>>; 1]>,
 	/// Bytes of the shared state and the live segments, excluding `segments` itself.
 	heap: usize,
 }
@@ -184,9 +186,9 @@ impl<T> Writer<T> {
 	/// Bytes the shared state occupies.
 	const SHARED: usize = crate::arc_heap::<Shared<T>>();
 
-	/// Bytes a log occupies once its first entry is appended: the shared state, the
-	/// first segment, and the one-slot list that holds it.
-	pub const HEAP: usize = Self::SHARED + Segment::<T>::heap(FIRST_SEGMENT) + size_of::<StdArc<Segment<T>>>();
+	/// Bytes a log occupies once its first entry is appended: the shared state and the
+	/// first segment.
+	pub const HEAP: usize = Self::SHARED + Segment::<T>::heap(FIRST_SEGMENT);
 
 	/// An empty log whose first entry gets index `start`.
 	pub fn new(start: u64) -> Self {
@@ -196,7 +198,7 @@ impl<T> Writer<T> {
 				base: AtomicU64::new(start),
 				head: Mutex::new(None),
 			}),
-			segments: VecDeque::new(),
+			segments: SmallVec::new(),
 			heap: Self::SHARED,
 		}
 	}
@@ -224,21 +226,25 @@ impl<T> Writer<T> {
 	/// Bytes this log occupies: its shared state and the segments it holds, which grow in
 	/// steps as entries arrive. Excludes an evicted segment a reader still holds.
 	pub fn heap(&self) -> usize {
-		self.heap + self.segments.capacity() * size_of::<StdArc<Segment<T>>>()
+		let list = match self.segments.spilled() {
+			true => self.segments.capacity() * size_of::<StdArc<Segment<T>>>(),
+			false => 0,
+		};
+		self.heap + list
 	}
 
 	/// Allocate the slot the next entry goes into, if there is none, without publishing
 	/// anything.
 	pub fn reserve(&mut self) {
 		let end = self.end();
-		let capacity = match self.segments.back() {
+		let capacity = match self.segments.last() {
 			Some(tail) if end < tail.start + tail.slots.len() as u64 => return,
 			Some(full) => (full.slots.len() * 2).min(MAX_SEGMENT),
 			None => FIRST_SEGMENT,
 		};
 
 		let segment = Segment::new(end, capacity);
-		match self.segments.back() {
+		match self.segments.last() {
 			// Linked before any entry lands in it, so a reader that passes `full` finds it.
 			Some(full) => {
 				let linked = full.next.set(StdArc::downgrade(&segment));
@@ -248,18 +254,14 @@ impl<T> Writer<T> {
 			None => *self.head() = Some(segment.clone()),
 		}
 		self.heap += Segment::<T>::heap(capacity);
-		// Exactly one slot for the first segment, which is all most logs hold.
-		if self.segments.capacity() == 0 {
-			self.segments.reserve_exact(1);
-		}
-		self.segments.push_back(segment);
+		self.segments.push(segment);
 	}
 
 	/// Append `value` at [`Self::end`], visible to every reader once this returns.
 	pub fn push(&mut self, value: T) {
 		self.reserve();
 		let end = self.end();
-		let tail = self.segments.back().expect("reserved");
+		let tail = self.segments.last().expect("reserved");
 		let at = (end - tail.start) as usize;
 		// SAFETY: slot `at` is past `filled`, so no reader reads it until the stores below
 		// publish it, and nothing wrote it before.
@@ -283,19 +285,18 @@ impl<T> Writer<T> {
 			self.shared.end.store(index, Ordering::Release);
 		}
 
-		let mut evicted = false;
-		while self.segments.front().is_some_and(|segment| segment.end() <= index) {
-			let segment = self.segments.pop_front().expect("checked");
-			self.heap -= Segment::<T>::heap(segment.slots.len());
-			evicted = true;
+		let evicted = self.segments.partition_point(|segment| segment.end() <= index);
+		if evicted == 0 {
+			return;
 		}
-		if evicted {
-			*self.head() = self.segments.front().cloned();
+		for segment in self.segments.drain(..evicted) {
+			self.heap -= Segment::<T>::heap(segment.slots.len());
 		}
 		if self.segments.is_empty() {
-			// Free the list too, so an emptied log costs only its shared state.
-			self.segments = VecDeque::new();
+			// Free a spilled list too, so an emptied log costs only its shared state.
+			self.segments = SmallVec::new();
 		}
+		*self.head() = self.segments.first().cloned();
 	}
 
 	/// The committed entry at `index`, unless it was evicted.
@@ -353,6 +354,18 @@ impl<T> Reader<T> {
 	/// log's oldest segment once and follows links from there.
 	pub fn get(&mut self, index: u64) -> Result<Option<&T>, Evicted> {
 		let base = self.shared.base.load(Ordering::Acquire);
+		// The common read: the segment last read already holds `index`. Acquire pairs with
+		// the writer's Release of `filled`, which follows the slot's write.
+		let held = self.segment.as_ref().is_some_and(|segment| {
+			segment.start <= index
+				&& base <= index
+				&& index < segment.start + segment.filled.load(Ordering::Acquire) as u64
+		});
+		if held {
+			let segment = self.segment.as_deref().expect("checked");
+			// SAFETY: `filled` covers `index`, so its slot was written before that load.
+			return Ok(Some(unsafe { segment.get(index) }));
+		}
 		// Stop pinning a segment that holds nothing readable any more, even from a reader
 		// parked at the end, where a release of every entry leaves it.
 		if self.segment.as_ref().is_some_and(|segment| segment.end() <= base) {
@@ -458,13 +471,24 @@ mod test {
 		}
 		assert_eq!(
 			layout(&writer),
-			[(0, 1), (1, 3), (3, 7), (7, 15), (15, 31), (31, 63), (63, 127), (127, 191), (191, 255)]
+			[
+				(0, 1),
+				(1, 3),
+				(3, 7),
+				(7, 15),
+				(15, 31),
+				(31, 63),
+				(63, 127),
+				(127, 191),
+				(191, 255)
+			]
 		);
 		let slots: usize = [1, 2, 4, 8, 16, 32, 64, 64, 64]
 			.into_iter()
 			.map(Segment::<u64>::heap)
 			.sum();
 		let list = writer.segments.capacity() * size_of::<StdArc<Segment<u64>>>();
+		assert!(writer.segments.spilled());
 		assert_eq!(writer.heap(), Writer::<u64>::SHARED + slots + list);
 	}
 

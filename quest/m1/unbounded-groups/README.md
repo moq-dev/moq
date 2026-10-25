@@ -67,7 +67,7 @@ Decided 2026-10-16 (maintainer interview):
   separate `Slot.head` copy.
 - Storage (decided 2026-10-24 by the maintainer, over the group storage
   benchmark, [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627)):
-  the lock-free [append-only log](/quest/m1/unbounded-groups/log.md) is the
+  the lock-free append-only log (`kio::log`) is the
   tail run, from a base that only advances, and refilled runs sit below it.
   It moved here from m2, ahead of Front eviction, so the end-state storage
   lands once instead of a mutex layout swapped later. Prototyped, the log
@@ -106,7 +106,6 @@ moq-transport, with memory held near the pool size.
 ## Required
 
 - [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - large frames store as sealed segments, preallocate at most one, and release receive credit per segment
-- [Append-only log](/quest/m1/unbounded-groups/log.md) - `GroupState`'s frames move onto a lock-free kio log with an advancing base
 - [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - groups shed whole frames from their front under pressure and refill them in place; the group caps go
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame evict and refill by `(frame, byte)` on the next lite version; the frame cap goes
 - [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - `@moq/net` drops its caps, streams huge frames, and matches front eviction

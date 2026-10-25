@@ -3,7 +3,7 @@
 ## Goal
 
 Every moq-net channel whose state is an append log with front eviction moves
-onto the [kio append-only log](/quest/m1/unbounded-groups/log.md),
+onto the kio append-only log (`kio::log`),
 where it measures as a win. Each migrated channel lands with the contended
 bench or `just bench-profile lock` before and after; a channel that measures no win
 stays on its mutex.
@@ -29,6 +29,5 @@ stays on its mutex.
 
 ## Required
 
-- [Append-only log](/quest/m1/unbounded-groups/log.md) - the primitive this adopts
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - if per-worker replicas win, each channel's cross-core readers collapse to one flow-controlled stream per worker and adoption is likely abandoned
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - the same question with nothing shared
