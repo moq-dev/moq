@@ -188,8 +188,10 @@ response emitted in one burst with future timestamps, wants the opposite. Set
 
 Durations need a unit; a bare number is rejected. Audio holds the buffer as
 encoded frames, so a large one is cheap; video waits as decoded pictures, which
-hold decoder memory, so a long video buffer is not. `el.reset()` flushes and re-anchors at the
-next frame, which is how a producer interrupts an utterance.
+hold decoder memory, so a long video buffer is not. The first video frame shows
+as a poster at once, and playback starts once every enabled track has buffered
+the delay. `el.reset()` flushes and re-anchors at the next frame, which is how a
+producer interrupts an utterance.
 
 ## Strict CSP
 

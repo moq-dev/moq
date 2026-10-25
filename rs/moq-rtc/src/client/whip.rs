@@ -79,10 +79,5 @@ pub(crate) async fn dial(
 	for mid in mids {
 		session.open_media(mid)?;
 	}
-	tokio::spawn(async move {
-		let result = session.run().await;
-		session::log_session_end("whip client", &result);
-	});
-
-	Ok(())
+	session::end("whip client", session.run().await)
 }

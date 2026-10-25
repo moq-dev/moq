@@ -167,7 +167,7 @@ impl Server {
 		version: lite::Version,
 		client_setup: Option<lite::AcceptedSetup>,
 		peer_hop: Option<crate::Hop>,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 	) -> Result<(Session, crate::Driver), Error> {
 		let (publish, subscribe) = self.stat_tagged_origins();
 
@@ -281,7 +281,7 @@ impl Server {
 			_ => return Err(Error::Version),
 		};
 
-		let auth = crate::auth::Handle::new(match &handshake {
+		let auth = crate::auth::Link::new(match &handshake {
 			PausedHandshake::LiteBare { version, .. } | PausedHandshake::LiteSetup { version, .. } => {
 				version.has_auth()
 			}
@@ -451,8 +451,8 @@ impl Server {
 			// Lite 01/02 and moq-transport 14-16 carry no AUTH, though a moq-transport request
 			// still carries a token.
 			auth: match version {
-				Version::Ietf(_) => crate::auth::Handle::ietf(false),
-				Version::Lite(_) => crate::auth::Handle::new(false),
+				Version::Ietf(_) => crate::auth::Link::ietf(false),
+				Version::Lite(_) => crate::auth::Link::new(false),
 			},
 			inner: Some(RequestInner {
 				server: self.clone(),
@@ -491,7 +491,7 @@ impl Server {
 			assigned_hop: crate::Hop::random(),
 			// The client's SETUP already settled whether it offered MoQ Auth, so it is
 			// negotiated exactly when we offer it too.
-			auth: crate::auth::Handle::ietf(peer_setup.declared.auth && self.extensions.auth),
+			auth: crate::auth::Link::ietf(peer_setup.declared.auth && self.extensions.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -525,7 +525,7 @@ pub struct Handshake {
 	assigned_hop: crate::Hop,
 	/// The session's auth handle, available before [`Handshake::ok`] so the caller can
 	/// take the peer's token requests before any arrive.
-	auth: crate::auth::Handle,
+	auth: crate::auth::Link,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
 	inner: Option<RequestInner>,
 }
@@ -575,7 +575,7 @@ impl PausedIetfModern {
 		server: Server,
 		runtime: Deadlines,
 		peer_hop: Option<crate::Hop>,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 	) -> Result<(Session, crate::Driver), Error> {
 		let Self {
 			session,
@@ -654,7 +654,7 @@ impl PausedLegacy {
 		server: Server,
 		runtime: Deadlines,
 		peer_hop: Option<crate::Hop>,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 	) -> Result<(Session, crate::Driver), Error> {
 		let Self {
 			session,
@@ -830,7 +830,7 @@ impl Handshake {
 
 	/// The session's auth handle, the same one [`Session::auth`] returns once accepted.
 	pub fn auth(&self) -> crate::auth::Handle {
-		self.auth.clone()
+		self.auth.handle().clone()
 	}
 
 	/// Answer every token the client presents yourself, instead of the default acceptor:
@@ -848,7 +848,7 @@ impl Handshake {
 	///
 	/// [`auth::Requests`]: crate::auth::Requests
 	pub fn requests(&mut self) -> crate::auth::Requests {
-		self.auth.requests()
+		self.auth.handle().requests()
 	}
 
 	/// The credential the client presented in its SETUP's `AUTHORIZATION TOKEN` option.
@@ -904,6 +904,8 @@ impl Handshake {
 
 	/// Refuse the session with [`Error::Timeout`] if [`ok`](Self::ok) has not answered
 	/// SETUP by `at`, as when the peer withholds flow-control credit for the reply.
+	///
+	/// Dropping a pending `ok` refuses it the same way, so a caller's own deadline counts too.
 	pub fn with_deadline(mut self, at: Instant) -> Self {
 		self.inner_mut().deadline = Some(at);
 		self
@@ -927,7 +929,8 @@ impl Handshake {
 		} = self.inner.take().expect("request already responded");
 
 		let stats = server.stats.clone();
-		let (mut refused, version) = handshake.transport();
+		let (session, version) = handshake.transport();
+		let unanswered = Unanswered(Some((session, version, stats.clone())));
 		let reply = async move {
 			match handshake {
 				PausedHandshake::LiteBare { session, version } => {
@@ -947,12 +950,11 @@ impl Handshake {
 			}
 		};
 		let res = match deadline {
-			Some(at) => moq_clock::timeout_at(at, reply).await.unwrap_or_else(|_| {
-				close(&mut refused, &Error::Timeout, Some(version));
-				Err(Error::Timeout)
-			}),
+			// The guard refuses the session on the way out.
+			Some(at) => moq_clock::timeout_at(at, reply).await.map_err(|_| Error::Timeout)?,
 			None => reply.await,
 		};
+		unanswered.answered();
 		if let Err(err) = &res {
 			stats.end(err);
 		}
@@ -971,6 +973,26 @@ impl RequestInner {
 		self.server.stats.end(&err);
 		let (mut session, version) = self.handshake.transport();
 		close(&mut session, &err, Some(version));
+	}
+}
+
+/// A SETUP reply the peer has not taken yet. Dropped unanswered, it refuses the session with
+/// [`Error::Timeout`]: the reply waits only on the peer, so giving up on it means the peer
+/// took too long.
+struct Unanswered(Option<(Transport, Version, stats::Session)>);
+
+impl Unanswered {
+	fn answered(mut self) {
+		self.0 = None;
+	}
+}
+
+impl Drop for Unanswered {
+	fn drop(&mut self) {
+		if let Some((mut session, version, stats)) = self.0.take() {
+			close(&mut session, &Error::Timeout, Some(version));
+			stats.end(&Error::Timeout);
+		}
 	}
 }
 
@@ -1381,6 +1403,30 @@ mod tests {
 		assert_eq!(failed.count(stats::Failure::Application), 1, "{failed:?}");
 	}
 
+	/// A reply the caller stops waiting for, as a relay does at its drain deadline, is
+	/// refused like one past the handshake's own deadline.
+	#[moq_clock::test]
+	async fn an_abandoned_reply_fails_like_the_deadline() {
+		let registry = stats::Registry::new(Default::default());
+		let version = ietf::Version::Draft16;
+		let session = FakeSession::new(ALPN_16, [])
+			.with_bi(legacy_setup(version, ietf::Parameters::default()))
+			.withholding_credit();
+		let request = Server::new()
+			.accept_request(moq_clock::now(), session.clone())
+			.await
+			.unwrap()
+			.with_stats(registry.tier(Default::default()).session("room"));
+		let abandoned = moq_clock::timeout(std::time::Duration::from_secs(1), request.ok()).await;
+		assert!(abandoned.is_err(), "a reply the peer never took completed");
+		assert_eq!(
+			session.close_code(),
+			Some(Version::Ietf(version).session_code(&SessionError::Timeout))
+		);
+		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
+		assert_eq!(failed.count(stats::Failure::Application), 1, "{failed:?}");
+	}
+
 	/// A rejection counts by the code the peer is told, so a "no error" close is clean
 	/// however this side spelled it.
 	#[moq_clock::test]
@@ -1616,7 +1662,7 @@ mod tests {
 			token: None,
 			peer_implementation: None,
 			assigned_hop: Hop::random(),
-			auth: crate::auth::Handle::ietf(false),
+			auth: crate::auth::Link::ietf(false),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
 				runtime: Deadlines::new(moq_clock::now()),

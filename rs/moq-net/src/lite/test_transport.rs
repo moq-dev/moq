@@ -592,6 +592,9 @@ pub struct SinkSession {
 	/// Set by [`Self::accepted_bi`]. `None` parks `accept_bi` forever, which is what
 	/// every session that only ever opens its own streams expects.
 	accept_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::with_open_bi_gate`] to withhold bidi stream credit.
+	bi_open_gate: Option<kio::Consumer<bool>>,
+	bi_open_park: kio::Park,
 	/// Set by [`Self::gated_uni`] to hold unidirectional stream writes.
 	uni_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::gated_open_uni`] to withhold unidirectional stream credit.
@@ -714,6 +717,12 @@ impl SinkSession {
 		self.uni_open_gate = Some(gate);
 		self
 	}
+
+	/// Also hold bidi stream opens until `gate` grants stream credit.
+	pub fn with_open_bi_gate(mut self, gate: kio::Consumer<bool>) -> Self {
+		self.bi_open_gate = Some(gate);
+		self
+	}
 }
 
 impl poll::Session for SinkSession {
@@ -736,12 +745,19 @@ impl poll::Session for SinkSession {
 
 	fn poll_open_bi(
 		&mut self,
-		_cx: &mut Context<'_>,
+		cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		let Some(gate) = self.bi_gate.clone() else {
 			return Poll::Pending;
 		};
+		if let Some(credit) = &self.bi_open_gate {
+			let waiter = self.bi_open_park.hold(cx);
+			match credit.poll(waiter, |open| (**open).then_some(()).map_or(Poll::Pending, Poll::Ready)) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
+			}
+		}
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 
 		let mut send = SinkSend::gated(self.log.clone(), gate).opened(options);

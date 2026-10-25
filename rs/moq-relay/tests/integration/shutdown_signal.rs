@@ -345,7 +345,7 @@ async fn a_drain_ends_once_every_session_leaves_inner() {
 
 	// A window the test would time out long before, so only an early exit passes.
 	let mut config = relay_config();
-	config.drain_timeout = Duration::from_secs(600);
+	config.drain_timeout = Some((Duration::from_secs(600)).into());
 	config.internal.listen = Some("127.0.0.1:0".parse().expect("parse addr"));
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
@@ -423,9 +423,9 @@ async fn a_reconnecting_client_rides_out_a_restart_inner() {
 	broadcast.announce(Default::default()).expect("announce");
 	let mut publisher = moq_tokio::connect::Config::default();
 	// Redials paced well inside the drain, under a window that ends long before it.
-	publisher.backoff.initial = Some(DRAIN_TIMEOUT / 15);
-	publisher.backoff.max = Some(DRAIN_TIMEOUT / 15);
-	publisher.backoff.timeout = Some(DRAIN_TIMEOUT / 3);
+	publisher.backoff.initial = Some((DRAIN_TIMEOUT / 15).into());
+	publisher.backoff.max = Some((DRAIN_TIMEOUT / 15).into());
+	publisher.backoff.timeout = Some((DRAIN_TIMEOUT / 3).into());
 	let publisher = publisher
 		.init(Default::default())
 		.expect("client init")
@@ -515,7 +515,7 @@ fn relay_config() -> Config {
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	config.auth = auth;
-	config.drain_timeout = DRAIN_TIMEOUT;
+	config.drain_timeout = Some((DRAIN_TIMEOUT).into());
 	config
 }
 

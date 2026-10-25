@@ -124,7 +124,7 @@ mod test {
 	fn next_preserves_intermediate_states() {
 		let (mut producer, mut track) = producer(true);
 		let mut subscription = track.subscription();
-		subscription.max_delay = std::time::Duration::MAX;
+		subscription.max_delay = None;
 		track.update(subscription).unwrap();
 		for value in [b"one".as_slice(), b"two", b"three"] {
 			producer.update(value).unwrap();

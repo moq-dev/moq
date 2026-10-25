@@ -18,6 +18,7 @@ use ranges::Ranges;
 pub(super) struct Subscriptions {
 	count: usize,
 	priority: BTreeMap<i8, usize>,
+	// Keyed by budget, so `None` counts as the widest of all.
 	max_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
 	descending: usize,
@@ -32,7 +33,7 @@ pub(super) struct Subscriptions {
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (i8, Duration, Order);
+type Scalars = (i8, Option<Duration>, Order);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
@@ -56,7 +57,7 @@ impl Subscriptions {
 		(self.count != 0).then(|| {
 			(
 				*self.priority.last_key_value().unwrap().0,
-				*self.max_delay.last_key_value().unwrap().0,
+				Some(*self.max_delay.last_key_value().unwrap().0).filter(|budget| *budget != Duration::MAX),
 				if self.descending == 0 {
 					Order::Ascending
 				} else {
@@ -140,7 +141,7 @@ impl Subscriptions {
 		let moved = old.map(|old| &old.ranges) != new.map(|new| &new.ranges);
 		if let Some(new) = new {
 			add(&mut self.priority, new.priority);
-			add(&mut self.max_delay, new.max_delay);
+			add(&mut self.max_delay, new.budget());
 			if moved {
 				for range in &new.ranges {
 					reshaped |= self.ranges.add(*range);
@@ -151,7 +152,7 @@ impl Subscriptions {
 		}
 		if let Some(old) = old {
 			remove(&mut self.priority, old.priority);
-			remove(&mut self.max_delay, old.max_delay);
+			remove(&mut self.max_delay, old.budget());
 			if moved {
 				for range in &old.ranges {
 					reshaped |= self.ranges.remove(*range);
@@ -318,7 +319,7 @@ mod tests {
 				.collect();
 			let next = Subscription {
 				priority: rng.random_range(0..8),
-				max_delay: Duration::from_millis(rng.random_range(0..8)),
+				max_delay: Some(Duration::from_millis(rng.random_range(0..8))),
 				ranges,
 				order: if rng.random_bool(0.5) {
 					Order::Ascending
@@ -374,7 +375,7 @@ mod tests {
 		assert!(producer.poll_subscription_changed(&waiter).is_pending());
 		let mut weak = producer.subscribe(
 			Subscription::default()
-				.with_groups(100..200)
+				.with_range(100..200)
 				.with_order(Order::Ascending),
 		);
 		weak.update(Subscription::default().with_priority(5)).unwrap();

@@ -640,7 +640,7 @@ impl TrackState {
 			.next_discontinuity
 			.is_some_and(|previous| previous != discontinuity_sequence)
 		{
-			importer.discontinuity();
+			importer.discontinuity()?;
 		}
 		if reanchored {
 			importer.seek(group_sequence)?;
@@ -648,7 +648,7 @@ impl TrackState {
 		// Every playlist entry is a source segment boundary, so declare it even when the media
 		// carries no styp. Every rendition declares the same ones; the timeline drops a cut
 		// that would land inside its minimum segment duration, so the duplicates cost nothing.
-		importer.cut();
+		importer.cut()?;
 		importer.decode(&bytes).map_err(|err| match err {
 			// Timestamp resets are unsupported: the published tracks never rewind, and no later
 			// pass can import this segment, so it is refused rather than retried.
