@@ -24,8 +24,9 @@ ownership, no new `abort()` on media handles.
   cause-less drop, so a garbage-collected binding cannot leak one.
 - Breaking: a call on a media handle after its broadcast closes returns
   `Closed`, and a dropped handle now aborts its track. Migrate each binding
-  wrapper (py, go, swift, kt, dart, cpp) and `doc/lib/*`; the PR's Impact
-  says how.
+  wrapper (py, go, swift, kt, dart, cpp), the moq-ffi and moq-c doc
+  comments that say subscribed tracks carry on, and `doc/lib/*`; the PR's
+  Impact says how.
 - Test in moq-ffi and moq-c with a paused clock: close with open handles,
   drop without finish, and finish then close, each read by a subscriber that
   checks the cause.

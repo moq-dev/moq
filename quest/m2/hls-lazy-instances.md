@@ -12,6 +12,8 @@ Decided with the maintainer on 2026-10-24: m2, an efficiency gain. Retention
 is already bounded by the broadcasts the publisher keeps open
 ([moq-dev/moq#6649](https://github.com/moq-dev/moq/pull/6649)).
 
-- Start the watchers on the first request for that instance and keep them
-  while requests continue; a test shows an unread retained instance holds
-  none.
+- Start the watchers on the first request for that instance, keep them
+  while requests continue, stop them once its readers go idle, and restart
+  them on a later request. Tests show an unread retained instance holds
+  none, including after its last reader leaves, and that a later request
+  restarts them.

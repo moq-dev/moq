@@ -4,8 +4,8 @@
 
 A full queue run checks py, kt, swift, go, carla, and cpp concurrently, so
 the binding checks leave the critical path. Each binding still validates
-the moq-ffi build its own command produces, and direct `just <lang> check`
-recipes stay self-contained.
+the default moq-ffi build its own `just <lang> check` would produce, and
+those direct recipes stay self-contained.
 
 ## Plan
 
@@ -23,7 +23,9 @@ than measure first or drop py's test features.
   `cpp/moq/build`.
 - Build moq-ffi's default cdylib once before the binding lanes start, and
   give py's test-featured build its own target directory so it never
-  overwrites the shared one. Give carla its own venv. Keep cpp and
+  overwrites the shared one. Each recipe keeps its own build of the default
+  cdylib, which then finds it fresh, so concurrent lanes never rebuild the
+  shared output while another reads it. Give carla its own venv. Keep cpp and
   obs_compile in one lane. Every other binding becomes its own lane under
   `MOQ_CHECK_JOBS`.
 - dart keeps running alone: its build hook checks the filtered build stays

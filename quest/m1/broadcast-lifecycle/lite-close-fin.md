@@ -17,5 +17,6 @@ failure for followers on published lite versions.
   the ACK drain closes first, so a SUBSCRIBE FIN still pending is dropped.
   Later lite versions deliver it.
 - Fix the close ordering at its source for those versions; no extra wait or
-  timer. Extend `relay_upstream_close` to assert a finished track on lite-03
-  and lite-04 too.
+  timer. Extend `relay_upstream_close` to leave several SUBSCRIBE FINs
+  pending at the close and assert every track finishes, on lite-03 and
+  lite-04 too.
