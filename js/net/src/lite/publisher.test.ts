@@ -666,7 +666,7 @@ async function servedSubscription(
 		broadcast = new BroadcastProducer();
 		const front = new Front();
 		front.serve(broadcast.consume());
-		const dynamic = origin.dynamicRoute(Path.from("test"));
+		const dynamic = origin.requestsRoute(Path.from("test"));
 		void (async () => {
 			for await (const request of dynamic.requested()) hooks.acceptRequest(request, front.consumer);
 		})();
