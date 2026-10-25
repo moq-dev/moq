@@ -1,4 +1,4 @@
-#![cfg(feature = "fuzz")]
+#![cfg(feature = "async")]
 
 //! Moxygen announces one prefix, then serves its sixteen-field test namespaces.
 //!

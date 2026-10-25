@@ -80,7 +80,6 @@ async fn expect_replaced(version: Version, announced: &mut announce::Consumer, p
 }
 
 /// Nothing more arrives, past the update hold.
-#[cfg(feature = "fuzz")]
 async fn quiet(version: Version, announced: &mut announce::Consumer) {
 	if let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
 		panic!("{version}: expected nothing more, got {event:?}");
@@ -175,14 +174,12 @@ relay_chain_tests! {
 /// A worker claiming `pool` without an epoch, answering each request with an output
 /// whose `video` track carries the worker's name. The claim is a peer's, landed through
 /// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
-#[cfg(feature = "fuzz")]
 struct Worker {
 	origin: origin::Producer,
 	_claim: Rc<origin::Dynamic>,
 	_outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
-#[cfg(feature = "fuzz")]
 impl Worker {
 	fn new(hop: u64) -> Self {
 		let origin = produce_origin(hop);
@@ -210,7 +207,6 @@ impl Worker {
 /// `pool/job-2` from `10` to itself while `11` keeps winning `pool` itself and
 /// `pool/job-0`, and `10` keeps `pool/job-1` (pinned by the spread hash). `D` restarts
 /// `pool`, and the next subscribes reach the right workers.
-#[cfg(feature = "fuzz")]
 async fn prefix_pool(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let upstream = produce_origin(2);
@@ -245,7 +241,6 @@ async fn prefix_pool(version: &str) {
 	}
 }
 
-#[cfg(feature = "fuzz")]
 #[moq_clock::test]
 async fn prefix_pool_lite06() {
 	moq_clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-06"))
@@ -253,7 +248,6 @@ async fn prefix_pool_lite06() {
 		.expect("timed out");
 }
 
-#[cfg(feature = "fuzz")]
 #[moq_clock::test]
 async fn prefix_pool_lite07() {
 	moq_clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-07-wip"))
@@ -265,13 +259,11 @@ async fn prefix_pool_lite07() {
 /// the test can write into it: `outputs[n]` answered the `n`th request. Only a peer's
 /// claim carries an epoch or re-prices, so it lands through the hidden `fuzz` module as
 /// a session lands it.
-#[cfg(feature = "fuzz")]
 struct Claim {
 	dynamic: Rc<origin::Dynamic>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
-#[cfg(feature = "fuzz")]
 impl Claim {
 	fn new(origin: &origin::Producer, epoch: Option<Epoch>) -> Self {
 		let mut route = origin::Route::default();
@@ -315,7 +307,6 @@ impl Claim {
 /// A same-epoch re-price keeps every handle. Moving to `to` restarts `V`, the
 /// subscription already open stays on the old answer, and a re-request asks the
 /// handler again and reads none of the old answer's cached groups.
-#[cfg(feature = "fuzz")]
 async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
@@ -389,7 +380,6 @@ fn epochs() -> (Epoch, Epoch) {
 macro_rules! dynamic_epoch_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[cfg(feature = "fuzz")]
 			#[moq_clock::test]
 			async fn $name() {
 				let (a, b) = epochs();
@@ -413,7 +403,6 @@ dynamic_epoch_tests! {
 /// An update does not override route selection: with a second claim still at the
 /// epoch, a claim dropping it hands re-requests to the second, which outranks any
 /// route without one.
-#[cfg(feature = "fuzz")]
 #[moq_clock::test]
 async fn dynamic_epoch_second_route_keeps_winning() {
 	let (a, _) = epochs();
@@ -578,7 +567,6 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 	}
 }
 
-#[cfg(feature = "fuzz")]
 #[moq_clock::test]
 async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 	for name in [
