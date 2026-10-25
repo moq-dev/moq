@@ -39,6 +39,7 @@ use mpeg2ts::ts::{
 };
 
 use moq_net::Timestamp;
+use rustc_hash::FxHashMap;
 
 use super::catalog::Catalog as _;
 use crate::catalog::Stream;
@@ -147,7 +148,7 @@ where
 	/// The program tables changed, so the next frame muxed is a tune-in point that leads with them.
 	revised: bool,
 	/// The next continuity counter per PID, numbered as packets go out.
-	counters: HashMap<u16, u8>,
+	counters: FxHashMap<u16, u8>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
 	program_descriptors: Vec<catalog::Descriptor>,
 	/// Transport/service identity captured on import, used to rebuild a consistent
@@ -1209,7 +1210,7 @@ where
 			held: None,
 			generation: 0,
 			tracks: HashMap::new(),
-			counters: HashMap::new(),
+			counters: FxHashMap::default(),
 			program_descriptors: Vec::new(),
 			program: None,
 			si: BTreeMap::new(),

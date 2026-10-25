@@ -1,11 +1,12 @@
 //! Lays a TS export's packets onto its PCR grid.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, VecDeque};
 use std::time::Duration;
 
 use anyhow::Context;
 use mpeg2ts::ts::TsPacket;
+use rustc_hash::FxHashMap;
 
 use super::export::PCR_INTERVAL;
 
@@ -566,7 +567,7 @@ pub(super) struct Schedule {
 	/// The due slot of the last unit pushed.
 	last: Option<u128>,
 	/// Each PID's buffers, from [`Self::set_buffer`].
-	buffers: HashMap<u16, Buffer>,
+	buffers: FxHashMap<u16, Buffer>,
 	/// The PID every slot's clock packet rides on, from [`Self::set_clock`].
 	clock: Option<u16>,
 	/// The PMT's PID, which shares TBsys with the PAT, from [`Self::set_tables`].
@@ -575,12 +576,12 @@ pub(super) struct Schedule {
 	decoding: VecDeque<(u16, u128, usize)>,
 	/// When each transport buffer's last admitted packet finishes leaving it, and when it
 	/// last started filling from empty.
-	transport: HashMap<u16, (i128, i128)>,
+	transport: FxHashMap<u16, (i128, i128)>,
 	/// When Bsys has removed every system byte admitted so far, and the Rsys it empties at
 	/// whenever it holds one.
 	system: Option<(i128, u128)>,
 	/// When each video PID's MB finishes passing its last admitted payload on into EB.
-	mb: HashMap<u16, i128>,
+	mb: FxHashMap<u16, i128>,
 	/// Every source has ended, so a unit that misses its deadline is the tail going out late
 	/// rather than an output that cannot keep up.
 	ended: bool,
@@ -599,13 +600,13 @@ impl Schedule {
 			next: None,
 			horizon: None,
 			last: None,
-			buffers: HashMap::new(),
+			buffers: FxHashMap::default(),
 			clock: None,
 			pmt: None,
 			decoding: VecDeque::new(),
-			transport: HashMap::new(),
+			transport: FxHashMap::default(),
 			system: None,
-			mb: HashMap::new(),
+			mb: FxHashMap::default(),
 			ended: false,
 			seq: 0,
 			lead: None,
@@ -869,8 +870,8 @@ impl Schedule {
 	/// The PIDs the program tables still to go out hold back, each with the first of them that
 	/// does: a unit on one, pushed after those tables, waits for them. `left` is how many
 	/// packets each unit has still to send.
-	fn holding(&self, left: impl Fn(usize) -> usize) -> HashMap<u16, u64> {
-		let mut held = HashMap::new();
+	fn holding(&self, left: impl Fn(usize) -> usize) -> FxHashMap<u16, u64> {
+		let mut held = FxHashMap::default();
 		for (i, unit) in self.units.iter().enumerate() {
 			let Some(program) = unit.tables.as_ref().filter(|_| left(i) > 0) else {
 				continue;
@@ -1105,8 +1106,8 @@ impl Schedule {
 		// One head per PID preserves decode order without walking all future units at every
 		// transport position. Removal events keep occupancy work proportional to units.
 		let mut lanes: Vec<VecDeque<usize>> = Vec::new();
-		let mut lane_by_pid = HashMap::new();
-		let mut occupancy: HashMap<u16, usize> = HashMap::new();
+		let mut lane_by_pid = FxHashMap::default();
+		let mut occupancy: FxHashMap<u16, usize> = FxHashMap::default();
 		let mut removals = Vec::new();
 		self.decoding.retain(|&(_, decode, _)| decode as i128 > time(0));
 		for &(pid, decode, held) in &self.decoding {
@@ -1432,7 +1433,7 @@ impl Schedule {
 	fn admit(&mut self, index: u128, mut budget: usize) -> Vec<usize> {
 		// Unpadded layout has no exact packet clock until the slot is assembled, so it
 		// retains units until their decode instant is behind the opening grid point.
-		let mut occupancy: HashMap<u16, usize> = HashMap::new();
+		let mut occupancy: FxHashMap<u16, usize> = FxHashMap::default();
 		self.decoding
 			.retain(|&(_, decode, _)| decode >= index.saturating_sub(1) * PCR_INTERVAL.as_nanos());
 		for &(pid, _, held) in &self.decoding {
@@ -1445,7 +1446,7 @@ impl Schedule {
 		let mut order: Vec<usize> = (0..self.units.len()).collect();
 		order.sort_by_key(|&i| self.units[i].due);
 		let mut take = vec![0; self.units.len()];
-		let mut carried: HashMap<u16, usize> = HashMap::new();
+		let mut carried: FxHashMap<u16, usize> = FxHashMap::default();
 		let mut stopped: Vec<u16> = Vec::new();
 		let mut holding = self.holding(|i| self.units[i].remaining());
 		for i in order {
@@ -1505,6 +1506,8 @@ impl Schedule {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::HashMap;
+
 	use super::*;
 
 	/// A unit of `count` packets on PID `pid`.

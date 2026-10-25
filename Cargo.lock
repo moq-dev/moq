@@ -5022,6 +5022,7 @@ dependencies = [
  "mpeg2ts",
  "num_enum",
  "roxmltree",
+ "rustc-hash 2.1.3",
  "scuffle-av1",
  "scuffle-h265",
  "serde",
