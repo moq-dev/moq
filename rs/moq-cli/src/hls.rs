@@ -296,8 +296,10 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		let Some(recording) = recording else {
 			return Ok(());
 		};
+		// Wait for a covering route rather than asking on the spot: a recording started beside
+		// its publisher, or over a session that discovers only watched paths, sees no route yet.
 		let broadcast = scoped
-			.request_broadcast(name.as_str(), None)
+			.routed_broadcast(name.as_str())
 			.await
 			.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
 		let source = moq_mux::Source::new(scoped.clone(), broadcast);
@@ -437,6 +439,32 @@ mod test {
 		assert!(producer.route().is_none(), "an empty playlist was announced");
 		let err = result.expect_err("an empty playlist imports nothing");
 		assert!(format!("{err:#}").contains("before it declared a track"), "{err:#}");
+	}
+
+	/// A recording started before its broadcast is announced waits for it instead of failing.
+	#[tokio::test(start_paused = true)]
+	async fn a_recording_waits_for_its_broadcast() {
+		let dir = tempfile::tempdir().unwrap();
+		let args = ExportArgs {
+			listen: None,
+			output: Some(dir.path().join("recording")),
+			tls: Tls {
+				cert: Vec::new(),
+				key: Vec::new(),
+				generate: Vec::new(),
+				root: Vec::new(),
+				legacy_cert: Vec::new(),
+				legacy_key: Vec::new(),
+				legacy_generate: Vec::new(),
+				legacy_root: Vec::new(),
+			},
+			window: std::time::Duration::from_secs(16).into(),
+			cors: Default::default(),
+		};
+		let origin = moq_tokio::origin::spawn();
+		let exporting = export(origin.consume(), args, "live".to_string());
+		let result = moq_clock::timeout(std::time::Duration::from_secs(1), exporting).await;
+		assert!(result.is_err(), "the recording gave up: {result:?}");
 	}
 
 	/// The next group a subscriber reads after the import stopped: the error it ended with.

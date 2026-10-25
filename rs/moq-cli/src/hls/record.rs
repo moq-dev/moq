@@ -514,7 +514,7 @@ mod tests {
 	/// A broadcast publishing VP8 renditions with aligned two-second GOPs.
 	struct Publisher {
 		origin: moq_net::origin::Producer,
-		broadcast: moq_net::broadcast::Producer,
+		broadcast: moq_net::origin::Publication,
 		catalog: moq_mux::catalog::Producer,
 		video: Vec<Video>,
 	}
@@ -522,12 +522,12 @@ mod tests {
 	impl Publisher {
 		fn new(names: &[&str]) -> Self {
 			let origin = moq_tokio::origin::spawn();
-			let mut broadcast = origin.create_broadcast("live").unwrap();
+			let broadcast = origin.create_broadcast("live").unwrap();
 			// A hinted timeline is advertised before any media, so every rendition is recorded
 			// from its first segment.
 			let hinted = moq_mux::timeline::Config::default().with_duration_hint(Duration::from_secs(2));
 			let config = moq_mux::catalog::Config::default().with_timeline(hinted);
-			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 			let reserved = catalog.reserve();
 			let video = names
 				.iter()
