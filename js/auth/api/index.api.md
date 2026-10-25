@@ -582,6 +582,7 @@ export const RefusalSchema: z.ZodMiniObject<{
     reason: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCatch<z.ZodMiniEnum<{
         expired: "expired";
         forbidden: "forbidden";
+        malformed: "malformed";
         refused: "refused";
     }>>>;
     root: z.ZodMiniOptional<z.ZodMiniString<string>>;

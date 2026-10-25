@@ -958,6 +958,7 @@ export const SessionCode: ((code: number) => SessionCode) & {
     readonly Timeout: SessionCode;
     readonly AuthTokenCacheOverflow: SessionCode;
     readonly Version: SessionCode;
+    readonly MalformedAuthToken: SessionCode;
     readonly UnknownAuthTokenAlias: SessionCode;
     readonly InvalidAuthority: SessionCode;
     readonly Unsupported: SessionCode;
