@@ -217,11 +217,15 @@ int main() {
     // thread blocks on one at a time.
     moq::ClientConfig client_config;
     client_config.tls.insecure = true;
+    client_config.implementation = moq::IMPLEMENTATION;
     auto client = ok(moq::Client::init(client_config), "client init");
     auto accepting = server->accept();
     auto connecting = client->connect("https://" + addr);
     auto request = ok(accepting.get(), "accept");
     CHECK(request != nullptr);
+    // The package names itself ahead of moq-ffi, so a server can tell bindings apart.
+    auto implementation = request->peer_implementation();
+    CHECK(implementation && implementation->rfind("moq-cpp/", 0) == 0);
     auto served = ok(request->accept(nullptr, nullptr).get(), "request accept");
     auto session = ok(connecting.get(), "connect");
 

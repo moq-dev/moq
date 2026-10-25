@@ -16,7 +16,8 @@ func TestClientConfigFfiMapsZeroValuesToNativeDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientConfig{}.ffi() failed: %v", err)
 	}
-	if !reflect.DeepEqual(got, ffi.MoqClientConfig{}) {
+	// The wrapper's own product token is the one field it always sets.
+	if !reflect.DeepEqual(got, ffi.MoqClientConfig{Implementation: &implementation}) {
 		t.Errorf("ClientConfig{}.ffi() = %+v, want the native defaults", got)
 	}
 
