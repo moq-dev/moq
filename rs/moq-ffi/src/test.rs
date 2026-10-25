@@ -5120,10 +5120,7 @@ async fn server_client_roundtrip() {
 		assert_eq!(request.path(), "/test");
 		assert_eq!(request.query().as_deref(), Some("foo=bar"));
 		let core = format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
-		assert_eq!(
-			request.peer_implementation(),
-			Some(format!("app/1 wrapper/2 {core}"))
-		);
+		assert_eq!(request.peer_implementation(), Some(format!("app/1 wrapper/2 {core}")));
 		request.accept(None, None).await.expect("handshake failed")
 	});
 

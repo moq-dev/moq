@@ -5762,7 +5762,11 @@ fn server_accepts_a_session() {
 	);
 	assert_eq!(
 		borrowed_string(implementation.data, implementation.len),
-		Some(format!("moq-c/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
+		Some(format!(
+			"moq-c/{} {}",
+			env!("CARGO_PKG_VERSION"),
+			moq_net::IMPLEMENTATION
+		))
 	);
 
 	let session_cb = States::new();
