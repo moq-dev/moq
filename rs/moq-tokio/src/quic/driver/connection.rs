@@ -382,6 +382,7 @@ impl Connection {
 	}
 
 	/// Open a request stream using only the credit already granted by the peer.
+	#[cfg(feature = "net")]
 	pub(crate) fn open_request(&self) -> Result<Option<(SendStream, RecvStream)>, ConnectionError> {
 		let mut state = self.0.state.lock("open_request");
 		if let Some(err) = &state.error {

@@ -33,7 +33,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Feature shapes in the gate](/quest/m0/nightly/feature-shapes.md) - feature-gated dead code fails the PR that adds it, not the next Nightly
 - [Nightly's base in a shallow checkout](/quest/m0/nightly/shallow-base.md) - `sh/gh/nightly.test.py` passes in Nightly's depth-1 checkout
 - [Windows builds moq-relay tests](/quest/m0/nightly/windows-relay-expect.md) - an unfulfilled lint expectation stops failing the Windows build
 - [OBS audio-candidate test](/quest/m0/nightly/obs-audio-candidate.md) - the TSan test waits for pending_audio to clear instead of racing it
+- [moq-hls without default features](/quest/m0/nightly/hls-poll-closed.md) - `Broadcaster::poll_closed` is gated with its only caller, so the no-default-features build stops warning
