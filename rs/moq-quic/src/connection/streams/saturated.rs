@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::state::StreamsState;
-use super::{SendDomain, SendGroup, SendGroups, SendOptions, SendStream, Streams};
+use super::{SendGroup, SendGroups, SendOptions, SendStream, Streams};
 use crate::{
 	Dir, Side, StreamId, VarInt,
 	connection::{State as ConnState, spaces::Retransmits},
@@ -404,60 +404,16 @@ fn ungrouped_streams_preempt_groups() {
 	assert_eq!(sender.bytes(&[control]), 10_000);
 }
 
-/// Domains split bytes evenly however many groups each holds and whatever their
-/// priorities, while priority still orders the groups inside one domain.
-#[test]
-fn domains_share_bytes_and_confine_priority() {
-	let mut sender = Sender::new();
-	let crowded = sender.groups().open_domain();
-	let quiet = sender.groups().open_domain();
-
-	let crowded_groups: Vec<_> = (0..10)
-		.map(|priority| sender.groups().open_in(priority, &crowded))
-		.collect();
-	let crowded_streams: Vec<_> = crowded_groups
-		.iter()
-		.map(|group| sender.open(Some(group), 0, 1_000_000))
-		.collect();
-	let quiet_group = sender.groups().open_in(-100, &quiet);
-	let quiet_stream = sender.open(Some(&quiet_group), 0, 1_000_000);
-
-	sender.drain(200);
-	assert_fair(sender.wire(&crowded_streams), sender.wire(&[quiet_stream]));
-	// Only the crowded domain's top group sent anything.
-	assert_eq!(sender.bytes(&crowded_streams[9..]), sender.bytes(&crowded_streams));
-}
-
-/// Groups outside any explicit domain share the default domain, which takes one share
-/// of the domain round robin.
-#[test]
-fn the_default_domain_is_one_share() {
-	let mut sender = Sender::new();
-	let domain = sender.groups().open_domain();
-	let inside = sender.groups().open_in(0, &domain);
-	let outside: Vec<SendGroup> = (0..3).map(|_| sender.group(0)).collect();
-	let inside = sender.open(Some(&inside), 0, 1_000_000);
-	let outside: Vec<_> = outside
-		.iter()
-		.map(|group| sender.open(Some(group), 0, 1_000_000))
-		.collect();
-
-	sender.drain(200);
-	assert_fair(sender.wire(&[inside]), sender.wire(&outside));
-}
-
 /// A released group lives until its last stream is gone, here by a reset, and then
 /// leaves nothing behind in the schedule.
 #[test]
 fn reset_frees_a_released_group() {
 	let mut sender = Sender::new();
-	let domain: SendDomain = sender.groups().open_domain();
-	let group = sender.groups().open_in(0, &domain);
+	let group = sender.group(0);
 	let reset = sender.open(Some(&group), 0, 10_000);
 	let finished = sender.open(Some(&group), 1, 100);
 	sender.send(finished).finish().unwrap();
 	sender.groups().close(group);
-	sender.groups().close_domain(domain);
 
 	assert_eq!(sender.drain(1)[0], finished);
 	sender.send(reset).reset(0u32.into()).unwrap();
@@ -601,22 +557,6 @@ fn datagrams_and_streams_share_a_groups_credit() {
 
 	sender.drain(200);
 	assert_fair(sender.datagram_wire(&tags), sender.wire(&[stream]));
-}
-
-/// With one domain per broadcast, two saturated datagram broadcasts both keep sending,
-/// one of many small datagrams and one of few large ones, each getting half the bytes.
-#[test]
-fn saturated_datagram_domains_share_bytes() {
-	let mut sender = Sender::new();
-	let small = sender.groups().open_domain();
-	let large = sender.groups().open_domain();
-	let small = sender.groups().open_in(0, &small);
-	let large = sender.groups().open_in(9, &large);
-	let small: Vec<_> = (0..2_000).map(|seq| sender.datagram(Some(&small), seq, 50)).collect();
-	let large: Vec<_> = (0..200).map(|seq| sender.datagram(Some(&large), seq, 1_000)).collect();
-
-	sender.drain(100);
-	assert_fair(sender.datagram_wire(&small), sender.datagram_wire(&large));
 }
 
 /// A datagram outside every group goes ahead of every group, like a control stream.

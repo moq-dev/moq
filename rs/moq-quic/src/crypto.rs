@@ -1,9 +1,9 @@
 //! Traits and implementations for the QUIC cryptography protocol
 //!
-//! The protocol logic in Quinn is contained in types that abstract over the actual
+//! The protocol logic in moq-quic is contained in types that abstract over the actual
 //! cryptographic protocol used. This module contains the traits used for this
 //! abstraction layer as well as a single implementation of these traits that uses
-//! *ring* and rustls to implement the TLS protocol support.
+//! rustls with ring or aws-lc-rs to implement the TLS protocol support.
 //!
 //! Note that usage of any protocol (version) other than TLS 1.3 does not conform to any
 //! published versions of the specification, and will not be supported in QUIC v1.
