@@ -422,17 +422,25 @@ impl Follower {
 		&self.control.policy
 	}
 
-	/// Follow under `policy` from now on. A different policy starts over at its
-	/// [`Policy::max`], as a fresh [`Follower`] would, and the next poll feeds it the
-	/// current grant. A disabled sender stays disabled until that grant resumes it
-	/// under the new policy, since nothing told it to start.
+	/// Follow under `policy` from now on, feeding it the current grant on the next poll.
+	///
+	/// A new ceiling or floor starts over at its [`Policy::max`], as a fresh [`Follower`]
+	/// would, since the sender applied that ceiling itself. A new
+	/// [`lower`](Policy::lower) alone keeps the target and ramp, since nothing retuned
+	/// the sender. Either way a disabled sender stays disabled until that grant resumes
+	/// it under the new policy, since nothing told it to start.
 	pub fn set_policy(&mut self, policy: Policy) {
-		if policy != self.control.policy {
+		if policy == self.control.policy {
+			return;
+		}
+		if policy.max == self.control.policy.max && policy.min == self.control.policy.min {
+			self.control.policy = policy;
+		} else {
 			let enabled = self.control.enabled;
 			self.control = Control::new(policy);
 			self.control.enabled = enabled;
-			self.refeed = true;
 		}
+		self.refeed = true;
 	}
 
 	/// Poll for the next target the sender should produce at, or the error that
@@ -967,6 +975,28 @@ mod tests {
 		grant.set(Some(bps(3_000_000))).unwrap();
 		follower.set_policy(Policy::new(bps(4_000_000)));
 		assert_eq!(follower.next().await.unwrap(), on(bps(3_000_000)));
+	}
+
+	/// A new lower rendition alone keeps the target the sender is actually at, so a
+	/// grant at the ceiling still ramps it there instead of reading as already applied.
+	#[tokio::test(start_paused = true)]
+	async fn a_new_lower_keeps_the_applied_target() {
+		let grant = bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		grant.set(Some(bps(2_000_000))).unwrap();
+		assert_eq!(follower.next().await.unwrap(), on(bps(2_000_000)));
+
+		grant.set(Some(bps(4_000_000))).unwrap();
+		let mut policy = Policy::new(bps(4_000_000));
+		policy.lower = Some(bps(1_000_000));
+		follower.set_policy(policy);
+
+		let mut applied = Vec::new();
+		while let Ok(target) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+			applied.push(target.unwrap());
+		}
+		assert_eq!(applied.last(), Some(&on(bps(4_000_000))), "{applied:?}");
+		assert!(applied.len() > 1, "a raise from 2 Mbps ramps: {applied:?}");
 	}
 
 	/// A grant no session probes for, like a whole estimate, never disables a rendition,
