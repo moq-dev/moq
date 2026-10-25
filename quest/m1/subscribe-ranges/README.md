@@ -94,12 +94,39 @@ This line owns the end-to-end test: a relay with a sparse cache answers a
 wide past range plus live in both orders, over lite-07 and moq-transport, with
 every sequence delivered or dropped.
 
+### Delete the old start bookkeeping (2026-10-24 pre-cut audit)
+
+Lite `TrackRun`'s fixes cluster on where a subscription starts and what it
+is owed or dropped (e713c30991, 36f82ac450, 35fa44f6bf, e1b5d2741f,
+f235fcfcbd, df0bd5c36f, 342445f251, 06765f4c1a, 4927167904, f52848d634,
+0513c07369, 5ad3652871). That state spans about eight fields (`floor`,
+`cap`, `start`, `first`, `skipped`, `served`, `start_frame`, `end_frame`),
+plus `cursor_floor` and a pre-06 re-pin branch, encoding three wire
+generations of "start". When ranges land:
+
+- Move what each cursor is owed and what was dropped into the model, so
+  `TrackRun` only translates it into SUBSCRIBE_START/DROP/END per version;
+  delete `skipped`, `served`, `first`, and the pre-06 branches rather than
+  layering lite-07 ranges on top.
+- On lite-07 a stream or a DROP accounts for every sequence except one sent
+  only as a datagram, which can be lost unseen
+  (`a_lost_datagram_delays_the_end` in `tests/integration/track_tail.rs`).
+  So the subscriber's end is "owed range covered and no stream active",
+  except that a hole a datagram may have left still settles within a bounded
+  grace; only reliable accounting of datagram sequences could remove that.
+  Keep `Settle`'s full grace for lite-05/06 and moq-transport behind one
+  version predicate.
+- Lite-07 is unpublished, so sending a fresh START per update can remove the
+  `requested == start` gate (`lite/subscriber.rs` about line 7366).
+
 ## Required
 
+- [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md) - filling stays flat as range count and span grow
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport range updates](/quest/m1/subscribe-ranges/ietf.md) - widening and narrowing upstream ranges, and `Time` ends
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
+- [Range count cost](/quest/m1/subscribe-ranges/range-cost.md) - a subscription's range count cannot multiply per-group cost
 
 ## Related
 

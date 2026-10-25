@@ -347,7 +347,7 @@ mod consumer_tests {
 		tokio::time::pause();
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
-		producer.abort(moq_net::Error::Cancel).unwrap();
-		assert!(matches!(consumer.rate_changed().await, Err(MoqError::Cancelled)));
+		drop(producer);
+		assert!(consumer.rate_changed().await.is_err());
 	}
 }

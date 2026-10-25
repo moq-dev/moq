@@ -12,7 +12,7 @@ Component crates are named `moq-<component>` (`hang` is the exception); infrastr
 
 # Producer / Consumer
 
-Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder, and a consumer never keeps its producer or parent alive. A track, group, or frame consumer seeing `Error::Dropped` is a bug too: its producer went away unfinished without calling `abort` with a specific error, so find that path and abort with the real cause. Lifecycle watchers like `broadcast::Demand` return `Dropped` after `close()` by design.
+Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder, and a consumer never keeps its producer or parent alive. A track, group, or frame consumer seeing `Error::Dropped` is a bug too: its producer went away unfinished without calling `abort` with a specific error, so find that path and abort with the real cause. Lifecycle watchers like `track::Demand` return `Dropped` after `close()` by design.
 
 # Async / poll
 

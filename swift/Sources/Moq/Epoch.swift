@@ -8,10 +8,3 @@ import MoqFFI
 public func mintEpoch() -> String {
     moqMintEpoch()
 }
-
-/// The wall-clock time an epoch encodes, to the millisecond. Throws unless
-/// `epoch` is a lowercase hyphenated UUIDv7.
-public func epochTime(_ epoch: String) throws -> Date {
-    let ms = try moqEpochTimeMs(epoch: epoch)
-    return Date(timeIntervalSince1970: Double(ms) / 1000)
-}

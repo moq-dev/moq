@@ -6942,7 +6942,8 @@ impl AnnounceConsumer {
 	}
 
 	/// Whether this consumer has synced; see [`Self::poll_synced`].
-	pub fn is_synced(&self) -> bool {
+	#[cfg(test)]
+	pub(crate) fn is_synced(&self) -> bool {
 		let state = self.state.read();
 		state.is_closed() || state.synced()
 	}
@@ -6969,12 +6970,6 @@ impl AnnounceConsumer {
 				false => Poll::Pending,
 			})
 			.map(|_| ())
-	}
-
-	/// Wait until this consumer has synced; see [`Self::poll_synced`].
-	#[cfg(feature = "async")]
-	pub async fn synced(&self) {
-		kio::wait(|waiter| self.poll_synced(waiter)).await
 	}
 
 	// The wire sender uses this only to bound its initial replay.
