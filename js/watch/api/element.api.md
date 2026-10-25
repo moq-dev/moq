@@ -37,14 +37,21 @@ class MoqWatch extends HTMLElement {
     connection: Moq.Connection;
     readonly controls: {
         paused: Signal<boolean>;
-        volume: Signal<number>;
-        muted: Signal<boolean>;
-        visible: Signal<Video.Visible>;
-        backend: Signal<Video.Backend>;
         delay: Signal<Delay>;
         buffer: Signal<Milli>;
-        target: Signal<Video.Target | undefined>;
-        captions: Signal<string | undefined>;
+        video: {
+            target: Signal<Video.Target | undefined>;
+            visible: Signal<Video.Visible>;
+            backend: Signal<Video.Backend>;
+        };
+        audio: {
+            target: Signal<Audio_2.Target | undefined>;
+            volume: Signal<number>;
+            muted: Signal<boolean>;
+        };
+        text: {
+            target: Signal<string | undefined>;
+        };
     };
     get delay(): Delay;
     set delay(value: Delay);

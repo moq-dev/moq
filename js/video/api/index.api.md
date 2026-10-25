@@ -21,6 +21,7 @@ export type Dimensions = {
 export type Presentation = {
     rotation?: number;
     flip?: boolean;
+    interlaced?: boolean;
 };
 
 export class Renderer {

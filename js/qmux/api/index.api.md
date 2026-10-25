@@ -9,15 +9,13 @@ export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBuff
 }
 
 export interface Config {
-    maxData?: bigint;
-    maxDatagramFrameSize?: bigint;
-    maxIdleTimeout?: bigint;
+    idleTimeout?: number | null;
+    maxDatagramFrameSize?: bigint | null;
     maxRecordSize?: bigint;
-    maxStreamDataBidiLocal?: bigint;
-    maxStreamDataBidiRemote?: bigint;
-    maxStreamDataUni?: bigint;
     maxStreamsBidi?: bigint;
     maxStreamsUni?: bigint;
+    receiveWindow?: bigint;
+    streamReceiveWindow?: bigint;
 }
 
 export function install(options?: InstallOptions): boolean;
@@ -71,7 +69,7 @@ export class StreamError extends Error implements Pick<WebTransportError, "sourc
     readonly streamErrorCode: number;
 }
 
-export type Version = Exclude<WireFormat, "webtransport">;
+export type Version = WireFormat;
 
 export interface WebSocketLike {
     binaryType: string;

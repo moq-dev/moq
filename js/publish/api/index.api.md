@@ -82,7 +82,6 @@ export type BroadcastInput = {
     origin: Getter<Net.Origin.Table | undefined>;
     enabled: Getter<boolean>;
     announce: Getter<boolean>;
-    linger: Getter<boolean>;
     name: Getter<Net.Path.Valid>;
     display: Getter<{
         width: number;

@@ -40,15 +40,11 @@ interface Announce_2 {
 
 declare namespace Auth {
     export {
-        grantsEqual,
-        Grant,
-        Unsupported,
-        Auth_2 as Auth,
-        Request_2 as Request,
-        Issued,
-        Requests,
+        Duplicate,
         Handle,
-        None
+        Unsupported,
+        Grant,
+        Auth_2 as Auth
     }
 }
 
@@ -78,9 +74,7 @@ declare namespace Broadcast {
     export {
         Tracks,
         TracksEvent,
-        Demand_3 as Demand,
         Producer_3 as Producer,
-        Finish,
         Consumer_4 as Consumer
     }
 }
@@ -89,6 +83,7 @@ export class Connection {
     constructor(props?: ConnectionProps);
     static readonly accept: typeof accept;
     announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
+    readonly auth: Getter<Auth_4.Handle | undefined>;
     readonly bandwidth: Getter<Handle_2 | undefined>;
     static readonly certificateHash: typeof certificateHash;
     close(abort?: Error): void;
@@ -122,6 +117,11 @@ export namespace Connection {
     export type Transport = Transport;
     export type WebSocketProps = WebSocketProps;
     export type WebTransportProps = WebTransportProps;
+}
+
+class ConnectTimeout extends Error {
+    constructor(timeout: Milli);
+    readonly timeout: Milli;
 }
 
 class Consumer {
@@ -202,7 +202,6 @@ function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array];
 class Demand {
     get closed(): GetPromise<Error | null>;
     readonly name: string;
-    get priority(): number;
     get wanted(): Getter<number | undefined>;
 }
 
@@ -213,16 +212,14 @@ class Demand_2 {
     get used(): Getter<boolean>;
 }
 
-class Demand_3 {
-    get closed(): GetPromise<null>;
-    unused(): Promise<void>;
-    get used(): Getter<boolean>;
+class Duplicate extends Error {
+    constructor(message?: string);
 }
 
 class Dynamic {
     close(): void;
     readonly prefix: Path_2.Valid;
-    requested(): AsyncIterableIterator<Request_4>;
+    requested(): AsyncIterableIterator<Request_3>;
     get route(): Route;
 }
 
@@ -243,14 +240,13 @@ declare namespace Epoch {
         parse,
         mint,
         time,
-        toBytes,
-        fromBytes,
         Valid_2 as Valid
     }
 }
 
 declare namespace Error_2 {
     export {
+        ConnectTimeout,
         FrameTooLarge,
         GroupTooLarge,
         NoStreamCredit,
@@ -275,13 +271,6 @@ interface FetchGroupOptions {
     signal?: AbortSignal;
 }
 
-class Finish {
-    close(): void;
-    get closed(): GetPromise<null>;
-    readonly linger: Milli;
-    wait(): Promise<void>;
-}
-
 interface Frame {
     payload: Uint8Array;
     timestamp?: Timestamp;
@@ -295,15 +284,11 @@ class FrameTooLarge extends Stream {
 
 function from(...paths: string[]): Valid;
 
-function fromBytes(bytes: Uint8Array): Valid_2;
-
 interface Grant {
     expires?: number;
     publish: Path_2.Patterns;
     subscribe: Path_2.Patterns;
 }
-
-function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean;
 
 declare namespace Group {
     export {
@@ -329,10 +314,11 @@ class GroupTooLarge extends Stream {
     });
 }
 
-interface Handle {
+class Handle {
+    constructor();
+    abort(err?: Error): void;
     add(token: string | Uint8Array): Promise<Auth_2>;
-    readonly grant: Getter<Grant | undefined>;
-    requests(): Requests;
+    get grant(): Getter<Grant | undefined>;
 }
 
 interface Handle_2 {
@@ -342,6 +328,8 @@ interface Handle_2 {
 function hasPrefix(prefix: Valid, path: Valid): boolean;
 
 type Hop = z.infer<typeof HopSchema>;
+
+export const IMPLEMENTATION: string;
 
 interface Info {
     compress?: boolean;
@@ -359,19 +347,7 @@ function infoDefaults(info?: Partial<Info>): Info;
 
 function isAnonymous(route: Route): boolean;
 
-interface Issued {
-    close(): void;
-    readonly closed: PromiseLike<Error | null>;
-    revoke(code: SessionCode, reason: string): void;
-    update(grant: Grant): void;
-}
-
 function join(path: Valid, other: Valid): Valid;
-
-interface Location_2 {
-    frame: number;
-    group: number;
-}
 
 const MAX_GROUP_CACHE_BYTES: number;
 
@@ -388,12 +364,6 @@ const MAX_U53: number;
 const MAX_U6: number;
 
 function mint(): Valid_2;
-
-class None implements Handle {
-    add(_token: string | Uint8Array): Promise<Auth_2>;
-    readonly grant: Getter<Grant | undefined>;
-    requests(): Requests;
-}
 
 function normalizeRelative(rel: string): Relative;
 
@@ -412,10 +382,10 @@ type Order = "ascending" | "descending";
 class Ordered {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    end(): Location_2 | undefined;
-    finished(): Promise<Location_2>;
+    end(): Position_2 | undefined;
+    finished(): Promise<Position_2>;
     info(): Promise<Info>;
-    largest(): Promise<Location_2 | undefined>;
+    largest(): Promise<Position_2 | undefined>;
     readonly name: string;
     nextGroup(): Promise<Consumer_2 | undefined>;
     readBool(): Promise<boolean | undefined>;
@@ -426,10 +396,10 @@ class Ordered {
     readJson(): Promise<unknown | undefined>;
     readString(): Promise<string | undefined>;
     recvDatagram(): Promise<Datagram | undefined>;
-    setGroups(groups: Groups): void;
     get subscription(): Getter<Subscription | undefined>;
+    tryNextGroup(): Consumer_2 | undefined;
     update(options: Subscription): void;
-    withGroups(groups: Groups): this;
+    withRange(groups: Groups): this;
 }
 
 declare namespace Origin_2 {
@@ -438,14 +408,13 @@ declare namespace Origin_2 {
         Hop,
         Route,
         isAnonymous,
-        Preference,
         Table,
         RequestOptions,
         Producer_5 as Producer,
         Requesting,
         Consumer_5 as Consumer,
         Dynamic,
-        Request_4 as Request,
+        Request_3 as Request,
         Prepared
     }
 }
@@ -480,18 +449,16 @@ declare namespace Path {
     }
 }
 
-type Preference = number & {
-    readonly _brand: "preference";
-};
-
-const Preference: ((value: number) => Preference) & {
-    default: Preference;
-};
+interface Position_2 {
+    frame: number;
+    group: number;
+}
 
 class Prepared {
+    [Symbol.dispose](): void;
     readonly broadcast: Broadcast_2.Producer;
+    close(): void;
     publish(): Broadcast_2.Producer;
-    reject(err: Error): void;
 }
 
 class Producer {
@@ -503,10 +470,10 @@ class Producer {
     get closed(): GetPromise<Error | null>;
     demand(): Demand;
     dropGroups(start: number, end: number, error: Error): void;
-    finishAt(end: Location_2): void;
+    finishAt(end: Position_2): void;
     info(): Promise<Info>;
     insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array): void;
-    largest(): Location_2 | undefined;
+    largest(): Position_2 | undefined;
     readonly name: string;
     get priority(): number;
     subscribe(options?: Subscription): Subscriber;
@@ -538,8 +505,6 @@ class Producer_3 {
     get closed(): GetPromise<null>;
     consume(): Consumer_4;
     createTrack(name: string, info?: Partial<track.Info>): track.Producer;
-    demand(): Demand_3;
-    finish(): Finish;
     removeTrack(name: string): void;
     get route(): Route | undefined;
     track(name: string): track.Consumer;
@@ -557,7 +522,6 @@ class Producer_5 implements Table {
     dynamic(prefix: Path_2.Valid): Dynamic;
     request(path: Path_2.Valid, options?: RequestOptions): Requesting;
     scope(root: Path_2.Valid, patterns: Path_2.Patterns): Producer_5;
-    withPreference(preference: Preference): Producer_5;
 }
 
 class ProtocolViolation extends Error {
@@ -582,14 +546,7 @@ type Relative = string & {
 
 function relative(target: Valid, base: Valid): Relative | undefined;
 
-interface Request_2 {
-    accept(grant: Grant): Issued;
-    readonly closed: PromiseLike<Error | null>;
-    reject(code: SessionCode, reason: string): void;
-    readonly token: Uint8Array;
-}
-
-class Request_3 {
+class Request_2 {
     accept(info?: Partial<Info>): Producer;
     demand(): Demand;
     readonly name: string;
@@ -599,7 +556,7 @@ class Request_3 {
     get subscription(): Readonly<Subscription>;
 }
 
-class Request_4 {
+class Request_3 {
     readonly path: Path_2.Valid;
     prepare(epoch: Epoch_2.Valid): Prepared;
     reject(err: Error): void;
@@ -610,17 +567,11 @@ class Requesting {
     close(): void;
     readonly closed: GetPromise<Error | null>;
     readonly path: Path_2.Valid;
-    readonly unroutable: Getter<boolean>;
 }
 
 interface RequestOptions {
     announced?: boolean;
     epoch?: Epoch_2.Valid;
-}
-
-interface Requests {
-    close(): void;
-    next(): Promise<Request_2 | undefined>;
 }
 
 class Reservation implements Disposable {
@@ -733,19 +684,18 @@ function stripPrefix(prefix: Valid, path: Valid): Valid | null;
 class Subscriber {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    end(): Location_2 | undefined;
-    finished(): Promise<Location_2>;
+    end(): Position_2 | undefined;
+    finished(): Promise<Position_2>;
     info(): Promise<Info>;
-    largest(): Promise<Location_2 | undefined>;
+    largest(): Promise<Position_2 | undefined>;
     readonly name: string;
     ordered(): Ordered;
     recvDatagram(): Promise<Datagram | undefined>;
     recvGroup(): Promise<Consumer_2 | undefined>;
-    setGroups(groups: Groups): void;
     get subscription(): Getter<Subscription | undefined>;
     tryRecvGroup(): Consumer_2 | undefined;
     update(options: Subscription): void;
-    withGroups(groups: Groups): this;
+    withRange(groups: Groups): this;
 }
 
 interface Subscription {
@@ -808,8 +758,6 @@ class TimestampMismatch extends Stream {
     });
 }
 
-function toBytes(epoch: Valid_2): Uint8Array;
-
 class TooFarBehind extends Stream {
     constructor(options?: {
         cause?: unknown;
@@ -820,13 +768,13 @@ declare namespace Track {
     export {
         infoDefaults,
         Datagram,
-        Location_2 as Location,
+        Position_2 as Position,
         Info,
         Bound,
         Groups,
         Subscription,
         Order,
-        Request_3 as Request,
+        Request_2 as Request,
         Staged,
         FetchGroupOptions,
         Consumer_3 as Consumer,

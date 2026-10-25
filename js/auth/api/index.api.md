@@ -613,6 +613,7 @@ export const RequestSchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
         publisher: "publisher";
         subscriber: "subscriber";
     }>>;
+    implementation: z.ZodMiniOptional<z.ZodMiniString<string>>;
     tls: z.ZodMiniOptional<z.ZodMiniObject<{
         name: z.ZodMiniString<string>;
         fingerprint: z.ZodMiniString<string>;
@@ -650,6 +651,7 @@ export const RequestSchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
         publisher: "publisher";
         subscriber: "subscriber";
     }>>;
+    implementation: z.ZodMiniOptional<z.ZodMiniString<string>>;
     tls: z.ZodMiniOptional<z.ZodMiniObject<{
         name: z.ZodMiniString<string>;
         fingerprint: z.ZodMiniString<string>;
@@ -687,6 +689,7 @@ export const RequestSchema: z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
         publisher: "publisher";
         subscriber: "subscriber";
     }>>;
+    implementation: z.ZodMiniOptional<z.ZodMiniString<string>>;
     tls: z.ZodMiniOptional<z.ZodMiniObject<{
         name: z.ZodMiniString<string>;
         fingerprint: z.ZodMiniString<string>;

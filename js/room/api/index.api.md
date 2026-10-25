@@ -9,16 +9,14 @@ import * as Clock from '@moq/clock';
 import { Effect } from '@moq/signals';
 import { Getter } from '@moq/signals';
 import { GetterInit } from '@moq/signals';
-import * as Hang from '@moq/hang';
 import * as Json from '@moq/json';
+import * as Moq from '@moq/net';
 import { Nano } from '@moq/clock';
-import * as Net from '@moq/net';
 import { Path } from '@moq/net';
 import * as Publish from '@moq/publish';
 import { Readonlys } from '@moq/signals';
 import type { Root } from '@moq/hang/catalog';
 import { Signal } from '@moq/signals';
-import * as Signals from '@moq/signals';
 import { Timed } from '@moq/net';
 import { Track } from '@moq/net';
 import * as Watch from '@moq/watch';
@@ -55,8 +53,6 @@ export type ExtendedCatalog = Root & {
     hang?: HangCatalog;
 };
 
-export { Hang }
-
 export type HangCatalog = {
     user?: TrackRef;
     preview?: TrackRef;
@@ -87,7 +83,7 @@ export class Local {
     readonly chatting: Signal<boolean>;
     close(): void;
     readonly enabled: Signal<boolean>;
-    readonly identity: Getter<Net.Path.Valid>;
+    readonly identity: Getter<Moq.Path.Valid>;
     readonly microphone: Publish.Source.Microphone;
     readonly microphoneEnabled: Signal<boolean>;
     get preview(): Getter<Preview>;
@@ -102,16 +98,16 @@ export class Local {
 
 export interface LocalProps {
     cameraEnabled?: GetterInit<boolean>;
-    connection: Net.Connection;
+    connection: Moq.Connection;
     enabled?: GetterInit<boolean>;
-    identity: GetterInit<Net.Path.Valid>;
+    identity: GetterInit<Moq.Path.Valid>;
     microphoneEnabled?: GetterInit<boolean>;
     screenEnabled?: GetterInit<boolean>;
     user?: UserProps;
 }
 
 export class Member {
-    constructor(kind: Kind, path: Net.Path.Valid, connection: Net.Connection);
+    constructor(kind: Kind, path: Moq.Path.Valid, connection: Moq.Connection);
     readonly audio: Watch.Audio.Decoder;
     readonly broadcast: Watch.Broadcast;
     readonly canvas: Signal<HTMLCanvasElement | undefined>;
@@ -119,7 +115,7 @@ export class Member {
     readonly emitter: Watch.Audio.Emitter;
     readonly kind: Kind;
     readonly muted: Signal<boolean>;
-    readonly path: Net.Path.Valid;
+    readonly path: Moq.Path.Valid;
     readonly player: Watch.Player;
     readonly preview: Getter<Preview>;
     readonly renderer: Watch.Video.Renderer;
@@ -127,8 +123,6 @@ export class Member {
     readonly video: Watch.Video.Decoder;
     readonly volume: Signal<number>;
 }
-
-export { Net }
 
 export function parse(path: Path.Valid): Parsed | undefined;
 
@@ -151,8 +145,6 @@ export const PRIORITY = 90;
 
 const PRIORITY_2 = 10;
 
-export { Publish }
-
 class Publisher {
     constructor(track: Track.Producer);
     static create(broadcast: Broadcast.Producer): Publisher;
@@ -163,42 +155,40 @@ class Publisher {
 
 export class Remote {
     constructor(props: RemoteProps);
-    attach(kind: Kind, path: Net.Path.Valid): void;
+    attach(kind: Kind, path: Moq.Path.Valid): void;
     readonly camera: Getter<Member | undefined>;
     close(): void;
     detach(kind: Kind): void;
     empty(): boolean;
-    readonly identity: Net.Path.Valid;
+    readonly identity: Moq.Path.Valid;
     readonly preview: Getter<Preview>;
     readonly screen: Getter<Member | undefined>;
     readonly user: Readonlys<UserInput>;
 }
 
 export interface RemoteProps {
-    connection: Net.Connection;
-    identity: Net.Path.Valid;
+    connection: Moq.Connection;
+    identity: Moq.Path.Valid;
 }
 
 export class Room {
     constructor(props: RoomProps);
     close(): void;
-    readonly connection: Net.Connection;
+    readonly connection: Moq.Connection;
     readonly enabled: Getter<boolean>;
-    readonly identity: Getter<Net.Path.Valid | undefined>;
-    readonly prefix: Getter<Net.Path.Valid | undefined>;
-    get remotes(): Getter<Map<Net.Path.Valid, Remote>>;
+    readonly identity: Getter<Moq.Path.Valid | undefined>;
+    readonly prefix: Getter<Moq.Path.Valid | undefined>;
+    get remotes(): Getter<Map<Moq.Path.Valid, Remote>>;
 }
 
 export interface RoomProps {
-    connection: Net.Connection;
+    connection: Moq.Connection;
     enabled?: GetterInit<boolean>;
-    identity?: GetterInit<Net.Path.Valid | undefined>;
-    prefix?: GetterInit<Net.Path.Valid | undefined>;
+    identity?: GetterInit<Moq.Path.Valid | undefined>;
+    prefix?: GetterInit<Moq.Path.Valid | undefined>;
 }
 
 export function serve(broadcast: Publish.Broadcast, user: UserInput, preview: Getter<Preview>, effect: Effect): void;
-
-export { Signals }
 
 class Subscriber {
     constructor(track: Track.Subscriber);
@@ -238,8 +228,6 @@ export type UserProps = {
     avatar?: string | Signal<string | undefined>;
     color?: string | Signal<string | undefined>;
 };
-
-export { Watch }
 
 
 ```

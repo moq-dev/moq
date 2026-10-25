@@ -4,20 +4,16 @@
 
 ```ts
 
-class MoqWatchSupport extends HTMLElement {
-    constructor();
-    attributeChangedCallback(name: Observed, _oldValue: string | null, newValue: string | null): void;
-    connectedCallback(): void;
-    get details(): boolean;
-    set details(details: boolean);
-    disconnectedCallback(): void;
-    static observedAttributes: readonly ["show", "details"];
-    get show(): Show;
-    set show(show: Show);
+import { Report as Report_2 } from '@moq/ui';
+import { Show } from '@moq/ui';
+import { Support } from '@moq/ui';
+
+class MoqWatchSupport extends Support {
+    protected detect(): Promise<Report_2>;
 }
 export default MoqWatchSupport;
 
-export type Show = "always" | "warning" | "error" | "never";
+export { Show }
 
 
 ```

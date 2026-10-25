@@ -5,7 +5,6 @@
 ```ts
 
 import type { Micro } from '@moq/clock';
-import * as Moq from '@moq/net';
 
 export class Format {
     constructor(kind?: "audio" | "video" | "data");
@@ -18,17 +17,6 @@ export interface Frame {
     keyframe: boolean;
     payload: Uint8Array;
     timestamp: Micro;
-}
-
-export class Producer {
-    constructor(track: Moq.Track.Producer);
-    close(err?: Error): void;
-    encode(data: Uint8Array | Source, timestamp: Micro, keyframe: boolean): void;
-}
-
-export interface Source {
-    byteLength: number;
-    copyTo(buffer: Uint8Array): void;
 }
 
 

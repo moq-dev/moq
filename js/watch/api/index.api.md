@@ -156,7 +156,9 @@ export class Player {
     readonly broadcast: Broadcast;
     close(): void;
     readonly emitter: Audio_3.Emitter;
-    readonly in: Readonlys<PlayerInput>;
+    readonly in: Readonlys<Omit<PlayerInput, Kind>> & {
+        readonly [K in Kind]: Readonlys<PlayerInput[K]>;
+    };
     readonly renderer: Video_3.Renderer;
     reset(): void;
     readonly sync: Sync;
@@ -173,20 +175,29 @@ export type PlayerInput = {
     catalogFormat: Getter<CatalogFormat | undefined>;
     catalog: Getter<Catalog.Root | undefined>;
     probe: Getter<Net.Connection.Probe | undefined>;
-    canvas: Getter<HTMLCanvasElement | undefined>;
-    container: Getter<HTMLElement | undefined>;
     paused: Getter<boolean>;
-    volume: Getter<number>;
-    muted: Getter<boolean>;
-    visible: Getter<Video_3.Visible>;
-    backend: Getter<Video_3.Backend>;
     delay: Getter<Delay>;
     buffer: Getter<Milli>;
-    target: Getter<Video_3.Target | undefined>;
-    captions: Getter<string | undefined>;
+    video: {
+        target: Getter<Video_3.Target | undefined>;
+        canvas: Getter<HTMLCanvasElement | undefined>;
+        visible: Getter<Video_3.Visible>;
+        backend: Getter<Video_3.Backend>;
+    };
+    audio: {
+        target: Getter<Audio_3.Target | undefined>;
+        volume: Getter<number>;
+        muted: Getter<boolean>;
+    };
+    text: {
+        target: Getter<string | undefined>;
+        container: Getter<HTMLElement | undefined>;
+    };
 };
 
-export type PlayerProps = Inputs<PlayerInput>;
+export type PlayerProps = Inputs<Omit<PlayerInput, Kind>> & {
+    [K in Kind]?: Inputs<PlayerInput[K]>;
+};
 
 function renderable(config: Catalog.TextConfig): boolean;
 

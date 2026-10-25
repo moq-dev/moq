@@ -8,6 +8,10 @@ export class Elapsed extends Error {
     constructor();
 }
 
+export interface Installed {
+    close(): void;
+}
+
 export type Instant = number & {
     readonly _brand: "clock-instant";
 };
@@ -31,8 +35,9 @@ export function interval(period: Nano): Interval;
 
 export class Manual {
     advance(duration: Nano): Promise<void>;
+    drive<T>(work: PromiseLike<T>): Promise<T>;
     fire(): Promise<Instant>;
-    install(): () => void;
+    install(): Installed;
     jump(duration: Nano): void;
     now(): Instant;
     stepWall(wall: Wall): void;

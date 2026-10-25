@@ -337,6 +337,8 @@ export const EchoSchema: z.ZodMiniObject<{
     path: z.ZodMiniType<RelativeBroadcast, string, z.core.$ZodTypeInternals<RelativeBroadcast, string>>;
 }, z.core.$strip>;
 
+export function encode(root: Root): Root;
+
 export const EpochSchema: z.ZodMiniType<ReferenceEpoch, string>;
 
 export class EscapingBroadcast extends Error {
@@ -387,8 +389,6 @@ export type KnownCompression = "deflate";
 export type KnownMode = "snapshot" | "stream";
 
 export const MAX_RENDITIONS = 64;
-
-export function minVersion(root: Root): number | undefined;
 
 export type Mode = z_2.infer<typeof ModeSchema>;
 
@@ -523,7 +523,9 @@ export const RootSchema: z.ZodMiniObject<{
                 kind: string;
             }>>]>>;
             stereo: z.ZodMiniOptional<z.ZodMiniString<string>>;
+            interlaced: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
             framerate: z.ZodMiniOptional<z.ZodMiniNumber<number>>;
+            reorder: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u8", "out">>;
             bitrate: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
             enabled: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
             preference: z.ZodMiniOptional<z.ZodMiniInt32>;
@@ -623,7 +625,9 @@ export const RootSchema: z.ZodMiniObject<{
                 kind: string;
             }>>]>>;
             stereo: z.ZodMiniOptional<z.ZodMiniString<string>>;
+            interlaced: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
             framerate: z.ZodMiniOptional<z.ZodMiniNumber<number>>;
+            reorder: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u8", "out">>;
             bitrate: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
             enabled: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
             preference: z.ZodMiniOptional<z.ZodMiniInt32>;
@@ -702,7 +706,9 @@ export const RootSchema: z.ZodMiniObject<{
                     };
                 } | undefined;
                 stereo?: string | undefined;
+                interlaced?: boolean | undefined;
                 framerate?: number | undefined;
+                reorder?: (number & z.$brand<"u8">) | undefined;
                 bitrate?: (number & z.$brand<"u53">) | undefined;
                 enabled?: boolean | undefined;
                 preference?: number | undefined;
@@ -790,7 +796,9 @@ export const RootSchema: z.ZodMiniObject<{
                 };
             } | undefined;
             stereo?: string | undefined;
+            interlaced?: boolean | undefined;
             framerate?: number | undefined;
+            reorder?: (number & z.$brand<"u8">) | undefined;
             bitrate?: (number & z.$brand<"u53">) | undefined;
             enabled?: boolean | undefined;
             preference?: number | undefined;
@@ -1243,7 +1251,9 @@ export const VideoConfigSchema: z.ZodMiniObject<{
         kind: string;
     }>>]>>;
     stereo: z.ZodMiniOptional<z.ZodMiniString<string>>;
+    interlaced: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
     framerate: z.ZodMiniOptional<z.ZodMiniNumber<number>>;
+    reorder: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u8", "out">>;
     bitrate: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
     enabled: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
     preference: z.ZodMiniOptional<z.ZodMiniInt32>;
@@ -1335,7 +1345,9 @@ export const VideoSchema: z.ZodMiniUnion<readonly [z.ZodMiniObject<{
             kind: string;
         }>>]>>;
         stereo: z.ZodMiniOptional<z.ZodMiniString<string>>;
+        interlaced: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
         framerate: z.ZodMiniOptional<z.ZodMiniNumber<number>>;
+        reorder: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u8", "out">>;
         bitrate: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
         enabled: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
         preference: z.ZodMiniOptional<z.ZodMiniInt32>;
@@ -1435,7 +1447,9 @@ export const VideoSchema: z.ZodMiniUnion<readonly [z.ZodMiniObject<{
             kind: string;
         }>>]>>;
         stereo: z.ZodMiniOptional<z.ZodMiniString<string>>;
+        interlaced: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
         framerate: z.ZodMiniOptional<z.ZodMiniNumber<number>>;
+        reorder: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u8", "out">>;
         bitrate: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
         enabled: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
         preference: z.ZodMiniOptional<z.ZodMiniInt32>;
@@ -1514,7 +1528,9 @@ export const VideoSchema: z.ZodMiniUnion<readonly [z.ZodMiniObject<{
                 };
             } | undefined;
             stereo?: string | undefined;
+            interlaced?: boolean | undefined;
             framerate?: number | undefined;
+            reorder?: (number & z.$brand<"u8">) | undefined;
             bitrate?: (number & z.$brand<"u53">) | undefined;
             enabled?: boolean | undefined;
             preference?: number | undefined;
@@ -1602,7 +1618,9 @@ export const VideoSchema: z.ZodMiniUnion<readonly [z.ZodMiniObject<{
             };
         } | undefined;
         stereo?: string | undefined;
+        interlaced?: boolean | undefined;
         framerate?: number | undefined;
+        reorder?: (number & z.$brand<"u8">) | undefined;
         bitrate?: (number & z.$brand<"u53">) | undefined;
         enabled?: boolean | undefined;
         preference?: number | undefined;

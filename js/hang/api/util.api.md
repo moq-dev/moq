@@ -11,6 +11,7 @@ declare namespace Aac {
     export {
         supportsRate,
         pickRate,
+        objectType,
         audioSpecificConfig,
         SAMPLE_RATES
     }
@@ -54,6 +55,8 @@ declare namespace Libav {
         polyfill
     }
 }
+
+function objectType(codec: string): 2 | 5 | 29 | undefined;
 
 declare namespace Opus {
     export {
