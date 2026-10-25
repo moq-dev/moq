@@ -18,15 +18,16 @@ priority/cost. Decided 2026-10-13: only explicitly selected peers are dialed;
 there is no default dial-all. Prefer a selected set/handle to a callback,
 settling the public shape with its consumer. The origin carries no auth state
 and the pooled `Connection` hides `Established.auth`, yet peer grants need
-the identity key proven and AUTH_KEYS/AUTH_PEER received across relay reconnects, so
+the presenter key announced and AUTH_KEYS/AUTH_PEER received across relay reconnects, so
 define that handle before fixing `Peers`. Publishing into the origin reaches
 the relay and its announce stream is the roster. Tests inject transport
 factories and cover pairing, application selection, and the roster gate.
 
 Identity: the roster id is the origin's route-layer node id, the id its
-ROUTE_START carries ([routes](/quest/m1/cluster-routing/routes.md)), owned
-once per tab by the origin rather than once per session. lite-07 drops the
-hop list, so no hop chain carries it.
+ROUTE_START carries ([routes](/quest/m1/cluster-routing/routes.md)), which
+the relay stamps on the tab's session
+([Stamp routing identities](/quest/m1/cluster-routing/stamp.md)) and its peer
+grant names. lite-07 drops the hop list, so no hop chain carries it.
 
 Roster: each peer publishes `<prefix><id>` with an `info.json` snapshot track:
 the moq ALPNs it accepts, `webrtc: true`, the presenter public key that
@@ -87,8 +88,7 @@ and short-lived, which the peer presents in band with a proof of possession;
 the other side verifies the relay's signature, the node id and key against
 the roster, and that the key is the one the session proved, then serves only the granted paths. Issuance,
 asymmetric keys, JWKS, and refresh live in
-[Peer grants](/quest/m2/p2p/peer-grant.md), and the session's key proof in
-[Identity proof](/quest/m1/cluster-routing/identity.md): HMAC keys cannot be given to
+[Peer grants](/quest/m2/p2p/peer-grant.md), along with the key's proof: HMAC keys cannot be given to
 browsers without also letting them forge grants, so an HS256-only relay
 issues nothing. A peer session with no verifiable grant serves nothing;
 there is no equal-scope shortcut.

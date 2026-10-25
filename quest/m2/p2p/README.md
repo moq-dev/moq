@@ -118,8 +118,9 @@ channel, and has no reset code without a side channel.
 Routing is the [cluster routing line](/quest/m1/cluster-routing/README.md)'s:
 every session speaks per-node ROUTEs and path-less ANNOUNCEs, so a broadcast's
 announce names its origin node, the roster maps that node to a peer, and the
-application priority followed by total cost picks the direct link or relay. The roster id is the node id, held once per origin rather than once
-per session.
+application priority followed by total cost picks the direct link or relay. The roster id is the node id the origin's relay
+stamped on its session, which its [peer grant](/quest/m2/p2p/peer-grant.md)
+carries onto direct sessions.
 
 Decided 2026-10-13: priority then total cost selects among authorized routes;
 a direct connection does not always win. A watching tab never re-serves what

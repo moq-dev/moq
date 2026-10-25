@@ -112,17 +112,21 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   them was rejected: downstream nodes would lose their only route during the
   drain. Existing readers resume only
   across a matching explicit epoch; epochless changes preserve Restart.
-- Fresh routing identity per process/tab restart, shared across its
-  authenticated live sessions, decided 2026-10-13. It is the hash of a
-  per-process key that every session proves once
-  ([Identity proof](/quest/m1/cluster-routing/identity.md), decided
-  2026-10-14). Keep administrative identity and broadcast epoch separate. The shared identity recognizes an
-  origin reached through CDN and direct links and maps it to a roster peer.
-  The origin advances its seqno whenever its own set of sessions changes:
-  feasibility distances held elsewhere otherwise refuse a restart that reuses
-  an identity, and starve the old neighbors of an origin that moved to a
-  farther attachment (`restart_reusing_identity_is_refused`,
-  `reconnect_without_restart_needs_a_seqno_advance`). A random identity alone
+- The relay a session attaches to stamps its routing identity and ignores a
+  self-named one ([Stamp routing identities](/quest/m1/cluster-routing/stamp.md),
+  decided 2026-10-25). This supersedes the per-process key shared across an
+  origin's live sessions and proven once per session (decided 2026-10-13 and
+  2026-10-14): a self-named identity is unverifiable without that proof, and
+  key proof moves to [Peer grants](/quest/m2/p2p/peer-grant.md), which also
+  owns recognizing an origin reached through CDN and direct links and mapping
+  it to a roster peer. Keep administrative identity and broadcast epoch
+  separate. An identity's seqno advances whenever the sessions it is reached
+  through change: feasibility distances held elsewhere otherwise refuse a
+  restart that reuses an identity, and starve the old neighbors of an origin
+  that moved to a farther attachment (`restart_reusing_identity_is_refused`,
+  `reconnect_without_restart_needs_a_seqno_advance`); with a fresh stamp per
+  session, settle here whether the stamping relay or the session advances it.
+  A random identity alone
   does not keep a dead incarnation away. What bounds it is ordered sessions,
   state scoped to the session that delivered it, never advertising an
   unreachable route, and keeping the feasibility distance until every
@@ -131,7 +135,7 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   message already in flight on a live session, which delivers the retraction
   next (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
   `cluster.id` stops naming a routing identity.
-- Decided 2026-10-14: a connection's own proven identity stays bare. An
+- Decided 2026-10-14: a connection's own stamped identity stays bare. An
   identity a connection forwards for another origin is subject-qualified:
   filed under `hash(subject, id)` when the connection's publish grant is
   scoped, and bare when it is unscoped (publish `**` at the root). The hash
@@ -284,10 +288,8 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   whether a connection is sent routes learned from other connections; it is
   never on the wire. Relays default on; applications choose per P2P
   connection; browser tabs stay off until the Rust-to-TypeScript port.
-- A plain client (`proxy` off) advertises its own origin and publications only. Its
-  authenticated routing identity is shared across its live sessions so P2P
-  can recognize the same origin, superseding the session-only identity plan.
-  Clients receive only authorized, interested claims; opaque ids expose no
+- A plain client (`proxy` off) advertises its own origin and publications only, under
+  the identity its relay stamped. Clients receive only authorized, interested claims; opaque ids expose no
   backbone addresses, but are not themselves authorization. A client
   advertises nothing it receives, so it holds no feasibility distance and
   falls back from P2P to the CDN at once. It still echoes every ROUTE_END.
@@ -306,8 +308,7 @@ loss never reports an END:
   seqno advance, claim change, or seqno request that would reach it rotates
   the identity instead, ending the old one everywhere and announcing the
   claims again under a fresh one, so nothing wraps and every advertised
-  seqno leaves room for the successor a request names. A session proves one
-  key once, so rotating closes and reopens every session the origin has up
+  seqno leaves room for the successor a request names
   (`exhausted_counters_rotate_the_identity`).
   A session sends an origin's announcements in batches, each closed by its
   floors: per region, the revision as of which the stream's announcements
@@ -641,7 +642,7 @@ release.
 
 ## Required
 
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - proven own identities and subject-qualified forwarded ones
+- [Stamp routing identities](/quest/m1/cluster-routing/stamp.md) - every session's own identity is relay-stamped, never self-named
 
 ## Related
 

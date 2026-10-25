@@ -34,7 +34,9 @@ not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut. Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
-wip is current when they land.
+wip is current when they land. Decided 2026-10-25: no routing identity proof
+gates the cut; relays stamp identities instead, and the key and its proof
+belong to Peer grants.
 
 Decided 2026-10-08: Restart and AUTH join Required, since both change the
 lite-07 wire. Compressed tracks joined on 2026-10-17 and landed
@@ -92,7 +94,6 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 ## Required
 
 - [Token in band](/quest/m1/auth/token-in-band.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - lite-07 carries the routing key and its per-session proof
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
