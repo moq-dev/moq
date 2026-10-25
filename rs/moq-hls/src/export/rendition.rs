@@ -1359,13 +1359,13 @@ mod tests {
 	async fn pending_reads_preserve_a_later_authorization_refusal() {
 		let origin = moq_tokio::origin::spawn();
 		let broadcast = origin.create_broadcast("room/live").unwrap();
-		let dynamic = origin.dynamic_route("room/secret", Default::default()).unwrap();
+		let dynamic = origin.dynamic("room/secret").unwrap();
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
 		let rendition = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
 		let request = dynamic.requested_broadcast().await.unwrap();
-		let other = origin.dynamic_route("room/hidden", Default::default()).unwrap();
+		let other = origin.dynamic("room/hidden").unwrap();
 		config.broadcast = Some(moq_net::path::Relative::new("./hidden").to_owned());
 		let resolving = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
 		let other_request = other.requested_broadcast().await.unwrap();

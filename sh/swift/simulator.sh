@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 # The simulators have no hardware encoder, so the release build (rs/moq-ffi/build.sh)
 # turns on `openh264`; check the same feature set it ships.
 for target in aarch64-apple-ios-sim x86_64-apple-ios; do

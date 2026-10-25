@@ -37,13 +37,10 @@ Decided with the maintainer on 2026-10-23:
   consume. For each follower, sketch here the field it would add and confirm
   it is additive: receive timestamps per acked packet (GCC, SCReAM, BBR3
   delay bound), the controller's ECT codepoint choice and CE counts (L4S),
-  seed state at construction (careful resume), and the ProbeBW_UP signal
-  [native probing](/quest/m1/probe-native.md) reads.
+  seed state at construction (careful resume), and the probe signal
+  native probing reads (`Controller::probes` and
+  `ControllerMetrics::probe_inflight`, from [moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)).
 
 Measure the per-packet cost (the state struct, the removed packet map, the
 pacer move) with a benchmark, alongside the existing cleanup benchmark, and
 run the bufferbloat lanes in `test/ts/README.md` before and after.
-
-## Related
-
-- [Native probing](/quest/m1/probe-native.md) - also reads BBR3 state from `moq-quic`; whichever lands second adapts

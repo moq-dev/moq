@@ -139,6 +139,11 @@ pub(crate) struct Applied {
 }
 
 impl Applied {
+	// A confirmed preset disables frame reordering even when the bitstream omits its bound.
+	fn reorder(&self, parsed: Option<u8>) -> Option<u8> {
+		self.preset.map(|_| 0).or(parsed)
+	}
+
 	/// A report that `preset` took effect through `controls`.
 	#[cfg_attr(
 		not(any(feature = "openh264", feature = "nvidia", feature = "vaapi", target_os = "macos")),
@@ -294,6 +299,7 @@ impl Config {
 		// rides in an optional VUI. Fill them from the config that produced the rest.
 		rendition.bitrate.get_or_insert(self.resolved_bitrate().as_bps());
 		rendition.framerate.get_or_insert(self.framerate.as_f64());
+		rendition.reorder = sink.applied().reorder(rendition.reorder);
 		Ok((rendition, sink))
 	}
 
@@ -380,7 +386,6 @@ impl Encoder {
 
 	/// The latency and compression controls the backend applied for
 	/// [`Config::preset`], fixed for the session's lifetime.
-	#[cfg(test)]
 	pub(crate) fn applied(&self) -> Applied {
 		self.backend.applied()
 	}
@@ -565,6 +570,21 @@ mod tests {
 	use super::*;
 
 	use crate::{I420, Surface};
+
+	#[test]
+	fn reorder_is_declared_only_for_confirmed_controls() {
+		for preset in [Preset::LowLatency, Preset::Balanced, Preset::Quality] {
+			let applied = Applied {
+				preset: Some(preset),
+				..Applied::default()
+			};
+			assert_eq!(applied.reorder(None), Some(0));
+			assert_eq!(applied.reorder(Some(3)), Some(0));
+		}
+		let unconfirmed = Applied::default();
+		assert_eq!(unconfirmed.reorder(None), None);
+		assert_eq!(unconfirmed.reorder(Some(3)), Some(3));
+	}
 
 	/// A mid-gray RGBA buffer: encodable without a camera.
 	fn gray_rgba(width: u32, height: u32) -> Vec<u8> {

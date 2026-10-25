@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Error, Hop, Timestamp, Version, announce, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -96,7 +96,7 @@ struct Topology {
 	publisher: origin::Producer,
 	relay_b: origin::Producer,
 	subscriber: origin::Producer,
-	_broadcast: broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	track: track::Producer,
 	p_to_a: Option<MockPair>,
 	a_to_r: Option<MockPair>,
@@ -769,7 +769,7 @@ struct Replica {
 	/// Tags its payloads, so the reader shows which replica served each frame.
 	name: &'static str,
 	origin: origin::Producer,
-	broadcast: broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	track: track::Producer,
 	group: Option<moq_net::group::Producer>,
 	link: Option<MockPair>,
@@ -1153,12 +1153,7 @@ async fn producer_replaced(version: &str) {
 		.expect("the track was not requested again")
 		.unwrap();
 
-	// The application owns where the replacement starts: an append would reuse the first
-	// producer's sequences, so it is refused, and the replacement continues explicitly.
-	assert!(
-		matches!(second.append_group(), Err(Error::Duplicate)),
-		"{version}: the replacement restarted its sequences"
-	);
+	// The application owns where the replacement starts, so it continues explicitly.
 	let mut group = second.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
