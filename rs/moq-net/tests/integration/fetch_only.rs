@@ -41,7 +41,7 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 }
 
 /// Publish a finished track of three groups, and flag any subscription it ever gets.
-fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, Arc<AtomicBool>) {
+fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Publication, Arc<AtomicBool>) {
 	let broadcast = origin.create_broadcast("bcast").unwrap();
 	let mut track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();

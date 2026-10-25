@@ -47,7 +47,7 @@ fn payload(frame: u64) -> Vec<u8> {
 struct Fixture {
 	track: moq_net::track::Producer,
 	subscriber: moq_net::track::Subscriber,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_hops: Vec<MockPair>,
 	_origins: Vec<moq_net::origin::Producer>,
 }
@@ -55,7 +55,7 @@ struct Fixture {
 /// A track announced by the original publisher, before any relay carries it.
 struct Published {
 	publisher: moq_net::origin::Producer,
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	track: moq_net::track::Producer,
 }
 

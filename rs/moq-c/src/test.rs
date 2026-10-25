@@ -3704,14 +3704,14 @@ fn consume_announced_close_cancels() {
 }
 
 /// Publish `path` on `origin` through `route`, which the C ABI cannot set.
-fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::broadcast::Producer {
+fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::origin::Publication {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
 	State::lock().origin.get(origin).unwrap().publish(path, route).unwrap()
 }
 
 /// Publish `path` on `origin` under a fresh epoch, as each run of a publisher does.
-fn publish_run(origin: u32, path: &str) -> moq_net::broadcast::Producer {
+fn publish_run(origin: u32, path: &str) -> moq_net::origin::Publication {
 	publish(
 		origin,
 		path,

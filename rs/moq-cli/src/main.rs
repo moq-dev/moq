@@ -747,7 +747,7 @@ fn spawn_import(
 			Publish::ts_programs(origin.clone(), name, config)
 		} else {
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-			Publish::new(broadcast, &format, config)?
+			Publish::from_publication(broadcast, &format, config)?
 		}
 		.with_linger(linger);
 		publish.announce(epoch)?;
@@ -1143,7 +1143,7 @@ mod tests {
 			connection: moq_tokio::Connection,
 			consumer: moq_net::origin::Consumer,
 			_shutdown: Shutdown,
-			_broadcast: moq_net::broadcast::Producer,
+			_broadcast: moq_net::origin::Publication,
 			_track: moq_net::track::Producer,
 		}
 

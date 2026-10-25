@@ -53,7 +53,7 @@ fn bufferbloat(bits_per_second: u64) -> moq_shaper::Profile {
 /// A server publishing broadcast `room`, and a client subscribed to its origin over a
 /// connection with the given transport settings.
 struct Setup {
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	remote: moq_net::broadcast::Consumer,
 	/// The client's connection, for its credit stats.
 	conn: driver::Connection,
@@ -382,7 +382,7 @@ async fn lite_frame_past_the_window_gives_way() {
 /// A subscriber served on the raw driver with a connection window of [`WINDOW`], and a
 /// publisher dialing it whose connection can also send raw streams.
 struct Reversed {
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	remote: moq_net::broadcast::Consumer,
 	/// The publisher's connection, for streams no session would send.
 	conn: driver::Connection,
