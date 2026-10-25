@@ -44,6 +44,3 @@ with exactly the rows listed before it; with the old run's drain held
 blocked, the successor's recording begins as soon as `Restart` is processed;
 catalog EOF and catalog-error behavior are unchanged.
 
-## Related
-
-- [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - the recorder that would see a replaced run

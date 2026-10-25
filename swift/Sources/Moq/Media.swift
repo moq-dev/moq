@@ -186,7 +186,7 @@ public enum Media {
         ///
         /// Pair it with ``Moq/TrackConsumer/recvGroup()`` to read media in arrival order: frame
         /// timestamps are container media time, not the transport's. Which groups arrive, and how
-        /// long a stalled one stays readable, is the subscription's `maxDelayUs`. Takes over
+        /// long a stalled one stays readable, is the subscription's `maxDelay`. Takes over
         /// `group`, whose handle is closed afterward; throws if it has already read a frame.
         public convenience init(group: Moq.GroupConsumer, container: Container) throws {
             self.init(try MoqMediaGroupConsumer(group: group.ffi, container: container))

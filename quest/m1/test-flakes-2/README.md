@@ -42,5 +42,3 @@ Public API: none. Wire: none.
 
 - [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
 - [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
-- [macOS receive credit](/quest/m1/test-flakes-2/macos-receive-credit.md) - `partial_control_requests_give_way` passes on the macOS lane, after checking for a shared platform cause
-- [moq-gst pinned replay](/quest/m1/test-flakes-2/gst-pinned-replay.md) - the pinned-instance finish test waits on events instead of sleep loops
