@@ -633,6 +633,15 @@
           # finds a shim there too. That is the only way mbx reaches a build
           # that spawns Cargo itself, which release-plz does.
           shellHook = ''
+            # `nix develop` points TMPDIR at a fresh nix-shell.* dir that it
+            # never removes. Drop it and keep the caller's TMPDIR, as nix-direnv
+            # does, so nothing piles up there.
+            if [[ ''${NIX_BUILD_TOP-} == */nix-shell.* && -d $NIX_BUILD_TOP ]]; then
+              rm -rf "$NIX_BUILD_TOP"
+              export TMPDIR=''${NIX_BUILD_TOP%/*}
+              unset NIX_BUILD_TOP TMP TEMP TEMPDIR
+            fi
+
             status=$(mbx setup --status 2>/dev/null || true)
             shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
             if [ -x "$shim" ]; then

@@ -32,15 +32,12 @@ if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then
     if dev_env=$(nix --extra-experimental-features 'nix-command flakes' --accept-flake-config \
         print-dev-env --profile "$PWD/.direnv/codex-profile" .#default \
         2>"$PWD/.direnv/codex-hook.log"); then
-        # Every command sources this, and print-dev-env makes a fresh nix-shell.*
-        # TMPDIR each time without removing it. Make it in the checkout, drop it,
-        # and leave TMPDIR on the checkout's .tmp/ as .envrc does.
-        tmp=$(printf '%q' "$PWD/.tmp")
+        # Point TMPDIR at the checkout's .tmp/ as .envrc does. The dev shell's
+        # hook keeps it there rather than in a nix-shell.* dir of its own.
         # shellcheck disable=SC2016 # expands when sourced, not here
         {
-            printf 'export TMPDIR=%s\nmkdir -p "$TMPDIR"\n' "$tmp"
+            printf 'export TMPDIR=%q\nmkdir -p "$TMPDIR"\n' "$PWD/.tmp"
             printf '%s\n' "$dev_env"
-            printf 'rm -rf "$NIX_BUILD_TOP"\nunset NIX_BUILD_TOP TMP TEMP TEMPDIR\nexport TMPDIR=%s\n' "$tmp"
         } >"$env_tmp"
         mv "$env_tmp" "$env_file"
         exit 0
