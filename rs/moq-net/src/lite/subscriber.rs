@@ -631,8 +631,9 @@ impl SubscriberDriver {
 		self.cleanup.close();
 	}
 
-	/// Read only the closed transport's buffered uni streams. Control machines
-	/// stay owned, so their cancellation guards cannot remove subscription state.
+	/// Read what the closed transport already delivered: the buffered uni streams, then
+	/// the subscribe responses. Serve machines wait for the group streams, since ending a
+	/// subscription removes the state their tails are delivered into.
 	pub fn poll_drain(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let closed = self.uni.poll(waiter).is_ready();
 		let _ = self.uni.children.poll(waiter);
@@ -640,11 +641,14 @@ impl SubscriberDriver {
 		// them can deliver it: the peer can open no more.
 		let stuck = self.subscriber.peer_setup.ietf().is_none()
 			&& self.uni.children.len() == self.subscriber.setup_waits.load(atomic::Ordering::Relaxed);
-		if closed && (self.uni.children.is_empty() || stuck) {
-			Poll::Ready(())
-		} else {
-			Poll::Pending
+		if !closed || !(self.uni.children.is_empty() || stuck) {
+			return Poll::Pending;
 		}
+		// The peer's close can win the race against a SUBSCRIBE FIN it sent first, and on
+		// Lite03/04 that FIN is the only end: read it, so the track finishes rather than
+		// aborts. Each source reads its streams once, then retires on the closed session.
+		let _ = self.sources.poll(waiter);
+		Poll::Ready(())
 	}
 
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -6618,7 +6622,18 @@ impl kio::Task for TrackServeRun {
 		}
 		ready!(self.gate.poll_ready(waiter));
 		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
-		if !matches!(self.state, TrackRunState::Finish(_)) && self.gate.poll_denied(waiter).is_ready() {
+		// Nor on a closed session, whose grants end with it: the session's end decides how
+		// its tracks end.
+		if !matches!(self.state, TrackRunState::Finish(_))
+			&& self.gate.poll_denied(waiter).is_ready()
+			&& self
+				.serve
+				.subscriber
+				.session
+				.clone()
+				.poll_closed(&mut waiter.context())
+				.is_pending()
+		{
 			self.revoke();
 			return Poll::Ready(());
 		}
