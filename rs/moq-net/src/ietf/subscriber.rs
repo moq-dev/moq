@@ -3123,7 +3123,7 @@ impl Subscriber {
 			return None;
 		}
 
-		tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe started");
+		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe started");
 
 		// Park the origin request where a session abort can reject it. The producer
 		// does not exist until SUBSCRIBE_OK, and dropping this task would otherwise
@@ -3230,7 +3230,7 @@ impl Subscriber {
 		};
 
 		let Some(response) = setup else {
-			tracing::info!(
+			tracing::debug!(
 				broadcast = %self.origin.absolute(broadcast_path),
 				track = %track_name,
 				"subscribe abandoned before it was accepted"
@@ -3613,7 +3613,7 @@ impl Subscriber {
 						group_fetches.push(fetch);
 					}
 					End::Idle => {
-						tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe cancelled (idle)");
+						tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe cancelled (idle)");
 						break true;
 					}
 					End::Done(res) => {
@@ -3625,7 +3625,7 @@ impl Subscriber {
 						});
 						match res.map(|done| done.stream_count) {
 							Ok(count) => {
-								tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe complete");
+								tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe complete");
 								// The publisher sends PUBLISH_DONE once every data stream it opened
 								// is closed, but QUIC does not order them, so some can still be on
 								// their way. Wait until Stream Count of their headers arrived and
@@ -3822,7 +3822,7 @@ impl Subscriber {
 				Step::Subscribe => break true,
 				Step::Expired => match idle.track.abort_unused(Error::Cancel) {
 					Ok(()) => {
-						tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track released (idle)");
+						tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track released (idle)");
 						self.state.lock().lingering.remove(&id);
 						return None;
 					}
