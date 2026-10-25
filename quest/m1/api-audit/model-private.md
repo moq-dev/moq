@@ -23,8 +23,7 @@ for a named consumer.
   `Track.Producer.dropGroups` become internal again (`dropGroups` returns to
   `hooks.dropTrackGroups`). Keep `create_frame(self)`: hang and moq-mux use it.
 - The `// pending:` and `// private:` marks and their lint are already gone.
-  The moq-transport passthrough fields stay crate-private, as
-  [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) requires.
+  The moq-transport passthrough fields stay crate-private.
 
 Rejected: the toy-transport integration tests proving a third party could
 build from the public model; the goal they proved is dropped.
