@@ -4570,13 +4570,19 @@ impl Consumer {
 				serving: None,
 			}));
 		}
-		let (fills, holes) = {
+		let (fills, holes, cached) = {
 			let state = state.read();
+			let cached = state
+				.lookup
+				.range(span.clone())
+				.filter(|(_, slot)| !slot.is_aborted())
+				.map(|(sequence, _)| *sequence)
+				.collect();
 			let holes: Vec<ops::Range<u64>> = miss::holes(&state, span)
 				.into_iter()
 				.flat_map(|hole| state.drops.gaps(&hole).collect::<Vec<_>>())
 				.collect();
-			(state.fills.clone(), holes)
+			(state.fills.clone(), holes, cached)
 		};
 		let joins = holes
 			.into_iter()
@@ -4587,6 +4593,7 @@ impl Consumer {
 			priority,
 			joins,
 			checked: 0,
+			cached,
 		}))
 	}
 
@@ -4864,18 +4871,23 @@ fn queue(fills: &kio::Shared<FillState>, sequence: u64, options: &group::Fetch) 
 pub(crate) struct Filled {
 	/// Held to keep the fills wanted.
 	joins: Vec<fill::Join>,
+	/// The sequences the cache held when the fill began, lowest first.
+	cached: Vec<u64>,
 	/// A front's logical track, held read so the front keeps the filled copy serving it.
 	_read: Option<kio::Consumer<TrackState>>,
 }
 
 #[cfg(feature = "async")]
 impl Filled {
-	/// The sequences of `span` the fills accepted, lowest first. Their source has them even
-	/// once the cache evicts them, so reading one again fetches it again.
-	pub(crate) fn accepted(&self, span: ops::Range<u64>) -> std::collections::BTreeSet<u64> {
+	/// The sequences of `span` the cache held when the fill began or the fills accepted,
+	/// lowest first. Their source has them even once the cache evicts them, so reading one
+	/// again fetches it again.
+	pub(crate) fn held(&self, span: ops::Range<u64>) -> std::collections::BTreeSet<u64> {
+		let cached = self.cached.iter().copied().filter(|sequence| span.contains(sequence));
 		self.joins
 			.iter()
 			.flat_map(|join| join.outcome().read().accepted_in(&span).collect::<Vec<_>>())
+			.chain(cached)
 			.collect()
 	}
 
@@ -4910,6 +4922,8 @@ enum FillStage {
 		joins: Vec<fill::Join>,
 		/// How many of `joins` were answered and checked for a refusal to ask again.
 		checked: usize,
+		/// The sequences the cache held when the fill began.
+		cached: Vec<u64>,
 	},
 	/// Resolved.
 	Done,
@@ -4938,18 +4952,19 @@ impl FillStage {
 				if serving.is_none() {
 					// The front ended without a copy, so nothing fills.
 					let Some(copy) = ready!(routes.poll_serving(waiter)) else {
-						return Poll::Ready(self.resolve(Vec::new()));
+						return Poll::Ready(self.resolve(Vec::new(), Vec::new()));
 					};
 					*serving = Some(Box::new(copy.fill_groups(span.clone(), *priority).into_inner().0));
 				}
 				let filled = ready!(serving.as_mut().expect("set above").poll(waiter));
-				Poll::Ready(self.resolve(filled.joins))
+				Poll::Ready(self.resolve(filled.joins, filled.cached))
 			}
 			Self::Asked {
 				fills,
 				priority,
 				joins,
 				checked,
+				cached,
 			} => loop {
 				for join in &joins[*checked..] {
 					ready!(join.poll_answered(waiter));
@@ -4971,6 +4986,7 @@ impl FillStage {
 				if retry.is_empty() {
 					return Poll::Ready(Filled {
 						joins: std::mem::take(joins),
+						cached: std::mem::take(cached),
 						_read: None,
 					});
 				}
@@ -4982,13 +4998,14 @@ impl FillStage {
 		}
 	}
 
-	/// Resolve a front's fill with the joins its serving copy asked.
-	fn resolve(&mut self, joins: Vec<fill::Join>) -> Filled {
+	/// Resolve a front's fill with what its serving copy held and asked.
+	fn resolve(&mut self, joins: Vec<fill::Join>, cached: Vec<u64>) -> Filled {
 		let Self::Front { read, .. } = std::mem::replace(self, Self::Done) else {
 			unreachable!("only a front resolves through its copy");
 		};
 		Filled {
 			joins,
+			cached,
 			_read: Some(read),
 		}
 	}
@@ -18283,11 +18300,13 @@ mod test {
 		};
 		assert_eq!(consumer.cached_groups(0..8), [2, 5, 6]);
 
-		// An accepted group stays named once the cache evicts it, so the answer reads it again.
-		// Group 5, which the live feed answered, counts too.
+		// A group cached when the fill began, or accepted since, stays named once the cache
+		// evicts it, so the answer reads it again. Group 5, which the live feed answered,
+		// counts too.
+		evict(&producer, 2);
 		evict(&producer, 6);
-		assert_eq!(consumer.cached_groups(0..8), [2, 5]);
-		assert_eq!(filled.accepted(0..8).into_iter().collect::<Vec<_>>(), [5, 6]);
+		assert_eq!(consumer.cached_groups(0..8), [5]);
+		assert_eq!(filled.held(0..8).into_iter().collect::<Vec<_>>(), [2, 5, 6]);
 	}
 
 	/// A span fill that joined after a tighter budget went on the wire is not answered by
@@ -18312,7 +18331,7 @@ mod test {
 		assert_eq!((fill.start().group, fill.end(), fill.max_delay()), (5, 6, None));
 		fill.accept(5, None).unwrap().finish().unwrap();
 		let filled = filling.await;
-		assert_eq!(filled.accepted(5..6).into_iter().collect::<Vec<_>>(), [5]);
+		assert_eq!(filled.held(5..6).into_iter().collect::<Vec<_>>(), [5]);
 	}
 
 	/// A drop judges the subscription, not a fetch: a fetched head still arriving keeps

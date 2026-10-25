@@ -274,9 +274,9 @@ async fn prepare_fetch(
 			}) {
 				return Err(failed(err));
 			}
-			// A group filled for this answer exists even if the cache evicted it while the
-			// rest of the span filled: reading it again fetches it again.
-			let mut groups = filled.accepted(span.clone());
+			// A group cached or filled for this answer exists even if the cache evicted it
+			// while the rest of the span filled: reading it again fetches it again.
+			let mut groups = filled.held(span.clone());
 			groups.extend(track.cached_groups(span));
 			(Some(filled), groups.into_iter().collect())
 		}
@@ -2856,6 +2856,10 @@ impl Publisher {
 		if let Some(error) = namespace.and_then(|namespace| super::namespace::refusal(namespace, self.version)) {
 			return super::request_stream::reject(stream, error).await;
 		}
+		// What the requester sent on this stream so far, kept across every phase that watches
+		// it for a cancel, so a second GOAWAY is caught wherever it arrives.
+		let mut finished = false;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let priority = super::priority::from_wire(msg.subscriber_priority);
 
 		// Serving a Range Filter unfiltered would deliver objects the subscriber excluded.
@@ -3004,11 +3008,13 @@ impl Publisher {
 					return Err(Error::Unauthorized);
 				};
 				debug_assert_eq!(id, subscriber_request_id);
-				let (end, cache, namespace, ranking, token) =
-					match self.joined(&mut stream, subscriber_request_id).await? {
-						Ok(joined) => joined,
-						Err((err, reason)) => return self.reject_fetch(stream, msg.request_id, &err, reason).await,
-					};
+				let (end, cache, namespace, ranking, token) = match self
+					.joined(&mut stream, &mut finished, &mut messages, subscriber_request_id)
+					.await?
+				{
+					Ok(joined) => joined,
+					Err((err, reason)) => return self.reject_fetch(stream, msg.request_id, &err, reason).await,
+				};
 				// The cache outlives the subscription, so the fetch holds its own gate and ends
 				// with the subscription rather than trusting the cache. One the subscription's
 				// request token authorized is held to the peer's grant alone, as the subscription is.
@@ -3075,8 +3081,6 @@ impl Publisher {
 				priority,
 				compression,
 			));
-			let mut finished = false;
-			let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 			kio::wait(|waiter| {
 				let mut cx = waiter.context();
 				if super::request_stream::poll_cancel(&mut stream, &mut finished, &mut messages, self.version, &mut cx)
@@ -3219,8 +3223,6 @@ impl Publisher {
 
 		// The groups after FETCH_OK, which may wait on a group still being written, so the
 		// subscriber cancelling still releases everything the answer holds.
-		let mut finished = false;
-		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let respond = async {
 			let mut rank = ranking.rank(range.start);
 			let uni = self
@@ -3301,6 +3303,8 @@ impl Publisher {
 	async fn joined(
 		&mut self,
 		stream: &mut Stream<Transport, Version>,
+		finished: &mut bool,
+		messages: &mut super::request_stream::Messages,
 		subscribe_id: RequestId,
 	) -> Result<
 		Result<
@@ -3319,17 +3323,13 @@ impl Publisher {
 		// the lifetime of a request whose subscription never arrives or resolves.
 		let joined = {
 			let mut pending = false;
-			let mut finished = false;
-			let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 			let mut deadline = crate::time::Deadline::after(&self.runtime, Duration::from_secs(10));
 			kio::wait(|waiter| {
 				let mut cx = waiter.context();
 				// The request reader is what the subscriber FINs or resets. The writer
 				// on a draft-14-16 virtual stream reports closed immediately, which is
 				// not a cancellation.
-				if super::request_stream::poll_cancel(stream, &mut finished, &mut messages, self.version, &mut cx)
-					.is_ready()
-				{
+				if super::request_stream::poll_cancel(stream, finished, messages, self.version, &mut cx).is_ready() {
 					return Poll::Ready(Err(Error::Cancel));
 				}
 				let joins = self.joins.poll(waiter, |joins| match joins.get(&subscribe_id) {
@@ -11938,74 +11938,98 @@ mod serve_tests {
 		}
 	}
 
+	/// A FETCH of groups 3 and 4 on a session whose request stream first carries `script`,
+	/// driven until FETCH_OK is out and the answer waits on group 3, still being written.
+	async fn fetch_waiting_after_ok(
+		version: Version,
+		script: Vec<u8>,
+	) -> (
+		ScriptedSession,
+		group::Producer,
+		std::pin::Pin<Box<impl std::future::Future<Output = Result<(), Error>>>>,
+	) {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+		let mut open = track.create_group(group::Info { sequence: 3 }).unwrap();
+		open.write_frame(timestamp(), b"3-0".to_vec()).unwrap();
+		let mut done = track.create_group(group::Info { sequence: 4 }).unwrap();
+		done.write_frame(timestamp(), b"4-0".to_vec()).unwrap();
+		done.finish().unwrap();
+		settle().await;
+
+		let session = ScriptedSession::new(script);
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+		let publisher = Publisher::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(session.clone()),
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			version,
+		);
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			.await
+			.unwrap();
+		let mark = session.log.writes.lock().unwrap().len();
+		let mut fetch = Box::pin(publisher.run_fetch_stream(
+			stream,
+			ietf::Fetch {
+				request_id: FETCH_ID,
+				subscriber_priority: 128,
+				group_order: GroupOrder::Ascending,
+				fetch_type: FetchType::Standalone {
+					namespace: crate::Path::new("room"),
+					track: "video".into(),
+					start: Location { group: 3, object: 0 },
+					end: Location { group: 4, object: 0 },
+				},
+				range_filters: false,
+				fill_timeout: false,
+				properties_wanted: true,
+				epoch: None,
+			},
+		));
+		for _ in 0..100 {
+			assert!(futures::poll!(fetch.as_mut()).is_pending(), "{version}: answered early");
+			if session.log.writes.lock().unwrap().len() > mark {
+				break;
+			}
+			moq_clock::sim::yield_now().await;
+		}
+		assert!(
+			session.log.writes.lock().unwrap().len() > mark,
+			"{version}: FETCH_OK never went out"
+		);
+		(session, open, fetch)
+	}
+
 	/// A FETCH whose answer waits on an earlier group still being written, after FETCH_OK
 	/// is out, ends when the subscriber cancels it rather than holding the group.
 	#[moq_clock::test]
 	async fn a_fetch_cancelled_after_its_fetch_ok_stops_waiting() {
 		use crate::lite::test_transport::Close;
 		for version in FETCH_DRAFTS {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
-			let mut open = track.create_group(group::Info { sequence: 3 }).unwrap();
-			open.write_frame(timestamp(), b"3-0".to_vec()).unwrap();
-			let mut done = track.create_group(group::Info { sequence: 4 }).unwrap();
-			done.write_frame(timestamp(), b"4-0".to_vec()).unwrap();
-			done.finish().unwrap();
-			settle().await;
-
-			let session = ScriptedSession::new(Vec::new());
-			let peer_setup = peer::PeerSetup::default();
-			peer_setup.set(peer::Peer::default());
-			let publisher = Publisher::new(
-				crate::time::sim(),
-				crate::driver::Transport::new(session.clone()),
-				origin.consume(),
-				Control::new(None, false),
-				None,
-				peer_setup,
-				version,
-			);
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
-				.await
-				.unwrap();
-			let mark = session.log.writes.lock().unwrap().len();
-			let mut fetch = std::pin::pin!(publisher.run_fetch_stream(
-				stream,
-				ietf::Fetch {
-					request_id: FETCH_ID,
-					subscriber_priority: 128,
-					group_order: GroupOrder::Ascending,
-					fetch_type: FetchType::Standalone {
-						namespace: crate::Path::new("room"),
-						track: "video".into(),
-						start: Location { group: 3, object: 0 },
-						end: Location { group: 4, object: 0 },
-					},
-					range_filters: false,
-					fill_timeout: false,
-					properties_wanted: true,
-					epoch: None,
-				},
-			));
-			for _ in 0..100 {
-				assert!(futures::poll!(fetch.as_mut()).is_pending(), "{version}: answered early");
-				if session.log.writes.lock().unwrap().len() > mark {
-					break;
-				}
-				moq_clock::sim::yield_now().await;
-			}
-			assert!(
-				session.log.writes.lock().unwrap().len() > mark,
-				"{version}: FETCH_OK never went out"
-			);
-
+			let (session, _open, mut fetch) = fetch_waiting_after_ok(version, Vec::new()).await;
 			session.close(Close::Reset);
-			let res = moq_clock::timeout(std::time::Duration::from_secs(1), fetch)
-				.await
-				.unwrap_or_else(|_| panic!("{version}: still waiting after the cancel"));
-			assert!(res.is_ok(), "{version}: {res:?}");
-			drop(open);
+			let res = futures::poll!(fetch.as_mut());
+			assert!(matches!(res, Poll::Ready(Ok(()))), "{version}: {res:?}");
+		}
+	}
+
+	/// A request stream carries at most one GOAWAY, counted across the whole FETCH: one
+	/// before FETCH_OK and another after it close the session.
+	#[moq_clock::test]
+	async fn a_fetch_counts_goaways_across_its_fetch_ok() {
+		const GOAWAY: [u8; 5] = [0x10, 0, 2, 0, 0];
+		for version in [Version::Draft18, Version::Draft22] {
+			let (session, _open, mut fetch) = fetch_waiting_after_ok(version, GOAWAY.to_vec()).await;
+			assert!(session.log.closes().is_empty(), "{version}: one GOAWAY is allowed");
+			session.push(&GOAWAY);
+			assert!(futures::poll!(fetch.as_mut()).is_ready(), "{version}: still answering");
+			assert_eq!(session.log.closes()[0].0, 0x03, "{version}");
 		}
 	}
 
