@@ -1160,7 +1160,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
 			sub.track.writeGroup(group);
 			group.close(skipped === "failed" ? new Error("cut") : undefined);
-			if (skipped === "failed") sub.track.dropGroups(7, 8, new Error("cut"));
+			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7, 8, new Error("cut"));
 			sub.serve(6);
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");

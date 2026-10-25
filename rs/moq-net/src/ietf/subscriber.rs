@@ -5668,7 +5668,7 @@ impl Subscriber {
 		end: Option<u64>,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
-		let sequence = producer.info().sequence;
+		let sequence = producer.sequence;
 		let mut next = start;
 		let mut prior_group = None;
 		let mut ended = false;

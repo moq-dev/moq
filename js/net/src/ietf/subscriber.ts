@@ -1239,7 +1239,7 @@ export class Subscriber {
 		}
 		// Staged until the answer is written in below, so no reader sees the track before its
 		// Largest and start.
-		const staged = request.stage({
+		const staged = hooks.stageRequest(request, {
 			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
 			// and the track must not claim one when served onward.
 			timescale: ok.properties.timescale,

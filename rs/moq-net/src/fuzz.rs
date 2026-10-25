@@ -293,6 +293,12 @@ impl AnnounceWriter {
 	}
 }
 
+/// Mark `track` as a copy received from a remote publisher, as a subscriber session does, for
+/// the tail bench.
+pub fn received(track: &track::Producer) {
+	track.received();
+}
+
 /// `origin` as a session connected to `peer` serves it, for the viewers bench.
 pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
 	origin.excluding(peer)

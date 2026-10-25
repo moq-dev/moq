@@ -12,7 +12,7 @@ already accepted keep running and finish. Nothing becomes public.
 Decided 2026-10-23 (maintainer), reshaping
 [moq-dev/moq#6411](https://github.com/moq-dev/moq/pull/6411) after the
 public-model goal was dropped
-([session-only items stay private](/quest/m1/api-audit/model-private.md)):
+([moq-dev/moq#6747](https://github.com/moq-dev/moq/pull/6747)):
 
 - Keep only the internal simplification: `broadcast::RequestValidity` and
   `origin::Selection` checks move into the source. The answering session

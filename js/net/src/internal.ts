@@ -376,6 +376,17 @@ export interface TrackRequestOptions {
 	pending: Set<Request>;
 }
 
+/**
+ * A requested track written before any subscriber sees it; see `hooks.stageRequest`.
+ * Write through {@link producer}; {@link commit} publishes it with everything written so far.
+ */
+export interface StagedTrack {
+	/** The track's writer. */
+	readonly producer: Producer;
+	/** Resolve every waiting subscriber now. Throws, rejecting the request, if the info is refused. */
+	commit(): Producer;
+}
+
 /** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
 export const MAX_DATAGRAMS = 64;
 
@@ -400,6 +411,13 @@ export const hooks: {
 	 * continues past it. Mirrors the Rust `close` on a `received()` copy; assigned by `track.ts`.
 	 */
 	releaseTrack: (producer: Producer) => void;
+	/**
+	 * Record that the publisher gave up the groups `[start, end)` with `error`: none will
+	 * arrive, so a reader waiting on one moves past it, a group still arriving in them ends with
+	 * `error`, the declared end does not wait for them, and a relay serving this track forwards
+	 * the drop. Mirrors the Rust `drop_groups`; assigned by `track.ts`.
+	 */
+	dropTrackGroups: (producer: Producer, start: number, end: number, error: Error) => void;
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -418,6 +436,11 @@ export const hooks: {
 	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
+	/**
+	 * Take a request's producer without resolving its subscribers, so content written before
+	 * {@link StagedTrack.commit} is there when the first reader looks; assigned by `track.ts`.
+	 */
+	stageRequest: (request: Request, info: Partial<Info>) => StagedTrack;
 	/** Have a producer write through a broadcast's sequence namespace for its name. */
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
@@ -566,6 +589,9 @@ export const hooks: {
 	releaseTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
+	dropTrackGroups: () => {
+		throw new Error("track.ts not loaded");
+	},
 	producerLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -579,6 +605,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	stageRequest: () => {
 		throw new Error("track.ts not loaded");
 	},
 	bindSequence: () => {

@@ -10,9 +10,6 @@ URL, and each version sends the part it carries.
 
 Decided 2026-10-23 (API audit follow-up, maintainer):
 
-- `track::Request::stage` and `track::Staged`, used only by the moq-transport
-  subscriber, go private with the other session-only items in
-  [session-only items stay private](/quest/m1/api-audit/model-private.md).
 - `Client::with_path` and `Client::with_authority` become one
   `Client::with_url(url::Url)`. moq-net gains the `url` dependency and owns
   what moq-tokio's `setup_path` and `setup_authority` decide today

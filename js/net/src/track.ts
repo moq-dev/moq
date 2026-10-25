@@ -36,6 +36,7 @@ import {
 	type Run,
 	removeRun,
 	runGaps,
+	type StagedTrack,
 	type TrackRequestOptions,
 	type TrackSequence,
 	type TrackSequences,
@@ -346,6 +347,7 @@ export class Request {
 
 	static {
 		hooks.makeRequest = (options) => new Request(options);
+		hooks.stageRequest = (request, info) => request.#stage(info);
 	}
 
 	/** Watch the subscribers waiting for this request. */
@@ -365,77 +367,34 @@ export class Request {
 
 	/**
 	 * Accept the request, committing the track's immutable {@link Info}. Throws, rejecting the
-	 * request, if `info` is invalid. The same as {@link stage} followed by {@link Staged.commit}.
+	 * request, if `info` is invalid.
 	 */
 	accept(info: Partial<Info> = {}): Producer {
-		return this.stage(info).commit();
+		return this.#stage(info).commit();
 	}
 
-	/**
-	 * Take the track's {@link Producer} without resolving any subscriber yet, so content written
-	 * through {@link Staged.producer} is there when the first reader looks. For a relay that
-	 * already holds groups of the track: write them, then {@link Staged.commit}. Disposing the
-	 * {@link Staged} uncommitted rejects the request.
-	 */
-	stage(info: Partial<Info> = {}): Staged {
+	#stage(info: Partial<Info>): StagedTrack {
 		this.#pending.delete(this);
 		bindProducerSequence(this.#producer, this.#sequences.get(this.name));
-		return new Staged(this.#producer, info);
+		const producer = this.#producer;
+		return {
+			producer,
+			commit: () => {
+				try {
+					return producer.accept(info);
+				} catch (err) {
+					// Refused, so its subscribers see the error instead of waiting on an open request.
+					producer.close(err instanceof Error ? err : new Error(String(err)));
+					throw err;
+				}
+			},
+		};
 	}
 
 	/** Reject the request, closing the track optionally with an error. */
 	reject(err?: Error): void {
 		this.#pending.delete(this);
 		this.#producer.close(err);
-	}
-}
-
-/**
- * A requested track being written before any subscriber sees it; see {@link Request.stage}.
- *
- * Write through {@link producer}. Subscribers waiting on the request resolve only at
- * {@link commit}, with everything written by then. Disposing it uncommitted rejects the request,
- * so hold it with `using` or commit it.
- *
- * @public
- */
-export class Staged {
-	/** The track's writer. */
-	readonly producer: Producer;
-
-	#info: Partial<Info>;
-	#done = false;
-
-	/** @internal */
-	constructor(producer: Producer, info: Partial<Info>) {
-		this.producer = producer;
-		this.#info = info;
-	}
-
-	/**
-	 * Publish the track: every waiting subscriber resolves now, with what was written. Throws,
-	 * rejecting the request, if the info is invalid or something written does not match it.
-	 * Throws without publishing once committed or disposed.
-	 */
-	commit(): Producer {
-		// Rust's `commit(self)` consumes the handle; here a disposed one has already rejected
-		// its subscribers, and accepting a closed producer would silently do nothing.
-		if (this.#done) throw new Error("staged track already committed or dropped");
-		this.#done = true;
-		try {
-			return this.producer.accept(this.#info);
-		} catch (err) {
-			// Refused, so its subscribers see the error instead of waiting on an open request.
-			this.producer.close(err instanceof Error ? err : new Error(String(err)));
-			throw err;
-		}
-	}
-
-	/** Reject the request unless it was committed. */
-	[Symbol.dispose](): void {
-		if (this.#done) return;
-		this.#done = true;
-		this.producer.close(new Error("staged track dropped"));
 	}
 }
 
@@ -817,6 +776,7 @@ export class Producer {
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
 		hooks.releaseTrack = (producer) => producer.#close(undefined, false);
+		hooks.dropTrackGroups = (producer, start, end, error) => producer.#drop(start, end, error, true);
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
 			producer.#owe();
@@ -869,16 +829,6 @@ export class Producer {
 			}
 		};
 		mayLand = (producer, land) => producer.#mayLand(land);
-	}
-
-	/**
-	 * Record that the publisher gave up the groups `[start, end)` with `error`, mirroring the
-	 * Rust `drop_groups`: none will arrive, so a reader waiting on one moves past it, a group
-	 * still arriving in them ends with `error`, the declared end does not wait for them, and a
-	 * relay serving this track forwards the drop.
-	 */
-	dropGroups(start: number, end: number, error: Error): void {
-		this.#drop(start, end, error, true);
 	}
 
 	// Whether a group may still land from the live feed, by the rule a pending tail is judged
