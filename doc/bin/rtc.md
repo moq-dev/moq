@@ -37,5 +37,11 @@ resource URL tears a session down per the RFC. Each WHIP session publishes
 under a fresh [epoch](/concept/moq-lite#publisher-epochs), so a publisher that
 reconnects while its stale session lingers replaces it at once.
 
+An export stays on the publisher it started with. A replacement publisher never
+reaches its session, so timestamps and codec state never reset mid-session.
+Once the original publisher leaves, the session ends with an error, and the
+player or `export rtc --connect` must reconnect to reach the replacement.
+`--connect` runs until its session ends.
+
 Built on [str0m](https://crates.io/crates/str0m); the library is
 [`moq-rtc`](https://docs.rs/moq-rtc).

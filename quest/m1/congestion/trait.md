@@ -26,8 +26,8 @@ Decided with the maintainer on 2026-10-23:
   exposes when the next packet may leave and how large a burst may be.
   `moq-quic` deletes `connection/pacing.rs`. A transport that keeps its own
   pacer (noq) reads the rate instead.
-- **Crate-owned inputs.** An RTT snapshot struct replaces `RttEstimator`, a
-  crate type replaces `SpaceId` (or packet identity becomes opaque), and time
+- **Crate-owned inputs.** An event struct replaces the interim `RttEstimator`
+  snapshot and QUIC-shaped `SpaceId` (or packet identity becomes opaque), and time
   stays `moq_clock::Instant`.
 - **Exhaustive structs, explicit breaks.** Event structs that transports
   build are not `#[non_exhaustive]`: a new field breaks the transport's
@@ -43,10 +43,6 @@ Decided with the maintainer on 2026-10-23:
 Measure the per-packet cost (the state struct, the removed packet map, the
 pacer move) with a benchmark, alongside the existing cleanup benchmark, and
 run the bufferbloat lanes in `test/ts/README.md` before and after.
-
-## Required
-
-- [Move the controllers](/quest/m1/congestion/move.md) - the crate exists with today's trait
 
 ## Related
 

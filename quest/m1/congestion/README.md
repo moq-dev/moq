@@ -19,8 +19,8 @@ moq commit access to noq's BBR3 or an external crate:
 
 - **Home.** `rs/moq-congestion` in this monorepo, published by release-plz
   like every other crate, so it shares CI, moq-shaper, and the QUIC sim.
-- **Two steps in moq.** A move with no behavior change, then the trait
-  redesign, so the rename diff and the design diff are reviewed separately.
+- **Trait redesign.** The controllers now live in the crate with their existing
+  callbacks. Redesign that trait separately from the mechanical move.
 - **Followers land in the crate.** GCC, SCReAM, the BBR3 delay bound, the
   BBR media study, L4S, and careful resume build on the redesigned trait, and
   the redesign checks its shape against each of them.
@@ -29,7 +29,6 @@ moq commit access to noq's BBR3 or an external crate:
 
 ## Required
 
-- [Move the controllers](/quest/m1/congestion/move.md) - BBR3, Cubic, and Unlimited live in `moq-congestion` and `moq-quic` consumes them, unchanged
 - [Portable controller trait](/quest/m1/congestion/trait.md) - an s2n-style trait with crate-owned per-packet state and pacing, independent of any transport's types
 
 ## Related

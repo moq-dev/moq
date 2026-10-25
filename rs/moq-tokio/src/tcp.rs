@@ -406,15 +406,12 @@ mod tests {
 			assert_eq!(request.transport(), crate::Transport::Tcp);
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=credential"));
-			let (session, _driver) = request.ok().await.unwrap();
+			let session = request.ok().await.unwrap();
 			(server, session)
 		});
 
 		let dial = |insecure: bool| {
-			let mut config = crate::connect::Config {
-				once: Some(true),
-				..Default::default()
-			};
+			let mut config = crate::connect::Config::default();
 			config.tls.insecure = Some(insecure);
 			config
 				.init(Default::default())

@@ -2153,7 +2153,7 @@ mod test {
 		let dynamic = request.dynamic();
 		let track = consumer.track("track1").unwrap();
 		let pending_fetch = track.fetch_group(0, None);
-		let fetch = dynamic.requested_group().await.unwrap();
+		let fetch = dynamic.requested_fill_group().await.unwrap();
 		let mut group = fetch.accept(crate::track::Info::timed()).unwrap();
 		group.finish().unwrap();
 		pending_fetch.await.unwrap();

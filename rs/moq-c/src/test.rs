@@ -3328,7 +3328,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 	assert_eq!(moq_publish_group_finish(group), 0);
 	assert_eq!(fetch.recv_timeout(TIMEOUT).unwrap().unwrap(), (0, payload.to_vec()));
 
-	// A rejected fetch fails with the application code.
+	// A rejected fetch fails as not found.
 	let fetch = fetch_group(broadcast, "data", 6, 0, 0);
 	let request = id(group_cb.recv());
 	assert_eq!(moq_group_request_abort(request, 9), 0);
@@ -3336,8 +3336,62 @@ fn track_dynamic_serves_a_fetch_miss() {
 		.recv_timeout(TIMEOUT)
 		.unwrap()
 		.expect_err("a rejected fetch fails");
-	assert!(matches!(err, moq_net::Error::App(9)), "got {err:?}");
+	assert!(matches!(err, moq_net::Error::NotFound), "got {err:?}");
 
+	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	assert_eq!(group_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A group request every reader narrowed past is withdrawn, and the next group its fill
+/// still owes is requested without waiting for an answer.
+#[test]
+fn a_group_request_nobody_reads_is_withdrawn() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-dynamic-narrowed");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let group_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+
+	let ascending = |start, end| {
+		moq_net::track::Subscription::default()
+			.with_max_delay(None)
+			.with_range(start..end)
+			.with_order(moq_net::track::Order::Ascending)
+	};
+	let mut reader = {
+		let mut state = State::lock();
+		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+		let reader = producer.subscribe(ascending(7, u64::MAX));
+		producer.start_at(10).unwrap();
+		let mut group = producer.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
+			.unwrap();
+		group.finish().unwrap();
+		reader
+	};
+	let waiter = kio::Waiter::noop();
+	while let std::task::Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+	let first = id(group_cb.recv());
+	let mut sequence = 0u64;
+	assert_eq!(unsafe { moq_group_request_sequence(first, &mut sequence) }, 0);
+	assert_eq!(sequence, 7);
+
+	// Reading only 8, so the fill owes nothing once 8 is let go.
+	reader.update(ascending(8, 9)).unwrap();
+	assert!(reader.poll_recv_group(&waiter).is_pending());
+	let next = id(group_cb.recv());
+	assert_eq!(unsafe { moq_group_request_sequence(next, &mut sequence) }, 0);
+	assert_eq!(sequence, 8, "group 7, which nobody reads, held the fill back");
+	assert!(moq_group_request_accept(first) < 0, "the withdrawn request");
+
+	assert_eq!(moq_group_request_free(next), 0);
+	drop(reader);
 	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
@@ -5155,7 +5209,7 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.connect.tls.root.is_empty());
 	assert!(parsed.quic.gso.is_none());
 	assert!(parsed.quic.mtu_discovery.is_none());
-	assert!(!parsed.quic.resolve().keylog);
+	assert!(parsed.quic.resolve().keylog.is_none());
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,
@@ -5180,19 +5234,16 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_backoff_initial);
 	assert_eq!(
 		config.backoff_initial_us,
-		expected.connect.backoff.initial.unwrap().as_micros() as u64
+		expected.connect.backoff.initial().as_micros() as u64
 	);
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
 	assert!(config.has_backoff_max);
-	assert_eq!(
-		config.backoff_max_us,
-		expected.connect.backoff.max.unwrap().as_micros() as u64
-	);
+	assert_eq!(config.backoff_max_us, expected.connect.backoff.max().as_micros() as u64);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
-		expected.connect.backoff.timeout,
-		Some(std::time::Duration::from_micros(config.backoff_timeout_us))
+		expected.connect.backoff.timeout(),
+		std::time::Duration::from_micros(config.backoff_timeout_us)
 	);
 
 	let websocket = expected.connect.websocket.resolve();
@@ -5220,7 +5271,9 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	// And what it reports must round-trip: dialing with it is dialing with the defaults.
 	let expected = crate::client::Config::default();
 	let reparsed = parsed(&config);
-	assert_eq!(reparsed.connect.backoff.initial, expected.connect.backoff.initial);
+	assert_eq!(reparsed.connect.backoff.initial(), expected.connect.backoff.initial());
+	assert_eq!(reparsed.connect.backoff.max(), expected.connect.backoff.max());
+	assert_eq!(reparsed.connect.backoff.timeout(), expected.connect.backoff.timeout());
 	assert_eq!(
 		reparsed.connect.websocket.resolve().enabled,
 		expected.connect.websocket.resolve().enabled
@@ -5238,13 +5291,22 @@ fn zero_with_a_flag_set_is_a_real_value() {
 	config.has_quic_keep_alive = true;
 
 	let explicit = parsed(&config);
-	assert_eq!(explicit.connect.backoff.timeout, Some(std::time::Duration::ZERO));
-	assert_eq!(explicit.quic.keep_alive, Some(std::time::Duration::ZERO));
+	assert_eq!(
+		explicit.connect.backoff.timeout,
+		Some((std::time::Duration::ZERO).into())
+	);
+	assert_eq!(explicit.quic.keep_alive, Some((std::time::Duration::ZERO).into()));
 
 	// Without the flags the same zeroes mean nothing at all.
 	let defaults = parsed(&client_config());
-	assert_ne!(defaults.connect.backoff.timeout, Some(std::time::Duration::ZERO));
-	assert_eq!(defaults.quic.keep_alive, Some(std::time::Duration::from_secs(3)));
+	assert_ne!(
+		defaults.connect.backoff.timeout,
+		Some((std::time::Duration::ZERO).into())
+	);
+	assert_eq!(
+		defaults.quic.resolve().keep_alive,
+		Some(std::time::Duration::from_secs(3))
+	);
 }
 
 #[test]
@@ -5372,19 +5434,25 @@ fn config_quic_and_backoff_knobs_apply() {
 	let parsed = parsed(&config);
 	assert_eq!(
 		parsed.connect.backoff.initial,
-		Some(std::time::Duration::from_micros(500_000))
+		Some(std::time::Duration::from_micros(500_000).into())
 	);
 	assert_eq!(parsed.connect.backoff.multiplier, 3);
 	assert_eq!(
 		parsed.connect.backoff.max,
-		Some(std::time::Duration::from_micros(10_000_000))
+		Some(std::time::Duration::from_micros(10_000_000).into())
 	);
 	assert_eq!(parsed.quic.max_streams, Some(4096));
-	assert_eq!(parsed.quic.idle_timeout, Some(std::time::Duration::from_millis(15_000)));
+	assert_eq!(
+		parsed.quic.idle_timeout,
+		Some(std::time::Duration::from_millis(15_000).into())
+	);
 	assert_eq!(parsed.quic.gso, Some(false));
 	assert_eq!(parsed.quic.mtu_discovery, Some(true));
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
-	assert_eq!(parsed.quic.keylog, Some(true));
+	assert_eq!(
+		parsed.quic.keylog,
+		Some(std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into())
+	);
 }
 
 /// Whether a qlog directory works at all is a compile-time feature, so the capability

@@ -226,7 +226,7 @@ impl Message for Setup {
 			params.set_varint(PARAM_COST, cost, version)?;
 		}
 		if let Some(hop) = self.hop {
-			params.set_varint(PARAM_HOP, hop.id(), version)?;
+			params.set_varint(PARAM_HOP, hop.wire_id(version.into()), version)?;
 		}
 		if let Some(implementation) = &self.implementation {
 			params.set_bytes(PARAM_IMPLEMENTATION, implementation.as_bytes().to_vec());
@@ -647,6 +647,22 @@ mod tests {
 			..Default::default()
 		};
 		assert_eq!(round_trip(&msg), msg);
+	}
+
+	// A hop past 2^62 - 1 travels as 0 on a QUIC-varint version, which reads as undeclared.
+	#[test]
+	fn wide_hop_needs_leading_ones() {
+		let msg = Setup {
+			hop: Some(crate::Hop::new(u64::MAX).unwrap()),
+			..Default::default()
+		};
+		for (version, want) in [(Version::Lite06, None), (Version::Lite07, msg.hop)] {
+			let mut buf = Vec::new();
+			msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
+			let got = crate::coding::decode_buf(&mut &buf[..], version, Setup::decode).unwrap();
+			assert_eq!(got.hop, want, "{version:?}");
+		}
 	}
 
 	// A declared id of 0 carries no identity (it cannot be excluded), so it

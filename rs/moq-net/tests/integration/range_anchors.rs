@@ -149,17 +149,15 @@ async fn each_wire_refuses_only_the_anchors_it_drops() {
 	}
 }
 
-/// Every wire carries the live and oldest starts, which it spells with no floor.
+/// Every wire carries the live and oldest starts, which it spells with no floor. A wire whose
+/// copy starts at the live edge fills the older groups after it.
 #[moq_clock::test]
 async fn every_wire_carries_the_live_and_oldest_starts() {
 	for version in VERSIONS {
 		let live = read(Some(version), Range::live()).await;
 		assert_eq!(live.unwrap().last(), Some(&4), "{version}: live reads the latest group");
-		let oldest = read(Some(version), Range::oldest()).await;
-		assert_eq!(
-			oldest.unwrap().last(),
-			Some(&4),
-			"{version}: oldest reads through the latest group"
-		);
+		let mut oldest = read(Some(version), Range::oldest()).await.unwrap();
+		oldest.sort_unstable();
+		assert_eq!(oldest, [0, 1, 2, 3, 4], "{version}: oldest reads every group");
 	}
 }
