@@ -785,9 +785,15 @@ impl Schedule {
 				holds,
 				leads: pid,
 			};
+			// They go out ahead of the first byte of a placed unit, which a decode time well past
+			// its placement would otherwise let them hold the lane until, past later tables' due.
+			let lead = Timing {
+				by: place.map_or(timing.by, |(place, _)| place.min(timing.by)),
+				..timing
+			};
 			// The unit they lead keeps its own start.
 			let last = self.last;
-			self.enqueue(pmt, timing, tables.packets, Some(program));
+			self.enqueue(pmt, lead, tables.packets, Some(program));
 			self.last = last;
 		}
 		if packets.is_empty() {
@@ -1632,6 +1638,44 @@ mod tests {
 		);
 		let sent: usize = slots.iter().filter_map(|(_, pids, _)| pids.get(&7)).sum();
 		assert_eq!(sent, 200);
+	}
+
+	/// Tables leading a placed picture that decodes a second out go out by its placement, so
+	/// the tables leading a unit due sooner, which ride the same lane after them, are not held
+	/// past that unit's deadline.
+	#[test]
+	fn tables_leading_a_placed_pes_go_out_by_its_placement() {
+		let mut schedule = Schedule::new(Duration::from_millis(25));
+		schedule.set_rate(Some(RATE));
+		schedule.set_tables(100);
+		schedule.set_clock(1);
+		schedule.set_buffer(1, VIDEO);
+		let tables = || Tables {
+			packets: [unit(0, 1), unit(100, 1)].concat(),
+			clock: 1,
+			rate: Some(RATE),
+			added: Vec::new(),
+		};
+		let mut picture = unit(7, 200);
+		picture[1] |= 0x40;
+		schedule.lead(tables());
+		schedule
+			.push_placed(7, (ms(50), ms(1_000)), 0, picture, true, Vec::new())
+			.unwrap();
+		schedule.lead(tables());
+		schedule.push(1, timing(100), unit(1, 30), true).unwrap();
+		let slots = drain(&mut schedule);
+		let last = slots
+			.iter()
+			.filter(|(_, pids, _)| pids.contains_key(&1))
+			.map(|&(index, ..)| index)
+			.max();
+		assert!(
+			last.is_some_and(|last| last <= slot(ms(100))),
+			"the unit due at 100 ms goes out by slot {last:?}"
+		);
+		let tables: usize = slots.iter().filter_map(|(_, pids, _)| pids.get(&100)).sum();
+		assert_eq!(tables, 2);
 	}
 
 	/// The pointer byte goes just before placement, so it cannot cost a section another packet.
