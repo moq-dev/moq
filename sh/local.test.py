@@ -20,7 +20,7 @@ BASH = shutil.which("bash")
 class LocalGate(unittest.TestCase):
     def env(self, **changes):
         env = dict(os.environ)
-        for key in ("QUEST_GATE_ADMITTED", "MOQ_LOCAL_SUPERVISED", "GITHUB_ACTIONS", "NEXTEST_TEST_THREADS"):
+        for key in ("QUEST_GATE_ADMITTED", "LOCAL_SUPERVISED", "GITHUB_ACTIONS", "NEXTEST_TEST_THREADS"):
             env.pop(key, None)
         env.update(changes)
         return env
@@ -37,11 +37,11 @@ class LocalGate(unittest.TestCase):
 
     def test_nested_admission_preserves_failures_and_worker_override(self):
         result = self.run_command('import os; print(os.environ["NEXTEST_TEST_THREADS"]); exit(9)',
-                                  MOQ_LOCAL_SUPERVISED="1", NEXTEST_TEST_THREADS="2", PATH="")
+                                  LOCAL_SUPERVISED="1", NEXTEST_TEST_THREADS="2", PATH="")
         self.assertEqual(result.returncode, 9, result.stderr)
         self.assertEqual(result.stdout.strip(), "2")
         result = self.run_command('import os; print(os.environ["NEXTEST_TEST_THREADS"])',
-                                  MOQ_LOCAL_SUPERVISED="1", PATH="")
+                                  LOCAL_SUPERVISED="1", PATH="")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLessEqual(int(result.stdout), 4)
         self.assertGreater(int(result.stdout), 0)
@@ -67,7 +67,7 @@ class LocalGate(unittest.TestCase):
     def test_external_admission_keeps_descendant_supervision(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "bun").symlink_to(BUN)
-            result = self.run_command('import os; print(os.environ["MOQ_LOCAL_SUPERVISED"])',
+            result = self.run_command('import os; print(os.environ["LOCAL_SUPERVISED"])',
                                       QUEST_GATE_ADMITTED="1", PATH=directory)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "1")
