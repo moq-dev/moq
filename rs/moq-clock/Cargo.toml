@@ -26,7 +26,7 @@ default = ["runtime"]
 serde = ["dep:serde", "dep:serde_with"]
 # The deterministic single-threaded executor and `#[moq_clock::test]`. Meant for
 # dev-dependencies, so production builds never compile it.
-sim = ["dep:futures", "dep:moq-clock-macros", "kio/sim"]
+sim = ["dep:futures", "dep:moq-clock-macros", "kio/_sim"]
 runtime = ["dep:tokio", "dep:web-async"]
 # `Manual::install`: a clock that only a test moves, as one tokio runtime's ambient
 # clock. Native only. Meant for test builds, so production builds never compile it.

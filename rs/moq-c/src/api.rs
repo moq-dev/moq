@@ -155,8 +155,6 @@ pub enum moq_container_format {
 	MOQ_CONTAINER_FORMAT_TS = 2,
 	/// Flash Video, as used by RTMP.
 	MOQ_CONTAINER_FORMAT_FLV = 3,
-	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	MOQ_CONTAINER_FORMAT_CMAF = 4,
 }
 
 /// Configuration for [moq_publish_audio].
@@ -309,7 +307,6 @@ fn container_format_from_u32(value: u32) -> Result<moq_mux::import::ContainerFor
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_MKV as u32 => ContainerFormat::Mkv,
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_TS as u32 => ContainerFormat::Ts,
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_FLV as u32 => ContainerFormat::Flv,
-		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_CMAF as u32 => ContainerFormat::Cmaf,
 		_ => return Err(Error::InvalidCode),
 	})
 }
@@ -1196,16 +1193,15 @@ pub struct moq_client_config {
 	/// The length in bytes of `tls_key`.
 	pub tls_key_len: usize,
 
-	/// Reconnect pacing. Each must leave a non-zero delay or retrying would
-	/// spin, which is rejected at dial.
+	/// The first reconnect delay in microseconds; zero retries at once.
 	pub backoff_initial_us: u64,
 	/// Whether `backoff_initial_us` is present.
 	pub has_backoff_initial: bool,
-	/// The factor by which the reconnect delay increases.
+	/// The factor by which the reconnect delay increases; 0 or 1 keeps it constant.
 	pub backoff_multiplier: u32,
 	/// Whether `backoff_multiplier` is present.
 	pub has_backoff_multiplier: bool,
-	/// The maximum reconnect delay in microseconds.
+	/// The maximum reconnect delay in microseconds; zero leaves it uncapped.
 	pub backoff_max_us: u64,
 	/// Whether `backoff_max_us` is present.
 	pub has_backoff_max: bool,
@@ -1291,16 +1287,14 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.websocket_delay_us = micros(websocket.delay);
 		dst.has_websocket_delay = true;
 
-		dst.backoff_initial_us = micros(config.connect.backoff.initial.unwrap());
+		dst.backoff_initial_us = micros(config.connect.backoff.initial());
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier;
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_us = micros(config.connect.backoff.max.unwrap());
+		dst.backoff_max_us = micros(config.connect.backoff.max());
 		dst.has_backoff_max = true;
-		if let Some(timeout) = config.connect.backoff.timeout {
-			dst.backoff_timeout_us = micros(timeout);
-			dst.has_backoff_timeout = true;
-		}
+		dst.backoff_timeout_us = micros(config.connect.backoff.timeout());
+		dst.has_backoff_timeout = true;
 
 		let quic = config.quic.resolve();
 		dst.quic_max_streams = quic.max_streams;
@@ -1544,7 +1538,9 @@ unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, 
 	listen.tls.generate = unsafe { ffi::parse_strings(config.tls_generate, config.tls_generate_len)? };
 
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.keylog = Some(config.quic_keylog);
+	quic.keylog = config
+		.quic_keylog
+		.then(|| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
 	listen.init(quic).map_err(|err| Error::InvalidConfig(err.to_string()))
 }
 
@@ -2961,6 +2957,8 @@ pub unsafe extern "C" fn moq_publish_dynamic(
 /// [moq_publish_dynamic_cancel] was called) or a negative error. After the terminal
 /// (`<= 0`) callback, `user_data` is never touched again. Cached groups never reach the
 /// handler. Answer each request with [moq_group_request_accept] or [moq_group_request_abort].
+/// A request whose group nobody reads any more is withdrawn: answering it then fails as not
+/// found, so move on to the next request.
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
@@ -3174,9 +3172,10 @@ pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 	})
 }
 
-/// Reject a group request with an application error code, failing the waiting fetches.
+/// Reject a group request, failing the waiting fetches as not found.
 ///
-/// Consumes the request handle. Returns a zero on success, or a negative code on failure.
+/// The error code is not delivered. Consumes the request handle. Returns a zero on success,
+/// or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {

@@ -274,8 +274,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// This is where audio groups are drawn too: audio rolls its group at a segment boundary, so
 	/// it follows the same segmentation as video. A passthrough video track rolls there as well,
 	/// while an unwrapped one opens a group at each sync sample.
-	pub fn cut(&mut self) {
+	pub fn cut(&mut self) -> Result<()> {
 		self.pending_cut = true;
+		Ok(())
 	}
 
 	/// Restrict which track roles are published.
@@ -1475,7 +1476,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// restarts below where it was still fails with
 	/// [`TimestampRewind`](crate::container::TimestampRewind): a track refuses a group that
 	/// rewinds, before publishing any of it.
-	pub fn discontinuity(&mut self) {
+	pub fn discontinuity(&mut self) -> Result<()> {
 		for track in self.text.values_mut() {
 			track.end_decode_time = None;
 			track.discontinuity = true;
@@ -1483,5 +1484,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for track in self.tracks.values_mut() {
 			track.last_decode_time = None;
 		}
+		Ok(())
 	}
 }

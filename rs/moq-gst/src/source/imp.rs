@@ -2996,7 +2996,11 @@ mod session_tests {
 	#[test]
 	fn the_source_retries_without_a_budget() {
 		let config = super::connect_config(&unreachable());
-		assert_eq!(config.backoff.timeout, Some(Duration::ZERO), "zero is unlimited");
+		assert_eq!(
+			config.backoff.timeout,
+			Some((Duration::ZERO).into()),
+			"zero is unlimited"
+		);
 	}
 
 	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.
@@ -3005,8 +3009,12 @@ mod session_tests {
 		if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
 			return;
 		}
-		let mut keylog = unreachable();
-		keylog.quic.keylog = Some(true);
+		let mut connection = crate::connection::Settings::default();
+		connection.set("quic-keylog", &true.to_value());
+		let keylog = ResolvedSettings {
+			quic: connection.resolve().unwrap().1,
+			..unreachable()
+		};
 		let err = super::connect(&keylog)
 			.err()
 			.expect("a keylog without SSLKEYLOGFILE must be refused");
@@ -4521,7 +4529,7 @@ mod session_tests {
 								let admit = *admitting.lock().unwrap();
 								match admit {
 									Admit::Serve => {
-										if let Ok((session, _driver)) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
+										if let Ok(session) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
 											sessions.push(session);
 										}
 									}

@@ -95,11 +95,13 @@ impl Settings {
 			.map(|version| version.parse().map_err(anyhow::Error::msg))
 			.collect::<anyhow::Result<_>>()?;
 		connect.tls.insecure = Some(self.tls_disable_verify);
-		connect.backoff.timeout = Some(Duration::ZERO);
+		connect.backoff.timeout = Some(Duration::ZERO.into());
 		let mut quic = moq_tokio::quic::Config::default();
-		quic.idle_timeout = self.quic_idle_timeout;
-		quic.keep_alive = self.quic_keep_alive;
-		quic.keylog = Some(self.quic_keylog);
+		quic.idle_timeout = self.quic_idle_timeout.map(Into::into);
+		quic.keep_alive = self.quic_keep_alive.map(Into::into);
+		quic.keylog = self
+			.quic_keylog
+			.then(|| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
 		Ok((connect, quic))
 	}
 }
@@ -152,11 +154,11 @@ mod tests {
 			["moq-transport-14".parse().unwrap(), "moq-lite-06".parse().unwrap()]
 		);
 		assert_eq!(connect.tls.insecure, Some(true));
-		assert_eq!(connect.backoff.timeout, Some(Duration::ZERO));
+		assert_eq!(connect.backoff.timeout, Some(Duration::ZERO.into()));
 		let quic = quic.resolve();
 		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
 		assert_eq!(quic.keep_alive, None);
-		assert!(quic.keylog);
+		assert!(quic.keylog.is_some());
 		settings.set("connect-version", &"moq-lite-99".to_value());
 		assert!(settings.resolve().unwrap_err().to_string().contains("moq-lite-99"));
 	}

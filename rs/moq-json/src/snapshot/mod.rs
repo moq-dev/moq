@@ -222,7 +222,7 @@ mod test {
 	fn next_preserves_intermediate_states() {
 		let (mut producer, mut track) = producer(cfg(true));
 		let mut subscription = track.subscription();
-		subscription.max_delay = std::time::Duration::MAX;
+		subscription.max_delay = None;
 		track.update(subscription).unwrap();
 		for n in [1, 2, 3] {
 			producer

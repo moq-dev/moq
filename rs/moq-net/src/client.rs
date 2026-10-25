@@ -622,6 +622,7 @@ mod tests {
 
 	#[derive(Default)]
 	struct FakeSessionState {
+		panic_on_poll: std::sync::atomic::AtomicBool,
 		protocol: Option<&'static str>,
 		control_stream: Mutex<Option<(FakeSendStream, FakeRecvStream)>>,
 		close_events: kio::Shared<Vec<(u32, String)>>,
@@ -645,6 +646,7 @@ mod tests {
 				data: VecDeque::from(server_control_bytes),
 			});
 			let state = FakeSessionState {
+				panic_on_poll: Default::default(),
 				protocol,
 				control_stream: Mutex::new(Some((send, recv))),
 				close_events: kio::Shared::default(),
@@ -763,6 +765,13 @@ mod tests {
 		}
 
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+			assert!(
+				!self
+					.state
+					.panic_on_poll
+					.swap(false, std::sync::atomic::Ordering::Relaxed),
+				"injected driver poll panic"
+			);
 			let _ = std::task::ready!(self.state.close_events.poll(self.park.hold(cx), any_close));
 			Poll::Ready(FakeError)
 		}
@@ -1106,14 +1115,46 @@ mod tests {
 	// rather than parking forever on a machine nobody polls.
 	#[test]
 	fn dropped_driver_resolves_closed() {
+		for polled in [false, true] {
+			let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+			let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+			let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
+			let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake)).unwrap();
+			if polled {
+				assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
+			}
+			drop(driver);
+			assert!(matches!(futures::executor::block_on(session.closed()), Error::Cancel));
+		}
+	}
+
+	#[test]
+	fn driver_panic_is_published_before_the_executor_drops_it() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
-		let (session, driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
-
-		drop(driver);
-		assert!(matches!(futures::executor::block_on(session.closed()), Error::Cancel));
+		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
+		fake.state
+			.panic_on_poll
+			.store(true, std::sync::atomic::Ordering::Relaxed);
+		let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+		}));
+		assert!(panic.is_err(), "the owner must still receive the panic");
+		assert!(matches!(
+			futures::FutureExt::now_or_never(session.closed()),
+			Some(Error::Transport(message)) if message == "session driver panicked"
+		));
+		// Even a caller that catches the panic cannot resume the damaged session.
+		assert!(matches!(
+			driver.poll(runtime.now(), &kio::Waiter::noop()),
+			Err(Error::Transport(_))
+		));
+		drop(driver); // outside unwinding, as an executor's catch_unwind drops a failed future
+		assert!(matches!(
+			futures::executor::block_on(session.closed()),
+			Error::Transport(_)
+		));
 	}
 
 	// `stats()` reads the machine's latest sample and primes the sampler, so a

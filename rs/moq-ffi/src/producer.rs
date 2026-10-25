@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
 
-use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
+use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubscription, MoqTrackConsumer};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::{Background, Task};
@@ -186,9 +186,9 @@ impl DynamicProducer {
 }
 
 impl TrackDynamicProducer {
-	async fn requested_group(&mut self) -> Result<Arc<MoqGroupRequest>, MoqError> {
-		let request = self.inner.requested_group().await?;
-		Ok(Arc::new(MoqGroupRequest::new(request)))
+	async fn requested_fill(&mut self) -> Result<Arc<MoqFill>, MoqError> {
+		let fill = self.inner.requested_fill().await?;
+		Ok(Arc::new(MoqFill { inner: Arc::new(fill) }))
 	}
 }
 
@@ -481,17 +481,17 @@ impl MoqBroadcastDynamic {
 
 #[uniffi::export]
 impl MoqTrackDynamic {
-	/// Wait for the next fetch of an uncached group.
+	/// Wait for the next run of groups readers miss: a fetch of an uncached group, or
+	/// history a subscription reads that the cache no longer holds.
 	///
-	/// Accept the returned request to produce the group, or abort it with an
-	/// application error. Cached groups are served without reaching this method.
-	pub async fn requested_group(&self) -> Result<Arc<MoqGroupRequest>, MoqError> {
+	/// Cached groups are served without reaching this method.
+	pub async fn requested_fill(&self) -> Result<Arc<MoqFill>, MoqError> {
 		self.task
-			.run(|mut state| async move { state.requested_group().await })
+			.run(|mut state| async move { state.requested_fill().await })
 			.await
 	}
 
-	/// Cancel all current and future `requested_group()` calls.
+	/// Cancel all current and future `requested_fill()` calls.
 	///
 	/// Terminal: the dynamic track is released here, not when the handle is, so any pending
 	/// fetch is rejected.
@@ -500,55 +500,104 @@ impl MoqTrackDynamic {
 	}
 }
 
-/// An uncached group requested by a fetch consumer.
+/// A run of groups readers miss, mirroring [`moq_net::track::Fill`].
+///
+/// Call [`accept`](Self::accept) for each group you have and [`drop_groups`](Self::drop_groups)
+/// for the rest; [`next`](Self::next) names what is still owed, in the fill's order. Releasing
+/// it names whatever is left as dropped while a reader still wants it; once nobody does, it is
+/// withdrawn, so stop serving it when [`unused`](Self::unused) resolves. Stop serving a single
+/// group when [`unwanted`](Self::unwanted) resolves for it, and move on to the next.
 #[derive(uniffi::Object)]
-pub struct MoqGroupRequest {
-	sequence: u64,
-	priority: i8,
-	inner: std::sync::Mutex<Option<moq_net::group::Request>>,
-}
-
-impl MoqGroupRequest {
-	fn new(request: moq_net::group::Request) -> Self {
-		Self {
-			sequence: request.sequence(),
-			priority: request.priority(),
-			inner: std::sync::Mutex::new(Some(request)),
-		}
-	}
-
-	fn take(&self) -> Result<moq_net::group::Request, MoqError> {
-		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
-	}
+pub struct MoqFill {
+	inner: Arc<moq_net::track::Fill>,
 }
 
 #[uniffi::export]
-impl MoqGroupRequest {
-	/// The requested group sequence within the track.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
+impl MoqFill {
+	/// The first group to fill.
+	pub fn start_group(&self) -> u64 {
+		self.inner.start().group
 	}
 
-	/// The consumer's delivery priority for this fetch.
+	/// The frame within the first group to start from.
+	pub fn start_frame(&self) -> u64 {
+		self.inner.start().frame
+	}
+
+	/// The exclusive end group.
+	pub fn end_group(&self) -> u64 {
+		self.inner.end()
+	}
+
+	/// The most urgent delivery priority among the readers waiting on it.
 	pub fn priority(&self) -> i8 {
-		self.priority
+		self.inner.priority()
 	}
 
-	/// Accept the request and return a producer for filling the fetched group.
-	pub fn accept(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	/// The most tolerant age budget among the readers waiting on it, in microseconds, or null
+	/// for the publisher's max age alone.
+	pub fn max_delay_us(&self) -> Option<u64> {
+		self.inner
+			.max_delay()
+			.map(|max_delay| u64::try_from(max_delay.as_micros()).unwrap_or(u64::MAX))
+	}
+
+	/// Which end to fill first.
+	pub fn order(&self) -> MoqOrder {
+		self.inner.order().into()
+	}
+
+	/// The next group still owed in the fill's order, or null once every group is answered.
+	pub fn next(&self) -> Option<u64> {
+		self.inner.next()
+	}
+
+	/// Insert group `sequence` and return a producer for filling it. The first group starts
+	/// at [`start_frame`](Self::start_frame), so its frames keep their indices.
+	pub fn accept(&self, sequence: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let group = self.take()?.accept(None)?;
+		let group = self.inner.accept(sequence, None)?;
 		Ok(Arc::new(MoqGroupProducer {
 			sequence: group.sequence,
 			inner: std::sync::Mutex::new(Some(group)),
 		}))
 	}
 
-	/// Reject the fetch with an application error code.
-	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
+	/// Name groups `start` up to the exclusive `end` as never to be delivered.
+	pub fn drop_groups(&self, start: u64, end: u64) {
 		let _guard = crate::ffi::enter();
-		self.take()?.reject(moq_net::Error::App(error_code));
-		Ok(())
+		self.inner.drop_groups(start..end);
+	}
+
+	/// Whether a reader still waits on this fill.
+	pub fn is_used(&self) -> bool {
+		self.inner.is_used()
+	}
+
+	/// Wait until no reader waits on this fill.
+	pub async fn unused(&self) -> Result<(), MoqError> {
+		let fill = self.inner.clone();
+		crate::ffi::detached(async move {
+			fill.unused().await;
+			Ok::<_, MoqError>(())
+		})
+		.await
+	}
+
+	/// Whether a reader still waits for group `sequence` from this fill: false once every
+	/// reader took it or narrowed past it, or nobody waits on the fill.
+	pub fn is_wanted(&self, sequence: u64) -> bool {
+		self.inner.is_wanted(sequence)
+	}
+
+	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
+	pub async fn unwanted(&self, sequence: u64) -> Result<(), MoqError> {
+		let fill = self.inner.clone();
+		crate::ffi::detached(async move {
+			fill.unwanted(sequence).await;
+			Ok::<_, MoqError>(())
+		})
+		.await
 	}
 }
 

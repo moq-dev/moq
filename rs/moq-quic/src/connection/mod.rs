@@ -4567,7 +4567,7 @@ fn negotiate_max_idle_timeout(x: Option<VarInt>, y: Option<VarInt>) -> Option<Du
 mod tests {
     use super::*;
 
-    #[cfg(feature = "rustls-ring")]
+    #[cfg(feature = "ring")]
     #[test]
     fn large_initial_token_leaves_room_for_close() {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();

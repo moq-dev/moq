@@ -2199,7 +2199,7 @@ mod tests {
 		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
 		assert_eq!(quic.keep_alive, Some(Duration::from_secs(3)));
 		assert!(!sink.property::<bool>("quic-keylog"));
-		assert!(!quic.keylog);
+		assert!(quic.keylog.is_none());
 
 		sink.set_property("quic-keep-alive", 0u64);
 		sink.set_property("quic-idle-timeout", 0u64);
@@ -2208,7 +2208,7 @@ mod tests {
 		let quic = super::super::session::quic_config(&resolved).resolve();
 		assert_eq!(quic.idle_timeout, Duration::ZERO);
 		assert_eq!(quic.keep_alive, None);
-		assert!(quic.keylog);
+		assert!(quic.keylog.is_some());
 	}
 
 	/// The sink retries without a budget, so an outage of any length is ridden out
@@ -2221,7 +2221,11 @@ mod tests {
 		sink.set_property("broadcast", "test");
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let config = super::super::session::connect_config(&resolved);
-		assert_eq!(config.backoff.timeout, Some(Duration::ZERO), "zero is unlimited");
+		assert_eq!(
+			config.backoff.timeout,
+			Some((Duration::ZERO).into()),
+			"zero is unlimited"
+		);
 	}
 
 	#[test]

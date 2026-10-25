@@ -50,19 +50,19 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 		out.connect.bind = Some(addr);
 	}
 	if config.has_connect_timeout {
-		out.connect.timeout = Some(std::time::Duration::from_micros(config.connect_timeout_us));
+		out.connect.timeout = Some((std::time::Duration::from_micros(config.connect_timeout_us)).into());
 	}
 	if config.has_failover_delay {
-		out.connect.race = Some(std::time::Duration::from_micros(config.failover_delay_us));
+		out.connect.race = Some((std::time::Duration::from_micros(config.failover_delay_us)).into());
 	}
 	if config.has_resolution_delay {
-		out.connect.resolution_delay = Some(std::time::Duration::from_micros(config.resolution_delay_us));
+		out.connect.resolution_delay = Some((std::time::Duration::from_micros(config.resolution_delay_us)).into());
 	}
 	if config.has_websocket_enabled {
 		out.connect.websocket.enabled = Some(config.websocket_enabled);
 	}
 	if config.has_websocket_delay {
-		out.connect.websocket.delay = Some(std::time::Duration::from_micros(config.websocket_delay_us));
+		out.connect.websocket.delay = Some((std::time::Duration::from_micros(config.websocket_delay_us)).into());
 	}
 
 	// TLS. `insecure` needs no flag: false is both "unset" and "verify".
@@ -87,16 +87,16 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 
 	// Reconnect backoff
 	if config.has_backoff_initial {
-		out.connect.backoff.initial = Some(std::time::Duration::from_micros(config.backoff_initial_us));
+		out.connect.backoff.initial = Some((std::time::Duration::from_micros(config.backoff_initial_us)).into());
 	}
 	if config.has_backoff_multiplier {
 		out.connect.backoff.multiplier = config.backoff_multiplier;
 	}
 	if config.has_backoff_max {
-		out.connect.backoff.max = Some(std::time::Duration::from_micros(config.backoff_max_us));
+		out.connect.backoff.max = Some((std::time::Duration::from_micros(config.backoff_max_us)).into());
 	}
 	if config.has_backoff_timeout {
-		out.connect.backoff.timeout = Some(std::time::Duration::from_micros(config.backoff_timeout_us));
+		out.connect.backoff.timeout = Some((std::time::Duration::from_micros(config.backoff_timeout_us)).into());
 	}
 
 	// QUIC
@@ -104,10 +104,10 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 		out.quic.max_streams = Some(config.quic_max_streams);
 	}
 	if config.has_quic_idle_timeout {
-		out.quic.idle_timeout = Some(std::time::Duration::from_micros(config.quic_idle_timeout_us));
+		out.quic.idle_timeout = Some((std::time::Duration::from_micros(config.quic_idle_timeout_us)).into());
 	}
 	if config.has_quic_keep_alive {
-		out.quic.keep_alive = Some(std::time::Duration::from_micros(config.quic_keep_alive_us));
+		out.quic.keep_alive = Some((std::time::Duration::from_micros(config.quic_keep_alive_us)).into());
 	}
 	if config.has_quic_gso {
 		out.quic.gso = Some(config.quic_gso);
@@ -122,7 +122,9 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 			Some(moq_tokio::quic::CongestionControl::from_str(family).map_err(Error::InvalidConfig)?);
 	}
 	out.quic.qlog = unsafe { ffi::parse_str_optional(config.quic_qlog, config.quic_qlog_len)? }.map(Into::into);
-	out.quic.keylog = Some(config.quic_keylog);
+	out.quic.keylog = config
+		.quic_keylog
+		.then(|| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
 
 	Ok(out)
 }

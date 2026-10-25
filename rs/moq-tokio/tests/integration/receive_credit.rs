@@ -109,7 +109,7 @@ async fn setup_through(
 	let dial = shaper.as_ref().map_or(server_addr, |shaper| shaper.addr());
 	tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let (session, _driver) = request.with_publisher(&publisher).ok().await.expect("session");
+		let session = request.with_publisher(&publisher).ok().await.expect("session");
 		let _ = session.closed().await;
 	});
 

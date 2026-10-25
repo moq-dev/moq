@@ -726,12 +726,11 @@ mod tests {
 		let pub_for_accept = pub_origin.clone();
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.expect("accept");
-			let (session, driver) = request
+			let session = request
 				.with_publisher(&pub_for_accept)
 				.ok()
 				.await
 				.expect("publisher session");
-			let _ = driver.await;
 			let _ = session.closed().await;
 		});
 
