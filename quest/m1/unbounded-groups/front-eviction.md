@@ -34,10 +34,45 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
   with the tail writer. Coalesce concurrent readers on one hole into a
   single request, as `PendingFetch` does. Fold today's `Slot.head` tail copy
   into this.
+- A refill asks for exactly the hole: from the reader's missing frame to the
+  first frame still cached, over a frame-precise range end. Today's fills
+  always run to the group's end (`end_frame: None`), which on a live group
+  would duplicate the live edge. If more is evicted while the refill runs,
+  the reader hits the next hole and refills again, one RTT per hole.
+- Refills are unpaced (decided 2026-10-24, maintainer). Pacing a refill on
+  its fastest reader, and shared "trains" of readers that merge into the
+  run ahead, were rejected as not worth their complexity. `FillState`
+  coalescing is the sharing. A merged reader sits at the group's front,
+  the first victim, so merging would also thrash under steady pressure.
 - A refill must not evict what it was fetched for before the waiting reader
-  takes it: hand its first demanded frame to that reader, or backpressure
-  the refill on the reader's cursor. Test a `track::Dynamic` handler that
-  writes more than the pool synchronously, so the reader still progresses.
+  takes it: hand its first demanded frame to that reader. Test a
+  `track::Dynamic` handler that writes more than the pool synchronously, so
+  the reader still progresses.
+- A refill of frames `0..N` refreshes the recency of the group's frames from
+  `N+1` on (decided 2026-10-24, maintainer). Pressure then sheds the
+  refilled run once read, before `N+1`, so a refill never evicts the frames
+  its reader needs next. This is recency, not pinning: under enough
+  pressure `N+1` still goes. Test a slow reader on a long live group in a
+  small pool: it makes progress by refilling holes, never by refetching a
+  frame it already had.
+- When nothing serves the hole, the reader gets `Error::Evicted`, and a
+  join onto a group whose first frame is evicted asks for a new group as if
+  it were over the `Info::refresh` ratio, on tracks that opt into
+  refresh (decided 2026-10-24, maintainer). The origin's `track::Dynamic`
+  handler decides whether to serve old content; refresh is the fallback.
+- The live edge is never paced by a reader (decided 2026-10-24,
+  maintainer). A slow reader on a 1:1 track falls behind, loses its front,
+  and refills, at up to twice the upstream bandwidth for that reader.
+  Backpressuring the publisher like TCP was rejected: one reader would stall
+  it.
+- Groups are bounded by bytes, not frame count (decided 2026-10-24,
+  maintainer). Each frame's storage slot is charged to the pool, so empty
+  frames still cost their slot once `MAX_GROUP_FRAMES` goes. Today slots are
+  charged only through `VecDeque` capacity growth (`reserve_frame` in
+  `model/group.rs`); on the log, charge each segment's slots when it is
+  allocated. Storing a group as flat header and payload bytes was rejected:
+  it copies every small frame, and lite and IETF encode headers
+  differently.
 - Refill goes through a `track::Dynamic` fill. Over
   moq-transport, a hole that covers whole objects refills; one inside an
   object is `Evicted`.

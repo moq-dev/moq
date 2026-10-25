@@ -48,6 +48,8 @@ Beyond "does not panic":
   draft-16+ do not sort by key first).
 - A lite-07 announce stream our decoder accepts, recompressed by our encoder, resolves
   to the same announcements.
+- Setup Options a client accepts from its server, a server accepts from its client: only
+  PATH and AUTHORITY are one-sided.
 - `Path::relative` inverts `Path::resolve`, and never produces a reference that walks
   above the root.
 

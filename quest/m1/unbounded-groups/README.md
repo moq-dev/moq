@@ -26,6 +26,17 @@ its readers reject a second group (`Rolled`), and a `Window` that never pops
 is already the rolling log. Pointing `Stream`'s docs at `Window` in the
 meantime was declined.
 
+Decided 2026-10-24 (maintainer interview): one group should work as an
+indefinite stream, since many applications are 1:1 and keeping a whole
+group just in case someone joins is wasteful. Refills ask for exactly the
+hole and are unpaced; reader-paced refill "trains" that merge were rejected
+as not worth their complexity. A refill refreshes the frames after it so it
+never evicts what its reader needs next. When nothing serves a hole, the
+reader gets `Evicted` and a joiner falls back to `Info::refresh`. The live
+edge is never paced by readers. Groups are bounded by bytes, with each
+frame's slot charged to the pool. Details are in
+[Front eviction](/quest/m1/unbounded-groups/front-eviction.md).
+
 Decided 2026-10-16 (maintainer interview):
 
 - #3585 replaced front eviction with a `GroupTooLarge` abort because a reader
