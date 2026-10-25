@@ -5,11 +5,6 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### `MoqAudioEncoderFinish` is `MoqAudioEncoderFinished` (#6052)
-
-The record `MoqAudioEncoder::finish` returns is renamed, so its C name no longer collides with the method's.
-The wrappers' `EncoderFinish` aliases are unchanged.
-
 ### Durations are typed
 
 Every duration is a UniFFI `Duration` instead of an integer microsecond field, and drops its `_us` suffix: each language receives its own duration type (`timedelta`, `TimeInterval`, `java.time.Duration`, `time.Duration`, Dart `Duration`, C++ `std::chrono` nanoseconds).

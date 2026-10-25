@@ -19,6 +19,9 @@ find_program(UNIFFI_BINDGEN_CPP uniffi-bindgen-cpp REQUIRED)
 # uses the staticlib. Rendered to a scratch directory and copied only when changed, so a no-op
 # cargo build does not recompile the bindings.
 set(_generated "${CMAKE_CURRENT_BINARY_DIR}/include/moq/ffi")
+# MOQ_IMPLEMENTATION names this package's version, which lives in VERSION.
+set(_version_header "${CMAKE_CURRENT_BINARY_DIR}/include/moq/version.h")
+configure_file(cmake/version.h.in "${_version_header}" @ONLY)
 set(_generated_files moq.h moq_c.cpp moq.hpp moq.cpp moq_scaffolding.hpp uniffi_expected.hpp)
 list(TRANSFORM _generated_files PREPEND "${_generated}/" OUTPUT_VARIABLE _generated_paths)
 set(_render "${CMAKE_CURRENT_BINARY_DIR}/render")
@@ -90,6 +93,7 @@ if(PROJECT_IS_TOP_LEVEL)
     install(TARGETS moq-c ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
     install(FILES include/moq/moq.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/moq)
     install(FILES "${_generated}/moq.h" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/moq/ffi)
+    install(FILES "${_version_header}" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/moq)
     # Renamed, so moq-cpp, which ships its own moq-ffi at its own pin, can install to the same
     # prefix without either overwriting the other's archive.
     set(MOQ_FFI_LIB_NAME "${CMAKE_STATIC_LIBRARY_PREFIX}moq_c_ffi${CMAKE_STATIC_LIBRARY_SUFFIX}")

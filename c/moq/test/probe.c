@@ -1,7 +1,7 @@
 /* Exercises the installed package end to end over a real QUIC session from plain C: a returned
- * error, a loopback connect, a frame read through a callback, a cancelled read, a retrying
- * first dial's failure, a callback in flight at shutdown, and every callback run on this
- * thread through a custom dispatcher. */
+ * error, a loopback connect naming the package, a frame read through a callback, a cancelled
+ * read, a retrying first dial's state, a callback in flight at shutdown, and every callback run
+ * on this thread through a custom dispatcher. */
 
 /* clock_gettime and the pthread timed wait under strict C11. */
 #define _POSIX_C_SOURCE 200809L
@@ -221,6 +221,20 @@ static void *await(result *pending, const char *what) {
     return pending->value;
 }
 
+static void on_state(void *user_data, moq_error *error, moq_connection_state *value) {
+    on_value(user_data, error, value);
+}
+
+/* Waits for the state after `state`, which it frees. */
+static moq_connection_state *next_state(moq_session *session, moq_connection_state *state) {
+    result changed = {0};
+    moq_task *task = moq_session_state_changed(session, state->revision, on_state, &changed);
+    moq_connection_state *next = await(&changed, "state_changed");
+    moq_task_free(task);
+    moq_connection_state_free(state);
+    return next;
+}
+
 int main(void) {
 #ifdef _WIN32
     InitializeSRWLock(&loop.lock);
@@ -272,6 +286,7 @@ int main(void) {
     /* Both halves of the handshake are pending at once, and complete on this thread. */
     moq_client_config client_config = moq_client_config_default();
     client_config.tls.insecure = true;
+    client_config.implementation = MOQ_IMPLEMENTATION;
     moq_client *client = NULL;
     ok(moq_client_new(&client_config, &client), "client new");
     char url[128];
@@ -283,6 +298,10 @@ int main(void) {
     moq_task *connect_task = moq_client_connect(client, url, on_session, &connecting);
     moq_request *request = await(&accepting, "accept");
     CHECK(request);
+    /* The package names itself ahead of moq-ffi, so a server can tell bindings apart. */
+    char *implementation = moq_request_peer_implementation(request);
+    CHECK(implementation && strncmp(implementation, "moq-c/", 6) == 0);
+    moq_string_free(implementation);
     result serving = {0};
     moq_task *serve_task = moq_request_accept(request, NULL, NULL, on_session, &serving);
     moq_session *served = await(&serving, "request accept");
@@ -367,30 +386,34 @@ int main(void) {
     moq_broadcast_producer_free(broadcast);
     moq_origin_producer_free(origin);
 
-    /* A first dial that keeps failing never resolves connect, so moq_client_failure reports
-     * its last failure; the server is gone, so every dial fails. */
+    /* A first dial that keeps failing still returns the session, whose state names each failed
+     * attempt while it retries, then ends closed once cancelled; the server is gone, so every
+     * dial fails. */
     moq_client_config retry_config = moq_client_config_default();
-    retry_config.timeout_us.has_value = true;
-    retry_config.timeout_us.value = 100000;
+    retry_config.timeout.has_value = true;
+    retry_config.timeout.value = 100000000; /* 100ms */
     retry_config.websocket.enabled.has_value = true;
     retry_config.websocket.enabled.value = false;
     moq_client *retrying = NULL;
     ok(moq_client_new(&retry_config, &retrying), "client new");
-    CHECK(moq_client_failure(retrying) == NULL);
     result dialing = {0};
     task = moq_client_connect(retrying, url, on_session, &dialing);
-    moq_error *failure = NULL;
-    for (int waited = 0; !failure && waited < 5000; waited += 10) {
-        CHECK(!pump(&dialing.done, 10));
-        failure = moq_client_failure(retrying);
-    }
-    CHECK(failure && failure->tag == MOQ_ERROR_CONNECT);
-    moq_error_free(failure);
-    moq_client_cancel(retrying);
-    CHECK(pump(&dialing.done, 5000));
-    CHECK(dialing.error && dialing.error->tag == MOQ_ERROR_CANCELLED);
-    moq_error_free(dialing.error);
+    moq_session *redialing = await(&dialing, "retrying connect");
     moq_task_free(task);
+    moq_connection_state *state = moq_session_state(redialing);
+    while (!state->failure) {
+        state = next_state(redialing, state);
+    }
+    CHECK(state->phase == MOQ_CONNECTION_PHASE_CONNECTING);
+    CHECK(state->failure->tag == MOQ_ERROR_CONNECT);
+    CHECK(state->connects == 0);
+    moq_session_cancel(redialing, 0);
+    while (state->phase != MOQ_CONNECTION_PHASE_CLOSED) {
+        state = next_state(redialing, state);
+    }
+    CHECK(state->connects == 0);
+    moq_connection_state_free(state);
+    moq_session_free(redialing);
     moq_client_free(retrying);
 
     /* A read whose frame arrives just before shutdown has its callback in flight, so it may run

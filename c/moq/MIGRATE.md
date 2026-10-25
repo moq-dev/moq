@@ -2,60 +2,25 @@
 
 How to update your code for each breaking change, newest first.
 
-## Unreleased
-
-### The C API is generated from moq-ffi (#6052)
-
-moq-c 0.8.0 replaces the hand-written ABI with one generated from moq-ffi, the crate every other binding wraps, so a function here means what its method means in Python, Go, or C++.
-Every call changes shape once; the names are moq-ffi's in snake case, and `<moq/ffi/moq.h>` documents each one.
-
-| 0.7 | 0.8 |
-| --- | --- |
-| `#include <moq.h>` | `#include <moq/moq.h>` |
-| `-lmoq` | `-lmoq -lmoq_c_ffi` plus the C++ runtime; take them from `pkg-config --libs moq-c` or `moq::c` |
-| `int32_t` handles | opaque pointers, each released with its `moq_<type>_free` |
-| a negative return code, then `moq_error()` | a returned `moq_error *` (NULL on success) with `tag`, its fields, and `moq_error_message()`; free it with `moq_error_free` |
-| results written to `dst` | results written to the last argument, `out` |
-| `const char *` plus a length | a NUL-terminated UTF-8 string |
-| a zeroed config struct | `moq_<record>_default()`, then set fields |
-| a value plus a `*_present` flag | `{ has_value, value }`, or a pointer that is NULL when absent |
-| one `moq_status_callback` per stream of results | a callback per call that returns a `moq_task *`; call again for the next result, and `moq_task_free` cancels |
-| callbacks on moq's callback thread | callbacks on moq's dispatcher thread, or your own loop through `moq_set_dispatcher` and `moq_work_run` |
-| process teardown | `moq_shutdown()` before unloading; pending callbacks may run during it, never after |
-
-A few common calls:
-
-| 0.7 | 0.8 |
-| --- | --- |
-| `moq_origin_create` | `moq_origin_producer_new` |
-| `moq_origin_create_broadcast` | `moq_origin_producer_create_broadcast` |
-| `moq_publish_track` | `moq_broadcast_producer_publish_track` |
-| `moq_session_connect` | `moq_client_new`, then `moq_client_connect` |
-| `moq_session_failure` | `moq_client_failure` while the first dial retries, then `moq_session_failure`; each returns the last failure as a `moq_error *`, or NULL |
-| `moq_server_listen` | `moq_server_new`, `moq_server_listen`, then `moq_server_accept` per session |
-| `moq_consume_track` | `moq_broadcast_consumer_subscribe_track`, then `moq_track_consumer_read_frame` per frame |
-
-```c
-static void on_frame(void *user_data, moq_error *error, moq_frame *frame) {
-    if (error) {
-        fprintf(stderr, "read failed: %s\n", moq_error_message(error));
-        moq_error_free(error);
-    } else if (frame) {
-        use(frame->payload.data, frame->payload.len);
-        moq_frame_free(frame);
-    }
-}
-
-moq_task *task = moq_track_consumer_read_frame(track, on_frame, user_data);
-// Free it after the callback, or before to cancel the read.
-```
-
-The archive holds the compiled C API (`libmoq.a` / `moq.lib`) and moq-ffi's staticlib, installed as `libmoq_c_ffi.a` / `moq_c_ffi.lib` so it never overwrites moq-cpp's, and links the C++ runtime.
-It embeds the same Rust runtime as the C++ package, `moq-cpp`, so a program links one of the two, never both.
-
 ## moq-c 0.7, the hand-written ABI
 
-The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries, then the table above.
+The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
+
+### Sessions report a lifecycle snapshot
+
+`moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
+Each change delivers a `moq_connection_state` with `phase`, `connects`, `failure`, and the live `protocol`; copy what you keep, since it is valid only during the callback.
+Read `state->connects` where you read a positive status code. A failed dial or dropped connection now fires the callback with a negative `failure`, so drop your `moq_session_failure` polling; `moq_error()` describes it during the callback.
+The terminal call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after a requested close or the error that ended the session, where the terminal status code used to be. Release `user_data` there, as before.
+
+### Exact encoder rates and publication options
+
+`moq_video_encoder_input.framerate` is now `moq_video_frame_rate { numerator,
+denominator }`, changing the C ABI layout. Replace `30` with `{30, 1}` or use
+`{30000, 1001}` for an exact fractional rate. Both components must be nonzero;
+rates above 1,000,000 fps are refused. Recompile callers with the generated header
+and matching native library. Invalid rational rates return `MOQ_ERROR_INVALID_CONFIG`.
+Audio and publication track arguments are unchanged.
 
 ### Video rendition preference
 
@@ -98,7 +63,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.
+`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close`.
 Publish a replacement under a new name, and expect a finished track's demand terminal callback when the broadcast closes rather than at the finish.
 
 ### A claim answers by publishing (#5678)
@@ -236,6 +201,7 @@ if (frame.timestamp_present) use(frame.timestamp_us);
 ### `moq_publish_finish` is removed (#4152)
 
 Close the broadcast with `moq_publish_close`.
+To end its content first, call `moq_publish_catalog_finish`; the broadcast stays up until `moq_publish_close`.
 
 ### A decoded frame can fail on its own (#4094)
 

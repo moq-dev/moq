@@ -3,6 +3,11 @@
 #define MOQ_MOQ_H
 
 #include <moq/ffi/moq.h>
+#include <moq/version.h>
+
+/* This package's product token. Every config is generated, so nothing sets it for you: put it in
+ * moq_client_config.implementation and moq_server_config.implementation, after your own tokens. */
+#define MOQ_IMPLEMENTATION "moq-c/" MOQ_C_VERSION
 
 #ifdef __cplusplus
 extern "C" {
