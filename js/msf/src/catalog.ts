@@ -164,8 +164,15 @@ export function decode(raw: Uint8Array): Catalog {
 		}
 
 		// id -> inline payload, built once so resolution is linear in the number
-		// of tracks rather than tracks x entries.
-		const inline = new Map((wire.initDataList ?? []).filter((e) => e.type === "inline").map((e) => [e.id, e.data]));
+		// of tracks rather than tracks x entries. A repeated id is refused: readers
+		// that kept different entries would disagree on a track's init bytes.
+		const ids = new Set<string>();
+		const inline = new Map<string, string>();
+		for (const entry of wire.initDataList ?? []) {
+			if (ids.has(entry.id)) throw new Error(`MSF catalog has duplicate initData id "${entry.id}"`);
+			ids.add(entry.id);
+			if (entry.type === "inline") inline.set(entry.id, entry.data);
+		}
 
 		const tracks = (wire.tracks ?? []).map(({ initRef, ...track }) => {
 			track.isLive ??= false;

@@ -107,6 +107,22 @@ test("leaves initData undefined for a dangling or non-inline initRef", () => {
 	expect(catalog.tracks[1].initData).toBeUndefined();
 });
 
+test("rejects a duplicate initDataList id", () => {
+	// Mirrors the Rust side: keeping either entry would let two readers disagree on init bytes.
+	const raw = encodeJson({
+		version: "draft-01",
+		initDataList: [
+			{ id: "v", type: "inline", data: "AQID" },
+			{ id: "v", type: "inline", data: "BAUG" },
+		],
+		tracks: [
+			{ name: "video0", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initRef: "v" },
+		],
+	});
+
+	expect(() => decode(raw)).toThrow(/duplicate initData/);
+});
+
 test("rejects an unsupported numeric version", () => {
 	// Mirrors the Rust side: any number other than 1 is rejected.
 	expect(() => decode(encodeJson({ version: 2, tracks: [] }))).toThrow();
