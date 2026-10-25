@@ -75,7 +75,8 @@ impl Counters {
 		{
 			let _ = writeln!(
 				out,
-				"moq_relay_stun_dropped_total{{reason=\"{reason}\"}} {}",
+				"moq_relay_stun_dropped_total{{reason=\"{}\"}} {}",
+				crate::internal::Label(reason),
 				count.load(Ordering::Relaxed)
 			);
 		}

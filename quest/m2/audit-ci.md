@@ -67,7 +67,7 @@ verdicts:
 - `just test wasm` on main `f42b336f0e` fails `ietf: reads a published
   broadcast` (`remote error: code=0`). Bisected to
   [moq-dev/moq#6348](https://github.com/moq-dev/moq/pull/6348): the harness
-  finishes its track before the pre-draft-20 joining FETCH arrives, which
+  finishes its track before the pre-draft-22 joining FETCH arrives, which
   [join after a quick finish](/quest/m2/ietf-join-after-finish.md) owns. The
   merge queue does not run the browser harness, so only Nightly sees it.
   - Audio quality: two Chromium Opus `wide` rows exceed their `target_ms_p95`
@@ -91,7 +91,7 @@ verdicts:
   ([#6315](https://github.com/moq-dev/moq/pull/6315),
   [#6317](https://github.com/moq-dev/moq/pull/6317)). The moq-mux large-enum
   and moq-net minimal-feature lints pass on main `f42b336f0e`.
-- Interop's finite-track tails fail before draft 20 (`Error: old`, a JS
+- Interop's finite-track tails fail before draft 22 (`Error: old`, a JS
   `RESET_STREAM`); [join after a quick finish](/quest/m2/ietf-join-after-finish.md)
   owns them. TS fails T-STD overflow and late audio starts; the TS reliability
   quests own them. The relay-log `FAIL` lines in Interop's self-test are
@@ -140,13 +140,13 @@ verdicts:
   ran). The longest 2026-10-22 jobs: Audio quality 62 minutes, Loom 60
   (cancelled), binding benchmark 52, Rust bench targets 48, relay profiles 45,
   Rust benchmark tests 44, the gate suite 40.
-- The merge queue runs one `just ci` job on the persistent `nix/runner` VM:
+- The merge queue runs one `just ci` job on the self-hosted `moq-queue` runner:
   median 5.5 minutes, p90 11.9, at most 24.2 over 32 entries (m0, 2026-10-21).
   Its job summary lists seconds per module, and the `cargo-timings` artifact
   is the per-crate drill-down.
-- Job summaries now carry the binding generator comparison, Rust and JS
-  coverage, the browser backend baseline, and browser benchmark comparisons
-  (m1). Relay-profile traces stay artifact-only diagnosis; native audio rows
+- Job summaries now carry Rust and JS coverage, the browser backend baseline,
+  and browser benchmark comparisons (m1). Relay-profile traces stay
+  artifact-only diagnosis; native audio rows
   wait on the audio jitter target's reporting decision.
 
 ### Every workflow (m1, 2026-10-22)

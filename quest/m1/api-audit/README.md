@@ -36,8 +36,7 @@ Rules every child follows:
 - Inherited debt is fixed here only when it is cheap or sits on a surface
   this release breaks anyway. Otherwise it joins the later quest that
   reshapes it (the ordered track reader joins
-  [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md); binding durations get
-  [their own quest](/quest/m1/ffi-durations.md)).
+  [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md)).
 - Each child lists its public API and wire impact in its PR, and its Impact
   bullet says how to migrate.
 
@@ -46,6 +45,20 @@ by flate's removal ([compress migrate](/quest/m1/compress/migrate.md)), in m1,
 so the cut waits for it. hang's
 `Archive::replay_epoch` goes with the root `archive` section in
 [catalog HLS](/quest/m1/archive/catalog-hls.md).
+
+Kept public though only moq-transport uses them (decided 2026-10-23), so an
+audit skips them:
+
+- moq-transport-only error variants (`Error::{InvalidJoiningRequestId,
+  InvalidRange, Remote, UnsupportedExtension}`, the `DecodeError` auth-token
+  variants) and the session error codes the lite draft registers with
+  moq-transport's meaning. Errors are fine; only dead ones go.
+- `setup::Extensions::{auth, solicit, epoch}` and the relay's
+  `[listen|connect.extensions]` TOML, as interop knobs documented as
+  affecting moq-transport only.
+- `setup::Token` and `server::Handshake::token`:
+  [token in band](/quest/m1/auth/token-in-band.md) gives lite-07 a SETUP
+  token, which makes them shared.
 
 Rejected in planning:
 
@@ -64,12 +77,9 @@ Rejected in planning:
 ## Required
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [The origin announces](/quest/m1/api-audit/announce-owner.md) - a broadcast producer cannot announce; the origin hands out the announcement, so `Prepared` and standalone broadcasts lose methods that always fail
-- [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - the dead and test-only moq-net, `@moq/net`, and moq-ffi items the follow-up audit found go private or away
-- [Pinned consumers adopt the CLI flag names](/quest/m1/api-audit/cli-flags-consumers.md) - pinned downstream deployments move past the flag rename and use its spellings
+- [JS origin publications](/quest/m1/api-audit/js-publication.md) - `@moq/net` origins hand out a `Publication` that announces, so `Prepared` and standalone broadcasts lose methods that always throw
+- [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
 - [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
-- [A request's source enforces its validity](/quest/m1/api-audit/answer.md) - a stale source refuses new track requests by itself, with no public additions
-- [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) - no public moq-net item exists only for moq-transport, and a client names its request target once as a URL
 - [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
 - [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror
 - [Request handlers are named requests](/quest/m1/api-audit/requests.md) - `dynamic()` and `Dynamic` become `requests()` and `Requests` at every layer

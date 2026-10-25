@@ -35,13 +35,12 @@ Go, and C++, `moq-c` for C, `decodebin` on each `audio_N` pad for GStreamer, and
 publisher's channel count, contiguous timestamps, and each channel's tone carrying
 most of its energy by a Goertzel filter. A garbled decode (wrong channel order or
 sample rate), silence, a timestamp gap, or a rendition left undecoded fails the cell.
-Each publisher's tone starts at timestamp zero, so `--phase` also holds every Opus
+Each publisher's tone starts at timestamp zero, so `--phase` also holds every
 rendition's tone to its timestamps within a sample, which fails a decoder that keeps
-or drops the wrong pre-skip. It skips the browser publisher, which stamps its file
-from its own page clock, and the native-JS subscriber, which leaves the pre-skip to the
-player as WebCodecs does and stamps milliseconds. AAC is skipped until the fMP4
-importer applies the edit list holding ffmpeg's priming
-([quest](/quest/m1/fmp4-edit-lists.md)). The browser plays each rendition in a page
+or drops the wrong Opus pre-skip or AAC priming. It skips the browser publisher, which stamps its file
+from its own page clock, the native-JS subscriber, which leaves the pre-skip to the
+player as WebCodecs does and stamps milliseconds, and GStreamer's AAC, whose `faad`
+decoder reads the priming a frame early. The browser plays each rendition in a page
 of its own, the player pinned to it by `controls.audio.target`, and runs the same
 filter on each channel of the player's audio graph. A negative control then has the
 Rust CLI swap its channels' tones, and every subscriber must refuse every rendition
@@ -548,7 +547,7 @@ just test interop-report /tmp/results.jsonl /tmp/interop-report
 `just test bare-fin` exchanges encoded subscription responses between Rust and
 JS, then feeds them into each implementation's subscriber over an in-memory
 transport. It checks bare FIN before and after SUBSCRIBE\_START on lite-05/06/07,
-and FIN without PUBLISH\_DONE on IETF draft-19. Clean-end controls use the same
+and FIN without PUBLISH\_DONE on IETF draft-18. Clean-end controls use the same
 path. This tests response interoperability, not network delivery or relay behavior.
 The interop workflow runs it alongside the real-transport matrix.
 
@@ -579,12 +578,12 @@ range is per version: JS writes lite-07's 64-bit values, which Rust reads back,
 and JS refuses them on lite-06.
 
 `ietf_datagram_interop` does the same for moq-transport's `OBJECT_DATAGRAM` on
-drafts 14 through 22: `ietf-datagram.ts` decodes Rust's datagrams and their
+each supported draft: `ietf-datagram.ts` decodes Rust's datagrams and their
 Timestamps and re-encodes them byte for byte, and Rust decodes the datagram the
 JS publisher sends.
 
 `ietf_track_status_interop` sends Rust's `TRACK_STATUS` to the JS publisher on
-drafts 14 through 22 through `track-status.ts`, and Rust decodes each
+each supported draft through `track-status.ts`, and Rust decodes each
 `TRACK_STATUS_OK` and the refusal for a missing broadcast the way its
 subscriber reads them.
 

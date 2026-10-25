@@ -381,9 +381,6 @@ test("toStreamCode: a control timeout keeps its own code", () => {
 		Version.DRAFT_16,
 		Version.DRAFT_17,
 		Version.DRAFT_18,
-		Version.DRAFT_19,
-		Version.DRAFT_20,
-		Version.DRAFT_21,
 		Version.DRAFT_22,
 	]) {
 		expect(toStreamCode(timeout, { version })).toBe(StreamCode.Internal);
@@ -445,6 +442,6 @@ test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 	]) {
-		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_20 })).toBe(StreamCode.Internal);
+		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_22 })).toBe(StreamCode.Internal);
 	}
 });

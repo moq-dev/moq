@@ -101,6 +101,18 @@ void main() {
     broadcast.close();
   });
 
+  test('a negative duration in a raw record is refused', () {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(name: 'negative', info: null);
+    expect(
+      () => track.consume(
+        subscription: Subscription(maxDelay: const Duration(microseconds: -1)),
+      ),
+      throwsArgumentError,
+    );
+    broadcast.close();
+  });
+
   test(
     'an ascending subscription reads a cached backlog oldest first',
     () async {
@@ -119,7 +131,7 @@ void main() {
 
       final consumer = track.consume(
         subscription: Subscription(
-          maxDelayUs: 10000000,
+          maxDelay: const Duration(seconds: 10),
           ranges: [Range(start: RelativeMoqAnchor(2))],
           order: Order.ascending,
         ),
@@ -278,6 +290,8 @@ void main() {
 
     final accepted = () async {
       final request = await server.requests().first.timeout(timeout);
+      // The wrapper names itself ahead of moq-ffi, so a server can tell bindings apart.
+      expect(request.peerImplementation(), startsWith('moq-dart/'));
       return request.accept().timeout(timeout);
     }();
 
@@ -301,7 +315,11 @@ void main() {
           keylog: false,
         ),
         once: true,
-        backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
+        backoff: Backoff(
+          initial: const Duration(milliseconds: 1),
+          max: const Duration(milliseconds: 2),
+          timeout: const Duration(milliseconds: 3),
+        ),
         websocket: WebSocketConfig(enabled: false, delay: Duration.zero),
       ),
     ).timeout(timeout);
@@ -396,17 +414,7 @@ void main() {
     expect(() => catalog.finish(), throwsA(isA<ClosedMoqException>()));
   });
 
-  test('microsecond fields read back as Durations', () {
-    final backoff = Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000);
-    expect(backoff.initial, const Duration(milliseconds: 1));
-    expect(backoff.max, const Duration(milliseconds: 2));
-    expect(backoff.timeout, const Duration(milliseconds: 3));
-
-    expect(ConnectionStats().rtt, isNull);
-    expect(
-      ConnectionStats(rttUs: 1500).rtt,
-      const Duration(microseconds: 1500),
-    );
+  test('microsecond timestamps read back as Durations', () {
     expect(
       Frame(payload: Uint8List(0), timestampUs: 20000).timestamp,
       const Duration(milliseconds: 20),
@@ -414,18 +422,6 @@ void main() {
     expect(
       moq_video.Frame(timestampUs: 33333, data: Uint8List(0)).timestamp,
       const Duration(microseconds: 33333),
-    );
-    expect(moq_video.DecoderOutput().maxDelay, isNull);
-    expect(
-      moq_audio.EncoderOutput(codec: moq_audio.Codec.opus()).frameDuration,
-      Duration.zero,
-    );
-    expect(
-      moq_audio.DecoderOutput(
-        format: moq_audio.SampleFormat.f32,
-        maxDelayUs: 500,
-      ).maxDelay,
-      const Duration(microseconds: 500),
     );
   });
 
@@ -467,10 +463,6 @@ void main() {
     final broadcast = origin.createBroadcast(path: 'epoch');
 
     final first = mintEpoch();
-    expect(
-      epochTime('018bcfe5-6800-7000-8000-000000000000'),
-      DateTime.utc(2023, 11, 14, 22, 13, 20),
-    );
     broadcast.announce(route: AnnounceRoute(epoch: first));
     final start = await nextRoute(announced) as AnnounceEventStart;
     expect(start.announce.route.epoch, first);
@@ -480,7 +472,10 @@ void main() {
     final restart = await nextRoute(announced) as AnnounceEventRestart;
     expect(restart.announce.route.epoch, second);
 
-    expect(() => epochTime('not-an-epoch'), throwsA(isA<MoqException>()));
+    expect(
+      () => broadcast.announce(route: AnnounceRoute(epoch: 'not-an-epoch')),
+      throwsA(isA<MoqException>()),
+    );
     announced.cancel();
     announced.dispose();
   });
@@ -691,9 +686,8 @@ void main() {
 
     final fixedOutput = moq_audio.DecoderOutput(
       format: moq_audio.SampleFormat.f32,
-      delayUs: 80000,
+      delay: const Duration(milliseconds: 80),
     );
-    expect(fixedOutput.delay, const Duration(milliseconds: 80));
     final fixed = await moq_audio.Consumer.subscribe(
       broadcast: consumer,
       id: 'mic',
@@ -706,8 +700,8 @@ void main() {
       catalogAudio: rendition,
       output: moq_audio.DecoderOutput(format: moq_audio.SampleFormat.f32),
     ).timeout(timeout);
-    expect(fixed.delay, const Duration(milliseconds: 80));
-    final initial = estimated.delay;
+    expect(fixed.delay(), const Duration(milliseconds: 80));
+    final initial = estimated.delay();
 
     // Two 20 ms Opus frames of silence at 48 kHz mono.
     for (var i = 0; i < 2; i++) {
@@ -721,8 +715,8 @@ void main() {
     expect(await fixed.next().timeout(timeout), isA<moq_audio.ReadFrame>());
     expect(await estimated.next().timeout(timeout), isA<moq_audio.ReadFrame>());
 
-    expect(fixed.delay, const Duration(milliseconds: 80));
-    expect(estimated.delay, isNot(initial));
+    expect(fixed.delay(), const Duration(milliseconds: 80));
+    expect(estimated.delay(), isNot(initial));
 
     fixed.cancel();
     estimated.cancel();
@@ -743,7 +737,7 @@ void main() {
         ),
         output: moq_audio.EncoderOutput(
           codec: moq_audio.Codec.opus(),
-          frameDurationUs: 10000,
+          frameDuration: const Duration(milliseconds: 10),
         ),
         track: 'mic',
       ),

@@ -799,12 +799,11 @@ pub struct MoqVideoDecoderOutput {
 	/// dimensions rather than assuming this took. Both dimensions must be even.
 	#[uniffi(default = None)]
 	pub resize: Option<crate::media::MoqDimensions>,
-	/// Upper bound on buffering before skipping a stalled group, in
-	/// microseconds. Same knob as
-	/// [`MoqAudioDecoderOutput::max_delay_us`](crate::audio::MoqAudioDecoderOutput::max_delay_us).
+	/// Upper bound on buffering before skipping a stalled group. Same knob as
+	/// [`MoqAudioDecoderOutput::max_delay`](crate::audio::MoqAudioDecoderOutput::max_delay).
 	/// `None` keeps the moq-mux default of zero (skip aggressively).
 	#[uniffi(default = None)]
-	pub max_delay_us: Option<u64>,
+	pub max_delay: Option<std::time::Duration>,
 	/// Keep each frame in the surface its decoder produced, for
 	/// [`MoqVideoDecodedFrame::surface`]. `false`, the default, downloads every
 	/// frame to CPU memory as it is decoded, so
@@ -916,8 +915,8 @@ pub enum MoqVideoRead {
 	Gap {
 		/// The furthest presentation point already read, in microseconds.
 		timestamp_us: u64,
-		/// An upper bound on how long until the next picture resumes, in microseconds.
-		duration_us: u64,
+		/// An upper bound on how long until the next picture resumes.
+		duration: std::time::Duration,
 	},
 	/// The publisher stopped its encoder: it paused, switched source, or finished.
 	///
@@ -940,7 +939,7 @@ impl TryFrom<moq_video::decode::Read> for MoqVideoRead {
 			},
 			moq_video::decode::Read::Gap { timestamp, duration } => Self::Gap {
 				timestamp_us: timestamp_us(timestamp)?,
-				duration_us: timestamp_us(duration)?,
+				duration: crate::ffi::duration(duration.into()),
 			},
 			moq_video::decode::Read::End { end } => Self::End {
 				end_us: timestamp_us(end)?,
@@ -1061,10 +1060,7 @@ impl MoqVideoConsumer {
 		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
-		options.max_delay = output
-			.max_delay_us
-			.map(std::time::Duration::from_micros)
-			.unwrap_or_default();
+		options.max_delay = output.max_delay.unwrap_or_default();
 
 		let consumer = broadcast
 			.driver

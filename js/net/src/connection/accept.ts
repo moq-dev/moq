@@ -31,7 +31,11 @@ export interface AcceptProps {
 	 */
 	consume?: OriginProducer;
 
-	/** The moq-transport extensions to offer, each on unless set to `false`. */
+	/**
+	 * The moq-transport extensions to offer, each on unless set to `false`.
+	 *
+	 * @internal Tests only; nothing outside the package consumes it.
+	 */
 	extensions?: Extensions.Extensions;
 
 	/** The implementation this side advertises in SETUP; see the `implementation` connect option. */
@@ -83,15 +87,7 @@ async function acceptInner(
 	if (protocol === Ietf.ALPN.DRAFT_22) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_22, wiring);
 	}
-	if (protocol === Ietf.ALPN.DRAFT_21) {
-		return acceptAlpn(transport, url, Ietf.Version.DRAFT_21, wiring);
-	}
-	if (protocol === Ietf.ALPN.DRAFT_20) {
-		return acceptAlpn(transport, url, Ietf.Version.DRAFT_20, wiring);
-	}
-	if (protocol === Ietf.ALPN.DRAFT_19) {
-		return acceptAlpn(transport, url, Ietf.Version.DRAFT_19, wiring);
-	} else if (protocol === Ietf.ALPN.DRAFT_18) {
+	if (protocol === Ietf.ALPN.DRAFT_18) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_18, wiring);
 	} else if (protocol === Ietf.ALPN.DRAFT_17) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_17, wiring);

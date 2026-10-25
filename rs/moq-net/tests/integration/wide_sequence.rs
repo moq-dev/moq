@@ -13,7 +13,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 /// and through a forwarding origin, even beyond JavaScript's exact number range.
 #[moq_clock::test]
 async fn largest_quic_sequence_reaches_the_subscriber() {
-	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-19"] {
+	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-18"] {
 		for relayed in [false, true] {
 			let version: Version = alpn.parse().unwrap();
 			let publisher = produce_origin(1);
@@ -53,7 +53,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				let frame = got.read_frame().await.unwrap().unwrap();
 				assert_eq!(frame.payload, b"ladder".as_ref());
 				// Lite-02 carries no timestamps, and a lite-06 subscriber drops them.
-				let timed = alpn == "moq-transport-19";
+				let timed = alpn == "moq-transport-18";
 				assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn} relayed={relayed}");
 			}
 		}

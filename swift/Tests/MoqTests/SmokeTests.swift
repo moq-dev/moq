@@ -46,7 +46,7 @@ final class SmokeTests: XCTestCase {
             try group.finish()
         }
         let consumer = try track.consume(subscription: Subscription(
-            maxDelayUs: 10_000_000,
+            maxDelay: 10,
             ranges: [Subscription.Range(start: .relative(groups: 2))],
             order: .ascending
         ))
@@ -114,6 +114,8 @@ final class SmokeTests: XCTestCase {
         defer { client.cancel() }
         let session = try await client.connect(to: "https://\(addr)")
         guard let request = try await accepted else { return XCTFail("server closed before accept") }
+        // The wrapper names itself ahead of moq-ffi, so a server can tell bindings apart.
+        XCTAssertTrue(request.peerImplementation?.hasPrefix("moq-swift/") == true, "\(String(describing: request.peerImplementation))")
         let peer = try await request.accept()
 
         // Ending both sessions ends any wait below, so a grant that never arrives fails
@@ -125,7 +127,7 @@ final class SmokeTests: XCTestCase {
         }
         defer { watchdog.cancel() }
 
-        let everything = Grant(publish: ["**"], subscribe: ["**"], expiresUs: nil)
+        let everything = Grant(publish: ["**"], subscribe: ["**"], expires: nil)
         for auth in [session.auth(), peer.auth()] {
             var grant = auth.grant()
             while grant != everything {
@@ -216,7 +218,6 @@ final class SmokeTests: XCTestCase {
         let broadcast = try origin.createBroadcast(path: "epoch")
 
         let first = mintEpoch()
-        XCTAssertEqual(try epochTime("018bcfe5-6800-7000-8000-000000000000"), Date(timeIntervalSince1970: 1_700_000_000))
         try broadcast.announce(route: AnnounceRoute(epoch: first))
         guard case .start(let start) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
@@ -230,7 +231,7 @@ final class SmokeTests: XCTestCase {
         }
         XCTAssertEqual(restart.route.epoch, second)
 
-        XCTAssertThrowsError(try epochTime("not-an-epoch"))
+        XCTAssertThrowsError(try broadcast.announce(route: AnnounceRoute(epoch: "not-an-epoch")))
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {
@@ -476,7 +477,7 @@ final class SmokeTests: XCTestCase {
         let frame = try XCTUnwrap(received)
         XCTAssertEqual(frame.payload, Data("payload".utf8))
         XCTAssertNil(frame.timestampUs)
-        XCTAssertNil(try consumer.info().timescale)
+        XCTAssertNil(consumer.info().timescale)
         try track.finish()
         try broadcast.close()
     }
@@ -538,9 +539,8 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
-    /// `frameDurationUs` is microseconds so Opus' 2.5 ms frame is expressible at
-    /// all, and a duration outside the Opus set is refused rather than silently
-    /// rounded.
+    /// Opus' 2.5 ms frame reaches the encoder, and a duration outside the Opus set
+    /// is refused rather than silently rounded.
     func testEncodeAudioFrameDurations() throws {
         let broadcast = try BroadcastProducer()
         let input = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
@@ -549,7 +549,7 @@ final class SmokeTests: XCTestCase {
         let fine = try Audio.Producer(
             catalog: catalog,
             input: input,
-            output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDurationUs: 2_500),
+            output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDuration: 0.0025),
             track: "fine"
         )
         // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
@@ -560,7 +560,7 @@ final class SmokeTests: XCTestCase {
             try Audio.Producer(
                 catalog: catalog,
                 input: input,
-                output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDurationUs: 2_000),
+                output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDuration: 0.002),
                 track: "coarse"
             )
         ) { error in
@@ -593,14 +593,14 @@ final class SmokeTests: XCTestCase {
 
         let fixed = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
-            output: AudioDecoderOutput(format: .f32, delayUs: 80_000)
+            output: AudioDecoderOutput(format: .f32, delay: 0.08)
         )
         let estimated = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
             output: AudioDecoderOutput(format: .f32)
         )
-        XCTAssertEqual(fixed.delayUs, 80_000)
-        let initial = estimated.delayUs
+        XCTAssertEqual(fixed.delay, 0.08, accuracy: 1e-9)
+        let initial = estimated.delay
 
         // Two 20 ms Opus frames of silence at 48 kHz mono.
         for i in 0..<2 {
@@ -611,8 +611,8 @@ final class SmokeTests: XCTestCase {
         let estimatedFrame = try await estimated.next()
         XCTAssertNotNil(estimatedFrame)
 
-        XCTAssertEqual(fixed.delayUs, 80_000)
-        XCTAssertNotEqual(estimated.delayUs, initial, "the estimate should move as frames are read")
+        XCTAssertEqual(fixed.delay, 0.08, accuracy: 1e-9)
+        XCTAssertNotEqual(estimated.delay, initial, "the estimate should move as frames are read")
 
         fixed.cancel()
         estimated.cancel()

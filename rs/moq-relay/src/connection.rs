@@ -394,6 +394,9 @@ pub async fn supervise(
 			}
 		};
 		tokio::select! {
+			// A close withdraws every in-band credential in the same step, so the lease
+			// can end with it; the close is the cause, not a revocation.
+			biased;
 			err = session.closed() => {
 				lease.close_session(&err, session_bytes(&session));
 				break Err(err.into());

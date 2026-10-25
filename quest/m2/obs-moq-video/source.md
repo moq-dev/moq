@@ -16,18 +16,10 @@ The MoQ source loads and plays supported video without FFmpeg's video libraries 
 
 The source consumes the `video` namespace decoder rather than the removed decoder on `BroadcastConsumer`.
 
-The 2026-10-22 release audit reproduced two inherited correctness defects in
-the current FFmpeg path at main 1d43c096e0. `moq_source_decode_frame` assigns
-the current input packet timestamp to a decoded output, even when B-frame
-reordering returns an older picture. The clean media EOF callback also
-returns without draining delayed pictures. An algorithm-level reproduction
-using real libavcodec and 12 H.264 B-frames produced 10 pictures, all with
-incorrect assigned timestamps; explicit EOF draining recovered two omitted
-pictures. This was not a running OBS integration test.
-[OBS decode timing](/quest/m1/release-audit/obs-decode-timing.md) fixes both
-on the current FFmpeg path in m1 (2026-10-22, maintainer); the replacement
-keeps decoded output timestamps and clean EOF draining, covered with
-reordered video.
+The current FFmpeg path stamps each decoded picture with its own presentation
+timestamp, not the input packet's, and drains delayed pictures at clean media
+EOF; a reordered H.264 scenario in `cpp/obs/test/moq-source-test.cpp` covers
+both. The replacement keeps that behavior, covered with reordered video.
 
 ## Related
 

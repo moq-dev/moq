@@ -6,7 +6,15 @@ How to update your code for each breaking change, newest first.
 
 ### Decoders read gaps and ends
 
-`Audio.Consumer` and `Video.Consumer` yield `Audio.Read` / `Video.Read` instead of frames. Match `case .frame(let frame)` where you used each element as a frame; `.gap(timestampUs:durationUs:)` marks lost media and `.end(endUs:)` where the publisher stopped its encoder, and what follows either does not continue what came before.
+`Audio.Consumer` and `Video.Consumer` yield `Audio.Read` / `Video.Read` instead of frames. Match `case .frame(let frame)` where you used each element as a frame; `.gap(timestampUs:duration:)` marks lost media and `.end(endUs:)` where the publisher stopped its encoder, and what follows either does not continue what came before.
+
+### Durations are `TimeInterval`
+
+Every duration is a `TimeInterval` in seconds instead of a `UInt64` `...Us` field, and drops the suffix: `Client(timeout:race:resolutionDelay:)`, `Backoff(initial:max:timeout:)`, `QuicConfig(idleTimeout:keepAlive:)`, `WebSocketConfig(delay:)`, `ConnectionStats.rtt`, `Grant.expires`, `TrackInfo.maxAge`, `Subscription.maxDelay`, `Fill.maxDelay`, `Audio.Consumer.delay`, and the decoder outputs' `maxDelay` and `delay`.
+Divide a microsecond value by 1,000,000. A negative interval traps.
+`AudioEncoderOutput.frameDuration` is optional: pass `nil` where you passed `frameDurationUs: 0` for the codec's own frame.
+`Subscription.maxDelay` has no default: pass `0` for the old one.
+`TrackConsumer.info()` no longer throws.
 
 ### Connection state
 

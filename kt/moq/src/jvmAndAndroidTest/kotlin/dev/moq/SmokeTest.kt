@@ -41,10 +41,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration
-import kotlin.time.Instant
 
 @Serializable
 private data class Status(val state: String)
@@ -146,7 +143,7 @@ class SmokeTest {
                 ClientConfig(
                     tls = ClientTls(insecure = true),
                     once = true,
-                    websocket = WebSocketConfig(enabled = false, delayUs = 0uL),
+                    websocket = WebSocketConfig(enabled = false, delay = java.time.Duration.ZERO),
                 ),
             ).use { moq -> moq.session.closed() }
         }
@@ -195,10 +192,10 @@ class SmokeTest {
         val stream: StreamConfig = StreamConfig(compression = false)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
         val backoff: Backoff = Backoff(
-            initialUs = 500_000uL,
+            initial = java.time.Duration.ofMillis(500),
             multiplier = 2u,
-            maxUs = 10_000_000uL,
-            timeoutUs = 0uL,
+            max = java.time.Duration.ofSeconds(10),
+            timeout = java.time.Duration.ZERO,
         )
         val client: ClientConfig = ClientConfig(
             tls = ClientTls(insecure = true),
@@ -215,7 +212,7 @@ class SmokeTest {
         assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
-        assertEquals(500_000uL, backoff.initialUs)
+        assertEquals(java.time.Duration.ofMillis(500), backoff.initial)
         assertEquals(ConnectionPhase.CONNECTED, status)
     }
 
@@ -293,7 +290,7 @@ class SmokeTest {
             }
             val consumer = track.consume(
                 Subscription(
-                    maxDelayUs = 10_000_000uL,
+                    maxDelay = java.time.Duration.ofSeconds(10),
                     ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
                     order = Order.ASCENDING,
                 ),
@@ -412,28 +409,11 @@ class SmokeTest {
         assertNotNull(audio)
     }
 
-    /** Microsecond fields read back as a Duration. */
+    /** Microsecond timestamps read back as a Duration. */
     @Test
-    fun `microsecond fields read back as durations`() {
-        val backoff = Backoff(initialUs = 1_000uL, multiplier = 2u, maxUs = 2_000uL, timeoutUs = 3_000uL)
-        assertEquals(1.milliseconds, backoff.initial)
-        assertEquals(2.milliseconds, backoff.max)
-        assertEquals(3.milliseconds, backoff.timeout)
-
-        fun stats(rttUs: ULong?) = ConnectionStats(
-            rttUs = rttUs,
-            estimatedSendRateBps = null,
-            bytesSent = null,
-            bytesReceived = null,
-            bytesLost = null,
-            packetsSent = null,
-            packetsReceived = null,
-            packetsLost = null,
-        )
-        assertNull(stats(null).rtt)
-        assertEquals(1_500.microseconds, stats(1_500uL).rtt)
+    fun `microsecond timestamps read back as durations`() {
         assertEquals(20.milliseconds, Frame(payload = ByteArray(0), timestampUs = 20_000uL).timestamp)
-        assertEquals(Duration.ZERO, AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
+        assertNull(AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
     }
 
     @Test
@@ -551,6 +531,18 @@ class SmokeTest {
     }
 
     @Test
+    fun `sessions advertise the wrapper ahead of moq-ffi`() = runTest {
+        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
+            Moq.connect("https://${server.localAddr}", ClientConfig(tls = ClientTls(insecure = true))).use {
+                server.requests().first().use { request ->
+                    val advertised = request.peerImplementation()
+                    assertTrue(advertised?.startsWith("moq-kt/") == true, "advertised: $advertised")
+                }
+            }
+        }
+    }
+
+    @Test
     fun `closing a server releases its port`() = runTest {
         val first = Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost"))))
         val addr = first.localAddr
@@ -593,7 +585,6 @@ class SmokeTest {
             val announced = origin.consume().announced(AnnounceConfig())
             origin.createBroadcast("epoch").use { broadcast ->
                 val first = mintEpoch()
-                assertEquals(Instant.fromEpochMilliseconds(1_700_000_000_000), epochTime("018bcfe5-6800-7000-8000-000000000000"))
                 broadcast.announce(AnnounceRoute(epoch = first))
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals(first, start.announce.route.epoch)
@@ -603,7 +594,7 @@ class SmokeTest {
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
                 assertEquals(second, restart.announce.route.epoch)
 
-                assertFailsWith<MoqException> { epochTime("not-an-epoch") }
+                assertFailsWith<MoqException> { broadcast.announce(AnnounceRoute(epoch = "not-an-epoch")) }
             }
         }
     }
@@ -650,9 +641,8 @@ class SmokeTest {
     }
 
     /**
-     * `frameDurationUs` is microseconds so Opus' 2.5 ms frame is expressible at
-     * all, and a duration outside the Opus set is refused rather than silently
-     * rounded.
+     * Opus' 2.5 ms frame reaches the encoder, and a duration outside the Opus
+     * set is refused rather than silently rounded.
      */
     @Test
     fun `encode audio honors the opus frame duration set`() {
@@ -664,7 +654,7 @@ class SmokeTest {
                 catalog,
                 AudioProducerOptions(
                     input = input,
-                    output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDurationUs = 2_500u),
+                    output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDuration = java.time.Duration.ofNanos(2_500_000)),
                     track = "fine",
                 ),
             )
@@ -677,7 +667,7 @@ class SmokeTest {
                     catalog,
                     AudioProducerOptions(
                         input = input,
-                        output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDurationUs = 2_000u),
+                        output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDuration = java.time.Duration.ofMillis(2)),
                         track = "coarse",
                     ),
                 )
@@ -702,7 +692,7 @@ class SmokeTest {
                 ClientConfig(bind = "127.0.0.1:0", versions = version, tls = ClientTls(insecure = true), once = true),
             )
             moq.use {
-                val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expiresUs = null)
+                val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
                 assertEquals(everything, moq.auth().grants().first { it != null })
                 val session = accepted.await()
                 assertEquals(everything, session.auth().grants().first { it != null })
@@ -748,12 +738,11 @@ class SmokeTest {
                 val catalog = CatalogConsumer.subscribe(consumer).next()!!
                 val rendition = catalog.audio["mic"]!!
 
-                val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delayUs = 80_000uL)
-                assertEquals(80.milliseconds, fixedOutput.delay)
+                val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delay = java.time.Duration.ofMillis(80))
                 val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
                 val estimated = AudioConsumer.subscribe(consumer, "mic", rendition, AudioDecoderOutput(format = AudioSampleFormat.F32))
-                assertEquals(80.milliseconds, fixed.delay)
-                val initial = estimated.delay
+                assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
+                val initial = estimated.delay()
 
                 // Two 20 ms Opus frames of silence at 48 kHz mono.
                 for (i in 0 until 2) {
@@ -762,8 +751,8 @@ class SmokeTest {
                 assertIs<AudioReadFrame>(fixed.next())
                 assertIs<AudioReadFrame>(estimated.next())
 
-                assertEquals(80.milliseconds, fixed.delay)
-                assertTrue(estimated.delay != initial, "the estimate should move as frames are read")
+                assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
+                assertTrue(estimated.delay() != initial, "the estimate should move as frames are read")
 
                 fixed.cancel()
                 estimated.cancel()

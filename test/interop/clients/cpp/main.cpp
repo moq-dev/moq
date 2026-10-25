@@ -50,7 +50,7 @@ using Clock = std::chrono::steady_clock;
 constexpr size_t READ_CHUNK = 64 * 1024;
 
 // SubscribeMedia max delay: how much reordering the jitter buffer tolerates.
-constexpr uint64_t MAX_DELAY_US = 1'000'000;
+constexpr std::chrono::nanoseconds MAX_DELAY = std::chrono::seconds(1);
 
 // Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 constexpr const char *AUDIO_TRACK = "tone";
@@ -58,8 +58,8 @@ constexpr uint32_t AUDIO_RATE = 48'000;
 constexpr double AUDIO_AMPLITUDE = 0.5;
 constexpr double PI = 3.14159265358979323846;
 // A non-default frame duration, and the shortest Opus offers. 20 ms would pass even if the
-// microsecond field were truncated to milliseconds somewhere.
-constexpr uint32_t AUDIO_FRAME_DURATION_US = 2'500;
+// duration were truncated to milliseconds somewhere.
+constexpr std::chrono::nanoseconds AUDIO_FRAME_DURATION = std::chrono::microseconds(2'500);
 // Written in 20 ms batches, so each write spans eight encoded Opus frames.
 constexpr uint64_t AUDIO_BATCH_US = 20'000;
 constexpr size_t AUDIO_BATCH_SAMPLES = AUDIO_RATE * AUDIO_BATCH_US / 1'000'000;
@@ -201,7 +201,7 @@ int publish(
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
-    output.frame_duration_us = AUDIO_FRAME_DURATION_US;
+    output.frame_duration = AUDIO_FRAME_DURATION;
     auto audio = ok(
         moq::AudioProducer::init(
             catalog,
@@ -290,7 +290,7 @@ void decode_audio(
     }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
-    output.max_delay_us = MAX_DELAY_US;
+    output.max_delay = MAX_DELAY;
     auto decoder = until(moq::AudioConsumer::subscribe(consumer, id, audio, output), deadline, "audio consumer");
 
     std::ofstream log(out + ".txt");
@@ -360,7 +360,8 @@ int subscribe(
     const auto &[id, video] = *catalog->video.begin();
 
     moq::Subscription subscription;
-    subscription.max_delay_us = finish ? static_cast<uint64_t>(timeout * 1e6) : MAX_DELAY_US;
+    subscription.max_delay =
+        finish ? std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(timeout)) : MAX_DELAY;
     auto media = until(
         moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), read_deadline,
         "container consumer"

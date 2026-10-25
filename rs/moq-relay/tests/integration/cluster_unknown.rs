@@ -130,7 +130,7 @@ fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 }
 
 struct Publisher {
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }
@@ -381,7 +381,7 @@ async fn unknown_publisher_does_not_flap_across_a_lite_cluster_triangle() {
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
-	let version = "moq-transport-19".parse().expect("parse version");
+	let version = "moq-transport-22".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version)).await;
 }
 

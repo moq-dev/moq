@@ -32,8 +32,8 @@ class End:
     end: timedelta
 
 
-def _gap(timestamp_us: int, duration_us: int) -> Gap:
-    return Gap(timestamp=_from_us(timestamp_us), duration=_from_us(duration_us))
+def _gap(timestamp_us: int, duration: timedelta) -> Gap:
+    return Gap(timestamp=_from_us(timestamp_us), duration=duration)
 
 
 def _end(end_us: int) -> End:

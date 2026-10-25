@@ -28,8 +28,8 @@ waveform reference.
 Generated with FFmpeg 9.0.2 from the repository's Nix dev shell:
 
 ```sh
-curl --fail --location https://upload.wikimedia.org/wikipedia/commons/b/bb/Neil_Armstrong_small_step.wav --output .scratch/apollo11.wav
-nix develop --command python3 rs/moq-audio/src/decode/test_data/generate.py .scratch/apollo11.wav
+curl --fail --location https://upload.wikimedia.org/wikipedia/commons/b/bb/Neil_Armstrong_small_step.wav --output .tmp/apollo11.wav
+nix develop --command python3 rs/moq-audio/src/decode/test_data/generate.py .tmp/apollo11.wav
 ```
 
 The script checks the source hash and contains every encode/decode argument.

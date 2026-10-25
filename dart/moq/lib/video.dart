@@ -98,22 +98,12 @@ extension VideoDecodedFrameDuration on MoqVideoDecodedFrame {
 extension VideoReadGapDuration on GapMoqVideoRead {
   /// The furthest presentation point already read.
   Duration get timestamp => Duration(microseconds: timestampUs);
-
-  /// Upper bound on how long until the next picture resumes.
-  Duration get duration => Duration(microseconds: durationUs);
 }
 
 /// Duration view over an encoder end.
 extension VideoReadEndDuration on EndMoqVideoRead {
   /// Where the stopped encoder's media stops.
   Duration get end => Duration(microseconds: endUs);
-}
-
-/// Duration view over a decoder's latency bound.
-extension VideoDecoderOutputDuration on MoqVideoDecoderOutput {
-  /// Upper bound on buffering before a stalled group is skipped, or null for the default.
-  Duration? get maxDelay =>
-      maxDelayUs == null ? null : Duration(microseconds: maxDelayUs!);
 }
 
 /// Input, codec settings, and publication ownership for a producer.

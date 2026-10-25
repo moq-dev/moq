@@ -19,7 +19,7 @@ from moq_ffi import (
 from moq_ffi import MoqVideoFrameRate as FrameRate
 
 from ._read import End, Gap, _end, _gap
-from ._records import _from_us, _opt_us, _to_us
+from ._records import _from_us, _to_us
 from ._stream import _Stream
 from .media import CatalogProducer, Dimensions, Video
 from .publish import TrackDemand
@@ -73,7 +73,7 @@ class DecoderOutput:
     def _ffi(self) -> MoqVideoDecoderOutput:
         return MoqVideoDecoderOutput(
             resize=self.resize,
-            max_delay_us=_opt_us(self.max_delay, "max_delay"),
+            max_delay=self.max_delay,
             surface=self.surface,
         )
 
@@ -169,7 +169,7 @@ class Consumer(_Stream[Read]):
         if isinstance(value, MoqVideoRead.FRAME):
             return value.frame
         if isinstance(value, MoqVideoRead.GAP):
-            return _gap(value.timestamp_us, value.duration_us)
+            return _gap(value.timestamp_us, value.duration)
         if isinstance(value, MoqVideoRead.END):
             return _end(value.end_us)
         raise TypeError(f"unknown video read: {value!r}")

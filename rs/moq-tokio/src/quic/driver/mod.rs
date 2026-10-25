@@ -60,26 +60,22 @@ pub(crate) use std::time::Duration;
 
 pub use moq_quic::BloomTokenLog;
 pub use moq_quic::{
-    AckFrequencyConfig, ApplicationClose, Chunk, ClientConfig, ClosedStream, ConfigError,
-    ConnectError, ConnectionClose, ConnectionError, ConnectionId, ConnectionIdGenerator,
-    ConnectionStats, Dir, EcnCodepoint, EndpointConfig, FrameStats, FrameType, IdleTimeout,
-    InvalidCid, MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore, PathStats, ServerConfig, Side,
-    StdSystemTime, StreamId, TimeSource, TokenLog, TokenMemoryCache, TokenReuseError, TokenStore,
-    Transmit, TransportConfig, TransportErrorCode, UdpStats, ValidationTokenConfig, VarInt,
-    VarIntBoundsExceeded, Written, crypto,
+	AckFrequencyConfig, ApplicationClose, Chunk, ClientConfig, ClosedStream, ConfigError, ConnectError,
+	ConnectionClose, ConnectionError, ConnectionId, ConnectionIdGenerator, ConnectionStats, Dir, EcnCodepoint,
+	EndpointConfig, FrameStats, FrameType, IdleTimeout, InvalidCid, MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore,
+	PathStats, ServerConfig, Side, StdSystemTime, StreamId, TimeSource, TokenLog, TokenMemoryCache, TokenReuseError,
+	TokenStore, Transmit, TransportConfig, TransportErrorCode, UdpStats, ValidationTokenConfig, VarInt,
+	VarIntBoundsExceeded, Written, crypto,
 };
 #[cfg(feature = "qlog")]
 pub use moq_quic::{QlogConfig, QlogStream};
 
 pub use crate::quic::driver::connection::{
-    AcceptBi, AcceptUni, Connecting, Connection, OpenBi, OpenUni, ReadDatagram,
-    RemoteAddressWatcher, SendDatagramError,
+	AcceptBi, AcceptUni, Connecting, Connection, OpenBi, OpenUni, ReadDatagram, RemoteAddressWatcher, SendDatagramError,
 };
 pub use crate::quic::driver::endpoint::{Accept, Endpoint, EndpointStats};
 pub use crate::quic::driver::incoming::{Incoming, IncomingFuture, RetryError};
-pub use crate::quic::driver::recv_stream::{
-    Lease, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError,
-};
+pub use crate::quic::driver::recv_stream::{Lease, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError};
 #[cfg(feature = "quic")]
 pub(crate) use crate::quic::driver::runtime::send_failed;
 #[cfg(all(test, feature = "quic"))]
@@ -90,38 +86,35 @@ pub use crate::quic::driver::send_stream::{SendStream, StoppedError, WriteError}
 
 #[cfg(test)]
 #[expect(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    reason = "tests read the host clock directly"
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
 )]
 mod tests;
 
 #[derive(Debug)]
 pub(crate) enum ConnectionEvent {
-    Close {
-        error_code: VarInt,
-        reason: bytes::Bytes,
-    },
-    Proto(moq_quic::ConnectionEvent),
-    Rebind(Pin<Box<dyn UdpSender>>),
+	Close { error_code: VarInt, reason: bytes::Bytes },
+	Proto(moq_quic::ConnectionEvent),
+	Rebind(Pin<Box<dyn UdpSender>>),
 }
 
 fn udp_transmit<'a>(t: &Transmit, buffer: &'a [u8]) -> moq_sock::udp::Transmit<'a> {
-    moq_sock::udp::Transmit {
-        destination: t.destination,
-        ecn: t.ecn.map(udp_ecn),
-        contents: buffer,
-        segment_size: t.segment_size,
-        src_ip: t.src_ip,
-    }
+	moq_sock::udp::Transmit {
+		destination: t.destination,
+		ecn: t.ecn.map(udp_ecn),
+		contents: buffer,
+		segment_size: t.segment_size,
+		src_ip: t.src_ip,
+	}
 }
 
 fn udp_ecn(ecn: EcnCodepoint) -> moq_sock::udp::EcnCodepoint {
-    match ecn {
-        EcnCodepoint::Ect0 => moq_sock::udp::EcnCodepoint::Ect0,
-        EcnCodepoint::Ect1 => moq_sock::udp::EcnCodepoint::Ect1,
-        EcnCodepoint::Ce => moq_sock::udp::EcnCodepoint::Ce,
-    }
+	match ecn {
+		EcnCodepoint::Ect0 => moq_sock::udp::EcnCodepoint::Ect0,
+		EcnCodepoint::Ect1 => moq_sock::udp::EcnCodepoint::Ect1,
+		EcnCodepoint::Ce => moq_sock::udp::EcnCodepoint::Ce,
+	}
 }
 
 /// Maximum number of datagrams processed in send/recv calls to make before moving on to other processing

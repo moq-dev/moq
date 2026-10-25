@@ -318,7 +318,7 @@ impl Replay {
 		let driver = tokio::spawn(moq_net::time::run(driver));
 		let broadcast = origin.create_broadcast("rec").unwrap();
 		let serving = moq_archive::consumer::Config::default().with_cache(cache);
-		let consumer = moq_archive::Consumer::open(store.clone(), broadcast.clone(), serving)
+		let consumer = moq_archive::Consumer::open(store.clone(), broadcast.broadcast().clone(), serving)
 			.await
 			.unwrap();
 		let consumer = tokio::spawn(consumer.run());

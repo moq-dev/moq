@@ -1,3 +1,4 @@
+import Foundation
 import MoqFFI
 
 /// Native audio encoding, publication, and decoding.
@@ -100,9 +101,9 @@ public enum Audio {
             try await ffi.next()
         }
 
-        /// The playout delay to hold ahead of the playhead, in microseconds: the fixed
-        /// `DecoderOutput.delayUs`, or the estimate from every frame read so far.
-        public var delayUs: UInt64 { ffi.delayUs() }
+        /// The playout delay to hold ahead of the playhead: the fixed `DecoderOutput.delay`,
+        /// or the estimate from every frame read so far.
+        public var delay: TimeInterval { ffi.delay() }
 
         /// Cancel all current and future reads.
         public func cancel() {

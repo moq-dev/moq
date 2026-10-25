@@ -1,3 +1,4 @@
+import Foundation
 import MoqFFI
 
 /// A MoQ client, built from its configuration and then dialed with `connect(to:)`.
@@ -10,9 +11,9 @@ public final class Client: Sendable {
     ///   - bind: The local UDP address to bind; `nil` binds an ephemeral dual-stack port.
     ///   - versions: Protocol versions to offer, most preferred first (`"moq-lite-03"`);
     ///     empty offers every supported version, which `versions()` lists.
-    ///   - timeoutUs: How long one connect may take, dial and handshake together; 0 waits forever.
-    ///   - raceUs: Happy Eyeballs: how long before the next resolved address is also dialed.
-    ///   - resolutionDelayUs: Happy Eyeballs: how long IPv4 waits for the full DNS answer.
+    ///   - timeout: How long one connect may take, dial and handshake together; 0 waits forever.
+    ///   - race: Happy Eyeballs: how long before the next resolved address is also dialed.
+    ///   - resolutionDelay: Happy Eyeballs: how long IPv4 waits for the full DNS answer.
     ///   - tls: Certificate trust (`insecure`, `roots`, `fingerprints`, ...), the SNI override,
     ///     and the mTLS identity.
     ///   - quic: QUIC tuning, such as the peer's inbound stream cap and the idle timeout.
@@ -27,9 +28,9 @@ public final class Client: Sendable {
     public init(
         bind: String? = nil,
         versions: [String] = [],
-        timeoutUs: UInt64? = nil,
-        raceUs: UInt64? = nil,
-        resolutionDelayUs: UInt64? = nil,
+        timeout: TimeInterval? = nil,
+        race: TimeInterval? = nil,
+        resolutionDelay: TimeInterval? = nil,
         tls: ClientTls = ClientTls(),
         quic: QuicConfig = QuicConfig(),
         websocket: WebSocketConfig = WebSocketConfig(),
@@ -41,14 +42,15 @@ public final class Client: Sendable {
         ffi = try MoqClient(config: MoqClientConfig(
             bind: bind,
             versions: versions,
-            timeoutUs: timeoutUs,
-            raceUs: raceUs,
-            resolutionDelayUs: resolutionDelayUs,
+            timeout: timeout,
+            race: race,
+            resolutionDelay: resolutionDelay,
             tls: tls,
             quic: quic,
             websocket: websocket,
             once: once,
             backoff: backoff,
+            implementation: implementation,
             publish: publish?.ffi,
             consume: consume?.ffi
         ))

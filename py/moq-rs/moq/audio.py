@@ -19,7 +19,7 @@ from moq_ffi import (
 )
 
 from ._read import End, Gap, _end, _gap
-from ._records import _from_us, _opt_us, _to_us
+from ._records import _from_us, _to_us
 from ._stream import _Stream
 from .media import Audio, AudioInit, CatalogProducer
 from .publish import TrackDemand
@@ -59,15 +59,15 @@ Read = Frame | Gap | End
 class EncoderOutput:
     """Codec-side settings.
 
-    A zero ``frame_duration`` takes the codec's own frame: 20 ms for Opus, 1024
-    samples for AAC. 10 ms Opus packets halve the packetization delay.
+    ``frame_duration`` of ``None`` takes the codec's own frame: 20 ms for Opus,
+    1024 samples for AAC. 10 ms Opus packets halve the packetization delay.
     """
 
     codec: Codec
     sample_rate: int | None = None
     channels: int | None = None
     bitrate: int | None = None
-    frame_duration: timedelta = timedelta(0)
+    frame_duration: timedelta | None = None
 
     def _ffi(self) -> MoqAudioEncoderOutput:
         return MoqAudioEncoderOutput(
@@ -75,7 +75,7 @@ class EncoderOutput:
             sample_rate=self.sample_rate,
             channels=self.channels,
             bitrate=self.bitrate,
-            frame_duration_us=_to_us(self.frame_duration, "frame_duration"),
+            frame_duration=self.frame_duration,
         )
 
 
@@ -99,8 +99,8 @@ class DecoderOutput:
             format=self.format,
             sample_rate=self.sample_rate,
             channels=self.channels,
-            max_delay_us=_opt_us(self.max_delay, "max_delay"),
-            delay_us=_opt_us(self.delay, "delay"),
+            max_delay=self.max_delay,
+            delay=self.delay,
         )
 
 
@@ -179,7 +179,7 @@ class Consumer(_Stream[Read]):
         if isinstance(value, MoqAudioRead.FRAME):
             return Frame._from_ffi(value.frame)
         if isinstance(value, MoqAudioRead.GAP):
-            return _gap(value.timestamp_us, value.duration_us)
+            return _gap(value.timestamp_us, value.duration)
         if isinstance(value, MoqAudioRead.END):
             return _end(value.end_us)
         raise TypeError(f"unknown audio read: {value!r}")
@@ -191,7 +191,7 @@ class Consumer(_Stream[Read]):
         The estimate measures when each frame is read, so read the next frame as
         soon as the previous one is handled rather than pacing reads to the speaker.
         """
-        return _from_us(self._inner.delay_us())
+        return self._inner.delay()
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering audio frames."""
