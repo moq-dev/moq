@@ -8,12 +8,14 @@ merges, `nix/moxygen.nix` pins a Moxygen that includes it,
 `nix/moxygen-track-status.patch` is deleted, and the Moxygen interop and
 conformance lanes still pass.
 
-Check moxygen#264's state. Delete this quest once the patch is gone.
+Check moxygen#264's state. Delete this quest once the patch is gone, or if
+moxygen#264 lands before the patch reaches `main`.
 
 ## Plan
 
-[moq-dev/moq#6729](https://github.com/moq-dev/moq/pull/6729) carries the patch
-until upstream lands it. Upstream's client has moved to draft-20 Location
+The patch is not on `main` yet:
+[moq-dev/moq#6729](https://github.com/moq-dev/moq/pull/6729), still open, adds
+it to `nix/moxygen.nix`'s `patches` and carries it until upstream lands it. Upstream's client has moved to draft-20 Location
 Filters, so the profile patch the pin also applies needs rebasing in the same
 bump. Run `just test interop --all` and the Moxygen smoke lane.
 

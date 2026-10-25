@@ -11,7 +11,9 @@ dropping it until the table repeats.
 Since [moq-dev/moq#6757](https://github.com/moq-dev/moq/pull/6757), TS import
 admits SI only once a valid program-clock interval exists. The export writes
 its first SI ahead of its PMT and PCRs, so the importer drops it. Order the
-export's first output as PAT, PMT, a PCR interval, then SI. Test it with an
+export's first output as PAT, PMT, a PCR interval, then SI. A PCR interval
+here is what `si.rs` needs to place a section: one forward PCR step of at most
+`MAX_INTERVAL`, not the importer's two-second catalog window. Test it with an
 export-to-import round trip that sees every SI table's first emission.
 
 Not planned (2026-10-25, maintainer): bounding SI aging against a source that

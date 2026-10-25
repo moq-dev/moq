@@ -9,7 +9,10 @@ TS route, so import state stays bounded across repeated re-inits.
 
 ## Plan
 
-Reuse the retirement #6757 added to `rs/moq-mux/src/timeline.rs`. Test a
-stream that re-inits many times and assert the import's state does not grow.
+Reuse the retirement #6757 added to `rs/moq-mux/src/timeline.rs`.
+`Timelines::retire` refuses a timeline whose recorder is still live, so each
+re-init finishes and drops the old recorder before retiring, as the TS route
+end does. Test a stream that re-inits many times and assert the import's state
+does not grow.
 
 Public API: none. Wire: none.
