@@ -78,29 +78,23 @@ declare namespace Auth {
         Handle,
         Unsupported,
         Grant,
-        Auth_2 as Auth
+        Credential_2 as Credential
     }
 }
 
-interface Auth_2 {
-    close(): void;
-    readonly closed: PromiseLike<Error | null>;
-    readonly grant: Getter<Grant | undefined>;
-}
-
-declare namespace Auth_3 {
+declare namespace Auth_2 {
     export {
 
     }
 }
 
-declare namespace Auth_4 {
+declare namespace Auth_3 {
     export {
         Duplicate,
         Handle,
         Unsupported,
         Grant,
-        Auth_2 as Auth
+        Credential_2 as Credential
     }
 }
 
@@ -168,9 +162,9 @@ function connect(input: ConnectProps): Promise<Established>;
 export class Connection {
     constructor(props?: ConnectionProps);
     static readonly accept: typeof accept;
+    readonly allocator: Getter<Handle_2 | undefined>;
     announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
-    readonly auth: Getter<Auth_4.Handle | undefined>;
-    readonly bandwidth: Getter<Handle_2 | undefined>;
+    readonly auth: Getter<Auth_3.Handle | undefined>;
     static readonly certificateHash: typeof certificateHash;
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
@@ -222,7 +216,7 @@ interface ConnectionProps {
 }
 
 interface ConnectProps {
-    auth?: Auth_4.Handle;
+    auth?: Auth_3.Handle;
     consume?: Producer_5;
     extensions?: Extensions.Extensions;
     implementation?: string;
@@ -301,6 +295,12 @@ type Cost = bigint;
 const Cost: {
     zero: bigint;
 };
+
+interface Credential_2 {
+    close(): void;
+    readonly closed: PromiseLike<Error | null>;
+    readonly grant: Getter<Grant | undefined>;
+}
 
 class Cursor {
     constructor(buffer: Uint8Array, version: StreamVersion);
@@ -412,7 +412,7 @@ declare namespace Error_2 {
 interface Established {
     abort(): void;
     announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
-    readonly auth: Auth_4.Handle;
+    readonly auth: Auth_3.Handle;
     close(): Promise<void>;
     closed: Promise<Error | null>;
     readonly peerImplementation: Promise<string | undefined>;
@@ -499,7 +499,7 @@ class GroupTooLarge extends Stream {
 class Handle {
     constructor();
     abort(err?: Error): void;
-    add(token: string | Uint8Array): Promise<Auth_2>;
+    add(token: string | Uint8Array): Promise<Credential_2>;
     get grant(): Getter<Grant | undefined>;
 }
 
@@ -515,7 +515,7 @@ const HopSchema: z.core.$ZodBranded<z.ZodMiniBigInt<bigint>, "Hop", "out">;
 
 declare namespace Ietf {
     export {
-        Auth_3 as Auth,
+        Auth_2 as Auth,
         Cluster,
         Epoch_3 as Epoch,
         Setup,
@@ -742,6 +742,7 @@ class Producer {
     appendGroup(): Producer_2;
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
+    createGroup(sequence: number): Producer_2;
     demand(): Demand;
     dropGroups(start: number, end: number, error: Error): void;
     finishAt(end: Position_2): void;
@@ -753,7 +754,6 @@ class Producer {
     subscribe(options?: Subscription): Subscriber;
     get subscription(): Getter<Subscription | undefined>;
     writeFrame(frame: Frame): void;
-    writeGroup(group: Producer_2): void;
 }
 
 class Producer_2 {
@@ -894,15 +894,15 @@ interface RequestOptions {
 class Reservation implements Disposable {
     [Symbol.dispose](): void;
     close(): void;
-    get grant(): Getter<number | undefined>;
     peek(): number | undefined;
+    get rate(): Getter<number | undefined>;
     update(max: number): void;
 }
 
 function resolve(base: Valid, rel: Relative): Valid;
 
 interface Route {
-    auth?: Auth_2;
+    auth?: Credential_2;
     cost: Cost;
     epoch?: Epoch_2.Valid;
     hops: Hop[];
@@ -914,7 +914,7 @@ const Route: {
         epoch?: Epoch_2.Valid;
         hops?: readonly Hop[];
         cost?: Cost;
-        auth?: Auth_2;
+        auth?: Credential_2;
     }): Route;
 };
 

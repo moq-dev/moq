@@ -148,6 +148,7 @@ class Producer {
     appendGroup(): Producer_2;
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
+    createGroup(sequence: number): Producer_2;
     demand(): Demand;
     dropGroups(start: number, end: number, error: Error): void;
     finishAt(end: Position_2): void;
@@ -159,7 +160,6 @@ class Producer {
     subscribe(options?: Subscription): Subscriber;
     get subscription(): Getter<Subscription | undefined>;
     writeFrame(frame: Frame): void;
-    writeGroup(group: Producer_2): void;
 }
 
 class Producer_2 {
