@@ -75,6 +75,8 @@ namespace {
 struct moq_source;
 
 enum class Decoded { Pending, Ready, Failed };
+// Full: the decoder refused the packet until its pending pictures are taken.
+enum class Sent { Accepted, Full, Failed };
 
 // A track owns its codec and converted output, including while it is only a candidate.
 struct VideoDecoder {
@@ -215,7 +217,7 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 static void moq_source_clear_audio_locked(struct moq_source *ctx);
 static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog);
-static bool moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame &frame_data);
+static Sent moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame &frame_data);
 static Decoded moq_source_receive_frame(VideoDecoder &decoder);
 
 // Wraps a continuation so it runs under ctx->mutex, and only while `conn` is still
@@ -656,14 +658,27 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 			moq_source_discard_candidate(conn, track);
 			return;
 		}
-		// The decoder holds reordered pictures back until it learns the stream ended.
-		if (avcodec_send_packet(track->video_decoder->codec_ctx, nullptr) == 0)
+		// The decoder holds reordered pictures back until it learns the stream ended. Like a
+		// packet, the end is refused while pictures are pending, so take them first.
+		AVCodecContext *codec = track->video_decoder->codec_ctx;
+		int ended = avcodec_send_packet(codec, nullptr);
+		if (ended == AVERROR(EAGAIN)) {
+			moq_source_output_video(ctx, conn, track);
+			ended = avcodec_send_packet(codec, nullptr);
+		}
+		if (ended == 0)
 			moq_source_output_video(ctx, conn, track);
 		moq_source_discard_candidate(conn, track);
 		return;
 	}
-	const bool decoded = moq_source_send_packet(*track->video_decoder, **result) &&
-			     moq_source_output_video(ctx, conn, track);
+	Sent sent = moq_source_send_packet(*track->video_decoder, **result);
+	bool drained = true;
+	if (sent == Sent::Full) {
+		// A drain that failed partway left pictures behind; take them so the packet fits.
+		drained = moq_source_output_video(ctx, conn, track);
+		sent = moq_source_send_packet(*track->video_decoder, **result);
+	}
+	const bool decoded = sent == Sent::Accepted && moq_source_output_video(ctx, conn, track) && drained;
 	if (!decoded && track == conn->pending_video) {
 		moq_source_discard_candidate(conn, track);
 		return;
@@ -1022,13 +1037,13 @@ static std::unique_ptr<VideoDecoder> moq_source_prepare_decoder(const moq::Video
 	return decoder;
 }
 
-// Feeds one frame to the decoder. False when the decoder refused it.
+// Feeds one frame to the decoder.
 //
 // NOTE: Caller must hold ctx->mutex when calling this function.
-static bool moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame &frame_data)
+static Sent moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame &frame_data)
 {
 	if (!decoder.codec_ctx)
-		return false;
+		return Sent::Failed;
 
 	// Skip non-keyframes until we get the first one
 	if (!decoder.got_keyframe && !frame_data.keyframe) {
@@ -1037,7 +1052,7 @@ static bool moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame 
 			LOG_INFO("Waiting for keyframe... (skipped %u frames so far)",
 				 decoder.frames_waiting_for_keyframe);
 		}
-		return true;
+		return Sent::Accepted;
 	}
 
 	// Mark that we've received a keyframe from the stream
@@ -1056,7 +1071,7 @@ static bool moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame 
 	// Create AVPacket from frame data
 	AVPacket *packet = av_packet_alloc();
 	if (!packet) {
-		return false;
+		return Sent::Failed;
 	}
 
 	packet->data = const_cast<uint8_t *>(frame_data.payload.data());
@@ -1086,9 +1101,9 @@ static bool moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame 
 				LOG_ERROR("Error sending packet to decoder: %s", errbuf);
 			}
 		}
-		return ret == AVERROR(EAGAIN);
+		return ret == AVERROR(EAGAIN) ? Sent::Full : Sent::Failed;
 	}
-	return true;
+	return Sent::Accepted;
 }
 
 // Takes the decoder's next picture into decoder.frame, stamped with that picture's own

@@ -277,6 +277,10 @@ std::atomic<long> g_av_allocs{0};
 std::atomic<bool> g_find_decoder_ok{true};
 // How many pictures the decoder holds back to reorder, as H.264 does for B-frames.
 std::atomic<size_t> g_reorder_delay{0};
+// How many decoded pictures the decoder buffers before refusing input with EAGAIN.
+std::atomic<size_t> g_decoder_capacity{SIZE_MAX};
+// The one picture, by packet pts, whose first receive fails and leaves it in the decoder.
+std::atomic<int64_t> g_unconverted_pts{-1};
 int g_decoded_width = 320;
 int g_decoded_height = 240;
 std::atomic<int> g_last_decoder_extradata{-1};
@@ -354,6 +358,8 @@ int avcodec_send_packet(AVCodecContext *ctx, const AVPacket *packet)
 		state.held.clear();
 		return 0;
 	}
+	if (state.ready.size() >= g_decoder_capacity)
+		return AVERROR(EAGAIN);
 	state.last_pts = packet->pts;
 	if (state.last_pts == 1'000'000'000)
 		g_candidate_attempts++;
@@ -377,6 +383,9 @@ int avcodec_receive_frame(AVCodecContext *ctx, AVFrame *frame)
 	}
 	if (state.ready.empty())
 		return state.draining ? AVERROR_EOF : AVERROR(EAGAIN);
+	int64_t unconverted = state.ready.front();
+	if (g_unconverted_pts.compare_exchange_strong(unconverted, -1))
+		return AVERROR_INVALIDDATA;
 
 	frame->pts = state.ready.front();
 	frame->best_effort_timestamp = frame->pts;
@@ -499,6 +508,8 @@ void reset(std::string url, std::string broadcast = "obs/test")
 	g_sws_scales = 0;
 	g_find_decoder_ok = true;
 	g_reorder_delay = 0;
+	g_decoder_capacity = SIZE_MAX;
+	g_unconverted_pts = -1;
 	g_decoded_width = 320;
 	g_decoded_height = 240;
 	g_last_decoder_extradata = -1;
@@ -751,6 +762,41 @@ int main()
 		CHECK(g_video_timestamps == expected);
 	}
 	report("reordered video keeps decoded timestamps and drains at eof");
+
+	// A picture that fails to decode stays in the decoder, which then refuses the next
+	// packet until that picture is taken. The refused packet is sent again, not skipped.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		g_decoder_capacity = 1;
+		const auto timestamp_us = [](int picture) {
+			return 2'000'000 + uint64_t(picture) * 20'000;
+		};
+		g_unconverted_pts = int64_t(timestamp_us(2));
+		Publisher publisher(relay, "obs/test", true, false);
+		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
+		CHECK(WaitFor([&] {
+			std::lock_guard lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			return conn && conn->pending_video && conn->pending_video->consumer;
+		}));
+
+		const std::vector<uint8_t> delta = {0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x00, 0x33, 0xff};
+		std::vector<uint64_t> expected;
+		for (int picture = 0; picture < 6; picture++) {
+			const auto payload = picture == 0 ? TestH264Keyframe() : delta;
+			TestOk(publisher.video->write_frame(moq::Frame{payload, timestamp_us(picture)}), "write video");
+			expected.push_back(timestamp_us(picture) * 1000);
+		}
+		// Left unfinished: nothing is held back, and a finish appends an empty end-of-group frame.
+
+		CHECK(WaitFor([] { return g_output_frames >= 6; }));
+		destroySource(source);
+		std::lock_guard<std::mutex> lock(g_video_mutex);
+		CHECK(g_video_timestamps == expected);
+	}
+	report("a refused packet is resent once the decoder drains");
 
 	// A replacement that ends before its first picture is dropped, not drained over the
 	// video that is still playing.
