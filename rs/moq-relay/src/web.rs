@@ -1333,7 +1333,7 @@ mod tests {
 		decider.await.unwrap();
 
 		let mut report = Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::ZERO);
 		let [entry] = report.sessions.as_slice() else {
 			panic!("expected one attributed entry: {:?}", report.sessions);
 		};
@@ -1436,7 +1436,7 @@ mod tests {
 		}
 		let _leases = decider.await.unwrap();
 		let mut report = Report::default();
-		state.cluster.stats.report(&mut report);
+		state.cluster.stats.report(&mut report, moq_net::time::Instant::ZERO);
 		assert_eq!(report.traffic.len(), 2);
 		assert_eq!(report.sessions.len(), 2);
 		for label in ["first", "second"] {

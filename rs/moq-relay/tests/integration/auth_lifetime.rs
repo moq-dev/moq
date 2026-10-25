@@ -537,7 +537,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	// Each label's (active sessions, sent bytes, received bytes), from one report.
 	let labels = || {
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::ZERO);
 		report
 			.sessions
 			.into_iter()

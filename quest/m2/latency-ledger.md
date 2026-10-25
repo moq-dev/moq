@@ -35,5 +35,4 @@ probes, which was the right trade to get it running. This quest promotes them.
 
 ## Related
 
-- [QoS](/quest/m2/qos/README.md) - relay-side health, the same idea from the other end
 - [Media stats](/quest/m2/stats/README.md) - the hang stats and `.echo` snapshots these stages join

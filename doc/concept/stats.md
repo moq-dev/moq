@@ -288,7 +288,8 @@ reader that misses every frame from the group's last change until it is
 unlisted loses that instance's tail, so a meter reads the node's totals.
 
 `paths` holds each broadcast path's egress (`publisher`) and ingress
-(`subscriber`) [Traffic](#traffic). A path appears from its first nonzero
+(`subscriber`) [Traffic](#traffic), without `lag` and `dropped`: the group's
+own totals, the node's totals, and the prefix tracks carry those. A path appears from its first nonzero
 counter until the relay drops its counters, even while idle: the last viewer
 can leave while the publisher still holds the path, and a returning viewer
 resumes the same counters. So a path missing from a frame had no counters, and
@@ -356,6 +357,8 @@ stale.
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
     "inflated": 0,
     "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 },
+    "lag": { "50ms": 1040000, "1s": 8576 },
+    "dropped": { "duration": 462.0, "bytes": 1500, "groups": 1 },
     "announced": 1, "announced_closed": 0,
     "broadcasts": 3, "broadcasts_closed": 1,
     "subscriptions": 6, "subscriptions_closed": 2
@@ -374,6 +377,18 @@ stale.
 | `datagrams` | Groups delivered as an unreliable datagram. A subset of `groups`. |
 | `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy, plus received compressed datagrams, which inflate on arrival. Not part of `bytes`, which counts payload as stored or sent. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with the same four fields. Disjoint from the top-level payload counters. |
+| `lag` | Egress only: how far each subscription's peer is behind, weighted by bytes. Every stats interval, the bytes a subscription's track produced since the last are counted in the bucket of its lag then. Keys are each bucket's exclusive upper edge (`50ms`, `100ms`, `250ms`, `500ms`, `1s`, `2s`, `5s`, then `inf`), and an empty bucket is left out. |
+| `dropped` | Egress only: group streams that ended before the peer acknowledged them (a skip, an expiry, or a closed session). `groups` counts those that carried a frame, `bytes` the payload the transport accepted on them, also counted in `bytes`, and `duration` each one's oldest to newest frame timestamp, in fractional milliseconds. |
+
+A subscription's lag is the newest media its track produced minus the newest
+the peer acknowledged, counting a group stream as acknowledged once its FIN
+is. It starts level with the newest media when the subscription opens, so a
+backlog it starts behind is not lag. A peer that acknowledges nothing for a
+whole interval in which the track produced reads at least that interval behind,
+and every interval after adds to it until an acknowledgement arrives, so a
+media clock that crawls or stops cannot hide a stalled viewer. A subscription
+that closes counts its last bytes at its lag when it closed. Diff two frames
+for one interval's distribution, and sum nodes bucket by bucket.
 
 The last six fields are legacy spellings of the `*_started` and `*_ended`
 counters, still written so an older consumer reads a newer relay. A reader
@@ -462,7 +477,8 @@ nodes or labels takes the largest.
 
 ### Counters
 
-Every counter is a cumulative, monotonic unsigned integer. A rate is the
+Every counter is cumulative and monotonic, and an unsigned integer except
+`dropped.duration`'s fractional milliseconds. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 

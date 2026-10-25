@@ -568,6 +568,7 @@ impl Producer {
 		}
 		// Ingress payload: count the chunk's bytes as they're written.
 		self.stats.bytes(len as u64);
+		self.group().produced(self.info.timestamp, len as u64);
 		// Fast path: a single whole-frame write keeps the caller's allocation.
 		if len == self.buf.size() && self.buf.written(Ordering::Acquire) == 0 {
 			match self.buf.try_set_bytes(chunk.into_bytes()) {

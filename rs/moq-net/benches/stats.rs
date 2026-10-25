@@ -1,12 +1,14 @@
 //! Drain benchmark for the stats registry: [`stats::Registry::report`] refilling
 //! one reused report, swept over broadcasts, tiers, labels, sessions and connections
-//! so a cost that grows faster than the entries it reports shows up as a slope.
+//! so a cost that grows faster than the entries it reports shows up as a slope, and
+//! over egress subscriptions per broadcast, since every drain also samples each
+//! subscription's lag.
 //!
 //! Run with `cargo bench -p moq-net --bench stats`.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{announce, fuzz, origin, stats, transport};
+use moq_net::{Timescale, Timestamp, announce, fuzz, origin, stats, track, transport};
 
 /// `(broadcasts, tiers)` shapes; every broadcast records under every tier.
 const SHAPES: [(usize, usize); 4] = [(100, 1), (1_000, 1), (100, 10), (1_000, 10)];
@@ -48,7 +50,7 @@ fn report(c: &mut Criterion) {
 	for (broadcasts, tiers) in SHAPES {
 		let fixture = registry(broadcasts, tiers);
 		let mut report = stats::Report::default();
-		fixture.registry.report(&mut report);
+		fixture.registry.report(&mut report, moq_net::time::Instant::ZERO);
 		assert_eq!(
 			report.traffic.len(),
 			broadcasts * tiers,
@@ -58,7 +60,7 @@ fn report(c: &mut Criterion) {
 		group.bench_with_input(
 			BenchmarkId::from_parameter(format!("{broadcasts}x{tiers}")),
 			&fixture,
-			|b, fixture| b.iter(|| fixture.registry.report(&mut report)),
+			|b, fixture| b.iter(|| fixture.registry.report(&mut report, moq_net::time::Instant::ZERO)),
 		);
 	}
 	group.finish();
@@ -122,7 +124,7 @@ fn session_report(c: &mut Criterion) {
 					})
 					.collect();
 				let mut report = stats::Report::default();
-				registry.report(&mut report);
+				registry.report(&mut report, moq_net::time::Instant::ZERO);
 				assert_eq!(report.sessions.len(), labels);
 				for row in &report.sessions {
 					assert_eq!(row.presence.sessions_started, sessions as u64);
@@ -132,7 +134,7 @@ fn session_report(c: &mut Criterion) {
 				group.throughput(Throughput::Elements((labels * sessions) as u64));
 				group.bench_function(
 					BenchmarkId::from_parameter(format!("{labels}x{sessions}/connections={connections}")),
-					|b| b.iter(|| registry.report(&mut report)),
+					|b| b.iter(|| registry.report(&mut report, moq_net::time::Instant::ZERO)),
 				);
 				std::hint::black_box((contexts, wires));
 			}
@@ -174,5 +176,75 @@ fn retag(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, report, request, write, session_report, retag);
+/// `(broadcasts, subscriptions per broadcast)` shapes for the lag sampler.
+const SUBSCRIBED: [(usize, usize); 4] = [(100, 1), (1_000, 1), (100, 10), (1_000, 10)];
+
+/// A registry with `subscriptions` tagged egress subscriptions on each of
+/// `broadcasts` live broadcasts, each track holding one frame.
+struct Subscribed {
+	registry: stats::Registry,
+	_driver: origin::Driver,
+	_publishers: Vec<(origin::Publication, track::Producer)>,
+	_subscribers: Vec<track::Subscriber>,
+}
+
+fn subscribed(broadcasts: usize, subscriptions: usize) -> Subscribed {
+	let registry = stats::Registry::new(stats::Config::new());
+	let (producer, mut driver) = origin::Producer::new(origin::Config::default());
+	let waiter = kio::Waiter::noop();
+	let timed = track::Info::default().with_timescale(Timescale::MILLI);
+	let mut publishers = Vec::new();
+	let mut subscribers = Vec::new();
+	for i in 0..broadcasts {
+		let path = format!("room/{i}");
+		let broadcast = producer.publish(path.as_str(), origin::Route::default()).unwrap();
+		let track = broadcast.create_track("video", timed.clone()).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, vec![0u8; 100]).unwrap();
+		group.finish().unwrap();
+		for _ in 0..subscriptions {
+			let session = registry.tier(stats::Tier::default()).session("root");
+			let pending = producer
+				.consume()
+				.with_stats(session)
+				.request_broadcast(path.as_str(), None);
+			driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+			let consumer = pending.now_or_never().expect("resolves once driven").unwrap();
+			let pending = consumer.track("video").unwrap().subscribe(None);
+			driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+			subscribers.push(pending.now_or_never().expect("subscribes once driven").unwrap());
+		}
+		publishers.push((broadcast, track));
+	}
+	Subscribed {
+		registry,
+		_driver: driver,
+		_publishers: publishers,
+		_subscribers: subscribers,
+	}
+}
+
+fn sample(c: &mut Criterion) {
+	let mut group = c.benchmark_group("stats/sample");
+	for (broadcasts, subscriptions) in SUBSCRIBED {
+		let fixture = subscribed(broadcasts, subscriptions);
+		let mut report = stats::Report::default();
+		fixture.registry.report(&mut report, moq_net::time::Instant::ZERO);
+		let subscribed: u64 = report.traffic.iter().map(|e| e.publisher.subscriptions_started).sum();
+		assert_eq!(
+			subscribed,
+			(broadcasts * subscriptions) as u64,
+			"every subscription is tagged"
+		);
+
+		group.bench_with_input(
+			BenchmarkId::from_parameter(format!("{broadcasts}x{subscriptions}")),
+			&fixture,
+			|b, fixture| b.iter(|| fixture.registry.report(&mut report, moq_net::time::Instant::ZERO)),
+		);
+	}
+	group.finish();
+}
+
+criterion_group!(benches, report, request, write, session_report, retag, sample);
 criterion_main!(benches);

@@ -4218,14 +4218,10 @@ impl TrackRun {
 			),
 		};
 		debug_assert!(self.opening.is_none(), "one group waits for stream credit at a time");
-		self.opening = Some(GroupServe::new(
-			self.ctx.group_context(),
-			sequence,
-			frame_start,
-			capped,
-			rank,
-			group,
-		));
+		self.opening = Some(
+			GroupServe::new(self.ctx.group_context(), sequence, frame_start, capped, rank, group)
+				.delivered(self.track.delivery()),
+		);
 	}
 }
 
@@ -4267,6 +4263,9 @@ struct GroupServe {
 	// frame's delta is absolute (against an implicit prev value of 0), every
 	// subsequent delta is signed against the previous frame.
 	prev_ts: u64,
+	// What this stream wrote, for the subscription's acknowledged frontier: an
+	// acknowledged FIN advances it, anything else counts as dropped on drop.
+	delivery: crate::stats::Delivery,
 	state: GroupState,
 	// A long cached group drains a slice per poll, so its siblings still run.
 	budget: kio::coop::Budget,
@@ -4323,9 +4322,16 @@ impl GroupServe {
 			frame_start,
 			capped,
 			prev_ts: 0,
+			delivery: Default::default(),
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
 		}
+	}
+
+	/// Report what this stream writes to its subscription's acknowledged frontier.
+	fn delivered(mut self, delivery: crate::stats::Delivery) -> Self {
+		self.delivery = delivery;
+		self
 	}
 
 	/// Count opened streams for the scheduling tests.
@@ -4485,7 +4491,8 @@ impl GroupServe {
 							}
 							if let Some(pending) = chunk {
 								match writer.poll_write(&mut cx, pending) {
-									Poll::Ready(Ok(_)) => {
+									Poll::Ready(Ok(written)) => {
+										self.delivery.wrote(written);
 										if !bytes::Buf::has_remaining(pending) {
 											*chunk = None;
 										}
@@ -4539,6 +4546,7 @@ impl GroupServe {
 								if let Err(err) = buffered {
 									break 'serve Err(err);
 								}
+								self.delivery.frame(batched.frame.timestamp);
 								let payload = std::mem::take(&mut batched.frame.payload);
 								if !payload.is_empty() {
 									*chunk = Some(payload);
@@ -4593,6 +4601,7 @@ impl GroupServe {
 										if let Err(err) = buffered {
 											break 'serve Err(err);
 										}
+										self.delivery.frame(next.timestamp);
 										*frame = Some(next);
 									}
 									Poll::Ready(Ok(None)) => match records.take() {
@@ -4651,6 +4660,7 @@ impl GroupServe {
 					};
 					self.state = GroupState::Done;
 					return Poll::Ready(res.map(|()| {
+						std::mem::take(&mut self.delivery).acked();
 						tracing::debug!(sequence = self.sequence, "finished group");
 					}));
 				}
@@ -6947,6 +6957,98 @@ mod serve_group_test {
 		drop(open);
 		run.await.unwrap();
 		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 2, 3, 0, 0, 0x34, 1, 1, 2]);
+	}
+
+	/// Group streams report to their subscription's frontier: an acknowledged FIN moves
+	/// it, and a stream abandoned mid-frame drops only what the transport took.
+	#[moq_clock::test]
+	async fn group_streams_report_to_the_frontier() {
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let stats = registry.tier(crate::stats::Tier::default()).session("root");
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("test", crate::track::Info::timed()).unwrap();
+		let sub = broadcast
+			.consume()
+			.with_stats(stats.egress("demo"))
+			.track("test")
+			.unwrap()
+			.subscribe(None)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let subscription = |session: SinkSession| Subscription {
+			session: crate::driver::Transport::new(session),
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			publisher: 0,
+			group: None,
+			steer: kio::Producer::new(Steer::default()).consume(),
+			steer_seen: Steer::default(),
+			version: Version::Lite06,
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
+			runtime: crate::time::sim(),
+			outcomes: Default::default(),
+			ietf: false,
+		};
+		let serve = |mut ctx: Subscription, sequence: u64, group: group::Consumer| {
+			let handle = ctx.priority.insert(Priority::new(0, 0, sequence));
+			let mut serve = GroupServe::new(
+				ctx.group_context(),
+				sequence,
+				0,
+				false,
+				super::Rank::Queue(handle),
+				group,
+			)
+			.delivered(sub.delivery());
+			async move {
+				kio::wait(|waiter| serve.poll_open(&mut ctx.session, ctx.group.as_ref(), waiter))
+					.await
+					.unwrap();
+				kio::wait(move |waiter| serve.poll_serve(waiter)).await
+			}
+		};
+		let ms = |ms| Timestamp::from_millis(ms).unwrap();
+
+		// Acknowledged: the frontier moves to its newest frame, 500ms.
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(ms(0), b"a".as_slice()).unwrap();
+		group.write_frame(ms(500), b"b".as_slice()).unwrap();
+		group.finish().unwrap();
+		serve(subscription(SinkSession::new(Log::default())), 0, group.consume())
+			.await
+			.unwrap();
+
+		// The transport takes the headers and part of the payload, then holds the rest
+		// until the stream is abandoned.
+		let mut group = track.create_group(group::Info { sequence: 1 }).unwrap();
+		group.write_frame(ms(1000), vec![0u8; 1000]).unwrap();
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_uni_prefix(100, gate.consume());
+		let log = session.log.clone();
+		let mut abandoned = Box::pin(serve(subscription(session), 1, group.consume()));
+		assert!(futures::poll!(abandoned.as_mut()).is_pending());
+		drop(abandoned);
+		let payload = log
+			.trail()
+			.into_iter()
+			.rev()
+			.find_map(|(_, sent)| match sent {
+				Sent::Write(bytes) => Some(bytes),
+				_ => None,
+			})
+			.expect("a payload write");
+		assert!((1..1000).contains(&payload.len()), "{}", payload.len());
+
+		let mut report = crate::stats::Report::default();
+		registry.report(&mut report, crate::time::Instant::ZERO);
+		let row = report.traffic[0].publisher;
+		assert_eq!(row.dropped.groups, 1);
+		assert_eq!(row.dropped.bytes, payload.len() as u64);
+		assert_eq!(row.dropped.duration, Duration::ZERO);
+		// 1000ms produced against a 500ms frontier: the [500ms, 1s) bucket.
+		assert_eq!(row.lag.buckets(), &[0, 0, 0, 0, 1002, 0, 0, 0]);
 	}
 }
 

@@ -1459,8 +1459,8 @@ mod tests {
 
 		bump_publisher_bytes(&registry, "room/1", &tier, 5);
 		let mut report = crate::stats::Report::default();
-		registry.report(&mut report);
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::ZERO);
+		registry.report(&mut report, crate::time::Instant::ZERO);
 		let entry = report
 			.traffic
 			.iter()

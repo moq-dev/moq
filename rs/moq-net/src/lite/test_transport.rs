@@ -597,6 +597,8 @@ pub struct SinkSession {
 	bi_open_park: kio::Park,
 	/// Set by [`Self::gated_uni`] to hold unidirectional stream writes.
 	uni_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::gated_uni_prefix`].
+	uni_prefix: usize,
 	/// Set by [`Self::gated_open_uni`] to withhold unidirectional stream credit.
 	uni_open_gate: Option<kio::Consumer<bool>>,
 	uni_open_park: kio::Park,
@@ -707,6 +709,15 @@ impl SinkSession {
 		}
 	}
 
+	/// Write this prefix on each unidirectional stream before holding its remaining
+	/// bytes, so the write that crosses it is accepted only in part.
+	pub fn gated_uni_prefix(prefix: usize, gate: kio::Consumer<bool>) -> Self {
+		Self {
+			uni_prefix: prefix,
+			..Self::gated_uni(gate)
+		}
+	}
+
 	/// Hold unidirectional stream opens until `gate` grants stream credit.
 	pub fn gated_open_uni(gate: kio::Consumer<bool>) -> Self {
 		Self::default().with_open_uni_gate(gate)
@@ -792,6 +803,7 @@ impl poll::Session for SinkSession {
 			Some(gate) => SinkSend::gated(self.log.clone(), gate.clone()),
 			None => SinkSend::new(self.log.clone()),
 		};
+		send.prefix = self.uni_prefix;
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok(send.opened(options)))
 	}

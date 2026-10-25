@@ -138,7 +138,7 @@ impl Relay {
 			.collect();
 
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::ZERO);
 		assert_eq!(report.traffic.len(), paths * tiers, "one held entry per path and tier");
 
 		let depth = if groups.is_some() { 1 } else { 0 };

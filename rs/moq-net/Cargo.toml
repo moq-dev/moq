@@ -40,6 +40,7 @@ num_enum = { workspace = true }
 rand = { workspace = true }
 rangemap = { workspace = true }
 serde = { workspace = true }
+serde_with = { workspace = true }
 slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

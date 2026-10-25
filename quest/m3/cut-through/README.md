@@ -75,5 +75,4 @@ stats field, which its quest documents inline.
 
 ## Related
 
-- [QoS](/quest/m2/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions
 - [Frame slot accounting](https://github.com/moq-dev/moq/pull/5239) - landed: the cache charges frame slot growth, which covers the in-flight frames a cut-through build would hold

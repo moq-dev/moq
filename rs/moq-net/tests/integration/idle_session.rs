@@ -189,7 +189,7 @@ async fn wire_collection_never_arms_the_idle_sampler() {
 			pair.server_transport.wire().set_sent_bytes(tick);
 			pair.server_transport.wire().set_received_bytes(tick * 2);
 			let mut report = moq_net::stats::Report::default();
-			registry.report(&mut report);
+			registry.report(&mut report, moq_net::time::Instant::ZERO);
 			assert_eq!(
 				(report.sessions[0].presence.wire_tx, report.sessions[0].presence.wire_rx),
 				(tick, tick * 2)

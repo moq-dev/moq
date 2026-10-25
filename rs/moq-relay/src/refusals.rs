@@ -88,7 +88,7 @@ mod tests {
 			}
 		}
 		let mut report = moq_net::stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::ZERO);
 		assert_eq!(report.sessions.len(), 4);
 		for entry in report.sessions {
 			assert!(["", "tenant"].contains(&entry.label.as_str()));

@@ -89,9 +89,8 @@ kind.
   removes `.z` siblings; follow the delta policy it retains on the single track. An unsubscribed stats track never leaves the process.
   Gauges are carried but never summed.
 - **On main.** Every change is additive: optional sections on
-  `#[non_exhaustive]` catalog types, and new types. The line left the
-  [QoS](/quest/m2/qos/README.md) line, which keeps the relay's moq-stats
-  changes.
+  `#[non_exhaustive]` catalog types, and new types. The relay's moq-stats
+  changes stay out of this line.
 - **No `@moq/stats` package.** Media types live in `@moq/hang`, and the
   demo dashboard's relay-stats reader stays where it is.
 - Docs stay inline: `doc/concept/hang.md` documents both catalog sections,
@@ -120,8 +119,6 @@ connection view and the dashboard flow.
 
 ## Related
 
-- [QoS](/quest/m2/qos/README.md) - the relay's delivery counters; the
-  combined per-broadcast verdict reading both lives downstream
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   adapts its bitrate to what its viewers report
 - [Latency ledger](/quest/m2/latency-ledger.md) - adds the viewer's latency

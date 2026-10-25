@@ -172,7 +172,7 @@ async fn gateway_admission_refuses_once_in_the_shared_stats_registry() {
 	assert_eq!(values[0].1.sessions_refused.refused, 1);
 	assert_eq!(values[0].1.sessions_started, 0);
 	let mut report = moq_net::stats::Report::default();
-	registry.report(&mut report);
+	registry.report(&mut report, moq_net::time::Instant::ZERO);
 	assert_eq!(
 		report.sessions[0].label.as_str(),
 		"",
@@ -210,7 +210,7 @@ async fn embedded_expired_refusals_keep_verified_root_and_tier() {
 		assert_eq!(actual, expected);
 	}
 	let mut report = moq_net::stats::Report::default();
-	registry.report(&mut report);
+	registry.report(&mut report, moq_net::time::Instant::ZERO);
 	assert_eq!(report.sessions.len(), 2);
 	for entry in report.sessions {
 		assert!(["", "edge"].contains(&entry.tier.as_str()));

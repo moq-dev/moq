@@ -38,7 +38,3 @@ an RTT counts nothing.
 Public API: an additive trait accessor. Wire: a new `moq-stats` field,
 additive on `main` since `Traffic` is `#[non_exhaustive]` and readers default
 missing fields.
-
-## Related
-
-- [QoS](/quest/m2/qos/README.md) - the per-broadcast ingress conventions this follows

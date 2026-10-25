@@ -1246,7 +1246,7 @@ mod tests {
 			check();
 			drop(guard);
 			drop(session);
-			registry.report(&mut Default::default());
+			registry.report(&mut Default::default(), moq_net::time::Instant::ZERO);
 			check();
 		}
 	}
@@ -1273,7 +1273,7 @@ mod tests {
 		drop(broadcast);
 		drop(producer);
 		let mut report = moq_net::stats::Report::default();
-		stats.report(&mut report);
+		stats.report(&mut report, moq_net::time::Instant::ZERO);
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(

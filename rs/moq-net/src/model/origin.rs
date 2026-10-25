@@ -7879,7 +7879,7 @@ mod tests {
 		project.request_broadcast(".svc/foo", None).await.expect("resolves");
 
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::ZERO);
 		let paths: Vec<_> = report
 			.traffic
 			.iter()

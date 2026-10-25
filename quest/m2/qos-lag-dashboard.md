@@ -9,11 +9,9 @@ and per node like the existing counters.
 
 ## Plan
 
-- Read both from the stats totals and prefix tracks
-  (`<path>/prefix.json`) rather than the group tracks' per-path rows they sit on today (decided in the
-  2026-10-06 audit; the rows stay for existing readers, 2026-10-12); [viewer lag histogram](/quest/m2/qos/lag-histogram.md)
-  lands them on the egress side of its per-group totals and prefix tracks
-  (decided 2026-10-08). `lag` is a cumulative byte count per bucket keyed
+- Read both from the egress side of the stats totals, a group's totals, and
+  the prefix tracks (`<path>/prefix.json`); a group's per-path `paths` rows
+  leave them out (decided in the 2026-10-06 audit). `lag` is a cumulative byte count per bucket keyed
   by its upper edge (`"50ms"` to `"5s"`, then `"inf"`, empty buckets
   omitted); `dropped` is `{ duration, bytes, groups }` with the duration in
   fractional milliseconds. `doc/concept/stats.md` documents them. Diff two
@@ -30,7 +28,3 @@ and per node like the existing counters.
   package is planned.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Viewer lag histogram](/quest/m2/qos/lag-histogram.md) - the `lag` histogram and `dropped` counters the dashboard reads

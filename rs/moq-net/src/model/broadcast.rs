@@ -898,7 +898,7 @@ impl Clone for Consumer {
 impl Consumer {
 	/// Attach an egress stats scope, inherited by the tracks subscribed through this
 	/// handle. Set by a tagged `origin::Consumer` at the broadcast handoff.
-	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
+	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
 	}

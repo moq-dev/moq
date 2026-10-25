@@ -402,7 +402,7 @@ async fn expired_verified_tokens_count_under_the_token_root_and_auth_tier() {
 		assert_eq!(relay.refused("expired").await, 1);
 		assert_eq!(relay.refused("refused").await, 0);
 		let mut report = moq_net::stats::Report::default();
-		relay.stats.report(&mut report);
+		relay.stats.report(&mut report, moq_net::time::Instant::ZERO);
 		assert_eq!(report.sessions.len(), 1);
 		let entry = &report.sessions[0];
 		assert_eq!(entry.tier.as_str(), tier.unwrap_or(""));

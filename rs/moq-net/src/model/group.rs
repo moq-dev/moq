@@ -1285,7 +1285,14 @@ impl Producer {
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
 		self.stats.bytes(size);
+		self.produced(timestamp, size);
 		Ok(())
+	}
+
+	/// Record `bytes` of a frame at `timestamp` toward the lag sampler, whether or not
+	/// this group is tagged; see [`crate::stats::Production`].
+	pub(super) fn produced(&self, timestamp: Option<Timestamp>, bytes: u64) {
+		self.handle.cache.production().record(timestamp, bytes);
 	}
 
 	/// Write a whole batch of frames at once, draining `frames`.
@@ -1362,6 +1369,7 @@ impl Producer {
 			now = state.charge.add(size + slots);
 			state.stamp(frame.timestamp);
 			latest = frame.timestamp;
+			self.handle.cache.production().record(frame.timestamp, size);
 			state.frames.push_back(frame);
 		}
 		state.next_index = next_index;
@@ -1527,8 +1535,10 @@ impl Producer {
 		}
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
-		// producer writes them.
+		// producer writes them. Production too: the header places the frame in time, and
+		// its payload weighs only as it arrives.
 		self.stats.frames(1);
+		self.produced(timestamp, 0);
 
 		Ok(frame::Info {
 			size: frame.size,

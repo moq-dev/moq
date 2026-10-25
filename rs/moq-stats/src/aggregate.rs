@@ -329,6 +329,15 @@ impl Mergeable for Traffic {
 			|| self.stale.frames < prev.stale.frames
 			|| self.stale.groups < prev.stale.groups
 			|| self.stale.datagrams < prev.stale.datagrams
+			|| self
+				.lag
+				.buckets()
+				.iter()
+				.zip(prev.lag.buckets())
+				.any(|(now, prev)| now < prev)
+			|| self.dropped.duration < prev.dropped.duration
+			|| self.dropped.bytes < prev.dropped.bytes
+			|| self.dropped.groups < prev.dropped.groups
 	}
 }
 
@@ -2276,6 +2285,32 @@ mod tests {
 			true,
 		);
 		(merged, (path, None))
+	}
+
+	/// Nodes' lag histograms and dropped media merge bucket by bucket, and each is a
+	/// counter a reset shows in.
+	#[test]
+	fn lag_and_drops_merge_and_regress_like_every_counter() {
+		let traffic = |json: &str| serde_json::from_str::<Traffic>(json).expect("traffic");
+		let node = traffic(r#"{"lag":{"50ms":5,"inf":2},"dropped":{"duration":2,"bytes":3,"groups":1}}"#);
+		let mut merged = node;
+		Traffic::merge(
+			&mut merged,
+			traffic(r#"{"lag":{"1s":4},"dropped":{"duration":1.5,"bytes":1,"groups":1}}"#),
+		);
+		assert_eq!(merged.lag.buckets(), &[5, 0, 0, 0, 4, 0, 0, 2]);
+		assert_eq!(merged.dropped.duration, Duration::from_micros(3500));
+		assert_eq!((merged.dropped.bytes, merged.dropped.groups), (4, 2));
+
+		assert!(!node.regressed(&node));
+		for lower in [
+			r#"{"lag":{"50ms":4,"inf":2},"dropped":{"duration":2,"bytes":3,"groups":1}}"#,
+			r#"{"lag":{"50ms":5,"inf":2},"dropped":{"duration":1,"bytes":3,"groups":1}}"#,
+			r#"{"lag":{"50ms":5,"inf":2},"dropped":{"duration":2,"bytes":2,"groups":1}}"#,
+			r#"{"lag":{"50ms":5,"inf":2},"dropped":{"duration":2,"bytes":3,"groups":0}}"#,
+		] {
+			assert!(traffic(lower).regressed(&node), "{lower}");
+		}
 	}
 
 	#[test]

@@ -26,7 +26,7 @@ pending frame and retire everything at or below the acknowledged offset.
 Each acknowledged frame moves the subscription's frontier to that frame's
 timestamp, so the interval samples from the lag histogram read a frontier that
 is at most one frame stale instead of one group. When a stream
-is reset before a frame is acknowledged, `dropped_duration` now grows by the
+is reset before a frame is acknowledged, `dropped.duration` now grows by the
 span from the newest acknowledged frame to the newest written one, which is
 the exact media the viewer lost.
 
@@ -42,18 +42,15 @@ Backends that return unsupported from `poll_acked` keep the group-granularity
 sampling from the lag histogram, so the histogram never disappears over qmux or
 a browser transport; document which resolution a node offers.
 
-Deferred to m2 with the parent QoS sampler. Group-granularity lag lands
-first after the next release; frame-granularity sampling then adds the ACK
-hook without making either resolution a release gate.
-
-Decided 2026-10-08: the group-granularity sampler is the
-[viewer lag histogram](/quest/m2/qos/lag-histogram.md), not yet on main (its
-code is on `wip/4133-lag-histogram`), so that quest is Required.
+The group-granularity sampler is `Registry::report` in
+`rs/moq-net/src/stats.rs`, reading the frontier that `stats::Delivery`
+advances on each acknowledged group FIN. Frame-granularity sampling adds the
+ACK hook without making either resolution a release gate.
 
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity
 tracking of the same run; a reset mid-group attributing only the
-unacknowledged span to `dropped_duration`; delivery delay staying inside one bucket of the true RTT plus the peer's
+unacknowledged span to `dropped.duration`; delivery delay staying inside one bucket of the true RTT plus the peer's
 `max_ack_delay`; and fallback to group-granularity frontier tracking when the hook is
 unsupported.
 
@@ -61,5 +58,3 @@ unsupported.
 
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   hook this samples through
-- [Egress lag histogram](/quest/m2/qos/lag-histogram.md) - the
-  group-granularity sampler and starvation histogram this refines

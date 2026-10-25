@@ -246,8 +246,9 @@ impl Consumer {
 		}
 	}
 
-	/// Subscribe to the logical track with the reader's own preferences.
-	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
+	/// Subscribe to the logical track with the reader's own preferences, weighing what
+	/// each copy may still deliver against `frontier`.
+	pub(super) fn subscribe(&self, subscription: track::Preferences, frontier: stats::Frontier) -> Subscriber {
 		let mirrored = subscription.read().clone();
 		let window = Window::new(&mirrored.ranges, None, &Unheld).expect("an unheld hop refuses nothing");
 		// An absolute floor holds from the start, as on a plain cursor; a relative one
@@ -271,6 +272,7 @@ impl Consumer {
 				peeked: None,
 				declared: None,
 				refused: false,
+				frontier,
 			})
 		});
 		// Subscribed to the serving copy at once, so groups it has now are the reader's
@@ -393,6 +395,12 @@ struct Copy {
 	/// Held by every group handed out from this copy, so a replaced copy stays subscribed
 	/// while one is still read from it.
 	lease: Arc<()>,
+	/// What the track instance the copy subscribed to produces.
+	production: Arc<stats::Production>,
+	/// Weighs [`Self::production`] against the reader's frontier while the copy may still
+	/// deliver a new group: from its subscription until [`Self::until`] bounds it. Bound
+	/// to the copy, so one let go stops weighing however it leaves.
+	watch: stats::Watch,
 }
 
 // Boxed: a subscriber is twice a pending answer, and a copy holds one for its whole life.
@@ -834,6 +842,8 @@ struct Reader {
 	/// Runs the serving copy gave up that the reader has yet to report; see
 	/// [`Reader::poll_drop`].
 	drops: RangeMap<u64, StreamError>,
+	/// The subscription's acknowledged frontier, which each copy's [`Copy::watch`] feeds.
+	frontier: stats::Frontier,
 }
 
 impl Reader {
@@ -980,6 +990,7 @@ impl Reader {
 			copy.generation = generation;
 			copy.replaced = false;
 			copy.until = None;
+			copy.watch = self.frontier.watch(&copy.production);
 			copy.since = None;
 			copy.done = None;
 			copy.datagrams_done = None;
@@ -1001,9 +1012,12 @@ impl Reader {
 		// The wire request carries the floor from the first message: some sessions read
 		// the demand only once.
 		let wire = self.mirrored.clamped(floor, None, &resolved);
+		let (sub, production) = track.subscribe_produced(wire);
 		self.copies.push(Copy {
 			generation,
-			sub: Sub::Pending(track.subscribe(wire)),
+			sub: Sub::Pending(sub),
+			watch: self.frontier.watch(&production),
+			production,
 			track,
 			floor,
 			from: self.mirrored.ranges.clone(),
@@ -1147,6 +1161,7 @@ impl Reader {
 		for copy in &mut self.copies {
 			if copy.replaced && copy.until.is_none() {
 				copy.until = Some(until);
+				copy.watch = stats::Watch::default();
 				copy.since = Some(copy.track.now());
 				copy.update(mirrored);
 			}
@@ -1167,6 +1182,10 @@ impl Reader {
 		for copy in &mut self.copies[..index] {
 			if copy.replaced && copy.until.is_none() {
 				copy.until = Some(bound);
+				// What the copy produces past the bound never reaches this reader. Frames
+				// still written into a group it already handed out go unweighed too: an
+				// approximation that keeps per-group accounting off the frame path.
+				copy.watch = stats::Watch::default();
 				copy.since = Some(copy.track.now());
 				copy.update(&self.mirrored);
 			}
@@ -4076,7 +4095,7 @@ mod test {
 		routes.serve(a.consume());
 		let sub = routes
 			.consume()
-			.subscribe(kio::Producer::new(Subscription::default()).into());
+			.subscribe(kio::Producer::new(Subscription::default()).into(), Default::default());
 		let mut reader = sub.reader.lock().unwrap();
 		let copy = &mut reader.copies[0];
 		copy.floor = Some(0);
@@ -4237,7 +4256,9 @@ mod test {
 		let subscription = Subscription::default()
 			.with_max_delay(Duration::from_secs(30))
 			.with_ranges([range]);
-		let sub = routes.consume().subscribe(kio::Producer::new(subscription).into());
+		let sub = routes
+			.consume()
+			.subscribe(kio::Producer::new(subscription).into(), Default::default());
 		let mut reader = sub.reader.lock().unwrap();
 		let (groups, mirrored) = (reader.groups, reader.mirrored.clone());
 		let old = &mut reader.copies[0];
@@ -4268,7 +4289,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let subscription = kio::Producer::new(Subscription::default());
-			let sub = routes.consume().subscribe(subscription.into());
+			let sub = routes.consume().subscribe(subscription.into(), Default::default());
 			let mut reader = sub.reader.lock().unwrap();
 			let old = &mut reader.copies[0];
 			old.until = Some(last);
@@ -5982,5 +6003,169 @@ mod test {
 				Event::Cancel,
 			],
 		);
+	}
+
+	/// A stats-tagged reader of `logical`, as a session serving a viewer holds one.
+	fn tagged(logical: &track::Producer, session: &stats::Session) -> track::Subscriber {
+		logical
+			.consume()
+			.with_stats(session.egress("demo"))
+			.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)))
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+	}
+
+	/// One group of one frame at `sequence`, half a second of media apart.
+	fn publish(track: &track::Producer, sequence: u64, payload: &[u8]) {
+		let mut group = track.create_group(group::Info { sequence }).unwrap();
+		group.write_frame(ts(sequence * 500), payload).unwrap();
+		group.finish().unwrap();
+	}
+
+	/// The egress lag one report reads. Every report samples at the same instant, so
+	/// only weight and media lag move.
+	fn lag(registry: &stats::Registry) -> stats::Histogram {
+		let mut report = stats::Report::default();
+		registry.report(&mut report, crate::time::Instant::ZERO);
+		report.traffic[0].publisher.lag
+	}
+
+	/// A route-fed track's lag weighs what its copies may still deliver: a replaced copy
+	/// until the new route hands out its first group, then only the new route.
+	#[test]
+	fn lag_weighs_the_serving_copy() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry.tier(stats::Tier::default()).session("root");
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = tagged(&logical, &session);
+		drain(&mut sub, false);
+		publish(&a, 0, b"a0");
+		assert_eq!(lag(&registry).total(), 2);
+
+		// B has nothing yet, so A may still deliver: its group counts, 500ms behind the
+		// frame the subscription started from.
+		let b = copy();
+		routes.serve(b.consume());
+		publish(&a, 1, b"a1");
+		drain(&mut sub, false);
+		let pending = lag(&registry);
+		assert_eq!(pending.total(), 4);
+		assert_eq!(pending.buckets()[4], 2);
+
+		// B's first group bounds A, whose later groups never reach this reader.
+		publish(&b, 2, b"b2");
+		drain(&mut sub, false);
+		assert_eq!(lag(&registry).total(), 6);
+		publish(&a, 3, b"a3");
+		assert_eq!(lag(&registry).total(), 6);
+	}
+
+	/// A copy served across a no-route gap stops counting once the new route delivers,
+	/// even while a group the reader holds keeps it alive.
+	#[test]
+	fn lag_stops_weighing_a_copy_replaced_across_a_gap() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry.tier(stats::Tier::default()).session("root");
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = tagged(&logical, &session);
+		drain(&mut sub, false);
+		publish(&a, 0, b"aa");
+		let held = recv(&mut sub);
+
+		routes.park();
+		drain(&mut sub, false);
+		let b = copy();
+		routes.serve(b.consume());
+		drain(&mut sub, false);
+		publish(&b, 1, b"bbbb");
+		drain(&mut sub, false);
+		assert_eq!(lag(&registry).total(), 6);
+
+		publish(&a, 2, b"cccccc");
+		assert_eq!(lag(&registry).total(), 6);
+		drop(held);
+	}
+
+	/// A replaced copy bounded at the serving copy's clean end stops counting, even while
+	/// it may still deliver a group below that end.
+	#[test]
+	fn lag_stops_weighing_a_copy_bounded_at_a_clean_end() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry.tier(stats::Tier::default()).session("root");
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = tagged(&logical, &session);
+		drain(&mut sub, false);
+		publish(&a, 0, b"a");
+		publish(&a, 2, b"a");
+		assert_eq!(drain(&mut sub, false), [0, 2]);
+
+		// The new route replays only the group already handed out, and ends there.
+		let b = copy();
+		publish(&b, 2, b"b");
+		b.finish().unwrap();
+		routes.serve(b.consume());
+		assert!(drain(&mut sub, false).is_empty(), "group 1 may still land");
+		assert_eq!(copies(&routes), 2);
+		assert_eq!(lag(&registry).total(), 2);
+
+		publish(&a, 3, b"cccccc");
+		assert_eq!(lag(&registry).total(), 2);
+	}
+
+	/// A replaced copy let go before anything bounds it stops counting as it goes.
+	#[test]
+	fn lag_stops_weighing_a_copy_let_go_unbounded() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry.tier(stats::Tier::default()).session("root");
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = tagged(&logical, &session);
+		publish(&a, 0, b"aa");
+		assert_eq!(lag(&registry).total(), 2);
+
+		// A reader that only reads datagrams keeps no replaced copy.
+		routes.serve(copy().consume());
+		assert!(sub.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
+		publish(&a, 1, b"bbbb");
+		assert_eq!(lag(&registry).total(), 2);
+	}
+
+	/// A route that comes back after another delivered is weighed again.
+	#[test]
+	fn lag_weighs_a_route_that_comes_back() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry.tier(stats::Tier::default()).session("root");
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = tagged(&logical, &session);
+		drain(&mut sub, false);
+		publish(&a, 0, b"aa");
+		let held = recv(&mut sub);
+
+		let b = copy();
+		routes.serve(b.consume());
+		publish(&b, 1, b"bb");
+		drain(&mut sub, false);
+		assert_eq!(lag(&registry).total(), 4);
+
+		routes.serve(a.consume());
+		drain(&mut sub, false);
+		publish(&a, 2, b"cccc");
+		assert_eq!(lag(&registry).total(), 8);
+		drop(held);
 	}
 }

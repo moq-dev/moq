@@ -3347,7 +3347,8 @@ impl Producer {
 			delivered: Delivered::default(),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
-			_stats_sub: stats::Subscription::default(),
+			stats_sub: stats::Subscription::default(),
+			_watch: stats::Watch::default(),
 			largest: Reported::default(),
 		}
 	}
@@ -4184,16 +4185,27 @@ impl Consumer {
 	/// that the budget convicts, so the default budget of zero delivers only the latest
 	/// group and a larger one reaches back over what it can still use.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
+		self.subscribe_produced(subscription).0
+	}
+
+	/// [`Self::subscribe`], with what the subscribed track instance produces, which a
+	/// route copy weighs against its reader's lag frontier.
+	pub(super) fn subscribe_produced(
+		&self,
+		subscription: impl Into<Option<Subscription>>,
+	) -> (kio::Pending<Subscribing>, Arc<stats::Production>) {
 		let (state, subscription) = self.resolve(Some(&subscription.into().unwrap_or_default()));
 		let subscription = subscription.expect("a subscription was requested");
+		let production = state.read().cache.production().clone();
 
-		kio::Pending::new(Subscribing {
+		let pending = kio::Pending::new(Subscribing {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
 			state,
 			subscription,
 			stats: self.stats.clone(),
-		})
+		});
+		(pending, production)
 	}
 
 	/// Poll for the first group the live feed serves, once the serving session has
@@ -4702,13 +4714,24 @@ impl Subscribing {
 			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 		refuse_untimed(&info, &self.subscription.read())?;
 
+		let stats_sub = self.stats.subscribe();
 		let resume = self.state.read().routes.clone();
-		let inner = match resume {
-			Some(resume) => Inner::Resume(
-				Box::new(resume.subscribe(self.subscription.clone())),
-				self.state.clone(),
+		// A route-fed track weighs whichever copy serves it; a plain one, its own.
+		let (inner, watch) = match resume {
+			Some(resume) => (
+				Inner::Resume(
+					Box::new(resume.subscribe(self.subscription.clone(), stats_sub.frontier().clone())),
+					self.state.clone(),
+				),
+				stats::Watch::default(),
 			),
-			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
+			None => {
+				let production = self.state.read().cache.production().clone();
+				(
+					Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
+					stats_sub.frontier().watch(&production),
+				)
+			}
 		};
 		Poll::Ready(Ok(Subscriber {
 			name: self.name.clone(),
@@ -4717,7 +4740,8 @@ impl Subscribing {
 			inner,
 			delivered: Delivered::default(),
 			stats: self.stats.clone(),
-			_stats_sub: self.stats.subscribe(),
+			stats_sub,
+			_watch: watch,
 			largest: Reported::default(),
 		}))
 	}
@@ -4990,8 +5014,12 @@ pub struct Subscriber {
 	// (no-op) for an untagged track.
 	stats: stats::Scope,
 	// The subscription guard: bumps `subscriptions` (and the egress viewer refcount)
-	// while held, closing them on drop. Empty (no-op) for an untagged track.
-	_stats_sub: stats::Subscription,
+	// while held, closing them on drop, and holds the egress lag frontier. Empty
+	// (no-op) for an untagged track.
+	stats_sub: stats::Subscription,
+	// Weighs a plain track's production against the frontier; a route-fed track's
+	// copies hold their own. Empty (no-op) for an untagged track.
+	_watch: stats::Watch,
 	largest: Reported,
 }
 
@@ -6429,6 +6457,12 @@ impl Subscriber {
 			Inner::Plain(cursor) => cursor.take_stale(),
 			Inner::Resume(resume, _) => resume.take_stale(),
 		}
+	}
+
+	/// Track one group stream written toward the peer against this subscription's
+	/// acknowledged frontier. A no-op for an untagged subscriber.
+	pub(crate) fn delivery(&self) -> stats::Delivery {
+		self.stats_sub.frontier().delivery()
 	}
 
 	/// Create a handle for updating this subscriber's delivery preferences.

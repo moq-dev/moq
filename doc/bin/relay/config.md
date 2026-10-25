@@ -367,7 +367,11 @@ its linger restarts its counters under a new epoch without an announce. The
 node's totals count everything since its epoch began, so billing reads those;
 a group's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
-per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
+per-session limits, past which one is closed with `TOO_MANY_REQUESTS`. The
+totals and prefix tracks also carry how far viewers are behind
+([`lag`](/concept/stats#traffic)) and what was dropped before they acknowledged
+it, sampled once per `interval`: a viewer that acknowledges nothing for a whole
+interval reads at least that far behind.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them
 with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 

@@ -4844,7 +4844,8 @@ impl TrackServe {
 							slice,
 						)
 						.counted(self.opened.clone())
-						.terminal(self.terminal.clone()),
+						.terminal(self.terminal.clone())
+						.delivered(self.track.delivery()),
 					);
 				}
 				Poll::Ready(Ok(None)) => {
@@ -5241,6 +5242,9 @@ struct GroupServe {
 	ended: bool,
 	terminal: Option<Arc<Terminal>>,
 	marked: bool,
+	/// What this stream wrote, for the subscription's acknowledged frontier: an
+	/// acknowledged FIN advances it, anything else counts as dropped on drop.
+	delivery: crate::stats::Delivery,
 	state: GroupState,
 	/// A long cached group drains a slice per poll, so its siblings still run.
 	budget: kio::coop::Budget,
@@ -5313,6 +5317,7 @@ impl GroupServe {
 			ended: false,
 			terminal: None,
 			marked: false,
+			delivery: Default::default(),
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
 		}
@@ -5320,6 +5325,12 @@ impl GroupServe {
 
 	fn terminal(mut self, terminal: Arc<Terminal>) -> Self {
 		self.terminal = Some(terminal);
+		self
+	}
+
+	/// Report what this stream writes to its subscription's acknowledged frontier.
+	fn delivered(mut self, delivery: crate::stats::Delivery) -> Self {
+		self.delivery = delivery;
 		self
 	}
 
@@ -5414,7 +5425,8 @@ impl GroupServe {
 							}
 							if let Some(pending) = chunk {
 								match writer.poll_write(&mut cx, pending) {
-									Poll::Ready(Ok(_)) => {
+									Poll::Ready(Ok(written)) => {
+										self.delivery.wrote(written);
 										if !bytes::Buf::has_remaining(pending) {
 											*chunk = None;
 										}
@@ -5476,6 +5488,7 @@ impl GroupServe {
 									},
 								)?;
 								self.prior_object = Some(id);
+								self.delivery.frame(batched.timestamp);
 								let payload = std::mem::take(&mut batched.frame.payload);
 								if !payload.is_empty() {
 									*chunk = Some(payload);
@@ -5524,6 +5537,7 @@ impl GroupServe {
 											},
 										)?;
 										self.prior_object = Some(id);
+										self.delivery.frame(next.timestamp);
 										// An empty object has no payload to stream.
 										if next.size > 0 {
 											*frame = Some(next);
@@ -5626,6 +5640,7 @@ impl GroupServe {
 						terminal.sent.store(true, Ordering::Relaxed);
 					}
 					return Poll::Ready(res.map(|()| {
+						std::mem::take(&mut self.delivery).acked();
 						tracing::debug!(sequence, "finished group");
 					}));
 				}
@@ -6759,6 +6774,88 @@ mod group_priority_test {
 		edge.finish().unwrap();
 
 		assert!(matches!(serving.await, Err(Error::Old)));
+	}
+
+	/// Subgroup streams report to their subscription's frontier: an acknowledged FIN
+	/// moves it, and a stream abandoned mid-frame drops only what the transport took.
+	#[moq_clock::test]
+	async fn subgroups_report_to_the_frontier() {
+		use futures::FutureExt;
+
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let stats = registry.tier(crate::stats::Tier::default()).session("root");
+		let broadcast = crate::broadcast::Info::new().produce();
+		let track = broadcast.create_track("test", crate::track::Info::timed()).unwrap();
+		let sub = broadcast
+			.consume()
+			.with_stats(stats.egress("demo"))
+			.track("test")
+			.unwrap()
+			.subscribe(None)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let serve = |session: SinkSession, group: group::Consumer| {
+			GroupServe::new(
+				crate::driver::Transport::new(session),
+				ietf::GroupHeader {
+					track_alias: 0,
+					group_id: group.sequence,
+					sub_group_id: 0,
+					publisher_priority: 0,
+					flags: Default::default(),
+				},
+				Rank::solo(kio::Producer::new(0).consume()),
+				group,
+				Some(Timescale::MILLI),
+				Version::Draft18,
+				GroupSlice::default(),
+			)
+			.delivered(sub.delivery())
+		};
+		let ms = |ms| crate::Timestamp::from_millis(ms).unwrap();
+
+		// Acknowledged: the frontier moves to its newest frame, 500ms.
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(ms(0), b"a".as_slice()).unwrap();
+		group.write_frame(ms(500), b"b".as_slice()).unwrap();
+		group.finish().unwrap();
+		let mut done = serve(SinkSession::new(Default::default()), group.consume());
+		kio::wait(|waiter| done.poll_serve(waiter)).await.unwrap();
+
+		// The transport takes the headers and part of the payload, then holds the rest
+		// until the stream is abandoned.
+		let mut group = track.create_group(group::Info { sequence: 1 }).unwrap();
+		group.write_frame(ms(1000), vec![0u8; 1000]).unwrap();
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_uni_prefix(100, gate.consume());
+		let log = session.log.clone();
+		let mut abandoned = serve(session, group.consume());
+		assert!(
+			kio::wait(|waiter| abandoned.poll_serve(waiter))
+				.now_or_never()
+				.is_none()
+		);
+		drop(abandoned);
+		let payload = log
+			.trail()
+			.into_iter()
+			.rev()
+			.find_map(|(_, sent)| match sent {
+				crate::lite::test_transport::Sent::Write(bytes) => Some(bytes),
+				_ => None,
+			})
+			.expect("a payload write");
+		assert!((1..1000).contains(&payload.len()), "{}", payload.len());
+
+		let mut report = crate::stats::Report::default();
+		registry.report(&mut report, crate::time::Instant::ZERO);
+		let row = report.traffic[0].publisher;
+		assert_eq!(row.dropped.groups, 1);
+		assert_eq!(row.dropped.bytes, payload.len() as u64);
+		assert_eq!(row.dropped.duration, Duration::ZERO);
+		// 1000ms produced against a 500ms frontier: the [500ms, 1s) bucket.
+		assert_eq!(row.lag.buckets(), &[0, 0, 0, 0, 1002, 0, 0, 0]);
 	}
 }
 

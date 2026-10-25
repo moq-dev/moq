@@ -10,9 +10,8 @@ cooperation.
 
 ## Plan
 
-This is the ingress mirror of the egress `lag` histogram ([viewer lag
-histogram](/quest/m2/qos/lag-histogram.md), which lands first so this reuses
-its histogram type, decided 2026-10-08) and needs no acknowledgments: the relay is the receiver, and a frame is measured
+This is the ingress mirror of the egress `lag` histogram (reuse its
+`moq_net::stats::Histogram` type, decided 2026-10-08) and needs no acknowledgments: the relay is the receiver, and a frame is measured
 when its last byte arrives, because a partial frame is not useful.
 
 Frame timestamps are relative and jittered with no epoch, so measure each
@@ -51,7 +50,3 @@ simulated hour; a paused publisher records a
 stall and no drift for frames it never sent; a regression across groups is
 counted while intra-group reordering is not; a track without a timescale is
 excluded.
-
-## Required
-
-- [Viewer lag histogram](/quest/m2/qos/lag-histogram.md) - the egress histogram whose type and edges this reuses

@@ -247,7 +247,7 @@ impl Task {
 				return;
 			}
 
-			drain.collect();
+			drain.collect(scheduled);
 			drain.publish(scheduled);
 		}
 	}
@@ -303,10 +303,10 @@ impl Drain {
 		}
 	}
 
-	/// Drain the registry and sort each entry into its pending frames,
-	/// creating group tracks on first sight.
-	fn collect(&mut self) {
-		self.task.registry.report(&mut self.report);
+	/// Drain the registry at `now`, its lag sample's instant, and sort each entry
+	/// into its pending frames, creating group tracks on first sight.
+	fn collect(&mut self, now: Instant) {
+		self.task.registry.report(&mut self.report, now);
 		self.tick += 1;
 		self.node.collect(&self.report, self.tick, self.task.depth);
 	}
@@ -855,6 +855,15 @@ struct PathUsage {
 	subscriber: Option<Traffic>,
 }
 
+/// `traffic` as a group track's per-path row carries it: without the egress lag
+/// histogram and dropped media, which the totals and prefix tracks report, so a
+/// row per path stays small.
+fn path_row(mut traffic: Traffic) -> Traffic {
+	traffic.lag = Default::default();
+	traffic.dropped = Default::default();
+	traffic
+}
+
 /// Group tracks are timed like every stats track, and keep merge-patch deltas
 /// inside the track's own DEFLATE window, so a joiner asks for a fresh group
 /// once the deltas outweigh eight snapshots.
@@ -919,8 +928,8 @@ impl GroupTrack {
 			tier.paths.entries.push((
 				entry.path.clone(),
 				PathUsage {
-					publisher: publisher.then_some(entry.publisher),
-					subscriber: subscriber.then_some(entry.subscriber),
+					publisher: publisher.then_some(path_row(entry.publisher)),
+					subscriber: subscriber.then_some(path_row(entry.subscriber)),
 				},
 			));
 		}
@@ -1428,7 +1437,7 @@ mod tests {
 	async fn pumping_at<T>(drain: &mut Drain, now: Instant, future: impl std::future::Future<Output = T>) -> T {
 		let mut future = std::pin::pin!(future);
 		for _ in 0..1000 {
-			drain.collect();
+			drain.collect(now);
 			drain.publish(now);
 			if let Some(result) = futures::FutureExt::now_or_never(future.as_mut()) {
 				return result;
@@ -1500,7 +1509,7 @@ mod tests {
 					counters.set_received_bytes(n * 2);
 				};
 				store(40);
-				drain.collect();
+				drain.collect(Instant::now());
 				drain.publish(Instant::now());
 				let consumer = edge.consume().with_hidden(true);
 				let mut events = consumer.announced();
@@ -1534,7 +1543,7 @@ mod tests {
 						"a cache exposed an earlier hold's bytes"
 					);
 					store(reading + delta);
-					drain.collect();
+					drain.collect(Instant::now());
 					drain.publish(Instant::now());
 					let next = pumping(&mut drain, reader.next()).await.unwrap().unwrap().value;
 					assert_eq!((next[""].wire_tx, next[""].wire_rx), (delta, delta * 2));
@@ -1564,7 +1573,7 @@ mod tests {
 					drop(reader);
 					for _ in 0..100 {
 						tokio::task::yield_now().await;
-						drain.collect();
+						drain.collect(Instant::now());
 						drain.publish(Instant::now());
 						if drain.node.presence.is_empty() {
 							break;
@@ -2364,7 +2373,7 @@ mod tests {
 		})
 		.expect("drain");
 		let mut tick = || {
-			drain.collect();
+			drain.collect(moq_clock::now());
 			drain.publish(moq_clock::now());
 			drain.node.presence.len()
 		};
@@ -2518,6 +2527,27 @@ mod tests {
 		assert!(matches!(subscribing.await, Err(moq_net::Error::NotFound)));
 	}
 
+	/// The egress lag histogram reaches the totals, the prefix tracks, and a group's
+	/// totals, while the group's per-path rows leave it out.
+	#[tokio::test(start_paused = true)]
+	async fn lag_reaches_totals_and_prefixes_but_not_path_rows() {
+		let (producer, origin) = grouped_producer(DEFAULT_LINGER);
+		let registry = producer.registry();
+		let _live = feed(registry, Tier::default(), "acme/live", true, 1, 10).await;
+		drive_tick().await;
+		let (_, stats) = announced(&origin).await;
+
+		assert_eq!(default_totals(&stats).await.publisher.lag.total(), 10);
+		let mut track = hold_prefix(&stats, "acme").await;
+		let frame = last_prefix(&mut track).expect("answered at once");
+		assert_eq!(frame[""].publisher.lag.total(), 10);
+		assert_eq!(frame[""].children["live"].publisher.lag.total(), 10);
+		let group = read_group(&stats, "acme").await;
+		let tier = &group.tiers[""];
+		assert_eq!(tier.publisher.lag.total(), 10);
+		assert!(tier.paths["acme/live"].publisher.lag.is_empty());
+	}
+
 	/// Counters follow presence: a prefix held while 300 subscriptions are
 	/// live counts all 300 as active, and every one leaving reads as ended.
 	/// The child leaves the map after its closing readout; its tail stays in
@@ -2621,7 +2651,7 @@ mod tests {
 		})
 		.expect("drain");
 		let mut tick = || {
-			drain.collect();
+			drain.collect(moq_clock::now());
 			drain.publish(moq_clock::now());
 			drain.node.prefixes.len()
 		};
@@ -2842,7 +2872,7 @@ mod tests {
 
 				// Warm up: create the groups and tracks and grow every buffer.
 				for _ in 0..3 {
-					drain.collect();
+					drain.collect(moq_clock::now());
 					drain.publish(moq_clock::now());
 				}
 				// Hold a prefix with a child per tier, as a reader would.
@@ -2858,11 +2888,11 @@ mod tests {
 					);
 					drain.node.prefixes["room0"].pair.plain.track.subscribe(None)
 				});
-				drain.collect();
+				drain.collect(moq_clock::now());
 				drain.publish(moq_clock::now());
 
 				let before = counting::allocs();
-				drain.collect();
+				drain.collect(moq_clock::now());
 				let allocs = counting::allocs() - before;
 				drain.publish(moq_clock::now());
 
@@ -2932,7 +2962,7 @@ mod tests {
 		let start = Instant::now();
 
 		let acme = registry.tier(Tier::default()).session("acme/live");
-		drain.collect();
+		drain.collect(start);
 		drain.publish(start);
 		let consumer = edge.consume().with_hidden(true);
 		let mut announced = consumer.announced();
