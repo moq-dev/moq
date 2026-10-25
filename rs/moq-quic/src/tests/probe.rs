@@ -799,7 +799,10 @@ fn competing_cubic() {
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn competing_bbr() {
-    competing("bbr", Arc::new(Bbr3Config::default()));
+    // Seeded, as the media's own controller is, so both runs see the same competitor
+    let mut config = Bbr3Config::default();
+    config.probe_rng_seed([1; 16]);
+    competing("bbr", Arc::new(config));
 }
 
 /// A target the path can never carry keeps the probe trying, within the overhead budget

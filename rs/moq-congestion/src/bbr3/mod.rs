@@ -1810,9 +1810,11 @@ impl Bbr3 {
         }
         let bdp = self.bw * self.min_rtt.as_secs_f64();
         let inflight = (self.probe_bw_up_pacing_gain * bdp) as u64;
-        // BBRQuantizationBudget, without the side effects `get_inflight` has on BBR.bdp
+        // BBRQuantizationBudget, without the side effects `get_inflight` has on BBR.bdp, nor the
+        // 2 SMSS ProbeBW_UP adds: the gain already reaches past BBR.bw, and on a small BDP two
+        // more packets only queue ahead of the next frame, over a round trip at 10ms
         let inflight = Ord::max(inflight, self.offload_budget);
-        Some(Ord::max(inflight, self.min_pipe_cwnd) + 2 * self.smss)
+        Some(Ord::max(inflight, self.min_pipe_cwnd))
     }
 }
 
@@ -7508,7 +7510,7 @@ mod test {
             sim.bbr.probe_inflight()
         };
         let bdp = (sim.bbr.bw * sim.bbr.min_rtt.as_secs_f64() * 1.25) as u64;
-        let inflight = Ord::max(bdp, sim.bbr.min_pipe_cwnd) + 2 * sim.bbr.smss;
+        let inflight = Ord::max(bdp, sim.bbr.min_pipe_cwnd);
         assert_eq!(up(&mut sim, 100), Some(inflight));
         assert_eq!(up(&mut sim, 1100), None, "within the wait");
         sim.bbr.maybe_fill_probe_bw_up(sim.at(2200 * MS));
