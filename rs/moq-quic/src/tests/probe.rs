@@ -973,8 +973,8 @@ fn rtt_200ms() {
 /// A path above the media's average but below its keyframe bursts, without a probe target
 ///
 /// ProbeRTT's half-BDP window would hold a keyframe and the frames queued behind it for 200ms,
-/// past the deadline, but between bursts the flow is application-limited with its RTT back at
-/// the floor, so it skips ProbeRTT.
+/// past the deadline, but between bursts the flow is application-limited without loss, so it
+/// skips ProbeRTT.
 #[test]
 fn borderline_skips_probe_rtt() {
     let _guard = subscribe();

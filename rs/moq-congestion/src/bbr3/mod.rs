@@ -87,12 +87,6 @@ const PROBE_RTT_DURATION_MS: u64 = 200;
 /// ProbeRTT states: 5 secs.
 const PROBE_RTT_INTERVAL_SEC: u64 = 5;
 
-/// An application-limited flow's lowest RTT sample stands in for a ProbeRTT when it sits within
-/// BBR.min_rtt / 8 (12.5%) of BBR.min_rtt, as QUICHE BBRv1's `kSimilarMinRttThreshold` (kBBR7): a
-/// BBR.min_rtt up to 12.5% low is covered by the cwnd gain and ProbeBW_UP's headroom.
-/// <https://quiche.googlesource.com/quiche.git/+/59748eb0effcf74602957379bf5a8ce0f5aec770/quic/core/congestion_control/bbr_sender.cc>
-const PROBE_RTT_SKIP_DIVISOR: u32 = 8;
-
 /// equivalent to BBR.LossThresh: A constant specifying the maximum tolerated per-round-trip packet
 /// loss rate when probing for bandwidth (the default is 2%).
 const LOSS_THRESH: f64 = 0.02;
@@ -505,17 +499,14 @@ pub struct Bbr3 {
     /// BBR.probe_rtt_min_delay has expired and is due for a refresh with an application idle
     /// period or a transition into ProbeRTT state.
     probe_rtt_expired: bool,
-    /// The lowest RTT sample since BBR.probe_rtt_min_stamp last moved, so each ProbeRTT interval
-    /// brings its own evidence for skipping the next ProbeRTT.
-    probe_rtt_skip_delay: Duration,
     /// Whether the transport reported the flow application-limited since BBR.probe_rtt_min_stamp
-    /// last moved. A bulk flow also drains near BBR.min_rtt every ProbeBW_DOWN; requiring this
-    /// keeps it entering ProbeRTT, where competing BBR flows converge.
+    /// last moved, which lets the due ProbeRTT be skipped. A flow that never ran out of data keeps
+    /// entering ProbeRTT, where competing BBR flows converge.
     probe_rtt_skip_app_limited: bool,
-    /// Whether loss or CE signalled congestion since BBR.probe_rtt_min_stamp last moved. The flow
-    /// then shares a full queue, where a sample near a BBR.min_rtt that skipping never re-measures
-    /// cannot vouch for it: beside a loss-based flow, it would hold BBR.min_rtt below the queue
-    /// that flow keeps and yield to it. Persistent loss thus never postpones ProbeRTT.
+    /// Whether loss or CE signalled congestion since BBR.probe_rtt_min_stamp last moved, which
+    /// denies a skip. The flow then shares a full queue whose delay only ProbeRTT re-measures:
+    /// beside a loss-based flow, skipping would hold BBR.min_rtt below the queue that flow keeps
+    /// and yield to it. Persistent loss thus never postpones ProbeRTT.
     probe_rtt_skip_congested: bool,
     /// equivalent to C.delivered_time: The wall clock time when C.delivered was last updated. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.1.2.1>
     delivered_time: Option<Instant>,
@@ -737,7 +728,6 @@ impl Bbr3 {
             probe_rtt_min_delay: Duration::from_secs(u64::MAX),
             probe_rtt_min_stamp: None,
             probe_rtt_expired: false,
-            probe_rtt_skip_delay: Duration::from_secs(u64::MAX),
             probe_rtt_skip_app_limited: false,
             probe_rtt_skip_congested: false,
             delivered_time: None,
@@ -1239,17 +1229,17 @@ impl Bbr3 {
     /// as expired instead would dip every connection into ProbeRTT on its very first ack, and so
     /// into `min_pipe_cwnd`, since `bw` is still 0.
     ///
-    /// ProbeRTT only checks that BBR.min_rtt is still accurate, so an application-limited flow
-    /// whose RTT came back near BBR.min_rtt during the interval, without congestion, skips it,
-    /// which spares media its periodic window cut. A skip moves only the stamps: the evidence is
-    /// too coarse to lower or raise the estimate, and a path whose RTT rose beyond the tolerance
-    /// never meets it, so it still reaches ProbeRTT and the higher sample. BBR.min_rtt_stamp moves
-    /// too, or BBR.min_rtt could expire into the high sample that opens the next ProbeRTT. An idle
-    /// restart keeps the draft's free refresh instead, sampling the drained path directly.
+    /// An application-limited flow without congestion during the interval skips the due ProbeRTT,
+    /// as QUICHE BBRv1's kBBR8 does, which spares media its periodic window cut. Its near-floor
+    /// kBBR7 also requires an application-limited interval, so kBBR8 covers it.
+    /// <https://quiche.googlesource.com/quiche.git/+/59748eb0effcf74602957379bf5a8ce0f5aec770/quic/core/congestion_control/bbr_sender.cc>
+    /// A skip moves only the stamps and keeps the values, so a base RTT that rose meanwhile is not
+    /// followed until congestion or an interval that never ran out of data brings ProbeRTT back.
+    /// BBR.min_rtt_stamp moves too, or BBR.min_rtt could expire into the high sample that opens
+    /// the next ProbeRTT. A lower BBR.min_rtt from before a ProbeRTT that measured a higher RTT
+    /// still expires first, since its filter is two ProbeRTT intervals long. An idle restart keeps
+    /// the draft's free refresh instead, sampling the drained path directly.
     fn update_min_rtt(&mut self, now: Instant) {
-        if let Some(rate_sample) = self.rs {
-            self.probe_rtt_skip_delay = Ord::min(self.probe_rtt_skip_delay, rate_sample.rtt);
-        }
         self.probe_rtt_expired = match self.probe_rtt_min_stamp {
             Some(probe_rtt_min_stamp) => {
                 now > probe_rtt_min_stamp
@@ -1258,14 +1248,10 @@ impl Bbr3 {
             }
             None => false,
         };
-        let near_min_rtt = self
-            .min_rtt
-            .saturating_add(self.min_rtt / PROBE_RTT_SKIP_DIVISOR);
         if self.probe_rtt_expired
             && !self.idle_restart
             && self.probe_rtt_skip_app_limited
             && !self.probe_rtt_skip_congested
-            && self.probe_rtt_skip_delay <= near_min_rtt
         {
             self.probe_rtt_expired = false;
             self.min_rtt_stamp = Some(now);
@@ -1297,7 +1283,6 @@ impl Bbr3 {
     /// Restarts the ProbeRTT interval, which then gathers its own evidence for a skip.
     fn refresh_probe_rtt_min_stamp(&mut self, now: Instant) {
         self.probe_rtt_min_stamp = Some(now);
-        self.probe_rtt_skip_delay = Duration::from_secs(u64::MAX);
         self.probe_rtt_skip_app_limited = false;
         self.probe_rtt_skip_congested = false;
     }
@@ -7843,35 +7828,42 @@ mod test {
         entries
     }
 
-    /// An application-limited flow whose RTT stays within 12.5% of BBR.min_rtt skips the due
-    /// ProbeRTT, moving only the stamps.
+    /// An application-limited flow skips every due ProbeRTT, even after its RTT rose well past
+    /// BBR.min_rtt, moving only the stamps: BBR.min_rtt keeps the old floor.
     #[test]
-    fn app_limited_near_min_rtt_skips_probe_rtt() {
+    fn app_limited_skips_probe_rtt() {
         let mut sim = probed();
         assert_eq!(sim.bbr.min_rtt, Duration::from_millis(10));
-        assert_eq!(pipeline(&mut sim, 10 * MS, 6000 * MS, |_| 11 * MS, true), 0);
+        let rtt = |send_ns| {
+            if send_ns < 1000 * MS {
+                10 * MS
+            } else {
+                20 * MS
+            }
+        };
+        assert_eq!(pipeline(&mut sim, 10 * MS, 20_000 * MS, rtt, true), 0);
         assert_eq!(sim.bbr.min_rtt, Duration::from_millis(10));
         assert_eq!(sim.bbr.probe_rtt_min_delay, Duration::from_millis(10));
-        assert!(sim.bbr.probe_rtt_min_stamp.unwrap() > sim.at(5000 * MS));
-        assert!(sim.bbr.min_rtt_stamp.unwrap() > sim.at(5000 * MS));
+        assert!(sim.bbr.probe_rtt_min_stamp.unwrap() > sim.at(15_000 * MS));
+        assert!(sim.bbr.min_rtt_stamp.unwrap() > sim.at(15_000 * MS));
     }
 
-    /// A standing queue of its own keeps an application-limited flow's RTT beyond the
-    /// tolerance, so it enters ProbeRTT.
-    #[test]
-    fn app_limited_standing_queue_enters_probe_rtt() {
-        let mut sim = probed();
-        assert_eq!(pipeline(&mut sim, 10 * MS, 6000 * MS, |_| 12 * MS, true), 1);
-    }
-
-    /// Loss in the interval means the flow filled a queue, so it enters ProbeRTT despite RTT
-    /// samples near BBR.min_rtt.
+    /// Loss or CE in the interval means the flow shares a full queue, so an application-limited
+    /// flow enters ProbeRTT, and BBR.min_rtt expires into the higher RTT it measured even though
+    /// the next interval skips.
     #[test]
     fn congested_interval_enters_probe_rtt() {
-        let mut sim = probed();
-        sim.send(10 * MS, 1);
-        sim.lose(20 * MS, sim.pn - 1);
-        assert_eq!(pipeline(&mut sim, 20 * MS, 6000 * MS, |_| 11 * MS, true), 1);
+        for ce in [false, true] {
+            let mut sim = probed();
+            sim.send(10 * MS, 1);
+            match ce {
+                true => sim.ack_ce(20 * MS, [sim.pn - 1]),
+                false => sim.lose(20 * MS, sim.pn - 1),
+            }
+            let entries = pipeline(&mut sim, 20 * MS, 12_000 * MS, |_| 20 * MS, true);
+            assert_eq!(entries, 1, "ce={ce}");
+            assert_eq!(sim.bbr.min_rtt, Duration::from_millis(20), "ce={ce}");
+        }
     }
 
     /// A flow never application-limited enters ProbeRTT even with every RTT sample at
@@ -7883,24 +7875,6 @@ mod test {
             pipeline(&mut sim, 10 * MS, 6000 * MS, |_| 10 * MS, false),
             1
         );
-    }
-
-    /// After the base RTT steps up beyond the tolerance, the next interval has no near-floor
-    /// sample of its own, so the flow enters ProbeRTT and BBR.min_rtt follows the new RTT.
-    #[test]
-    fn rtt_step_up_enters_probe_rtt() {
-        let mut sim = probed();
-        let rtt = |send_ns| {
-            if send_ns < 1000 * MS {
-                10 * MS
-            } else {
-                20 * MS
-            }
-        };
-        // The first interval saw the old RTT, so its ProbeRTT is skipped.
-        assert_eq!(pipeline(&mut sim, 10 * MS, 5100 * MS, rtt, true), 0);
-        assert_eq!(pipeline(&mut sim, 5100 * MS, 20_000 * MS, rtt, true), 1);
-        assert_eq!(sim.bbr.min_rtt, Duration::from_millis(20));
     }
 
     /// A scripted `Sim` in PROBE_UP with a 100,000-byte long-term bound, a 10,000-byte BDP, a

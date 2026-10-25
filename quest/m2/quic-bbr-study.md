@@ -15,9 +15,16 @@ quality or performance.
 
 Decided in the 2026-09-30 audit: the Google BBR comparison merged here as
 one study, since both reuse the same media profiles, harness, and baseline.
-ProbeRTT natural-drain credit is settled: BBR3 already skips a due ProbeRTT
-after an app-limited, congestion-free interval whose lowest RTT stayed within
-12.5% of `min_rtt` (QUICHE's kBBR7).
+ProbeRTT natural-drain credit is settled: BBR3 skips a due ProbeRTT after an
+interval that was app-limited at least once and saw no loss or CE (QUICHE
+BBRv1's kBBR8, which subsumes its near-floor kBBR7). The maintainer chose
+kBBR8 on 2026-10-25 on the advice of BBR's designer, replacing the
+2026-10-24 kBBR7-only decision. The rejected risk, `min_rtt` ratcheting up
+under a standing queue the flow builds itself, is the known cost; a skip keeps
+the `min_rtt` value rather than taking the queued samples, so it shows up as
+the mirror image: while media stays app-limited and congestion-free, `min_rtt`
+does not follow a base-RTT rise until a lost or CE-marked packet, or an
+interval with no starved poll, brings ProbeRTT back.
 
 ### Harness
 
