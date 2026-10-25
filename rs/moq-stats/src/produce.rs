@@ -607,7 +607,7 @@ impl PendingPair {
 
 /// The node's stats broadcast and its change-detection state.
 struct NodePublisher {
-	broadcast: broadcast::Producer,
+	broadcast: origin::Publication,
 	/// Holds the broadcast's request queue open, so a subscriber asking for a
 	/// presence or prefix track parks until the next drain serves it instead
 	/// of being rejected `NotFound` on the spot.
@@ -1694,7 +1694,7 @@ mod tests {
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
 		announced: announce::Consumer,
-		source: broadcast::Producer,
+		source: origin::Publication,
 		consumer: broadcast::Consumer,
 		sub: Option<track::Subscriber>,
 	}

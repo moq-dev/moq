@@ -107,7 +107,7 @@ mod tests {
 			.parse()
 			.expect("WHEP URL");
 		let err = Client::new(Config::default())
-			.subscribe(url, broadcast)
+			.subscribe(url, broadcast.broadcast().clone())
 			.await
 			.expect_err("dial a closed port");
 

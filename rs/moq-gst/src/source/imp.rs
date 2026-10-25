@@ -2255,13 +2255,14 @@ mod session_tests {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let origin = origin();
-		let mut catalog_broadcast = origin.create_broadcast("room/catalog").unwrap();
+		let catalog_broadcast = origin.create_broadcast("room/catalog").unwrap();
 		let mut local = catalog_broadcast.dynamic();
 		let left = origin.create_broadcast("room/left").unwrap();
 		let mut remote = left.dynamic();
 		let right = origin.create_broadcast("room/right").unwrap();
 		let mut replacement = right.dynamic();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut catalog_broadcast, Default::default()).unwrap();
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut catalog_broadcast.broadcast().clone(), Default::default()).unwrap();
 		let mut config = video_rendition();
 		config.broadcast = Some("./left".into());
 		config.track = Some("encoded".into());
@@ -3056,6 +3057,7 @@ mod session_tests {
 
 	/// A broadcast with one video rendition, and what feeds it.
 	struct Publisher {
+		publication: Option<moq_net::origin::Publication>,
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
@@ -3065,15 +3067,19 @@ mod session_tests {
 	impl Publisher {
 		/// Publish at `room` on `origin` under `route`.
 		fn new(origin: &moq_net::origin::Producer, route: moq_net::origin::Route, config: VideoConfig) -> Self {
-			let publisher = Self::build(origin.create_broadcast("room").unwrap(), config);
-			publisher.broadcast.announce(route).unwrap();
+			let publication = origin.create_broadcast("room").unwrap();
+			let mut publisher = Self::build(publication.broadcast().clone(), config);
+			publication.announce(route).unwrap();
+			publisher.publication = Some(publication);
 			publisher
 		}
 
 		/// The `cam` broadcast a rendition of `room` references as `./cam`, under `route`.
 		fn sibling(origin: &moq_net::origin::Producer, route: moq_net::origin::Route) -> Self {
-			let publisher = Self::build(origin.create_broadcast("cam").unwrap(), video_rendition());
-			publisher.broadcast.announce(route).unwrap();
+			let publication = origin.create_broadcast("cam").unwrap();
+			let mut publisher = Self::build(publication.broadcast().clone(), video_rendition());
+			publication.announce(route).unwrap();
+			publisher.publication = Some(publication);
 			publisher
 		}
 
@@ -3092,6 +3098,7 @@ mod session_tests {
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 			);
 			Self {
+				publication: None,
 				broadcast,
 				catalog,
 				video,
@@ -3308,7 +3315,7 @@ mod session_tests {
 	/// Records what reaches the element's video pads. A new pad's first stream-start and caps
 	/// precede its pad-added, so only a kept pad's later ones show.
 	#[derive(Clone, Default)]
-	struct Recorder(std::sync::Arc<Mutex<Vec<Seen>>>);
+	struct Recorder(std::sync::Arc<(Mutex<Vec<Seen>>, std::sync::Condvar)>);
 
 	impl Recorder {
 		fn attach(element: &super::super::MoqSrc) -> Self {
@@ -3351,11 +3358,30 @@ mod session_tests {
 		}
 
 		fn push(&self, seen: Seen) {
-			self.0.lock().unwrap().push(seen);
+			let (list, pushed) = &*self.0;
+			list.lock().unwrap().push(seen);
+			pushed.notify_all();
 		}
 
 		fn seen(&self) -> Vec<Seen> {
-			self.0.lock().unwrap().clone()
+			self.0.0.lock().unwrap().clone()
+		}
+
+		/// Block until `tag` reaches a pad, returning that pad.
+		fn reached(&self, tag: u8) -> String {
+			let reached = |seen: &[Seen]| {
+				seen.iter().find_map(|seen| match seen {
+					Seen::Buffer(pad, seen) if *seen == tag => Some(pad.clone()),
+					_ => None,
+				})
+			};
+			let (list, pushed) = &*self.0;
+			let (seen, _) = pushed
+				.wait_timeout_while(list.lock().unwrap(), Duration::from_secs(10), |seen| {
+					reached(seen).is_none()
+				})
+				.unwrap();
+			reached(&seen).unwrap_or_else(|| panic!("{tag} never reached a pad: {seen:?}"))
 		}
 
 		fn count(&self, matches: impl Fn(&Seen) -> bool) -> usize {
@@ -3417,6 +3443,15 @@ mod session_tests {
 		super::RUNTIME
 			.block_on(async { tokio::time::timeout(Duration::from_secs(10), next).await })
 			.expect("the announcement never arrived");
+	}
+
+	/// Block until someone reads the publisher's video, or until nobody does once `wanted` is false.
+	fn await_demand(publisher: &Publisher, wanted: bool) {
+		let mut demand = publisher.video.demand();
+		let changed = async { while demand.wanted_changed().await.expect("the track closed").is_some() != wanted {} };
+		super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), changed).await })
+			.expect("the demand never changed");
 	}
 
 	/// Follow `room` on `origin` past its start. A follower folds everything on hand while nothing
@@ -3647,9 +3682,9 @@ mod session_tests {
 		first.video.finish().unwrap();
 		await_finished(&first);
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
-		first.broadcast.unannounce();
+		first.publication.as_ref().unwrap().unannounce();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
-		first.broadcast.announce(route).unwrap();
+		first.publication.as_ref().unwrap().announce(route).unwrap();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 
 		let mut second = Publisher::sibling(&origin, epoch());
@@ -4175,25 +4210,28 @@ mod session_tests {
 		let _room = referencing(&origin, Some(named.clone()));
 		let mut old = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(named));
 		let session = follow(&element, &origin);
-		let pad = recorder.written(&mut old, 1);
+		await_demand(&old, true);
+		old.write(1);
+		let pad = recorder.reached(1);
 
+		// The reference lets the old instance go once another wins its path, and only then
+		// does the new one leave, so the return is a resume rather than a missed restart.
 		let mut follow = origin.consume().follow("cam").unwrap();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		let mut new = Publisher::sibling(&origin, epoch());
 		await_event(&mut follow, |event| {
 			matches!(event, moq_net::announce::Event::Restart(_))
 		});
+		await_demand(&old, false);
 		new.write(2);
 		drop(new);
 		await_event(&mut follow, |event| {
 			matches!(event, moq_net::announce::Event::Restart(_))
 		});
 
-		assert_eq!(
-			recorder.written(&mut old, 3),
-			pad,
-			"the named instance moved to another pad"
-		);
+		await_demand(&old, true);
+		old.write(3);
+		assert_eq!(recorder.reached(3), pad, "the named instance moved to another pad");
 		stop(session);
 		assert!(
 			!recorder.seen().contains(&Seen::Buffer(pad, 2)),
@@ -4285,7 +4323,12 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		recorder.written(&mut publisher, 1);
 
-		publisher.broadcast.announce(route.with_cost(5)).unwrap();
+		publisher
+			.publication
+			.as_ref()
+			.unwrap()
+			.announce(route.with_cost(5))
+			.unwrap();
 		await_event(&mut announced, |event| {
 			matches!(event, moq_net::announce::Event::Update(_))
 		});
@@ -4424,7 +4467,7 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
-		old.broadcast.unannounce();
+		old.publication.as_ref().unwrap().unannounce();
 		await_event(&mut announced, |event| {
 			matches!(event, moq_net::announce::Event::End(_))
 		});

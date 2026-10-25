@@ -1,6 +1,7 @@
 //! Connect to peers and manage MoQ sessions.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use url::Url;
 
@@ -30,17 +31,16 @@ pub struct MoqClientConfig {
 	/// Empty offers every supported version; [`moq_versions`] lists them.
 	#[uniffi(default = [])]
 	pub versions: Vec<String>,
-	/// How long one connect may take, dial and handshake together, in microseconds. 0 waits
-	/// forever.
+	/// How long one connect may take, dial and handshake together. 0 waits forever.
 	#[uniffi(default = None)]
-	pub timeout_us: Option<u64>,
-	/// Happy Eyeballs: how long before the next resolved address is also dialed, in
-	/// microseconds. 0 dials every address at once.
+	pub timeout: Option<Duration>,
+	/// Happy Eyeballs: how long before the next resolved address is also dialed. 0 dials
+	/// every address at once.
 	#[uniffi(default = None)]
-	pub race_us: Option<u64>,
-	/// Happy Eyeballs: how long IPv4 waits for the full DNS answer, in microseconds.
+	pub race: Option<Duration>,
+	/// Happy Eyeballs: how long IPv4 waits for the full DNS answer.
 	#[uniffi(default = None)]
-	pub resolution_delay_us: Option<u64>,
+	pub resolution_delay: Option<Duration>,
 	/// Certificate trust and the mTLS identity.
 	#[uniffi(default)]
 	pub tls: MoqClientTls,
@@ -113,12 +113,12 @@ pub struct MoqQuicConfig {
 	/// endpoint subscribing to many tracks wants this raised.
 	#[uniffi(default = None)]
 	pub max_streams: Option<u64>,
-	/// How long an idle connection survives before it is dropped, in microseconds.
+	/// How long an idle connection survives before it is dropped.
 	#[uniffi(default = None)]
-	pub idle_timeout_us: Option<u64>,
-	/// Keep-alive ping interval, in microseconds. 0 disables it.
+	pub idle_timeout: Option<Duration>,
+	/// Keep-alive ping interval. 0 disables it.
 	#[uniffi(default = None)]
-	pub keep_alive_us: Option<u64>,
+	pub keep_alive: Option<Duration>,
 	/// UDP generic segmentation offload: batches sends into one syscall.
 	#[uniffi(default = None)]
 	pub gso: Option<bool>,
@@ -165,12 +165,8 @@ impl From<MoqQuicConfig> for moq_tokio::quic::Config {
 	fn from(config: MoqQuicConfig) -> Self {
 		let mut quic = Self::default();
 		quic.max_streams = config.max_streams;
-		quic.idle_timeout = config
-			.idle_timeout_us
-			.map(|us| std::time::Duration::from_micros(us).into());
-		quic.keep_alive = config
-			.keep_alive_us
-			.map(|us| std::time::Duration::from_micros(us).into());
+		quic.idle_timeout = config.idle_timeout.map(Into::into);
+		quic.keep_alive = config.keep_alive.map(Into::into);
 		quic.gso = config.gso;
 		quic.mtu_discovery = config.mtu_discovery;
 		quic.congestion_control = config.congestion_control.map(Into::into);
@@ -190,33 +186,33 @@ pub struct MoqWebSocketConfig {
 	/// QUIC, so a failed QUIC dial reports its own error.
 	#[uniffi(default = None)]
 	pub enabled: Option<bool>,
-	/// Head start QUIC gets before the fallback joins the race, in microseconds. Null uses
-	/// 200ms, and 0 races both at once.
+	/// Head start QUIC gets before the fallback joins the race. Null uses 200ms, and 0 races
+	/// both at once.
 	#[uniffi(default = None)]
-	pub delay_us: Option<u64>,
+	pub delay: Option<Duration>,
 }
 
 /// Retry pacing for the automatic reconnect.
 ///
-/// The delay starts at `initial_us`, multiplies by `multiplier` after each failed attempt,
-/// and caps at `max_us`. After `timeout_us` of consecutive failures the connection gives up
+/// The delay starts at `initial`, multiplies by `multiplier` after each failed attempt,
+/// and caps at `max`. After `timeout` of consecutive failures the connection gives up
 /// for good; the window resets whenever a session stays up past 1s. Each null field uses
 /// moq-tokio's default: 1s, x2, 5s, and a 10s window. Zero means off: no wait, no growth,
 /// no cap, or no give-up.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqBackoff {
-	/// Delay before the first reconnect attempt, in microseconds. 0 retries at once.
+	/// Delay before the first reconnect attempt. 0 retries at once.
 	#[uniffi(default = None)]
-	pub initial_us: Option<u64>,
+	pub initial: Option<Duration>,
 	/// Multiplier applied to the delay after each failure.
 	#[uniffi(default = None)]
 	pub multiplier: Option<u32>,
-	/// Maximum delay between reconnect attempts, in microseconds. 0 leaves it uncapped.
+	/// Maximum delay between reconnect attempts. 0 leaves it uncapped.
 	#[uniffi(default = None)]
-	pub max_us: Option<u64>,
-	/// Time spent retrying before giving up, in microseconds. 0 retries forever.
+	pub max: Option<Duration>,
+	/// Time spent retrying before giving up. 0 retries forever.
 	#[uniffi(default = None)]
-	pub timeout_us: Option<u64>,
+	pub timeout: Option<Duration>,
 }
 
 /// What sessions opened through this crate advertise in SETUP: moq-ffi ahead of its core.
@@ -234,8 +230,6 @@ pub(crate) fn implementation() -> String {
 pub fn moq_client_defaults() -> MoqClientConfig {
 	#[cfg(not(target_arch = "wasm32"))]
 	{
-		let micros = |duration: std::time::Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
-
 		let connect = moq_tokio::connect::Config::default();
 		let resolved = connect.resolve();
 		let websocket = connect.websocket.resolve();
@@ -243,24 +237,24 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 		let quic = moq_tokio::quic::Config::default().resolve();
 
 		MoqClientConfig {
-			timeout_us: Some(micros(resolved.timeout)),
-			race_us: Some(micros(resolved.race)),
-			resolution_delay_us: Some(micros(resolved.resolution_delay)),
+			timeout: Some(resolved.timeout),
+			race: Some(resolved.race),
+			resolution_delay: Some(resolved.resolution_delay),
 			quic: MoqQuicConfig {
 				max_streams: Some(quic.max_streams),
-				idle_timeout_us: Some(micros(quic.idle_timeout)),
-				keep_alive_us: Some(quic.keep_alive.map_or(0, micros)),
+				idle_timeout: Some(quic.idle_timeout),
+				keep_alive: Some(quic.keep_alive.unwrap_or_default()),
 				..Default::default()
 			},
 			websocket: MoqWebSocketConfig {
 				enabled: Some(websocket.enabled),
-				delay_us: Some(micros(websocket.delay)),
+				delay: Some(websocket.delay),
 			},
 			backoff: MoqBackoff {
-				initial_us: Some(micros(backoff.initial())),
+				initial: Some(backoff.initial()),
 				multiplier: Some(backoff.multiplier),
-				max_us: Some(micros(backoff.max())),
-				timeout_us: Some(micros(backoff.timeout())),
+				max: Some(backoff.max()),
+				timeout: Some(backoff.timeout()),
 			},
 			..Default::default()
 		}
@@ -320,11 +314,9 @@ impl Client {
 			connect.bind = Some(bind);
 		}
 		connect.version = parse_versions(&config.versions)?;
-		connect.timeout = config.timeout_us.map(|us| std::time::Duration::from_micros(us).into());
-		connect.race = config.race_us.map(|us| std::time::Duration::from_micros(us).into());
-		connect.resolution_delay = config
-			.resolution_delay_us
-			.map(|us| std::time::Duration::from_micros(us).into());
+		connect.timeout = config.timeout.map(Into::into);
+		connect.race = config.race.map(Into::into);
+		connect.resolution_delay = config.resolution_delay.map(Into::into);
 
 		let tls = config.tls;
 		connect.tls.insecure = Some(tls.insecure);
@@ -336,22 +328,22 @@ impl Client {
 		connect.tls.host_name = tls.host_name;
 
 		connect.websocket.enabled = config.websocket.enabled;
-		if let Some(delay) = config.websocket.delay_us {
-			connect.websocket.delay = Some((std::time::Duration::from_micros(delay)).into());
+		if let Some(delay) = config.websocket.delay {
+			connect.websocket.delay = Some(delay.into());
 		}
 
 		let backoff = config.backoff;
-		if let Some(initial) = backoff.initial_us {
-			connect.backoff.initial = Some((std::time::Duration::from_micros(initial)).into());
+		if let Some(initial) = backoff.initial {
+			connect.backoff.initial = Some(initial.into());
 		}
 		if let Some(multiplier) = backoff.multiplier {
 			connect.backoff.multiplier = multiplier;
 		}
-		if let Some(max) = backoff.max_us {
-			connect.backoff.max = Some((std::time::Duration::from_micros(max)).into());
+		if let Some(max) = backoff.max {
+			connect.backoff.max = Some(max.into());
 		}
-		if let Some(timeout) = backoff.timeout_us {
-			connect.backoff.timeout = Some((std::time::Duration::from_micros(timeout)).into());
+		if let Some(timeout) = backoff.timeout {
+			connect.backoff.timeout = Some(timeout.into());
 		}
 
 		let quic = config.quic.into();
@@ -573,7 +565,7 @@ mod tests {
 			versions: vec!["moq-lite-03".into()],
 			once: true,
 			backoff: MoqBackoff {
-				timeout_us: Some(0),
+				timeout: Some(Duration::ZERO),
 				..Default::default()
 			},
 			..Default::default()
@@ -602,9 +594,9 @@ impl Client {
 		let MoqClientConfig {
 			bind,
 			versions,
-			timeout_us,
-			race_us,
-			resolution_delay_us,
+			timeout,
+			race,
+			resolution_delay,
 			tls,
 			quic,
 			websocket,
@@ -620,9 +612,9 @@ impl Client {
 			..tls.clone()
 		};
 		if bind.is_some()
-			|| timeout_us.is_some()
-			|| race_us.is_some()
-			|| resolution_delay_us.is_some()
+			|| timeout.is_some()
+			|| race.is_some()
+			|| resolution_delay.is_some()
 			|| native_tls != MoqClientTls::default()
 			|| quic != MoqQuicConfig::default()
 			|| websocket != MoqWebSocketConfig::default()
@@ -766,8 +758,8 @@ impl MoqClient {
 /// not the same as a zero value.
 #[derive(uniffi::Record)]
 pub struct MoqConnectionStats {
-	/// Smoothed round-trip time, in microseconds.
-	pub rtt_us: Option<u64>,
+	/// Smoothed round-trip time.
+	pub rtt: Option<Duration>,
 	/// Estimated send bandwidth from the congestion controller, in bits per second.
 	pub estimated_send_rate_bps: Option<u64>,
 	/// Total bytes sent, including retransmissions and overhead.
@@ -792,7 +784,7 @@ pub struct MoqConnectionStats {
 impl MoqConnectionStats {
 	fn new(stats: moq_net::session::Stats, version: Option<moq_net::Version>) -> Self {
 		Self {
-			rtt_us: stats.rtt.map(|d| d.as_micros() as u64),
+			rtt: stats.rtt.map(crate::ffi::duration),
 			estimated_send_rate_bps: stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps),
 			bytes_sent: stats.bytes_sent,
 			bytes_received: stats.bytes_received,
