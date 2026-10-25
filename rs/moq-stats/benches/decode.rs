@@ -128,11 +128,14 @@ fn measure(broadcasts: usize, tiers: usize, changed_percent: usize) -> (usize, D
 	let mut elapsed = Duration::ZERO;
 	for _ in 0..TICKS {
 		let (payload, keyframe) = frames.next().unwrap();
-		assert!(!keyframe, "the run stays in one group");
 		ALLOCATIONS.store(0, Ordering::Relaxed);
 		COUNTING.store(true, Ordering::Relaxed);
 		let start = Instant::now();
-		decoder.delta(&payload).unwrap();
+		// A large, busy group reaches its byte cap and opens a fresh one.
+		match keyframe {
+			true => decoder.snapshot(&payload).unwrap(),
+			false => decoder.delta(&payload).unwrap(),
+		}
 		let frame = decoder.decode().unwrap();
 		elapsed += start.elapsed();
 		COUNTING.store(false, Ordering::Relaxed);
