@@ -188,24 +188,30 @@ for (const version of drafts) {
 		const clock = new Manual();
 		const installed = clock.install();
 		using _installed = { [Symbol.dispose]: () => installed.close() };
+		// Spied before listing, since the PUBLISH may go out before the listing's OK is read.
+		// Restored only once the test is done: `Message.write` reads `writer.write` before
+		// awaiting its frame, so restoring mid-write would drop a concurrent write on the stale spy.
+		const resume = Promise.withResolvers<void>();
+		let holding = false;
+		const write = Writer.prototype.write;
+		const held = spyOn(Writer.prototype, "write").mockImplementation(async function (this: Writer, chunk) {
+			await write.call(this, chunk);
+			if (holding || chunk[0] !== Publish.id) return;
+			holding = true;
+			await resume.promise;
+		});
+		using _held = { [Symbol.dispose]: () => held.mockRestore() };
 		const fx = fixture(version);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 		broadcast.announce();
 		const track = broadcast.createTrack("video");
 		const listing = await fx.list();
 		await ok(listing, version);
-		const resume = Promise.withResolvers<void>();
-		const write = Writer.prototype.write;
-		const held = spyOn(Writer.prototype, "write").mockImplementation(async function (this: Writer, chunk) {
-			await write.call(this, chunk);
-			if (chunk[0] !== Publish.id) return;
-			held.mockRestore();
-			await resume.promise;
-		});
 		const { stream } = await fx.offered(false);
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
+		expect(holding).toBe(true);
 		resume.resolve();
 		await publishOk(stream, version);
 		expect(await stream.reader.u53()).toBe(PublishDone.id);
