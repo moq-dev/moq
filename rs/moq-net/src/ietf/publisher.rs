@@ -262,6 +262,16 @@ async fn prepare_fetch(
 		false => {
 			let span = range.start.group..range.end.group.saturating_add(1);
 			let filled = track.fill_groups(span.clone(), priority).await;
+			// Leaving out a group the source failed to serve would tell the peer it does not
+			// exist, so a failure that says nothing about the group refuses the whole answer.
+			if let Some(err) = filled.refused(span.clone()).into_iter().find(|err| {
+				!matches!(
+					err,
+					Error::NotFound | Error::NotFetchable | Error::Unsupported | Error::Old
+				)
+			}) {
+				return Err(failed(err));
+			}
 			// A group filled for this answer exists even if the cache evicted it while the
 			// rest of the span filled: reading it again fetches it again.
 			let mut groups = filled.accepted(span.clone());
@@ -11364,6 +11374,36 @@ mod serve_tests {
 			);
 			assert_eq!(ok.end_of_track, matches!(largest, Largest::Finished), "{version}");
 			assert_eq!(objects, pairs([group]), "{version}");
+		}
+	}
+
+	/// A fill that fails for a reason other than the group's absence refuses the whole range,
+	/// rather than leaving the group out as though it did not exist.
+	#[moq_clock::test]
+	async fn a_range_fetch_refuses_a_failed_fill() {
+		for version in FETCH_DRAFTS {
+			let h = serve(version);
+			let request = h._broadcast.reserve_track("cam").unwrap();
+			let dynamic = request.dynamic();
+			let fetching = request.consume().fetch_group(1, None);
+			let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
+			fetched.write_frame(None, b"1-0".to_vec()).unwrap();
+			fetched.finish().unwrap();
+			fetching.await.unwrap();
+
+			let fetch_type = fetch_range(
+				version,
+				"cam",
+				Location { group: 0, object: 0 },
+				Location { group: 1, object: 1 },
+			);
+			let refuse = async {
+				let fill = dynamic.requested_fill().await.unwrap();
+				assert_eq!((fill.start().group, fill.end()), (0, 1), "{version}");
+				fill.refuse_groups(0..1, Error::Unauthorized);
+			};
+			let (buf, ()) = futures::join!(run_fetch(&h, fetch_type, GroupOrder::Ascending, true), refuse);
+			fetch_refusal(buf, version);
 		}
 	}
 

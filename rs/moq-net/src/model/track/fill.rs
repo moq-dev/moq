@@ -131,6 +131,12 @@ impl Outcome {
 			.into_iter()
 	}
 
+	/// Why the sequences of `span` were refused, lowest first.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn refused_in(&self, span: &ops::Range<u64>) -> impl Iterator<Item = &Error> {
+		self.refused.overlapping(span).map(|(_, refusal)| &refusal.err)
+	}
+
 	/// What was answered within `wanted`: accepted, or refused with why and the budget
 	/// the fill asked with.
 	#[expect(

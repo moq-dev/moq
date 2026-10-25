@@ -4889,6 +4889,14 @@ impl Filled {
 			.flat_map(|join| join.outcome().read().accepted_in(&span).collect::<Vec<_>>())
 			.collect()
 	}
+
+	/// Why the fills refused sequences of `span`, lowest first.
+	pub(crate) fn refused(&self, span: ops::Range<u64>) -> Vec<Error> {
+		self.joins
+			.iter()
+			.flat_map(|join| join.outcome().read().refused_in(&span).cloned().collect::<Vec<_>>())
+			.collect()
+	}
 }
 
 /// The pollable state of a [`Consumer::fetch_group`].
