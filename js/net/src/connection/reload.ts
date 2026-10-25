@@ -159,8 +159,9 @@ export class Reload {
 	 *
 	 * Each session presents every token it holds, so a route naming one keeps it across a
 	 * reconnect, and its grant follows the live session. It spans URL changes too, so its
-	 * tokens go to whatever URL the loop dials next. It ends when the loop closes, and
-	 * aborting it stops the loop at its next reconnect, with the abort's error.
+	 * tokens go to whatever URL the loop dials next. It ends once the loop closes and its
+	 * sessions finish draining, and aborting it stops the loop at its next reconnect, with the
+	 * abort's error.
 	 */
 	readonly auth = new AuthHandle();
 
@@ -233,6 +234,9 @@ export class Reload {
 	// dials. Retired when it closes, at its handover cap, or when the sequence ends.
 	#draining: Draining | undefined;
 
+	// Sessions this loop ended that are still draining, each until its close settles.
+	#ending = new Map<Established, Promise<void>>();
+
 	// The current run of migrations. A redirect back to an endpoint that already sent us away is
 	// a loop, however healthy each session looked. Reset when a session ends without a GOAWAY,
 	// outlives the capped delay, or a new sequence starts.
@@ -260,6 +264,8 @@ export class Reload {
 
 	// True after the browser freezes or hides the page until it visibly resumes.
 	#suspended = new Signal(false);
+	// Watches the page for #suspended, outliving the loop until the sessions it ended settle.
+	#suspension = new Effect();
 
 	// Use the serialized URL as the reactive connection key. URL objects use identity
 	// equality, but replacing one with an equivalent instance should not reconnect.
@@ -303,11 +309,17 @@ export class Reload {
 		const win = globalThis.window;
 		const doc = globalThis.document;
 		if (typeof win !== "undefined" && typeof doc !== "undefined") {
-			this.#signals.event(win, "pagehide", () => this.#suspended.set(true));
-			this.#signals.event(win, "pageshow", () => this.#suspended.set(false));
-			this.#signals.event(win, "unload", () => this.#suspended.set(true));
-			this.#signals.event(doc, "visibilitychange", () => {
+			this.#suspension.event(win, "pagehide", () => this.#suspended.set(true));
+			this.#suspension.event(win, "pageshow", () => this.#suspended.set(false));
+			this.#suspension.event(win, "unload", () => this.#suspended.set(true));
+			this.#suspension.event(doc, "visibilitychange", () => {
 				if (!doc.hidden) this.#suspended.set(false);
+			});
+			// Nothing would run to finish a drain begun before the page went away either.
+			this.#suspension.run((effect) => {
+				if (!effect.get(this.#suspended)) return;
+				for (const connection of this.#ending.keys()) connection.abort();
+				this.#ending.clear();
 			});
 		}
 
@@ -395,12 +407,12 @@ export class Reload {
 		// This run's teardown, handed to connect() so a rerun cancels the attempt in flight.
 		const signal = effect.abort;
 
-		// The session this run serves, closed with the run. A drained one leaves this slot
+		// The session this run serves, ended with the run. A drained one leaves this slot
 		// for #draining, which outlives the run.
 		let current: Established | undefined;
 		effect.cleanup(() => {
 			if (current) {
-				current.abort();
+				this.#end(current);
 				if (this.established.peek() === current) this.established.set(undefined);
 				current = undefined;
 			}
@@ -437,7 +449,8 @@ export class Reload {
 						this.#dialing = false;
 					}
 
-					// Hand the connection to the effect, which closes it now if this run is already over.
+					// Hand the connection to the effect. One that lands after this run is over never
+					// served anything, so there is nothing to drain.
 					if (signal.aborted) {
 						connection.abort();
 						return;
@@ -457,6 +470,7 @@ export class Reload {
 					if (ended === null || ended instanceof Error) {
 						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);
 						this.#redirects.reset();
+						current = undefined;
 						if (this.established.peek() === connection) this.established.set(undefined);
 						this.#retry(effect, connected, ended ?? undefined);
 						return;
@@ -535,7 +549,7 @@ export class Reload {
 			// The peer is leaving and named somewhere we won't go: redialing the old address
 			// would ignore it, so stop here.
 			console.warn("GOAWAY redirect refused:", err);
-			connection.abort();
+			this.#end(connection);
 			this.established.set(undefined);
 			this.status.set("disconnected");
 			this.#giveUp(error(err));
@@ -549,8 +563,8 @@ export class Reload {
 		}
 
 		console.info("GOAWAY received; migrating");
-		// A newer GOAWAY retires an older predecessor rather than holding two open.
-		this.#draining?.retire();
+		// A newer GOAWAY retires an older predecessor rather than serving from two.
+		this.#retire();
 		const cap = handover(this.goaway.handover ?? DEFAULT_HANDOVER, drain.timeout);
 		const draining = new Draining(connection, cap, () => {
 			if (this.#draining === draining) this.#draining = undefined;
@@ -561,6 +575,28 @@ export class Reload {
 		});
 		this.#draining = draining;
 		return true;
+	}
+
+	/**
+	 * End a session this loop is done with. Its groups in flight finish within the close
+	 * deadline, unless the page is going away: nothing would run to finish them, and an abort
+	 * closes the transport now rather than leaving the browser to sever it.
+	 */
+	#end(connection: Established): void {
+		if (this.#suspended.peek()) {
+			connection.abort();
+			return;
+		}
+		// A served live track never finishes, so the deadline aborting the rest is the usual end.
+		const ending = connection.close().catch(() => {});
+		this.#ending.set(connection, ending);
+		void ending.then(() => this.#ending.delete(connection));
+	}
+
+	/** Stop serving from a drained predecessor, ending it if still open. */
+	#retire(): void {
+		const draining = this.#draining?.retire();
+		if (draining) this.#end(draining);
 	}
 
 	#initial(): Milli {
@@ -647,7 +683,7 @@ export class Reload {
 		this.#deadline = undefined;
 		this.#sequenceHref = undefined;
 		this.#redirects.reset();
-		this.#draining?.retire();
+		this.#retire();
 	}
 
 	/**
@@ -694,12 +730,19 @@ export class Reload {
 		return this.established.peek()?.stats();
 	}
 
-	/** Stop reconnecting, close the current connection, and settle {@link Reload.closed}. Idempotent. */
+	/** Stop reconnecting, drain and close the current connection, and settle {@link Reload.closed}. Idempotent. */
 	close(abort?: Error) {
 		this.#signals.close();
-		this.#draining?.retire();
-		// No session will present the tokens again, so they end with the loop.
-		this.auth.abort(abort ?? new Error("connection closed"));
+		this.#retire();
+		// No session will present the tokens again, so they end with the loop, once the sessions
+		// still draining no longer need their grants or a page hide to cut them short.
+		const err = abort ?? new Error("connection closed");
+		const done = () => {
+			this.auth.abort(err);
+			this.#suspension.close();
+		};
+		if (this.#ending.size === 0) done();
+		else void Promise.all(this.#ending.values()).then(done);
 		if (this.#closed.peek() === undefined) this.#closed.set(abort ?? null);
 	}
 }
@@ -760,7 +803,9 @@ export function pumpAnnounced(effect: Effect, upstream: Announce.Consumer, produ
 
 /**
  * A session the peer sent GOAWAY on, left serving so its groups in flight finish. It retires
- * when it closes on its own or overstays its handover window, and `onRetire` runs once either way.
+ * when it closes on its own, overstays its handover window, or is retired by the loop, and
+ * `onRetire` runs once either way. The window still caps a retired session's close: it is
+ * aborted at the window's end if still open.
  */
 class Draining {
 	#connection: Established;
@@ -773,22 +818,23 @@ class Draining {
 		this.#onRetire = onRetire;
 		void sleep(Nano.fromMilli(handover), { signal: this.#timer.signal }).then(
 			() => {
-				if (this.#retired) return;
-				console.warn("old session did not drain in time; closing");
-				this.retire();
+				if (this.retire()) console.warn("old session did not drain in time; closing");
+				connection.abort();
 			},
 			() => {},
 		);
-		void connection.closed.then(() => this.retire());
+		void connection.closed.then(() => {
+			this.#timer.abort();
+			this.retire();
+		});
 	}
 
-	/** Close the old session now, whatever remains of its window. Idempotent. */
-	retire(): void {
-		if (this.#retired) return;
+	/** Stop serving from the old session, returning it the first time for the caller to end. */
+	retire(): Established | undefined {
+		if (this.#retired) return undefined;
 		this.#retired = true;
-		this.#timer.abort();
-		this.#connection.abort();
 		this.#onRetire();
+		return this.#connection;
 	}
 }
 

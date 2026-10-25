@@ -96,7 +96,7 @@ pub struct MoqVideoFrameRate {
 	pub denominator: u32,
 }
 
-impl TryFrom<MoqVideoFrameRate> for moq_video::Rate {
+impl TryFrom<MoqVideoFrameRate> for moq_video::FrameRate {
 	type Error = MoqError;
 
 	fn try_from(rate: MoqVideoFrameRate) -> Result<Self, Self::Error> {
@@ -1108,7 +1108,10 @@ mod finish_tests {
 				&output,
 			)
 			.unwrap();
-			assert_eq!(config.framerate, moq_video::Rate::new(numerator, denominator).unwrap());
+			assert_eq!(
+				config.framerate,
+				moq_video::FrameRate::new(numerator, denominator).unwrap()
+			);
 			assert_eq!(config.framerate.denominator(), 1001);
 		}
 		for (numerator, denominator) in [(0, 1), (30_000, 0), (1_000_001, 1)] {

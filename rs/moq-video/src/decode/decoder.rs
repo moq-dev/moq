@@ -468,7 +468,7 @@ mod tests {
 	fn h264_software_encoder(size: crate::Size) -> Encoder {
 		Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.expect("openh264 encoder")
 	}
@@ -728,7 +728,7 @@ mod tests {
 			let mut encoder = Encoder::new(&EncodeConfig {
 				kind: EncodeKind::Software,
 				color: Some(color),
-				..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+				..EncodeConfig::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 			})
 			.unwrap();
 			encoder.cut().unwrap();
@@ -996,7 +996,7 @@ mod tests {
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("videotoolbox".into()),
-			..EncodeConfig::new(160, 120, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(160, 120, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no VideoToolbox H.264 hardware encoder available");
@@ -1025,7 +1025,7 @@ mod tests {
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("videotoolbox".into()),
 			codec: crate::encode::Codec::H265,
-			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(encoder) = encoder else {
 			eprintln!("skipping: no VideoToolbox H.265 hardware encoder available");
@@ -1212,7 +1212,7 @@ mod tests {
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("mediafoundation".into()),
-			..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no Media Foundation H.264 hardware encoder available");
@@ -1297,7 +1297,7 @@ mod tests {
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("mediafoundation".into()),
-			..EncodeConfig::new(target.width, target.height, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(target.width, target.height, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no Media Foundation H.264 hardware encoder available");
@@ -1326,7 +1326,7 @@ mod tests {
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("mediafoundation".into()),
 			codec: crate::encode::Codec::H265,
-			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(encoder) = encoder else {
 			eprintln!("skipping: no Media Foundation H.265 hardware encoder available");

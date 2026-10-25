@@ -229,8 +229,8 @@ export interface ConnectProps {
 	 * naming one of its `Auth`s keeps it across a reconnect. Omit to give the session a handle
 	 * of its own, which ends with it.
 	 *
-	 * The handle backs one active session at a time, plus the ones draining after a GOAWAY:
-	 * connecting another while one is still active rejects with {@link Auth.Duplicate}.
+	 * The handle backs one active session at a time, plus the ones draining after a GOAWAY or a
+	 * `close()`: connecting another while one is still active rejects with {@link Auth.Duplicate}.
 	 */
 	auth?: Auth.Handle;
 
