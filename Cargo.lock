@@ -4923,6 +4923,7 @@ dependencies = [
 name = "moq-hls"
 version = "0.5.11"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "futures",
@@ -4930,6 +4931,7 @@ dependencies = [
  "humantime",
  "kio 0.6.2",
  "m3u8-rs",
+ "moq-archive",
  "moq-clock",
  "moq-json",
  "moq-mux",

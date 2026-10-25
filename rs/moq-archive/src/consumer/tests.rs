@@ -117,16 +117,10 @@ async fn serve(store: &Store<Mock>) -> (broadcast::Producer, JoinHandle<Result<(
 	(broadcast, tokio::spawn(consumer.run()))
 }
 
-/// FETCH group `sequence` from frame `frame_start` on.
-async fn fetch(
-	broadcast: &broadcast::Producer,
-	track: &str,
-	sequence: u64,
-	frame_start: u64,
-) -> moq_net::Result<Vec<String>> {
+/// FETCH group `sequence`.
+async fn fetch(broadcast: &broadcast::Producer, track: &str, sequence: u64) -> moq_net::Result<Vec<String>> {
 	let track = broadcast.consume().track(track)?;
-	let fetch = group::Fetch::default().with_frame_start(frame_start);
-	let mut group = timeout(Duration::from_secs(10), track.fetch_group(sequence, fetch))
+	let mut group = timeout(Duration::from_secs(10), track.fetch_group(sequence, None))
 		.await
 		.expect("the fetch is answered")?;
 	let mut frames = Vec::new();
@@ -143,7 +137,7 @@ async fn fetch(
 async fn subscribe(broadcast: &broadcast::Producer, track: &str) -> track::Ordered {
 	let track = broadcast.consume().track(track).unwrap();
 	let subscription = Subscription::default()
-		.with_groups(0..)
+		.with_range(0..)
 		.with_order(Order::Ascending)
 		.with_max_delay(None);
 	track.subscribe(subscription).await.unwrap().ordered()
@@ -248,9 +242,9 @@ async fn a_recording_round_trips() {
 	// The untimed track keeps its datagram a datagram.
 	let info = broadcast.consume().track("log").unwrap().query().await.unwrap();
 	assert_eq!((info.priority, info.timescale), (9, None));
-	assert_eq!(fetch(&broadcast, "log", 0, 0).await.unwrap(), ["a"]);
+	assert_eq!(fetch(&broadcast, "log", 0).await.unwrap(), ["a"]);
 	assert!(matches!(
-		fetch(&broadcast, "log", 1, 0).await,
+		fetch(&broadcast, "log", 1).await,
 		Err(moq_net::Error::NotFetchable | moq_net::Error::NotFound)
 	));
 }
@@ -265,13 +259,12 @@ async fn history_older_than_any_max_age_is_served() {
 	archive.object("video", 0, vec![frames(true, 10_000, 0..2)]).await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
-	assert_eq!(fetch(&broadcast, "video", 0, 0).await.unwrap(), expected(true, 0, 0..2));
+	assert_eq!(fetch(&broadcast, "video", 0).await.unwrap(), expected(true, 0, 0..2));
 	let mut reader = subscribe(&broadcast, "video").await;
 	assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..2)));
 }
 
-/// One GET serves every group of an object, and a group split across objects is served whole,
-/// from any frame.
+/// One GET serves every group of an object, and a group split across objects is served whole.
 #[tokio::test(start_paused = true)]
 async fn groups_come_from_cached_objects_and_span_them() {
 	let archive = Archive::new();
@@ -289,13 +282,11 @@ async fn groups_come_from_cached_objects_and_span_them() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let mock = archive.store.inner().clone();
 	mock.take();
-	assert_eq!(fetch(&broadcast, "video", 0, 0).await.unwrap(), expected(true, 0, 0..2));
-	assert_eq!(fetch(&broadcast, "video", 1, 1).await.unwrap(), expected(true, 1, 1..2));
+	assert_eq!(fetch(&broadcast, "video", 0).await.unwrap(), expected(true, 0, 0..2));
+	assert_eq!(fetch(&broadcast, "video", 1).await.unwrap(), expected(true, 1, 0..2));
 	assert_eq!(mock.gets().len(), 1, "both groups come from one object");
 
-	assert_eq!(fetch(&broadcast, "video", 2, 0).await.unwrap(), expected(true, 2, 0..5));
-	// From a frame in the continuation only.
-	assert_eq!(fetch(&broadcast, "video", 2, 4).await.unwrap(), expected(true, 2, 4..5));
+	assert_eq!(fetch(&broadcast, "video", 2).await.unwrap(), expected(true, 2, 0..5));
 }
 
 /// A group every reader narrowed past stops its GET, so the groups the fill still owes are read
@@ -315,7 +306,7 @@ async fn a_narrowed_read_skips_the_group_it_left() {
 	let ascending = |groups| {
 		Subscription::default()
 			.with_max_delay(None)
-			.with_groups(groups)
+			.with_range(groups)
 			.with_order(Order::Ascending)
 	};
 	let mut subscriber = broadcast
@@ -363,9 +354,9 @@ async fn a_gap_reads_as_dropped() {
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	// Inside an object, and between two.
-	not_found(fetch(&broadcast, "video", 1, 0).await);
-	not_found(fetch(&broadcast, "video", 3, 0).await);
-	not_found(fetch(&broadcast, "video", 4, 0).await);
+	not_found(fetch(&broadcast, "video", 1).await);
+	not_found(fetch(&broadcast, "video", 3).await);
+	not_found(fetch(&broadcast, "video", 4).await);
 
 	let mut reader = subscribe(&broadcast, "video").await;
 	for expected in [0, 2, 5, 6] {
@@ -386,15 +377,14 @@ async fn a_pruned_start_reads_as_dropped() {
 	archive.object("video", 0, vec![frames(true, 8, 0..1)]).await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
-	not_found(fetch(&broadcast, "video", 0, 0).await);
-	not_found(fetch(&broadcast, "video", 4, 0).await);
-	not_found(fetch(&broadcast, "video", 5, 0).await);
-	assert_eq!(fetch(&broadcast, "video", 5, 2).await.unwrap(), expected(true, 5, 2..4));
-	assert_eq!(fetch(&broadcast, "video", 6, 0).await.unwrap(), expected(true, 6, 0..2));
+	not_found(fetch(&broadcast, "video", 0).await);
+	not_found(fetch(&broadcast, "video", 4).await);
+	not_found(fetch(&broadcast, "video", 5).await);
+	assert_eq!(fetch(&broadcast, "video", 6).await.unwrap(), expected(true, 6, 0..2));
 
 	// An object pruned after it was listed reads as dropped too.
 	archive.store.inner().hide_gets("rec/video/0000000000000000007-");
-	not_found(fetch(&broadcast, "video", 7, 0).await);
+	not_found(fetch(&broadcast, "video", 7).await);
 }
 
 /// A growing archive is followed through each track's own cursor, a key sorting before
@@ -527,7 +517,7 @@ async fn groups_and_datagrams_keep_their_forms() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let track = broadcast.consume().track("mixed").unwrap();
 	let subscription = Subscription::default()
-		.with_groups(0..)
+		.with_range(0..)
 		.with_order(Order::Ascending)
 		.with_max_delay(None);
 	let mut reader = track.subscribe(subscription).await.unwrap();
@@ -543,9 +533,9 @@ async fn groups_and_datagrams_keep_their_forms() {
 	assert_eq!((datagram.sequence, &datagram.payload[..]), (3, &b"3/0"[..]));
 
 	// A stored datagram is never fetched as a group.
-	assert!(fetch(&broadcast, "mixed", 1, 0).await.is_err());
-	assert_eq!(fetch(&broadcast, "mixed", 0, 0).await.unwrap(), ["0/0"]);
-	assert_eq!(fetch(&broadcast, "mixed", 2, 0).await.unwrap(), ["2/0"]);
+	assert!(fetch(&broadcast, "mixed", 1).await.is_err());
+	assert_eq!(fetch(&broadcast, "mixed", 0).await.unwrap(), ["0/0"]);
+	assert_eq!(fetch(&broadcast, "mixed", 2).await.unwrap(), ["2/0"]);
 
 	// The newest stored group arrives live as a group, still open.
 	let mut sequences = Vec::new();

@@ -23,7 +23,7 @@ impl<T: ObjectStore> Store<T> {
 	}
 
 	/// The underlying object store.
-	pub fn inner(&self) -> &T {
+	pub(crate) fn inner(&self) -> &T {
 		&self.inner
 	}
 
@@ -36,7 +36,7 @@ impl<T: ObjectStore> Store<T> {
 	///
 	/// An existing recording in an older format is refused with [`Error::Version`]: a
 	/// [`Consumer`](crate::Consumer) still reads it, but nothing appends to it.
-	pub async fn put_info(&self, track: &str, info: &Info) -> Result<()> {
+	pub(crate) async fn put_info(&self, track: &str, info: &Info) -> Result<()> {
 		let path = self.info_path(track)?;
 		let bytes = info.encode()?;
 		match self
@@ -69,7 +69,8 @@ impl<T: ObjectStore> Store<T> {
 	}
 
 	/// Fetch and validate a track's `.info`.
-	pub async fn get_info(&self, track: &str) -> Result<Info> {
+	#[cfg(test)]
+	pub(crate) async fn get_info(&self, track: &str) -> Result<Info> {
 		Info::decode(&self.get_bytes(&self.info_path(track)?).await?)
 	}
 

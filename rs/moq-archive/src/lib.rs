@@ -69,7 +69,7 @@ mod mock;
 mod path;
 pub mod producer;
 /// The object store and key prefix an archive lives under.
-pub mod store;
+mod store;
 
 pub use consumer::Consumer;
 pub use error::{Error, Result};

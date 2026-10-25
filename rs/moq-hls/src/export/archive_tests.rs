@@ -12,14 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use hang::timeline::{Position, Record};
 use moq_archive::Store;
 use moq_archive::object_store::memory::InMemory;
 use moq_archive::object_store::path::Path;
 use moq_archive::object_store::{
-	self, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt,
+	self, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
 	PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 use moq_json::window;
@@ -119,6 +118,8 @@ struct Source {
 
 /// A source broadcast recorded into a store as it publishes.
 struct Recording {
+	/// The store's own handle, for its GET log.
+	counting: Counting,
 	store: Store<Counting>,
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_json::snapshot::Producer<hang::Catalog>,
@@ -127,9 +128,9 @@ struct Recording {
 }
 
 impl Recording {
-	/// `archive` is the catalog's root entry; `checkpoint` bounds each timeline's checkpoint.
-	async fn new(archive: hang::catalog::Archive, checkpoint: Option<usize>) -> Self {
-		let store = Store::new(Counting::default(), "rec");
+	async fn new() -> Self {
+		let counting = Counting::default();
+		let store = Store::new(counting.clone(), "rec");
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
@@ -138,7 +139,7 @@ impl Recording {
 		json.deltas = false;
 		let mut catalog = moq_json::snapshot::Producer::new(track, json);
 		catalog
-			.update(moq_net::Timed::from(&self::catalog(archive)).at(Timestamp::now()))
+			.update(moq_net::Timed::from(&self::catalog()).at(Timestamp::now()))
 			.unwrap();
 
 		let mut sources = HashMap::new();
@@ -150,10 +151,7 @@ impl Recording {
 			let media = broadcast.create_track(name, media).unwrap();
 			let timeline = track::Info::default().with_timescale(Timescale::MILLI);
 			let timeline = broadcast.create_track(timeline_name(name), timeline).unwrap();
-			let mut config = window::ProducerConfig::default().with_compression(true).with_ops(false);
-			if let Some(limit) = checkpoint {
-				config = config.with_checkpoint_records(limit);
-			}
+			let config = window::ProducerConfig::default().with_compression(true).with_ops(false);
 			let source = Source {
 				media,
 				timeline,
@@ -177,6 +175,7 @@ impl Recording {
 			}
 		}
 		Self {
+			counting,
 			store,
 			broadcast,
 			catalog,
@@ -257,7 +256,7 @@ impl Recording {
 
 	/// Every GET since the last call.
 	fn gets(&self) -> Vec<String> {
-		self.store.inner().take()
+		self.counting.take()
 	}
 }
 
@@ -281,8 +280,9 @@ fn legacy(track: &str, micros: u64, keyframe: bool) -> Bytes {
 	encoded.freeze()
 }
 
-/// A live-style archive entry naming every rendition's timeline.
-fn live() -> hang::catalog::Archive {
+/// The source's catalog: every rendition's config, plus an `archive` entry naming each
+/// rendition's timeline. Out-of-band configs, so no init needs media.
+fn catalog() -> hang::Catalog {
 	let mut archive = hang::catalog::Archive::new();
 	for track in ["360p", "1080p", "audio"] {
 		archive.timelines.insert(
@@ -290,20 +290,6 @@ fn live() -> hang::catalog::Archive {
 			hang::catalog::Timeline::new(timeline_name(track), 4_000),
 		);
 	}
-	archive
-}
-
-/// The archive entry of a source that declares itself durable: its timelines, in a store.
-fn durable() -> hang::catalog::Archive {
-	let mut archive = live();
-	archive.store = Some("memory:///rec/".parse().unwrap());
-	archive.version = Some(hang::catalog::Archive::VERSION);
-	archive
-}
-
-/// The source's catalog: every rendition's config, plus `archive`. Out-of-band configs, so no
-/// init needs media.
-fn catalog(archive: hang::catalog::Archive) -> hang::Catalog {
 	let mut catalog = hang::Catalog::default();
 	catalog.archive = Some(archive);
 	for (name, width, height) in [("360p", 640, 360), ("1080p", 1920, 1080)] {
@@ -320,17 +306,14 @@ fn catalog(archive: hang::catalog::Archive) -> hang::Catalog {
 /// An archive served back through an origin by a consumer, and a broadcaster exporting it.
 struct Replay {
 	broadcaster: Arc<Broadcaster>,
-	origin: moq_net::origin::Producer,
+	/// Keeps the served broadcast's origin open.
+	_origin: moq_net::origin::Producer,
 	consumer: tokio::task::JoinHandle<moq_archive::Result<()>>,
 	driver: tokio::task::JoinHandle<moq_net::Error>,
 }
 
 impl Replay {
 	async fn open(store: &Store<Counting>, cache: u64) -> Self {
-		Self::open_with(store, cache, Config::default()).await
-	}
-
-	async fn open_with(store: &Store<Counting>, cache: u64, config: Config) -> Self {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		let driver = tokio::spawn(moq_net::time::run(driver));
 		let broadcast = origin.create_broadcast("rec").unwrap();
@@ -341,14 +324,14 @@ impl Replay {
 		let consumer = tokio::spawn(consumer.run());
 		broadcast.announce(Default::default()).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "rec").await, config);
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "rec").await, Config::default());
 		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.expect("a rendition becomes playable or fails");
 
 		Self {
 			broadcaster,
-			origin,
+			_origin: origin,
 			consumer,
 			driver,
 		}
@@ -380,22 +363,6 @@ impl Replay {
 		}
 		panic!("{name} playlist never became ready");
 	}
-
-	/// Wait until `name`'s playlist answers a failed timeline, then return that error.
-	async fn failure(&self, kind: Kind, name: &str) -> crate::Error {
-		let rendition = self.rendition(kind, name);
-		for _ in 0..500 {
-			let answer = tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None))
-				.await
-				.expect("playlist answers");
-			if let Err(err) = answer {
-				assert!(matches!(err, crate::Error::TimelineFailed { .. }), "{name}: {err}");
-				return err;
-			}
-			tokio::time::sleep(Duration::from_millis(10)).await;
-		}
-		panic!("{name} playlist never failed");
-	}
 }
 
 impl Drop for Replay {
@@ -412,29 +379,10 @@ fn is_media(path: &str) -> bool {
 	!marker && !path.contains("timeline") && !path.contains("catalog")
 }
 
-/// The keys of `track`'s stored objects, oldest first, with the first group each holds.
-async fn objects(store: &Store<Counting>, track: &str) -> Vec<(u64, Path)> {
-	// The names here escape only `.`, as a track directory spells it.
-	let encoded = track.replace('.', "%2E");
-	let dir = Path::parse(format!("rec/{encoded}")).unwrap();
-	let metas: Vec<ObjectMeta> = store.inner().list(Some(&dir)).try_collect().await.unwrap();
-	let mut objects: Vec<(u64, Path)> = metas
-		.into_iter()
-		.filter_map(|meta| {
-			let name = meta.location.filename()?;
-			let group = name.split('-').next()?.parse().ok()?;
-			Some((group, meta.location))
-		})
-		.collect();
-	objects.sort();
-	objects
-}
-
 /// `count` 2s segments: one keyframe group per video record, four audio groups per audio record.
-/// The first video rendition by name, 1080p, is the reference. `checkpoint` bounds each
-/// timeline's checkpoint.
-async fn segments(count: u64, checkpoint: Option<usize>) -> Recording {
-	let mut recording = Recording::new(durable(), checkpoint).await;
+/// The first video rendition by name, 1080p, is the reference.
+async fn segments(count: u64) -> Recording {
+	let mut recording = Recording::new().await;
 	for segment in 0..count {
 		add_segment(&mut recording, segment, 0);
 	}
@@ -456,7 +404,7 @@ fn add_segment(recording: &mut Recording, segment: u64, pop: u64) {
 
 #[tokio::test(start_paused = true)]
 async fn playlists_read_only_timelines_and_segments_their_own_objects() {
-	let recording = segments(3, None).await;
+	let recording = segments(3).await;
 	recording.stored().await;
 	let replay = Replay::open(&recording.store, 64 * 1024 * 1024).await;
 
@@ -466,7 +414,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 	// Render and reload every playlist with media GETs refused: shared numbering, and not one
 	// media GET. The reference lists every segment; the others hold back the newest until their
 	// own timeline passes its end, or ends.
-	recording.store.inner().reject_media(true);
+	recording.counting.reject_media(true);
 	for _ in 0..2 {
 		for (kind, name, listed) in [
 			(Kind::Video, "1080p", 3),
@@ -489,7 +437,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 		);
 	}
 	assert!(gets.iter().any(|path| path.contains("timeline")), "{gets:?}");
-	recording.store.inner().reject_media(false);
+	recording.counting.reject_media(false);
 
 	// Switching renditions downloads only the selected rendition's objects.
 	for (kind, name, segment) in [
@@ -526,7 +474,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 
 #[tokio::test(start_paused = true)]
 async fn a_bounded_cache_rereads_evicted_objects() {
-	let recording = segments(3, None).await;
+	let recording = segments(3).await;
 	recording.stored().await;
 	// Too small for any object, so nothing stays cached.
 	let replay = Replay::open(&recording.store, 1).await;
@@ -547,7 +495,7 @@ async fn a_bounded_cache_rereads_evicted_objects() {
 
 #[tokio::test(start_paused = true)]
 async fn missing_rendition_segments_are_gaps_and_time_jumps_are_discontinuities() {
-	let mut recording = Recording::new(durable(), None).await;
+	let mut recording = Recording::new().await;
 	recording.add("1080p", 0, 2000, &[(0, &[0])], 0);
 	recording.add("360p", 0, 8000, &[(0, &[0])], 0);
 	recording.add("audio", 0, 2000, &[(0, &[0])], 0);
@@ -557,6 +505,7 @@ async fn missing_rendition_segments_are_gaps_and_time_jumps_are_discontinuities(
 	recording.add("1080p", 10_000, 2000, &[(2, &[10_000_000])], 0);
 	recording.add("360p", 10_000, 2000, &[(1, &[10_000_000])], 0);
 	// The completed archive resolves each rendition's newest segment.
+	let counting = recording.counting.clone();
 	let store = recording.finish().await;
 
 	let replay = Replay::open(&store, 64 * 1024 * 1024).await;
@@ -577,10 +526,10 @@ async fn missing_rendition_segments_are_gaps_and_time_jumps_are_discontinuities(
 	);
 
 	// A gap is never fetched.
-	store.inner().take();
+	counting.take();
 	let rendition = replay.rendition(Kind::Video, "360p");
 	assert!(rendition.listed_segment(1).await.unwrap().is_none());
-	assert!(!store.inner().take().iter().any(|path| is_media(path)));
+	assert!(!counting.take().iter().any(|path| is_media(path)));
 	let after = rendition.listed_segment(2).await.unwrap().unwrap();
 	assert_eq!(&after[4..8], b"moof");
 }
@@ -589,7 +538,7 @@ async fn missing_rendition_segments_are_gaps_and_time_jumps_are_discontinuities(
 /// complete.
 #[tokio::test(start_paused = true)]
 async fn a_growing_recording_ends_with_its_markers() {
-	let mut recording = segments(3, None).await;
+	let mut recording = segments(3).await;
 	recording.stored().await;
 	let replay = Replay::open(&recording.store, 64 * 1024 * 1024).await;
 	replay.playlist(Kind::Video, "1080p").await;
@@ -620,7 +569,7 @@ async fn a_growing_recording_ends_with_its_markers() {
 /// however much the store retains.
 #[tokio::test(start_paused = true)]
 async fn a_durable_timeline_lists_the_window() {
-	let recording = segments(12, None).await;
+	let recording = segments(12).await;
 	recording.stored().await;
 	let replay = Replay::open(&recording.store, 64 * 1024 * 1024).await;
 	let playlist = replay
