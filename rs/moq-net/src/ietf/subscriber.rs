@@ -2810,12 +2810,9 @@ impl Subscriber {
 				Some(requested) => requested.to_owned(),
 				None => continue,
 			};
-			let source = crate::model::broadcast::SourceGuard::new(self.origin.create_source(&requested));
-			// The handler exists before the requester sees the source, so a track it asks
-			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
-			let dynamic = source.dynamic();
 			// The source serves the instance the route names now: every request for it names
-			// that epoch, so the peer refuses one that would reach another instance.
+			// that epoch when the peer can read one, and the source takes new tracks only
+			// while the peer still selects that instance.
 			let (validity, epoch) = {
 				let state = self.state.lock();
 				let entry = state
@@ -2830,6 +2827,10 @@ impl Subscriber {
 					});
 				(validity, entry.and_then(|entry| entry.route.epoch.clone()))
 			};
+			let source = crate::model::broadcast::SourceGuard::new(self.origin.create_source(&requested, validity));
+			// The handler exists before the requester sees the source, so a track it asks
+			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
+			let dynamic = source.dynamic();
 			request.accept(&*source);
 
 			// The namespace's token closes the source as it is retracted. If it was
@@ -2847,7 +2848,7 @@ impl Subscriber {
 			}
 
 			let mut this = self.clone();
-			this.validity = validity;
+			this.validity = dynamic.validity().clone();
 			this.epoch = epoch;
 			broadcasts.push(async move {
 				if let Err(err) = this.run_broadcast(requested.borrow(), source, dynamic, route).await {
@@ -2878,8 +2879,8 @@ impl Subscriber {
 	}
 
 	/// Serve one minted source's track requests, taken through its `broadcast` handler,
-	/// until it closes: its namespace is retracted (`route` closes), nothing holds it any
-	/// more, or the session dies.
+	/// until it closes: its namespace is retracted (`route` closes), the peer stops
+	/// selecting its instance, nothing holds it any more, or the session dies.
 	async fn run_broadcast(
 		&self,
 		path: Path<'_>,
@@ -4149,6 +4150,7 @@ impl Subscriber {
 		let validity = self.validity.start();
 		let work = async move {
 			let res = async {
+				// This subscription owns its joining fetch, so wait for stream credit.
 				// No ID is spent while opening a stream, so dropping a blocked open
 				// cannot leave a gap in the peer's sequential request IDs.
 				let mut opening = this.session.clone();
@@ -4157,7 +4159,7 @@ impl Subscriber {
 					if let Poll::Ready(err) = track.poll_closed(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					Stream::poll_open_request(&mut opening, this.version, &mut waiter.context())
+					Stream::poll_open(&mut opening, this.version, &mut waiter.context())
 				})
 				.await?;
 				stream = super::request_stream::with_stats(stream, this.origin.stats(), this.version);
@@ -5457,13 +5459,18 @@ impl Subscriber {
 
 		// The owning subscribe/linger loop enforces its admitted gate, including a
 		// token-authorized announce outside the session scope. Its abort ends this job.
+		// The fill is already owned by waiting readers; credit backpressures it until
+		// their demand leaves instead of refusing accepted work.
 		let mut opening = self.session.clone();
 		let mut stream = match kio::wait(|waiter| {
 			validity.check(waiter)?;
 			if let Poll::Ready(err) = fill.poll_closed(waiter) {
 				return Poll::Ready(Err(err));
 			}
-			Stream::poll_open_request(&mut opening, self.version, &mut waiter.context())
+			if fill.poll_unwanted_groups(run.clone(), waiter).is_ready() {
+				return Poll::Ready(Err(Error::Cancel));
+			}
+			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
 		})
 		.await
 		{
@@ -5476,6 +5483,9 @@ impl Subscriber {
 			validity.check(waiter)?;
 			if let Poll::Ready(err) = fill.poll_closed(waiter) {
 				return Poll::Ready(Err(err));
+			}
+			if fill.poll_unwanted_groups(run.clone(), waiter).is_ready() {
+				return Poll::Ready(Err(Error::Cancel));
 			}
 			self.control.poll_credit(waiter, &mut timeout)
 		})
@@ -9861,7 +9871,7 @@ mod tests {
 	async fn a_minted_source_closes_unheld_or_retracted() {
 		let (subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let run = |route: &kio::Producer<()>| {
-			let source = crate::model::broadcast::SourceGuard::new(origin.create_source("pool/p"));
+			let source = crate::model::broadcast::SourceGuard::new(origin.create_source("pool/p", Default::default()));
 			let (holder, dynamic) = (source.consume(), source.dynamic());
 			let (this, route) = (subscriber.clone(), route.consume());
 			let task = moq_clock::sim::spawn(async move {
@@ -16416,8 +16426,7 @@ mod joining_fetch_tests {
 	async fn invalid_joining_open_is_refused() {
 		for version in JOINING_DRAFTS {
 			for retired in [false, true] {
-				let gate = kio::Producer::new(false);
-				let session = ScriptedSession::gated_open(Vec::new(), gate.consume());
+				let session = ScriptedSession::new(Vec::new()).without_credit();
 				let log = session.log.clone();
 				let (mut subscriber, track, _tasks) =
 					pending_join(crate::driver::Transport::new(session.clone()), version);
@@ -16445,10 +16454,10 @@ mod joining_fetch_tests {
 	}
 
 	#[moq_clock::test]
-	async fn refusing_a_joining_fetch_spends_no_request_credit() {
+	async fn a_joining_fetch_waits_without_spending_request_credit() {
 		for version in JOINING_DRAFTS {
 			let session = ScriptedSession::new(Vec::new()).without_credit();
-			let (mut subscriber, track, _tasks) = pending_join(crate::driver::Transport::new(session), version);
+			let (mut subscriber, track, _tasks) = pending_join(crate::driver::Transport::new(session.clone()), version);
 			subscriber.control = Control::new(
 				match version {
 					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(RequestId(2)),
@@ -16458,14 +16467,18 @@ mod joining_fetch_tests {
 			);
 			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
 			assert!(
-				joining.poll(&kio::Waiter::noop()).is_ready(),
-				"{version}: refusal must be immediate"
+				joining.poll(&kio::Waiter::noop()).is_pending(),
+				"{version}: a subscription owns its joining FETCH"
 			);
 			assert_eq!(
 				subscriber.control.poll_next_request_id(&kio::Waiter::noop()),
 				Poll::Ready(RequestId(1)),
-				"{version}: refusal spends neither an ID nor MAX_REQUEST_ID credit"
+				"{version}: waiting spends neither an ID nor MAX_REQUEST_ID credit"
 			);
+			assert_eq!(session.log.bi_opens(), 0);
+			session.grant_credit();
+			assert!(joining.poll(&kio::Waiter::noop()).is_pending());
+			assert_eq!(session.log.bi_opens(), 1, "{version}: credit releases the FETCH");
 		}
 	}
 
@@ -16766,6 +16779,9 @@ mod joining_fetch_tests {
 
 	#[derive(Clone, Copy, PartialEq, Eq)]
 	enum FetchStage {
+		Credit,
+		CreditRetired,
+		CreditGranted,
 		Unanswered,
 		Retired,
 		Accepted,
@@ -16780,7 +16796,12 @@ mod joining_fetch_tests {
 	async fn abandon_group_fetch(version: Version, stage: FetchStage) {
 		const GROUP: u64 = 4;
 		let complete = matches!(stage, FetchStage::Complete | FetchStage::CompleteReset);
+		let waiting = matches!(
+			stage,
+			FetchStage::Credit | FetchStage::CreditRetired | FetchStage::CreditGranted
+		);
 		let session = ScriptedSession::new(Vec::new());
+		let session = if waiting { session.without_credit() } else { session };
 		let (tasks, _task_set) = TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
@@ -16815,6 +16836,30 @@ mod joining_fetch_tests {
 			None,
 		));
 		assert!(futures::poll!(run.as_mut()).is_pending());
+		if waiting {
+			assert_eq!(session.log.bi_opens(), 0, "{version}: waits before opening");
+			assert!(subscriber.state.lock().group_fetches.is_empty());
+			if stage == FetchStage::CreditGranted {
+				session.grant_credit();
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				assert_eq!(session.log.bi_opens(), 1, "{version}: credit releases the FETCH");
+			}
+			if stage == FetchStage::CreditRetired {
+				drop(route);
+			} else {
+				drop(fetch);
+			}
+			assert!(
+				futures::poll!(run.as_mut()).is_ready(),
+				"{version}: releases owned work"
+			);
+			assert!(subscriber.state.lock().group_fetches.is_empty());
+			assert!(matches!(
+				outcome.read().refused(GROUP).map(|(err, _)| err.clone()),
+				Some(Error::Cancel | Error::Unroutable)
+			));
+			return;
+		}
 		let slot = subscriber.state.lock().group_fetches[&RequestId(1)].clone();
 
 		if matches!(stage, FetchStage::Unanswered | FetchStage::Retired) {
@@ -16828,7 +16873,7 @@ mod joining_fetch_tests {
 				"{version:?}: unanswered FETCH stays alive"
 			);
 			assert!(matches!(
-				outcome.read().refused(GROUP).cloned(),
+				outcome.read().refused(GROUP).map(|(err, _)| err.clone()),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 		} else {
@@ -17000,6 +17045,15 @@ mod joining_fetch_tests {
 	async fn a_complete_group_fetch_survives_a_request_reset() {
 		for version in JOINING_DRAFTS {
 			abandon_group_fetch(version, FetchStage::CompleteReset).await;
+		}
+	}
+
+	#[moq_clock::test]
+	async fn a_claimed_fetch_waits_only_while_wanted() {
+		for version in JOINING_DRAFTS {
+			for stage in [FetchStage::Credit, FetchStage::CreditRetired, FetchStage::CreditGranted] {
+				abandon_group_fetch(version, stage).await;
+			}
 		}
 	}
 

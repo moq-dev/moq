@@ -70,10 +70,10 @@ public final class Fill: Sendable {
         ffi.priority()
     }
 
-    /// The most tolerant age budget among its readers in microseconds, or nil for the
-    /// publisher's max age alone.
-    public var maxDelayUs: UInt64? {
-        ffi.maxDelayUs()
+    /// The most tolerant age budget among its readers, or nil for the publisher's max age
+    /// alone.
+    public var maxDelay: TimeInterval? {
+        ffi.maxDelay()
     }
 
     /// Which end to fill first.

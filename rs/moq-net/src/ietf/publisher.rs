@@ -17846,9 +17846,8 @@ enum FillServe {
 		skip: u64,
 		until: Option<u64>,
 	},
-	/// A range spanning several groups, which we do not serve: multi-group fetch
-	/// serialization depends on a negotiated group order we do not implement, so the
-	/// stream is reset instead, the draft's fill-failure signal.
+	/// A range spanning several groups, which a fill does not serve: `run_fill` writes a
+	/// single group, so the stream is reset instead, the draft's fill-failure signal.
 	Unsupported,
 }
 

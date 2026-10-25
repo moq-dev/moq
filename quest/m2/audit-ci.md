@@ -144,9 +144,9 @@ verdicts:
   median 5.5 minutes, p90 11.9, at most 24.2 over 32 entries (m0, 2026-10-21).
   Its job summary lists seconds per module, and the `cargo-timings` artifact
   is the per-crate drill-down.
-- Job summaries now carry the binding generator comparison, Rust and JS
-  coverage, the browser backend baseline, and browser benchmark comparisons
-  (m1). Relay-profile traces stay artifact-only diagnosis; native audio rows
+- Job summaries now carry Rust and JS coverage, the browser backend baseline,
+  and browser benchmark comparisons (m1). Relay-profile traces stay
+  artifact-only diagnosis; native audio rows
   wait on the audio jitter target's reporting decision.
 
 ### Every workflow (m1, 2026-10-22)
