@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use hang::catalog::Reference;
 use moq_audio::bus::{Bus, Strip};
 use moq_mux::catalog::Stream;
 
@@ -296,9 +297,11 @@ impl Driver {
 		let format = moq_mux::catalog::CatalogFormat::detect(path).unwrap_or_default();
 		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await?;
 
-		// A rendition name always means the same decoder config, so only a new
-		// name restarts a decoder; a metadata-only update, such as a jitter
-		// estimate, leaves playback alone.
+		// A track name always means the same content, so only a new track
+		// restarts a decoder. That is the track an entry resolves to, not its
+		// catalog ID: a publisher may keep the ID and point it at a replacement
+		// track, as the JS publisher does on a codec change. A metadata-only
+		// update, such as a jitter estimate, leaves playback alone.
 		let mut video: Option<String> = None;
 		let mut audio: Option<String> = None;
 		let mut video_playing: Playing<'_> = Box::pin(std::future::pending());
@@ -310,30 +313,21 @@ impl Driver {
 					let Some(catalog) = catalog? else {
 						return Ok(());
 					};
-					// Renditions served from another broadcast would need that
-					// broadcast's own subscription; the studio's sources are single
-					// broadcasts.
-					let next = catalog
-						.video
-						.enabled()
-						.find(|(_, config)| config.broadcast.is_none())
-						.map(|(name, config)| (name.clone(), config.clone()));
-					if next.as_ref().map(|(name, _)| name) != video.as_ref() {
-						video = next.as_ref().map(|(name, _)| name.clone());
+					let next = pick(catalog.video.enabled())?;
+					let track = next.as_ref().map(|(id, config)| Reference::track(config, id).to_string());
+					if track != video {
+						video = track;
 						video_playing = match next {
-							Some((name, config)) => Box::pin(self.play_video(&broadcast, name, config)),
+							Some((id, config)) => Box::pin(self.play_video(&broadcast, id, config)),
 							None => Box::pin(std::future::pending()),
 						};
 					}
-					let next = catalog
-						.audio
-						.enabled()
-						.find(|(_, config)| config.broadcast.is_none())
-						.map(|(name, config)| (name.clone(), config.clone()));
-					if next.as_ref().map(|(name, _)| name) != audio.as_ref() {
-						audio = next.as_ref().map(|(name, _)| name.clone());
+					let next = pick(catalog.audio.enabled())?;
+					let track = next.as_ref().map(|(id, config)| Reference::track(config, id).to_string());
+					if track != audio {
+						audio = track;
 						audio_playing = match next {
-							Some((name, config)) => Box::pin(self.play_audio(&broadcast, name, config)),
+							Some((id, config)) => Box::pin(self.play_audio(&broadcast, id, config)),
 							None => Box::pin(std::future::pending()),
 						};
 					}
@@ -389,14 +383,42 @@ impl Driver {
 		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
 		input.format = moq_audio::Format::F32;
 		let mut channel = self.context.bus.channel(input, strip)?;
-		// Gaps and encoder boundaries need nothing: the bus plays what arrives
-		// on its own clock, and silence fills whatever does not.
+		// Gaps and encoder boundaries need nothing. Like a picture, which shows
+		// on arrival, the bus plays a source at its live edge on the program
+		// clock: a stall plays as silence while it lasts, and a burst after it
+		// is bounded by the bus's buffer. Replaying the publisher's
+		// timeline, holes included, would put the audio behind the live edge
+		// and its own video.
 		while let Some(read) = consumer.read().await? {
 			if let moq_audio::decode::Read::Frame(frame) = read {
 				channel.write(&frame.data)?;
 			}
 		}
 		Ok(())
+	}
+}
+
+/// The best enabled rendition the broadcast serves itself, of `renditions`
+/// ranked best first.
+///
+/// One served from another broadcast would need that broadcast's own
+/// subscription, which a source does not open, so a catalog offering only
+/// those is refused rather than shown as black or played as silence.
+fn pick<'a, C: Reference + Clone + 'a>(
+	renditions: impl Iterator<Item = (&'a String, &'a C)>,
+) -> Result<Option<(String, C)>, Error> {
+	let mut foreign = None;
+	for (id, config) in renditions {
+		if config.broadcast().is_none() {
+			return Ok(Some((id.clone(), config.clone())));
+		}
+		foreign.get_or_insert(id);
+	}
+	match foreign {
+		Some(id) => Err(Error::Unsupported(format!(
+			"rendition {id} is served from another broadcast"
+		))),
+		None => Ok(None),
 	}
 }
 
@@ -613,6 +635,87 @@ mod tests {
 			while second.wanted_changed().await.unwrap().is_none() {}
 			while first.wanted_changed().await.unwrap().is_some() {}
 			assert_eq!(sources.get("guest").unwrap().status(), Status::Live);
+		})
+		.await;
+	}
+
+	/// A rendition that keeps its catalog ID but points at a replacement track,
+	/// as the JS publisher does on a codec change, moves playback to that track.
+	#[tokio::test]
+	async fn a_broadcast_follows_a_renditions_track() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, origin) = context(dir.path());
+			let publication = origin.create_broadcast("room/guest").unwrap();
+			let mut broadcast = publication.broadcast().clone();
+			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let info = catalog.track_info(hang::catalog::PRIORITY.audio);
+			let first = broadcast.create_track("first", info.clone()).unwrap();
+			let second = broadcast.create_track("second", info).unwrap();
+			let point = |catalog: &mut moq_mux::catalog::Producer, track: &str| {
+				let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+				config.track = Some(track.into());
+				catalog
+					.mutate(|catalog| {
+						catalog.audio.renditions.insert("audio".into(), config);
+					})
+					.unwrap();
+			};
+			point(&mut catalog, "first");
+			publication
+				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+				.unwrap();
+
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection());
+			start(&sources, drivers).await;
+
+			let mut first = first.demand();
+			while first.wanted_changed().await.unwrap().is_none() {}
+
+			point(&mut catalog, "second");
+			let mut second = second.demand();
+			while second.wanted_changed().await.unwrap().is_none() {}
+			while first.wanted_changed().await.unwrap().is_some() {}
+			assert_eq!(sources.get("guest").unwrap().status(), Status::Live);
+		})
+		.await;
+	}
+
+	/// A catalog whose only rendition lives in another broadcast fails the
+	/// source rather than leaving it live and silent.
+	#[tokio::test]
+	async fn a_foreign_rendition_is_refused() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, origin) = context(dir.path());
+			let publication = origin.create_broadcast("room/guest").unwrap();
+			let mut broadcast = publication.broadcast().clone();
+			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+			config.broadcast = Some("../other".into());
+			catalog
+				.mutate(|catalog| {
+					catalog.audio.renditions.insert("audio".into(), config);
+				})
+				.unwrap();
+			publication
+				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+				.unwrap();
+
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection());
+			start(&sources, drivers).await;
+
+			let guest = sources.get("guest").unwrap();
+			for _ in 0..1000 {
+				if let Status::Failed(reason) = guest.status() {
+					assert!(reason.contains("another broadcast"), "{reason}");
+					return;
+				}
+				tokio::task::yield_now().await;
+			}
+			panic!("the source never failed: {:?}", guest.status());
 		})
 		.await;
 	}

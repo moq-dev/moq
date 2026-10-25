@@ -396,7 +396,10 @@ impl Panels {
 				for (name, feed) in state.sources.iter() {
 					ui.label(name);
 					ui.label(describe(feed.source()));
-					status(ui, &feed.status());
+					match state.compositor.error(name) {
+						Some(err) => status(ui, &Status::Failed(err.to_string())),
+						None => status(ui, &feed.status()),
+					}
 					if ui.small_button("Remove").clicked() {
 						remove = Some(name.to_string());
 					}

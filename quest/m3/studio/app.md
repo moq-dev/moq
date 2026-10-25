@@ -10,8 +10,10 @@ landed.
 
 - **macOS:** camera, display, microphone, and system audio sources, plus the
   window, preview, program, and publish path.
-- **Windows:** camera, display, window, microphone, and system audio sources,
-  plus the window, preview, program, and publish path.
+- **Windows:** camera, display, window, and microphone sources, plus the
+  window, preview, program, and publish path. System audio is `Unsupported`
+  there until [Windows capture parity](/quest/m2/capture-windows.md) adds
+  WASAPI loopback, so that quest runs it.
 - Build with `--features capture`, since a default build has image, color,
   and broadcast sources only.
 

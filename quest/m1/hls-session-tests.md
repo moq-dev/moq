@@ -53,6 +53,5 @@ Decided 2026-10-25 (maintainer interview):
 
 ## Related
 
-- [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - the cursors' first consumer outside moq-hls, and the end-to-end path with a relay hop
 - [HLS restart drain cutoff](/quest/m2/hls-restart-drain-cutoff.md) - changes what a replaced run's cursor drains; update the takeover scenario with it
 - [Test coverage audit](/quest/m2/audit-test-coverage.md) - the recurring audit this gap slipped past
