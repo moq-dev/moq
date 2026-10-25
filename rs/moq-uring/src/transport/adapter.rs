@@ -70,6 +70,14 @@ pub trait Grouped: backend::Session<SendStream: GroupedSend> {
 	/// Adapt one of the backend's receive streams, freshly accepted or opened.
 	fn recv(stream: RecvStream<Self::RecvStream>) -> Self::Recv;
 
+	/// Open a request without waiting for stream credit.
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<Option<backend::BiStreams<Self>>, Self::Error>> {
+		backend::Session::poll_open_bi(self, cx).map_ok(Some)
+	}
+
 	/// The wire counters the backend updates as it sends and receives, or `None` when it has none.
 	fn wire(&self) -> Option<moq::Wire> {
 		None
@@ -159,6 +167,18 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 		backend::Session::poll_open_bi(&mut self.0, cx)
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send).scheduled(options), S::recv(RecvStream(recv)))))
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
+	) -> Poll<Result<Option<poll::BiStreams<Self>>, Self::Error>> {
+		Grouped::poll_open_request(&mut self.0, cx)
+			.map_err(Error)
+			.map_ok(|streams| {
+				streams.map(|(send, recv)| (SendStream(send).scheduled(options), S::recv(RecvStream(recv))))
+			})
 	}
 	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as GroupedSend>::Group> {
 		Grouped::send_group(&mut self.0, priority)
@@ -347,6 +367,7 @@ mod tests {
 		fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<backend::BiStreams<Self>, Failure>> {
 			backend::Session::poll_accept_bi(self, cx)
 		}
+
 		fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Failure>> {
 			self.0.set(payload.len() as u32);
 			Poll::Ready(Ok(()))

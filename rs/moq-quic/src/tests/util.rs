@@ -812,12 +812,7 @@ impl Write for SharedBuffer {
 pub(super) fn server_config() -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(server_crypto()));
     config.transport = Arc::new(TransportConfig::default());
-    if !cfg!(feature = "bloom") {
-        config
-            .validation_token
-            .sent(2)
-            .log(Arc::new(SimpleTokenLog::default()));
-    }
+
     config
 }
 
@@ -992,7 +987,7 @@ impl TokenLog for SimpleTokenLog {
     fn check_and_insert(
         &self,
         nonce: u128,
-        _issued: SystemTime,
+        _issued: Wall,
         _lifetime: Duration,
     ) -> Result<(), TokenReuseError> {
         if self.0.lock().unwrap().insert(nonce) {

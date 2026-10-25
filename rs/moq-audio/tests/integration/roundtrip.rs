@@ -66,8 +66,8 @@ async fn opus_roundtrip(case: Case) {
 	input.format = case.format;
 	let mut options = encode::Options::default();
 	options.track = Some("audio".into());
-	options.settings = encode::Settings::new(48_000, case.layout);
-	options.settings.codec = encode::Codec::Opus;
+	options.config = encode::Config::new(48_000, case.layout);
+	options.config.codec = encode::Codec::Opus;
 	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
 	let channels = case.layout.channels();
 	let chunk_frames = case.rate as usize / 50;
@@ -151,7 +151,7 @@ async fn pcm_round_trip_is_lossless() {
 	let input = encode::Input::new(48_000, Layout::Stereo);
 	let mut options = encode::Options::default();
 	options.track = Some("pcm".to_string());
-	options.settings.codec = encode::Codec::Pcm;
+	options.config.codec = encode::Codec::Pcm;
 
 	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
 	let samples = sine_f32_interleaved(440.0, 48_000, 2, 960);
@@ -198,8 +198,8 @@ async fn pcm_five_one_reads_back_at_any_layout() {
 	let input = encode::Input::new(48_000, Layout::FivePointOne);
 	let mut options = encode::Options::default();
 	options.track = Some("pcm".to_string());
-	options.settings = encode::Settings::new(48_000, Layout::FivePointOne);
-	options.settings.codec = encode::Codec::Pcm;
+	options.config = encode::Config::new(48_000, Layout::FivePointOne);
+	options.config.codec = encode::Codec::Pcm;
 
 	// A level per speaker: left, right, center, LFE, side left, side right.
 	let speakers = [0.1f32, 0.2, 0.3, 0.4, 0.05, 0.06];
@@ -256,8 +256,8 @@ async fn pcm_five_one_reads_back_at_any_layout() {
 async fn next_frame(consumer: &mut decode::Consumer) -> Result<Option<moq_audio::Frame>, moq_audio::Error> {
 	loop {
 		match consumer.read().await? {
-			Some(decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
-			Some(decode::Read::End { .. }) => {}
+			Some(decode::Read::Frame(frame)) => return Ok(Some(frame)),
+			Some(decode::Read::Gap { .. } | decode::Read::End { .. }) => {}
 			None => return Ok(None),
 		}
 	}

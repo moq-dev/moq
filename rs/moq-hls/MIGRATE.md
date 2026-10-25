@@ -4,6 +4,37 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A failed catalog fails listings and cursors with `CatalogFailed`
+
+A catalog stream that ends in an error now fails every rendition's playlist,
+manifest, and recording cursor with `Error::CatalogFailed { source }` instead of
+the raw `source`. Before, a recording cursor returned the raw network error
+(such as `Unroutable`) when the catalog failed before the reference timeline
+did, so a caller could not tell that final failure from a retryable fetch error.
+Match `CatalogFailed` wherever you match `TimelineFailed`, and look through
+`source` for the underlying error.
+
+### Rendition URLs name the publisher instance
+
+`Server` follows each instance that takes over a broadcast, and every URL the
+master playlist and DASH manifest list now sits under that instance:
+`/{broadcast}/@{instance}/{kind}/{rendition}/...` instead of
+`/{broadcast}/{kind}/{rendition}/...`. `Route::parse` refuses the old layout,
+and `Resource::{Media, Init, Segment, SegmentAt}` carry the `instance` they
+name. `Broadcaster::master_playlist` and `Broadcaster::manifest` render the new
+layout. An embedder that answers through `Server::respond` needs no change; one
+that routes rendition URLs itself must pass the `@{instance}` segment through.
+
+### Denied broadcast references report authorization failure
+
+A rendition whose referenced broadcast is outside the source origin's scope now
+returns `Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized))` from
+playlist (ranged too), init and segment reads, and from the segment cursor,
+instead of behaving like missing media.
+`Broadcaster::ready` and `Rendition::playable` settle on that refusal. Embedders
+should answer it with an uncacheable 403; the HTTP server does so automatically.
+Allowed renditions keep serving, and missing or disconnected media remains 404.
+
 ### A failed timeline fails the segment cursor
 
 `export::segments::Consumer::next` returns `Err(Error::TimelineFailed { .. })` once a failed timeline's covered segments drain, instead of `Ok(None)`.
@@ -18,6 +49,11 @@ match cursor.next().await {
 }
 ```
 
+### Segment requests carry a timeline reference
+
+`export::Rendition::segment(n)` is `segment(tag, n)`. Use the tag in the playlist segment URI instead of choosing one locally.
+Media playlist segment URIs gain the tag before the number, after any generation prefix: `seg/{n}.m4s` becomes `seg/{tag}.{n}.m4s`. Route the tag and number separately to `segment`.
+
 ### HLS import unwraps fMP4 to Legacy (#6250)
 
 `import::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
@@ -27,11 +63,12 @@ Set `import::Config::passthrough` to keep publishing CMAF.
 
 `import::Import::run` returns `Ok(())` once every rendition's playlist carries `EXT-X-ENDLIST` and its last segment is imported, instead of polling forever.
 A playlist that has already ended (`EXT-X-ENDLIST`) when a rendition first sees it is refused with the new `Error::PlaylistEnded`, from `init` and `run` alike, instead of importing its last three segments.
-Call `Import::finish` then, and keep the returned `broadcast::Finish` (or await `Finish::wait`) so subscribers still catching up drain the tail.
+Call `Import::finish` then, and hold the importer, which owns the finished tracks, with `moq_mux::Linger` so subscribers that arrive late still get the tail.
 
 ```rust
 import.run().await?;
-import.finish()?.wait().await;
+import.finish()?;
+moq_mux::Linger::new([broadcast], import, moq_mux::Linger::DEFAULT).wait().await;
 ```
 
 ### A timestamp rewind ends the import (#6426)
@@ -55,13 +92,6 @@ match rendition.media_playlist(query) {
 	Err(err) => { /* the export failed: 5xx, no-store */ }
 }
 ```
-
-### Imports always anchor their own timebase (#5967)
-
-`import::Config::timebase` and `Error::ForeignTimebase` are removed.
-Drop the field from `Config`, and any match arm on `ForeignTimebase`.
-Each import mints its timebase from the catalog it writes, and its first fragment anchors it.
-A placed timebase only made redundant importers share timestamps; each importer now publishes its own epoch instead.
 
 ### A rendition waits for its own timeline (#6009)
 

@@ -402,22 +402,22 @@
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
-        # and the fork adds `error_style = "expected"` and `strip_type_prefix`,
-        # which cpp/moq/uniffi.toml turns on. Its tags add a `-kixelated.N`
-        # pre-release so they never collide with upstream's. Move back upstream
-        # once one tags both.
+        # and the fork adds `error_style = "expected"`, `strip_type_prefix`, and
+        # `strip_function_prefix`, which cpp/moq/uniffi.toml turns on. Its tags
+        # add a `-kixelated.N` pre-release so they never collide with upstream's.
+        # Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
-          version = "0.11.0-kixelated.5+v0.32.2";
+          version = "0.11.0-kixelated.7+v0.32.2";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             rev = "v${version}";
-            hash = "sha256-y148irMNOsMrfjbUT/f3jlNmpxT0/z/2LVlP+t1oq8I=";
+            hash = "sha256-nErLn2hQus5omIaFheJWy06wKQS9HiKNtksxaJm9Z8k=";
           };
 
-          cargoHash = "sha256-QBURLIg255O6J4A+wzZVk4cUJPdJb6JepZKofX0fLZg=";
+          cargoHash = "sha256-fz7fn6D12zmFFSVSdySDfNRtQe+n4KCB9bXAsuvq/QY=";
 
           # The workspace's other member is the fixture crate, which pulls the
           # uniffi examples in from git; build only the generator.

@@ -15,13 +15,11 @@
 //! per connection and CPU per message (see the README).
 
 #[cfg(target_os = "linux")]
-mod duration;
-
-#[cfg(target_os = "linux")]
 mod linux {
+	use moq_clock::Wall;
 	use std::collections::HashMap;
 	use std::io::Write;
-	use std::time::{Duration, SystemTime, UNIX_EPOCH};
+	use std::time::Duration;
 
 	use anyhow::Context;
 	use procfs::CurrentSI;
@@ -64,7 +62,7 @@ mod linux {
 
 		/// Stop after this duration. Runs until interrupted (or the targets exit) otherwise.
 		#[usage(long)]
-		duration: Option<crate::duration::Duration>,
+		duration: Option<moq_tokio::cli::Duration>,
 
 		/// Write JSON lines to this file instead of stdout. Truncates on start.
 		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jsonl", "json"))]
@@ -233,9 +231,8 @@ mod linux {
 		target.ctx.retain(|tid| live.contains(&tid));
 
 		Ok(Sample {
-			timestamp_ms: SystemTime::from(moq_clock::wall())
-				.duration_since(UNIX_EPOCH)
-				.unwrap_or_default()
+			timestamp_ms: moq_clock::wall()
+				.saturating_duration_since(Wall::UNIX_EPOCH)
 				.as_millis(),
 			pid: target.proc.pid,
 			comm: stat.comm.clone(),
@@ -306,11 +303,7 @@ mod linux {
 			out.flush()?;
 
 			anyhow::ensure!(!targets.is_empty(), "all target processes exited");
-			let Some(delay) = next_delay(
-				args.interval.0,
-				args.duration.map(crate::duration::Duration::into_std),
-				start.elapsed(),
-			) else {
+			let Some(delay) = next_delay(args.interval.0, args.duration.map(Into::into), start.elapsed()) else {
 				return Ok(());
 			};
 			#[expect(

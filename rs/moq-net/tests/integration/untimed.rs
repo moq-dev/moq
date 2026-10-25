@@ -187,7 +187,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 
 		let consumer = chain.nodes[1].consume().request_broadcast("room", None).await.unwrap();
 		let subscription = track::Subscription::default()
-			.with_groups(2..)
+			.with_range(2..)
 			.with_max_delay(Duration::from_secs(30));
 		let mut subscriber = moq_clock::timeout(TIMEOUT, consumer.track("data").unwrap().subscribe(subscription))
 			.await
@@ -250,11 +250,11 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 		};
 		let groups = request.dynamic();
 		let _track = request.accept(untimed());
-		let request = match futures::future::select(std::pin::pin!(groups.requested_group()), &mut waiting).await {
+		let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 			futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
-		let mut group = request.accept(timed()).unwrap();
+		let mut group = request.accept(0, timed()).unwrap();
 		group.write_frame(None, Bytes::from_static(b"segment")).unwrap();
 		group.finish().unwrap();
 

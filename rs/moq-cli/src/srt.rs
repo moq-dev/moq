@@ -29,7 +29,7 @@ pub struct Args {
 
 	/// SRT receive latency: the buffering delay traded for loss-recovery headroom.
 	#[usage(long, default = "500ms")]
-	pub latency: crate::duration::Duration,
+	pub latency: moq_tokio::cli::Duration,
 }
 
 /// SRT import args: the endpoint, plus which programs of a multiplex to publish.
@@ -53,12 +53,12 @@ pub struct ExportArgs {
 	#[usage(flatten)]
 	pub endpoint: Args,
 
-	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
-	/// then carry on with the same stream. A replacement ends the stream unless `--stitch`
-	/// is passed.
-	/// Also bounds a stitched replacement through its first catalog; zero requires it already available.
+	/// How long to wait for the same publisher instance, or with `--stitch` a replacement, to
+	/// come back once the broadcast ends (e.g. `10s`), then carry on with the same stream.
+	/// Zero follows only an instance already serving. A replacement ends the stream unless
+	/// `--stitch` is passed.
 	#[usage(long, default = "0s")]
-	pub linger: crate::duration::Duration,
+	pub follow: moq_tokio::cli::Duration,
 
 	/// Follow another publisher instance that replaces the broadcast, as a full program switch
 	/// on the same SRT connection.
@@ -99,6 +99,7 @@ pub async fn listen_import(
 		origin,
 		name,
 		max_age,
+		linger,
 		bandwidth,
 	} = target;
 	let mut server = Server::bind(addr, latency).await?;
@@ -116,6 +117,7 @@ pub async fn listen_import(
 						.with_max_age(max_age)
 						.with_bandwidth(bandwidth)
 						.with_program(program)
+						.with_linger(linger)
 						.accept(&origin, &name)
 						.await
 					{
@@ -143,8 +145,8 @@ pub async fn listen_export(
 	name: String,
 	args: ExportArgs,
 ) -> anyhow::Result<()> {
-	let mut server = Server::bind(addr, args.endpoint.latency.into_std()).await?;
-	let (linger, stitch) = (args.linger.into_std(), args.stitch);
+	let mut server = Server::bind(addr, Duration::from(args.endpoint.latency)).await?;
+	let (follow, stitch) = (args.follow.into(), args.stitch);
 	tracing::info!(%addr, %name, "SRT listening (export)");
 	notify_ready();
 
@@ -154,7 +156,7 @@ pub async fn listen_export(
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					let subscribe = subscribe.with_linger(linger).with_stitch(stitch);
+					let subscribe = subscribe.with_follow(follow).with_stitch(stitch);
 					if let Err(err) = subscribe.accept(&origin, &name).await {
 						tracing::warn!(%name, %err, "SRT request ended with error");
 					}
@@ -188,7 +190,8 @@ pub async fn connect_import(
 		.with_max_delay(latency)
 		.with_max_age(target.max_age)
 		.with_bandwidth(target.bandwidth)
-		.with_program(program);
+		.with_program(program)
+		.with_linger(target.linger);
 	client.pull(&target.origin, name).await.map_err(suggest_program)
 }
 
@@ -204,8 +207,8 @@ pub async fn connect_export(
 	notify_ready();
 
 	let client = moq_srt::Client::new(addr, resource)
-		.with_max_delay(args.endpoint.latency.into_std())
-		.with_linger(args.linger.into_std())
+		.with_max_delay(args.endpoint.latency.into())
+		.with_follow(args.follow.into())
 		.with_stitch(args.stitch);
 	Ok(client.publish(&origin, &name).await?)
 }

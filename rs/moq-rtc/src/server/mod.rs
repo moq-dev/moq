@@ -22,7 +22,7 @@ use axum::Router;
 use axum::http::{HeaderValue, StatusCode, Uri};
 use tokio::sync::{OnceCell, oneshot};
 
-use crate::{Error, Result};
+use crate::Result;
 use mux::Mux;
 
 /// The result of a WHIP/WHEP [`whip::accept`] / [`whep::accept`]: the SDP answer
@@ -33,8 +33,6 @@ pub struct Response {
 	pub resource_id: String,
 	/// The SDP answer body (`Content-Type: application/sdp`).
 	pub answer: String,
-	/// This peer's cumulative UDP payload bytes, retained after the session ends.
-	pub wire: crate::wire::Source,
 	session: AcceptedSession,
 }
 
@@ -88,18 +86,18 @@ impl AcceptedSession {
 			}
 		};
 		if let Some(res) = ended {
-			crate::session::log_session_end(self.role, &res);
-			return normalize_session_result(res);
+			return crate::session::end(self.role, res);
 		}
 
 		// A DELETE is the peer's clean end after its final media. An ingest serves the
-		// finished broadcast until its media is stale, so subscribers still catching up
-		// drain the tail; dropping this future ends that early, as does a newer publish
-		// at the path. A peer that vanishes instead closes the broadcast at once.
+		// finished broadcast for the linger, so a subscriber that arrives after the end still
+		// gets the tail; dropping this future ends that early. A peer that vanishes instead
+		// closes the broadcast at once.
 		tracing::debug!(role = self.role, "webrtc session terminated by DELETE");
-		if let Some(finish) = session.finish()? {
-			tracing::info!(role = self.role, linger = ?finish.linger(), "serving the finished broadcast until its media is stale");
-			finish.wait().await;
+		let linger = self.server.config().linger;
+		if let Some(finished) = session.finish(linger)? {
+			tracing::info!(role = self.role, ?linger, "serving the finished broadcast");
+			finished.wait().await;
 		}
 		Ok(())
 	}
@@ -108,15 +106,6 @@ impl AcceptedSession {
 impl Drop for AcceptedSession {
 	fn drop(&mut self) {
 		self.server.unregister_session(&self.resource_id);
-	}
-}
-
-/// Fold an ordinary peer disconnect into `Ok` so [`Response::run`] only errors
-/// on genuine failures.
-fn normalize_session_result(result: Result<()>) -> Result<()> {
-	match result {
-		Ok(()) | Err(Error::SessionClosed) => Ok(()),
-		Err(err) => Err(err),
 	}
 }
 
@@ -168,6 +157,11 @@ pub struct Config {
 	/// Connection allocator each ingested track claims its peak-hold bitrate on.
 	/// Ingest only (`server publish` / WHIP); WHEP egress ignores this.
 	pub bandwidth: moq_net::bandwidth::Allocator,
+
+	/// How long an ingest the peer ended with a `DELETE` stays up, so a subscriber that
+	/// arrives after the end still gets the tail. Defaults to [`moq_mux::Linger::DEFAULT`];
+	/// zero closes it at once. Ingest only (`server publish` / WHIP).
+	pub linger: Duration,
 }
 
 impl Default for Config {
@@ -177,6 +171,7 @@ impl Default for Config {
 			udp_bind: SocketAddr::from(([0, 0, 0, 0], 0)),
 			max_age: None,
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			linger: moq_mux::Linger::DEFAULT,
 		}
 	}
 }
@@ -316,11 +311,6 @@ mod tests {
 		let _cancel = server.register_session(id.to_string());
 		server.unregister_session(id);
 		assert!(!server.terminate(id), "unregistered session can't be terminated");
-	}
-
-	#[test]
-	fn peer_close_is_a_successful_session_result() {
-		assert!(normalize_session_result(Err(Error::SessionClosed)).is_ok());
 	}
 
 	#[cfg(feature = "server")]

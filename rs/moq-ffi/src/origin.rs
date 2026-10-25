@@ -105,9 +105,10 @@ pub fn moq_mint_epoch() -> String {
 #[uniffi::export]
 pub fn moq_epoch_time_ms(epoch: String) -> Result<u64, MoqError> {
 	let epoch: moq_net::Epoch = epoch.parse()?;
-	let since = epoch.time().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-	// A UUIDv7 holds 48 bits of milliseconds, so this never truncates.
-	Ok(since.as_millis() as u64)
+	// This numeric API retains UUIDv7's full 48-bit range, beyond Wall's year 2554.
+	// Parsing above guarantees these fields are canonical hexadecimal Unix milliseconds.
+	let text = epoch.as_str();
+	Ok(u64::from_str_radix(&text[..8], 16).unwrap() << 16 | u64::from_str_radix(&text[9..13], 16).unwrap())
 }
 
 /// An origin in which broadcasts can be published.
@@ -493,8 +494,8 @@ impl MoqOriginConsumer {
 	///
 	/// Calling this straight after connecting therefore races the session's announcements
 	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first. A
-	/// moq-lite client only asks the relay about paths something watches, through `announced`
-	/// or `announced_broadcast`, so a path nothing watches stays unroutable.
+	/// client only asks the relay about paths something watches, through `announced` or
+	/// `announced_broadcast`, so a path nothing watches stays unroutable.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self
 			.driver
@@ -696,7 +697,7 @@ mod supervision_tests {
 	}
 
 	#[tokio::test]
-	async fn a_finish_after_a_driver_panic_closes_the_broadcast() {
+	async fn a_finish_after_a_driver_panic_reports_it_until_the_close() {
 		let (inner, completion, trigger) = crate::ffi::panicking_origin();
 		let origin = MoqOriginProducer::from_inner(Origin {
 			inner,
@@ -706,11 +707,15 @@ mod supervision_tests {
 		// A dynamic handle outlives the consumed producer, so only an explicit close ends it.
 		let _dynamic = broadcast.dynamic().unwrap();
 		let consumer = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.consume();
+		let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 		*trigger
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
 		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
-		assert!(matches!(broadcast.finish(), Err(MoqError::Task { .. })));
+		assert!(matches!(catalog.finish(), Err(MoqError::Task { .. })));
+		// The handle stays the caller's to close, and the close still ends the broadcast.
+		assert!(!consumer.is_closed());
+		assert!(matches!(broadcast.close(), Err(MoqError::Task { .. })));
 		assert!(consumer.is_closed());
 	}
 

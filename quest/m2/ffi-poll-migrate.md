@@ -50,7 +50,7 @@ once this lands.
 - **Still lost on cancel**: when a RustFuture finishes and the foreign side
   then drops it as cancelled (Python asyncio cancel, Go ctx), the result is
   gone. The spike measured this in both `Task` and Shape A. Keep the Go
-  wrapper's terminal cancel. [Foreign poll](/quest/m2/ffi-poll-protocol.md)
+  wrapper's terminal cancel. [Foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md)
   fixes it later for the hot reads.
 - **What stays**: migrate an export only when it is pure kio polling over
   handle state. Anything that awaits tokio channels, codecs, or I/O keeps
@@ -76,5 +76,5 @@ get items in call order; sequence and arrival order are unchanged. Wire: none.
 
 ## Related
 
-- [Foreign poll for hot reads](/quest/m2/ffi-poll-protocol.md) - the generated protocol that follows this, once the fork exists
+- [Foreign poll for hot reads](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - the generated protocol that follows this, once the fork exists
 - [Runtime trait](/quest/m2/runtime-trait.md) - moq-ffi's remaining tokio use may move behind it

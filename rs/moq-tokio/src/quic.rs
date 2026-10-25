@@ -17,9 +17,9 @@ use crate::cli::Duration as CliDuration;
 #[cfg(feature = "quic")]
 mod backend;
 #[cfg(feature = "quic")]
-pub(crate) use backend::{Client, Closer, Options, Server, accept};
+pub use backend::Error;
 #[cfg(feature = "quic")]
-pub use backend::{Connection, Error};
+pub(crate) use backend::{Client, Closer, Options, Server, accept};
 /// The flow-control limits a live QUIC connection can change; see [`driver::Connection::set_limits`].
 #[cfg(feature = "driver")]
 pub use moq_quic::{Limits, LimitsError};
@@ -66,10 +66,10 @@ impl std::str::FromStr for ServerId {
 	}
 }
 
-/// QUIC-LB connection-ID encoding.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub struct LoadBalancer {
+/// Resolved QUIC-LB connection-ID encoding.
+#[cfg(feature = "quic")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LoadBalancer {
 	/// The routable server identifier encoded into each connection ID.
 	pub id: ServerId,
 	/// Number of random nonce bytes appended to each connection ID.
@@ -144,7 +144,7 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
 
 /// The `--quic-*` transport section, applied to dialed and accepted connections alike.
-#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -181,48 +181,31 @@ pub struct Config {
 	/// Idle timeout before an inactive connection is dropped. Defaults to 10s.
 	///
 	/// QUIC uses the smaller of both ends' timeouts, so either side can shorten it.
-	/// `None` uses the default; an explicit command-line flag or environment variable wins.
-	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
-	pub idle_timeout: Option<Duration>,
-
-	/// Idle timeout before an inactive connection is dropped. Defaults to 10s.
+	/// `None` uses the default; zero disables this duration.
 	#[usage(
 		name = "quic-idle-timeout",
 		long = "quic-idle-timeout",
 		env = "MOQ_QUIC_IDLE_TIMEOUT",
 		setting = "quic.idle_timeout"
 	)]
-	#[serde(default, rename = "__cli_idle_timeout", skip_serializing_if = "Option::is_none")]
-	idle_timeout_arg: Option<CliDuration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub idle_timeout: Option<crate::cli::Duration>,
 
 	/// Keep-alive ping interval. Defaults to 3s; set `0s` to disable.
 	///
 	/// The iroh backend applies this to its connection keep-alive. It also keeps
 	/// a 5s per-path heartbeat that its builder will not raise or clear, so any
-	/// interval above 5s still sends those path pings, and `0s` leaves both at 5s.
-	/// `None` uses the default; an explicit command-line flag or environment variable wins.
-	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
-	pub keep_alive: Option<Duration>,
-
-	/// Keep-alive ping interval. Defaults to 3s; 0s disables it.
+	/// interval above 5s still sends those path pings. Explicit `0s` is refused
+	/// by Iroh because its builder cannot disable either heartbeat.
+	/// `None` uses the default; zero disables this duration.
 	#[usage(
 		name = "quic-keep-alive",
 		long = "quic-keep-alive",
 		env = "MOQ_QUIC_KEEP_ALIVE",
 		setting = "quic.keep_alive"
 	)]
-	#[serde(default, rename = "__cli_keep_alive", skip_serializing_if = "Option::is_none")]
-	keep_alive_arg: Option<CliDuration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub keep_alive: Option<crate::cli::Duration>,
 
 	/// Enable path MTU discovery. Defaults to off.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -304,21 +287,20 @@ pub struct Config {
 	#[usage(value_hint = usage_rs::ValueHint::DirPath)]
 	pub qlog: Option<PathBuf>,
 
-	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names. Defaults to off.
+	/// Danger: append TLS session secrets to this private file, for debugging.
 	///
-	/// Anyone holding that file can decrypt captured traffic, so keep it to debugging.
-	/// Setting it without `SSLKEYLOGFILE` errors at init.
+	/// Anyone holding this file can decrypt captured traffic. The native QUIC backend
+	/// opens it at initialization; Iroh refuses this setting because its API only supports
+	/// process-wide environment-based logging.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-keylog",
 		long = "quic-keylog",
 		env = "MOQ_QUIC_KEYLOG",
-		setting = "quic.keylog",
-		default_missing = "true",
-		num_args = 0..=1,
-		require_equals = true,
+		setting = "quic.keylog"
 	)]
-	pub keylog: Option<bool>,
+	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
+	pub keylog: Option<PathBuf>,
 
 	/// The old role-prefixed spellings, kept parsing but hidden. Never read as
 	/// settings: [`Config::deprecated`] names what replaced each one so a process
@@ -327,27 +309,6 @@ pub struct Config {
 	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			max_streams: None,
-			gso: None,
-			idle_timeout: Some(DEFAULT_IDLE_TIMEOUT),
-			idle_timeout_arg: None,
-			keep_alive: Some(DEFAULT_KEEP_ALIVE),
-			keep_alive_arg: None,
-			mtu_discovery: None,
-			congestion_control: None,
-			receive_window: None,
-			stream_receive_window: None,
-			send_window: None,
-			qlog: None,
-			keylog: None,
-			legacy: Default::default(),
-		}
-	}
 }
 
 /// The hidden `--client-quic-*` / `--server-quic-*` spellings (and their env
@@ -576,13 +537,15 @@ impl Config {
 	/// advertise. Called when the endpoint is built.
 	#[cfg(feature = "_transport")]
 	pub fn validate(&self) -> crate::Result<()> {
+		if self.keylog.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
+			return Err(crate::Error::KeylogUnset);
+		}
 		// Erroring beats silently ignoring the flag: the operator asked for traces and
 		// would otherwise go looking for files that were never going to appear.
 		match self.qlog.as_ref() {
 			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
 			_ => Ok(()),
 		}?;
-		validate_keylog(self.keylog, std::env::var_os("SSLKEYLOGFILE").as_deref())?;
 		validate_idle_timeout(Some(self.resolve().idle_timeout))?;
 		validate_streams(self.max_streams)?;
 		validate_windows(self)
@@ -596,16 +559,8 @@ impl Config {
 	pub fn resolve(&self) -> Resolved {
 		// A zero keep-alive means "disabled"; anything else (including unset) keeps
 		// the connection warm, defaulting to 3s.
-		let idle_timeout = self
-			.idle_timeout_arg
-			.map(Into::into)
-			.or(self.idle_timeout)
-			.unwrap_or(DEFAULT_IDLE_TIMEOUT);
-		let keep_alive = self
-			.keep_alive_arg
-			.map(Into::into)
-			.or(self.keep_alive)
-			.unwrap_or(DEFAULT_KEEP_ALIVE);
+		let idle_timeout = self.idle_timeout.map(Into::into).unwrap_or(DEFAULT_IDLE_TIMEOUT);
+		let keep_alive = self.keep_alive.map(Into::into).unwrap_or(DEFAULT_KEEP_ALIVE);
 		let keep_alive = (!keep_alive.is_zero()).then_some(keep_alive);
 
 		Resolved {
@@ -619,21 +574,9 @@ impl Config {
 			stream_receive_window: self.stream_receive_window.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
 			send_window: self.send_window.unwrap_or(DEFAULT_SEND_WINDOW),
 			qlog: self.qlog.clone(),
-			keylog: self.keylog.unwrap_or(false),
+			keylog: self.keylog.clone(),
 		}
 	}
-}
-
-/// Reject a key log with no file to write to, given the file `SSLKEYLOGFILE` names.
-///
-/// rustls logs nothing without a path, which would hide the mistake the way an
-/// ignored qlog directory would.
-#[cfg(feature = "_transport")]
-fn validate_keylog(keylog: Option<bool>, file: Option<&std::ffi::OsStr>) -> crate::Result<()> {
-	if keylog == Some(true) && file.is_none_or(std::ffi::OsStr::is_empty) {
-		return Err(crate::Error::KeylogUnset);
-	}
-	Ok(())
 }
 
 /// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
@@ -745,8 +688,8 @@ pub struct Resolved {
 	pub send_window: u64,
 	/// Directory to write qlog traces into, or `None` to not capture them.
 	pub qlog: Option<PathBuf>,
-	/// Whether to write TLS session secrets to `SSLKEYLOGFILE`.
-	pub keylog: bool,
+	/// The explicit file to append TLS session secrets to, or `None` to disable logging.
+	pub keylog: Option<PathBuf>,
 }
 
 impl Resolved {
@@ -804,6 +747,8 @@ mod tests {
 
 	#[test]
 	fn defaults_apply_when_unset() {
+		assert!(Config::default().idle_timeout.is_none());
+		assert!(Config::default().keep_alive.is_none());
 		let quic = Config::default().resolve();
 		assert_eq!(quic.max_streams, DEFAULT_MAX_STREAMS);
 		assert_eq!(quic.idle_timeout, DEFAULT_IDLE_TIMEOUT);
@@ -811,19 +756,19 @@ mod tests {
 		assert!(!quic.mtu_discovery);
 		assert_eq!(quic.gso, None);
 		assert!(!quic.gso_disabled());
-		assert!(!quic.keylog);
+		assert!(quic.keylog.is_none());
 	}
 
 	#[test]
 	fn zero_keep_alive_disables_it() {
 		let disabled = Config {
-			keep_alive: Some(Duration::ZERO),
+			keep_alive: Some((Duration::ZERO).into()),
 			..Default::default()
 		};
 		assert_eq!(disabled.resolve().keep_alive, None);
 
 		let explicit = Config {
-			keep_alive: Some(Duration::from_secs(2)),
+			keep_alive: Some((Duration::from_secs(2)).into()),
 			..Default::default()
 		};
 		assert_eq!(explicit.resolve().keep_alive, Some(Duration::from_secs(2)));
@@ -854,12 +799,13 @@ mod tests {
 			"--quic-qlog",
 			"/tmp/qlog",
 			"--quic-keylog",
+			"/tmp/keys.log",
 		]);
 		assert_eq!(quic.max_streams, Some(5000));
 		assert_eq!(quic.gso, Some(false));
 		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
-		assert_eq!(quic.keylog, Some(true));
+		assert_eq!(quic.keylog.as_deref(), Some(std::path::Path::new("/tmp/keys.log")));
 	}
 
 	/// `none` is spelled the same on the CLI, in TOML, and through `FromStr`.
@@ -971,43 +917,25 @@ mod tests {
 		}
 	}
 
-	/// Asking for a key log nobody can read back fails instead of logging nothing.
-	#[cfg(feature = "_transport")]
-	#[test]
-	fn keylog_requires_a_path() {
-		let file = Some(std::ffi::OsStr::new("/tmp/keys.log"));
-		let empty = Some(std::ffi::OsStr::new(""));
-		for keylog in [None, Some(false)] {
-			assert!(validate_keylog(keylog, None).is_ok());
-		}
-		for unset in [None, empty] {
-			assert!(matches!(
-				validate_keylog(Some(true), unset),
-				Err(crate::Error::KeylogUnset)
-			));
-		}
-		assert!(validate_keylog(Some(true), file).is_ok());
-	}
-
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the
 	/// value arrives from a TOML file or a C caller, so validation has to catch it here.
 	#[cfg(feature = "_transport")]
 	#[test]
 	fn idle_timeout_beyond_the_varint_is_rejected() {
 		let over = Config {
-			idle_timeout: Some(MAX_IDLE_TIMEOUT + Duration::from_millis(1)),
+			idle_timeout: Some((MAX_IDLE_TIMEOUT + Duration::from_millis(1)).into()),
 			..Default::default()
 		};
 		assert!(matches!(over.validate(), Err(crate::Error::IdleTimeoutRange)));
 
 		let saturated = Config {
-			idle_timeout: Some(Duration::from_millis(u64::MAX)),
+			idle_timeout: Some((Duration::from_millis(u64::MAX)).into()),
 			..Default::default()
 		};
 		assert!(matches!(saturated.validate(), Err(crate::Error::IdleTimeoutRange)));
 
 		let at_limit = Config {
-			idle_timeout: Some(MAX_IDLE_TIMEOUT),
+			idle_timeout: Some((MAX_IDLE_TIMEOUT).into()),
 			..Default::default()
 		};
 		assert!(at_limit.validate().is_ok());

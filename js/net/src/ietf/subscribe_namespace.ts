@@ -253,30 +253,42 @@ export class SubscribeNamespaceError {
 	}
 }
 
+/** UNSUBSCRIBE_NAMESPACE (0x14), drafts 14 and 15 only: draft 14 names the prefix, draft 15 the request. */
 export class UnsubscribeNamespace {
 	static id = 0x14;
 
+	/** Draft 14: the Track Namespace Prefix of the SUBSCRIBE_NAMESPACE it cancels. */
+	prefix: Path.Valid;
+	/** Draft 15: the Request ID of the SUBSCRIBE_NAMESPACE it cancels. */
 	requestId: bigint;
 
-	constructor({ requestId }: { requestId: bigint }) {
+	constructor({ prefix = "" as Path.Valid, requestId = 0n }: { prefix?: Path.Valid; requestId?: bigint }) {
+		this.prefix = prefix;
 		this.requestId = requestId;
 	}
 
-	async #encode(w: Writer): Promise<void> {
-		await w.u62(this.requestId);
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (version === Version.DRAFT_14) {
+			await Namespace.encode(w, this.prefix);
+		} else if (version === Version.DRAFT_15) {
+			await w.u62(this.requestId);
+		} else {
+			throw new Error(`UNSUBSCRIBE_NAMESPACE is draft-14/15 only, not ${version}`);
+		}
 	}
 
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (wr) => this.#encode(wr, version));
 	}
 
-	static async decode(r: Reader, _version: IetfVersion): Promise<UnsubscribeNamespace> {
-		return Message.decode(r, UnsubscribeNamespace.#decode);
+	static async decode(r: Reader, version: IetfVersion): Promise<UnsubscribeNamespace> {
+		return Message.decode(r, (rd) => UnsubscribeNamespace.#decode(rd, version));
 	}
 
-	static async #decode(r: Reader): Promise<UnsubscribeNamespace> {
-		const requestId = await r.u62();
-		return new UnsubscribeNamespace({ requestId });
+	static async #decode(r: Reader, version: IetfVersion): Promise<UnsubscribeNamespace> {
+		if (version === Version.DRAFT_14) return new UnsubscribeNamespace({ prefix: await Namespace.decode(r) });
+		if (version === Version.DRAFT_15) return new UnsubscribeNamespace({ requestId: await r.u62() });
+		throw new Error(`UNSUBSCRIBE_NAMESPACE is draft-14/15 only, not ${version}`);
 	}
 }
 

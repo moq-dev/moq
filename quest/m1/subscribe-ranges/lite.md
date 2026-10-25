@@ -35,6 +35,14 @@ that is the Largest Object's group, so a newest group with no objects yet is
 not counted until its first object arrives; the relay reports what it has
 rather than waiting for the peer.
 
+Today a track copy received over lite-06 or earlier, or any moq-transport
+draft, refuses relative and time anchors with `Unsupported`, while a lite-07
+copy resolves them locally (it learns the largest and media time and asks for
+everything the budget allows; `lite::Version::resolves_anchors`). Each mapping
+above that makes an older wire carry an anchor lifts that wire's refusal for
+that anchor only, and extends the per-wire table in
+`rs/moq-net/tests/integration/range_anchors.rs`.
+
 Test the lite-05 relay case #5000 left out, on mock time beside
 `rs/moq-net/tests/integration/late_lower_group.rs`: a live subscriber already reading
 group 1, then one from `Absolute(0)`, and a fresh group 0 reaches only the
@@ -46,8 +54,7 @@ list.
 
 Update `drafts/draft-lcurley-moq-lite.md` in the same PR: the SUBSCRIBE and
 SUBSCRIBE_UPDATE fields, the Group Order section (the order is now a field),
-the removal of FETCH, and the lite-07 changelog. Fix the stale "offset by 1"
-sentence on Group Start while there. This quest also owns the Order row of
+the removal of FETCH, and the lite-07 changelog. This quest also owns the Order row of
 the priority table in `doc/concept/moq-lite.md`: it now describes the field
 (decided 2026-10-08, since subscribe ranges owns group order). Published versions (lite-03..06) keep
 FETCH, answered through the model's ranges. Run `just drafts check` and
@@ -56,10 +63,6 @@ FETCH, answered through the model's ranges. Run `just drafts check` and
 Decided 2026-10-22 (maintainer): SUBSCRIBE_OK carries the resolved start for
 a relative range start, so a reader's ordered cursor takes its floor from it
 ([Container reads drop backfill](/quest/m1/read-backfill.md)).
-
-## Required
-
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the misses a relay fills upstream by range
 
 ## Related
 

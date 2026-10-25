@@ -159,11 +159,7 @@ pub async fn accept(
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::rtc)?;
 	let resource_id = sdp::new_resource_id();
-	let socket = moq_ice::Socket {
-		udp: mux.socket(),
-		locals: mux.candidates().to_vec(),
-		inbound,
-	};
+	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
 	let session = session::Session::egress(rtc, socket, source)?;
 
 	// Register before returning so a DELETE that races startup still finds the
@@ -173,7 +169,6 @@ pub async fn accept(
 	Ok(Response {
 		resource_id: resource_id.clone(),
 		answer: sdp::render_answer(&answer),
-		wire: session.wire(),
 		session: crate::server::AcceptedSession {
 			server: server.clone(),
 			resource_id,
@@ -261,12 +256,11 @@ mod tests {
 		let addr = server.tcp_local_addr().expect("tcp listener bound");
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.expect("accept");
-			let (session, driver) = request
+			let session = request
 				.with_publisher(&pub_origin)
 				.ok()
 				.await
 				.expect("publisher session");
-			let _ = driver.await;
 			let _ = session.closed().await;
 		});
 

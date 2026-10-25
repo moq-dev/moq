@@ -18,7 +18,3 @@ Decided 2026-10-23 (maintainer interview):
 - This is the cursors' first consumer outside moq-hls's tests.
 - Update `doc/bin/cli.md` and `doc/bin/hls.md`, and every example that uses
   `export hls`.
-
-## Required
-
-- [HLS cursors error on every incomplete recording](/quest/m1/hls-teardown.md) - an abrupt end or a missed segment must surface as an error before the recorder relies on it

@@ -9,7 +9,7 @@ and syscalls. Not io_uring specific: anything on the relay's hot path qualifies,
 including the shared moq-net model layer and kio.
 
 Every implementation quest lands with a measured before/after (`just bench BASE` on Linux,
-plus the targeted micro-benches it names). A measured no-win is a valid
+or `just bench-runtime` for an io_uring change, plus the targeted micro-benches it names). A measured no-win is a valid
 outcome that abandons the quest.
 
 ## Plan
@@ -48,10 +48,7 @@ package, and none of the uring micro-opts is measured on `moq-quic`. The unmeasu
 ones moved out (3200 to m2; 3129 with the open contract, 3201, 3202, and 3204
 to m3), and NAPI busy polling (3203), registered wait arguments (3205), and
 the priority `set_track` wakes were dropped. Egress requeue folded into Run to
-quiescence; egress keep-alive folded into Group cost. The benchmark noise
-estimate comes first, since every quest here accepts "within noise". The
-profiling recipe and One enter per turn rank next: they produce the numbers
-that decide the rest.
+quiescence.
 
 Decided 2026-10-08: the CPU and allocation profile merged into the profiling
 recipe (`just bench-profile`), so the relay has one recipe with capture modes; #3199 moved to m2 beside 3200, since it is an
@@ -85,6 +82,7 @@ and profiles through [Profile the io_uring workers](/quest/m2/perf/uring-profile
 - [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
 - [Stream transports](/quest/m2/perf/stream/README.md) - qmux drives its own WebSocket and TCP sockets in one task, measured end to end, then serves them from the io_uring workers
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - fewer allocations per delivered frame, starting with per-stream session clones
+- [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - a measured verdict on the tokio driver's connection-wide mutex and per-packet endpoint-to-connection hop, with levers built only on evidence
 - [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - `just bench-profile` profiles `io-uring-workers` too, so ring quests stop working around a tokio-only recipe
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame

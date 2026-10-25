@@ -18,7 +18,7 @@
 //! let mut sink = engine.sink(input)?;
 //!
 //! while let Some(event) = audio.read().await? {
-//!     let moq_audio::decode::Read::Frame { frame, .. } = event else { continue };
+//!     let moq_audio::decode::Read::Frame(frame) = event else { continue };
 //!     let write = sink.write(&frame.data)?;
 //!     if write.dropped_sample_frames > 0 {
 //!         eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
@@ -112,6 +112,8 @@ impl Engine {
 		let (opened, ready) = tokio::sync::oneshot::channel();
 
 		let shared = Arc::new(driver::Shared::default());
+		// The audio thread cannot wake the observer itself, so it asks the driver to.
+		shared.observe.wake_with(commands.clone());
 		// A canceller holds no `Handle`, so `Shared` is where it reaches the
 		// driver to ask for a retry.
 		#[cfg(feature = "aec")]

@@ -147,8 +147,6 @@ impl Import {
 		self.track.abort(err);
 	}
 
-	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
-	/// the fields its config didn't supply.
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		self.track.cut(end)?;
@@ -167,11 +165,6 @@ impl Import {
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
 		Ok(())
-	}
-
-	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
-		self.track.flush(timestamp, now)
 	}
 
 	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
@@ -377,6 +370,14 @@ mod tests {
 		let mut ceiling = vec![0, 0, 0, 1];
 		ceiling.extend_from_slice(fixtures::SPS);
 		assert_eq!(config(&ceiling).unwrap().framerate, None);
+	}
+
+	/// The SPS's reorder depth at its highest sub-layer becomes the catalog's declaration.
+	#[test]
+	fn config_declares_the_sps_reorder_depth() {
+		let mut pyramid = vec![0, 0, 0, 1];
+		pyramid.extend_from_slice(fixtures::SPS_PYRAMID);
+		assert_eq!(config(&pyramid).unwrap().reorder, Some(2));
 	}
 
 	/// Square samples carry no display aspect, so the picture is shown at its own size.
