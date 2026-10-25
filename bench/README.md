@@ -210,7 +210,7 @@ them as `affinity` in the metadata. A CPU with one core type runs unpinned.
 BASE comparisons run paired rounds (default three, `BENCH_RUNTIME_ROUNDS`),
 alternating base/current order. Startup remains outside the final five-second
 throughput window. `BENCH_ARTIFACTS` chooses the evidence parent (default
-the current worktree's `.scratch/bench`), which must be outside the repository,
+the current worktree's `.tmp/bench`), which must be outside the repository,
 or git-ignored and outside `bench/`; each invocation retains a new run directory even on failure.
 It contains raw load/host JSONL, process diagnostics, Criterion statistics,
 execution order, source revision and tracked dirty patch, tool/build/machine
@@ -350,8 +350,8 @@ unavailable CPU clock fail the run; timing never does. The nightly runs
 The in-memory frame and retained-history paths also run directly in Chromium:
 
 ```bash
-nix develop --command bun bench/browser/micro.ts --bench frames --out .scratch/frames.json base=/path/to/release current=. aa=.
-nix develop --command bun bench/browser/micro.ts --bench drift --out .scratch/drift.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent page, with one full
@@ -426,11 +426,11 @@ Render the table from the published history:
 
 ```bash
 git fetch origin gh-pages
-git worktree add .scratch/pages origin/gh-pages
-nix develop --command just gh benchmark-report index .scratch/pages
+git worktree add .tmp/pages origin/gh-pages
+nix develop --command just gh benchmark-report index .tmp/pages
 ```
 
-Then open `.scratch/pages/bench/index.html`. Without `--commit`, the newest
+Then open `.tmp/pages/bench/index.html`. Without `--commit`, the newest
 recorded commit counts as tonight's. Reproduce the measurements locally:
 
 ```bash
@@ -505,7 +505,7 @@ just bench-local --checkout "$PWD" --checkout /path/to/another/checkout \
 
 Each JSON record retains host load, configured workers and lanes, admission
 delay, work wall time, total wall time, and child CPU time. Logs stay under each
-checkout's `.scratch/local-bench/`. To compare Bun workspace fanout, repeat with
+checkout's `.tmp/local-bench/`. To compare Bun workspace fanout, repeat with
 the same `bun run --filter=... test` command, then add `--sequential`. To compare
 the module lanes `just check` runs at once, sweep `--jobs 1 3` over
 `bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.

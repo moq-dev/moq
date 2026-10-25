@@ -169,7 +169,7 @@ x11-rgb-bench:
 x11-bench-ci:
     #!/usr/bin/env bash
     set -euo pipefail
-    log="${MOQ_X11_BENCH_LOG:-.scratch/x11-capture-benchmark.log}"
+    log="${MOQ_X11_BENCH_LOG:-.tmp/x11-capture-benchmark.log}"
     mkdir -p "$(dirname "$log")"
     {
         git rev-parse HEAD

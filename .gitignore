@@ -14,7 +14,9 @@
 /.claude/tmp/
 /.claude/worktrees/
 
-# Per-worktree scratch output, such as benchmark logs and agent notes.
+# Per-checkout temp and scratch output; the dev shell points TMPDIR here.
+/.tmp/
+# The old name, so a worktree's leftover scratch is never committed by accident.
 /.scratch/
 
 # IDE

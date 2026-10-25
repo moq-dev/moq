@@ -29,9 +29,19 @@ trap 'rm -f "$env_tmp"' EXIT
 # Codex only needs the flake dev shell environment, so avoid depending on
 # nix-direnv's remote bootstrap when Nix can emit the shell exports directly.
 if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then
-    if nix --extra-experimental-features 'nix-command flakes' --accept-flake-config \
+    if dev_env=$(nix --extra-experimental-features 'nix-command flakes' --accept-flake-config \
         print-dev-env --profile "$PWD/.direnv/codex-profile" .#default \
-        >"$env_tmp" 2>"$PWD/.direnv/codex-hook.log"; then
+        2>"$PWD/.direnv/codex-hook.log"); then
+        # Every command sources this, and print-dev-env makes a fresh nix-shell.*
+        # TMPDIR each time without removing it. Make it in the checkout, drop it,
+        # and leave TMPDIR on the checkout's .tmp/ as .envrc does.
+        tmp=$(printf '%q' "$PWD/.tmp")
+        # shellcheck disable=SC2016 # expands when sourced, not here
+        {
+            printf 'export TMPDIR=%s\nmkdir -p "$TMPDIR"\n' "$tmp"
+            printf '%s\n' "$dev_env"
+            printf 'rm -rf "$NIX_BUILD_TOP"\nunset NIX_BUILD_TOP TMP TEMP TEMPDIR\nexport TMPDIR=%s\n' "$tmp"
+        } >"$env_tmp"
         mv "$env_tmp" "$env_file"
         exit 0
     fi
