@@ -67,7 +67,7 @@ const MAX_BYTES: usize = 4096;
 
 /// Decode a namespace tuple, along with the sum of its field lengths.
 ///
-/// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-21 section 8.7):
+/// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-22 section 8.7):
 /// more than 32 fields, an empty field, or more than 4096 bytes.
 fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeError> {
 	let count = r.varint()?;
@@ -122,8 +122,6 @@ pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super
 			| super::Version::Draft16
 			| super::Version::Draft17
 			| super::Version::Draft18
-			| super::Version::Draft19
-			| super::Version::Draft20
 	) {
 		return None;
 	}
@@ -162,10 +160,12 @@ mod tests {
 		] {
 			let parts: Vec<_> = fields.iter().map(|field| (*field).to_owned()).collect();
 			let path = from_tuple(&parts);
-			for version in [super::super::Version::Draft21, super::super::Version::Draft22] {
-				assert_eq!(refusal(&path, version).is_some(), reserved, "{version}: {fields:?}");
-			}
-			assert!(refusal(&path, super::super::Version::Draft20).is_none());
+			assert_eq!(
+				refusal(&path, super::super::Version::Draft22).is_some(),
+				reserved,
+				"{fields:?}"
+			);
+			assert!(refusal(&path, super::super::Version::Draft18).is_none());
 		}
 	}
 	use crate::coding::Form;
@@ -260,7 +260,7 @@ mod tests {
 		assert_eq!(encode_path(&decoded), tuple);
 	}
 
-	/// Draft-21 section 8.7: every field holds a byte, and a namespace or a whole Full Track
+	/// Draft-22 section 8.7: every field holds a byte, and a namespace or a whole Full Track
 	/// Name holds at most 4096.
 	#[test]
 	fn names_are_bounded() {
