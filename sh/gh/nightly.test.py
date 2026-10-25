@@ -62,7 +62,7 @@ class NightlyTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_paired_base_applies_only_to_rust_bench_groups(self):
-        for group in ("js", "rust-test"):
+        for group in ("js", "rust-test", "bindings"):
             result, calls = self.run_group(group, BENCH_BASE="HEAD")
             self.assertEqual(result.returncode, 2, group)
             self.assertEqual(calls, [])
@@ -73,6 +73,15 @@ class NightlyTest(unittest.TestCase):
         self.assertIn("just js bench frames", calls)
         self.assertEqual(calls[-1], "just js clock-bench")
         self.assertIn("failed: just js bench reader", result.stderr)
+
+    def test_binding_runner_fails_without_its_report(self):
+        # The stubs write no reports, so every runner fails the group, a crash included.
+        result, calls = self.run_group("bindings", "py bench")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(calls[-1], "just dart bench")
+        self.assertIn("failed: just py bench", result.stderr)
+        for runner in ("rust-ffi", "rust-net", "go", "python", "kotlin", "cpp", "dart"):
+            self.assertIn(f"/{runner}.json", result.stderr)
 
     def test_bench_targets_share_one_invocation(self):
         result, calls = self.run_group("rust-bench")
