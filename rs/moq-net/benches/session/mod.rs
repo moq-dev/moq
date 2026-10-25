@@ -16,7 +16,10 @@
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
 //! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
 //! and FETCH; its constrained cases release held streams only after a real blocked write.
-//! A one-relay lite FETCH fixture asserts one upstream FETCH per group during setup.
+//! A one-relay FETCH fixture asserts one upstream FETCH per run during setup: one group on
+//! moq-lite, a whole burst on moq-transport.
+//! `session_delivery_fetch_range` FETCHes a burst of missing groups at once, swept over its
+//! length, so a relay fills each run with one moq-transport FETCH.
 //! `session_delivery_credit` grants a viewer one uni stream at a time, swept over its
 //! subscriptions and the backlog each holds, so every group waits for a stream grant. A
 //! publisher that parks state per backlogged group pays for it on each grant, which shows
@@ -45,7 +48,7 @@
 //! Everything runs on one current-thread runtime, so the only work measured is
 //! protocol and relay work, never scheduling across threads.
 //!
-//! Run with `cargo bench -p moq-net --bench session`.
+//! Run with `cargo bench -p moq-net --features fuzz --bench session`.
 
 #![allow(
 	dead_code,
@@ -133,7 +136,8 @@ struct Shape {
 	credit: Option<usize>,
 	/// Publish compressed groups and exercise negotiated versus plain fallback egress.
 	compress: bool,
-	/// Read each group via a fresh FETCH rather than a live subscription.
+	/// Read each group via a fresh FETCH rather than a live subscription, a burst's groups
+	/// at once so the relays can fill them as one run.
 	fetch: bool,
 }
 
@@ -182,6 +186,12 @@ impl Shape {
 		// 100-character title limit, which truncates and renumbers it.
 		if let Some(credit) = self.credit {
 			return format!("{version}/watch={}/burst={}/credit={credit}", self.watch, self.burst);
+		}
+		if self.fetch && self.burst > 1 {
+			return format!(
+				"{version}/publishers={}/viewers={}/burst={}/fetch",
+				self.publishers, self.viewers, self.burst
+			);
 		}
 		format!(
 			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}{}",
@@ -563,10 +573,7 @@ impl<B: Backend> Room<B> {
 			"a viewer can't watch more broadcasts than exist"
 		);
 		assert!(!shape.paced || shape.burst == 1, "a paced round writes one frame");
-		assert!(
-			!shape.fetch || (!shape.paced && shape.burst == 1),
-			"fetch rounds read one finished group"
-		);
+		assert!(!shape.fetch || !shape.paced, "fetch rounds read finished groups");
 		let mut cluster = Cluster::<B>::new(version, shape).await;
 
 		// Viewer v watches a contiguous window starting at v * watch, so viewers
@@ -653,21 +660,26 @@ impl<B: Backend> Room<B> {
 				"the constrained fixture must exercise flow control"
 			);
 		}
-		if shape.fetch && shape.relays == 1 && room.cluster.version.is_lite() {
+		if shape.fetch && shape.relays == 1 {
+			// A lite FETCH (stream type 3) names one group; a moq-transport FETCH (type 0x16)
+			// a whole run. Both types encode in one byte.
+			let (kind, run) = match room.cluster.version.is_lite() {
+				true => (3, 1),
+				false => (0x16, shape.burst),
+			};
 			let upstream_fetches = room
 				.cluster
 				._pairs
 				.iter()
 				.map(|pair| {
-					// Lite FETCH's stream type is 3, encoded in one byte.
 					pair.server_transport
 						.bidi_types()
 						.into_iter()
-						.filter(|kind| *kind == 3)
+						.filter(|found| *found == kind)
 						.count()
 				})
 				.sum::<usize>();
-			assert_eq!(upstream_fetches, room.groups, "one upstream FETCH per written group");
+			assert_eq!(upstream_fetches, room.groups / run, "one upstream FETCH per run");
 		}
 		room
 	}
@@ -709,16 +721,31 @@ impl<B: Backend> Room<B> {
 			}
 		}
 		let mut bytes = 0;
-		// Round-robin, so no subscription's backlog waits on another's being read.
-		for _ in 0..self.shape.burst {
+		// A fetching viewer asks for a burst's groups at once; a subscription reads them
+		// round-robin, so no subscription's backlog waits on another's being read.
+		let passes = if self.shape.fetch { 1 } else { self.shape.burst };
+		let burst = self.shape.burst as u64;
+		for _ in 0..passes {
 			for viewer in &mut self.viewers {
 				let transport = &viewer._pair.server_transport;
 				let read = async {
 					let mut bytes = 0;
 					for (broadcast, track) in &viewer.fetches {
-						let mut group = track.fetch_group(newest[*broadcast], None).await.unwrap();
-						while let Some(frame) = group.read_frame().await.unwrap() {
-							bytes += frame.payload.len();
+						let newest = newest[*broadcast];
+						// A burst is one span, as a downstream range FETCH asks for it.
+						let _filled = match burst {
+							1 => None,
+							_ => Some(
+								moq_net::fuzz::fill_groups(track, newest + 1 - burst..newest + 1)
+									.await
+									.unwrap(),
+							),
+						};
+						for sequence in newest + 1 - burst..=newest {
+							let mut group = track.fetch_group(sequence, None).await.unwrap();
+							while let Some(frame) = group.read_frame().await.unwrap() {
+								bytes += frame.payload.len();
+							}
 						}
 					}
 					for subscriber in &mut viewer.subscribers {
@@ -863,6 +890,25 @@ pub(crate) fn fetch_frames<B: Backend>(c: &mut Criterion) {
 		})
 	});
 	delivery::<B>(c, "fetch_frames", shapes);
+}
+
+/// Missing runs FETCHed at once across independent publishers, viewers, and run lengths.
+pub(crate) fn fetch_range<B: Backend>(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+		return;
+	}
+	let shapes = [1, 16].into_iter().flat_map(|publishers| {
+		[1, 16].into_iter().flat_map(move |viewers| {
+			[2, 16].map(move |burst| Shape {
+				publishers,
+				viewers,
+				burst,
+				fetch: true,
+				..Shape::BASE
+			})
+		})
+	});
+	delivery::<B>(c, "fetch_range", shapes);
 }
 
 fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {

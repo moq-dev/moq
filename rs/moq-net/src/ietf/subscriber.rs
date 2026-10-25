@@ -395,24 +395,184 @@ impl Fill {
 	}
 }
 
-/// A standalone FETCH of one group through its end, from FETCH_OK to its fetch stream.
+/// A standalone FETCH of a run of groups, from FETCH_OK to its fetch stream.
 enum GroupFetch {
 	/// Waiting on FETCH_OK, which the fetch stream can overtake.
 	Pending,
-	/// Accepted into the track cache, waiting for the fetch stream to write it.
-	Ready {
-		producer: group::Producer,
-		track: kio::Producer<track::TrackState>,
-		timescale: Option<Timescale>,
-		/// The first Object ID requested, which the producer starts at.
-		start: u64,
-		/// The exclusive last Object ID, when FETCH_OK's End Location falls inside the group.
-		end: Option<u64>,
-	},
-	/// A fetch stream is writing the group.
-	Receiving,
-	/// The group is written or failed.
+	/// FETCH_OK settled what the answer covers, waiting for the fetch stream to write it.
+	Ready(RangeFetch),
+	/// A fetch stream is writing the run, and the group it is writing, if any.
+	Receiving(Option<group::Handle>),
+	/// The request gave up on the run, so its fetch stream stops.
+	Cancelled,
+	/// The run is written or failed.
 	Done,
+}
+
+/// What FETCH_OK settled about a range FETCH, for the fetch stream writing its groups.
+struct RangeFetch {
+	fill: std::sync::Arc<track::Fill>,
+	timescale: Option<Timescale>,
+	/// The first group requested.
+	first: u64,
+	/// The last group the answer covers.
+	last: u64,
+	/// The first Object ID requested in `first`, which its producer starts at.
+	start: u64,
+	/// The exclusive last Object ID of `last`, when FETCH_OK's End Location falls inside it.
+	end: Option<u64>,
+}
+
+/// The groups one fetch stream writes into its fill, a group at a time.
+struct RangeWriter<'a> {
+	fetch: RangeFetch,
+	slot: &'a kio::Producer<GroupFetch>,
+	/// The group being written, with its producer unless its objects are read past.
+	current: Option<(u64, Option<crate::recv::Group>)>,
+	/// The first group not opened yet.
+	next: u64,
+}
+
+impl<'a> RangeWriter<'a> {
+	fn new(fetch: RangeFetch, slot: &'a kio::Producer<GroupFetch>) -> Self {
+		Self {
+			next: fetch.first,
+			fetch,
+			slot,
+			current: None,
+		}
+	}
+
+	/// The group being written.
+	fn sequence(&self) -> Option<u64> {
+		self.current.as_ref().map(|(sequence, _)| *sequence)
+	}
+
+	/// The current group's producer, `None` while its objects are read past.
+	fn producer(&mut self) -> Option<&mut crate::recv::Group> {
+		self.current.as_mut()?.1.as_mut()
+	}
+
+	/// The exclusive Object ID bounding group `sequence`, if FETCH_OK's End Location falls
+	/// inside it.
+	fn bound(&self, sequence: u64) -> Option<u64> {
+		self.fetch.end.filter(|_| sequence == self.fetch.last)
+	}
+
+	/// Finish the current group and open group `sequence`, returning the first Object ID it
+	/// starts at. The sequences between them do not exist. A group cached since it was asked
+	/// is read past, as is a datagram, which no request ever gets.
+	fn open(&mut self, sequence: u64, datagram: bool) -> Result<u64, Error> {
+		if sequence < self.next || sequence > self.fetch.last {
+			tracing::warn!(
+				sequence,
+				"a group fetch's group is out of order or past FETCH_OK's End Location"
+			);
+			return Err(Error::ProtocolViolation);
+		}
+		self.finish()?;
+		let fill = &self.fetch.fill;
+		fill.drop_groups(self.next..sequence);
+		self.next = sequence + 1;
+
+		let start = match sequence == self.fetch.first {
+			true => self.fetch.start,
+			false => 0,
+		};
+		let producer = match datagram {
+			true => {
+				tracing::debug!(sequence, "a datagram group is not fetchable");
+				fill.reject_groups(sequence..sequence + 1, Error::NotFetchable);
+				None
+			}
+			false => match fill.accept(sequence, None) {
+				Ok(producer) => Some(crate::recv::Group::new(producer)),
+				// Delivered since it was asked: this fetch's copy is a duplicate.
+				Err(Error::Duplicate) => None,
+				Err(err) => return Err(err),
+			},
+		};
+		if let Some(producer) = &producer {
+			let handle = producer.handle().clone();
+			if let Ok(mut state) = self.slot.write()
+				&& matches!(*state, GroupFetch::Receiving(_))
+			{
+				*state = GroupFetch::Receiving(Some(handle));
+			}
+		}
+		self.current = Some((sequence, producer));
+		if let Some(producer) = self.producer() {
+			// The objects keep the IDs they have in the group rather than restarting at 0.
+			producer.start_at(start)?;
+			producer.set_wire(group::Wire {
+				sparse: false,
+				first_object: start == 0,
+				first_id: start,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})?;
+		}
+		Ok(start)
+	}
+
+	/// Finish the current group: its objects end where the next group's begin. The slot
+	/// stays locked meanwhile, so an abandoning request never aborts a group as it finishes.
+	fn finish(&mut self) -> Result<(), Error> {
+		let mut state = self.slot.write().ok();
+		if let Some(state) = state.as_mut()
+			&& matches!(**state, GroupFetch::Receiving(_))
+		{
+			**state = GroupFetch::Receiving(None);
+		}
+		self.close_group()
+	}
+
+	/// Finish the current group, with the slot already settled.
+	fn close_group(&mut self) -> Result<(), Error> {
+		match self.current.take() {
+			Some((_, Some(producer))) => producer.finish(),
+			_ => Ok(()),
+		}
+	}
+
+	/// Settle the run once its stream ends: the groups after the last one written do not
+	/// exist, except that the last group bounded by an object may still hold later objects.
+	/// A failed stream aborts the group it was writing and refuses the rest for now.
+	fn settle(mut self, res: Result<(), Error>) -> Result<(), Error> {
+		let fill = self.fetch.fill.clone();
+		let end = self.fetch.last + 1;
+		let res = match res {
+			Ok(()) => self.close_group(),
+			Err(err) => {
+				if let Some((_, Some(producer))) = self.current.take() {
+					let _ = producer.abort(err.clone());
+				}
+				Err(err)
+			}
+		};
+		match res {
+			Ok(()) => {
+				match self.fetch.end {
+					Some(_) if self.next < end => {
+						fill.drop_groups(self.next..self.fetch.last);
+						fill.reject_groups(self.fetch.last..end, Error::NotFound);
+					}
+					_ => fill.drop_groups(self.next..end),
+				}
+				Ok(())
+			}
+			Err(err) => {
+				// As for a subgroup object: the track is malformed, not just this fetch.
+				if matches!(err, Error::MalformedTrack) {
+					let _ = track::TrackState::abort(&fill.track(), Error::MalformedTrack);
+				}
+				fill.refuse_groups(self.next..end, err.clone());
+				Err(err)
+			}
+		}
+	}
 }
 
 /// A group FETCH's entry in [`State::group_fetches`], removed when its request ends.
@@ -3975,8 +4135,8 @@ impl Subscriber {
 	/// answer until the subscription ends.
 	///
 	/// It asks for the head of the group SUBSCRIBE_OK names as Largest, and nothing below
-	/// it: a publisher serves one group per FETCH, so an earlier start's groups are left to
-	/// group FETCHes of their own. The subscribe's request id names the FETCH. The data
+	/// it: an earlier start's groups are the copy's fills, one FETCH per run of them. The
+	/// subscribe's request id names the FETCH. The data
 	/// arrives on its own fetch stream and [`Self::recv_fill`] stitches it. A refusal or a
 	/// failed send settles the fill as [`Fill::Done`], as a failed draft-22 fill does: only
 	/// the head is lost, and a whole group still stands alone. A malformed answer closes
@@ -5225,43 +5385,76 @@ impl Subscriber {
 		Ok(Fetched::Frame)
 	}
 
-	/// Serve a fill a group at a time, newest first for a descending reader, until it is
-	/// answered or nobody waits on it.
+	/// Serve a fill a run at a time, newest run first for a descending reader, until it is
+	/// answered or nobody waits on it. Each run is one FETCH, except that the source's live
+	/// group always goes alone: a run including the group its source is still writing would
+	/// hold the earlier groups until it finishes, or be cut short at the Largest Object by a
+	/// publisher following draft-22 section 9.11.
 	async fn serve_fill(self, broadcast: PathOwned, name: String, fill: track::Fill, timescale: Option<Timescale>) {
+		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
 		while fill.is_used()
-			&& let Some(sequence) = fill.next()
+			&& let Some(run) = fill.next_run()
 		{
-			// Every fetch answers its group, so the same one coming back is a bug; ending the
+			let run = match fill.live_group() {
+				Some(live) if run.contains(&live) => {
+					let mut pieces = [run.start..live, live..live + 1, live + 1..run.end]
+						.into_iter()
+						.filter(|piece| !piece.is_empty());
+					let piece = match fill.order() {
+						track::Order::Ascending => pieces.next(),
+						track::Order::Descending => pieces.next_back(),
+					};
+					piece.expect("the run holds the live group")
+				}
+				_ => run,
+			};
+			// Every fetch answers its run, so the same one coming back is a bug; ending the
 			// fill names it dropped rather than fetching it forever.
-			if last == Some(sequence) {
-				debug_assert!(false, "fill group {sequence} left unanswered");
+			if last.as_ref() == Some(&run) {
+				debug_assert!(false, "fill run {run:?} left unanswered");
 				return;
 			}
-			last = Some(sequence);
+			last = Some(run.clone());
 			self.clone()
-				.run_group_fetch(broadcast.clone(), name.clone(), fill.group(sequence), timescale)
+				.run_range_fetch(broadcast.clone(), name.clone(), fill.clone(), run, timescale)
 				.await;
 		}
 	}
 
-	/// Fetch a group from the publisher to fill a cache miss, with a standalone (or
-	/// draft-22 filtered) FETCH for this subscription's track. It asks from the frame the reader wants through the end
-	/// of the group, so a publisher that evicted the prefix can still answer.
-	///
-	/// The group is accepted only once FETCH_OK arrives, so a refusal reaches every
-	/// waiting [`track::Consumer::fetch_group`] as the publisher's own error. The objects
-	/// arrive on a fetch stream, which [`Self::recv_fill`] routes into the group.
+	/// Serve a whole fill with one FETCH, as [`Self::serve_fill`] serves each run.
+	#[cfg(test)]
 	async fn run_group_fetch(
 		self,
 		broadcast: PathOwned,
 		name: String,
-		request: track::GroupFill,
+		fill: track::Fill,
+		timescale: Option<Timescale>,
+	) {
+		let run = fill.start().group..fill.end();
+		self.run_range_fetch(broadcast, name, std::sync::Arc::new(fill), run, timescale)
+			.await;
+	}
+
+	/// Fetch a run of groups from the publisher to fill cache misses, with one standalone
+	/// (or draft-22 filtered) FETCH for this subscription's track. It asks from the frame the
+	/// reader wants in the first group through the end of the last, so a publisher that
+	/// evicted a prefix can still answer.
+	///
+	/// FETCH_OK settles what the answer covers before any group is accepted, so a refusal
+	/// reaches every waiting reader as the publisher's own error. The objects arrive on a
+	/// fetch stream, which [`Self::recv_fill`] routes to [`Self::recv_group_fetch`].
+	async fn run_range_fetch(
+		self,
+		broadcast: PathOwned,
+		name: String,
+		fill: std::sync::Arc<track::Fill>,
+		run: std::ops::Range<u64>,
 		timescale: Option<Timescale>,
 	) {
 		let validity = self.validity.start();
-		let sequence = request.sequence();
-		let start = request.frame_start();
+		let last = run.end - 1;
+		let start = fill.frame_start(run.start);
 		let draft22 = Filter::is_draft22(self.version);
 
 		// The owning subscribe/linger loop enforces its admitted gate, including a
@@ -5271,10 +5464,10 @@ impl Subscriber {
 		let mut opening = self.session.clone();
 		let mut stream = match kio::wait(|waiter| {
 			validity.check(waiter)?;
-			if let Poll::Ready(err) = request.poll_closed(waiter) {
+			if let Poll::Ready(err) = fill.poll_closed(waiter) {
 				return Poll::Ready(Err(err));
 			}
-			if request.poll_unused(waiter).is_ready() {
+			if fill.poll_unwanted_groups(run.clone(), waiter).is_ready() {
 				return Poll::Ready(Err(Error::Cancel));
 			}
 			Stream::poll_open(&mut opening, self.version, &mut waiter.context())
@@ -5282,16 +5475,16 @@ impl Subscriber {
 		.await
 		{
 			Ok(stream) => stream,
-			Err(err) => return request.reject(err),
+			Err(err) => return fill.reject_groups(run, err),
 		};
 		stream = super::request_stream::with_stats(stream, self.origin.stats(), self.version);
 		let mut timeout = crate::time::Deadline::after(&self.runtime, Control::REQUEST_ID_TIMEOUT);
 		let fetch_id = match kio::wait(|waiter| {
 			validity.check(waiter)?;
-			if let Poll::Ready(err) = request.poll_closed(waiter) {
+			if let Poll::Ready(err) = fill.poll_closed(waiter) {
 				return Poll::Ready(Err(err));
 			}
-			if request.poll_unused(waiter).is_ready() {
+			if fill.poll_unwanted_groups(run.clone(), waiter).is_ready() {
 				return Poll::Ready(Err(Error::Cancel));
 			}
 			self.control.poll_credit(waiter, &mut timeout)
@@ -5299,7 +5492,7 @@ impl Subscriber {
 		.await
 		{
 			Ok(id) => id,
-			Err(err) => return request.reject(err),
+			Err(err) => return fill.reject_groups(run, err),
 		};
 
 		// Registered before the FETCH goes out, since its stream can overtake FETCH_OK.
@@ -5309,7 +5502,7 @@ impl Subscriber {
 		let namespace = broadcast.clone();
 		let track = name.as_str().into();
 		let from = ietf::Location {
-			group: sequence,
+			group: run.start,
 			object: start,
 		};
 		let fetch_type = match draft22 {
@@ -5320,7 +5513,7 @@ impl Subscriber {
 				filter: Filter::Absolute {
 					start: from,
 					end: Some(ietf::EndLocation {
-						group: sequence,
+						group: last,
 						object: None,
 					}),
 				},
@@ -5330,10 +5523,7 @@ impl Subscriber {
 				namespace,
 				track,
 				start: from,
-				end: ietf::Location {
-					group: sequence,
-					object: 0,
-				},
+				end: ietf::Location { group: last, object: 0 },
 			},
 		};
 		let res = async {
@@ -5341,7 +5531,7 @@ impl Subscriber {
 				.writer
 				.encode_message(&ietf::Fetch {
 					request_id: fetch_id,
-					subscriber_priority: super::priority::to_wire(request.priority()),
+					subscriber_priority: super::priority::to_wire(fill.priority()),
 					group_order: GroupOrder::Ascending,
 					fetch_type,
 					range_filters: false,
@@ -5368,14 +5558,13 @@ impl Subscriber {
 					if let Err(err) = validity.check(waiter) {
 						return Poll::Ready(SetupResponse::Cancelled(err));
 					}
-					if let Poll::Ready(err) = request.poll_closed(waiter) {
+					if let Poll::Ready(err) = fill.poll_closed(waiter) {
 						return Poll::Ready(SetupResponse::Cancelled(err));
 					}
 					if let Poll::Ready(res) = response {
 						return Poll::Ready(SetupResponse::Response(res));
 					}
-					request
-						.poll_unused(waiter)
+					fill.poll_unwanted_groups(run.clone(), waiter)
 						.map(|_| SetupResponse::Cancelled(Error::Cancel))
 				})
 				.await
@@ -5385,14 +5574,14 @@ impl Subscriber {
 		let ok = match res {
 			SetupResponse::Response(Ok(ok)) => ok,
 			SetupResponse::Cancelled(err) => {
-				request.reject(err);
+				fill.reject_groups(run, err);
 				drop(registered);
 				self.cancel_group_fetch(stream, fetch_id).await;
 				return;
 			}
 			SetupResponse::Response(Err(err)) => {
-				tracing::debug!(%err, group = sequence, "group fetch refused");
-				request.reject(err);
+				tracing::debug!(%err, groups = ?run, "group fetch refused");
+				fill.reject_groups(run, err);
 				let _ = stream.writer.close().await;
 				return;
 			}
@@ -5402,7 +5591,7 @@ impl Subscriber {
 		let mut end = ok.end_location;
 		if draft22 {
 			let Some(object) = end.object.checked_add(1) else {
-				request.reject(Error::ProtocolViolation);
+				fill.reject_groups(run, Error::ProtocolViolation);
 				let _ = stream.writer.close().await;
 				return;
 			};
@@ -5411,79 +5600,69 @@ impl Subscriber {
 
 		// Before draft-22, Object 0 covers the whole named group. Legacy answers one
 		// group past it still pass the exclusive comparison below.
-		let whole_group = !draft22 && end.group == sequence && end.object == 0;
+		let whole_last = !draft22 && end.group == last && end.object == 0;
 
-		// Draft-22's answer must cover its start within the requested group. Validate before
-		// accepting the group or letting End of Track mark where the track ends.
-		if draft22 && (end.group != sequence || end.object <= start) {
+		// Draft-22's answer ends at or after its start and never past the requested end, which
+		// a publisher following section 9.11 cuts at the Largest Object. Validate before accepting a group or letting End of
+		// Track mark where the track ends.
+		if draft22 && (end.group < run.start || end.group > last || (end.group == run.start && end.object <= start)) {
 			let err = Error::ProtocolViolation;
-			tracing::warn!(
-				group = sequence,
-				?end,
-				"FETCH_OK's End Location is outside the requested range"
-			);
+			tracing::warn!(groups = ?run, ?end, "FETCH_OK's End Location is outside the requested range");
 			self.session.clone().close(
 				super::error::to_session_code(&SessionError::from(&err)),
 				err.to_string().as_ref(),
 			);
-			request.reject(err);
+			fill.reject_groups(run, err);
 			return;
 		}
 
 		// The publisher knows where the track ends, which a range FETCH downstream needs.
 		if ok.end_of_track {
-			let Some(final_sequence) = end.group.checked_add(u64::from(whole_group || end.object > 0)) else {
-				request.reject(Error::ProtocolViolation);
+			let Some(final_sequence) = end.group.checked_add(u64::from(whole_last || end.object > 0)) else {
+				fill.reject_groups(run, Error::ProtocolViolation);
 				let _ = stream.writer.close().await;
 				return;
 			};
-			request.finish_track_at(final_sequence);
+			fill.finish_track_at(final_sequence);
 		}
 
 		// Before draft-22, an empty answer opens no fetch stream at all.
-		if !whole_group && (end.group, end.object) <= (sequence, start) {
-			request.reject(Error::NotFound);
+		if !whole_last && (end.group, end.object) <= (run.start, start) {
+			fill.reject_groups(run, Error::NotFound);
 			let _ = stream.writer.close().await;
 			return;
 		}
-		// An exclusive End Location inside the group bounds the stream; before draft-22 the
-		// stream also owes every object up to it. A whole-group answer has no object bound.
-		let end = (end.group == sequence && !whole_group).then_some(end.object);
 
-		// The group's readers still count until they pick it up from the cache.
-		let readers = request.readers();
-		// The track was accepted before any fetch was asked, so it keeps that info.
-		let track = request.track();
-		let mut producer = match request.accept(None) {
-			Ok(producer) => producer,
-			// Already served by a concurrent fetch, or the track closed.
-			Err(err) => {
-				tracing::debug!(%err, group = sequence, "group fetch not served");
-				let _ = stream.writer.close().await;
-				return;
-			}
+		// The groups the answer covers: whole up to the End Location's group, and that one up
+		// to its exclusive object bound. Before draft-22, an End Object of 0 covers nothing of
+		// a group short of the requested end, and one past the requested end covers it whole.
+		let (covered, bound) = match end.object {
+			_ if whole_last => (last, None),
+			0 => ((end.group - 1).min(last), None),
+			_ if end.group > last => (last, None),
+			object => (end.group, Some(object)),
 		};
-		// The objects keep the IDs they have in the group rather than restarting at 0.
-		if let Err(err) = producer.start_at(start) {
-			let _ = producer.abort(err);
-			let _ = stream.writer.close().await;
-			return;
+		// A publisher may stop at the Largest Object, so the groups past it are not answered.
+		// They are refused for now rather than named dropped: they may still be written.
+		if covered < last {
+			fill.reject_groups(covered + 1..run.end, Error::NotFound);
 		}
-		let demand = producer.handle();
-		let owner = track.clone();
+
 		if let Ok(mut state) = slot.write() {
-			*state = GroupFetch::Ready {
-				producer,
-				track,
+			*state = GroupFetch::Ready(RangeFetch {
+				fill: fill.clone(),
 				timescale,
+				first: run.start,
+				last: covered,
 				start,
-				end,
-			};
+				end: bound,
+			});
 		}
+		let covered = run.start..covered + 1;
 
 		// Keep the request open until its data stream finishes or every reader leaves.
 		// A publisher that fails after FETCH_OK resets the request instead and owes no fetch
-		// stream, so the group it left waiting is aborted. A FIN is not that: the fetch
+		// stream, so the groups it left waiting are refused. A FIN is not that: the fetch
 		// stream can trail it.
 		let mut open = true;
 		let mut abandoned = false;
@@ -5502,22 +5681,27 @@ impl Subscriber {
 					Poll::Pending => {}
 				}
 			}
-			if let Poll::Ready(err) = track::TrackState::poll_closed(&owner, waiter) {
+			if let Poll::Ready(err) = fill.poll_closed(waiter) {
 				// Completed history stays cached. Only this FETCH's unfinished group is
 				// ours to abort; closing a track never cascades into cached siblings.
-				if !matches!(*slot.read(), GroupFetch::Done) {
-					demand.abort_open(err);
-					abandoned = true;
+				let state = slot.read();
+				if let GroupFetch::Receiving(Some(group)) = &*state {
+					group.abort_open(err.clone());
 				}
-				return Poll::Ready(None);
+				abandoned = !matches!(*state, GroupFetch::Done);
+				return Poll::Ready(Some(err));
 			}
 
+			let unwanted = fill.poll_unwanted_groups(covered.clone(), waiter).is_ready();
 			slot.poll(waiter, |state| match &**state {
 				GroupFetch::Done => Poll::Ready(()),
-				_ if readers.poll_unused(waiter).is_ready()
-					&& demand.poll_unused(waiter).is_ready()
-					&& demand.abort_unused(Error::Cancel) =>
+				GroupFetch::Receiving(Some(group))
+					if unwanted && group.poll_unused(waiter).is_ready() && group.abort_unused(Error::Cancel) =>
 				{
+					abandoned = true;
+					Poll::Ready(())
+				}
+				GroupFetch::Ready(_) | GroupFetch::Receiving(None) if unwanted => {
 					abandoned = true;
 					Poll::Ready(())
 				}
@@ -5527,17 +5711,28 @@ impl Subscriber {
 		})
 		.await;
 		if abandoned {
+			if let Ok(mut state) = slot.write()
+				&& !matches!(*state, GroupFetch::Done)
+			{
+				*state = GroupFetch::Cancelled;
+			}
+			// A closed track answers what the run still owes with its abort, so the fill is
+			// not asked for the same run again; groups nobody reads are owed nothing.
+			if let Some(err) = reset {
+				fill.reject_groups(covered, err);
+			}
 			drop(registered);
 			self.cancel_group_fetch(stream, fetch_id).await;
 			return;
 		}
-		// A group already written stays cached; only one still waiting for its stream is lost.
+		// A run already being written is the fetch stream's to settle; one still waiting for
+		// its stream is lost.
 		if let Some(err) = reset
 			&& let Ok(mut state) = slot.write()
-			&& matches!(*state, GroupFetch::Ready { .. })
-			&& let GroupFetch::Ready { producer, .. } = std::mem::replace(&mut *state, GroupFetch::Done)
+			&& matches!(*state, GroupFetch::Ready(_))
 		{
-			let _ = producer.abort(err);
+			*state = GroupFetch::Done;
+			fill.reject_groups(covered, err);
 		}
 		let _ = stream.writer.close().await;
 	}
@@ -5585,28 +5780,26 @@ impl Subscriber {
 		}
 	}
 
-	/// Write a group FETCH's objects into the group it accepted.
+	/// Write a FETCH's objects into the groups of the run it answers.
 	async fn recv_group_fetch(
 		&mut self,
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		slot: kio::Producer<GroupFetch>,
 	) -> Result<(), Error> {
-		// FETCH_OK can trail its own fetch stream. Taking the group in the same step is
-		// what refuses a second stream for one request.
+		// FETCH_OK can trail its own fetch stream. Taking the run in the same step is what
+		// refuses a second stream for one request.
 		let taken = kio::wait(|waiter| {
 			match slot.poll(waiter, |state| match &**state {
 				GroupFetch::Pending => Poll::Pending,
 				_ => Poll::Ready(()),
 			}) {
 				Poll::Ready(Ok(mut state)) => {
-					Poll::Ready(match std::mem::replace(&mut *state, GroupFetch::Receiving) {
-						GroupFetch::Ready {
-							producer,
-							track,
-							timescale,
-							start,
-							end,
-						} => Ok((producer, track, timescale, start, end)),
+					Poll::Ready(match std::mem::replace(&mut *state, GroupFetch::Receiving(None)) {
+						GroupFetch::Ready(fetch) => Ok(fetch),
+						GroupFetch::Cancelled => {
+							*state = GroupFetch::Cancelled;
+							Err(Error::Cancel)
+						}
 						other => {
 							*state = other;
 							Err(Error::Unsupported)
@@ -5618,32 +5811,26 @@ impl Subscriber {
 			}
 		})
 		.await;
-		let (producer, track, timescale, start, end) = taken?;
-		producer.set_wire(group::Wire {
-			sparse: false,
-			first_object: start == 0,
-			first_id: start,
-			extensions: true,
-			has_end: true,
-			fetchable: true,
-			last: None,
-		})?;
+		let mut writer = RangeWriter::new(taken?, &slot);
 
-		let closed = producer.handle();
-		let mut producer = crate::recv::Group::new(producer);
 		let res = {
-			let mut receive = std::pin::pin!(crate::util::sendable(self.recv_group_fetch_objects(
-				stream,
-				&mut producer,
-				start,
-				end,
-				timescale
-			)));
+			let mut receive = std::pin::pin!(crate::util::sendable(
+				self.recv_group_fetch_objects(stream, &mut writer)
+			));
 			kio::wait(|waiter| {
 				if let Poll::Ready(res) = waiter.poll_future(receive.as_mut()) {
 					return Poll::Ready(res);
 				}
-				closed.poll_closed(waiter).map(Err)
+				// The request gave up on the run, or the group being written was aborted under
+				// it, as by eviction while the stream stalls: the rest of the run is refused
+				// rather than left waiting on a stream that may never resume.
+				let mut aborted = Error::Cancel;
+				slot.poll(waiter, |state| match &**state {
+					GroupFetch::Cancelled => Poll::Ready(()),
+					GroupFetch::Receiving(Some(group)) => group.poll_closed(waiter).map(|err| aborted = err),
+					_ => Poll::Pending,
+				})
+				.map(|_| Err(aborted))
 			})
 			.await
 		};
@@ -5651,48 +5838,36 @@ impl Subscriber {
 		// Completion and abandonment share the slot lock, so a complete group is never
 		// aborted between finishing it and publishing Done to the request handler.
 		let mut state = slot.write().ok();
-		let res = match res {
-			Ok(()) => producer.finish(),
-			Err(err) => {
-				let _ = producer.abort(err.clone());
-				if matches!(err, Error::MalformedTrack) {
-					let _ = track::TrackState::abort(&track, Error::MalformedTrack);
-				}
-				Err(err)
-			}
-		};
+		let res = writer.settle(res);
 		if let Some(state) = state.as_mut() {
 			**state = GroupFetch::Done;
 		}
 		res
 	}
 
-	/// Decode one group's objects, preserving marked gaps and their properties, never
-	/// past `end` (exclusive) when FETCH_OK named one inside the group.
-	/// Before draft-22 they must also reach it.
+	/// Decode a FETCH's objects into the groups of its run, preserving marked gaps and their
+	/// properties, never past FETCH_OK's End Location. A group's objects end where the next
+	/// group's begin, since a FETCH carries every object of its range in order. Before
+	/// draft-22 the stream must also reach an object bound inside the last group.
 	async fn recv_group_fetch_objects(
 		&self,
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
-		producer: &mut crate::recv::Group,
-		start: u64,
-		end: Option<u64>,
-		timescale: Option<Timescale>,
+		writer: &mut RangeWriter<'_>,
 	) -> Result<(), Error> {
-		let sequence = producer.info().sequence;
-		let mut next = start;
+		let timescale = writer.fetch.timescale;
+		// The next Object ID expected in the current group.
+		let mut next = 0;
 		let mut prior_group = None;
-		let mut ended = false;
+		// The current group's END_OF_GROUP arrived, or the track's END_OF_TRACK did.
+		let mut group_ended = false;
+		let mut track_ended = false;
 		let mut first = true;
 		while let Some(object) = decode_fetch_object(stream, self.version, std::mem::take(&mut first)).await? {
-			if ended {
-				tracing::warn!(sequence, "a group fetch continued past its end marker");
+			if track_ended {
+				tracing::warn!("a group fetch continued past its end of track");
 				return Err(Error::ProtocolViolation);
 			}
-			if object.datagram {
-				tracing::debug!(sequence, "a datagram group is not fetchable");
-				return Err(Error::NotFetchable);
-			}
-			if !object.subgroup_ok {
+			if !object.subgroup_ok && !object.datagram {
 				tracing::warn!("subgroup ID is not supported, dropping group fetch");
 				return Err(Error::Unsupported);
 			}
@@ -5701,6 +5876,19 @@ impl Subscriber {
 			if let Some(group) = group {
 				prior_group = Some(group);
 			}
+			// The first object always names its group, so a later one leaving it out stays in it.
+			let sequence = group.or(writer.sequence()).ok_or(Error::ProtocolViolation)?;
+			if writer.sequence() != Some(sequence) {
+				next = writer.open(sequence, object.datagram)?;
+				group_ended = false;
+			} else if group_ended {
+				tracing::warn!(sequence, "a group fetch continued past its end marker");
+				return Err(Error::ProtocolViolation);
+			} else if object.datagram {
+				// A datagram group has one object, so it never shares one with a stream.
+				return Err(Error::ProtocolViolation);
+			}
+
 			let id = match (object.group.is_some(), object.object) {
 				(_, Some(id))
 					if matches!(
@@ -5718,7 +5906,7 @@ impl Subscriber {
 				(false, None) => next,
 				_ => return Err(Error::ProtocolViolation),
 			};
-			if group.is_some_and(|group| group != sequence) || id < next {
+			if id < next {
 				return Err(Error::ProtocolViolation);
 			}
 			let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
@@ -5726,47 +5914,77 @@ impl Subscriber {
 			if id > next && decoded.gap.is_none_or(|gap| gap < id - next) {
 				return Err(Error::Unsupported);
 			}
-			match self
-				.recv_fetch_payload(
-					stream,
-					producer,
-					FetchPayload {
-						decoded,
-						raw,
-						timescale,
-						id,
-					},
-				)
-				.await?
-			{
+			let fetched = match writer.producer() {
+				Some(producer) => {
+					self.recv_fetch_payload(
+						stream,
+						producer,
+						FetchPayload {
+							decoded,
+							raw,
+							timescale,
+							id,
+						},
+					)
+					.await?
+				}
+				// Cached already, or a datagram: read past it.
+				None => self.skip_fetch_payload(stream).await?,
+			};
+			match fetched {
 				Fetched::Frame => next = id.checked_add(1).ok_or(Error::ProtocolViolation)?,
 				// The status is an object of the group, so the End Location counts it.
 				Fetched::EndOfGroup => {
 					next = id.checked_add(1).ok_or(Error::ProtocolViolation)?;
-					ended = true;
+					group_ended = true;
 				}
-				Fetched::EndOfTrack => ended = true,
+				Fetched::EndOfTrack => track_ended = true,
 			}
-			if end.is_some_and(|end| next > end) {
-				tracing::warn!(sequence, ?end, "a group fetch continued past FETCH_OK's End Location");
+			if writer.bound(sequence).is_some_and(|end| next > end) {
+				tracing::warn!(sequence, "a group fetch continued past FETCH_OK's End Location");
 				return Err(Error::ProtocolViolation);
 			}
 		}
 
 		// A clean FIN short of the promised end would otherwise cache a truncated group as
 		// a complete one. Draft-22's End Location is the range covered, not the last object
-		// sent: objects missing before it do not exist (section 9.11).
-		if !Filter::is_draft22(self.version) && end.is_some_and(|end| next < end) {
-			tracing::warn!(
-				sequence,
-				next,
-				?end,
-				"a group fetch ended before FETCH_OK's End Location"
-			);
+		// sent: objects missing before it do not exist (section 9.11). Before draft-22 the
+		// stream must reach the bounded group at all, not just its objects.
+		if !Filter::is_draft22(self.version)
+			&& let Some(end) = writer.fetch.end
+			&& (writer.sequence() != Some(writer.fetch.last) || next < end)
+		{
+			let sequence = writer.sequence();
+			tracing::warn!(?sequence, next, "a group fetch ended before FETCH_OK's End Location");
 			return Err(Error::ProtocolViolation);
 		}
 
 		Ok(())
+	}
+
+	/// Read past one fetch object's payload, for a group this fetch does not write.
+	async fn skip_fetch_payload(
+		&self,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
+	) -> Result<Fetched, Error> {
+		let size = stream.varint().await?;
+		if size == 0 && matches!(self.version, Version::Draft14 | Version::Draft15) {
+			return match stream.varint().await? {
+				0 => Ok(Fetched::Frame),
+				END_OF_GROUP => Ok(Fetched::EndOfGroup),
+				END_OF_TRACK => Ok(Fetched::EndOfTrack),
+				_ => Err(Error::Unsupported),
+			};
+		}
+		let mut left = size;
+		while left > 0 {
+			let max = usize::try_from(left).unwrap_or(usize::MAX);
+			let chunk = std::future::poll_fn(|cx| stream.poll_read_chunk(cx, max))
+				.await?
+				.ok_or(Error::ProtocolViolation)?;
+			left -= chunk.len() as u64;
+		}
+		Ok(Fetched::Frame)
 	}
 }
 
@@ -7767,7 +7985,7 @@ mod tests {
 				let dynamic = track.dynamic();
 				let mut pending = Box::pin(track.consume().fetch_group(0, None));
 				assert!(futures::poll!(pending.as_mut()).is_pending());
-				let request = dynamic.requested_fill_group().await.expect("group request");
+				let request = dynamic.requested_fill().await.expect("group request");
 				group = Some(pending);
 				accepted = Some(track);
 				Box::pin(subscriber.clone().run_group_fetch(
@@ -7960,7 +8178,7 @@ mod tests {
 					let requested = track.dynamic();
 					let mut pending = Box::pin(track.consume().fetch_group(0, None));
 					assert!(futures::poll!(pending.as_mut()).is_pending());
-					let group = requested.requested_fill_group().await.expect("group request");
+					let group = requested.requested_fill().await.expect("group request");
 					fetch = Some((track, pending));
 					moq_clock::sim::spawn(subscriber.run_group_fetch(
 						Path::new("broadcast").to_owned(),
@@ -12601,9 +12819,9 @@ struct Join {
 /// subscription the tail, which `claim_fill` stitches back into one group producer.
 ///
 /// Earlier drafts have no fill parameter. Every subscription is a live join: Largest
-/// Object, followed by a joining FETCH relative at offset 0 for that group's head. A
-/// publisher serves one group per FETCH, so an earlier start's groups are left to group
-/// FETCHes of their own, and a later start skips the head locally. A bounded end has no
+/// Object, followed by a joining FETCH relative at offset 0 for that group's head. An
+/// earlier start's groups are left to the copy's fills, one FETCH per run of them, and a
+/// later start skips the head locally. A bounded end has no
 /// joining-FETCH spelling, so it is refused rather than left open.
 ///
 /// A start group we already know is absolute on draft-22 and needs no fill: the
@@ -13571,15 +13789,10 @@ mod stitch_tests {
 			// The next relay reads the same objects into its cache, up to the same end.
 			let end = last + u64::from(Filter::is_draft22(version));
 			let mut run = GroupFetchRun::new(version, decoder.rest().to_vec()).await;
-			let mut producer =
-				crate::recv::Group::new(run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap());
-			run.subscriber
-				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(end), None)
+			let mut reader = run
+				.recv_cached(Some(end), None)
 				.await
 				.unwrap_or_else(|err| panic!("{version}: {err}"));
-			let mut producer = producer.into_inner();
-			producer.finish().unwrap();
-			let mut reader = producer.consume();
 			for id in [6, 8] {
 				let frame = kio::wait(|waiter| reader.poll_read_object(waiter))
 					.await
@@ -13705,14 +13918,10 @@ mod stitch_tests {
 		w.varint(0u64).unwrap();
 		w.varint(END_OF_GROUP).unwrap();
 		let mut run = GroupFetchRun::new(version, objects).await;
-		let mut producer = crate::recv::Group::new(run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap());
-		run.subscriber
-			.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(1), Some(Timescale::MILLI))
+		let end = run
+			.recv_cached(Some(1), Some(Timescale::MILLI))
 			.await
-			.unwrap();
-		let end = producer
-			.into_inner()
-			.consume()
+			.unwrap()
 			.end_object()
 			.expect("the END_OF_GROUP object");
 		assert_eq!(leaves(&end.properties), status, "fetch");
@@ -13780,22 +13989,13 @@ mod stitch_tests {
 				}
 			}
 			let mut run = GroupFetchRun::new(version, objects).await;
-			let mut producer =
-				crate::recv::Group::new(run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap());
-			let result = run
-				.subscriber
-				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(1), milli)
-				.await;
-			match ok {
-				true => assert!(result.is_ok(), "fetch {}: {result:?}", properties.len()),
-				false => assert!(matches!(result, Err(Error::Unsupported)), "fetch: {result:?}"),
+			let result = run.recv_cached(Some(1), milli).await;
+			match &result {
+				Ok(_) => assert!(ok, "fetch {}: cached", properties.len()),
+				Err(err) => assert!(!ok && matches!(err, Error::Unsupported), "fetch: {err:?}"),
 			}
 			if status.is_some() {
-				let end = producer
-					.into_inner()
-					.consume()
-					.end_object()
-					.expect("the END_OF_GROUP object");
+				let end = result.unwrap().end_object().expect("the END_OF_GROUP object");
 				assert_eq!(end.properties.heap(), full.len() as u64);
 			}
 		}
@@ -13837,15 +14037,7 @@ mod stitch_tests {
 				objects.push(99);
 			}
 			let mut run = GroupFetchRun::new(version, objects.clone()).await;
-			let mut producer =
-				crate::recv::Group::new(run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap());
-			run.subscriber
-				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(9), None)
-				.await
-				.unwrap();
-			let mut producer = producer.into_inner();
-			producer.finish().unwrap();
-			let mut reader = producer.consume();
+			let mut reader = run.recv_cached(Some(9), None).await.unwrap();
 			for id in [6, 8] {
 				let frame = kio::wait(|waiter| reader.poll_read_object(waiter))
 					.await
@@ -15347,7 +15539,7 @@ mod stitch_tests {
 		buf.extend_from_slice(b"b");
 
 		let mut run = GroupFetchRun::new(DRAFT, buf.to_vec()).await;
-		let res = run.recv_objects(0, None).await;
+		let res = run.recv_objects().await;
 		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
 	}
 
@@ -15383,7 +15575,7 @@ mod stitch_tests {
 				buf.extend_from_slice(b"a");
 
 				let mut run = GroupFetchRun::new(version, buf.to_vec()).await;
-				let res = run.recv_objects(0, None).await;
+				let res = run.recv_objects().await;
 				assert!(
 					matches!(res, Err(Error::ProtocolViolation)),
 					"{version} {header:?}: {res:?}"
@@ -15425,22 +15617,71 @@ mod stitch_tests {
 				let payloads: Vec<&[u8]> = [b"a", b"b", b"c", b"d"][..count].iter().map(|p| &p[..]).collect();
 				let mut run = GroupFetchRun::new(version, group_fetch_objects(SEQUENCE, 0, &payloads)).await;
 
-				let (slot, mut consumer) = run.slot(None, Some(END)).await;
+				let (slot, fetch) = run.slot(None, Some(END)).await;
 				let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
 				assert_eq!(res.is_ok(), complete, "{version} {count} objects: {res:?}");
 				assert!(futures::FutureExt::now_or_never(run.track.closed()).is_none());
 
 				let mut read = 0;
-				let end = loop {
-					match consumer.read_frame().await {
-						Ok(Some(_)) => read += 1,
-						Ok(None) => break Ok(read),
-						Err(err) => break Err(err),
-					}
+				let end = match fetch.await {
+					Ok(mut consumer) => loop {
+						match consumer.read_frame().await {
+							Ok(Some(_)) => read += 1,
+							Ok(None) => break Ok(read),
+							Err(err) => break Err(err),
+						}
+					},
+					Err(err) => Err(err),
 				};
 				match complete {
 					true => assert_eq!(end.expect("a complete group"), count as u64, "{version}"),
 					false => assert!(end.is_err(), "{version} {count} objects: the group must fail, not end"),
+				}
+			}
+		}
+	}
+
+	/// A stream that FINs before the group its End Location bounds, with no objects or after
+	/// an earlier group, is short before draft-22. From draft-22 the bounded group is refused
+	/// for now, since objects past the bound may still be written.
+	#[moq_clock::test]
+	async fn a_range_fetch_must_reach_its_bounded_group() {
+		let last = SEQUENCE + 2;
+		for version in [Version::Draft18, VERSION] {
+			for objects in [Vec::new(), group_fetch_objects(SEQUENCE, 0, &[b"a"])] {
+				let empty = objects.is_empty();
+				let mut run = GroupFetchRun::new(version, objects).await;
+				let dynamic = run.track.dynamic();
+				let consumer = run.track.consume();
+				let mut filling = Box::pin(consumer.fill_groups(SEQUENCE..last + 1, 0));
+				assert!(futures::poll!(filling.as_mut()).is_pending());
+				let fill = dynamic.requested_fill().await.unwrap();
+				let bounded = consumer.fetch_group(last, None);
+				let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
+					fill: std::sync::Arc::new(fill),
+					timescale: None,
+					first: SEQUENCE,
+					last,
+					start: 0,
+					end: Some(2),
+				}));
+				let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
+				match Filter::is_draft22(version) {
+					false => assert!(
+						matches!(res, Err(Error::ProtocolViolation)),
+						"{version} empty={empty}: {res:?}"
+					),
+					true => {
+						assert!(res.is_ok(), "{version} empty={empty}: {res:?}");
+						let bounded = moq_clock::timeout(Duration::from_secs(1), bounded)
+							.await
+							.expect("refused");
+						assert!(
+							matches!(bounded, Err(Error::NotFound)),
+							"{version} empty={empty}: {:?}",
+							bounded.err()
+						);
+					}
 				}
 			}
 		}
@@ -15466,19 +15707,172 @@ mod stitch_tests {
 		buf
 	}
 
-	/// A datagram group is never fetchable, so a group fetch answered with one fails as
-	/// not fetchable, and nothing is cached.
+	/// A datagram group is never fetchable, so a group fetch answered with one names it
+	/// dropped as not fetchable, caching nothing, and reads on past its payload.
 	#[moq_clock::test]
-	async fn a_group_fetch_refuses_a_datagram_object() {
+	async fn a_group_fetch_drops_a_datagram_group() {
 		let mut run = GroupFetchRun::new(VERSION, datagram_object(SEQUENCE)).await;
-		let (slot, mut consumer) = run.slot(None, None).await;
+		let (slot, fetch) = run.slot(None, None).await;
 
 		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
-		assert!(matches!(res, Err(Error::NotFetchable)), "{res:?}");
-		assert!(
-			matches!(consumer.read_frame().await, Err(Error::NotFetchable)),
-			"the group fails without the payload"
-		);
+		assert!(res.is_ok(), "{res:?}");
+		assert!(matches!(fetch.await, Err(Error::NotFetchable)));
+		assert!(run.track.consume().peek_group(SEQUENCE).is_none(), "nothing is cached");
+	}
+
+	/// A run of missing groups goes upstream as one FETCH, whose single stream our publisher
+	/// answers with every group it holds. The next relay caches those, and answers the readers
+	/// of the groups between them, which do not exist, with a miss.
+	#[moq_clock::test]
+	async fn a_range_fetch_round_trips_with_the_groups_between_dropped() {
+		use crate::lite::test_transport::Sent;
+		for version in [
+			Version::Draft14,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft22,
+		] {
+			let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+			let track = broadcast
+				.create_track("video", track::Info::default().with_timescale(None))
+				.unwrap();
+			for sequence in [4, 6] {
+				let mut group = track.create_group(group::Info { sequence }).unwrap();
+				for object in 0..2 {
+					group
+						.write_frame(None, format!("{sequence}-{object}").into_bytes())
+						.unwrap();
+				}
+				group.finish().unwrap();
+			}
+			track.finish().unwrap();
+
+			// The FETCH a relay sends for the run 3..=6.
+			let namespace = Path::new("room");
+			let fetch_type = match Filter::is_draft22(version) {
+				true => ietf::FetchType::Filtered {
+					namespace,
+					track: "video".into(),
+					filter: Filter::Absolute {
+						start: ietf::Location { group: 3, object: 0 },
+						end: Some(ietf::EndLocation { group: 6, object: None }),
+					},
+				},
+				false => ietf::FetchType::Standalone {
+					namespace,
+					track: "video".into(),
+					start: ietf::Location { group: 3, object: 0 },
+					end: ietf::Location { group: 6, object: 0 },
+				},
+			};
+			let mut body = Vec::new();
+			ietf::Fetch {
+				request_id: RequestId(3),
+				subscriber_priority: 128,
+				group_order: ietf::GroupOrder::Ascending,
+				fetch_type,
+				range_filters: false,
+				fill_timeout: false,
+				properties_wanted: false,
+				epoch: None,
+			}
+			.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+			.unwrap();
+			let downstream = ScriptedSession::per_stream(vec![vec![]]);
+			let peer = peer::PeerSetup::default();
+			peer.set(peer::Peer::default());
+			let publisher = crate::ietf::Publisher::new(
+				crate::time::sim(),
+				crate::driver::Transport::new(downstream.clone()),
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				peer,
+				version,
+			);
+			let stream = Stream::open(&mut crate::driver::Transport::new(downstream.clone()), version)
+				.await
+				.unwrap();
+			moq_clock::timeout(
+				Duration::from_secs(1),
+				publisher
+					.handle_stream(ietf::Fetch::ID, ietf::Body(body.into()), stream, false)
+					.unwrap(),
+			)
+			.await
+			.expect("publisher");
+			let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
+			for (id, event) in downstream.log.trail() {
+				if let Sent::Write(bytes) = event {
+					streams.entry(id).or_default().extend(bytes);
+				}
+			}
+			let bytes: Vec<u8> = streams.into_values().flatten().collect();
+			let mut decoder = Decoder::new(&bytes, version.into());
+			assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID, "{version}");
+			let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
+			assert!(ok.end_of_track, "{version}");
+			assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
+			ietf::FetchHeader::decode(&mut decoder, version).unwrap();
+
+			// The next relay's fill of the same run reads that one stream.
+			let mut run = GroupFetchRun::new(version, decoder.rest().to_vec()).await;
+			let dynamic = run.track.dynamic();
+			let consumer = run.track.consume();
+			let mut filling = Box::pin(consumer.fill_groups(3..7, 0));
+			assert!(futures::poll!(filling.as_mut()).is_pending());
+			let fill = dynamic.requested_fill().await.unwrap();
+			assert_eq!(
+				(fill.start().group, fill.end()),
+				(3, 7),
+				"{version}: one fill for the run"
+			);
+			// Readers of the missing groups join that fill.
+			let missing = [3, 5].map(|sequence| consumer.fetch_group(sequence, None));
+			let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
+				fill: std::sync::Arc::new(fill),
+				timescale: None,
+				first: 3,
+				last: 6,
+				start: 0,
+				end: None,
+			}));
+			let res = moq_clock::timeout(
+				Duration::from_secs(1),
+				run.subscriber.recv_group_fetch(&mut run.stream, slot),
+			)
+			.await
+			.expect("recv");
+			assert!(res.is_ok(), "{version}: {res:?}");
+			let _filled = moq_clock::timeout(Duration::from_secs(1), filling)
+				.await
+				.expect("filled");
+			assert_eq!(consumer.cached_groups(0..10), [4, 6], "{version}");
+			for sequence in [4, 6] {
+				let mut group = consumer.fetch_group(sequence, None).await.unwrap();
+				for object in 0..2 {
+					let frame = group.read_frame().await.unwrap().unwrap();
+					assert_eq!(
+						frame.payload.as_ref(),
+						format!("{sequence}-{object}").as_bytes(),
+						"{version}"
+					);
+				}
+				assert!(group.read_frame().await.unwrap().is_none(), "{version}");
+			}
+			for fetched in missing {
+				let fetched = moq_clock::timeout(Duration::from_secs(1), fetched)
+					.await
+					.expect("dropped");
+				assert!(
+					matches!(fetched, Err(Error::NotFound)),
+					"{version}: {:?}",
+					fetched.err()
+				);
+			}
+		}
 	}
 
 	/// A fill answered with a datagram Object is refused the same way. Only the fill goes:
@@ -15541,6 +15935,23 @@ mod stitch_tests {
 		buf.to_vec()
 	}
 
+	/// A group aborted under a stalled fetch stream, as by eviction, ends the run with its
+	/// error instead of leaving the run's readers waiting on the stream.
+	#[moq_clock::test]
+	async fn a_group_aborted_under_a_stalled_fetch_ends_the_run() {
+		let mut run = GroupFetchRun::stalled(VERSION, group_fetch_objects(SEQUENCE, 0, &[b"0"])).await;
+		let (slot, _fetch) = run.slot(None, None).await;
+		let mut receiving = run.subscriber.clone();
+		let mut receive = std::pin::pin!(receiving.recv_group_fetch(&mut run.stream, slot.clone()));
+		assert!(futures::poll!(&mut receive).is_pending());
+		let group = match &*slot.read() {
+			GroupFetch::Receiving(Some(group)) => group.clone(),
+			_ => panic!("the group is being written"),
+		};
+		group.abort_open(Error::Evicted);
+		assert!(matches!(receive.await, Err(Error::Evicted)));
+	}
+
 	#[moq_clock::test]
 	async fn internal_group_fetch_setup_cancellation_is_cancel() {
 		let mut run = GroupFetchRun::new(VERSION, Vec::new()).await;
@@ -15563,7 +15974,15 @@ mod stitch_tests {
 
 	impl GroupFetchRun {
 		async fn new(version: Version, objects: Vec<u8>) -> Self {
-			let mut session = ScriptedSession::per_stream_eof(vec![objects]);
+			Self::with_session(version, ScriptedSession::per_stream_eof(vec![objects])).await
+		}
+
+		/// A stream that goes quiet after `objects` rather than ending.
+		async fn stalled(version: Version, objects: Vec<u8>) -> Self {
+			Self::with_session(version, ScriptedSession::per_stream(vec![objects])).await
+		}
+
+		async fn with_session(version: Version, mut session: ScriptedSession) -> Self {
 			let tasks = TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
@@ -15593,45 +16012,48 @@ mod stitch_tests {
 			}
 		}
 
-		/// Accept the cache miss through the same request state as a wire FETCH.
+		/// Queue the cache miss through the same request state as a wire FETCH, answered
+		/// through group `SEQUENCE`'s object `end` when set. The fetch resolves once the stream
+		/// writes the group.
 		async fn slot(
 			&self,
 			timescale: Option<Timescale>,
 			end: Option<u64>,
-		) -> (kio::Producer<GroupFetch>, group::Consumer) {
+		) -> (
+			kio::Producer<GroupFetch>,
+			std::pin::Pin<Box<kio::Pending<track::Fetching>>>,
+		) {
 			let dynamic = self.track.dynamic();
 			let mut fetch = Box::pin(self.track.consume().fetch_group(SEQUENCE, None));
 			assert!(futures::poll!(fetch.as_mut()).is_pending());
-			let request = dynamic.requested_fill_group().await.expect("group request");
-			let track = request.track();
-			let producer = request.accept(None).unwrap();
-			let consumer = producer.consume();
-			let slot = kio::Producer::new(GroupFetch::Ready {
-				producer,
-				track,
+			let fill = dynamic.requested_fill().await.expect("group request");
+			let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
+				fill: std::sync::Arc::new(fill),
 				timescale,
+				first: SEQUENCE,
+				last: SEQUENCE,
 				start: 0,
 				end,
-			});
-			(slot, consumer)
+			}));
+			(slot, fetch)
 		}
 
-		/// Decode the stream into a fresh group numbered from `start`.
-		async fn recv_objects(&mut self, start: u64, end: Option<u64>) -> Result<(), Error> {
-			let mut group = self.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
-			group.start_at(start).unwrap();
-			let mut group = crate::recv::Group::new(group);
-			match self
-				.subscriber
-				.recv_group_fetch_objects(&mut self.stream, &mut group, start, end, None)
-				.await
-			{
-				Ok(()) => group.finish(),
-				Err(err) => {
-					let _ = group.abort(err.clone());
-					Err(err)
-				}
-			}
+		/// Decode the stream as the answer for group `SEQUENCE`.
+		async fn recv_objects(&mut self) -> Result<(), Error> {
+			let (slot, _fetch) = self.slot(None, None).await;
+			self.subscriber.recv_group_fetch(&mut self.stream, slot).await
+		}
+
+		/// Decode the stream as the answer for group `SEQUENCE` through the exclusive object
+		/// `end`, in `timescale`, and read back the group it cached.
+		async fn recv_cached(
+			&mut self,
+			end: Option<u64>,
+			timescale: Option<Timescale>,
+		) -> Result<group::Consumer, Error> {
+			let (slot, fetch) = self.slot(timescale, end).await;
+			self.subscriber.recv_group_fetch(&mut self.stream, slot).await?;
+			fetch.await
 		}
 	}
 }
@@ -15943,23 +16365,18 @@ mod joining_fetch_tests {
 				.filter(|(id, _)| *id == ietf::Fetch::ID)
 				.count();
 			assert!(requests > 0, "cache-miss FETCH was sent");
-			let mut held = accepted.then(|| (&mut fetch).now_or_never().expect("FETCH_OK").unwrap());
+			// A group is accepted only once its first object arrives, so FETCH_OK alone
+			// leaves the fetch waiting on the stream.
+			assert!(futures::poll!(fetch.as_mut()).is_pending());
 			auth.handle().authorize(&crate::auth::Grant::default());
 			assert!(
 				futures::poll!(serving.as_mut()).is_pending(),
 				"FIN stays unacknowledged"
 			);
-			if let Some(group) = held.as_mut() {
-				assert!(matches!(
-					group.read_frame().now_or_never(),
-					Some(Err(Error::Unauthorized))
-				));
-			} else {
-				assert!(matches!(
-					futures::poll!(fetch.as_mut()),
-					Poll::Ready(Err(Error::Unauthorized))
-				));
-			}
+			assert!(matches!(
+				futures::poll!(fetch.as_mut()),
+				Poll::Ready(Err(Error::Unauthorized))
+			));
 			let stops = log.stops().len();
 			// One stop belongs to SUBSCRIBE, another to the cache-miss FETCH.
 			assert!(stops >= 2, "{version}: only {stops} streams cancelled before ACK");
@@ -15980,7 +16397,7 @@ mod joining_fetch_tests {
 	}
 
 	#[moq_clock::test]
-	async fn revocation_cancels_an_accepted_fetch_before_the_subscribe_fin_is_acked() {
+	async fn revocation_cancels_an_answered_fetch_before_the_subscribe_fin_is_acked() {
 		revoked_child_fetch(true).await;
 	}
 
@@ -16184,8 +16601,8 @@ mod joining_fetch_tests {
 		}
 	}
 
-	/// A start below, at, or past the Largest group joins that group alone, since a publisher
-	/// serves one group per FETCH: a group below it is left to a group FETCH of its own.
+	/// A start below, at, or past the Largest group joins that group alone: a group below it
+	/// is left to the copy's fills.
 	#[moq_clock::test]
 	async fn a_join_from_any_start_fetches_only_the_largest_group() {
 		let largest = Some(ietf::Location { group: 9, object: 0 });
@@ -16410,7 +16827,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = Box::pin(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_fill_group().await.expect("group request");
+		let request = dynamic.requested_fill().await.expect("group request");
 		let outcome = request.joined();
 		let mut run = Box::pin(subscriber.clone().run_group_fetch(
 			Path::new("broadcast").to_owned(),
@@ -16476,20 +16893,14 @@ mod joining_fetch_tests {
 				version,
 			));
 			assert!(futures::poll!(run.as_mut()).is_pending());
-			let group = fetch.await.expect("accepted group");
-			let observed = {
-				let state = slot.read();
-				let GroupFetch::Ready { producer, .. } = &*state else {
-					panic!("accepted slot")
-				};
-				producer.handle()
-			};
-			if stage == FetchStage::Accepted {
-				drop(group);
+			// No group is accepted until its first object arrives.
+			let observed = if stage == FetchStage::Accepted {
+				drop(fetch);
 				assert!(
 					futures::poll!(run.as_mut()).is_ready(),
-					"{version:?}: accepted FETCH stays alive"
+					"{version:?}: answered FETCH stays alive"
 				);
+				None
 			} else {
 				let mut objects = Vec::new();
 				if version == Version::Draft14 {
@@ -16527,7 +16938,14 @@ mod joining_fetch_tests {
 				let mut receiving = subscriber.clone();
 				let mut fill = Box::pin(receiving.recv_group_fetch(&mut reader, slot.clone()));
 				assert!(futures::poll!(fill.as_mut()).is_pending());
-				let mut group = group;
+				let mut group = fetch.await.expect("accepted group");
+				let observed = {
+					let state = slot.read();
+					let GroupFetch::Receiving(Some(handle)) = &*state else {
+						panic!("receiving slot")
+					};
+					handle.clone()
+				};
 				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"x");
 				assert!(
 					futures::poll!(run.as_mut()).is_pending(),
@@ -16553,8 +16971,9 @@ mod joining_fetch_tests {
 					);
 					assert!(matches!(futures::poll!(fill.as_mut()), Poll::Ready(Err(Error::Cancel))));
 				}
-			}
-			if !complete {
+				Some(observed)
+			};
+			if !complete && let Some(observed) = observed {
 				assert!(
 					matches!(observed.poll_closed(&kio::Waiter::noop()), Poll::Ready(Error::Cancel)),
 					"partial group must abort"
@@ -16686,7 +17105,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_fill_group().await.expect("no group requested");
+		let request = dynamic.requested_fill().await.expect("no group requested");
 
 		subscriber
 			.clone()
@@ -16758,7 +17177,7 @@ mod joining_fetch_tests {
 					}
 				));
 				assert!(futures::poll!(fetch.as_mut()).is_pending());
-				let request = dynamic.requested_fill_group().await.expect("no group requested");
+				let request = dynamic.requested_fill().await.expect("no group requested");
 
 				subscriber
 					.clone()
@@ -16900,7 +17319,7 @@ mod joining_fetch_tests {
 			}
 		));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_fill_group().await.expect("no group requested");
+		let request = dynamic.requested_fill().await.expect("no group requested");
 
 		let serving = moq_clock::sim::spawn(subscriber.clone().run_group_fetch(
 			Path::new("broadcast").to_owned(),

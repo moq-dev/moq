@@ -10,6 +10,7 @@ criterion_group!(
 	session::session::<Model>,
 	session::group_cost::<Model>,
 	session::fetch_frames::<Model>,
+	session::fetch_range::<Model>,
 	session::withdrawal::<Model>,
 	session::idle
 );

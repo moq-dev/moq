@@ -100,7 +100,7 @@ impl Backend for Relay {
 			.with_extensions(options.client_extensions);
 		// Older protocols need the peer exemption to discover dot paths.
 		if peer || hidden {
-			client = client.with_path("/peer");
+			client = client.with_url("moql://localhost/peer".parse().unwrap());
 		}
 		if let Some(publish) = options.client_publish {
 			client = client.with_publisher(publish);
@@ -128,6 +128,7 @@ criterion_group!(
 	session::session::<Relay>,
 	session::group_cost::<Relay>,
 	session::fetch_frames::<Relay>,
+	session::fetch_range::<Relay>,
 	session::withdrawal::<Relay>
 );
 criterion_main!(benches);

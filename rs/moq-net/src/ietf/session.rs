@@ -1777,6 +1777,113 @@ mod tests {
 		}
 	}
 
+	/// A granted token whose Auth request the peer resets is presented again on the same
+	/// session, backing off while each attempt is lost before a reply: at 0s, 1s, and 3s.
+	#[moq_clock::test]
+	async fn a_lost_auth_request_is_presented_again() {
+		let version = Version::Draft17;
+		let mut grant = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut grant, version.into());
+		encoder.varint(auth::AuthOk::ID).unwrap();
+		encoder.u16(3);
+		grant.extend([0, 0, 0]);
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![grant.clone(), grant]);
+		session.close(crate::lite::test_transport::Close::ResetStream(
+			crate::ietf::error::to_stream_code(&crate::StreamError::Internal, version),
+		));
+		let log = session.log.clone();
+		let handle = crate::auth::Handle::new();
+		let (driver, _) = start(Config {
+			runtime: crate::time::sim(),
+			stats: Default::default(),
+			session: crate::driver::Transport::new(session.clone()),
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client: true,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer {
+				auth: true,
+				..Default::default()
+			}),
+			auth: crate::auth::Link::attach(&handle, true, true).unwrap(),
+			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
+			extensions: Default::default(),
+		})
+		.unwrap();
+		let token = handle.present(bytes::Bytes::from_static(b"token")).unwrap();
+
+		let res = moq_clock::timeout(std::time::Duration::from_secs(5), driver).await;
+		assert!(res.is_err(), "the session ended: {res:?}");
+		assert_eq!(occurrences(&log, b"token"), 3);
+		assert!(
+			futures::FutureExt::now_or_never(token.closed()).is_none(),
+			"a lost request ended the token"
+		);
+	}
+
+	/// A peer that negotiated MoQ Auth but resets a token's request before any reply gave it
+	/// nothing: the token fails as unsupported rather than being presented again.
+	#[moq_clock::test]
+	async fn an_auth_request_reset_before_its_reply_is_unsupported() {
+		let version = Version::Draft17;
+		let mut grant = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut grant, version.into());
+		encoder.varint(auth::AuthOk::ID).unwrap();
+		encoder.u16(3);
+		grant.extend([0, 0, 0]);
+		// The setup token is granted; ours is reset before any reply.
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![grant, Vec::new()]);
+		session.close(crate::lite::test_transport::Close::ResetStream(
+			crate::ietf::error::to_stream_code(&crate::StreamError::Internal, version),
+		));
+		let log = session.log.clone();
+		let handle = crate::auth::Handle::new();
+		let (driver, _) = start(Config {
+			runtime: crate::time::sim(),
+			stats: Default::default(),
+			session: crate::driver::Transport::new(session.clone()),
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client: true,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer {
+				auth: true,
+				..Default::default()
+			}),
+			auth: crate::auth::Link::attach(&handle, true, true).unwrap(),
+			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
+			extensions: Default::default(),
+		})
+		.unwrap();
+		let token = handle.present(bytes::Bytes::from_static(b"token")).unwrap();
+
+		let res = moq_clock::timeout(std::time::Duration::from_secs(5), driver).await;
+		assert!(res.is_err(), "the session ended: {res:?}");
+		assert_eq!(occurrences(&log, b"token"), 1, "presented again");
+		let err = futures::FutureExt::now_or_never(token.closed()).expect("the token is still open");
+		assert!(matches!(err, Error::Unsupported), "{err:?}");
+	}
+
 	#[moq_clock::test]
 	async fn malformed_presenter_auth_closes_the_session() {
 		for version in [Version::Draft17, Version::Draft22] {

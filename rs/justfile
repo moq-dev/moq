@@ -166,7 +166,7 @@ x11-rgb-bench:
 x11-bench-ci:
     #!/usr/bin/env bash
     set -euo pipefail
-    log="${MOQ_X11_BENCH_LOG:-.scratch/x11-capture-benchmark.log}"
+    log="${MOQ_X11_BENCH_LOG:-.tmp/x11-capture-benchmark.log}"
     mkdir -p "$(dirname "$log")"
     {
         git rev-parse HEAD
@@ -310,12 +310,13 @@ doctest *args:
 # `tests/loom.rs`, `LOOM_MAX_PREEMPTIONS`). kio's own unit tests are
 # `cfg(not(loom))`.
 
-# Permutation-test the concurrent handoffs with loom.
+# Permutation-test the concurrent handoffs with loom. `crossbeam_loom` puts the
+# epoch collector that frees `kio::log` segments under loom too.
 [positional-arguments]
 loom *args:
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: "$@"
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom "$@"
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
+    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p kio --lib loom:: "$@"
+    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test loom "$@"
+    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
 
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite.
 quic-sim:
