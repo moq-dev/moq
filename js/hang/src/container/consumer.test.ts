@@ -50,6 +50,7 @@ function writeLoc(track: Track.Producer, groups: [Micro, number[]][][]) {
 		}
 		group.finish();
 	}
+	track.finish();
 	track.close();
 }
 
@@ -397,10 +398,12 @@ test("Consumer refuses a data marker that shares its group", async () => {
 			group.writeFrame({ payload: second, timestamp: Time.Timestamp.fromMicros(10_000) });
 			group.finish();
 			// A finished track resolves the read instead of hanging when the reader fails to end.
+			track.finish();
 			track.close();
 			await expect(nextFrame(consumer)).rejects.toThrow("shares its group");
 		} finally {
 			consumer.close();
+			track.finish();
 			track.close();
 		}
 	}
@@ -558,6 +561,7 @@ test("Consumer delivers frames from a single group", async () => {
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 500 as Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Micro, 33_000 as Micro]);
+	track.finish();
 	track.close();
 
 	const frames = await drainFrames(consumer, 200);
@@ -572,6 +576,7 @@ test("Consumer forces keyframe true at index 0", async () => {
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 500 as Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Micro, 33_000 as Micro]);
+	track.finish();
 	track.close();
 
 	const frames = await drainFrames(consumer, 200);
@@ -600,6 +605,7 @@ test("Consumer index spans MoQ frames for keyframe detection", async () => {
 	group.writeFrame({ payload: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() }); // second MoQ frame → 3 samples
 	group.finish();
 	track.writeGroup(group);
+	track.finish();
 	track.close();
 
 	const frames = await drainFrames(consumer, 200);
@@ -639,6 +645,7 @@ for (const [where, payloads] of [
 		g1.writeFrame({ payload: new Uint8Array([0x04]), timestamp: Time.Timestamp.now() });
 		g1.finish();
 		track.writeGroup(g1);
+		track.finish();
 		track.close();
 
 		const frames: number[] = [];
@@ -667,6 +674,7 @@ test("Consumer delivers everything ahead of a decode error", async () => {
 	malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: Time.Timestamp.fromMicros(200_000) });
 	malformed.finish();
 	track.writeGroup(malformed);
+	track.finish();
 	track.close();
 
 	const items: string[] = [];
@@ -695,6 +703,7 @@ test("Consumer keeps the first of several decode errors", async () => {
 		group.finish();
 		track.writeGroup(group);
 	}
+	track.finish();
 	track.close();
 	await settle();
 
@@ -766,6 +775,7 @@ test("Consumer keeps frames decoded before a group reset (truncated GoP)", async
 	g0.abort(new NetError.Stream(StreamCode.Cancel));
 
 	writeGroupWithLegacyFrames(track, 1, [4 as Micro]);
+	track.finish();
 	track.close();
 
 	const items: string[] = [];
@@ -806,6 +816,7 @@ test("Consumer skips groups via PTS-span when over the max delay", async () => {
 	writeGroupWithLegacyFrames(track, 0, [0 as Micro]);
 	writeGroupWithLegacyFrames(track, 1, [100_000 as Micro]);
 	writeGroupWithLegacyFrames(track, 2, [200_000 as Micro]);
+	track.finish();
 	track.close();
 
 	const frames = await drainFrames(consumer, 300);
@@ -846,8 +857,10 @@ test("Consumer measures arrivals as they land", async () => {
 		expect(replacement.spread.peek()).toBe(consumer.spread.peek());
 		replacement.close();
 	} finally {
+		track.finish();
 		track.close();
 		consumer.close();
+		next.finish();
 		next.close();
 		installed.close();
 	}
@@ -862,6 +875,7 @@ test("Consumer delivers groups in sequence order regardless of arrival order", a
 	writeGroupWithLegacyFrames(track, 2, [60_000 as Micro]);
 	writeGroupWithLegacyFrames(track, 0, [0 as Micro]);
 	writeGroupWithLegacyFrames(track, 1, [30_000 as Micro]);
+	track.finish();
 	track.close();
 
 	await new Promise((resolve) => setTimeout(resolve, 100));
@@ -888,6 +902,7 @@ test("Consumer delivers a group that arrives below the cursor", async () => {
 	// three are handed over, in sequence order, since delivery has not passed any of them yet.
 	writeGroupWithLegacyFrames(track, 3, [0 as Micro]);
 	writeGroupWithLegacyFrames(track, 6, [200_000 as Micro]);
+	track.finish();
 	track.close();
 
 	await new Promise((resolve) => setTimeout(resolve, 100));
@@ -905,6 +920,7 @@ test("Consumer next() yields no gap before the first frame", async () => {
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Micro, 33_000 as Micro]);
 	writeGroupWithLegacyFrames(track, 1, [66_000 as Micro]);
+	track.finish();
 	track.close();
 
 	await new Promise((resolve) => setTimeout(resolve, 50));
@@ -938,6 +954,7 @@ test("Consumer reads nothing after close, even the frame a gap was returned ahea
 
 	consumer.close();
 	expect(await consumer.next()).toBeUndefined();
+	track.finish();
 	track.close();
 });
 
@@ -959,6 +976,7 @@ test("Consumer keeps a trailing duration marker internal", async () => {
 	});
 	group.finish();
 	track.writeGroup(group);
+	track.finish();
 	track.close();
 	await settle();
 
@@ -989,6 +1007,7 @@ test("Consumer reads a leading marker as an end and keeps the first media keyfra
 	});
 	group.finish();
 	track.writeGroup(group);
+	track.finish();
 	track.close();
 
 	expect(await consumer.next()).toEqual({ kind: "end", group: 0, end: 20_000 as Micro });
@@ -1104,6 +1123,7 @@ test("Consumer throws the first error in delivery order", async () => {
 	malformed.finish();
 	track.writeGroup(malformed);
 	writeGroupWithLegacyFrames(track, 2, [0 as Micro, 100_000 as Micro], wallClock);
+	track.finish();
 	track.close();
 
 	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(10_000_000 as Micro);
@@ -1152,6 +1172,7 @@ test("Consumer checks a whole decoded batch before a skip drops its group", asyn
 	// Read only once the skip has dropped it, before the newer group's frame is delivered.
 	await rewound;
 	newest.finish();
+	track.finish();
 	track.close();
 
 	const read = async () => {
@@ -1325,6 +1346,7 @@ test("Consumer buffered signal updates as frames arrive", async () => {
 	expect(ranges[0].start).toBe(0 as Milli);
 	expect((ranges[0].end as number) >= 66).toBeTruthy();
 
+	track.finish();
 	track.close();
 	consumer.close();
 });
@@ -1341,6 +1363,7 @@ test("Consumer recovers from gap in group sequence numbers", async () => {
 	writeGroupWithLegacyFrames(track, 3, [120_000 as Micro, 140_000 as Micro]);
 	writeGroupWithLegacyFrames(track, 4, [160_000 as Micro, 180_000 as Micro]);
 	writeGroupWithLegacyFrames(track, 5, [200_000 as Micro, 220_000 as Micro]);
+	track.finish();
 	track.close();
 
 	await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1370,6 +1393,7 @@ test("Consumer handles empty decode result without deadlock", async () => {
 	group.writeFrame({ payload: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() }); // valid decode
 	group.finish();
 	track.writeGroup(group);
+	track.finish();
 	track.close();
 
 	const frames = await drainFrames(consumer, 300);
@@ -1394,6 +1418,7 @@ test("Consumer preserves empty media from formats without endpoint markers", asy
 	group.writeFrame({ payload: new Uint8Array([1]), timestamp: Time.Timestamp.now() });
 	group.finish();
 	track.writeGroup(group);
+	track.finish();
 	track.close();
 
 	expect(frameOf(await nextFrame(consumer)).payload).toHaveLength(0);
@@ -1420,6 +1445,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 	});
 	group.finish();
 	track.writeGroup(group);
+	track.finish();
 	track.close();
 
 	const frames = await drainFrames(consumer, 200);
@@ -1443,6 +1469,7 @@ test("Consumer with CmafFormat times an untimed track from tfdt", async () => {
 	group.writeFrame({ payload: fragment("untimedDelta") });
 	group.finish();
 	track.writeGroup(group);
+	track.finish();
 	track.close();
 
 	const frames = await drainFrames(consumer, 200);
@@ -1491,6 +1518,7 @@ test("Consumer duration-skips a stalled group once it is covered", async () => {
 
 	track.writeGroup(g0);
 	track.writeGroup(g1);
+	track.finish();
 	track.close();
 
 	const frames = await drainFrames(consumer, 200);
@@ -1533,6 +1561,7 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 	await new Promise((resolve) => setTimeout(resolve, 20));
 	g0.writeFrame({ payload: new Uint8Array([20]), timestamp: Time.Timestamp.now() });
 	g0.finish();
+	track.finish();
 	track.close();
 
 	const frames = await drainFrames(consumer, 200);
@@ -1927,10 +1956,12 @@ test("a live video frame is delivered before its duration marker arrives", async
 		timestamp: Time.Timestamp.now(),
 	});
 	group.finish();
+	track.finish();
 	track.close();
 	// The marker is the frame's duration, not an item.
 	expect(await consumer.next()).toBeUndefined();
 	consumer.close();
+	track.finish();
 	track.close();
 });
 
@@ -1979,6 +2010,7 @@ for (const code of [StreamCode.Cancel, StreamCode.Internal, StreamCode.Old, Stre
 			expect(error).not.toHaveBeenCalled();
 		} finally {
 			consumer.close();
+			track.finish();
 			track.close();
 			error.mockRestore();
 		}
@@ -1996,7 +2028,11 @@ for (const end of [
 		const consumer = new Consumer(replay(track), { format: new LegacyFormat("data") });
 		try {
 			const pending = consumer.next();
-			track.close(end ?? undefined);
+			if (end) track.abort(end);
+			else {
+				track.finish();
+				track.close();
+			}
 			if (end) await expect(pending).rejects.toBe(end);
 			else expect(await pending).toBeUndefined();
 		} finally {
@@ -2017,10 +2053,12 @@ test("a group reset does not hide a later container decode failure", async () =>
 		// A truncated timestamp varint.
 		malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: Time.Timestamp.now() });
 		malformed.finish();
+		track.finish();
 		track.close();
 		await expect(nextFrame(consumer)).rejects.toThrow("buffer too short");
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 	}
 });
@@ -2042,7 +2080,11 @@ for (const end of [
 			writeGroupWithLegacyFrames(track, 2, [1_000_000 as Micro]);
 			await settle();
 			const pending = consumer.next();
-			track.close(end ?? undefined);
+			if (end) track.abort(end);
+			else {
+				track.finish();
+				track.close();
+			}
 			const resumed = await Promise.race([pending, settle(100).then(() => "stalled" as const)]);
 			expect(resumed).not.toBe("stalled");
 			if (resumed === "stalled") return;
@@ -2052,6 +2094,7 @@ for (const end of [
 			else expect(await consumer.next()).toBeUndefined();
 		} finally {
 			consumer.close();
+			track.finish();
 			track.close();
 		}
 	});

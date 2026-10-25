@@ -118,6 +118,7 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	expect(second?.frame.payload[0]).toBe(11);
 
 	live.finish();
+	track.finish();
 	track.close();
 	consumer.close();
 });
@@ -150,6 +151,7 @@ test("delayed older groups survive a floor established by two newer groups", asy
 		await expect(nextFrame(consumer)).rejects.toThrow("below the previous group start");
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		clock.mockRestore();
 	}

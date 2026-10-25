@@ -364,7 +364,7 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 				}
 			} catch (err) {
 				if (stopped) return;
-				output.close(err instanceof Error ? err : new Error(String(err)));
+				output.abort(err instanceof Error ? err : new Error(String(err)));
 				broadcast.close();
 				return err;
 			}
@@ -376,7 +376,11 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 				stopped = true;
 				input.close();
 				release.resolve();
-				output.close(err);
+				if (err) output.abort(err);
+				else {
+					output.finish();
+					output.close();
+				}
 				broadcast.close();
 			},
 		};
@@ -568,7 +572,7 @@ test("a replacement claiming different track properties is refused once the old 
 	expect(sub.closed.peek()).toBeUndefined();
 
 	// The old copy failing with its route is what ends the track.
-	old.close(new StreamError(StreamCode.SessionClosed));
+	old.abort(new StreamError(StreamCode.SessionClosed));
 	await settle();
 	expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
 
@@ -587,7 +591,7 @@ test("waiting for the end of a track whose replacement was refused ends with the
 	finished.catch(() => {});
 
 	// The old copy failing with its route leaves only the refusal.
-	old.close(new StreamError(StreamCode.SessionClosed));
+	old.abort(new StreamError(StreamCode.SessionClosed));
 	await expect(finished).rejects.toThrow("changed its properties");
 
 	sub.close();
@@ -795,7 +799,7 @@ test("a route that goes for good ends the track as its last copy does", async ()
 	ta.write(0);
 	expect(drain(sub)).toEqual([0]);
 
-	ta.producer.close(new StreamError(StreamCode.SessionClosed));
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
 	disposeA();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -901,7 +905,7 @@ test("a replacement spliced before the first copy answers is still checked again
 	await settle();
 	expect((await sub.info()).priority).toBe(1);
 
-	old.close(new StreamError(StreamCode.SessionClosed));
+	old.abort(new StreamError(StreamCode.SessionClosed));
 	await settle();
 	expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
 
@@ -1175,6 +1179,7 @@ test("draining groups to their end leaves buffered datagrams readable", async ()
 	const sub = front.consumer.track("seq").subscribe();
 	ta.write(0);
 	ta.producer.appendDatagram(undefined, enc.encode("d"));
+	ta.producer.finish();
 	ta.producer.close();
 	expect(drain(sub)).toEqual([0]);
 	expect(await sub.recvGroup()).toBeUndefined();
@@ -1461,7 +1466,7 @@ test.each([true, false])(
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.0");
 
 		// The old route goes away, and the reader reads on and sees its copy end.
-		ta.producer.close(new StreamError(StreamCode.SessionClosed));
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
 		const later = next();
 		await settle();
 		failing.abort(new StreamError(StreamCode.SessionClosed));
@@ -1745,7 +1750,7 @@ test("the largest follows the serving copy across a swap without moving back, an
 	expect(hooks.peekLargest(sub).largest).toEqual({ group: 3, frame: 0 });
 
 	// The route fails: its copy's stream ends, the logical track's does not.
-	ta.producer.close(new StreamError(StreamCode.SessionClosed));
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
 	let settled = false;
 	const next = sub.largest().finally(() => {
 		settled = true;
@@ -1764,6 +1769,7 @@ test("the largest follows the serving copy across a swap without moving back, an
 	// No route replaces this one: the stream ends with its copy.
 	front.conclude();
 	const last = sub.largest();
+	tb.producer.finish();
 	tb.producer.close();
 	expect(await last).toBeUndefined();
 
@@ -1966,7 +1972,7 @@ test.each([true, false])("a replaced copy backs a group before its first arrival
 	front.serve(b.consume());
 	await settle();
 	// Its route fails once replaced: closing cleanly would declare the track ends at group 1.
-	ta.producer.close(new StreamError(StreamCode.SessionClosed));
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
 	front.serve(c.consume());
 	await settle();
 
@@ -2009,6 +2015,7 @@ test("a clean end waits for a group the replaced copy still carries", async () =
 
 		// The new route has only the group already handed out, and ends there.
 		tb.write(2);
+		tb.producer.finish();
 		tb.producer.close();
 		front.serve(b.consume());
 		await settle();
@@ -2131,6 +2138,7 @@ test("the serving copy closing cleanly settles closed and leaves its datagrams r
 	const sub = front.consumer.track("seq").subscribe();
 	ta.write(0);
 	ta.producer.appendDatagram(undefined, enc.encode("d"));
+	ta.producer.finish();
 	ta.producer.close();
 	await settle();
 	expect(sub.closed.peek()).toBeNull();
@@ -2317,6 +2325,7 @@ test.each(["lands", "expired"])(
 
 			// The new route has only the group already handed out, and ends there. Nothing reads.
 			tb.write(2);
+			tb.producer.finish();
 			tb.producer.close();
 			front.serve(b.consume());
 			await settle();
@@ -2385,6 +2394,7 @@ test("a clean end keeps the serving copy while a group read from a replaced one 
 
 		// The new route has all of group 1 and ends there.
 		tb.write(1, 2);
+		tb.producer.finish();
 		tb.producer.close();
 		await settle();
 		expect(sub.closed.peek()).toBeNull();
@@ -2419,6 +2429,7 @@ test("a retained copy declaring another end after a clean end fails the reads", 
 		// The new route ends at 3, while the old one still owes group 1.
 		tb.write(2);
 		tb.producer.finishAt({ group: 3, frame: 0 });
+		tb.producer.finish();
 		tb.producer.close();
 		front.serve(b.consume());
 		await settle();
@@ -2458,6 +2469,7 @@ test("a clean end keeps the serving copy while a group handed out before the swa
 		front.serve(b.consume());
 		await settle();
 		tb.write(0, 2);
+		tb.producer.finish();
 		tb.producer.close();
 		await settle();
 		expect(sub.closed.peek()).toBeNull();

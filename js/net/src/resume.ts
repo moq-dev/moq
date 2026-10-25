@@ -249,7 +249,7 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 		return wire.subscribe(name, subscription);
 	} catch (err) {
 		const failed = new track.Producer(name);
-		failed.close(err instanceof Error ? err : new Error(String(err)));
+		failed.abort(err instanceof Error ? err : new Error(String(err)));
 		return failed.subscribe(subscription);
 	}
 }

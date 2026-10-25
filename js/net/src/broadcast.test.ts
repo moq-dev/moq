@@ -51,6 +51,7 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	expect((await pendingRequest(consumer))?.name).toBe("audio");
 
 	// Once the shared track closes, a later subscribe re-opens it.
+	producer.finish();
 	producer.close();
 	consumer.track("video").subscribe();
 	expect((await pendingRequest(consumer))?.name).toBe("video");
@@ -104,6 +105,7 @@ test("a replacement producer refuses a rewind past its predecessor", () => {
 	const broadcast = new BroadcastProducer();
 	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	first.appendGroup().writeFrame(textFrame("a", Timestamp.fromMillis(1000)));
+	first.finish();
 	first.close();
 
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
@@ -116,6 +118,7 @@ test("a replacement producer refuses a rewind past its predecessor", () => {
 	const track = next.createTrack("media", { timescale: Timescale.MILLI });
 	track.appendGroup().writeFrame(textFrame("c", Timestamp.fromMillis(500)));
 
+	second.finish();
 	second.close();
 	broadcast.close();
 	next.close();
@@ -127,12 +130,14 @@ test("an empty replacement ends past its predecessor's groups", async () => {
 	const broadcast = new BroadcastProducer();
 	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	first.appendGroup().finish();
+	first.finish();
 	first.close();
 
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	const subscriber = second.subscribe();
 	expect(() => second.finishAt({ group: 0, frame: 0 })).toThrow(ProtocolViolation);
 	expect(() => second.finishAt({ group: 0, frame: 1 })).toThrow(ProtocolViolation);
+	second.finish();
 	second.close();
 	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
 	broadcast.close();
@@ -146,11 +151,13 @@ test("a removed producer writes nothing once its replacement claims the name", a
 
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	const subscriber = second.subscribe();
+	second.finish();
 	second.close();
 	expect(() => first.appendGroup()).toThrow("replaced");
 	expect(() => first.writeGroup(new GroupProducer(1))).toThrow("replaced");
 	expect(() => first.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow("replaced");
 	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
+	first.finish();
 	first.close();
 	broadcast.close();
 });
@@ -164,8 +171,9 @@ test("a removed producer's abort ignores its replacement's groups", async () => 
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	for (let i = 0; i < 3; i++) second.appendGroup().finish();
 	const abort = new Error("cut off");
-	first.close(abort);
+	first.abort(abort);
 	expect(first.closed.peek()).toBe(abort);
+	second.finish();
 	second.close();
 	broadcast.close();
 });
@@ -186,6 +194,7 @@ test("a replacement producer refuses to append a sequence the name already wrote
 	firstProducer.writeGroup(new GroupProducer(8));
 	firstProducer.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
 	firstSubscriber.close();
+	firstProducer.finish();
 	firstProducer.close();
 
 	const secondSubscriber = broadcast.track("media").subscribe();
@@ -209,6 +218,7 @@ test("a replacement producer refuses to append a sequence the name already wrote
 	expect(nextRequest.accept({ timescale: Timescale.MILLI }).appendGroup().sequence).toBe(0);
 
 	secondSubscriber.close();
+	secondProducer.finish();
 	secondProducer.close();
 	nextSubscriber.close();
 	broadcast.close();
@@ -276,12 +286,14 @@ test("created and requested tracks share a name's sequences", async () => {
 	expect(first.appendGroup().sequence).toBe(0);
 	first.writeGroup(new GroupProducer(8));
 	first.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
+	first.finish();
 	first.close();
 
 	// A replacement refuses to append past nothing, since that would reuse every explicit write.
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	expect(() => second.appendGroup()).toThrow("duplicate sequence");
 	second.writeGroup(new GroupProducer(13));
+	second.finish();
 	second.close();
 
 	// An on-demand producer checks the same namespace, and so does a later created track.
@@ -294,10 +306,12 @@ test("created and requested tracks share a name's sequences", async () => {
 	expect(() => requested.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow("duplicate sequence");
 	requested.insertDatagram(14, Timestamp.fromMillis(0), new Uint8Array());
 	subscriber.close();
+	requested.finish();
 	requested.close();
 
 	const later = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	expect(() => later.appendGroup()).toThrow("duplicate sequence");
+	later.finish();
 	later.close();
 
 	// Only a new broadcast starts over.
@@ -326,8 +340,13 @@ test("a written name refuses to reuse its sequences after many other names", () 
 	const broadcast = new BroadcastProducer();
 	const written = broadcast.createTrack("written");
 	written.appendGroup().finish();
+	written.finish();
 	written.close();
-	for (let i = 0; i < 1000; i++) broadcast.createTrack(`unused-${i}`).close();
+	for (let i = 0; i < 1000; i++) {
+		const unused = broadcast.createTrack(`unused-${i}`);
+		unused.finish();
+		unused.close();
+	}
 
 	expect(() => broadcast.createTrack("written").appendGroup()).toThrow("duplicate sequence");
 	broadcast.close();
@@ -358,6 +377,7 @@ test("publishing-side subscriptions coalesce onto one request", async () => {
 	await broadcast.demand().unused();
 	expect(producer.closed.peek()).toBeUndefined();
 
+	producer.finish();
 	producer.close();
 	broadcast.close();
 });
@@ -476,6 +496,7 @@ test("a held info lookup ending after removeTrack leaves demand alone", async ()
 	await Promise.resolve();
 	expect(demand.used.peek()).toBe(false);
 
+	track.finish();
 	track.close();
 	broadcast.close();
 });
@@ -494,6 +515,7 @@ test("removeTrack leaves a track that only a request serves", async () => {
 	expect(producer.closed.peek()).toBeUndefined();
 
 	subscriber.close();
+	producer.finish();
 	producer.close();
 	broadcast.close();
 });
@@ -511,6 +533,7 @@ test("closing a broadcast rejects a dequeued request", async () => {
 	expect(() => producer.appendGroup()).toThrow("track is closed");
 	await expect(subscriber.info()).rejects.toThrow("track closed before info was known");
 	subscriber.close();
+	producer.finish();
 	producer.close();
 });
 
@@ -737,6 +760,7 @@ test("a finished track is still served from its cache", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("track1", { timescale: Timescale.MILLI });
 	track.writeFrame(textFrame("last"));
+	track.finish();
 	track.close();
 
 	// Like Rust, finishing keeps the track: a late subscriber reads the cache, then the clean end.
@@ -753,7 +777,7 @@ test("a finished track is still served from its cache", async () => {
 
 test("an aborted track is gone, so a subscribe with no handler answers NotFound", async () => {
 	const broadcast = new BroadcastProducer();
-	broadcast.createTrack("track1").close(new Error("boom"));
+	broadcast.createTrack("track1").abort(new Error("boom"));
 
 	// Nothing serves requests on demand, so this must fail rather than wait forever.
 	const subscriber = broadcast.consume().track("track1").subscribe();
@@ -765,7 +789,7 @@ test("an aborted track is gone, so a subscribe with no handler answers NotFound"
 test("an aborted track falls through to a request when a handler is serving", async () => {
 	const broadcast = new BroadcastProducer();
 	const pulled = wireOf(broadcast).requested();
-	broadcast.createTrack("track1").close(new Error("boom"));
+	broadcast.createTrack("track1").abort(new Error("boom"));
 
 	broadcast.track("track1").subscribe();
 	expect((await pulled)?.name).toBe("track1");
@@ -885,6 +909,7 @@ test("broadcast demand watches static and pending tracks rather than broadcast h
 	await demand.unused();
 	expect(demand.used.peek()).toBe(false);
 	request.reject();
+	video.finish();
 	video.close();
 	broadcast.close();
 	expect(await demand.closed).toBeNull();
@@ -902,6 +927,7 @@ test("broadcast closure clears active demand and subscriptions", async () => {
 	expect(demand.used.peek()).toBe(false);
 	await demand.unused();
 	subscriber.close();
+	track.finish();
 	track.close();
 });
 
@@ -942,6 +968,7 @@ test("removeTrack stops counting the removed track's demand at once", async () =
 	expect(demand.used.peek()).toBe(false);
 
 	subscriber.close();
+	video.finish();
 	video.close();
 	broadcast.close();
 });

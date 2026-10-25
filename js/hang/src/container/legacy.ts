@@ -184,6 +184,10 @@ export class Producer {
 		if (!err) this.#close();
 		if (err) this.#group?.abort(err);
 		else this.#group?.finish();
-		this.#track.close(err);
+		if (err) this.#track.abort(err);
+		else {
+			this.#track.finish();
+			this.#track.close();
+		}
 	}
 }

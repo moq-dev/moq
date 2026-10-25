@@ -962,6 +962,7 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		const before = { inserted, played, buffered: ring.length };
 		silent = 0;
 
+		(playback.track as Moq.Track.Producer).finish();
 		(playback.track as Moq.Track.Producer).close();
 		playback.switchRendition("video/1");
 		video.replace(playback.producer.createTrack("video/1", { timescale: Moq.Time.Timescale.MILLI }));

@@ -69,6 +69,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 			expect(await reader.finished()).toEqual({ group: 3, frame: 0 });
 
 			video.writeFrame(textFrame("2"));
+			video.finish();
 			video.close();
 			expect(await readAll(reader)).toEqual(["2"]);
 			expect(await reader.closed).toBeNull();
@@ -94,6 +95,7 @@ test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_20])(
 			video.writeFrame(textFrame("1"));
 			video.writeFrame(textFrame("2"));
 			const ended = performance.now();
+			video.finish();
 			video.close();
 
 			expect(await readAll(reader)).toEqual(["1", "2"]);

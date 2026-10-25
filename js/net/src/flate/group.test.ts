@@ -35,6 +35,7 @@ test("synchronous writers store slices; plain readers share one charged inflated
 		expect(inflating).toHaveBeenCalledTimes(2);
 	} finally {
 		inflating.mockRestore();
+		track.finish();
 		track.close();
 	}
 });
@@ -80,6 +81,7 @@ test("empty frames preserve the window and prewritten groups bind without duplic
 	group.finish();
 	for (const expected of [payload, new Uint8Array(), payload])
 		expect((await reader.readFrame())?.payload).toEqual(expected);
+	track.finish();
 	track.close();
 });
 
@@ -92,6 +94,7 @@ test("a cut compressed group preserves its committed frames before returning its
 	group.abort(cut);
 	expect((await reader.readFrame())?.payload).toEqual(payload);
 	await expect(reader.readFrame()).rejects.toThrow(cut);
+	track.finish();
 	track.close();
 });
 
@@ -105,6 +108,7 @@ test("a shared plain read cannot change a later synchronous write's admission", 
 	expect(() => group.writeFrame({ payload: new Uint8Array() })).not.toThrow();
 	group.finish();
 	expect((await reader.readFrame())?.payload.length).toBe(0);
+	track.finish();
 	track.close();
 });
 
@@ -122,6 +126,7 @@ test("datagrams buffered before accept share one stored form, each reader its ow
 	expect(stored(first)?.inflated).toBe(payload.length);
 	expect(first.payload).toEqual(payload);
 	expect(second.payload).toEqual(payload);
+	track.finish();
 	track.close();
 });
 
@@ -134,6 +139,7 @@ test("a malformed compressed datagram is refused before reaching readers", () =>
 		/declared size/,
 	);
 	expect(hooks.tryRecvDatagram(reader).kind).toBe("idle");
+	track.finish();
 	track.close();
 });
 
@@ -149,6 +155,7 @@ test("refresh measures stored slices without inflating a compressed group", () =
 	} finally {
 		inflating.mockRestore();
 		group.finish();
+		track.finish();
 		track.close();
 	}
 });

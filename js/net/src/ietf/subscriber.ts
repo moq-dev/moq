@@ -846,7 +846,7 @@ export class Subscriber {
 					maxAge = result.maxAge;
 					break;
 				}
-				if (demand.closed.peek() === undefined && demand.wanted.peek() !== undefined) continue;
+				if (hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek() !== undefined) continue;
 				throw abandoned;
 			}
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
@@ -931,7 +931,7 @@ export class Subscriber {
 			const unanswered = new Signal(0);
 			const done = race([
 				this.#runPublishDone(stream, subscription, broadcast, unanswered).then(() => publisherEnded),
-				producer.closed.then(() => localEnded),
+				hooks.trackReleased(producer).then(() => localEnded),
 				revoked,
 			]);
 			const updates = this.#runUpdates(stream, requestId, producer, priority, maxAge, unanswered, done);
@@ -943,7 +943,11 @@ export class Subscriber {
 			const demand = producer.demand();
 			for (;;) {
 				const reason = await race([done, unwanted(demand).then(() => idle)]);
-				if (reason === idle && demand.closed.peek() === undefined && demand.wanted.peek() !== undefined)
+				if (
+					reason === idle &&
+					hooks.demandReleased(demand).peek() === undefined &&
+					demand.wanted.peek() !== undefined
+				)
 					continue;
 				terminal = reason;
 				break;
@@ -955,8 +959,9 @@ export class Subscriber {
 			// straight out of its loop for the same reason.
 			if (terminal === revokedEnded) {
 				console.info(`subscription no longer authorized: broadcast=${broadcast} track=${request.name}`);
-				producer.close(refused);
+				producer.abort(refused);
 			} else {
+				producer.finish();
 				producer.close();
 			}
 
@@ -975,7 +980,7 @@ export class Subscriber {
 			stream.abort(err);
 			const e = await sessionCause(this.#quic, err);
 			if (this.#localClose) hooks.releaseTrack(producer);
-			else producer.close(e);
+			else producer.abort(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
@@ -1033,7 +1038,7 @@ export class Subscriber {
 
 		const { tail, track } = subscription;
 		const complete = () => count > 0n && BigInt(tail.streams) >= count;
-		await tail.settle(complete, track.closed);
+		await tail.settle(complete, hooks.trackReleased(track));
 	}
 
 	/**
@@ -1103,7 +1108,7 @@ export class Subscriber {
 			} catch (err) {
 				// Nothing reached the wire, but the track can no longer follow its subscribers.
 				console.warn(`subscribe update failed: id=${requestId} error=${reason(error(err))}`);
-				producer.close(error(err));
+				producer.abort(error(err));
 				// Drafts 14 and 15 require the next request ID, so one spent and never sent would
 				// stall every later request: as in Rust, that ends the session.
 				if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
@@ -1572,7 +1577,7 @@ export class Subscriber {
 				// cache.
 				const frame =
 					stream.tryDecode(decode) ??
-					(await race([stream.decodeMaybe(decode), producer?.closed ?? track.closed]));
+					(await race([stream.decodeMaybe(decode), producer?.closed ?? hooks.trackReleased(track)]));
 				if (!producer && (frame === null || frame instanceof Error)) {
 					stream.stop(frame ?? new StreamError(StreamCode.Cancel));
 					return;
@@ -1648,14 +1653,14 @@ export class Subscriber {
 			if (e instanceof EndOfTrackProperties) {
 				// The group before the marker is complete; only the track's end can't be carried.
 				producer?.finish();
-				track.close(e);
+				track.abort(e);
 			} else if (
 				e instanceof ProtocolViolation ||
 				(e instanceof StreamError && e.code === StreamCode.MalformedTrack)
 			) {
 				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.abort(e);
-				track.close(e);
+				track.abort(e);
 			} else {
 				// A stream that fails before its first object still names a group, which the
 				// reader sees fail rather than silently go missing.

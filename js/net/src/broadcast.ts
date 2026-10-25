@@ -81,12 +81,12 @@ function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: 
 	if (state.demands.has(producer)) return;
 	const demand = producer.demand();
 	// A closed track is never demand, and its close already fired, so nothing would dispose a watcher.
-	if (demand.closed.peek() !== undefined) return;
+	if (hooks.demandReleased(demand).peek() !== undefined) return;
 	let active = false;
 	const update = () => {
 		const used =
 			state.closed.peek() === undefined &&
-			demand.closed.peek() === undefined &&
+			hooks.demandReleased(demand).peek() === undefined &&
 			((lookups?.pending ?? 0) > 0 || demand.wanted.peek() !== undefined);
 		if (active === used) return;
 		state.active += used ? 1 : -1;
@@ -95,8 +95,8 @@ function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: 
 	};
 	const disposeUsed = demand.wanted.subscribe(update);
 	if (lookups) lookups.changed = update;
-	const disposeClosed = demand.closed.subscribe(() => {
-		if (demand.closed.peek() === undefined) return;
+	const disposeClosed = hooks.demandReleased(demand).subscribe(() => {
+		if (hooks.demandReleased(demand).peek() === undefined) return;
 		cleanup();
 	});
 	const cleanup = () => {
@@ -161,13 +161,13 @@ function closeState(state: BroadcastState) {
 function lookup(state: BroadcastState, name: string): track.Producer | undefined {
 	const inserted = state.tracks.get(name);
 	if (inserted) {
-		if (!(inserted.closed.peek() instanceof Error)) return inserted;
+		if (!(hooks.trackReleased(inserted).peek() instanceof Error)) return inserted;
 		state.tracks.delete(name);
 	}
 
 	const requested = state.requests.get(name);
 	if (requested) {
-		if (requested.closed.peek() === undefined) return requested;
+		if (hooks.trackReleased(requested).peek() === undefined) return requested;
 		state.requests.delete(name);
 	}
 
@@ -193,7 +193,7 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 	if (!state.served) {
 		// Answer through the track rather than throwing, so a peer's subscribe is refused with
 		// the code instead of an unhandled error.
-		producer.close(new NotFound(`track ${name}`));
+		producer.abort(new NotFound(`track ${name}`));
 		return { producer, requested: false };
 	}
 
@@ -201,7 +201,7 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 	state.lookups.set(producer, lookups);
 	watchDemand(state, producer, lookups);
 	state.requests.set(name, producer);
-	void producer.closed.then(() => {
+	void hooks.trackReleased(producer).then(() => {
 		if (state.requests.get(name) === producer) state.requests.delete(name);
 	});
 
@@ -231,7 +231,10 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	let answered = false;
 	let ended = false;
 	const release = () => {
-		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined) producer.close();
+		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined) {
+			producer.finish();
+			producer.close();
+		}
 	};
 	info.then(
 		() => {
@@ -315,7 +318,7 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
 	state.listing.listOwn(producer.name, producer, info);
 
 	// A finished track keeps serving its cache, so only an abort evicts it.
-	void producer.closed.then((closed) => {
+	void hooks.trackReleased(producer).then((closed) => {
 		if (!(closed instanceof Error)) return;
 		if (state.tracks.get(producer.name) === producer) state.tracks.delete(producer.name);
 		state.listing.unlistOwn(producer.name, producer);
@@ -449,7 +452,7 @@ export class Producer {
 		// One logical track per name: an open track or a live request already serves it.
 		// A request a handler already pulled stays duplicate, as in Rust.
 		const live = [this.#state.tracks.get(name), this.#state.requests.get(name)];
-		if (live.some((existing) => existing && existing.closed.peek() === undefined)) {
+		if (live.some((existing) => existing && hooks.trackReleased(existing).peek() === undefined)) {
 			throw new Error(`duplicate track: ${name}`);
 		}
 

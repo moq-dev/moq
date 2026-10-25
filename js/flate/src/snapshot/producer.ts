@@ -67,6 +67,7 @@ export class Producer {
 
 	/** Finish the track. */
 	finish(): void {
+		this.#track.finish();
 		this.#track.close();
 	}
 }

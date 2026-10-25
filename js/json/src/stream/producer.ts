@@ -89,13 +89,14 @@ export class Producer<T> {
 		// sitting in the group with a generic error instead of the failure that ended the log.
 		this.#group?.abort(abort);
 		this.#group = undefined;
-		this.#track.close(abort);
+		this.#track.abort(abort);
 	}
 
 	/** Finish the track, closing the group. */
 	finish(): void {
 		this.#group?.finish();
 		this.#group = undefined;
+		this.#track.finish();
 		this.#track.close();
 	}
 }

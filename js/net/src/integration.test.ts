@@ -1051,7 +1051,9 @@ test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %
 			for (;;) {
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
-				request.accept({ timescale: Timescale.MILLI }).close();
+				const accepted = request.accept({ timescale: Timescale.MILLI });
+				accepted.finish();
+				accepted.close();
 			}
 		})();
 	}
@@ -2872,7 +2874,7 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 	expect(await group?.readString()).toBe("head");
 
 	const reset = StreamCode(70);
-	for (const producer of served) producer.close(new StreamError(reset));
+	for (const producer of served) producer.abort(new StreamError(reset));
 	const closed = await withTimeout(
 		Promise.resolve(track.closed),
 		Nano.fromMilli(Milli(2000)),

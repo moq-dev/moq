@@ -197,6 +197,7 @@ for (const version of drafts) {
 			const listing = await fx.list();
 			await ok(listing, version);
 			const { stream } = await fx.offered();
+			if (finished) track.finish();
 			if (finished) track.close();
 			broadcast.removeTrack("video");
 			expect(await stream.reader.u53()).toBe(PublishDone.id);
@@ -218,6 +219,7 @@ for (const version of drafts) {
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream } = await fx.offered(false);
+		track.finish();
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
@@ -253,6 +255,7 @@ for (const version of drafts) {
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream } = await fx.offered(false);
+		track.finish();
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
@@ -287,6 +290,7 @@ for (const version of drafts) {
 					published.set(publish.trackName, stream);
 				}
 				await clock.advance(Nano.zero);
+				video.finish();
 				video.close();
 				if (remove) broadcast.removeTrack("video");
 				broadcast.close();

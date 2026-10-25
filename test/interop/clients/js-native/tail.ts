@@ -62,14 +62,15 @@ try {
 				for (let sequence = 0; sequence < GROUPS; sequence++) {
 					const group = track.appendGroup();
 					if (drop && sequence === 1) {
-						group.close(new Error("cut"));
+						group.abort(new Error("cut"));
 						continue;
 					}
 					for (const size of compress ? [BYTES / 2, 0, BYTES / 2] : [BYTES]) {
 						group.writeFrame({ payload: new Uint8Array(size).fill(sequence) });
 					}
-					group.close();
+					group.finish();
 				}
+				track.finish();
 				track.close();
 			}
 		}

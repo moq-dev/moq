@@ -171,6 +171,10 @@ export class Producer<T> {
 		else this.#group?.finish();
 		this.#group = undefined;
 
-		this.#track.close(abort);
+		if (abort) this.#track.abort(abort);
+		else {
+			this.#track.finish();
+			this.#track.close();
+		}
 	}
 }

@@ -561,7 +561,7 @@ export class Encoder {
 		const cause = error instanceof Error ? error : new Error(String(error));
 		this.#failure.peek().set(cause);
 		this.#out.error.set(cause);
-		track.close(cause);
+		track.abort(cause);
 	}
 
 	// Publishes the catalog for the probe: its codec string, the coded-size ceiling, and the bitrate and

@@ -142,7 +142,8 @@ export function finish(
 		const healthTrack = health.createTrack("live");
 		const group = healthTrack.appendGroup();
 		group.writeFrame({ payload: new TextEncoder().encode("session-alive") });
-		group.close();
+		group.finish();
+		healthTrack.finish();
 		healthTrack.close();
 		health.announce();
 		state.ended = true;

@@ -104,6 +104,7 @@ test("concurrent consumer reads are rejected", async () => {
 	const first = consumer.next();
 
 	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
+	track.finish();
 	track.close();
 	expect(await first).toBeUndefined();
 });
@@ -410,6 +411,7 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.now() });
 		frame.commit();
 		group.finish();
+		track.finish();
 		track.close();
 
 		expect((await consumer.next())?.value).toEqual({ push: { index: 1, value: { n: 1 } } });

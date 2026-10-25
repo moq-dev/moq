@@ -25,6 +25,7 @@ function setup(maxDelay = 100) {
 	})();
 	onTestFinished(async () => {
 		consumer.close();
+		track.finish();
 		track.close();
 		try {
 			await reading;

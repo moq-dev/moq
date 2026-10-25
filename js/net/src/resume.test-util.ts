@@ -15,6 +15,7 @@ export function readsFrom(active: BroadcastConsumer | undefined, source: Broadca
 		return sub.tryRecvGroup() !== undefined;
 	} finally {
 		sub.close();
+		track.finish();
 		track.close();
 		source.removeTrack(name);
 	}

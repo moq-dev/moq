@@ -112,6 +112,7 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 			subscriber.update({ maxDelay: budget(current) });
 		}
 	} finally {
+		track.finish();
 		track.close();
 		consumer.close();
 		await reader;

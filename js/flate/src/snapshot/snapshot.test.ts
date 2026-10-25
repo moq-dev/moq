@@ -156,6 +156,7 @@ test("latest lets a newer group preempt an open one", async () => {
 	expect((await consumer.latest())?.value).toEqual(bytes(2));
 
 	stale.finish();
+	track.finish();
 	track.close();
 });
 
@@ -181,7 +182,7 @@ test("an aborted track surfaces its error instead of spinning", async () => {
 	const consumer = new Consumer({ track: track.subscribe() });
 
 	const boom = new Error("subscription aborted");
-	track.close(boom);
+	track.abort(boom);
 
 	await expect(consumer.next()).rejects.toThrow("subscription aborted");
 });

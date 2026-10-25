@@ -287,6 +287,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		delivery.resolve();
 		abort.abort();
 		consumer.close();
+		track.finish();
 		track.close();
 		await decode;
 		signals.close();

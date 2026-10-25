@@ -194,7 +194,11 @@ export class Producer<T> {
 		// Any further update fails on the closed track, but it has to fail as a track error rather
 		// than as a delta with nowhere to put it.
 		this.#encoder.reset();
-		this.#track.close(abort);
+		if (abort) this.#track.abort(abort);
+		else {
+			this.#track.finish();
+			this.#track.close();
+		}
 	}
 }
 

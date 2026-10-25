@@ -32,9 +32,10 @@ async function publishTrack(track: Moq.Track.Producer) {
 	}
 
 	// Mark the group as complete
-	group.close();
+	group.finish();
 
 	// Mark the track as complete (optional)
+	track.finish();
 	track.close();
 }
 

@@ -46,6 +46,7 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		]);
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		await reading;
 		installed.close();
@@ -97,6 +98,7 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 		]);
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		await reading;
 		installed.close();
@@ -138,6 +140,7 @@ test("the holes a stalled source left behind share one budget", async () => {
 		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame", "gap", "frame", "gap", "frame"]);
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		await reading;
 		installed.close();
@@ -182,6 +185,7 @@ test("a hole is late from the earliest arrival past it", async () => {
 		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame", "gap", "frame"]);
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		await reading;
 		installed.close();

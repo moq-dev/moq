@@ -14,6 +14,7 @@
  */
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { StreamCode, StreamError } from "./error.ts";
+import { hooks } from "./internal.ts";
 import type * as track from "./track.ts";
 
 /**
@@ -36,7 +37,7 @@ export type TracksEvent =
 
 /** Whether `own` closed cleanly, so its track leaves the listing as finished. */
 function finished(own: track.Producer): boolean {
-	return own.closed.peek() === null;
+	return hooks.trackReleased(own).peek() === null;
 }
 
 /** One listed track and who lists it. */

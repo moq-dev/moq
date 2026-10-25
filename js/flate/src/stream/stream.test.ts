@@ -77,6 +77,7 @@ test("a second group is a rolled log, not a continuation", async () => {
 		for (const payload of pair) group.writeFrame({ payload, timestamp: Time.Timestamp.now() });
 		group.finish();
 	}
+	track.finish();
 	track.close();
 
 	const consumer = new Consumer({ track: track.subscribe({ maxDelay: REPLAY_LATENCY }) });

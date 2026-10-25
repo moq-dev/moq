@@ -93,7 +93,7 @@ interface Registry {
 function wantsOf(entries: readonly Entry[]): Want[] {
 	const wants: Want[] = [];
 	for (const entry of entries) {
-		if (entry.demand.closed.peek() !== undefined) continue;
+		if (hooks.demandReleased(entry.demand).peek() !== undefined) continue;
 		if (entry.demand.wanted.peek() === undefined) continue;
 		wants.push({ id: entry.id, priority: entry.priority, max: entry.max });
 	}
@@ -164,7 +164,7 @@ export class Allocator implements Handle {
 			const entries = effect.get(this.#entries);
 			for (const entry of entries) {
 				effect.get(entry.demand.wanted);
-				effect.get(entry.demand.closed);
+				effect.get(hooks.demandReleased(entry.demand));
 			}
 			this.#publish();
 		});
@@ -239,7 +239,7 @@ export class Allocator implements Handle {
 
 	#prune(): void {
 		const entries = this.#entries.peek();
-		const live = entries.filter((entry) => entry.demand.closed.peek() === undefined);
+		const live = entries.filter((entry) => hooks.demandReleased(entry.demand).peek() === undefined);
 		if (live.length !== entries.length) this.#entries.set(live);
 	}
 

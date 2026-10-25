@@ -76,13 +76,15 @@ test("a track leaving the table is removed", async () => {
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "+b", "synced"]);
 	broadcast.removeTrack("a");
-	b.close(new Error("aborted"));
+	b.abort(new Error("aborted"));
 	expect(await tracks.drain()).toEqual(["-a", "-b"]);
 });
 
 test("a finished track is listed while the table holds it", async () => {
 	const broadcast = new BroadcastProducer();
-	broadcast.createTrack("a").close();
+	const a = broadcast.createTrack("a");
+	a.finish();
+	a.close();
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "synced"]);
 	// It finished before it was removed.
@@ -108,7 +110,9 @@ test("a lister finishes or removes a track", async () => {
 
 test("a recreated track leaves as it ended before it is added again", async () => {
 	const broadcast = new BroadcastProducer();
-	broadcast.createTrack("a").close();
+	const a = broadcast.createTrack("a");
+	a.finish();
+	a.close();
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "synced"]);
 	// The finished track still holds the name; its replacement takes it over.
@@ -205,10 +209,12 @@ test("a clean end follows the removals before it", async () => {
 	const live = broadcast.createTrack("live");
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "+b", "+live", "synced"]);
+	a.finish();
 	a.close();
 	broadcast.removeTrack("a");
 	broadcast.removeTrack("b");
 	broadcast.createTrack("unseen");
+	live.finish();
 	live.close();
 	broadcast.close();
 	expect(await tracks.drain()).toEqual(["~a", "-b", "~live", "end"]);
@@ -221,6 +227,7 @@ test("a clean end follows the removals before it", async () => {
 	const own = both.createTrack("a");
 	const served = list(both);
 	expect(await served.drain()).toEqual(["+a", "synced"]);
+	own.finish();
 	own.close();
 	both.close();
 	expect(await served.drain()).toEqual(["~a", "end"]);
@@ -230,6 +237,7 @@ test("a clean end follows the removals before it", async () => {
 	const gone = closing.createTrack("gone");
 	const reader = list(closing);
 	expect(await reader.drain()).toEqual(["+gone", "synced"]);
+	gone.finish();
 	gone.close();
 	closing.removeTrack("gone");
 	closing.close();

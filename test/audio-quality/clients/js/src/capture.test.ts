@@ -32,7 +32,7 @@ test("arrival capture stamps a later group before a stalled earlier group", asyn
 			timestamp: Time.Timestamp.fromMicros(20_000),
 			payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(20_000)),
 		});
-		late.close();
+		late.finish();
 		await read(late.consume());
 		expect(captured).toEqual([[10, 20, 1, 20]]);
 		now = 50;
@@ -40,15 +40,15 @@ test("arrival capture stamps a later group before a stalled earlier group", asyn
 			timestamp: Time.Timestamp.fromMicros(0),
 			payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(0)),
 		});
-		early.close();
+		early.finish();
 		await waiting;
 		expect(captured).toEqual([
 			[10, 20, 1, 20],
 			[50, 0, 0, 20],
 		]);
 	} finally {
-		early.close();
-		late.close();
+		early.finish();
+		late.finish();
 		clock.mockRestore();
 	}
 });
@@ -59,7 +59,7 @@ test("arrival capture excludes duration markers", async () => {
 		timestamp: Time.Timestamp.fromMicros(100_000),
 		payload: Legacy.encodeFrame(new Uint8Array(), Micro(100_000)),
 	});
-	group.close();
+	group.finish();
 	const captured: Arrival[] = [];
 	for await (const arrival of arrivals(group.consume(), { decoder: new Legacy.Format("audio"), config }))
 		captured.push(arrival);
@@ -187,7 +187,7 @@ test("closing the observer waits for in-flight groups and keeps their decode fai
 });
 
 test("a reset group truncates its arrivals without failing capture", async () => {
-	const error = await captureGroupEnd((group) => group.close(new NetError.TooFarBehind()));
+	const error = await captureGroupEnd((group) => group.abort(new NetError.TooFarBehind()));
 	expect(error).toBeUndefined();
 });
 
@@ -203,7 +203,7 @@ test("arrival durations come from Opus packets despite missing or differently si
 			payload: Legacy.encodeFrame(new Uint8Array([toc, 0]), Micro(timestamp)),
 		});
 	}
-	group.close();
+	group.finish();
 	const captured: Arrival[] = [];
 	for await (const arrival of arrivals(group.consume(), { decoder: new Legacy.Format("audio"), config })) {
 		captured.push(arrival);
@@ -221,7 +221,7 @@ test("arrival capture uses AAC's codec duration when the container leaves it imp
 		timestamp: Time.Timestamp.fromMicros(0),
 		payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(0)),
 	});
-	group.close();
+	group.finish();
 	const aac = Catalog.AudioConfigSchema.parse({ ...config, codec: "mp4a.40.2", sampleRate: 44100 });
 	const captured: Arrival[] = [];
 	for await (const arrival of arrivals(group.consume(), { decoder: new Legacy.Format("audio"), config: aac })) {
@@ -236,7 +236,7 @@ test("arrival capture refuses a packet with no usable duration", async () => {
 		timestamp: Time.Timestamp.fromMicros(0),
 		payload: Legacy.encodeFrame(new Uint8Array([0x7b]), Micro(0)),
 	});
-	group.close();
+	group.finish();
 	const reader = arrivals(group.consume(), { decoder: new Legacy.Format("audio"), config });
 	await expect(reader.next()).rejects.toThrow("no encoded frame duration for opus");
 });

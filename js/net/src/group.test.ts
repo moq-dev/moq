@@ -100,6 +100,17 @@ test("a closed group rejects a further write without discarding committed frames
 	expect((await consumer.readFrame())?.payload[0]).toBe(0);
 });
 
+test("an abort after finish keeps the clean outcome", async () => {
+	const { producer, consumer } = pair(0);
+	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
+	producer.finish();
+	producer.abort(new Error("boom"));
+
+	expect(producer.closed.peek()).toBeNull();
+	expect((await consumer.readFrame())?.payload[0]).toBe(1);
+	expect(await consumer.readFrame()).toBeUndefined();
+});
+
 test("a read that starts later skips frames below it instead of returning them", async () => {
 	const { producer, consumer } = pair(0);
 

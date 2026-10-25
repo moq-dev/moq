@@ -33,6 +33,7 @@ try {
 						group.finish();
 						track.writeGroup(group);
 					}
+					track.finish();
 					track.close();
 					return { origin, broadcast };
 				});

@@ -54,6 +54,7 @@ export async function run(): Promise<void> {
 							`${retained},${publishers},${readers},${((elapsed * 1e6) / (iterations * publishers * readers)).toFixed(0)}`,
 						);
 					} finally {
+						for (const track of tracks) track.finish();
 						for (const track of tracks) track.close();
 					}
 				}

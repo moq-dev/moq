@@ -217,6 +217,7 @@ async function subscribeEnd(sequences: number[], version: Version = Version.DRAF
 		// arrives late opens no stream at all, so there is nothing firmer to wait on.
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
+	track.finish();
 	track.close();
 
 	try {
@@ -819,6 +820,7 @@ test("lite draft-06: a cut group is dropped early, once", async () => {
 
 		sub.serve(2);
 		expect(await sub.servedSequence()).toBe(2);
+		sub.track.finish();
 		sub.track.close();
 		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
 	} finally {
@@ -858,6 +860,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect(await sub.servedSequence()).toBe(5);
 			await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, version);
 			await flush();
+			sub.track.finish();
 			sub.track.close();
 			const codes: number[] = [];
 			for (;;) {
@@ -928,6 +931,7 @@ test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
 		expect(await sub.servedSequence()).toBe(0);
 		sub.track.insertDatagram(1, Timestamp.fromMillis(1), new Uint8Array([1]));
 		await flush();
+		sub.track.finish();
 		sub.track.close();
 		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
 	} finally {
@@ -954,6 +958,7 @@ test("lite draft-06: a cut dropped then re-created is not served", async () => {
 		sub.serve(1);
 		sub.serve(2);
 		expect(await sub.servedSequence()).toBe(2);
+		sub.track.finish();
 		sub.track.close();
 		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
 	} finally {
@@ -1011,6 +1016,7 @@ test("lite draft-06: an update lowering the start is swept at the end", async ()
 		expect(await sub.servedSequence()).toBe(5);
 		await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
+		sub.track.finish();
 		sub.track.close();
 		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([[2, 4]]);
 	} finally {
@@ -1033,6 +1039,7 @@ test("lite draft-06: a raised floor is not dropped early", async () => {
 			sub.serve(sequence);
 			expect(await sub.servedSequence()).toBe(sequence);
 		}
+		sub.track.finish();
 		sub.track.close();
 		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
 	} finally {
@@ -1137,6 +1144,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.startTrack(sub.track, { requested: 2 });
 			sub.serve(6);
 			await flush();
+			sub.track.finish();
 			sub.track.close();
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
@@ -1634,6 +1642,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 		second.writeFrame(textFrame("hello"));
 		second.finish();
 		track.writeGroup(second);
+		track.finish();
 		track.close();
 
 		const resp = await pending;
@@ -1676,6 +1685,7 @@ async function heldOpenEnd() {
 	group.writeFrame(textFrame("hello"));
 	group.finish();
 	track.writeGroup(group);
+	track.finish();
 	track.close();
 
 	const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
@@ -1758,6 +1768,7 @@ test("lite draft-07: a group whose close fails is dropped", async () => {
 		group.writeFrame(textFrame("hello"));
 		group.finish();
 		track.writeGroup(group);
+		track.finish();
 		track.close();
 
 		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
@@ -1823,6 +1834,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(opens).toHaveBeenCalledTimes(8);
 		release();
+		track.finish();
 		track.close();
 		let dropped = 0;
 		for (;;) {
@@ -1889,6 +1901,7 @@ async function serve(
 		// the order written rather than whatever the cache hands over in one batch.
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
+	track.finish();
 	track.close();
 
 	const reader = pair.client.incomingUnidirectionalStreams.getReader();
@@ -2187,6 +2200,7 @@ test("lite draft-05: a group waiting for a stream slot is dropped when the subsc
 test("lite draft-05: a group waiting for a stream slot survives the track finishing", async () => {
 	const { client, track, freeSlot, outcome, close } = await saturatedGroup();
 
+	track.finish();
 	track.close();
 
 	// SUBSCRIBE_END goes out while the group is still waiting for its slot.
@@ -2863,6 +2877,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 			client.close();
 			server.close();
 			publisher.close();
+			track.finish();
 			track.close();
 			broadcast.close();
 			origin.close();

@@ -60,19 +60,21 @@ try {
 		} else if (command === "high") {
 			const group = high.appendGroup();
 			group.writeFrame({ payload: new Uint8Array(window / 2).fill(2) });
-			group.close();
+			group.finish();
 		} else if (command === "after") {
 			const group = low.appendGroup();
 			group.writeFrame({ payload: new TextEncoder().encode("after") });
-			group.close();
+			group.finish();
 		} else {
 			throw new Error(`unknown command: ${command}`);
 		}
 	}
 } finally {
 	// End the live tracks, or the close waits out its deadline for them.
-	partial?.close();
+	partial?.finish();
+	low.finish();
 	low.close();
+	high.finish();
 	high.close();
 	await session.close();
 	origin.close();

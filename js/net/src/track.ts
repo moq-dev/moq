@@ -386,7 +386,11 @@ export class Request {
 	/** Reject the request, closing the track optionally with an error. */
 	reject(err?: Error): void {
 		this.#pending.delete(this);
-		this.#producer.close(err);
+		if (err) this.#producer.abort(err);
+		else {
+			this.#producer.finish();
+			this.#producer.close();
+		}
 	}
 }
 
@@ -426,7 +430,7 @@ export class Staged {
 			return this.producer.accept(this.#info);
 		} catch (err) {
 			// Refused, so its subscribers see the error instead of waiting on an open request.
-			this.producer.close(err instanceof Error ? err : new Error(String(err)));
+			this.producer.abort(err instanceof Error ? err : new Error(String(err)));
 			throw err;
 		}
 	}
@@ -435,7 +439,7 @@ export class Staged {
 	[Symbol.dispose](): void {
 		if (this.#done) return;
 		this.#done = true;
-		this.producer.close(new Error("staged track dropped"));
+		this.producer.abort(new Error("staged track dropped"));
 	}
 }
 
@@ -569,6 +573,9 @@ class TrackState {
 	// end does not end readers yet. Mirrors the Rust `awaits_tail`.
 	owed = new Signal(false);
 	closed = new Once<Error | null>();
+	// The producer's outcome, settled by its close or by a reached and settled end, whichever
+	// is first. Only the producer's own state uses it.
+	outcome = new Once<Error | null>();
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
@@ -695,6 +702,7 @@ export class Demand {
 	static {
 		makeDemand = (name, wanted, state) => new Demand(name, wanted, state);
 		hooks.demandPriority = (demand) => demand.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
+		hooks.demandReleased = (demand) => demand.#state.closed;
 	}
 
 	/**
@@ -709,9 +717,12 @@ export class Demand {
 		return this.#wanted;
 	}
 
-	/** Settles once the track closes: `null` on a clean close, or the abort {@link Error}. */
+	/**
+	 * Settles once the track's outcome is final: `null` once its declared end is reached and
+	 * settled, or on a clean release, else the abort {@link Error}. Never because readers left.
+	 */
 	get closed(): GetPromise<Error | null> {
-		return this.#state.closed;
+		return this.#state.outcome;
 	}
 }
 
@@ -816,7 +827,8 @@ export class Producer {
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
-		hooks.releaseTrack = (producer) => producer.#close(undefined, false);
+		hooks.releaseTrack = (producer) => producer.#close(undefined);
+		hooks.trackReleased = (producer) => producer.#state.closed;
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
 			producer.#owe();
@@ -954,11 +966,13 @@ export class Producer {
 	}
 
 	/**
-	 * Settles once the track closes: `null` on a clean close, or the abort {@link Error}.
+	 * Settles once the track's outcome is final: `null` once its declared end is reached and
+	 * settled (every group below it finished) or on a clean release, else the abort
+	 * {@link Error}. The producer stays open after a settled end, serving its cache.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
 	get closed(): GetPromise<Error | null> {
-		return this.#state.closed;
+		return this.#state.outcome;
 	}
 
 	/**
@@ -987,7 +1001,7 @@ export class Producer {
 				}
 			}
 		} catch (err) {
-			this.close(err instanceof Error ? err : new Error(String(err)));
+			this.abort(err instanceof Error ? err : new Error(String(err)));
 			throw err;
 		}
 		this.#state.info.set(resolved);
@@ -1651,6 +1665,12 @@ export class Producer {
 		const end = this.#state.end.peek();
 		const owed = end !== undefined && this.#owes(finalSequence(end));
 		for (const state of [this.#state, ...this.#sinks]) state.owed.set(owed);
+		this.#settle();
+	}
+
+	// Settle the outcome cleanly once the declared end is reached and settled.
+	#settle(): void {
+		if (this.#state.outcome.peek() === undefined && this.#settled()) this.#state.outcome.set(null);
 	}
 
 	// Whether the pending tail misses a sequence from where the feed starts up to `final`: one
@@ -1720,6 +1740,7 @@ export class Producer {
 	// the end raised it already, so neither a late group below it nor a recreated copy of it
 	// moves it after this.
 	#endLargest(): void {
+		this.#settle();
 		if (this.#state.largestEnded.peek() || this.#largestOpen) return;
 		const end = this.#state.end.peek();
 		if (end === undefined || this.#liveEdge() < finalSequence(end)) return;
@@ -1727,35 +1748,55 @@ export class Producer {
 	}
 
 	/**
-	 * Close the track and every subscriber, mirroring the abort to their groups. Idempotent.
+	 * Declare the track's end after the highest sequence written to its name, including by an
+	 * earlier producer this one replaces. A no-op once an end is declared or the track closed,
+	 * so a cleanup path can finish whatever the track's state.
 	 *
-	 * A clean close keeps the end {@link finishAt} declared, or declares one past the highest
-	 * sequence produced; an abort ends without one. Subscribers still draining get the
-	 * finished groups first, then the end or the abort. An abort after the declared end
-	 * settled (reached, with every group below it finished) is a clean close. The groups
-	 * left behind still age out on the idle cache window, so a stale subscriber can't pin
-	 * them.
+	 * Not terminal: groups below the end may still be written. Readers end once the live edge
+	 * reaches it.
 	 */
-	close(abort?: Error) {
-		this.#close(abort, true);
+	finish(): void {
+		if (this.#state.end.peek() !== undefined || this.#state.closed.peek() !== undefined) return;
+		this.#finishAt({ group: this.#liveEdge(), frame: 0 });
 	}
 
-	// `declare` is false for a received copy whose session closed locally: a dead route, not
-	// finished content, so a clean close there leaves the end undeclared.
-	#close(abort: Error | undefined, declare: boolean) {
+	/**
+	 * Abort the track and every subscriber, mirroring the error to their open groups. Terminal
+	 * and idempotent.
+	 *
+	 * Subscribers still draining get the finished groups first, then the error. An abort after
+	 * the declared end settled (reached, with every group below it finished) only releases the
+	 * track: readers end cleanly. The groups left behind still age out on the idle cache
+	 * window, so a stale subscriber can't pin them.
+	 */
+	abort(error: Error): void {
+		this.#close(error);
+	}
+
+	/**
+	 * Release this producer, like dropping the last Rust producer. Idempotent.
+	 *
+	 * With an end declared ({@link finish} or {@link finishAt}), the track ends there and its
+	 * subscribers drain to it. Without one, the track aborts: nothing finished it.
+	 */
+	close(): void {
+		if (this.#state.end.peek() !== undefined) this.#close(undefined);
+		else this.#close(new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed without finish` }));
+	}
+
+	// `abort` is undefined for a clean close, which keeps whatever end was declared. A received
+	// copy whose session closed locally closes cleanly without one: a dead route, not finished
+	// content.
+	#close(abort: Error | undefined) {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
 		if (abort && this.#tailPending) this.#arrivals.expire(now(), this.#grace());
 		if (abort && this.#settled()) abort = undefined;
-		// A replacement continues its name's timeline: ending below an earlier producer's
-		// groups would contradict the ones subscribers already received.
-		if (declare && abort === undefined && this.#state.end.peek() === undefined) {
-			this.#declareEnd({ group: this.#liveEdge(), frame: 0 });
-		}
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
 		closeTrackState(this.#state, abort);
+		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? null);
 		this.#sequence.holders--;
 		if (this.#sequence.owner === this) this.#sequence.owner = undefined;
 		for (const { group } of this.#cache) {

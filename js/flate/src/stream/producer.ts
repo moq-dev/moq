@@ -90,7 +90,7 @@ export class Producer {
 			const abort = err instanceof Error ? err : new Error(String(err));
 			this.#group?.abort(abort);
 			this.#group = undefined;
-			this.#track.close(abort);
+			this.#track.abort(abort);
 			throw err;
 		}
 
@@ -102,6 +102,7 @@ export class Producer {
 	finish(): void {
 		this.#group?.finish();
 		this.#group = undefined;
+		this.#track.finish();
 		this.#track.close();
 	}
 }

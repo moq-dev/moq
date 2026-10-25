@@ -400,6 +400,13 @@ export const hooks: {
 	 * continues past it. Mirrors the Rust `close` on a `received()` copy; assigned by `track.ts`.
 	 */
 	releaseTrack: (producer: Producer) => void;
+	/**
+	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
+	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
+	 */
+	trackReleased: (producer: Producer) => GetPromise<Error | null>;
+	/** {@link trackReleased} for a demand handle. Assigned by `track.ts`. */
+	demandReleased: (demand: Demand) => GetPromise<Error | null>;
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -564,6 +571,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	releaseTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	trackReleased: () => {
+		throw new Error("track.ts not loaded");
+	},
+	demandReleased: () => {
 		throw new Error("track.ts not loaded");
 	},
 	producerLargest: () => {

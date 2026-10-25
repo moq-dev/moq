@@ -89,10 +89,11 @@ async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 				out.finish();
 			}
 			// Closing the broadcast does not end a track inserted into it.
+			video.finish();
 			video.close();
 		} catch (err) {
 			// An upstream abort goes downstream as an abort, never as a clean end.
-			video.close(err instanceof Error ? err : new Error(String(err)));
+			video.abort(err instanceof Error ? err : new Error(String(err)));
 		} finally {
 			copy.close();
 		}

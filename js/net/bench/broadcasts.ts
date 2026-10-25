@@ -101,6 +101,7 @@ for (const trackCount of [8, 32, 128]) {
 			`${trackCount},${observerCount},${(((performance.now() - start) * 1000) / demandUpdates).toFixed(1)}`,
 		);
 		for (const dispose of disposes) dispose();
+		for (const track of tracks) track.finish();
 		for (const track of tracks) track.close();
 		broadcast.close();
 	}

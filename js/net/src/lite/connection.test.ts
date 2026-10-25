@@ -245,6 +245,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			const last = producer.appendGroup();
 			last.writeFrame(textFrame("last"));
 			last.finish();
+			producer.finish();
 			producer.close();
 			const closing = server.close();
 
@@ -300,6 +301,7 @@ async function servedRawSubscription() {
 
 	// Finish the track only once it is served: a track closed before anyone subscribed is gone.
 	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
+	producer.finish();
 	producer.close();
 	// SUBSCRIBE_END, then the publisher's FIN.
 	await subscriber.reader.readAll();
@@ -467,6 +469,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 			startGroup: 0,
 		}).encode(subscriber.writer, version);
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
+		producer.finish();
 		producer.close();
 		await subscriber.reader.readAll();
 

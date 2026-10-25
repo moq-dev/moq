@@ -539,6 +539,7 @@ test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
 			const track = await first;
 			while (track.subscription.peek() !== undefined) await track.subscription.changed();
 			// Gone, so the resume asks for the track again, and nothing answers.
+			track.finish();
 			track.close();
 			const second = wireOf(fx.broadcast).requested();
 			const parameters = new Parameters();
@@ -657,6 +658,7 @@ test("RENDEZVOUS_TIMEOUT has a zero cap with TIMEOUT for a requested wait", asyn
 					expect(await wire.u53()).toBe(RequestError.id);
 					expect((await RequestError.decode(wire, version)).errorCode).toBe(millis && !live ? 0x02 : 0x10);
 				} finally {
+					track?.finish();
 					track?.close();
 					broadcast?.close();
 					origin.close();
@@ -692,6 +694,7 @@ test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces 
 				}
 			} finally {
 				request.cancel();
+				track?.finish();
 				track?.close();
 				broadcast?.close();
 				claim?.close();
@@ -898,6 +901,7 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		// Its successor presents no further, so only the wall clock since it arrived convicts
 		// group 0, after the track has ended.
 		write(1);
+		track.finish();
 		track.close();
 		await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 		expect(reset).toBe(false);
@@ -980,6 +984,7 @@ test("a group stream whose FIN never completes is reset after the cache evicts i
 		const later = Milli(10_000);
 		await clock.advance(Nano.fromMilli(later));
 		write(2);
+		track.finish();
 		track.close();
 
 		await clock.advance(Nano.fromMilli(Milli(budget - later - 1)));
@@ -2646,7 +2651,11 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 
 			expect(await client.reader.u53()).toBe(SubscribeOk.id);
 			await SubscribeOk.decode(client.reader, version);
-			track.close(abort);
+			if (abort) track.abort(abort);
+			else {
+				track.finish();
+				track.close();
+			}
 
 			expect(await client.reader.u53()).toBe(PublishDone.id);
 			const done = await PublishDone.decode(client.reader, version);
@@ -3499,6 +3508,7 @@ test.each([false, true])("draft-20: exact terminal 5/5 survives group FIN=%s", a
 		}
 		track.finishAt({ group: 5, frame: 5 });
 		group.finish();
+		track.finish();
 		track.close();
 		if (finished) {
 			const marker = await fx.uni.read();
@@ -3575,6 +3585,7 @@ test("draft-20: an inline terminal reset after its FIN falls back to a standalon
 
 		track.finishAt({ group: 5, frame: 5 });
 		group.finish();
+		track.finish();
 		track.close();
 
 		const inline = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
@@ -3625,6 +3636,7 @@ test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DO
 
 		// Beyond the end, so it is never served, and it must not hold the subscription open.
 		writeGroup(track, 1); // group 1
+		track.finish();
 		track.close();
 
 		expect(await client.reader.u53()).toBe(PublishDone.id);
@@ -3839,6 +3851,7 @@ test("draft-20: PUBLISH_DONE waits for a queued group and counts every stream", 
 
 	try {
 		writeGroup(track, 1);
+		track.finish();
 		track.close();
 
 		// Nothing ends the subscription while the group waits for its slot.
@@ -4008,6 +4021,7 @@ test("requester FIN keeps a draft-19 subscription serving; STOP_SENDING cancels 
 		await serving;
 	} finally {
 		client.close();
+		track.finish();
 		track.close();
 		fx.close();
 	}
@@ -4037,6 +4051,7 @@ for (const version of [Version.DRAFT_17, Version.DRAFT_18] as const) {
 			expect(track.subscription.peek()).toBeUndefined();
 		} finally {
 			client.close();
+			track.finish();
 			track.close();
 			fx.close();
 		}
@@ -4070,6 +4085,7 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		expect(track.subscription.peek()?.priority).toBe(117);
 	} finally {
 		client.close();
+		track.finish();
 		track.close();
 		fx.close();
 	}
@@ -4095,6 +4111,7 @@ test("REQUEST_UPDATE accepts delivery timeouts without changing the subscription
 		expect(track.subscription.peek()).toEqual(before);
 	} finally {
 		client.close();
+		track.finish();
 		track.close();
 		fx.close();
 	}
@@ -4129,6 +4146,7 @@ test("TRACK_PROPERTY_FILTER on a subscription update closes with PROTOCOL_VIOLAT
 		expect(Number((failure as ProtocolViolation).code)).toBe(0x03);
 	} finally {
 		client.close();
+		track.finish();
 		track.close();
 		fx.close();
 		await serving;
@@ -4158,6 +4176,7 @@ test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async 
 		expect(done.statusCode).toBe(0x08);
 	} finally {
 		client.close();
+		track.finish();
 		track.close();
 		fx.close();
 	}
@@ -4221,6 +4240,7 @@ test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async 
 			}
 		} finally {
 			client.close();
+			track.finish();
 			track.close();
 			fx.close();
 		}
@@ -4248,6 +4268,7 @@ test("a paused SUBSCRIBE ends once its grant is revoked", async () => {
 		expect((await PublishDone.decode(client.reader, V20)).statusCode).toBe(PublishDoneStatus.UNAUTHORIZED);
 	} finally {
 		client.close();
+		track.finish();
 		track.close();
 		fx.close();
 	}
@@ -4295,6 +4316,7 @@ test("a pause resets a group stream parked on flow control", async () => {
 		expect(reset).toBe(true);
 	} finally {
 		client.close();
+		track.finish();
 		track.close();
 		fx.close();
 	}
@@ -4458,6 +4480,7 @@ test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async
 		expect(track.subscription.peek()?.maxDelay).toBe(Milli(900));
 	} finally {
 		client.close();
+		track.finish();
 		track.close();
 		fx.close();
 	}

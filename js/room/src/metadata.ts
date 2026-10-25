@@ -159,7 +159,10 @@ function serveSnapshot<T>(
 			maxAge: Milli(86_400_000),
 			priority: PRIORITY,
 		});
-		effect.cleanup(() => track.close());
+		effect.cleanup(() => {
+			track.finish();
+			track.close();
+		});
 
 		const producer = new Json.Snapshot.Producer<T>({ track });
 		effect.cleanup(() => producer.finish());

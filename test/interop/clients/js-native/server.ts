@@ -31,7 +31,7 @@ const marker = origin.createBroadcast(Moq.Path.from("replacement"));
 const ready = marker.createTrack("ready");
 const markerGroup = ready.appendGroup();
 markerGroup.writeFrame({ payload: new Uint8Array([42]) });
-markerGroup.close();
+markerGroup.finish();
 marker.announce();
 
 type Socket = {
@@ -173,7 +173,7 @@ if (mode === "credit") {
 		try {
 			const probe = firstTrack.appendGroup();
 			probe.writeFrame({ payload: new Uint8Array([1]) });
-			probe.close();
+			probe.finish();
 			const data = await first.recvGroup();
 			assert(data);
 			assert.deepEqual((await data.readFrame())?.payload, new Uint8Array([1]));
@@ -182,7 +182,7 @@ if (mode === "credit") {
 			await queued;
 			const next = secondTrack.appendGroup();
 			next.writeFrame({ payload: new Uint8Array([2]) });
-			next.close();
+			next.finish();
 			const resumed = await second.recvGroup();
 			assert(resumed);
 			assert.deepEqual((await resumed.readFrame())?.payload, new Uint8Array([2]));
@@ -215,7 +215,7 @@ if (mode === "credit") {
 		while (demand.wanted.peek() === undefined) await demand.wanted.changed();
 		const group = video.appendGroup();
 		group.writeFrame({ payload: new Uint8Array(32) });
-		group.close();
+		group.finish();
 		assert.equal((await commands.next()).value, "first group");
 		await initial.control.writer.u53(GoAway.id);
 		await new GoAway({
@@ -227,7 +227,7 @@ if (mode === "credit") {
 		initial.connection.abort();
 		const next = video.appendGroup();
 		next.writeFrame({ payload: new Uint8Array(32).fill(1) });
-		next.close();
+		next.finish();
 		assert.equal((await commands.next()).value, "done");
 		console.error("js goaway redirect resumed");
 	} finally {

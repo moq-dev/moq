@@ -172,22 +172,25 @@ async function withPublisher<T>(
 			for (const frame of FIXTURE) {
 				group.writeFrame({ payload: frame, timestamp: Moq.Time.Timestamp.now() });
 			}
-			group.close();
+			group.finish();
 		}
+		track.finish();
 		track.close();
 	})();
 	const rejecting = (async () => {
 		while (missingUsed.peek() === undefined && missing.closed.peek() === undefined) {
 			await Promise.race([missingUsed.changed(), missing.closed]);
 		}
-		if (missingUsed.peek() !== undefined) missing.close(new Error("no such track: missing"));
+		if (missingUsed.peek() !== undefined) missing.abort(new Error("no such track: missing"));
 	})();
 
 	try {
 		return await run(advance);
 	} finally {
 		stopped = true;
+		track.finish();
 		track.close();
+		missing.finish();
 		missing.close();
 		broadcast.close();
 		// Teardown, not a graceful end: the case is over and the harness is not waiting

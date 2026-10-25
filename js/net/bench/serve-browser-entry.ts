@@ -120,6 +120,7 @@ async function measure(protocol: string, groups: number, viewers: number) {
 		clearInterval(timer);
 		publisher.close();
 		for (const stream of streams) stream.close();
+		track.finish();
 		track.close();
 		broadcast.close();
 		origin.close();

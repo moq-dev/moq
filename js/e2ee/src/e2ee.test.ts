@@ -751,7 +751,7 @@ test("produce waits for an unaccepted track's timescale", async () => {
 	const video = await generation.name("video");
 	const closed = new NetTrack.Producer(video);
 	const refused = generation.produce(closed, "video");
-	closed.close(new Error("gone"));
+	closed.abort(new Error("gone"));
 	await expect(refused).rejects.toThrow("gone");
 	await generation.produce(netTrack(video), "video");
 	expect(await failure(generation.produce(netTrack(video), "video"))).toBe("reuse");

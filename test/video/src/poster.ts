@@ -122,8 +122,8 @@ async function poster(audio: boolean, buffered: boolean) {
 		},
 		close() {
 			player.close();
-			group.close();
-			audioGroup?.close();
+			group.finish();
+			audioGroup?.finish();
 			producer.close();
 			origin.close();
 			canvas.remove();

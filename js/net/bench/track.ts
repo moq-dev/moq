@@ -111,6 +111,7 @@ async function measure(
 		if (group) throw new Error("track did not end at its declared boundary");
 	}
 	const end = (now() - endStart) * 1000;
+	producer.finish();
 	producer.close();
 	// Ending the track releases the newest group too; idle cleanup reclaims the cache.
 	clock += CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8 + 1;
