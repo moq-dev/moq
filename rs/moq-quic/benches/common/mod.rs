@@ -55,6 +55,8 @@ pub(crate) enum Sink {
     Lease(usize),
     /// Stop sending as soon as the stream opens.
     Stop,
+    /// Leave every stream unaccepted, as an application that has yet to run.
+    Ignore,
 }
 
 /// What a peer's application has received so far.
@@ -176,6 +178,7 @@ impl Peer {
             while let Some(event) = conn.poll() {
                 match event {
                     Event::ConnectionLost { reason } => panic!("connection lost: {reason}"),
+                    Event::Stream(StreamEvent::Opened { .. }) if self.sink == Sink::Ignore => {}
                     Event::Stream(StreamEvent::Opened { dir }) => {
                         while let Some(id) = conn.streams().accept(dir) {
                             drain(conn, id, self.sink, &mut self.received);
@@ -216,6 +219,9 @@ impl Peer {
 fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Received) {
     if let Sink::Lease(want) = sink {
         return lease(conn, id, want, received);
+    }
+    if sink == Sink::Ignore {
+        return;
     }
     let mut stream = conn.recv_stream(id);
     if sink == Sink::Stop {

@@ -94,8 +94,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Measure nightly compiler levers](/quest/m0/ci/nightly-levers.md) - the parallel frontend and Cranelift, adopted only if the numbers beat their risks
 - [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
-- [mbx on a full disk](/quest/m0/ci/mbx-low-disk.md) - gc never evicts a live build's trees, and the Dart check names the real cause
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
-- [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first `moq-ffi-v*` tag that runs `Release FFI`, and a `Shipping sizes` run; verify the wrappers and size keys
+- [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
 - [Loom tests compile](/quest/m0/ci/loom-build.md) - `just rs loom` builds on main and a `--cfg loom` break fails its PR
 - [just check without user namespaces](/quest/m0/ci/check-without-userns.md) - a host that refuses `unshare` reports the flake module as not run instead of cancelling other lanes

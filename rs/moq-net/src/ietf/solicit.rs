@@ -51,13 +51,13 @@ pub fn into_setup(params: &mut super::Parameters, _version: Version) {
 mod tests {
 	use super::*;
 
-	const VERSION: Version = Version::Draft19;
+	const VERSION: Version = Version::Draft18;
 
 	/// What we declare is what a peer reads back, on every draft that carries Setup
 	/// Options: an old peer can opt out too.
 	#[test]
 	fn every_version_round_trips() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft20] {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft22] {
 			let mut params = super::super::Parameters::default();
 			into_setup(&mut params, version);
 			assert_eq!(from_setup(&params, version).unwrap(), Some(true));
