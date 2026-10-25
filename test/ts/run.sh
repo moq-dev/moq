@@ -51,7 +51,7 @@
 # see a cadence regression at all.
 set -euo pipefail
 
-if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
 fi
 

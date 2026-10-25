@@ -6,7 +6,7 @@ Cross-language interop smoke for the published MoQ packages.
 - Install the published artifact each cell claims to test.
 - MoQ packages are tested at latest, with no package lock files here; `freshness.sh` enforces both. `cloudflare.sh` and `moxygen.sh` build from unpinned Git HEAD, and `just nix-channel` builds the moq flake with `--refresh` rather than locking it as an input.
 - npm `playwright` is the one version pin, and it matches the flake's `PLAYWRIGHT_VERSION`. Bump the toolchain with `nix flake update` and the pin together.
-- `moq-relay` and `moq` come from a channel (PATH, `RELAY_BIN`/`MOQ_BIN`, `just nix-channel`, or `clients/docker`). The harness leaves installing them to that channel.
+- `moq-relay` and `moq` come from a channel (PATH, `RELAY_BIN`/`CLI_BIN`, `just nix-channel`, or `clients/docker`). The harness leaves installing them to that channel.
 - A red cell is the result. `mark_broken` drops that package's cells and lets the rest of the matrix run. Retries belong on transient registry and release downloads. A client that failed to exchange media gets no retry, no longer timeout, and no skip.
 - A published-package bug is fixed at its source, then goes green here on the next release.
 - Hang media (`smoke.sh`), Cloudflare, and moxygen stay on separate lanes.
