@@ -8,21 +8,21 @@ use crate::error::MoqError;
 
 /// Divides one connection's send estimate among the tracks sharing it.
 ///
-/// Minted by [`MoqSession::bandwidth`](crate::session::MoqSession::bandwidth).
+/// Minted by [`MoqSession::allocator`](crate::session::MoqSession::allocator).
 /// Clones share one reservation registry, so two handles from the same session
 /// see each other's claims.
 #[derive(uniffi::Object)]
-pub struct MoqBandwidth {
+pub struct MoqAllocator {
 	allocator: moq_net::bandwidth::Allocator,
 }
 
-impl MoqBandwidth {
+impl MoqAllocator {
 	pub(crate) fn new(allocator: moq_net::bandwidth::Allocator) -> Self {
 		Self { allocator }
 	}
 
 	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
-	pub(crate) fn allocator(&self) -> &moq_net::bandwidth::Allocator {
+	pub(crate) fn inner(&self) -> &moq_net::bandwidth::Allocator {
 		&self.allocator
 	}
 
@@ -35,7 +35,7 @@ impl MoqBandwidth {
 }
 
 #[uniffi::export]
-impl MoqBandwidth {
+impl MoqAllocator {
 	/// Reserve up to `max_bps` for the track `demand` watches, returning the reservation.
 	///
 	/// Every track producer hands out its `demand()`, so raw, media, and JSON
@@ -49,7 +49,7 @@ impl MoqBandwidth {
 	}
 }
 
-/// One track's standing claim on a [`MoqBandwidth`].
+/// One track's standing claim on a [`MoqAllocator`].
 ///
 /// [`grant`](Self::grant) is [`moq_net::bandwidth::Reservation::peek`]: `None`
 /// means no estimate or no demand, so hold the current rate, and `Some(0)` is a
@@ -94,8 +94,8 @@ mod tests {
 
 	use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
 
-	fn bandwidth(estimate: &moq_net::bandwidth::Producer) -> Arc<MoqBandwidth> {
-		Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+	fn allocator(estimate: &moq_net::bandwidth::Producer) -> Arc<MoqAllocator> {
+		Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
 			estimate.consume(),
 		)))
 	}
@@ -108,7 +108,7 @@ mod tests {
 	#[test]
 	fn concurrent_reservations_split_the_estimate() {
 		let estimate = moq_net::bandwidth::Producer::new();
-		let bandwidth = bandwidth(&estimate);
+		let bandwidth = allocator(&estimate);
 		let broadcast = MoqBroadcastProducer::new().unwrap();
 
 		let first = named_track(&broadcast, "a");
@@ -139,8 +139,8 @@ mod tests {
 			.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 			.unwrap();
 		let allocator = moq_net::bandwidth::Allocator::new(estimate.consume());
-		let first = Arc::new(MoqBandwidth::new(allocator.clone()));
-		let second = Arc::new(MoqBandwidth::new(allocator));
+		let first = Arc::new(MoqAllocator::new(allocator.clone()));
+		let second = Arc::new(MoqAllocator::new(allocator));
 		let broadcast = MoqBroadcastProducer::new().unwrap();
 
 		let track = named_track(&broadcast, "a");
@@ -161,7 +161,7 @@ mod tests {
 		estimate
 			.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 			.unwrap();
-		let bandwidth = bandwidth(&estimate);
+		let bandwidth = allocator(&estimate);
 		let broadcast = MoqBroadcastProducer::new().unwrap();
 
 		let first = named_track(&broadcast, "a");
@@ -182,7 +182,7 @@ mod tests {
 	#[test]
 	fn a_reservation_reports_none_while_disconnected() {
 		let estimate = moq_net::bandwidth::Producer::new();
-		let bandwidth = bandwidth(&estimate);
+		let bandwidth = allocator(&estimate);
 		let broadcast = MoqBroadcastProducer::new().unwrap();
 
 		let track = named_track(&broadcast, "a");
@@ -209,7 +209,7 @@ mod tests {
 		use std::sync::atomic::Ordering;
 
 		let estimate = moq_net::bandwidth::Producer::new();
-		let bandwidth = bandwidth(&estimate);
+		let bandwidth = allocator(&estimate);
 		let broadcast = MoqBroadcastProducer::new().unwrap();
 		let track = named_track(&broadcast, "a");
 		let reserved = bandwidth.reserve(&track.demand().unwrap(), 4_000_000);

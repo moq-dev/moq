@@ -30,7 +30,7 @@ public enum Audio {
             input: EncoderInput,
             output: EncoderOutput,
             track: String? = nil,
-            bandwidth: Bandwidth? = nil
+            bandwidth: Allocator? = nil
         ) throws {
             ffi = try MoqAudioProducer(
                 catalog: catalog.ffi,

@@ -235,10 +235,10 @@ final class Moq {
 
   /// The session's bandwidth allocator.
   ///
-  /// Every call returns a handle to the same registry. [Bandwidth.reserve]
+  /// Every call returns a handle to the same registry. [Allocator.reserve]
   /// a share for an app-owned encoder; dropping the [Reservation] hands
   /// the room back.
-  Bandwidth bandwidth() => session.bandwidth();
+  Allocator allocator() => session.allocator();
 
   /// The session's authorization: the grant its peer gave it, and more tokens to present.
   ///

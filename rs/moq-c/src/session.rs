@@ -287,7 +287,7 @@ impl Session {
 	/// which the session probes for.
 	///
 	/// Errors with [`Error::Offline`] for an accepted session still in SETUP.
-	pub fn bandwidth(&self, id: Id) -> Result<moq_net::bandwidth::Allocator, Error> {
+	pub fn allocator(&self, id: Id) -> Result<moq_net::bandwidth::Allocator, Error> {
 		match self.link(id)? {
 			Link::Dialed { connection, .. } => Ok(connection.allocator()),
 			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.session.allocator()),

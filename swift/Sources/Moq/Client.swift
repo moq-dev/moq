@@ -147,8 +147,8 @@ public final class Session: Sendable {
     }
 
     /// Hold receive-estimate demand until the returned consumer is released.
-    public func recvBandwidth() -> Bandwidth.Consumer? {
-        ffi.recvBandwidth().map(Bandwidth.Consumer.init)
+    public func recvBandwidth() -> BandwidthConsumer? {
+        ffi.recvBandwidth().map(BandwidthConsumer.init)
     }
 
     /// The session's bandwidth allocator.
@@ -157,7 +157,7 @@ public final class Session: Sendable {
     /// through one are visible to the others. A client handle survives
     /// reconnects: the grant is `nil` while disconnected and resumes on the
     /// next connection.
-    public func bandwidth() -> Bandwidth {
-        Bandwidth(ffi.bandwidth())
+    public func allocator() -> Allocator {
+        Allocator(ffi.allocator())
     }
 }

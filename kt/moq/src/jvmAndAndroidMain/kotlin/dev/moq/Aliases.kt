@@ -148,10 +148,10 @@ typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 /** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** Divides one connection's send estimate among the tracks sharing it. */
-typealias Bandwidth = uniffi.moq.MoqBandwidth
+typealias Allocator = uniffi.moq.MoqAllocator
 /** An owned bandwidth estimate; release it to stop receive PROBE demand. */
 typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
-/** One track's standing claim on a [Bandwidth]. */
+/** One track's standing claim on an [Allocator]. */
 typealias Reservation = uniffi.moq.MoqReservation
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats

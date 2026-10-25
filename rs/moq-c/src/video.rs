@@ -723,14 +723,14 @@ unsafe fn encoder_kind(output: &moq_video_encoder_output) -> Result<moq_video::e
 /// - `input` / `output` must point to fully populated structs.
 /// - `output->encoder` must point to `output->encoder_len` bytes of UTF-8 when
 ///   `output->kind` is `MOQ_VIDEO_ENCODER_KIND_NAMED`.
-/// - `bandwidth` is a handle from [`crate::moq_session_bandwidth`], or 0 to hold the
+/// - `allocator` is a handle from [`crate::moq_session_allocator`], or 0 to hold the
 ///   configured bitrate regardless of congestion.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_encode_video(
 	broadcast: u32,
 	input: *const moq_video_encoder_input,
 	output: *const moq_video_encoder_output,
-	bandwidth: u32,
+	allocator: u32,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
@@ -759,9 +759,9 @@ pub unsafe extern "C" fn moq_encode_video(
 		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 
-		let bandwidth = ffi::parse_id_optional(bandwidth)?;
+		let allocator = ffi::parse_id_optional(allocator)?;
 		let mut state = State::lock();
-		let allocator = bandwidth.map(|id| state.bandwidth.allocator(id)).transpose()?;
+		let allocator = allocator.map(|id| state.bandwidth.allocator(id)).transpose()?;
 		let State { publish, video, .. } = &mut *state;
 		let id = video.publish(publish.target(broadcast)?, format, &config, rendition.clone(), encoder)?;
 		if let Some(allocator) = allocator.as_ref() {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use url::Url;
 
 use crate::auth::MoqAuth;
-use crate::bandwidth::MoqBandwidth;
+use crate::bandwidth::MoqAllocator;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
@@ -944,9 +944,9 @@ pub struct MoqSession {
 	closed: Task<Inner>,
 	publisher: Arc<MoqOriginProducer>,
 	consumer: Arc<MoqOriginConsumer>,
-	/// One allocator for the session. Every [`bandwidth`](Self::bandwidth) handle
+	/// One allocator for the session. Every [`allocator`](Self::allocator) handle
 	/// clones it, so they share one reservation registry.
-	bandwidth: Arc<MoqBandwidth>,
+	allocator: Arc<MoqAllocator>,
 }
 
 impl MoqSession {
@@ -990,14 +990,14 @@ impl MoqSession {
 		// is where the remote's broadcasts land (read via its consumer view).
 		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
 		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe));
-		let bandwidth = Arc::new(MoqBandwidth::new(Self::mint_allocator(&inner)));
+		let allocator = Arc::new(MoqAllocator::new(Self::mint_allocator(&inner)));
 		Self {
 			inner: inner.clone(),
 			shutdown: Default::default(),
 			closed: Task::new(inner.clone()),
 			publisher,
 			consumer,
-			bandwidth,
+			allocator,
 		}
 	}
 
@@ -1190,8 +1190,8 @@ impl MoqSession {
 	/// reconnects: the grant is `None` while disconnected and resumes on the
 	/// next connection. An accepted session with no congestion estimate mints
 	/// an unlimited allocator, which reports `None` for every reservation.
-	pub fn bandwidth(&self) -> Arc<MoqBandwidth> {
-		self.bandwidth.clone()
+	pub fn allocator(&self) -> Arc<MoqAllocator> {
+		self.allocator.clone()
 	}
 
 	/// The session's authorization: the grant its peer gave it, and more tokens to present.

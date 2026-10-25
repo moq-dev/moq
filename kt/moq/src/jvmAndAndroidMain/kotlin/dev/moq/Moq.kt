@@ -54,11 +54,11 @@ class Moq internal constructor(
     /**
      * The session's bandwidth allocator.
      *
-     * Every call returns a handle to the same registry. [Bandwidth.reserve] a
+     * Every call returns a handle to the same registry. [Allocator.reserve] a
      * share for an app-owned encoder, or pass the handle to an audio or video
      * producer.
      */
-    fun bandwidth(): Bandwidth = session.bandwidth()
+    fun allocator(): Allocator = session.allocator()
 
     /**
      * The session's authorization: the grant its peer gave it, and more tokens to present.

@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `AuthToken` is `Credential`; `Auth.Add` returns it.
 
+### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Bandwidth` is `Allocator`, and `Session.Bandwidth()` is `Session.Allocator()`. The `Bandwidth` field of `ProducerOptions` keeps its name and takes a `*moq.Allocator`.
+
 ### Connection state
 
 `Dial` returns a connecting native client. Replace `Session.Status`, `Connects`, and `Failure` with `State()` and `StateChanged(ctx, state.Revision)`. `ConnectionState` carries `Phase`, `Connects`, `Failure`, and `Version`; `ConnectionPhase` replaces `ConnectionStatus`. Cancelling a state wait only cancels that wait. Cancel the session itself to stop its dial.

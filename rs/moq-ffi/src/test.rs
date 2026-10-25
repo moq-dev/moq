@@ -498,7 +498,7 @@ async fn media_track_reserves_through_its_demand() {
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
-	let bandwidth = crate::bandwidth::MoqBandwidth::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
+	let bandwidth = crate::bandwidth::MoqAllocator::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let media = MoqMediaTrackProducer::audio(
@@ -6568,11 +6568,11 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
-	use crate::bandwidth::MoqBandwidth;
+	use crate::bandwidth::MoqAllocator;
 	use crate::video::*;
 
 	let estimate = moq_net::bandwidth::Producer::new();
-	let bandwidth = std::sync::Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
 		estimate.consume(),
 	)));
 
@@ -6661,10 +6661,10 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn dropping_a_video_producer_stops_the_rate_follower() {
-	use crate::bandwidth::MoqBandwidth;
+	use crate::bandwidth::MoqAllocator;
 
 	let estimate = moq_net::bandwidth::Producer::new();
-	let bandwidth = std::sync::Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
 		estimate.consume(),
 	)));
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -6690,10 +6690,10 @@ async fn dropping_a_video_producer_stops_the_rate_follower() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn set_bitrate_caps_a_later_bandwidth_grant() {
-	use crate::bandwidth::MoqBandwidth;
+	use crate::bandwidth::MoqAllocator;
 
 	let estimate = moq_net::bandwidth::Producer::new();
-	let bandwidth = std::sync::Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
 		estimate.consume(),
 	)));
 	let broadcast = MoqBroadcastProducer::new().unwrap();

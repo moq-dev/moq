@@ -9,6 +9,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 `MoqAuthToken` is `MoqCredential`, the core API's name for one presented credential.
 
+### `MoqAllocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`MoqBandwidth` is `MoqAllocator`, and `MoqSession::bandwidth()` is `allocator()`, matching `moq_net::bandwidth::Allocator`. The `bandwidth` option field on audio and video producers keeps its name.
+
 ### Connection state
 
 `MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.

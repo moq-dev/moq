@@ -20,7 +20,7 @@ from ._records import _from_us, _opt_us, _to_us
 from ._stream import _Stream
 from .media import CatalogProducer, Dimensions, Video
 from .publish import TrackDemand
-from .session import Bandwidth, Reservation
+from .session import Allocator, Reservation
 from .subscribe import BroadcastConsumer
 from .types import VideoCodec as Codec
 from .types import VideoDecodedFrame
@@ -85,7 +85,7 @@ class Producer:
         output: EncoderOutput,
         *,
         track: str | None = None,
-        bandwidth: Bandwidth | None = None,
+        bandwidth: Allocator | None = None,
     ) -> None:
         """Open a video track on the catalog's broadcast and register its rendition."""
         self._inner = MoqVideoProducer(

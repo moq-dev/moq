@@ -51,22 +51,22 @@ impl Bandwidth {
 ///
 /// Returns a non-zero handle, or a negative error if the session is unknown.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_session_bandwidth(session: u32) -> i32 {
+pub extern "C" fn moq_session_allocator(session: u32) -> i32 {
 	ffi::enter(move || {
 		let session = ffi::parse_id(session)?;
 		let mut state = State::lock();
-		let allocator = state.session.bandwidth(session)?;
+		let allocator = state.session.allocator(session)?;
 		state.bandwidth.insert(allocator)
 	})
 }
 
-/// Release a bandwidth handle. Reservations taken against it stay until they
+/// Release an allocator handle. Reservations taken against it stay until they
 /// themselves are closed (or the session's allocator is gone).
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_bandwidth_close(bandwidth: u32) -> i32 {
+pub extern "C" fn moq_allocator_close(allocator: u32) -> i32 {
 	ffi::enter(move || {
-		let bandwidth = ffi::parse_id(bandwidth)?;
-		State::lock().bandwidth.close(bandwidth)
+		let allocator = ffi::parse_id(allocator)?;
+		State::lock().bandwidth.close(allocator)
 	})
 }
 
@@ -76,13 +76,13 @@ pub extern "C" fn moq_bandwidth_close(bandwidth: u32) -> i32 {
 /// ever send. Drop the reservation with [`moq_reservation_close`] to hand the
 /// room back.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_bandwidth_reserve(bandwidth: u32, track: u32, max_bps: u64) -> i32 {
+pub extern "C" fn moq_allocator_reserve(allocator: u32, track: u32, max_bps: u64) -> i32 {
 	ffi::enter(move || {
-		let bandwidth = ffi::parse_id(bandwidth)?;
+		let allocator = ffi::parse_id(allocator)?;
 		let track = ffi::parse_id(track)?;
 		let mut state = State::lock();
 		let demand = state.publish.track_demand(track)?;
-		state.bandwidth.reserve(bandwidth, &demand, max_bps)
+		state.bandwidth.reserve(allocator, &demand, max_bps)
 	})
 }
 

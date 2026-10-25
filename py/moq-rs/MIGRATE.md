@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `moq.AuthToken` is `moq.Credential`; `Auth.add` returns it.
 
+### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`moq.Bandwidth` is `moq.Allocator`, and `Session.bandwidth()` is `allocator()`. `Bandwidth.Consumer`, returned by `recv_bandwidth()`, is the top-level `moq.BandwidthConsumer`. The producers' `bandwidth=` argument keeps its name.
+
 ### Connection state
 
 Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.

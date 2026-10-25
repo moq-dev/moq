@@ -5540,8 +5540,8 @@ fn bandwidth_reservations_split_the_estimate() {
 	let (first_sub, first_cb) = subscribe_named_track(consume, b"a");
 	let (second_sub, second_cb) = subscribe_named_track(consume, b"b");
 
-	let first = id(moq_bandwidth_reserve(bandwidth, first_track, 4_000_000));
-	let second = id(moq_bandwidth_reserve(bandwidth, second_track, 2_000_000));
+	let first = id(moq_allocator_reserve(bandwidth, first_track, 4_000_000));
+	let second = id(moq_allocator_reserve(bandwidth, second_track, 2_000_000));
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
@@ -5558,7 +5558,7 @@ fn bandwidth_reservations_split_the_estimate() {
 	assert_eq!(grant(second), Some(2_000_000));
 
 	assert_eq!(moq_reservation_close(second), 0);
-	assert_eq!(moq_bandwidth_close(bandwidth), 0);
+	assert_eq!(moq_allocator_close(bandwidth), 0);
 	assert_eq!(moq_consume_track_cancel(first_sub), 0);
 	assert_eq!(moq_consume_track_cancel(second_sub), 0);
 	let _ = first_cb.recv_terminal();
@@ -5592,16 +5592,16 @@ fn bandwidth_handles_share_the_registry() {
 	let (first_sub, first_cb) = subscribe_named_track(consume, b"a");
 	let (second_sub, second_cb) = subscribe_named_track(consume, b"b");
 
-	let reserved = id(moq_bandwidth_reserve(first, first_track, 4_000_000));
+	let reserved = id(moq_allocator_reserve(first, first_track, 4_000_000));
 	assert_eq!(wait_grant(reserved), 3_000_000);
-	let other = id(moq_bandwidth_reserve(second, second_track, 4_000_000));
+	let other = id(moq_allocator_reserve(second, second_track, 4_000_000));
 	assert_eq!(wait_grant(other), 1_500_000);
 	assert_eq!(grant(reserved), Some(1_500_000));
 
 	assert_eq!(moq_reservation_close(reserved), 0);
 	assert_eq!(moq_reservation_close(other), 0);
-	assert_eq!(moq_bandwidth_close(first), 0);
-	assert_eq!(moq_bandwidth_close(second), 0);
+	assert_eq!(moq_allocator_close(first), 0);
+	assert_eq!(moq_allocator_close(second), 0);
 	assert_eq!(moq_consume_track_cancel(first_sub), 0);
 	assert_eq!(moq_consume_track_cancel(second_sub), 0);
 	let _ = first_cb.recv_terminal();
@@ -5658,7 +5658,7 @@ fn encode_video_bitrate_caps_the_reservation() {
 	assert_eq!(moq_consume_track_cancel(sub), 0);
 	let _ = cb.recv_terminal();
 	assert_eq!(moq_encode_video_finish(producer), 0);
-	assert_eq!(moq_bandwidth_close(bandwidth), 0);
+	assert_eq!(moq_allocator_close(bandwidth), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -5756,8 +5756,8 @@ fn server_accepts_a_session() {
 
 	let mut stats: moq_connection_stats = unsafe { std::mem::zeroed() };
 	assert_eq!(unsafe { moq_session_stats(session, &mut stats) }, 0);
-	let bandwidth = id(moq_session_bandwidth(session));
-	assert_eq!(moq_bandwidth_close(bandwidth), 0);
+	let bandwidth = id(moq_session_allocator(session));
+	assert_eq!(moq_allocator_close(bandwidth), 0);
 
 	// The broadcast the server publishes reaches the client. A client only asks the
 	// server about what it watches, so wait on the path rather than request it once.

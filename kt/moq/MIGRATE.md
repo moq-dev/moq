@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `AuthToken` is `Credential`; `Auth.add` returns it.
 
+### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Bandwidth` is `Allocator`, and `bandwidth()` is `allocator()`. The producers' `bandwidth` option keeps its name.
+
 ### Connection state
 
 `Moq.connect` returns a connecting native session. Replace `status()`, `connects()`, and failure polls with `session.state()` and `session.stateChanged(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.

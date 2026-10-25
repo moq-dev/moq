@@ -139,12 +139,12 @@ typedef FetchGroupOptions = MoqFetchGroupOptions;
 typedef TrackInfo = MoqTrackInfo;
 
 /// Divides one connection's send estimate among the tracks sharing it.
-typedef Bandwidth = MoqBandwidth;
+typedef Allocator = MoqAllocator;
 
 /// An owned bandwidth estimate; release it to stop receive PROBE demand.
 typedef BandwidthConsumer = MoqBandwidthConsumer;
 
-/// One track's standing claim on a [Bandwidth].
+/// One track's standing claim on an [Allocator].
 typedef Reservation = MoqReservation;
 
 /// A snapshot of transport connection statistics.

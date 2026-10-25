@@ -62,12 +62,12 @@ func (s *Session) Stats() ConnectionStats {
 	return connectionStatsFromFFI(s.inner.Stats())
 }
 
-// Bandwidth is the session's bandwidth allocator. Every call returns a handle
+// Allocator is the session's bandwidth allocator. Every call returns a handle
 // to the same registry, so reservations made through one are visible to the
 // others. A client handle survives reconnects: the grant is nil while
 // disconnected and resumes on the next connection.
-func (s *Session) Bandwidth() *Bandwidth {
-	return &Bandwidth{inner: s.inner.Bandwidth()}
+func (s *Session) Allocator() *Allocator {
+	return &Allocator{inner: s.inner.Allocator()}
 }
 
 // Auth is the session's authorization: the grant its peer gave it, and more
@@ -135,9 +135,9 @@ func (t *Credential) Closed(ctx context.Context) error {
 // Close withdraws the token, removing its grant from the union.
 func (t *Credential) Close() { t.inner.Cancel() }
 
-// Bandwidth divides one connection's send estimate among the tracks sharing it.
-type Bandwidth struct {
-	inner *ffi.MoqBandwidth
+// Allocator divides one connection's send estimate among the tracks sharing it.
+type Allocator struct {
+	inner *ffi.MoqAllocator
 }
 
 // Reserve claims up to maxBps for the track demand watches; every track
@@ -145,11 +145,11 @@ type Bandwidth struct {
 // reserve the most the track can ever send. Reuse Reservation.Update to change
 // the ceiling, or call Update(0) before abandoning or replacing the reservation
 // to hand the room back without waiting for garbage collection.
-func (b *Bandwidth) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
-	return &Reservation{inner: b.inner.Reserve(demand.inner, maxBps)}
+func (a *Allocator) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
+	return &Reservation{inner: a.inner.Reserve(demand.inner, maxBps)}
 }
 
-// Reservation is one track's standing claim on a Bandwidth.
+// Reservation is one track's standing claim on an Allocator.
 //
 // Grant is a snapshot: nil means no estimate or no demand, so hold the current
 // rate, and 0 is a real zero grant.

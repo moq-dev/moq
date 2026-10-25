@@ -224,7 +224,7 @@ void main() {
       ),
     ).timeout(timeout);
     final serverSession = await accepted;
-    expect(client.bandwidth(), isA<MoqBandwidth>());
+    expect(client.allocator(), isA<MoqAllocator>());
 
     final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,

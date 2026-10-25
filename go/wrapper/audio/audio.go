@@ -93,7 +93,7 @@ type ProducerOptions struct {
 	// Track names the published track; nil derives a name from the codec.
 	Track *string
 	// Bandwidth reserves the track against a session allocator when non-nil.
-	Bandwidth *moq.Bandwidth
+	Bandwidth *moq.Allocator
 }
 
 // NewProducer opens an audio track on the catalog's broadcast and registers its rendition.
@@ -102,9 +102,9 @@ func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Prod
 	if err != nil {
 		return nil, err
 	}
-	var bw **ffi.MoqBandwidth
+	var bw **ffi.MoqAllocator
 	if options.Bandwidth != nil {
-		raw := bridge.Bandwidth(options.Bandwidth)
+		raw := bridge.Allocator(options.Bandwidth)
 		bw = &raw
 	}
 	inner, err := ffi.NewMoqAudioProducer(bridge.CatalogProducer(catalog), ffi.MoqAudioProducerOptions{Input: options.Input, Output: out, Track: options.Track, Bandwidth: bw})
