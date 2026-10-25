@@ -223,7 +223,7 @@ test("a peer's malformed listing closes the session", async () => {
 
 test("a listing past the announces cap is reset, and the session stays", async () => {
 	const cap = 3;
-	const { subscriber, listed, closing } = handPlayed({ limits: { announces: cap, requests: 10 } });
+	const { subscriber, listed, closing } = handPlayed({ limits: { announces: cap } });
 	const tracks = subscriber.consume(Path.from("room")).tracks();
 	const peer = await listed();
 	for (let i = 0; i <= cap; i++) await peer.send({ kind: "added", name: `t${i}`, info });
