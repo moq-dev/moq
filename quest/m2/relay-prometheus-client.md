@@ -11,8 +11,8 @@ exposition, with the same metric names, labels, and types.
 Found by the 2026-10-19 dependency audit; adding the dependency is the
 maintainer's call. `render_metrics` in `rs/moq-relay/src/internal.rs` writes
 its metric families by hand (about 430 lines, histograms included), and
-`rs/moq-relay/src/stun.rs` adds more. [Metric-safe tiers](/quest/m1/metric-tier.md)
-adds label escaping by hand first.
+`rs/moq-relay/src/stun.rs` adds more. Label values are escaped by hand through
+`internal::Label`; the crate's encoder replaces it.
 
 `prometheus-client` 0.25.1 (released 2026-09) needs only `dtoa`, `itoa`,
 `parking_lot`, and its derive crate without the protobuf feature. Keep the

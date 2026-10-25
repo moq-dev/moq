@@ -5,7 +5,7 @@ Which Rust binding `@moq/net` wraps in the browser: moq-ffi through UniFFI (ubrn
 This compares them on the [baseline harness](README.md#backend-baseline).
 
 BoltFFI cannot bind moq-ffi as written (see [What blocks BoltFFI](#what-blocks-boltffi)),
-so its network numbers come from the bench/ffi-gen slice with a browser client added. The
+so its network numbers come from the [BoltFFI spike](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md#boltffi-comparison)'s slice with a browser client added. The
 same slice also runs through UniFFI, so the two generators compare on identical Rust.
 
 **Decision** (maintainer, 2026-10-17, [#5838](https://github.com/moq-dev/moq/pull/5838)):

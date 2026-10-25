@@ -46,6 +46,20 @@ so the cut waits for it. hang's
 `Archive::replay_epoch` goes with the root `archive` section in
 [catalog HLS](/quest/m1/archive/catalog-hls.md).
 
+Kept public though only moq-transport uses them (decided 2026-10-23), so an
+audit skips them:
+
+- moq-transport-only error variants (`Error::{InvalidJoiningRequestId,
+  InvalidRange, Remote, UnsupportedExtension}`, the `DecodeError` auth-token
+  variants) and the session error codes the lite draft registers with
+  moq-transport's meaning. Errors are fine; only dead ones go.
+- `setup::Extensions::{auth, solicit, epoch}` and the relay's
+  `[listen|connect.extensions]` TOML, as interop knobs documented as
+  affecting moq-transport only.
+- `setup::Token` and `server::Handshake::token`:
+  [token in band](/quest/m1/auth/token-in-band.md) gives lite-07 a SETUP
+  token, which makes them shared.
+
 Rejected in planning:
 
 - Restoring `track::Demand::{used, unused}`: refresh
@@ -67,7 +81,6 @@ Rejected in planning:
 - [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - the dead and test-only moq-net, `@moq/net`, and moq-ffi items the follow-up audit found go private or away
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
-- [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) - no public moq-net item exists only for moq-transport, and a client names its request target once as a URL
 - [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
 - [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror
 - [Request handlers are named requests](/quest/m1/api-audit/requests.md) - `dynamic()` and `Dynamic` become `requests()` and `Requests` at every layer

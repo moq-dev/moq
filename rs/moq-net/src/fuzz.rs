@@ -510,10 +510,7 @@ impl LiteSample {
 				track: "video".into(),
 				priority: 2,
 				max_delay: std::time::Duration::from_secs(10),
-				start_group: None,
-				end_group: None,
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range::OLDEST],
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -738,20 +735,20 @@ impl Default for Messages {
 				track: "video".into(),
 				priority: 3,
 				max_delay: Duration::from_millis(500),
-				start_group: Some(1_000),
-				end_group: None,
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range {
+					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
+					end: None,
+				}],
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
-				start_group: Some(1_000),
-				end_group: Some(2_000),
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range {
+					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
+					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
+				}],
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				group: 1_234,
