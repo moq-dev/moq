@@ -96,11 +96,10 @@ conformance; the audit's segment-finalization redesign is folded into
 Catalog HLS field.
 
 Added 2026-10-25 (maintainer): the studio's
-[GPU encode](/quest/m2/studio-gpu/encode.md) and
-[source import](/quest/m2/studio-gpu/import.md) quests drive moq-video
-improvements, mainly encoders taking a GPU surface and zero-copy texture
-import. They land before the cut when ready but do not gate it, and stay at
-the top of m2.
+[GPU encode](/quest/m1/studio-gpu/encode.md) and
+[source import](/quest/m1/studio-gpu/import.md) quests are in m1 so
+moq-video's GPU encode and import API changes, mainly encoders taking a GPU
+surface and zero-copy texture import, land before the cut.
 
 ## Required
 
@@ -129,6 +128,7 @@ the top of m2.
 - [Broadcast lifecycle](/quest/m1/broadcast-lifecycle/README.md) - broadcasts are online or offline with no finished state in moq-net, finished-broadcast retention is a fixed moq-mux policy, and each linger timer has one meaning
 - [fMP4 passthrough sync start](/quest/m1/fmp4-passthrough-sync.md) - a passthrough video import that starts mid-GOP publishes nothing before its first sync sample
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
+- [Studio on the GPU](/quest/m1/studio-gpu/README.md) - moq-video encoders take a GPU surface and its renderer reports zero-copy import, proven through moq-studio on NVENC, VideoToolbox, Media Foundation, DMA-BUF, and Metal
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) - iroh, wasm, and ffi implement moq-net's `transport::poll` traits, and the remaining `web_transport_trait` adapters are deleted
