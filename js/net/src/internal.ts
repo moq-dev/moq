@@ -531,6 +531,11 @@ export const hooks: {
 	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
 	unverifyGroup: (group: GroupConsumer) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
+	/**
+	 * Release a group reader, failing it with `abort` if given: a mirror closes its own copy,
+	 * a shared handle ends only itself. Assigned by `group.ts`.
+	 */
+	releaseGroupReader: (group: GroupConsumer, abort?: Error) => void;
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Return when a group joined its track at this hop, on the installed clock. */
@@ -714,6 +719,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	arriveGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	releaseGroupReader: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupTimestamp: () => {

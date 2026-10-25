@@ -48,6 +48,23 @@ function pair(sequence: number) {
 	return { producer, consumer: producer.consume() };
 }
 
+test("closing a consumer releases only that handle", async () => {
+	const { producer, consumer } = pair(0);
+	const other = producer.consume();
+	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
+
+	consumer.close();
+	expect(await consumer.closed).toBeNull();
+	expect(producer.closed.peek()).toBeUndefined();
+
+	// The group stays writable, and another reader sees every frame and the end.
+	producer.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.now() });
+	producer.finish();
+	expect((await other.readFrame())?.payload[0]).toBe(1);
+	expect((await other.readFrame())?.payload[0]).toBe(2);
+	expect(await other.readFrame()).toBeUndefined();
+});
+
 test("a group caps its frame count and aborts on the next write", async () => {
 	const { producer, consumer } = pair(0);
 

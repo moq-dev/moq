@@ -270,7 +270,7 @@ export class Producer {
 
 	/** A read handle for this group. */
 	consume(): Consumer {
-		return makeConsumer(this.#state);
+		return makeConsumer(this.#state, false);
 	}
 
 	/**
@@ -297,7 +297,7 @@ export class Producer {
 		const closed = this.#state.closed.peek();
 		if (closed !== undefined) {
 			dst.closed.set(closed);
-			return makeConsumer(dst);
+			return makeConsumer(dst, true);
 		}
 
 		this.#mirrors ??= new Set();
@@ -313,7 +313,7 @@ export class Producer {
 			dispose();
 		});
 
-		return makeConsumer(dst);
+		return makeConsumer(dst, true);
 	}
 
 	/** Watch the mirror readers attached to this group. */
@@ -424,7 +424,7 @@ export class Producer {
 	}
 }
 
-let makeConsumer: (state: GroupState) => Consumer;
+let makeConsumer: (state: GroupState, owned: boolean) => Consumer;
 
 // A replacement copy asked for on behalf of one consumer, settled or still out.
 interface Attempt {
@@ -626,9 +626,13 @@ export class Consumer {
 	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
+	// Whether this consumer alone reads `#state` (a mirror), so releasing it closes that state.
+	// A `consume()` handle shares the producer's state and only lets go of its own view.
+	#owned: boolean;
 
-	private constructor(state: GroupState) {
+	private constructor(state: GroupState, owned: boolean) {
 		this.#state = state;
+		this.#owned = owned;
 		this.sequence = state.sequence;
 	}
 
@@ -676,7 +680,8 @@ export class Consumer {
 	}
 
 	static {
-		makeConsumer = (state) => new Consumer(state);
+		makeConsumer = (state, owned) => new Consumer(state, owned);
+		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
 		hooks.groupTimestamp = (group) => (group.#state.unverified ? undefined : group.#state.timestamp);
 		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
 		hooks.unverifyGroup = (group) => {
@@ -833,6 +838,7 @@ export class Consumer {
 		// The copy left behind stops teeing into the state this consumer read.
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(null);
 		this.#state = next;
+		this.#owned = replacement.group.#owned;
 		this.#expiry = replacement.expiry;
 		this.#skip = index;
 		this.#closed?.refresh();
@@ -933,7 +939,7 @@ export class Consumer {
 				this.#closed?.refresh();
 				return;
 			}
-			if (this.#expire()) return;
+			if (this.#released || this.#expire()) return;
 			if (this.#recover?.wants(undefined)) {
 				await this.#resume(undefined);
 				continue;
@@ -986,6 +992,8 @@ export class Consumer {
 				return;
 			}
 
+			// A released shared handle ends here; the group itself stays open for others.
+			if (this.#released) return;
 			// Nothing buffered and the group is still open: this wait is the stall the
 			// drift budget bounds, and the only place it applies.
 			if (this.#expire()) continue;
@@ -1016,8 +1024,17 @@ export class Consumer {
 		return frame ? frame.payload[0] === 1 : undefined;
 	}
 
-	/** Closes the group, optionally with an error to abort readers. Idempotent. */
-	close(abort?: Error) {
+	/**
+	 * Release this handle, like dropping a Rust consumer: it reads what is buffered and then
+	 * ends. Never changes the group for other readers. Idempotent.
+	 */
+	close(): void {
+		this.#release(undefined);
+	}
+
+	// Release this reader, failing it with `abort` if given. A mirror closes its own state,
+	// which drops its demand; a shared handle ends only its own view.
+	#release(abort: Error | undefined): void {
 		// A copy failure recovery was continuing past ends with the abort instead.
 		if (abort && this.#recover && this.#state.closed.peek() instanceof Error) {
 			this.#terminal ??= abort;
@@ -1028,7 +1045,12 @@ export class Consumer {
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;
-		if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
+		if (this.#owned) {
+			if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
+		} else if (this.#state.closed.peek() === undefined) {
+			if (abort) this.#terminal ??= abort;
+			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal ?? null);
+		}
 		this.#closed?.refresh();
 	}
 }

@@ -1116,11 +1116,11 @@ export class Producer {
 				for (const entry of this.#cache) {
 					const mirror = entry.mirrors.get(sink);
 					if (mirror) {
-						mirror.close(abort);
+						hooks.releaseGroupReader(mirror, abort);
 						entry.mirrors.delete(sink);
 					}
 				}
-				for (const group of sink.groups.peek()) group.close(abort);
+				for (const group of sink.groups.peek()) hooks.releaseGroupReader(group, abort);
 				dispose();
 			});
 		}
@@ -1808,7 +1808,7 @@ export class Producer {
 			this.#uncache(entry);
 		}
 		for (const sink of this.#sinks) {
-			for (const group of sink.groups.peek()) group.close(abort);
+			for (const group of sink.groups.peek()) hooks.releaseGroupReader(group, abort);
 			closeTrackState(sink, abort);
 		}
 		this.#sinks.clear();
@@ -2455,10 +2455,10 @@ export class Subscriber {
 		closeTrackState(this.#state, abort);
 		this.#resume?.close(abort);
 		this.#state.groups.mutate((groups) => {
-			for (const group of groups) group.close(abort);
+			for (const group of groups) hooks.releaseGroupReader(group, abort);
 			groups.length = 0;
 		});
-		this.#frameGroup?.close(abort);
+		if (this.#frameGroup) hooks.releaseGroupReader(this.#frameGroup, abort);
 		this.#frameGroup = undefined;
 		this.#state.timeline.length = 0;
 		this.#wall.timer?.abort();

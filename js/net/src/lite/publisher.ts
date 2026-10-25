@@ -1001,7 +1001,7 @@ export class Publisher {
 		let fetched: group.Consumer | undefined;
 		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
-			fetched?.close(revoked);
+			if (fetched) hooks.releaseGroupReader(fetched, revoked);
 			stream.abort(revoked);
 		});
 		try {
@@ -1075,7 +1075,7 @@ export class Publisher {
 				serving(group);
 				// Revoked while the group resolved: the watch already reset the stream.
 				if (watch.revoked()) {
-					group.close(unauthorized(msg.broadcast));
+					hooks.releaseGroupReader(group, unauthorized(msg.broadcast));
 					return;
 				}
 				await this.#runFetchGroup(group, stream.writer, {
@@ -1093,7 +1093,7 @@ export class Publisher {
 				console.warn(
 					`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`,
 				);
-				group?.close(e);
+				if (group) hooks.releaseGroupReader(group, e);
 				stream.abort(e);
 			}
 		} finally {
@@ -1733,13 +1733,13 @@ export class Publisher {
 			}
 			if (!stream) {
 				const failed = failure ?? new Error("no stream slot");
-				group.close(failed);
+				hooks.releaseGroupReader(group, failed);
 				return failed;
 			}
 			return stream;
 		} catch (err: unknown) {
 			const failed = error(err);
-			group.close(failed);
+			hooks.releaseGroupReader(group, failed);
 			return failed;
 		}
 	}
@@ -1818,7 +1818,7 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
-			group.close(e);
+			hooks.releaseGroupReader(group, e);
 			return e;
 		} finally {
 			priority.remove(stream);

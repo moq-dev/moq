@@ -1105,7 +1105,7 @@ export class Publisher {
 				opened.resolve();
 			}
 			if (!stream) {
-				group.close(failure ?? new Error("no stream slot"));
+				hooks.releaseGroupReader(group, failure ?? new Error("no stream slot"));
 				return;
 			}
 			streams.opened += 1;
@@ -1220,7 +1220,7 @@ export class Publisher {
 			}
 		} catch (err: unknown) {
 			// A failed open has no stream to reset, but still ends only this group.
-			group.close(error(err));
+			hooks.releaseGroupReader(group, error(err));
 		} finally {
 			group.close();
 		}

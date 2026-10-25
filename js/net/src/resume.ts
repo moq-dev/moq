@@ -1042,7 +1042,7 @@ class Reader implements ResumeSource {
 		for (const dispose of this.#dispose) dispose();
 		this.#dispose = [];
 		// A recovery in flight settles with the group rather than adopting a replacement.
-		for (const group of this.#open) group.close(abort);
+		for (const group of this.#open) hooks.releaseGroupReader(group, abort);
 		this.#open.clear();
 		for (const copy of this.#copies) this.#drop(copy, abort);
 		this.#copies = [];
