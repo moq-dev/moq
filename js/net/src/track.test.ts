@@ -3658,6 +3658,37 @@ test("a widened maxDelay wakes a parked read", async () => {
 	producer.close();
 });
 
+// A skip whose group the cache evicted can never be offered again, so it stops holding the
+// delivered gaps above it.
+test("an evicted stale skip lets the delivered gaps fold", () => {
+	const time = manualTime(1_000);
+	try {
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(30_000) });
+		const subscriber = producer.subscribe({ maxDelay: Milli(10) });
+		stampGroup(producer, 0, 0);
+		expect(drainGroups(subscriber)).toEqual([0]);
+		// Group 1 reaches 5ms, past the 10ms budget behind the 30ms edge.
+		stampGroup(producer, 1, 1);
+		stampGroup(producer, 2, 5);
+		stampGroup(producer, 3, 30);
+		expect(drainGroups(subscriber)).toEqual([2, 3]);
+
+		// Past the cache window, so the next write evicts group 1.
+		time.set(1_000 + 2 * CACHE_WINDOW_MS);
+		let most = 0;
+		for (let sequence = 4; sequence < 300; sequence++) {
+			// Every third group never arrives.
+			if (sequence % 3 === 1) continue;
+			stampGroup(producer, sequence, sequence + 30);
+			expect(drainGroups(subscriber)).toEqual([sequence]);
+			most = Math.max(most, hooks.deliveredRuns(subscriber));
+		}
+		expect(most).toBeLessThan(10);
+	} finally {
+		time.installed.close();
+	}
+});
+
 // A re-offer never hands out a group below a floor raised in the same update.
 test("a widened maxDelay re-offers nothing below a raised floor", () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });

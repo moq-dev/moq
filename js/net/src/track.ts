@@ -2020,14 +2020,20 @@ export class Subscriber {
 		if (delivered.aboveGap() === undefined) return;
 		// One edge for every group judged, so forgetting N gaps never resolves it N times.
 		const drift = this.#drift();
-		// Found once a gap is stale, so a hand-out that forgets nothing never scans #skipped.
+		// Found once a gap is stale, so a hand-out that forgets nothing never scans #skipped. A
+		// skip whose group left the cache can never be offered again, so it is forgotten here
+		// rather than holding the gaps above it forever.
 		let skipped: number | undefined;
 		let scanned = false;
 		for (let oldest = delivered.aboveGap(); oldest !== undefined; oldest = delivered.aboveGap()) {
 			if (!this.#staleAt(oldest, drift)) break;
 			if (!scanned) {
 				scanned = true;
-				for (const sequence of this.#skipped.keys()) skipped = Math.min(skipped ?? sequence, sequence);
+				const producer = this.#state.producer;
+				for (const sequence of this.#skipped.keys()) {
+					if (producer && !cachedHolds(producer, sequence)) this.#skipped.delete(sequence);
+					else skipped = Math.min(skipped ?? sequence, sequence);
+				}
 			}
 			if (skipped !== undefined && skipped < oldest) {
 				delivered.forgetBelow(skipped);
