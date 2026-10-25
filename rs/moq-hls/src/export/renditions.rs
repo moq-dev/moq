@@ -19,6 +19,7 @@ use std::time::Duration;
 use moq_mux::catalog::hang::Catalog;
 use moq_mux::timeline::Entry;
 
+use super::master;
 use super::rendition::{Kind, Rendition};
 use super::segments::{self, Discontinuities, Reference};
 
@@ -559,7 +560,9 @@ impl Producer {
 	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
 	/// from that same broadcast rather than whatever is at the path by the time it is asked. A
 	/// rendition whose `broadcast` reference escapes above the origin root names no broadcast at
-	/// all, so it is dropped with a warning rather than served.
+	/// all, so it is dropped with a warning rather than served. So is a rendition named `""`, `.`, or
+	/// `..`, which no URL path segment can address, so the master playlist, the DASH manifest, and
+	/// the router agree on what is served.
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
 		use hang::catalog::Reference as _;
 
@@ -604,6 +607,13 @@ impl Producer {
 		}
 
 		for (name, video) in &catalog.video.renditions {
+			if !master::is_path_segment(name) {
+				tracing::warn!(
+					rendition = name,
+					"ignoring video rendition not named as a URL path segment"
+				);
+				continue;
+			}
 			let key = (Kind::Video, name.clone());
 			if let Some(rendition) = current.renditions.get(&key) {
 				// Survived the stale pass, so it decodes the same: keep its window, its cached
@@ -626,6 +636,13 @@ impl Producer {
 			current.renditions.insert(key, rendition);
 		}
 		for (name, audio) in &catalog.audio.renditions {
+			if !master::is_path_segment(name) {
+				tracing::warn!(
+					rendition = name,
+					"ignoring audio rendition not named as a URL path segment"
+				);
+				continue;
+			}
 			let key = (Kind::Audio, name.clone());
 			if let Some(rendition) = current.renditions.get(&key) {
 				rendition.refresh(audio.bitrate, None, audio.enabled);

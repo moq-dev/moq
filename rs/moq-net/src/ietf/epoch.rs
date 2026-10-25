@@ -56,7 +56,7 @@ impl Param for Epoch {
 mod tests {
 	use super::*;
 
-	const VERSION: Version = Version::Draft19;
+	const VERSION: Version = Version::Draft18;
 
 	#[test]
 	fn code_point_parity() {
