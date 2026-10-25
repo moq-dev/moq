@@ -2463,9 +2463,13 @@ struct FrontierState {
 	sources: Vec<Source>,
 	/// What retired sources produced since their last sample, each at the edge it had,
 	/// so a sample records it even before a replacement has a frame, and never at the
-	/// replacement's lag.
+	/// replacement's lag. At most [`MAX_FOLDED`] entries.
 	folded: Vec<Folded>,
 }
+
+/// The most retired sources a frontier keeps apart between samples. A peer can retire
+/// copies as fast as it moves its route, so past this the latest share one entry.
+const MAX_FOLDED: usize = 8;
 
 /// Bytes a retired source produced before it stopped feeding the subscription,
 /// weighed at the edge it had then.
@@ -2473,6 +2477,15 @@ struct Folded {
 	weight: u64,
 	newest: Duration,
 	first: Duration,
+}
+
+impl Folded {
+	/// Merge `other` in at the later edge, so a shared entry's lag reads high, never low.
+	fn absorb(&mut self, other: Folded) {
+		self.weight = self.weight.saturating_add(other.weight);
+		self.newest = self.newest.max(other.newest);
+		self.first = self.first.min(other.first);
+	}
 }
 
 /// A track feeding a [`Frontier`], with the produced bytes already sampled.
@@ -2573,7 +2586,12 @@ impl FrontierInner {
 			&& let Some(newest) = Production::load(&production.newest)
 			&& let Some(first) = Production::load(&production.first)
 		{
-			state.folded.push(Folded { weight, newest, first });
+			let item = Folded { weight, newest, first };
+			if state.folded.len() < MAX_FOLDED {
+				state.folded.push(item);
+			} else if let Some(last) = state.folded.last_mut() {
+				last.absorb(item);
+			}
 		}
 	}
 
@@ -4426,6 +4444,24 @@ mod lag_tests {
 		near.record(at(100), 10);
 		far.record(at(3000), 20);
 		assert_eq!(grew(&last, &h.tick()), vec![(2, 10), (6, 20)]);
+	}
+
+	/// A route moved over and over between reports keeps only a few retired copies
+	/// apart, and still weighs every byte they produced.
+	#[test]
+	fn retired_copies_stay_bounded_between_reports() {
+		let h = Harness::new();
+		let subscription = h.session.egress(PATH).subscribe();
+		let frontier = subscription.frontier();
+		for _ in 0..1000 {
+			let copy = Arc::new(Production::default());
+			let watch = frontier.watch(&copy);
+			copy.record(Some(Timestamp::ZERO), 10);
+			drop(watch);
+		}
+		let held = frontier.0.as_ref().expect("egress").state().folded.len();
+		assert!(held <= MAX_FOLDED, "{held} retired copies held");
+		assert_eq!(h.tick().lag.total(), 10_000);
 	}
 
 	#[test]
