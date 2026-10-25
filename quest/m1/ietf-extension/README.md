@@ -112,9 +112,9 @@ them yet. Remaining, in order:
   edge's TRACK_INFO query becomes TRACK_STATUS upstream, and the pinned
   MoQTestPublisher inherits NOT_SUPPORTED. Preserve that refusal: widening
   query-only demand into a SUBSCRIBE is not an authorized fallback.
-  [Range widening](/quest/m1/compress/ietf-range-widen.md), claimed by
-  [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465), owns that
-  separate cold-metadata boundary. Needs a Moxygen revision whose test
+  No cold request needs that metadata to pick its start, since
+  [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465) starts every
+  subscription at a group's first frame. Needs a Moxygen revision whose test
   publisher answers TRACK_STATUS; then bump the pins, rebase the profile, and
   add the two-relay cell back to `test/ietf-conformance/run.sh` (it ran in
   [d96126c65a](https://github.com/moq-dev/moq/commit/d96126c65a52027820884cee7cb9741e79fb674b)).

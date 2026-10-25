@@ -184,16 +184,14 @@ export type Recv =
 	/** The track aborted. */
 	| { kind: "error"; error: Error };
 
-/** A package-internal frame read the wire publisher completes once written. */
+/** A package-internal frame read as the group stores it. */
 export interface ReadGroupFrame {
 	/** Frame sequence within the group. */
 	sequence: number;
-	/** Frame returned to the publisher. */
+	/** The frame, holding its DEFLATE slice on a compressed read. */
 	frame: Frame;
-	/** The stored slice's declared plain size, on compressed wire reads. */
+	/** The stored slice's declared plain size, on compressed reads. */
 	inflated?: number;
-	/** Mark the frame delivered or deliberately skipped by the wire publisher. */
-	complete(): void;
 }
 
 /** One past the highest sequence written under a broadcast track's name, by any of its producers. */
@@ -424,11 +422,6 @@ export const hooks: {
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
-	/**
-	 * How long a broadcast finishing now keeps this track servable: its max-age capped by the
-	 * cache window once it closed cleanly, else zero; assigned by `track.ts`.
-	 */
-	linger: (producer: Producer) => Milli;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
 	demandPriority: (demand: Demand) => number;
 	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
@@ -491,16 +484,10 @@ export const hooks: {
 		subscription: Subscription | undefined,
 		source: (shell: ResumeShell) => ResumeSource,
 	) => Subscriber;
-	/** Wake once a subscriber's group cursor may read differently; assigned by `track.ts`. */
+	/** Wake once a subscriber's group cursor may read differently, including when the track declares its end; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
-	/**
-	 * Replace a serving cursor. An omitted start keeps the current floor; a provided start
-	 * can lower it. Wire publishers apply SUBSCRIBE_UPDATE here rather than through
-	 * `setGroups`, which never rewinds.
-	 */
-	replaceGroups: (subscriber: Subscriber, groups: Groups) => void;
 	/**
 	 * Bind a group to its track's timedness, so a frame whose timestamp disagrees is refused.
 	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
@@ -546,10 +533,8 @@ export const hooks: {
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
-	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
-	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
-	/** Read a frame the wire publisher completes (or skips) once written. */
-	readGroupFrame: (group: GroupConsumer, from?: number, compressed?: boolean) => Promise<ReadGroupFrame | undefined>;
+	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
+	readGroupFrame: (group: GroupConsumer, compressed: boolean) => Promise<ReadGroupFrame | undefined>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
 	/** Attach the origin advertisement of a created broadcast. */
@@ -600,9 +585,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedLargest: () => {
-		throw new Error("track.ts not loaded");
-	},
-	linger: () => {
 		throw new Error("track.ts not loaded");
 	},
 	demandPriority: () => {
@@ -680,9 +662,6 @@ export const hooks: {
 	fetchBudget: () => {
 		throw new Error("track.ts not loaded");
 	},
-	replaceGroups: () => {
-		throw new Error("track.ts not loaded");
-	},
 	writeDatagram: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -735,9 +714,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
-		throw new Error("group.ts not loaded");
-	},
-	guardGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readGroupFrame: () => {

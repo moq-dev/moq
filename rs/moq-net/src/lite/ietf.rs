@@ -1265,61 +1265,6 @@ mod hop_tests {
 		}
 	}
 
-	/// A subscription capped at a group's last frame stops there: its Group State promises
-	/// no END_OF_GROUP, so the END_OF_GROUP record past the cap is not sent either.
-	#[moq_clock::test]
-	async fn a_capped_stream_carries_no_end_record() {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
-		let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
-		info.properties = draft22(Vec::new());
-		let track = broadcast.create_track("video", info).unwrap();
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
-		group
-			.set_wire(group::Wire {
-				sparse: false,
-				first_object: true,
-				first_id: 0,
-				extensions: false,
-				has_end: true,
-				fetchable: true,
-				last: None,
-			})
-			.unwrap();
-		for (index, payload) in [b"a", b"b"].into_iter().enumerate() {
-			let fields = crate::model::object::Fields {
-				id: index as u64,
-				properties: Properties::default(),
-			};
-			group = write(group, index as u64, Some(fields), payload);
-		}
-		group.mark_gap(2, None).unwrap();
-		group
-			.set_end_object(crate::model::object::Fields {
-				id: 2,
-				properties: Properties::default(),
-			})
-			.unwrap();
-		group.finish().unwrap();
-
-		let (downstream, _sessions) = test_hop(&upstream, "room", [true, true]).await;
-		let broadcast = moq_clock::timeout(TIMEOUT, downstream.consume().request_broadcast("room", None))
-			.await
-			.expect("no broadcast")
-			.unwrap();
-		let capped = track::Subscription::default().with_end(track::Position::after(0, 1));
-		let mut subscriber = moq_clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(capped))
-			.await
-			.expect("no subscription")
-			.unwrap();
-		let mut received = recv(&mut subscriber).await;
-		assert_eq!(&next(&mut received).await.unwrap().payload[..], b"a");
-		assert_eq!(&next(&mut received).await.unwrap().payload[..], b"b");
-		assert!(next(&mut received).await.is_none());
-		assert!(!received.wire().expect("relay state").has_end);
-		assert!(received.end_object().is_none(), "an END_OF_GROUP past the cap");
-	}
-
 	/// Subscribe across a negotiated hop to a timed track a draft-22 publisher published
 	/// with `values`.
 	async fn subscribe_across(values: Vec<Property>) -> Result<(), crate::Error> {
@@ -1521,13 +1466,11 @@ mod hop_tests {
 				.unwrap();
 			assert_eq!(next(&mut fetched).await.unwrap().timestamp, negotiated.then(|| ts(100)));
 			assert!(next(&mut fetched).await.is_none());
-			let mut subscriber = moq_clock::timeout(
-				TIMEOUT,
-				copy.subscribe(track::Subscription::default().with_start(track::Position::group(1))),
-			)
-			.await
-			.unwrap()
-			.unwrap();
+			let mut subscriber =
+				moq_clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(1)))
+					.await
+					.unwrap()
+					.unwrap();
 			// A peer may have stamped arrival times. The second group's rewind must not
 			// acquire native moq-lite checks merely because it crossed a relay hop.
 			let mut group = track.create_group(1u64.into()).unwrap();

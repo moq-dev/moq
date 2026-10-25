@@ -19,7 +19,3 @@ the session as it does in Rust.
   ([moq-dev/moq#6158](https://github.com/moq-dev/moq/pull/6158)). Match Rust.
 
 Public API: none (`Deadline` and `RequestStream` are internal). Wire: none.
-
-## Related
-
-- [IETF request order](/quest/m2/ietf-request-order.md) - the Rust side of the legacy request cleanup

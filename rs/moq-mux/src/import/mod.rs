@@ -1,17 +1,17 @@
 //! Import media into a moq broadcast.
 //!
-//! The importers split along two axes. By multiplicity: [`Track`] / [`TrackStream`]
-//! publish a single codec onto one MoQ track, while [`Container`] /
-//! [`ContainerStream`] decode a container that may publish more than one track. By
-//! frame boundaries: [`Track`] / [`Container`] take whole frames or chunks (the
-//! typical case for files and reassembled network input), while [`TrackStream`] /
-//! [`ContainerStream`] infer boundaries from a raw byte stream (piped Annex-B
-//! H.264, an fMP4 reader, …).
+//! The importers split by multiplicity: [`Track`] / [`TrackStream`] publish a
+//! single codec onto one MoQ track, while [`Container`] decodes a container
+//! that may publish more than one track. A single codec splits again by frame
+//! boundaries: [`Track`] takes whole frames (the typical case for files and
+//! reassembled network input), while [`TrackStream`] infers them from a raw
+//! byte stream (piped Annex-B H.264, ...). A container recovers its own
+//! framing, so [`Container`] takes chunks split anywhere.
 //!
-//! Each importer's `new` takes a format string (e.g. `"avc3"`, `"fmp4"`) and
-//! errors on a format it doesn't handle — `TrackStream` / `ContainerStream`
-//! accept only the self-delimiting formats. The concrete importers live with
-//! their format under [`crate::container`] or [`crate::codec`] and own their
+//! Each importer takes a typed format (parsed from e.g. `"avc3"` or `"fmp4"`)
+//! and errors on a format it doesn't handle; `TrackStream` accepts only the
+//! self-delimiting formats. The concrete importers live with their format
+//! under [`crate::container`] or [`crate::codec`] and own their
 //! catalog rendition through their container producer.
 //!
 //! A single-codec importer takes a track the caller mints, typically
@@ -205,7 +205,15 @@ mod tests {
 		data.resize(data.len() + PAD, 0);
 
 		assert_released("fmp4", &container(ContainerFormat::Fmp4, &data, CHUNK));
-		assert_released("cmaf", &container(ContainerFormat::Cmaf, &data, CHUNK));
+		assert_released("fmp4 passthrough", &|broadcast, catalog| {
+			let mut import =
+				crate::container::fmp4::Import::new(broadcast.clone(), catalog.reserve()).with_passthrough(true);
+			for chunk in data.chunks(CHUNK) {
+				import.decode(chunk).unwrap();
+			}
+			import.finish().unwrap();
+			Box::new(import)
+		});
 	}
 
 	#[tokio::test(start_paused = true)]

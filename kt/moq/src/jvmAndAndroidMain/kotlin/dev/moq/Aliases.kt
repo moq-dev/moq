@@ -75,20 +75,18 @@ typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
 /** Receives tracks requested from a dynamically served broadcast. */
 typealias BroadcastDynamic = uniffi.moq.MoqBroadcastDynamic
-/** A cleanly ended broadcast, still announced and serving its finished tracks until its linger ends. */
-typealias BroadcastFinish = uniffi.moq.MoqBroadcastFinish
 /** The write side of a raw track: append groups of frames. */
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 /** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it. */
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
-/** A stream of uncached group requests for one track, for serving fetches on demand. */
+/** A stream of the fills readers of one track need: runs of groups the cache lacks. */
 typealias TrackDynamic = uniffi.moq.MoqTrackDynamic
 /** A watch-only handle to whether a published track has subscribers; holding it keeps nothing open. */
 typealias TrackDemand = uniffi.moq.MoqTrackDemand
 /** The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind. */
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
-/** A request to produce one uncached group for a fetch consumer. */
-typealias GroupRequest = uniffi.moq.MoqGroupRequest
+/** A run of groups readers miss: accept each group you have and drop the rest. */
+typealias Fill = uniffi.moq.MoqFill
 /** The write side of a single group: append frames to it. */
 typealias GroupProducer = uniffi.moq.MoqGroupProducer
 /** The read side of a single group: yields timestamped raw frames. */
@@ -109,7 +107,7 @@ typealias Subscription = uniffi.moq.MoqSubscription
 typealias Range = uniffi.moq.MoqRange
 /** Where one end of a [Range] falls: [AnchorAbsolute], [AnchorRelative], or [AnchorTime]. */
 typealias Anchor = uniffi.moq.MoqAnchor
-/** An exact group and frame. */
+/** A group, delivered from its first frame. */
 typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
 /** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
 typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
@@ -135,7 +133,7 @@ typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
 typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
 /** The PCM layout the caller feeds an audio producer. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
-/** The codec-side encoder configuration: codec, output rate/channels, bitrate, frame duration, and preset. */
+/** The codec-side encoder configuration: codec, output rate/channels, bitrate, and frame duration. */
 typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
 /** One video frame: pixels in the configured layout plus a presentation timestamp. */
 typealias VideoFrame = uniffi.moq.MoqVideoFrame

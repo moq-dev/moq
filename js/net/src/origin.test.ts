@@ -1927,6 +1927,120 @@ test("a rooted producer shares the table and enforces its pattern union", async 
 	origin.close();
 });
 
+test("closing a derived handle releases only what it registered", async () => {
+	const origin = new Producer();
+	const owned = publish(origin, Path.from("lobby"));
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room"))]));
+	const wide = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const inside = publish(scoped, Path.from("room/alice"));
+	const claim = scoped.dynamic(Path.from("room/claim"));
+	const ranked = wide.dynamic(Path.from("ranked"));
+	const peer = serve(scoped, Path.from("room/peer"), provider(new BroadcastProducer()));
+
+	scoped.close();
+	wide.close();
+
+	expect(origin.closed.peek()).toBeUndefined();
+	expect(owned.closed.peek()).toBeUndefined();
+	expect(inside.closed.peek()).toBeNull();
+	const routes = (await announcedView(origin)).peek();
+	expect([...routes.keys()]).toEqual([Path.from("lobby")]);
+
+	// A released handle refuses new work, so a borrower notices instead of publishing into nothing.
+	expect(() => scoped.createBroadcast(Path.from("room/late"))).toThrow("origin handle is closed");
+	scoped.dynamic(Path.from("room/late")).close();
+	expect((await announcedView(origin)).peek().has(Path.from("room/late"))).toBe(false);
+
+	// The owner and fresh handles keep working.
+	const again = publish(origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()])), Path.from("room/bob"));
+	expect((await announcedView(origin)).peek().has(Path.from("room/bob"))).toBe(true);
+
+	// Closing what was already released is a no-op.
+	claim.close();
+	ranked.close();
+	peer();
+	scoped.close();
+	again.close();
+	origin.close();
+	expect(owned.closed.peek()).toBeNull();
+});
+
+test("a broadcast a derived handle released cannot announce again", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const path = Path.from("room");
+	const broadcast = publish(scoped, path);
+	const held = await routed(consumer, path);
+
+	scoped.close();
+
+	// The application's clone keeps the broadcast open, but the released handle no longer routes it.
+	expect(broadcast.closed.peek()).toBeUndefined();
+	expect(() => broadcast.announce()).toThrow("broadcast is closed");
+	expect((await announcedView(origin)).peek().has(path)).toBe(false);
+
+	held?.close();
+	origin.close();
+});
+
+test("closing a derived handle withdraws the sessions and answers attached through it", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const path = Path.from("blind");
+
+	const request = consumer.request(path);
+	const detach = wireOf(scoped).attach(false);
+	const snapshot = wireOf(scoped).snapshot(Path.empty());
+	const interests: string[] = [];
+	const unlisten = wireOf(scoped).interests((prefix, wanted) => interests.push(`${wanted ? "+" : "-"}${prefix}`));
+	const announced = consumer.announced();
+	const upstream = new BroadcastProducer();
+	const withdraw = wireOf(scoped).answer(path, upstream.consume());
+	expect(withdraw).toBeDefined();
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(consumer.discovery.peek()).toBe(false);
+	expect(announced.synced.peek()).toBe(false);
+	expect(interests.splice(0)).toEqual(["+"]);
+
+	scoped.close();
+	await settle();
+
+	// The session stops asking its peer for announcements, now and for later watches.
+	expect(interests.splice(0)).toEqual(["-"]);
+	consumer.request(Path.from("later"), { announced: true }).close();
+	expect(interests).toEqual([]);
+
+	// The answer, the attached session, and the initial set in flight went with the handle.
+	expect(request.active.peek()).toBeUndefined();
+	expect(consumer.discovery.peek()).toBeUndefined();
+	expect(announced.synced.peek()).toBe(true);
+	const retry = consumer.request(path);
+
+	// A session still using the released handle cannot answer, count as attached, or
+	// hold readers unsynced.
+	expect(wireOf(scoped).answer(path, new BroadcastProducer().consume())).toBeUndefined();
+	wireOf(scoped).attach(false);
+	wireOf(scoped).snapshot(Path.empty());
+	await settle();
+	expect(retry.active.peek()).toBeUndefined();
+	expect(consumer.discovery.peek()).toBeUndefined();
+	expect(announced.synced.peek()).toBe(true);
+
+	// The session's own teardown afterwards is a no-op.
+	withdraw?.();
+	snapshot();
+	unlisten();
+	expect(interests).toEqual([]);
+	detach();
+	announced.close();
+	retry.close();
+	request.close();
+	origin.close();
+});
+
 test("a scoped dynamic only serves allowed paths and presents relative requests", async () => {
 	const origin = new Producer();
 	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));

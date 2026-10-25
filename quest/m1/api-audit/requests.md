@@ -23,7 +23,3 @@ mechanism; `auth::Handle::requests() -> auth::Requests` is the precedent.
 About 240 Rust, 30 binding, and 10 JS call sites; land it in one sweep.
 
 Public API: moq-net, `@moq/net`, moq-ffi and wrappers renamed. Wire: none.
-
-## Related
-
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - adds `requested_fill` to the track handle this renames

@@ -8,8 +8,8 @@ and accepts no option it ignores.
 
 ## Plan
 
-[Transport config](/quest/m1/api-audit/transport-config.md) splits Rust's
-healthy bar out of `backoff.initial` into `backoff.healthy`. `ReloadDelay`
+Rust's moq-tokio split its healthy bar out of `backoff.initial` into
+`backoff.healthy` ([moq-dev/moq#6529](https://github.com/moq-dev/moq/pull/6529)). `ReloadDelay`
 (`js/net/src/connection/reload.ts`) still uses `initial` as the healthy bar.
 Add `healthy` with Rust's default and a mocked-time test.
 
@@ -20,7 +20,3 @@ the reload loop never passes them to `connect()`. Decided 2026-10-23
 unless that quest lands keeping it public, in which case forward it.
 
 Public API: breaking JS option change; the Impact bullet says how to migrate. Wire: none.
-
-## Required
-
-- [Transport config](/quest/m1/api-audit/transport-config.md) - the Rust `backoff.healthy` this mirrors

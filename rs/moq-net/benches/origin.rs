@@ -1576,12 +1576,12 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 	let subscription = track::Subscription::default().with_max_delay(Duration::from_secs(3600));
 	let mut subscribers = Vec::with_capacity(readers);
 	for _ in 0..readers {
-		let mut subscriber = moq_clock::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
+		let subscriber = moq_clock::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
 			.await
 			.expect("track did not splice")
 			.expect("subscribe failed");
 		// Held back until the drain, so every route's copy is kept for its unread groups.
-		subscriber.set_groups(..0);
+		let subscriber = subscriber.with_range(..0);
 		subscribers.push(subscriber);
 	}
 	let waiter = kio::Waiter::noop();
@@ -1606,11 +1606,9 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			);
 		}
 	}
-	for subscriber in &mut subscribers {
-		subscriber.set_groups(..);
-	}
 	let readers = subscribers
 		.into_iter()
+		.map(|subscriber| subscriber.with_range(..))
 		.map(|subscriber| match ordered {
 			true => ResumeReader::Sequence(subscriber.ordered()),
 			false => ResumeReader::Arrival(subscriber),

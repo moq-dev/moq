@@ -264,7 +264,7 @@ async fn a_follower_keeps_hangz_after_catalog_eof() {
 	drop((broadcast, track, catalog));
 	let mut follower = super::Follower::new(export)
 		.unwrap()
-		.with_linger(Duration::from_secs(1));
+		.with_follow(Duration::from_secs(1));
 	let (broadcast, track, mut catalog) = publish();
 	// Only catalog.json.z exists, so falling back to the default encoding cannot subscribe.
 	tokio::time::timeout(
@@ -3123,7 +3123,7 @@ async fn read_si_groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> 
 		.unwrap()
 		.subscribe(
 			moq_net::track::Subscription::default()
-				.with_groups(0..)
+				.with_range(0..)
 				.with_max_delay(Duration::from_secs(5)),
 		)
 		.await
@@ -9083,43 +9083,89 @@ fn finish((broadcast, mut catalog): (moq_net::broadcast::Producer, crate::catalo
 	drop((broadcast, catalog));
 }
 
-/// A failure while the broadcast stays announced is the export's own: it fails after the
-/// grace, without waiting out the linger.
+/// A failure whose cause is not the publisher leaving is the export's own: it fails at once,
+/// however long the follow.
 #[tokio::test(start_paused = true)]
-async fn a_follower_fails_with_the_broadcast_up_after_the_grace() {
-	let origin = crate::source::produce_origin();
-	let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-	let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
-	let mut follower = follower(&origin).await.with_linger(Duration::from_secs(10));
-	assert!(
-		tokio::time::timeout(Duration::from_secs(1), follower.next())
-			.await
-			.is_err(),
-		"nothing to mux yet"
-	);
+async fn a_follower_fails_at_once_on_its_own_failure() {
+	let causes = [
+		moq_net::Error::Cancel,
+		moq_net::Error::Stream(moq_net::StreamError::Internal),
+		moq_net::Error::MalformedTrack,
+	];
+	for cause in causes {
+		let origin = crate::source::produce_origin();
+		let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+		let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+		let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), follower.next())
+				.await
+				.is_err(),
+			"nothing to mux yet"
+		);
 
-	track.abort(moq_net::Error::Cancel);
-	let start = tokio::time::Instant::now();
-	let end = follower.next().await;
-	assert!(end.is_err(), "the export's own failure fails the follower: {end:?}");
-	assert_eq!(start.elapsed(), Duration::from_secs(1));
+		track.abort(cause.clone());
+		let start = tokio::time::Instant::now();
+		let end = follower.next().await;
+		assert!(
+			matches!(&end, Err(crate::Error::Moq(err)) if err.to_string() == cause.to_string()),
+			"{cause}: {end:?}"
+		);
+		assert_eq!(start.elapsed(), Duration::ZERO, "{cause}");
+	}
 }
 
-/// A replacement followed with stitching that never serves its catalog gives up at the
-/// linger, rather than waiting on the catalog past it.
+/// A track that lost its route, or whose session ended, says the publisher left even with the
+/// broadcast still announced: the follower waits out the follow for a return, then fails with
+/// that cause. moq-transport's PUBLISH_DONE has no code for a lost route, so a relay's copy
+/// reads there as an unregistered one.
 #[tokio::test(start_paused = true)]
-async fn a_follower_return_without_a_catalog_expires_with_the_linger() {
+async fn a_follower_waits_out_the_follow_on_a_lost_route() {
+	let causes = [
+		moq_net::Error::Unroutable,
+		moq_net::Error::Stream(moq_net::StreamError::Unroutable),
+		moq_net::Error::Session(moq_net::SessionError::Cancel),
+		moq_net::Error::Remote(0),
+	];
+	for cause in causes {
+		let origin = crate::source::produce_origin();
+		let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+		let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+		let follow = Duration::from_secs(10);
+		let mut follower = follower(&origin).await.with_follow(follow);
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), follower.next())
+				.await
+				.is_err(),
+			"nothing to mux yet"
+		);
+
+		track.abort(cause.clone());
+		let start = tokio::time::Instant::now();
+		let end = follower.next().await;
+		assert!(
+			matches!(&end, Err(crate::Error::Moq(err)) if err.to_string() == cause.to_string()),
+			"{cause}: {end:?}"
+		);
+		assert_eq!(start.elapsed(), follow, "{cause}");
+	}
+}
+
+/// A replacement followed with stitching is awaited until its catalog arrives, with no deadline
+/// of its own: one whose catalog request is never answered keeps the follower waiting past the
+/// follow, until it goes.
+#[tokio::test(start_paused = true)]
+async fn a_follower_awaits_a_replacement_catalog_past_the_follow() {
 	let origin = crate::source::produce_origin();
 	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-	let linger = Duration::from_secs(10);
-	let mut follower = follower(&origin).await.with_linger(linger).with_stitch(true);
-	let start = tokio::time::Instant::now();
+	let follow = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
 	finish(first);
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
-		"lingering"
+		"following"
 	);
 
 	// Replaced, but the replacement's catalog request is never answered.
@@ -9129,58 +9175,70 @@ async fn a_follower_return_without_a_catalog_expires_with_the_linger() {
 			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
 		)
 		.unwrap();
-	let _unanswered = second.dynamic();
-	let end = follower.next().await.unwrap();
-	assert!(end.is_none(), "a return that never resumes is no return");
-	assert_eq!(start.elapsed(), linger);
+	let unanswered = second.dynamic();
+	assert!(
+		tokio::time::timeout(follow * 3, follower.next()).await.is_err(),
+		"awaiting the replacement's catalog past the follow"
+	);
+
+	drop((second, unanswered));
+	let end = tokio::time::timeout(Duration::from_secs(1), follower.next())
+		.await
+		.expect("the replacement going ends the wait");
+	assert!(matches!(end, Ok(None)), "the original clean end: {end:?}");
 }
 
 /// A return of the same instance whose catalog subscription is answered but never delivers a
-/// snapshot is no return either: the linger still bounds it.
+/// snapshot is awaited past the follow, and once it fails too, it was no return: the export
+/// ends as it did before it.
 #[tokio::test(start_paused = true)]
-async fn a_follower_return_whose_catalog_never_snapshots_expires_with_the_linger() {
+async fn a_follower_awaits_a_return_catalog_until_it_fails() {
 	let origin = crate::source::produce_origin();
 	let epoch = moq_net::Epoch::mint();
 	let first = publish_bare(&origin, Some(&epoch));
-	let linger = Duration::from_secs(10);
-	let mut follower = follower(&origin).await.with_linger(linger);
-	let start = tokio::time::Instant::now();
+	let follow = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_follow(follow);
 	finish(first);
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
-		"lingering"
+		"following"
 	);
 
 	let second = origin
 		.publish("live", moq_net::origin::Route::default().with_epoch(epoch))
 		.unwrap();
-	let _silent = second.create_track(hang::Catalog::DEFAULT_NAME, None).unwrap();
-	let end = tokio::time::timeout(linger * 3, follower.next())
+	let silent = second.create_track(hang::Catalog::DEFAULT_NAME, None).unwrap();
+	assert!(
+		tokio::time::timeout(follow * 3, follower.next()).await.is_err(),
+		"awaiting the return's catalog past the follow"
+	);
+
+	silent.abort(moq_net::Error::Unroutable).unwrap();
+	let end = tokio::time::timeout(Duration::from_secs(1), follower.next())
 		.await
-		.expect("the linger bounds the return")
-		.unwrap();
-	assert!(end.is_none(), "a return that never resumes is no return");
-	assert_eq!(start.elapsed(), linger);
+		.expect("the failed return ends the wait");
+	assert!(matches!(end, Ok(None)), "the original clean end: {end:?}");
+	drop(second);
 }
 
 /// A return that goes again before its catalog resolves is no return yet: the follower keeps
-/// lingering, and with nothing else back it yields the original clean end at the deadline.
+/// following, and with nothing else back it yields the original clean end at the deadline.
 #[tokio::test(start_paused = true)]
-async fn a_follower_keeps_lingering_when_a_return_goes_before_it_resolves() {
+async fn a_follower_keeps_following_when_a_return_goes_before_it_resolves() {
 	let origin = crate::source::produce_origin();
 	let epoch = moq_net::Epoch::mint();
 	let first = publish_bare(&origin, Some(&epoch));
-	let linger = Duration::from_secs(10);
-	let mut follower = follower(&origin).await.with_linger(linger);
+	let follow = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_follow(follow);
 	let start = tokio::time::Instant::now();
 	finish(first);
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
-		"lingering"
+		"following"
 	);
 
 	// Back, but its catalog request is never answered before it goes again.
@@ -9196,11 +9254,11 @@ async fn a_follower_keeps_lingering_when_a_return_goes_before_it_resolves() {
 	);
 	drop((second, unanswered));
 
-	let end = tokio::time::timeout(linger * 3, follower.next())
+	let end = tokio::time::timeout(follow * 3, follower.next())
 		.await
-		.expect("the linger bounds the wait");
+		.expect("the follow bounds the wait");
 	assert!(matches!(end, Ok(None)), "the original clean end: {end:?}");
-	assert_eq!(start.elapsed(), linger);
+	assert_eq!(start.elapsed(), follow);
 }
 
 /// Announce `epoch` at `live`, refusing every track request with `NotFound` until the
@@ -9219,20 +9277,20 @@ fn publish_refusing(origin: &moq_net::origin::Producer, epoch: &moq_net::Epoch) 
 }
 
 /// A replacement that refuses its catalog while still announced is no return: the follower
-/// keeps lingering, and follows the next instance to serve.
+/// keeps following, and follows the next instance to serve.
 #[tokio::test(start_paused = true)]
-async fn a_follower_keeps_lingering_through_a_refused_return() {
+async fn a_follower_keeps_following_through_a_refused_return() {
 	let origin = crate::source::produce_origin();
 	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-	let linger = Duration::from_secs(10);
-	let mut follower = follower(&origin).await.with_linger(linger).with_stitch(true);
+	let follow = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
 	let start = tokio::time::Instant::now();
 	finish(first);
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
-		"lingering"
+		"following"
 	);
 
 	// Replaced, but the replacement refuses its catalog request.
@@ -9241,7 +9299,7 @@ async fn a_follower_keeps_lingering_through_a_refused_return() {
 		tokio::time::timeout(Duration::from_secs(2), follower.next())
 			.await
 			.is_err(),
-		"the refusal keeps it lingering"
+		"the refusal keeps it following"
 	);
 	refusing.abort();
 
@@ -9257,18 +9315,18 @@ async fn a_follower_keeps_lingering_through_a_refused_return() {
 	finish(second);
 	let end = follower.next().await;
 	assert!(matches!(end, Ok(None)), "the replacement's clean end: {end:?}");
-	assert_eq!(start.elapsed(), Duration::from_secs(4) + linger);
+	assert_eq!(start.elapsed(), Duration::from_secs(4) + follow);
 }
 
 /// A return that stays announced but refuses its catalog fails the follower only once the
-/// linger runs out, with that refusal rather than the original clean end.
+/// follow runs out, with that refusal rather than the original clean end.
 #[tokio::test(start_paused = true)]
-async fn a_follower_reports_a_refused_return_at_the_linger() {
+async fn a_follower_reports_a_refused_return_at_the_follow() {
 	let origin = crate::source::produce_origin();
 	let epoch = moq_net::Epoch::mint();
 	let first = publish_bare(&origin, Some(&epoch));
-	let linger = Duration::from_secs(10);
-	let mut follower = follower(&origin).await.with_linger(linger);
+	let follow = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_follow(follow);
 	let start = tokio::time::Instant::now();
 	finish(first);
 
@@ -9276,17 +9334,17 @@ async fn a_follower_reports_a_refused_return_at_the_linger() {
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
-		"lingering"
+		"following"
 	);
 	let _refusing = publish_refusing(&origin, &epoch);
-	let end = tokio::time::timeout(linger * 3, follower.next())
+	let end = tokio::time::timeout(follow * 3, follower.next())
 		.await
-		.expect("the linger bounds the wait");
+		.expect("the follow bounds the wait");
 	assert!(
 		matches!(end, Err(crate::Error::Moq(moq_net::Error::NotFound))),
-		"the refusal surfaces at the linger: {end:?}"
+		"the refusal surfaces at the follow: {end:?}"
 	);
-	assert_eq!(start.elapsed(), linger);
+	assert_eq!(start.elapsed(), follow);
 }
 
 /// A stitch whose replacement goes before it resolves is no switch yet: the export stays on
@@ -9299,7 +9357,7 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 	let mut follower = follower(&origin)
 		.await
 		.with_stitch(true)
-		.with_linger(Duration::from_secs(10));
+		.with_follow(Duration::from_secs(10));
 
 	// Replaced, but the replacement's catalog request is never answered before it goes.
 	let second = origin.publish("live", route()).unwrap();
@@ -9331,21 +9389,22 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 }
 
 /// A stitch that fails to resolve while a return is still awaiting its catalog goes back to
-/// that return, so its end starts the linger over rather than the old deadline cutting it off.
+/// that return, which ending before its first snapshot never resumed: the export ends as it did
+/// before it, at the original follow.
 #[tokio::test(start_paused = true)]
 async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	let origin = crate::source::produce_origin();
 	let epoch = moq_net::Epoch::mint();
 	let first = publish_bare(&origin, Some(&epoch));
-	let linger = Duration::from_secs(10);
-	let mut follower = follower(&origin).await.with_linger(linger).with_stitch(true);
+	let follow = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
 	let start = tokio::time::Instant::now();
 	finish(first);
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
-		"lingering"
+		"following"
 	);
 
 	// Back, with a catalog yet to deliver its first snapshot.
@@ -9376,18 +9435,18 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	finish(second);
 	let end = follower.next().await;
 	assert!(matches!(end, Ok(None)), "{end:?}");
-	assert_eq!(start.elapsed(), Duration::from_secs(3) + linger);
+	assert_eq!(start.elapsed(), follow);
 }
 
-/// A failure whose broadcast went and came back before the follower looked is no failure of
-/// the export's own: the return is followed instead of failing at the grace.
+/// A track that lost its route is the publisher leaving, so the return that follows is carried
+/// on into.
 #[tokio::test(start_paused = true)]
-async fn a_follower_follows_a_return_that_came_back_during_the_grace() {
+async fn a_follower_follows_a_return_after_a_lost_route() {
 	let origin = crate::source::produce_origin();
 	let epoch = moq_net::Epoch::mint();
 	let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
 	let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
-	let mut follower = follower(&origin).await.with_linger(Duration::from_secs(10));
+	let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
@@ -9395,15 +9454,9 @@ async fn a_follower_follows_a_return_that_came_back_during_the_grace() {
 		"nothing to mux yet"
 	);
 
-	track.abort(moq_net::Error::Cancel);
-	assert!(
-		tokio::time::timeout(Duration::from_millis(100), follower.next())
-			.await
-			.is_err(),
-		"waiting out the grace"
-	);
-	// The end and the return both arrive before the follower looks again.
-	drop((broadcast, catalog));
+	track.abort(moq_net::Error::Unroutable);
+	catalog.abort(moq_net::Error::Unroutable);
+	drop(broadcast);
 	let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
 	assert!(
@@ -9412,6 +9465,7 @@ async fn a_follower_follows_a_return_that_came_back_during_the_grace() {
 			.is_err(),
 		"carried on into the return"
 	);
+	assert!(follower.export().cataloged(), "the return served its catalog");
 
 	track.finish().unwrap();
 	finish((broadcast, catalog));
@@ -9453,27 +9507,29 @@ async fn a_follower_built_after_its_route_went_follows_the_return() {
 	finish(first);
 	tokio::time::sleep(Duration::from_secs(1)).await;
 
-	let linger = Duration::from_secs(10);
-	let mut follower = super::Follower::new(export).unwrap().with_linger(linger);
+	let follow = Duration::from_secs(10);
+	let mut follower = super::Follower::new(export).unwrap().with_follow(follow);
 	assert!(
 		tokio::time::timeout(Duration::from_secs(2), follower.next())
 			.await
 			.is_err(),
-		"lingering"
+		"following"
 	);
-	let second = publish_bare(&origin, Some(&epoch));
+	let mut second = publish_bare(&origin, Some(&epoch));
+	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"carried on"
 	);
+	assert!(follower.export().cataloged(), "the return served its catalog");
 
-	// Carried on into the return, so its end starts the linger over.
+	// Carried on into the return, so its end starts the follow over.
 	finish(second);
 	let end = follower.next().await;
 	assert!(matches!(end, Ok(None)), "{end:?}");
-	assert_eq!(start.elapsed(), Duration::from_secs(4) + linger);
+	assert_eq!(start.elapsed(), Duration::from_secs(4) + follow);
 }
 
 /// The export's own instance winning the path back from a cheaper route that went is no
@@ -9518,12 +9574,12 @@ async fn a_follower_takes_its_own_instance_winning_back_for_no_replacement() {
 }
 
 /// Without stitching, another instance taking the path fails the follower once the export
-/// ends, however long the linger.
+/// ends, however long the follow.
 #[tokio::test(start_paused = true)]
 async fn a_follower_fails_on_a_replacement_without_stitch() {
 	let origin = crate::source::produce_origin();
 	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-	let mut follower = follower(&origin).await.with_linger(Duration::from_secs(10));
+	let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 	finish(first);
 	let _second = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
 
@@ -9538,7 +9594,7 @@ async fn a_follower_fails_on_a_replacement_without_stitch() {
 async fn a_follower_takes_an_epochless_return_as_a_replacement() {
 	let origin = crate::source::produce_origin();
 	let first = publish_bare(&origin, None);
-	let mut follower = follower(&origin).await.with_linger(Duration::from_secs(10));
+	let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 	finish(first);
 	let _second = publish_bare(&origin, None);
 
@@ -9549,35 +9605,37 @@ async fn a_follower_takes_an_epochless_return_as_a_replacement() {
 	assert!(matches!(err, crate::Error::Replaced(_)), "{err}");
 }
 
-/// The same instance coming back within the linger carries the export on: when it ends
-/// again, the linger starts over from there.
+/// The same instance coming back within the follow carries the export on: when it ends
+/// again, the follow starts over from there.
 #[tokio::test(start_paused = true)]
 async fn a_follower_continues_on_the_same_instance_returning() {
 	let origin = crate::source::produce_origin();
 	let epoch = moq_net::Epoch::mint();
 	let first = publish_bare(&origin, Some(&epoch));
-	let linger = Duration::from_secs(10);
-	let mut follower = follower(&origin).await.with_linger(linger);
+	let follow = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_follow(follow);
 	let start = tokio::time::Instant::now();
 	finish(first);
 	assert!(
 		tokio::time::timeout(Duration::from_secs(2), follower.next())
 			.await
 			.is_err(),
-		"lingering"
+		"following"
 	);
 
-	let second = publish_bare(&origin, Some(&epoch));
+	let mut second = publish_bare(&origin, Some(&epoch));
+	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"carried on"
 	);
+	assert!(follower.export().cataloged(), "the return served its catalog");
 	finish(second);
 	let end = follower.next().await.unwrap();
 	assert!(end.is_none());
-	assert_eq!(start.elapsed(), Duration::from_secs(3) + linger);
+	assert_eq!(start.elapsed(), Duration::from_secs(3) + follow);
 }
 
 /// Pull frames from `follower` until it ends, or until nothing more comes within the drain.
@@ -9613,7 +9671,7 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 		.with_replay();
 	let mut follower = super::Follower::new(export)
 		.unwrap()
-		.with_linger(Duration::from_secs(10));
+		.with_follow(Duration::from_secs(10));
 	let start = tokio::time::Instant::now();
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut track, ms);
@@ -9623,7 +9681,9 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 
 	// Left unpolled across the handoff, and long enough for the first route's retraction to
 	// end the export's request before the second arrives.
-	drop((exact, catalog, track));
+	track.abort(moq_net::Error::Unroutable);
+	catalog.abort(moq_net::Error::Unroutable);
+	drop(exact);
 	tokio::time::sleep(Duration::from_secs(1)).await;
 	let mut served = origin.create_broadcast("pool/job").unwrap();
 	let mut catalog = crate::catalog::Producer::<()>::new(&mut served, Default::default()).unwrap();
@@ -9681,47 +9741,53 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	assert!(matches!(end, Ok(None)), "no replacement: {end:?}");
 }
 
-/// Both the catalog subscription and its first snapshot share the restart's linger bound.
+/// A mid-stream stitch awaits the replacement's catalog with no deadline of its own, so even a
+/// zero follow switches to a cold replacement once its first snapshot arrives.
 #[tokio::test(start_paused = true)]
-async fn a_midstream_stitch_catalog_expires_at_the_linger() {
-	for snapshot in [false, true] {
-		for linger in [Duration::ZERO, Duration::from_secs(10)] {
-			let origin = crate::source::produce_origin();
-			let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-			let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
-			let second = origin
-				.publish(
-					"live",
-					moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
-				)
-				.unwrap();
-			let _unanswered = second.dynamic();
-			let _silent = snapshot.then(|| second.create_track(hang::Catalog::DEFAULT_NAME, None).unwrap());
-			let waiter = kio::Waiter::noop();
-			if !linger.is_zero() {
-				assert!(follower.poll_next(&waiter).is_pending());
-				tokio::time::advance(linger - Duration::from_millis(1)).await;
-				assert!(follower.poll_next(&waiter).is_pending());
-				tokio::time::advance(Duration::from_millis(1)).await;
-			}
-			let std::task::Poll::Ready(Err(err)) = follower.poll_next(&waiter) else {
-				panic!("replacement catalog wait must fail at the linger, snapshot={snapshot}, linger={linger:?}");
-			};
-			assert!(err.to_string().contains("live"), "{err}");
-			assert!(err.to_string().contains("catalog"), "{err}");
-		}
+async fn a_midstream_stitch_awaits_the_replacement_catalog() {
+	for follow in [Duration::ZERO, Duration::from_secs(10)] {
+		let origin = crate::source::produce_origin();
+		let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+		let mut follower = follower(&origin).await.with_stitch(true).with_follow(follow);
+		let epoch = moq_net::Epoch::mint();
+		let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
+		assert!(
+			tokio::time::timeout(Duration::from_secs(60), follower.next())
+				.await
+				.is_err(),
+			"awaiting the replacement's catalog, follow={follow:?}"
+		);
+		assert!(!follower.export().cataloged(), "follow={follow:?}");
+
+		std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), follower.next())
+				.await
+				.is_err(),
+			"nothing to mux, follow={follow:?}"
+		);
+		assert!(
+			follower.export().cataloged(),
+			"the late snapshot switches, follow={follow:?}"
+		);
+		assert_eq!(follower.export().instance(), Some(&epoch));
 	}
 }
 
-/// Re-pricing a replacement while a stitch resolves it is the same instance: it neither
-/// restarts the resolve nor extends the linger bound.
+/// A mid-stream stitch keeps the old instance playing while the replacement's catalog request
+/// goes unanswered, rather than stalling the program on it.
 #[tokio::test(start_paused = true)]
-async fn a_midstream_stitch_bound_survives_route_updates() {
+async fn a_midstream_stitch_keeps_the_old_instance_playing_until_it_switches() {
 	let origin = crate::source::produce_origin();
-	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-	let linger = Duration::from_secs(10);
-	let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
-	let start = tokio::time::Instant::now();
+	let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let export = open_export(crate::source::resolved(&origin, "live").await)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	let mut follower = super::Follower::new(export).unwrap().with_stitch(true);
+
 	let second = origin
 		.publish(
 			"live",
@@ -9729,78 +9795,28 @@ async fn a_midstream_stitch_bound_survives_route_updates() {
 		)
 		.unwrap();
 	let _unanswered = second.dynamic();
-	let reprice = async {
-		let mut cost = 0u64;
-		loop {
-			tokio::time::sleep(Duration::from_secs(1)).await;
-			cost += 1;
-			second.announce(second.route().unwrap().with_cost(cost)).unwrap();
-		}
-	};
-	let end = tokio::time::timeout(linger * 3, async {
-		tokio::select! {
-			end = follower.next() => end,
-			() = reprice => unreachable!("re-pricing never stops"),
-		}
-	})
-	.await
-	.expect("updates extended the stitch bound");
-	let err = end.expect_err("the stitch fails at its linger");
-	assert!(err.to_string().contains("catalog"), "{err}");
-	assert_eq!(start.elapsed(), linger);
-}
-
-/// A catalog ready before the bound completes the switch, including zero linger.
-#[tokio::test(start_paused = true)]
-async fn a_midstream_stitch_catalog_within_linger_clears_the_bound() {
-	for linger in [Duration::ZERO, Duration::from_secs(10)] {
-		let origin = crate::source::produce_origin();
-		let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-		let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
-		let epoch = moq_net::Epoch::mint();
-		let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
-		let waiter = kio::Waiter::noop();
-		if !linger.is_zero() {
-			assert!(follower.poll_next(&waiter).is_pending());
-			tokio::time::advance(linger - Duration::from_millis(1)).await;
-		}
-		std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
-		// Resolve the local async serving path so zero linger sees an already available
-		// subscription and snapshot, rather than a request still parked on the driver.
-		let broadcast = origin
-			.consume()
-			.request_broadcast("live", Some(epoch.clone()))
-			.await
-			.unwrap();
-		let mut available = crate::catalog::Consumer::<()>::new(&broadcast, crate::catalog::CatalogFormat::Hang)
-			.await
-			.unwrap();
-		use crate::catalog::Stream;
-		kio::wait(|waiter| available.poll_next(waiter)).await.unwrap().unwrap();
-		let next = follower.poll_next(&waiter);
-		assert!(next.is_pending(), "{next:?}, linger={linger:?}");
-		assert!(follower.export().cataloged());
-		assert_eq!(follower.export().instance(), Some(&epoch));
-		tokio::time::advance(Duration::from_secs(20)).await;
-		assert!(
-			follower.poll_next(&waiter).is_pending(),
-			"the first snapshot clears the bound"
-		);
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut track, ms);
 	}
+	let (frames, end) = drain_follower(&mut follower).await;
+	assert!(end.is_none(), "still exporting: {end:?}");
+	assert_eq!(pes_count(&frames), 10, "the old instance kept playing");
 }
 
 /// A stitch onto a replacement that goes before it resolves leaves the export awaiting its
-/// current replacement's catalog, by that replacement's own deadline.
+/// current replacement's catalog, which still completes the switch when it arrives.
 #[tokio::test(start_paused = true)]
-async fn a_nested_stitch_keeps_the_pending_catalog_deadline() {
+async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 	let origin = crate::source::produce_origin();
-	let linger = Duration::from_secs(10);
 	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-	let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
-	let start = tokio::time::Instant::now();
+	let mut follower = follower(&origin)
+		.await
+		.with_stitch(true)
+		.with_follow(Duration::from_secs(10));
 
-	// Switched onto a replacement whose catalog never delivers a snapshot.
-	let _second = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	// Switched onto a replacement whose catalog has no snapshot yet.
+	let epoch = moq_net::Epoch::mint();
+	let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
 	assert!(
 		tokio::time::timeout(Duration::from_secs(2), follower.next())
 			.await
@@ -9823,66 +9839,25 @@ async fn a_nested_stitch_keeps_the_pending_catalog_deadline() {
 		"resolving the next replacement"
 	);
 	drop((third, unanswered));
-
-	let end = tokio::time::timeout(linger * 3, follower.next())
-		.await
-		.expect("the second replacement's deadline still bounds it");
-	let err = end.expect_err("a replacement without a catalog fails");
-	assert!(err.to_string().contains("catalog"), "{err}");
-	assert_eq!(start.elapsed(), linger);
-}
-
-/// A replacement restored after its own deadline, when the next one goes before it resolves,
-/// fails even with its late first snapshot ready.
-#[tokio::test(start_paused = true)]
-async fn a_nested_stitch_restored_after_its_deadline_fails() {
-	let origin = crate::source::produce_origin();
-	let linger = Duration::from_secs(10);
-	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-	let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
-	let start = tokio::time::Instant::now();
-
-	// Switched onto a replacement whose catalog has no snapshot yet, bounded at 10s.
-	let epoch = moq_net::Epoch::mint();
-	let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
 	assert!(
-		tokio::time::timeout(Duration::from_secs(2), follower.next())
+		tokio::time::timeout(Duration::from_secs(30), follower.next())
 			.await
 			.is_err(),
-		"awaiting the replacement's catalog"
+		"awaiting the second replacement's catalog again"
 	);
 
-	// Replaced again at 2s, bounded at 12s, but that one's catalog request is never answered.
-	let third = origin
-		.publish(
-			"live",
-			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
-		)
-		.unwrap();
-	let unanswered = third.dynamic();
+	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
-		"resolving the next replacement"
+		"nothing to mux"
 	);
-
-	// At 11s, the third goes and the second's first snapshot is ready, both past its deadline.
-	tokio::time::advance(linger + Duration::from_secs(1) - start.elapsed()).await;
-	drop((third, unanswered));
-	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
-	// Deliver the snapshot through the local serving path, so it is ready on the next poll.
-	let broadcast = origin.consume().request_broadcast("live", Some(epoch)).await.unwrap();
-	let mut available = crate::catalog::Consumer::<()>::new(&broadcast, crate::catalog::CatalogFormat::Hang)
-		.await
-		.unwrap();
-	use crate::catalog::Stream;
-	kio::wait(|waiter| available.poll_next(waiter)).await.unwrap().unwrap();
-
-	let std::task::Poll::Ready(Err(err)) = follower.poll_next(&kio::Waiter::noop()) else {
-		panic!("a snapshot after the restored replacement's deadline must not count");
-	};
-	assert!(err.to_string().contains("catalog"), "{err}");
+	assert!(
+		follower.export().cataloged(),
+		"the second replacement served its catalog"
+	);
+	assert_eq!(follower.export().instance(), Some(&epoch));
 }
 
 /// A replacement whose catalog closes before its first snapshot fails the stitch, rather than
@@ -9894,7 +9869,7 @@ async fn a_midstream_stitch_catalog_closed_without_a_snapshot_fails() {
 	let mut follower = follower(&origin)
 		.await
 		.with_stitch(true)
-		.with_linger(Duration::from_secs(10));
+		.with_follow(Duration::from_secs(10));
 
 	let (_second, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
 	assert!(
@@ -9910,38 +9885,6 @@ async fn a_midstream_stitch_catalog_closed_without_a_snapshot_fails() {
 		.await
 		.expect("the closed catalog ends the export");
 	let err = end.expect_err("a replacement without a catalog fails");
-	assert!(err.to_string().contains("catalog"), "{err}");
-}
-
-/// A snapshot that arrives after the deadline, before the follower polls again, is too late.
-#[tokio::test(start_paused = true)]
-async fn a_midstream_stitch_catalog_after_the_linger_fails() {
-	let origin = crate::source::produce_origin();
-	let linger = Duration::from_secs(10);
-	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-	let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
-	let epoch = moq_net::Epoch::mint();
-	let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
-	let waiter = kio::Waiter::noop();
-	assert!(follower.poll_next(&waiter).is_pending());
-
-	tokio::time::advance(linger).await;
-	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
-	// Deliver the snapshot through the local serving path, so it is ready on the next poll.
-	let broadcast = origin
-		.consume()
-		.request_broadcast("live", Some(epoch.clone()))
-		.await
-		.unwrap();
-	let mut available = crate::catalog::Consumer::<()>::new(&broadcast, crate::catalog::CatalogFormat::Hang)
-		.await
-		.unwrap();
-	use crate::catalog::Stream;
-	kio::wait(|waiter| available.poll_next(waiter)).await.unwrap().unwrap();
-
-	let std::task::Poll::Ready(Err(err)) = follower.poll_next(&waiter) else {
-		panic!("a snapshot after the linger must not count");
-	};
 	assert!(err.to_string().contains("catalog"), "{err}");
 }
 

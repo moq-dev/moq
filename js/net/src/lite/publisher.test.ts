@@ -14,6 +14,7 @@ import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
+import { Subscriber as TrackSubscriber } from "../track.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
@@ -594,7 +595,7 @@ const IDLE_MS = 500;
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function lastGroups(ranges: ReturnType<typeof spyOn>) {
-	return ranges.mock.calls.at(-1)?.[1];
+	return ranges.mock.calls.at(-1)?.[0];
 }
 
 // Wraps a writable so its writes park until `release()`, giving a test a window inside
@@ -1227,7 +1228,7 @@ test("lite draft-06: an omitted group start still serves a group below the first
 // to the next pop rather than reaching backward into this one.
 test("lite draft-05: a group popped before a cap update is still served", async () => {
 	const sub = await servedSubscription({ startGroup: 1, gated: true });
-	const ranges = spyOn(hooks, "replaceGroups");
+	const ranges = spyOn(TrackSubscriber.prototype, "withRange");
 	try {
 		sub.serve(1);
 		await sub.parked;
@@ -1255,7 +1256,7 @@ test("lite draft-05: a group popped before a cap update is still served", async 
 // poll order.
 test("lite draft-06: a queued floor update applies before the next group pop", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, gated: true });
-	const ranges = spyOn(hooks, "replaceGroups");
+	const ranges = spyOn(TrackSubscriber.prototype, "withRange");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -1281,7 +1282,7 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 });
 
 // SUBSCRIBE_START pins the floor to the first served group. A later update can still
-// widen it: public setGroups would keep the pin, so serving uses replaceGroups.
+// widen it, serving the cached groups below the old floor.
 test("lite draft-06: a widening update lowers the serving floor", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 10 });
 	try {
@@ -1309,7 +1310,7 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 		frames: ["a", "b", "c"],
 		gated: true,
 	});
-	const ranges = spyOn(hooks, "replaceGroups");
+	const ranges = spyOn(TrackSubscriber.prototype, "withRange");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -1400,7 +1401,7 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 		sub.serve(0);
 		await sub.parked;
 		sub.serve(1);
-		const ranges = spyOn(hooks, "replaceGroups");
+		const ranges = spyOn(TrackSubscriber.prototype, "withRange");
 
 		try {
 			// Two updates land back to back, the second superseding the first.
@@ -1419,7 +1420,8 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 			// Group 1 is popped under the latest state, with no application of the older one.
 			expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 0, payloads: ["a"] });
 			expect(ranges).toHaveBeenCalledTimes(1);
-			expect(lastGroups(ranges)).toEqual({ start: undefined, end: { included: 1 } });
+			// Draft-06 encodes a floor of group 0 as no floor, which assigns 0.
+			expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: { included: 1 } });
 		} finally {
 			ranges.mockRestore();
 		}
@@ -1437,11 +1439,13 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 		gated: true,
 	});
 	let second!: Promise<void>;
-	const replaceGroups = hooks.replaceGroups;
-	const ranges = spyOn(hooks, "replaceGroups").mockImplementation((subscriber, groups) => {
-		if (groups.start === undefined)
-			second ??= replayUpdate({ priority: 0, endGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
-		return replaceGroups(subscriber, groups);
+	const withRange = TrackSubscriber.prototype.withRange;
+	const ranges = spyOn(TrackSubscriber.prototype, "withRange").mockImplementation(function (
+		this: TrackSubscriber,
+		groups,
+	) {
+		second ??= replayUpdate({ priority: 0, endGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
+		return withRange.call(this, groups);
 	});
 
 	try {
@@ -1473,7 +1477,7 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 // The full update remains atomic to observers, while the local range cursor stays serialized.
 test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, gated: true });
-	const ranges = spyOn(hooks, "replaceGroups");
+	const ranges = spyOn(TrackSubscriber.prototype, "withRange");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -1493,7 +1497,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		sub.release();
 		expect(await sub.servedSequence()).toBe(0);
 		while (ranges.mock.calls.length === 0) await flush();
-		expect(lastGroups(ranges)).toEqual({ start: undefined, end: { included: 5 } });
+		expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: { included: 5 } });
 	} finally {
 		ranges.mockRestore();
 		sub.release();
