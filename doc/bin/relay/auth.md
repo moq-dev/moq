@@ -30,6 +30,8 @@ certificate. Nothing is parsed on the server's behalf: the `jwt` query parameter
 `subscribe` pattern unions and optionally a `root` alias, read-only `mounts`,
 `expires`, a `revalidate` cadence, a stats `tier` and `label`, and `peer` / `upstream` to
 mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
+A `tier` is `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`, such as `region/sjc`,
+because it becomes a metrics label: a grant naming any other tier is an auth server error, and a refusal naming one reads as unattributed.
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
