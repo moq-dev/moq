@@ -480,6 +480,21 @@ impl Producer {
 		}
 	}
 
+	/// Poll until the reference timeline fails.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match self.state.poll_ref(waiter, |state| match state.failed {
+			Some(_) => Poll::Ready(()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			_ => Poll::Pending,
+		}
+	}
+
 	/// Poll `f` over the listed rows, waking on the next window change while it is pending, and
 	/// return the [`resets`](Self::resets) those rows belong to. A closed window stays pending: no
 	/// new row can make `f` ready.

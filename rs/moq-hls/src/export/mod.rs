@@ -348,7 +348,7 @@ impl Broadcaster {
 	}
 
 	/// Start every enabled video rendition's init build, then resolve once one of them has its
-	/// init, or none is enabled. A DASH player picks its adaptation sets from the first manifest
+	/// init, or none is left that could be listed. A DASH player picks its adaptation sets from the first manifest
 	/// it loads, so that one must not lack video only because no init was built yet, while any
 	/// one built init is enough to render at once. Bounding the wait is the caller's policy.
 	#[cfg_attr(

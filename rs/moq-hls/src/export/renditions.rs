@@ -513,7 +513,8 @@ impl Producer {
 	}
 
 	/// Resolve once an enabled video rendition has its init and is
-	/// [advertised](Rendition::is_advertised), so a manifest lists it, or none is enabled.
+	/// [advertised](Rendition::is_advertised), so a manifest lists it, or none is left that
+	/// listings do not refuse: a denied or failed one can never be listed.
 	#[cfg_attr(
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
@@ -524,7 +525,11 @@ impl Producer {
 				let mut video = current
 					.renditions
 					.values()
-					.filter(|rendition| rendition.kind == Kind::Video && rendition.is_enabled())
+					.filter(|rendition| {
+						rendition.kind == Kind::Video
+							&& rendition.is_enabled()
+							&& rendition.poll_refused(waiter).is_pending()
+					})
 					.peekable();
 				if video.peek().is_none()
 					|| video.any(|rendition| {

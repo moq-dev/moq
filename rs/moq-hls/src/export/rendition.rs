@@ -750,6 +750,22 @@ impl Rendition {
 		self.live.failure().is_none() && self.check().is_err()
 	}
 
+	/// Poll until listings of this rendition refuse (see [`check`](Self::check)), waking when its
+	/// media is denied or either timeline fails.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub(crate) fn poll_refused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.poll_media(waiter);
+		let _ = self.spans.poll_failed(waiter);
+		let _ = self.live.poll_failed(waiter);
+		match self.check() {
+			Err(_) => Poll::Ready(()),
+			Ok(()) => Poll::Pending,
+		}
+	}
+
 	fn snapshot_from_window(&self, window: segments::Window, finished: bool, generation: Option<Arc<str>>) -> Snapshot {
 		// HLS requires EXT-X-TARGETDURATION to be at least every EXTINF, rounded up to whole
 		// seconds. The catalog duration is nominal, while actual records can be longer.
@@ -1656,5 +1672,36 @@ mod tests {
 		assert!(is_gone_publisher(&moq_net::Error::Cancel, &gone));
 		assert!(!is_cache_miss(&moq_net::Error::Dropped));
 		assert!(!is_cache_miss(&moq_net::Error::Remote(0)));
+	}
+
+	// A wait on a rendition's refusal wakes when either timeline fails mid-wait, so the
+	// manifest's first-video wait drops a video that can no longer be listed.
+	#[tokio::test(start_paused = true)]
+	async fn a_refusal_wait_wakes_on_a_timeline_failure() {
+		for own in [true, false] {
+			let origin = moq_tokio::origin::spawn();
+			let broadcast = origin.create_broadcast("live").unwrap();
+			let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
+			let config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			let rendition =
+				Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
+			// On its own task, so only a registered wake polls it again.
+			let refused = tokio::spawn({
+				let rendition = rendition.clone();
+				async move { kio::wait(|waiter| rendition.poll_refused(waiter)).await }
+			});
+			moq_clock::sleep(Duration::from_millis(10)).await;
+			assert!(!refused.is_finished(), "no timeline failed yet");
+			let err = crate::Error::Moq(moq_net::Error::Transport("connection lost".into()));
+			if own {
+				rendition.spans.fail(err, false);
+			} else {
+				rendition.fail(err);
+			}
+			moq_clock::timeout(Duration::from_secs(1), refused)
+				.await
+				.expect("the failure wakes the wait")
+				.unwrap();
+		}
 	}
 }

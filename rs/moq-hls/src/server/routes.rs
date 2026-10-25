@@ -364,6 +364,59 @@ mod tests {
 		assert!(body.contains("id=\"video/video0\""), "{body}");
 	}
 
+	/// A denied video can never be listed, so it never holds the manifest until the first-video
+	/// wait times out: the playable audio is served at once.
+	#[tokio::test(start_paused = true)]
+	async fn a_denied_video_never_holds_the_manifest() {
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin.create_broadcast("room/live").unwrap();
+		broadcast.announce(run()).unwrap();
+		let secret = origin.create_broadcast("room/secret").unwrap();
+		secret.announce(Default::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut config = video_config();
+		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
+		let mut video = reserved
+			.video(
+				secret.create_track("video0", timed()).unwrap(),
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+				config,
+			)
+			.unwrap();
+		let mut audio = reserved
+			.audio(
+				broadcast.create_track("audio0", timed()).unwrap(),
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+				hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+			)
+			.unwrap();
+		drop(reserved);
+		write_three_gops(&mut video);
+		for micros in [0, 2_000_000, 4_000_000] {
+			let keyframe = audio.needs_keyframe();
+			audio.write(vp8_frame(micros, keyframe)).unwrap();
+			audio.cut(None).unwrap();
+		}
+
+		let restricted = origin
+			.consume()
+			.scope(
+				"",
+				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
+			)
+			.unwrap();
+		let app = Server::new(restricted, Default::default()).router();
+		let start = tokio::time::Instant::now();
+		let response = oneshot(app, "/room/live/manifest.mpd").await;
+		assert!(start.elapsed() < READY_TIMEOUT, "waited {:?}", start.elapsed());
+		assert_eq!(response.status(), StatusCode::OK);
+		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+		let body = String::from_utf8(body.to_vec()).unwrap();
+		assert!(body.contains("id=\"audio/audio0\""), "{body}");
+		assert!(!body.contains("id=\"video/video0\""), "{body}");
+	}
+
 	/// A restarted publisher gets URLs of its own, whose numbering starts over: the master lists
 	/// the replacement, while a player already on the old instance keeps its playlist until that
 	/// instance's broadcast closes.
