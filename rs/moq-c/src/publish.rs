@@ -1319,24 +1319,33 @@ impl Publish {
 }
 
 impl State {
-	/// End a broadcast for good and release it with every child still open on it.
+	/// Release a broadcast and every child still open on it, returning what is left to end it.
 	///
 	/// The children end first, with `Unroutable` as a reader sees a publisher leave, so none
 	/// outlives the broadcast it publishes on.
-	pub fn publish_close(&mut self, broadcast: Id) -> Result<(), Error> {
+	pub fn publish_close(&mut self, broadcast: Id) -> Result<Closing, Error> {
 		let broadcast = self
 			.publish
 			.broadcasts
 			.remove(broadcast)
 			.ok_or(Error::BroadcastNotFound)?;
 		let err = moq_net::Error::Unroutable;
+		let mut encoders: Vec<Box<dyn FnOnce(moq_net::Error) + Send>> = Vec::new();
 		for child in broadcast.children.close() {
 			match child {
 				Child::Media(id) => self.publish.media.remove(id).map(|media| media.abort(err.clone())),
 				Child::Container(id) => self.publish.containers.remove(id).map(|media| media.abort(err.clone())),
 				Child::Track(id) => self.publish.tracks.remove(id).map(|track| track.abort(err.clone())),
-				Child::Audio(id) => self.audio.remove(id).ok().map(|audio| audio.abort(err.clone())),
-				Child::Video(id) => self.video.remove(id).ok().map(|video| video.abort(err.clone())),
+				Child::Audio(id) => self
+					.audio
+					.remove(id)
+					.ok()
+					.map(|audio| encoders.push(Box::new(|err| audio.abort(err)))),
+				Child::Video(id) => self
+					.video
+					.remove(id)
+					.ok()
+					.map(|video| encoders.push(Box::new(|err| video.abort(err)))),
 				Child::JsonSnapshot(id) => self
 					.publish
 					.json_snapshot
@@ -1355,7 +1364,28 @@ impl State {
 					.map(|data| data.abort(err.clone())),
 			};
 		}
-		Publish::close(broadcast)
+		Ok(Closing { encoders, broadcast })
+	}
+}
+
+/// A broadcast released by [`State::publish_close`], ended by [`Closing::run`] once the global
+/// lock is released.
+///
+/// An encoder holds its own lock across a codec call, a drain included, so ending one under the
+/// global lock would stall every unrelated call behind that codec.
+#[must_use = "the broadcast ends only once run"]
+pub struct Closing {
+	encoders: Vec<Box<dyn FnOnce(moq_net::Error) + Send>>,
+	broadcast: Broadcast,
+}
+
+impl Closing {
+	/// End the released encoders, waiting out any call in flight on them, then the broadcast.
+	pub fn run(self) -> Result<(), Error> {
+		for abort in self.encoders {
+			abort(moq_net::Error::Unroutable);
+		}
+		Publish::close(self.broadcast)
 	}
 }
 
@@ -1393,7 +1423,7 @@ mod children_tests {
 	async fn closing_a_broadcast_ends_its_open_tracks() {
 		let mut state = State::new();
 		let (broadcast, track, media, readers) = children(&mut state).await;
-		state.publish_close(broadcast).unwrap();
+		state.publish_close(broadcast).unwrap().run().unwrap();
 		for mut reader in readers {
 			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
 			assert!(matches!(
@@ -1432,7 +1462,7 @@ mod children_tests {
 			readers.push(consumer.track(name).unwrap().subscribe(None).await.unwrap());
 		}
 
-		state.publish_close(broadcast).unwrap();
+		state.publish_close(broadcast).unwrap().run().unwrap();
 		for mut reader in readers {
 			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
 			assert!(matches!(
@@ -1466,7 +1496,7 @@ mod children_tests {
 		let (broadcast, track, media, readers) = children(&mut state).await;
 		state.publish.track_finish(track).unwrap();
 		state.publish.media_finish(media).unwrap();
-		state.publish_close(broadcast).unwrap();
+		state.publish_close(broadcast).unwrap().run().unwrap();
 		for mut reader in readers {
 			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
 			assert!(matches!(read.expect("the track carried on"), Ok(None)));
@@ -1595,7 +1625,10 @@ mod supervision_tests {
 		assert!(matches!(state.publish.catalog_finish(broadcast), Err(Error::Panic)));
 		// The handle stays the caller's to close, and the close still ends the broadcast.
 		assert!(!consumer.is_closed());
-		assert!(matches!(state.publish_close(broadcast), Err(Error::Panic)));
+		assert!(matches!(
+			state.publish_close(broadcast).unwrap().run(),
+			Err(Error::Panic)
+		));
 		assert!(consumer.is_closed());
 	}
 }

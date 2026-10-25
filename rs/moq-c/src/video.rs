@@ -913,10 +913,17 @@ pub extern "C" fn moq_encode_video_bitrate(producer: u32, bitrate: u64) -> i32 {
 pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(producer)?;
-		// The id is dropped first, so nothing new queues behind the drain; whatever
-		// is mid-encode still finishes before this takes the encoder.
-		let producer = State::lock().video.remove(id)?;
-		producer.take().ok_or(Error::MediaNotFound)?.publish_finish(id)
+		// The id stays until the drain ends, so a racing moq_publish_close waits it out
+		// instead of missing a track that still publishes. A call queued behind the drain
+		// finds the encoder gone.
+		let shared = State::lock().video.producer(id)?;
+		let finished = {
+			let mut guard = shared.lock();
+			guard.take().ok_or(Error::MediaNotFound)?.publish_finish(id)
+		};
+		// A racing close may have released the id already.
+		let _ = State::lock().video.remove(id);
+		finished
 	})
 }
 

@@ -4325,6 +4325,35 @@ async fn dropping_an_unfinished_data_writer_ends_it() {
 	broadcast.close().unwrap();
 }
 
+/// A track handle goes to one writer: while one is built from it, another is refused, and a
+/// construction that fails hands the handle back.
+#[tokio::test(start_paused = true)]
+async fn a_track_is_adopted_by_one_writer() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("json".into(), None).unwrap();
+	let config = || MoqJsonSnapshotConfig {
+		deltas: false,
+		compression: false,
+	};
+	let failed = track.adopt::<MoqJsonSnapshotProducer>(|_| {
+		assert!(matches!(
+			MoqJsonSnapshotProducer::new(&broadcast, &track, config()),
+			Err(MoqError::Closed)
+		));
+		Err(MoqError::JsonTrack {
+			reason: "refused".into(),
+		})
+	});
+	assert!(matches!(failed, Err(MoqError::JsonTrack { .. })));
+	let writer = MoqJsonSnapshotProducer::new(&broadcast, &track, config()).unwrap();
+	assert!(matches!(
+		MoqJsonSnapshotProducer::new(&broadcast, &track, config()),
+		Err(MoqError::Closed)
+	));
+	drop(writer);
+	broadcast.close().unwrap();
+}
+
 /// A media finish that fails ends the track with that failure, rather than dropping it without a
 /// cause.
 #[tokio::test(start_paused = true)]

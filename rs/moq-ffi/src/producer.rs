@@ -181,6 +181,11 @@ impl Children {
 		}
 	}
 
+	/// Whether the broadcast closed, ending its children.
+	fn is_closed(&self) -> bool {
+		matches!(*self.0.lock().unwrap(), Family::Closed)
+	}
+
 	/// Keep a finished producer until the broadcast ends, or drop it now if it already has.
 	pub(crate) fn keep(&self, producer: impl kio::MaybeSend + 'static) {
 		let producer: Box<dyn kio::MaybeSend> = Box::new(producer);
@@ -720,10 +725,21 @@ impl MoqTrackProducer {
 		&self,
 		f: impl FnOnce(moq_net::track::Producer) -> Result<T, MoqError>,
 	) -> Result<Arc<T>, MoqError> {
-		// Not under the lock: `f` may take the broadcast's, which a close holds while it takes this one.
-		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		let writer = Arc::new(f(track)?);
-		self.inner.lock().unwrap().take();
+		// Taken for the whole construction, so a racing adopt finds the handle closed. `f` runs
+		// outside the lock: it may take the broadcast's, which a close holds while it takes this one.
+		let track = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let writer = match f(track.clone()) {
+			Ok(writer) => Arc::new(writer),
+			Err(err) => {
+				*self.inner.lock().unwrap() = Some(track);
+				// A close during `f` found nothing to end, so the restored track ends here.
+				let children = self.keep.lock().unwrap().clone();
+				if children.is_some_and(|children| children.is_closed()) {
+					Child::abort(self, moq_net::Error::Unroutable);
+				}
+				return Err(err);
+			}
+		};
 		// A finished track has no family left to join, and ends at its declared end.
 		let children = self.keep.lock().unwrap().clone();
 		match children {

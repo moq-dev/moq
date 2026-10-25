@@ -462,16 +462,23 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(producer)?;
-		// The id is dropped first, so nothing new queues behind the flush; whatever
-		// is mid-encode still finishes before this takes the producer.
-		let producer = State::lock().audio.remove(id)?;
-		let AudioEncoder {
-			mut producer, children, ..
-		} = producer.take().ok_or(Error::MediaNotFound)?;
-		producer.finish()?;
-		// The broadcast keeps the finished track, so its finish still holds it.
-		children.keep(crate::publish::Child::Audio(id), producer);
-		Ok(())
+		// The id stays until the flush ends, so a racing moq_publish_close waits it out
+		// instead of missing a track that still publishes. A call queued behind the flush
+		// finds the encoder gone.
+		let shared = State::lock().audio.producer(id)?;
+		let finished: Result<(), Error> = (|| {
+			let mut guard = shared.lock();
+			let AudioEncoder {
+				mut producer, children, ..
+			} = guard.take().ok_or(Error::MediaNotFound)?;
+			producer.finish()?;
+			// The broadcast keeps the finished track, so its finish still holds it.
+			children.keep(crate::publish::Child::Audio(id), producer);
+			Ok(())
+		})();
+		// A racing close may have released the id already.
+		let _ = State::lock().audio.remove(id);
+		finished
 	})
 }
 

@@ -2180,7 +2180,9 @@ pub extern "C" fn moq_publish_unannounce(broadcast: u32) -> i32 {
 pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		State::lock().publish_close(broadcast)
+		// Bound first, so the global lock is released before the encoders end.
+		let closing = State::lock().publish_close(broadcast)?;
+		closing.run()
 	})
 }
 
