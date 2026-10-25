@@ -356,6 +356,8 @@ export const hooks: {
 	trackReleased: (producer: Producer) => GetPromise<Error | null>;
 	/** {@link trackReleased} for a demand handle. Assigned by `track.ts`. */
 	demandReleased: (demand: Demand) => GetPromise<Error | null>;
+	/** Whether the producer declared the track's end, released or not. Assigned by `track.ts`. */
+	trackFinished: (producer: Producer) => boolean;
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -534,6 +536,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	demandReleased: () => {
+		throw new Error("track.ts not loaded");
+	},
+	trackFinished: () => {
 		throw new Error("track.ts not loaded");
 	},
 	producerLargest: () => {

@@ -94,6 +94,17 @@ test("a finished track is listed while the table holds it", async () => {
 	expect(await tracks.drain()).toEqual(["end"]);
 });
 
+test("a track that finished but stays open ends the listing as finished", async () => {
+	const broadcast = new BroadcastProducer();
+	const a = broadcast.createTrack("a");
+	broadcast.createTrack("b");
+	a.finish();
+	const tracks = list(broadcast);
+	expect(await tracks.drain()).toEqual(["+a", "+b", "synced"]);
+	broadcast.close();
+	expect(await tracks.drain()).toEqual(["~a", "end"]);
+});
+
 test("a lister finishes or removes a track", async () => {
 	const broadcast = new BroadcastProducer();
 	const lister = wireOf(broadcast).lister();

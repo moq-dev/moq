@@ -815,6 +815,7 @@ export class Producer {
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
 		hooks.releaseTrack = (producer) => producer.#close(undefined);
 		hooks.trackReleased = (producer) => producer.#state.closed;
+		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
 			producer.#owe();
@@ -1562,6 +1563,8 @@ export class Producer {
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
 	// boundary it falls just before. Mirrors the Rust `finish_at` on a `received()` copy.
 	#endPending(end: Position): void {
+		// Before the end lands, so settling it already counts what the tail still owes.
+		this.#tailPending = true;
 		const declared = this.#state.end.peek();
 		if (declared === undefined) {
 			this.finishAt(end);
@@ -1571,7 +1574,6 @@ export class Producer {
 			}
 			this.#declareEnd(end);
 		}
-		this.#tailPending = true;
 		this.#owe();
 	}
 

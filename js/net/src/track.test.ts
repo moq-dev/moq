@@ -3519,6 +3519,26 @@ async function settled(read: Promise<unknown>): Promise<boolean> {
 	return done;
 }
 
+// The end arrives after a higher group did, with lower ones still owed: it must not settle.
+test("a received end behind a hole settles only once the hole fills", () => {
+	const producer = new TrackProducer("test");
+	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
+	hooks.startTrack(producer, { start: 0 });
+	const late = new GroupProducer(2);
+	late.finish();
+	producer.writeGroup(late);
+	hooks.endTrack(producer, { group: 3, frame: 0 });
+	expect(producer.closed.peek()).toBeUndefined();
+
+	for (const sequence of [0, 1]) {
+		const group = new GroupProducer(sequence);
+		group.finish();
+		producer.writeGroup(group);
+	}
+	expect(producer.closed.peek()).toBeNull();
+	reader.close();
+});
+
 test("a pending tail holds readers at a hole until it fills", async () => {
 	const { producer, reader, write } = pendingTail(3);
 	write(2);

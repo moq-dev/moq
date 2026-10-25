@@ -35,9 +35,13 @@ export type TracksEvent =
 	| { kind: "removed"; name: string }
 	| { kind: "finished"; name: string };
 
-/** Whether `own` closed cleanly, so its track leaves the listing as finished. */
+/**
+ * Whether `own` leaves the listing as finished: it closed cleanly, or it declared its end and is
+ * still open, as the Rust listing counts a producer that finished but still holds its track.
+ */
 function finished(own: track.Producer): boolean {
-	return hooks.trackReleased(own).peek() === null;
+	const released = hooks.trackReleased(own).peek();
+	return released === null || (released === undefined && hooks.trackFinished(own));
 }
 
 /** One listed track and who lists it. */
