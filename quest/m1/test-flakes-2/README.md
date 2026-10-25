@@ -49,3 +49,4 @@ Public API: none. Wire: none.
 - [moq-gst pinned replay](/quest/m1/test-flakes-2/gst-pinned-replay.md) - the pinned-instance finish test waits on events instead of sleep loops
 - [Dart leak RSS](/quest/m1/test-flakes-2/dart-leak-rss.md) - the leak tests measure what moq owns, not process RSS
 - [Echo report test on mocked time](/quest/m1/test-flakes-2/export-echo-time.md) - the moq-cli echo report test stops taking 35 s of wall time
+- [OBS failed audio candidate](/quest/m1/test-flakes-2/obs-audio-candidate.md) - the OBS failed-audio-candidate test passes under load
