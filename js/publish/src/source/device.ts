@@ -6,7 +6,8 @@ export interface DeviceProps {
 	preferred?: string | Signal<string | undefined>;
 }
 
-type DeviceOutput = {
+/** Signals the device list derives. */
+export type DeviceOutput = {
 	// The devices that are available, or undefined without permission to enumerate them.
 	available: Signal<MediaDeviceInfo[] | undefined>;
 	// The device the platform names as its default, or undefined when it names none.

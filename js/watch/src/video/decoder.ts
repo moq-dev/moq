@@ -55,7 +55,8 @@ export interface Stats {
 	bytesReceived: number;
 }
 
-type DecoderOutput = {
+/** Signals the decoder derives. */
+export type DecoderOutput = {
 	/** Fatal decode failure, cleared when another source is selected. */
 	error: Signal<Error | undefined>;
 	// The current frame to render.
@@ -843,6 +844,7 @@ function hardwareAcceleration(config: { interlaced?: boolean }): HardwareAcceler
 	return config.interlaced ? "prefer-software" : undefined;
 }
 
+/** Whether the WebCodecs video decoder can play this config. */
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	if (!Catalog.containerSupported(config.container)) {
 		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.

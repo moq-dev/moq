@@ -637,8 +637,10 @@ export class Consumer {
 		return new Consumer(this.shareState());
 	}
 
-	// Hand this consumer's backing state and path to a clone. Opaque (`never`) so the state type
-	// stays unexported; a subclass passes it straight back into its own `super(...)`.
+	/**
+	 * This consumer's backing state and path, for a clone. Opaque (`never`) so the state type
+	 * stays unexported; a subclass passes it straight back into its own `super(...)`.
+	 */
 	protected shareState(): never {
 		return {
 			state: this.#state,

@@ -33,25 +33,26 @@ Decided 2026-10-23 (maintainer interview):
   and dropping an export's doc comment must each fail `just check`.
 - Rust is a non-goal: docs.rs and cargo-semver-checks cover it.
 
-Implementation checkpoint: strict compiler, extractor, and TSDoc messages are
-wired into the shared report configuration. The JSR `@module` tag is defined
-and translated to `@packageDocumentation` in the isolated declaration copy;
-focused fixtures cover missing exports, stripped names, and undocumented
-exports. The old checkers remain until the replacement can pass the workspace.
+Decided 2026-10-25 (maintainer): resolve declared dependency types without
+requiring sibling packages to be built, accepting a broader redesign of the
+analysis and its inputs, rather than scoping external-module diagnostics.
+Reason: an unresolved declaration should fail wherever it is, not only inside
+the package, and no blanket suppression of external-module diagnostics.
 
-Open decision: the isolated copy intentionally cannot resolve external
-packages, so strict compiler diagnostics reject every bare dependency import
-with TS2307. Choose whether to preserve isolation with narrowly scoped external
-module diagnostics, or resolve declared dependency types without relying on
-sibling packages having been built. The former keeps today's independent
-reports and is the smaller change, but makes the unresolved-declaration check
-explicitly local to the package. No diagnostic exception is implemented yet.
-
-Remaining after that decision: migrate existing release tags and TSDoc syntax,
-replace private-helper `typeof` references in public static method bags with
-explicit signatures, fix any other exposed public declarations without
-expanding exports unnecessarily, remove `docs.ts` and `declarations.ts` with
-their superseded tests, and pass `just check` and `just ci`.
+- The `dist/` copy gets a `node_modules` holding only the declared
+  dependencies, peer and optional dependencies, linked to their workspace
+  install. A workspace sibling resolves to its source through its `exports`,
+  so it never needs to be built; an undeclared import fails with TS2307.
+- A dependency's own declarations are checked by its own build: messages
+  located in files outside the copy are ignored, by location, not by code.
+- One compiler state covers every entrypoint. A forgotten export is accepted
+  when every same-named declaration in this package the reporting signature
+  references is nameable from some entrypoint: exported, a namespace member,
+  or renamed by a nameable declaration (`type A = B`, `x: typeof f`).
+- `export * as X` is rewritten to import-then-export, since API Extractor
+  treats each namespace re-export as a new namespace.
+- `ae-missing-release-tag` is off (`@internal` is the only tier) and
+  `ae-unresolved-link` is off (JSR resolves links in lexical scope).
 
 ## Related
 

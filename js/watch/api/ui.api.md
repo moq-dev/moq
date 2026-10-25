@@ -11,5 +11,4 @@ class MoqWatchUi extends HTMLElement {
 }
 export default MoqWatchUi;
 
-
 ```

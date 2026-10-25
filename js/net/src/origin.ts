@@ -11,6 +11,7 @@
  * @module
  */
 import { Derived, type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
+import type * as Announce from "./announce.ts";
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import type * as Epoch from "./epoch.ts";
@@ -39,7 +40,7 @@ import {
 } from "./wire.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
-export { isAnonymous } from "./hop.ts";
+export { HopSchema, isAnonymous } from "./hop.ts";
 
 /** The rooted permissions shared by a handle and every route it inserts. */
 class Scope {
@@ -1063,7 +1064,7 @@ export interface Table {
 	request(path: Path.Valid, options?: RequestOptions): Requesting;
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
+	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
 	dynamic(prefix: Path.Valid): Dynamic;
@@ -1464,7 +1465,7 @@ export class Producer implements Table {
 	}
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
+	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer {
 		return this.#reader.announced(scope, options);
 	}
 
@@ -1956,11 +1957,11 @@ export class Consumer {
 	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
 	 * peer sees it. A dynamic or received route announces the prefix it covers when its
 	 * subtree overlaps the scope. The stream ends when the origin closes or the consumer is
-	 * closed. Hidden routes are left out unless `options.hidden` opts in (see {@link announce.Options}).
+	 * closed. Hidden routes are left out unless `options.hidden` opts in (see {@link Announce.Options}).
 	 * While open, it watches the scope's literal head: a `consume` session asks its peer for
 	 * announcements there.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		const producer = new announce.Producer();
 		const patterns = this.#scope.patterns(scope);
 		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));

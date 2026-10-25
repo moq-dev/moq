@@ -48,7 +48,8 @@ export type SourceInput = {
 	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 
-type SourceOutput = {
+/** Signals the source derives. */
+export type SourceOutput = {
 	catalog: Signal<Catalog.Video | undefined>;
 	available: Signal<Record<string, Catalog.VideoConfig>>;
 

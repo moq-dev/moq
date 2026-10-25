@@ -62,7 +62,8 @@ export type CaptureProps = Inputs<CaptureInput> & {
 	channelCount?: number | Signal<number | undefined>;
 };
 
-type CaptureOutput = {
+/** Signals the capture derives. */
+export type CaptureOutput = {
 	// The PCM to encode, replaced whenever the source changes. Subscribe for a stream of your own:
 	// several renditions share one capture, and each needs every frame rather than the newest.
 	frames: Signal<Fanout<AudioFrame> | undefined>;
