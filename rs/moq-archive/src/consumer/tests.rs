@@ -462,6 +462,25 @@ async fn an_archive_without_markers_stays_open() {
 	assert!(pending.is_err(), "the newest group stays open");
 }
 
+/// Closing the broadcast ends a followed archive and cancels the tracks it still served live,
+/// the open newest group included.
+#[tokio::test(start_paused = true)]
+async fn closing_the_broadcast_cancels_the_live_tracks() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	archive.object("video", 0, vec![frames(true, 0, 0..1)]).await;
+
+	let (broadcast, run) = serve(&archive.store).await;
+	let mut reader = subscribe(&broadcast, "video").await;
+	let mut group = reader.next_group().await.unwrap().unwrap();
+	assert!(group.read_frame().await.unwrap().is_some());
+
+	broadcast.close();
+	run.await.unwrap().unwrap();
+	let err = group.read_frame().await.unwrap_err();
+	assert!(matches!(err, moq_net::Error::Cancel), "{err}");
+}
+
 /// A store failure ends the replay and aborts every served track with it, the open newest group
 /// included, so readers see the failure rather than a dropped producer.
 #[tokio::test(start_paused = true)]

@@ -148,7 +148,7 @@ impl<S: ObjectStore> Consumer<S> {
 			return Err(Error::NotFound(consumer.shared.store.prefix().to_string()));
 		}
 		if let Err(err) = consumer.apply(refreshed) {
-			consumer.abort();
+			consumer.abort(moq_net::Error::Stream(moq_net::StreamError::Internal));
 			return Err(err);
 		}
 		Ok(consumer)
@@ -157,21 +157,14 @@ impl<S: ObjectStore> Consumer<S> {
 	/// Serve the archive until the broadcast closes, following it while it grows.
 	///
 	/// Fails when the store does, or when it holds a key or object the layout does not name.
-	/// Every served track is then aborted, so its readers see the failure.
+	/// Every track still live is then aborted with that failure; one left live when the
+	/// broadcast closes, or when the consumer is dropped, is cancelled.
 	pub async fn run(mut self) -> Result<()> {
 		let result = self.serve().await;
 		if result.is_err() {
-			self.abort();
+			self.abort(moq_net::Error::Stream(moq_net::StreamError::Internal));
 		}
 		result
-	}
-
-	/// Abort every served track, its open group included, after serving failed.
-	fn abort(&mut self) {
-		let err = moq_net::Error::Stream(moq_net::StreamError::Internal);
-		for (_, track) in self.tracks.drain() {
-			track.live.abort(err.clone());
-		}
 	}
 
 	async fn serve(&mut self) -> Result<()> {
@@ -268,6 +261,24 @@ impl<S: ObjectStore> Consumer<S> {
 			self.ended = true;
 		}
 		Ok(())
+	}
+}
+
+impl<S> Consumer<S> {
+	/// Abort every served track with `err`, its open group included.
+	fn abort(&mut self, err: moq_net::Error) {
+		for (_, track) in self.tracks.drain() {
+			track.live.abort(err.clone());
+		}
+	}
+}
+
+impl<S> Drop for Consumer<S> {
+	fn drop(&mut self) {
+		// An archive that ended already finished every track as recorded.
+		if !self.ended {
+			self.abort(moq_net::Error::Cancel);
+		}
 	}
 }
 
