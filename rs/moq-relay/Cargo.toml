@@ -25,7 +25,10 @@ doc = false
 [features]
 # A programmatic relay fixture with generated TLS and ephemeral ports.
 test-support = []
-default = ["cluster-lan", "quic", "websocket", "uds"]
+# The optional public STUN Binding listener (`--stun-bind`).
+stun = ["dep:stun-types"]
+default = ["acme", "cluster-lan", "quic", "websocket", "uds"]
+acme = ["dep:rustls-acme"]
 iroh = ["moq-tokio/iroh"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
@@ -67,7 +70,7 @@ http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "r
 humantime = { workspace = true }
 hyper-util = { workspace = true }
 moq-auth = { workspace = true, features = ["client"] }
-moq-clock = { workspace = true }
+moq-clock = { workspace = true, features = ["serde"] }
 moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true, optional = true }
@@ -78,11 +81,11 @@ rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
 reqwest-middleware = "0.5"
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
-rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
+rustls-acme = { version = "0.15.4", optional = true, default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
-stun-types = { workspace = true }
+stun-types = { workspace = true, optional = true }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -109,9 +112,11 @@ h2 = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 # Clocks only the test moves, wall time included, so a grant's life is exact.
 moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
+moq-congestion = { path = "../moq-congestion" }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
+stun-types = { workspace = true }
 tempfile = { workspace = true }
 # Runs the tests that need a variable set or unset in a child process given it.
 test-env = { path = "../test-env" }
@@ -121,7 +126,7 @@ tracing-subscriber = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Workers built inside a runtime with a manual clock installed run on that clock.
-moq-uring = { workspace = true, features = ["manual"] }
+moq-uring = { workspace = true, features = ["_manual"] }
 # Which sockets the process still holds, so the embed tests can prove a stopped
 # relay closed its own without rebinding a port another test could take.
 socket2 = { workspace = true, features = ["all"] }
@@ -142,3 +147,6 @@ harness = false
 [[bench]]
 name = "http_auth"
 harness = false
+
+[lints]
+workspace = true

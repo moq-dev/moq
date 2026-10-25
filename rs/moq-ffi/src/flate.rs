@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use moq_mux::binary::Config;
-use moq_mux::catalog::hang::Extra;
 
 use crate::error::MoqError;
 use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
@@ -39,7 +38,7 @@ impl From<MoqFlateConfig> for Config {
 /// Publishes opaque payloads that consumers see as a single latest value.
 #[derive(uniffi::Object)]
 pub struct MoqFlateSnapshotProducer {
-	inner: std::sync::Mutex<Option<moq_mux::binary::Snapshot<Extra>>>,
+	inner: std::sync::Mutex<Option<moq_mux::binary::Snapshot>>,
 }
 
 #[uniffi::export]
@@ -91,7 +90,7 @@ impl MoqFlateSnapshotProducer {
 /// Publishes an ordered log of opaque payloads, one per append.
 #[derive(uniffi::Object)]
 pub struct MoqFlateStreamProducer {
-	inner: std::sync::Mutex<Option<moq_mux::binary::Stream<Extra>>>,
+	inner: std::sync::Mutex<Option<moq_mux::binary::Stream>>,
 }
 
 #[uniffi::export]

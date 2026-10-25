@@ -77,6 +77,51 @@ def rust(directory):
     return checked(entries)
 
 
+def paired(directory):
+    """Combine each run's paired comparison under its trend series names; None when no run was paired."""
+    runs = [Path(line) for line in (directory / 'criterion-runs.txt').read_text().splitlines() if line]
+    metadata = [json.loads((run / 'metadata.json').read_text()) for run in runs]
+    bases = {data['base'] for data in metadata}
+    if bases == {''}:
+        return None
+    if len(bases) != 1:
+        raise ValueError(f'Criterion runs disagree on their paired base: {sorted(bases)}')
+    combined = {'unavailable': [], 'cases': []}
+    for run, data in zip(runs, metadata):
+        comparison = json.loads((run / 'paired.json').read_text())
+        for key in ('commit', 'base', 'threshold_pct', 'rounds'):
+            if combined.setdefault(key, comparison[key]) != comparison[key]:
+                raise ValueError(f'paired run disagrees on {key}: {run}')
+        label = data['environment']['MOQ_BENCH_LABEL']
+        combined['unavailable'] += [{'name': f'rust/{label}/{entry["target"]}', 'reason': entry['reason']}
+                                    for entry in comparison['unavailable']]
+        for case in comparison['cases']:
+            case = dict(case)
+            combined['cases'].append({'name': f'rust/{label}/{case.pop("id")}', **case})
+    return combined
+
+
+def gate(directory):
+    """Print confirmed paired regressions and comparisons that could not run; nonzero when any exist."""
+    path = directory / 'paired.json'
+    if not path.exists():
+        raise ValueError(f'no paired comparison in {directory}')
+    comparison = json.loads(path.read_text())
+    regressions = [case for case in comparison['cases'] if case['verdict'] == 'regression']
+    lines = [f'Paired comparison of {comparison["commit"][:9]} against {comparison["base"][:9]}: '
+             f'{len(regressions)} confirmed regressions, {len(comparison["unavailable"])} targets not compared', '']
+    for case in regressions:
+        rounds = ', '.join(f'{delta:+.1f}%' for delta in case['rounds']['paired_deltas_pct'])
+        lines.append(f'- `{case["name"]}`: {case["rounds"]["delta_pct"]:+.1f}% (rounds {rounds})')
+    lines += [f'- `{entry["name"]}` not compared: {entry["reason"]}' for entry in comparison['unavailable']]
+    text = '\n'.join(lines) + '\n'
+    print(text, end='')
+    if summary := os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(summary, 'a') as stream:
+            stream.write(text)
+    return 1 if regressions or comparison['unavailable'] else 0
+
+
 def measurement_unit(column):
     if column == 'size_bytes':
         return 'bytes'
@@ -89,13 +134,6 @@ def measurement_unit(column):
 def javascript_file(path):
     entries, headers = [], None
     for line_number, line in enumerate(path.read_text().splitlines(), 1):
-        # The interests sweep reports dimensions and elapsed time in one line.
-        interests = re.fullmatch(r'broadcasts=(\d+) tracks=(\d+) acquire\+release=([\d.eE+-]+) us', line)
-        if interests:
-            broadcasts, tracks, elapsed = interests.groups()
-            entries.append({'name': f'js/{path.stem}/broadcasts={broadcasts}/tracks={tracks}/acquire+release',
-                            'unit': 'us', 'value': value(float(elapsed))})
-            continue
         row = [field.strip() for field in next(csv.reader([line]))]
         if len(row) > 1 and any(measurement_unit(field) for field in row):
             if len(set(row)) != len(row):
@@ -123,7 +161,7 @@ def javascript(directory):
 
 
 def prepare(directory, output):
-    costs, rates = [], []
+    costs, rates, comparisons = [], [], {}
     for source in sorted(directory.glob('bench-*')):
         # Other nightly artifacts share the prefix; only a recorded outcome marks a chart source.
         status = source / 'outcome.json'
@@ -143,10 +181,14 @@ def prepare(directory, output):
             target = rates if entry['unit'] in BIGGER else costs
             target.append({**entry, 'name': f'{source.name}/{entry["name"]}'})
         print(f'{source.name}: {len(entries)} measured entries')
+        if (source / 'paired.json').exists():
+            comparisons[source.name] = json.loads((source / 'paired.json').read_text())
     if not costs and not rates:
         # The table still rebuilds from stored history and marks every source stale.
         print('no completed benchmark reports; no history point')
     output.mkdir(parents=True, exist_ok=True)
+    # Tonight's paired comparisons replace the published ones, even when none finished.
+    (output / 'paired.json').write_text(json.dumps({'sources': comparisons}, indent=2) + '\n')
     for name, entries in [('costs', costs), ('rates', rates)]:
         (output / f'{name}.json').write_text(json.dumps(entries, indent=2) + '\n')
         if entries:
@@ -235,6 +277,63 @@ def table(rows):
             + '\n'.join(body) + '</tbody></table>')
 
 
+def paired_table(cases):
+    body = []
+    for case in sorted(cases, key=lambda case: -abs(case.get('delta_pct') or 0)):
+        sides = [number(case[side], 'ns') if case[side] is not None else '' for side in ('base_ns', 'current_ns')]
+        status = {'regression': 'worse', 'faster': 'better'}.get(case['verdict'], '')
+        change = f'{case["delta_pct"]:+.1f}%' if 'delta_pct' in case else case['verdict']
+        rounds = ' '.join(f'{delta:+.1f}%' for delta in case['rounds']['paired_deltas_pct']) if 'rounds' in case else ''
+        body.append(f'<tr class="paired"><td>{html.escape(case["name"])}<td>{sides[0]}<td>{sides[1]}'
+                    f'<td class="{status}">{change}<td>{rounds}')
+    return ('<table><thead><tr><th>Series<th>Base<th>Current<th>Screen<th>Rounds</thead><tbody>'
+            + '\n'.join(body) + '</tbody></table>')
+
+
+# Paired verdicts by section: open sections hold what needs a look tonight.
+PAIRED_SECTIONS = [
+    ({'regression'}, 'Confirmed regressions', True),
+    ({'unavailable'}, 'Not compared', True),
+    ({'faster'}, 'Faster in the screen', True),
+    ({'unconfirmed', 'noise'}, 'Slower in the screen, not confirmed', False),
+    ({'new', 'removed'}, 'Measured on one side only', False),
+    ({'unchanged'}, 'Unchanged', False),
+]
+
+
+def paired_section(directory):
+    """Render the published paired comparisons: tonight's commit against the previous nightly's, per source."""
+    path = directory / 'bench' / 'paired.json'
+    if not path.exists():
+        return ''
+    sources = json.loads(path.read_text())['sources']
+    if not sources:
+        return '<h2>Paired comparison</h2><p class="muted">No paired comparison finished on the latest nightly.</p>'
+    cases, notes, unavailable = [], [], []
+    for source, comparison in sorted(sources.items()):
+        commit, base = comparison['commit'], comparison['base']
+        notes.append(f'{html.escape(source)}: <a href="https://github.com/moq-dev/moq/compare/{base}...{commit}">'
+                     f'{base[:9]}...{commit[:9]}</a>')
+        cases += [{**case, 'name': f'{source}/{case["name"]}'} for case in comparison['cases']]
+        unavailable += [f'<li>{html.escape(source)}/{html.escape(entry["name"])}: {html.escape(entry["reason"])}'
+                        for entry in comparison['unavailable']]
+    threshold, rounds = comparison['threshold_pct'], comparison['rounds']
+    parts = [f'''<h2>Paired comparison</h2>
+<p>Each source built the previous nightly's commit beside this one and ran both on one runner, alternating
+which went first. A quick screen flags a change beyond {threshold}%; each slowdown then reruns in {rounds}
+alternating rounds of longer measurements, and fails the nightly when every round is slower and their median
+exceeds {threshold}%. {"; ".join(notes)}</p>''']
+    if unavailable:
+        parts.append(f'<p class="worse">Targets not compared:</p><ul>{"".join(unavailable)}</ul>')
+    for verdicts, label, flagged in PAIRED_SECTIONS:
+        rows = [case for case in cases if case['verdict'] in verdicts]
+        if rows or flagged:
+            attributes = ' open class="flagged"' if flagged else ''
+            parts.append(f'<details{attributes}><summary>{label} ({len(rows)})</summary>'
+                         f'{paired_table(rows) if rows else ""}</details>')
+    return '\n'.join(parts) + '\n<h2>Nightly trend</h2>\n'
+
+
 def regressions(directory, commit=None, now=None):
     """Render every series' newest point against its own baseline as one static table."""
     series = history(directory)
@@ -293,7 +392,7 @@ absolute deviation. Grey rows lack history or come from a source that did not fi
 <a href="https://github.com/moq-dev/moq/blob/main/bench/README.md#nightly-trends">Metrics and local
 reproduction</a></p>
 <input id="filter" type="search" placeholder="Filter series">
-{''.join(parts)}
+{paired_section(directory)}{''.join(parts)}
 <script>
 const filter = document.getElementById('filter');
 filter.oninput = () => {{
@@ -310,9 +409,11 @@ filter.oninput = () => {{
 '''
 
 
-def index(directory, commit=None):
+def index(directory, commit=None, paired_path=None):
     destination = directory / 'bench'
     destination.mkdir(parents=True, exist_ok=True)
+    if paired_path is not None:
+        (destination / 'paired.json').write_text(paired_path.read_text())
     (destination / 'index.html').write_text(regressions(directory, commit))
     # The table replaces the action's chart pages, which it only writes when missing.
     for kind in ('costs', 'rates'):
@@ -348,12 +449,19 @@ def main():
     sub = commands.add_parser('status')
     sub.add_argument('status', choices=('success', 'failure', 'cancelled', 'skipped'))
     sub.add_argument('directory', type=Path)
+    sub = commands.add_parser('gate')
+    sub.add_argument('directory', type=Path)
     sub = commands.add_parser('index')
     sub.add_argument('directory', type=Path)
     sub.add_argument('--commit', help='the nightly commit; sources without a point for it are stale')
+    sub.add_argument('--paired', type=Path, help="tonight's prepared paired comparisons, replacing the published ones")
     args = parser.parse_args()
     if args.command == 'rust':
         write(args.output, rust(args.directory))
+        if (comparison := paired(args.directory)) is not None:
+            args.output.with_name('paired.json').write_text(json.dumps(comparison, indent=2) + '\n')
+    elif args.command == 'gate':
+        raise SystemExit(gate(args.directory))
     elif args.command == 'js':
         write(args.output, javascript(args.directory))
     elif args.command == 'prepare':
@@ -362,7 +470,7 @@ def main():
         args.directory.mkdir(parents=True, exist_ok=True)
         (args.directory / 'outcome.json').write_text(json.dumps({'status': args.status}) + '\n')
     else:
-        index(args.directory, args.commit)
+        index(args.directory, args.commit, args.paired)
 
 
 if __name__ == '__main__':

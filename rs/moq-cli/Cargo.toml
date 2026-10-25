@@ -26,7 +26,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["cluster-lan", "quic", "websocket", "webrtc", "nvidia", "s3", "gcs", "azure"]
+default = ["cluster-lan", "quic", "websocket", "nvidia", "s3", "gcs", "azure"]
 # Experimental transport with a heavy dependency tree, enabled only on request.
 iroh = ["moq-relay/iroh", "moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
@@ -195,3 +195,6 @@ path = "../../test/interop/clients/rust/finish.rs"
 [[example]]
 name = "interop-audio"
 path = "../../test/interop/clients/rust/audio.rs"
+
+[lints]
+workspace = true

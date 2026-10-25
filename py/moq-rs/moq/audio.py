@@ -14,6 +14,7 @@ from moq_ffi import (
     MoqAudioFrame,
     MoqAudioPacket,
     MoqAudioProducer,
+    MoqAudioProducerOptions,
 )
 
 from ._records import _from_us, _opt_us, _to_us
@@ -24,7 +25,6 @@ from .session import Bandwidth, Reservation
 from .subscribe import BroadcastConsumer
 from .types import AudioCodec as Codec
 from .types import AudioEncoderInput as EncoderInput
-from .types import AudioPreset as Preset
 from .types import AudioSampleFormat as SampleFormat
 
 Packet = MoqAudioPacket
@@ -53,27 +53,23 @@ class Frame:
 class EncoderOutput:
     """Codec-side settings.
 
-    A zero ``frame_duration`` takes the ``preset``'s frame, or the codec's own.
-    ``preset`` defaults to ``Balanced`` and is refused alongside a nonzero ``frame_duration``.
+    A zero ``frame_duration`` takes the codec's own frame: 20 ms for Opus, 1024
+    samples for AAC. 10 ms Opus packets halve the packetization delay.
     """
 
     codec: Codec
-    track: str | None = None
     sample_rate: int | None = None
     channels: int | None = None
     bitrate: int | None = None
     frame_duration: timedelta = timedelta(0)
-    preset: Preset | None = None
 
     def _ffi(self) -> MoqAudioEncoderOutput:
         return MoqAudioEncoderOutput(
             codec=self.codec,
-            track=self.track,
             sample_rate=self.sample_rate,
             channels=self.channels,
             bitrate=self.bitrate,
             frame_duration_us=_to_us(self.frame_duration, "frame_duration"),
-            preset=self.preset,
         )
 
 
@@ -115,14 +111,18 @@ class Producer:
         input: EncoderInput,
         output: EncoderOutput,
         *,
+        track: str | None = None,
         bandwidth: Bandwidth | None = None,
     ) -> None:
-        """Open a audio track on the catalog's broadcast and register its rendition."""
+        """Open an audio track on the catalog's broadcast and register its rendition."""
         self._inner = MoqAudioProducer(
             catalog._inner,
-            input,
-            output._ffi(),
-            None if bandwidth is None else bandwidth._inner,
+            MoqAudioProducerOptions(
+                input=input,
+                output=output._ffi(),
+                track=track,
+                bandwidth=None if bandwidth is None else bandwidth._inner,
+            ),
         )
 
     def demand(self) -> TrackDemand:
@@ -220,7 +220,6 @@ __all__ = [
     "Frame",
     "Codec",
     "Packet",
-    "Preset",
     "Producer",
     "SampleFormat",
 ]

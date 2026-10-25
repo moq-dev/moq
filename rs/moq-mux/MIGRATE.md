@@ -4,6 +4,27 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Programs::finish` returns the program broadcasts
+
+`Programs::finish` now returns each program's `broadcast::Producer` instead of `()`.
+Hand them, with the `Programs` that owns their tracks, to the new `moq_mux::Linger` to keep the finished programs up for a fixed time from the end:
+
+```rust
+let broadcasts = programs.finish()?;
+moq_mux::Linger::new(broadcasts, programs, moq_mux::Linger::DEFAULT).wait().await;
+```
+
+### TS service information expires on the program clock
+
+TS import retracts SI sub-tables and incomplete generations that stop repeating within their table's maximum interval (30 seconds for unknown tables).
+Repeat current tables within that interval; stale tables no longer remain advertised indefinitely.
+Host time and stalled PCR do not age SI, and existing readers can finish snapshots they already hold.
+
+### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
+
+A passthrough `container::fmp4::Import` refuses a group that starts below the previous one with `Error::TimestampRewind` before opening it, as an unwrapped track does, instead of `Error::Moq(moq_net::Error::TimestampMismatch)` from a group it already opened.
+Match `TimestampRewind` where you matched `TimestampMismatch`.
+
 ### `Source` waits for a sibling's first announcement (#6254)
 
 `Source::bind`, `resolve`, and `subscribe_track` now wait for a sibling nothing announces yet instead of failing with `Unroutable`, and keep the first instance they resolve: once it goes, they answer that ended broadcast rather than waiting for the next.
@@ -80,12 +101,6 @@ Recordings published with `pes` framing no longer export; import their source ag
 
 `container::fmp4::Wire::new` returns `Result<Wire>`, as `Wire::from_init` already did, and refuses any other handler instead of treating it as data.
 Handle the error from `Wire::new`.
-
-### `ts::Programs::finish` returns each program's `Finish` (#5795)
-
-`Programs::finish` returns `anyhow::Result<Vec<moq_net::broadcast::Finish>>` instead of `anyhow::Result<()>`.
-Each handle keeps its program's broadcast servable until its media is stale, and dropping it closes that program.
-Await `Finish::wait` on each handle to linger, or drop the handles to close every program now.
 
 ### Timeline durations are hints (#5715)
 

@@ -66,6 +66,9 @@ impl std::fmt::Display for Transport {
 /// plain boxed flavor suffices.
 type OpBox<T> = futures::future::BoxFuture<'static, T>;
 
+/// A stream op that hands the stream back with its result, or `None` if interrupted.
+type StreamOp<S, T, E> = OpBox<(S, Option<Result<T, E>>)>;
+
 /// Adapts one of this crate's async backends (qmux, iroh, quic) to the poll interface
 /// moq-net requires.
 ///
@@ -111,6 +114,7 @@ pub struct Session<S: web_transport_trait::Session> {
 	accept_bi: OpSlot<BiResult<S>>,
 	open_uni: OpSlot<Result<S::SendStream, S::Error>>,
 	open_bi: OpSlot<BiResult<S>>,
+	request_bi: OpSlot<RequestResult<S>>,
 	recv_datagram: OpSlot<Result<Bytes, S::Error>>,
 	closed: OpSlot<S::Error>,
 }
@@ -121,6 +125,15 @@ type BiResult<S> = Result<
 		<S as web_transport_trait::Session>::SendStream,
 		<S as web_transport_trait::Session>::RecvStream,
 	),
+	<S as web_transport_trait::Session>::Error,
+>;
+
+/// A request's stream pair, or a refusal before consuming stream credit.
+type RequestResult<S> = Result<
+	Option<(
+		<S as web_transport_trait::Session>::SendStream,
+		<S as web_transport_trait::Session>::RecvStream,
+	)>,
 	<S as web_transport_trait::Session>::Error,
 >;
 
@@ -150,6 +163,7 @@ impl<S: web_transport_trait::Session> Session<S> {
 			accept_bi: OpSlot::default(),
 			open_uni: OpSlot::default(),
 			open_bi: OpSlot::default(),
+			request_bi: OpSlot::default(),
 			recv_datagram: OpSlot::default(),
 			closed: OpSlot::default(),
 		}
@@ -286,13 +300,12 @@ enum SendState<S: GroupedSend + 'static> {
 	/// retrying caller supplied the same bytes. A `None` result means the write
 	/// was interrupted by a reset (see [`SendStream::interrupt`]).
 	Writing {
-		#[allow(clippy::type_complexity)]
-		fut: OpBox<(S, Option<Result<(), S::Error>>)>,
+		fut: StreamOp<S, (), S::Error>,
 		chunk: Bytes,
 	},
 	/// The closed() acknowledgement watch; a `None` result means it was
 	/// interrupted by a late reset or priority change (see [`SendStream::interrupt`]).
-	Closing(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<(), S::Error>>)>),
+	Closing(StreamOp<S, (), S::Error>),
 }
 
 impl<S: GroupedSend + 'static> SendStream<S> {
@@ -668,7 +681,7 @@ enum RecvState<S: web_transport_trait::RecvStream + 'static> {
 	Idle(S),
 	/// A read in flight; a `None` result means it was interrupted by a stop
 	/// (see [`RecvStream::interrupt`]).
-	Reading(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<Option<Bytes>, S::Error>>)>),
+	Reading(StreamOp<S, Option<Bytes>, S::Error>),
 }
 
 impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
@@ -883,6 +896,9 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 
 #[cfg(feature = "quic")]
 impl Grouped for crate::quic::web::Session {
+	fn open_request(&self) -> impl std::future::Future<Output = RequestResult<Self>> + Send {
+		Self::open_request(self)
+	}
 	// Leased in the QUIC stack, so the receive window bounds what an incomplete message holds.
 	type Recv = crate::quic::web::RecvStream;
 
@@ -955,7 +971,7 @@ impl GroupedSend for web_transport_iroh::SendStream {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::sync::{
 		Arc, Mutex,

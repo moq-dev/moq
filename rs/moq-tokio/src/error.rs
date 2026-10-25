@@ -5,8 +5,10 @@ use std::sync::Arc;
 /// Dependency errors are stored as messages so their crates stay out of this crate's public
 /// API. Several of them (reqwest above all) keep the useful detail in `source()`, which a
 /// plain `to_string()` would drop.
-// A build with no transport feature compiles no backend module, so nothing calls this.
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
+)]
 pub(crate) fn message(err: impl std::error::Error) -> String {
 	use std::fmt::Write;
 
@@ -21,7 +23,10 @@ pub(crate) fn message(err: impl std::error::Error) -> String {
 
 /// Generates `From` conversions into message-carrying variants of the enclosing module's `Error`,
 /// so `?` still works on a dependency's error without that dependency reaching our public API.
-#[allow(unused_macros)]
+#[allow(
+	unused_macros,
+	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
+)]
 macro_rules! from_message {
 	($($ty:ty => $variant:ident),* $(,)?) => {
 		$(
@@ -34,7 +39,10 @@ macro_rules! from_message {
 	};
 }
 
-#[allow(unused_imports)]
+#[allow(
+	unused_imports,
+	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
+)]
 pub(crate) use from_message;
 
 /// Whether an HTTP response status means "ask again later".
@@ -93,9 +101,13 @@ pub enum Error {
 	#[error("qlog capture requires the 'qlog' feature")]
 	QlogUnsupported,
 
-	/// Key logging was configured, but `SSLKEYLOGFILE` names no file to write to.
-	#[error("quic.keylog requires SSLKEYLOGFILE to name a file")]
+	/// Key logging was enabled without a destination, including a boolean binding's missing env path.
+	#[error("quic.keylog needs a nonempty path; boolean keylog settings require SSLKEYLOGFILE")]
 	KeylogUnset,
+
+	/// A zero `connect.backoff.healthy`, which would count every session as healthy.
+	#[error("connect.backoff.healthy must be non-zero")]
+	BackoffHealthy,
 
 	/// The config was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
@@ -275,8 +287,9 @@ impl Error {
 			| Self::WindowRange(_)
 			| Self::ReceiveWindowTooSmall(_)
 			| Self::StreamsRange
-			| Self::QlogUnsupported
 			| Self::KeylogUnset
+			| Self::BackoffHealthy
+			| Self::QlogUnsupported
 			| Self::Connect(_) => true,
 			#[cfg(feature = "quic")]
 			Self::Quic(err) => err.is_terminal(),

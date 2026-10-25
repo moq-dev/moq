@@ -91,6 +91,7 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 	listener: Option<net::TcpListener>,
@@ -105,6 +106,7 @@ struct InternalState {
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 }
@@ -133,6 +135,7 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 			listener: None,
@@ -140,6 +143,7 @@ impl Internal {
 		}
 	}
 
+	#[cfg(feature = "stun")]
 	pub(crate) fn with_stun(mut self, counters: Option<crate::stun::Counters>) -> Self {
 		self.stun = counters;
 		self
@@ -259,6 +263,7 @@ impl Internal {
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
+				#[cfg(any(feature = "stun", test))]
 				stun: self.stun.clone(),
 				shutdown: self.shutdown.clone(),
 			})
@@ -334,6 +339,7 @@ async fn serve_health() -> Response {
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
+	#[cfg(any(feature = "stun", test))]
 	if let Some(stun) = &state.stun {
 		stun.render(&mut body);
 	}
@@ -626,7 +632,7 @@ fn render_drain(out: &mut String, tally: crate::shutdown::Tally) {
 /// zero so a rate over it is defined from the first scrape. A refused session
 /// never reaches the traffic counters above.
 fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
-	use crate::refusals::Refusal;
+	use crate::refusals::RefusalKind;
 	use std::fmt::Write as _;
 
 	let _ = writeln!(
@@ -635,7 +641,7 @@ fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
 	);
 	let _ = writeln!(out, "# TYPE moq_relay_sessions_refused_total counter");
 	let counts = refusals.snapshot();
-	for &refusal in Refusal::ALL {
+	for &refusal in RefusalKind::ALL {
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_refused_total{{reason=\"{}\"}} {}",
@@ -864,7 +870,7 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1147,6 +1153,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 		};
@@ -1166,6 +1173,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 		};
@@ -1178,10 +1186,10 @@ mod tests {
 	/// defined before the first refusal.
 	#[test]
 	fn refusal_metrics_list_every_reason_from_zero() {
-		use crate::refusals::{Refusal, Refusals};
+		use crate::refusals::{RefusalKind, Refusals};
 
 		let refusals = Refusals::default();
-		refusals.record(Refusal::Unavailable);
+		refusals.record(RefusalKind::Unavailable);
 		let mut body = String::new();
 		render_refusals(&mut body, &refusals);
 
@@ -1189,8 +1197,8 @@ mod tests {
 			body.contains("# TYPE moq_relay_sessions_refused_total counter"),
 			"type header:\n{body}"
 		);
-		for &refusal in Refusal::ALL {
-			let expected = u64::from(refusal == Refusal::Unavailable);
+		for &refusal in RefusalKind::ALL {
+			let expected = u64::from(refusal == RefusalKind::Unavailable);
 			let row = format!(
 				"moq_relay_sessions_refused_total{{reason=\"{}\"}} {expected}",
 				refusal.as_str()

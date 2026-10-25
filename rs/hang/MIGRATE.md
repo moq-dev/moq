@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Catalog` parses through `FromStr` (#6471)
+
+The inherent `Catalog::from_str` is replaced by `impl FromStr for Catalog`, with the same `Error`.
+Call `json.parse::<Catalog>()`, or bring `std::str::FromStr` into scope to keep calling `Catalog::from_str`.
+
+### Timeline records describe one track
+
+`timeline::Range` is replaced by `Position { group, frame }`. A `Record` has `start` and exclusive `end` positions for its own track instead of a `tracks` map of inclusive group ranges.
+`Record::segment` is `sequence`, and `Record::new` takes the start and end positions. `pts` and `duration` are optional for untimed records.
+`timeline::DEFAULT_NAME` is replaced by `SUFFIX`; construct a per-track name with `timeline::default_name(track)`.
+
 ### Priorities are signed (#6142)
 
 `catalog::Priorities` fields and `container::track_info`'s priority are `i8`, higher first, with 0 unset.
@@ -35,9 +46,9 @@ Rename that member, such as to `app_version`.
 
 ### Archive timelines declare a per-track duration (#5715)
 
-Each `Archive::timelines` value is a `Timeline` (the timeline `track` plus its nominal `duration` in the archive timescale, `None` when untimed) instead of the timeline track's name, and `Archive::duration_max` is removed.
-A catalog on the other side of this change decodes with no archive; see the [upgrade guide](https://github.com/moq-dev/moq/blob/main/doc/setup/upgrade.md).
-Insert `Timeline::new(track, duration)` and read the track name from `.track`.
+`Archive::track` becomes `Archive::timelines`, keyed by each media track name. Each value is `Timeline { track, duration }`, naming that media track's timeline and nominal duration, `None` when untimed.
+Replace `Archive::new(track)` with `Archive::new()` and insert each `Timeline::new(track, duration)`; `duration_max` is removed.
+The archive version is 3 rather than 1. Older catalog shapes are not read as this archive, so update publishers and consumers together.
 
 ### Timeline records are optionally timed (#5720)
 

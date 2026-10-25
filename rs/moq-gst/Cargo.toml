@@ -21,6 +21,7 @@ crate-type = ["cdylib", "rlib"]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
 gst = { package = "gstreamer", version = "0.25" }
+gst-audio = { package = "gstreamer-audio", version = "0.25" }
 hang = { workspace = true }
 moq-clock = { workspace = true }
 moq-mux = { workspace = true }
@@ -46,3 +47,6 @@ tokio = { workspace = true, features = ["test-util"] }
 [[bench]]
 name = "catalog"
 harness = false
+
+[lints]
+workspace = true

@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `serve::Refusal` is `serve::Denial` (#6510)
+
+The reference server's policy failure is `serve::Denial`, so `Refusal` names only the shared 403 body, `moq_auth::Refusal`.
+Rename `serve::Refusal` to `serve::Denial`; its variants are unchanged, and `Policy::decide` and `Server::answer` return it.
+
+### `Key` and `KeySet` parse through `FromStr` (#6471)
+
+The inherent `Key::from_str` and `KeySet::from_str` are replaced by `impl FromStr`, with the same `Error`.
+Call `text.parse::<Key>()`, or bring `std::str::FromStr` into scope to keep calling `Key::from_str`.
+
 ### `Client::connect` has no timeout of its own (#5765)
 
 `Client::connect` waits on the auth server for as long as its caller does, and dropping the future drops the request.

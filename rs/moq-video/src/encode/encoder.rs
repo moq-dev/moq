@@ -105,9 +105,8 @@ impl Gop {
 /// backend maps a preset onto the controls it actually has, so two presets can
 /// apply the same controls on one backend, and some backends cannot rule out
 /// frame reordering or queueing: V4L2 leaves both to the driver, and
-/// MediaCodec's no-B-frame setting is only a hint. [`Encoder::applied`] reports
-/// what took effect, and only a reported [`Applied::preset`] confirms it. A
-/// preset describes the encoder alone, not keyframe join time, transport delay,
+/// MediaCodec's no-B-frame setting is only a hint. The encoder logs the
+/// controls that took effect at debug level when it opens. A preset describes the encoder alone, not keyframe join time, transport delay,
 /// or viewer playout.
 ///
 /// `#[non_exhaustive]` so a later policy can be added without breaking a
@@ -124,28 +123,26 @@ pub enum Preset {
 	Quality,
 }
 
-/// The latency and compression controls an encoder actually applied, as
-/// reported by [`Encoder::applied`].
+/// The latency and compression controls a backend actually applied at open.
 ///
 /// A report, not a request: a backend that has no distinct mapping for the
 /// requested [`Preset`] names the one whose controls it did apply, and one that
 /// could not confirm the controls a preset needs names none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Applied {
+pub(crate) struct Applied {
 	/// The preset whose controls took effect, or `None` when the backend could
 	/// not confirm them (a refused or advisory low-latency setting).
-	pub preset: Option<Preset>,
+	pub(crate) preset: Option<Preset>,
 	/// The backend controls that took effect, for display, e.g.
 	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
-	pub controls: String,
+	pub(crate) controls: String,
 }
 
 impl Applied {
 	/// A report that `preset` took effect through `controls`.
 	#[cfg_attr(
 		not(any(feature = "openh264", feature = "nvidia", feature = "vaapi", target_os = "macos")),
-		allow(dead_code)
+		allow(dead_code, reason = "only the encoder backends report a preset")
 	)]
 	pub(crate) fn new(preset: Preset, controls: impl Into<String>) -> Self {
 		Self {
@@ -338,9 +335,6 @@ pub struct Encoder {
 	codec: Codec,
 	size: Size,
 	bitrate: moq_net::bandwidth::Rate,
-	/// What the backend reported applying for [`Config::preset`], read once at
-	/// open: the controls are fixed for the session's lifetime.
-	applied: Applied,
 	/// What the backend wrote into the bitstream's VUI, kept so a frame declaring
 	/// a different space is caught rather than silently mislabeled.
 	color: Color,
@@ -371,7 +365,6 @@ impl Encoder {
 			codec: config.codec,
 			size,
 			bitrate: config.resolved_bitrate(),
-			applied,
 			color: config.resolved_color(),
 			pending_cut: false,
 			#[cfg(target_os = "linux")]
@@ -386,9 +379,10 @@ impl Encoder {
 	}
 
 	/// The latency and compression controls the backend applied for
-	/// [`Config::preset`].
-	pub fn applied(&self) -> &Applied {
-		&self.applied
+	/// [`Config::preset`], fixed for the session's lifetime.
+	#[cfg(test)]
+	pub(crate) fn applied(&self) -> Applied {
+		self.backend.applied()
 	}
 
 	/// The resolution this encoder emits; external Vulkan inputs may be larger.
@@ -563,7 +557,10 @@ impl Encoder {
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
 
 	use super::*;
 
@@ -1110,7 +1107,6 @@ mod tests {
 			codec: config.codec,
 			size: config.size(),
 			bitrate: config.resolved_bitrate(),
-			applied: Applied::default(),
 			color: config.resolved_color(),
 			pending_cut: false,
 			#[cfg(target_os = "linux")]

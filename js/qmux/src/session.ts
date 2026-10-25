@@ -1,9 +1,9 @@
-import { Instant, type Interval, interval, Milli, MissedTickBehavior, Nano, now, sleep } from "@moq/clock";
+import { Instant, type Interval, interval, Milli, MissedTickBehavior, Nano, now, Second, timeout } from "@moq/clock";
 import { Credit, replenishWindow } from "./credit.ts";
 import { resetCode, SessionError, StreamError, streamCode } from "./error.ts";
 import type { TransportParams, WireFormat } from "./frame.ts";
 import * as Frame from "./frame.ts";
-import { DEFAULT_TRANSPORT_PARAMS, isQmux, usesRecords } from "./frame.ts";
+import { DEFAULT_TRANSPORT_PARAMS, usesRecords } from "./frame.ts";
 import { RecvStream } from "./recv.ts";
 import { RecvOpen } from "./recv-open.ts";
 import { DEFAULT_SEND_ORDER, SendScheduler, type SendSink, WritableStreamSink } from "./scheduler.ts";
@@ -16,13 +16,8 @@ import {
 	type WebSocketStreamLike,
 } from "./web-socket-stream.ts";
 
-/** The QMux wire-format versions a caller can advertise.
- *
- * The legacy `webtransport` wire format only appears bare on the wire (never
- * prefixed) and is appended automatically by the polyfill, so it isn't a
- * valid value here.
- */
-export type Version = Exclude<WireFormat, "webtransport">;
+/** The QMux wire-format versions a caller can advertise. */
+export type Version = WireFormat;
 
 /** Options for a new outgoing stream. `@types/web` doesn't declare `waitUntilAvailable` yet. */
 type SendStreamOptions = WebTransportSendStreamOptions & {
@@ -37,52 +32,79 @@ export interface Config {
 	/** Max concurrent unidirectional streams the peer can open. */
 	maxStreamsUni?: bigint;
 	/** Connection-level receive window in bytes. */
-	maxData?: bigint;
-	/** Per-stream receive window for bidi streams we initiate. */
-	maxStreamDataBidiLocal?: bigint;
-	/** Per-stream receive window for bidi streams the peer initiates. */
-	maxStreamDataBidiRemote?: bigint;
-	/** Per-stream receive window for uni streams. */
-	maxStreamDataUni?: bigint;
-	/** Idle timeout in milliseconds (0 = disabled). */
-	maxIdleTimeout?: bigint;
+	receiveWindow?: bigint;
+	/** Receive window in bytes for every stream. */
+	streamReceiveWindow?: bigint;
+	/** Idle timeout in milliseconds, or null to disable it; zero is refused. */
+	idleTimeout?: number | null;
 	/** Maximum QMux Record size in bytes (draft-01). */
 	maxRecordSize?: bigint;
 	/** Largest DATAGRAM *frame* (RFC 9221: type + length + payload) we advertise
-	 *  willingness to receive; 0 disables datagrams. This is a frame size, not a
+	 *  willingness to receive; null disables datagrams. This is a frame size, not a
 	 *  payload size — {@link Datagrams.maxDatagramSize} reports the usable payload
 	 *  (this value less framing overhead). Keep it at or below `maxRecordSize`.
 	 *  Datagrams are a record-framed-draft feature (qmux-01+); this is ignored on
 	 *  qmux-00. Defaults to a full record. */
-	maxDatagramFrameSize?: bigint;
+	maxDatagramFrameSize?: bigint | null;
 }
 
 const DEFAULT_CONFIG: Required<Config> = {
 	maxStreamsBidi: 100n,
 	maxStreamsUni: 100n,
-	maxData: 1_048_576n,
-	maxStreamDataBidiLocal: 262_144n,
-	maxStreamDataBidiRemote: 262_144n,
-	maxStreamDataUni: 262_144n,
-	maxIdleTimeout: 30_000n,
+	receiveWindow: 1_048_576n,
+	streamReceiveWindow: 262_144n,
+	idleTimeout: 30_000,
 	maxRecordSize: Frame.DEFAULT_MAX_RECORD_SIZE,
 	// Fill a full record by default; the record layer bounds the size.
 	maxDatagramFrameSize: Frame.DEFAULT_MAX_RECORD_SIZE,
 };
 
+function resolveConfig(config?: Config): Required<Config> {
+	if (config !== undefined && (config === null || typeof config !== "object" || Array.isArray(config))) {
+		throw new TypeError("config must be an object");
+	}
+	const resolved = { ...DEFAULT_CONFIG };
+	for (const key of Reflect.ownKeys(config ?? {})) {
+		if (typeof key !== "string" || !Object.hasOwn(DEFAULT_CONFIG, key)) {
+			throw new TypeError(`Unsupported QMux config setting: ${String(key)}`);
+		}
+		const value = config?.[key as keyof Config];
+		if (value !== undefined) Object.assign(resolved, { [key]: value });
+	}
+	for (const [key, value] of Object.entries(resolved)) {
+		if (key === "idleTimeout") {
+			if (value !== null && (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)) {
+				throw new TypeError("idleTimeout must be a positive safe integer or null");
+			}
+		} else if (key !== "maxDatagramFrameSize" || value !== null) {
+			if (typeof value !== "bigint") throw new TypeError(`${key} must be a bigint`);
+			VarInt.from(value);
+		}
+	}
+	if (resolved.maxDatagramFrameSize === 0n) throw new Error("maxDatagramFrameSize must be positive or null");
+	if (resolved.maxRecordSize < Frame.DEFAULT_MAX_RECORD_SIZE) {
+		throw new Error(`maxRecordSize must be at least ${Frame.DEFAULT_MAX_RECORD_SIZE}`);
+	}
+	return resolved;
+}
+
 function configToTransportParams(config: Required<Config>): TransportParams {
 	return {
-		maxIdleTimeout: config.maxIdleTimeout,
-		initialMaxData: config.maxData,
-		initialMaxStreamDataBidiLocal: config.maxStreamDataBidiLocal,
-		initialMaxStreamDataBidiRemote: config.maxStreamDataBidiRemote,
-		initialMaxStreamDataUni: config.maxStreamDataUni,
+		maxIdleTimeout: BigInt(config.idleTimeout ?? 0),
+		initialMaxData: config.receiveWindow,
+		initialMaxStreamDataBidiLocal: config.streamReceiveWindow,
+		initialMaxStreamDataBidiRemote: config.streamReceiveWindow,
+		initialMaxStreamDataUni: config.streamReceiveWindow,
 		initialMaxStreamsBidi: config.maxStreamsBidi,
 		initialMaxStreamsUni: config.maxStreamsUni,
 		// Clamp to maxRecordSize so we never advertise a datagram larger than our
 		// record layer accepts.
 		maxDatagramFrameSize:
-			config.maxDatagramFrameSize < config.maxRecordSize ? config.maxDatagramFrameSize : config.maxRecordSize,
+			config.maxDatagramFrameSize === null
+				? 0n
+				: config.maxDatagramFrameSize < config.maxRecordSize
+					? config.maxDatagramFrameSize
+					: config.maxRecordSize,
 		maxRecordSize: config.maxRecordSize,
 		// Version-gated in #startSession (only advertised on qmux-02).
 		resetStreamAt: false,
@@ -177,8 +199,8 @@ interface PendingIncomingStream<T> {
  * mark; `desiredSize` is only a backpressure signal. QMux cannot stop reading
  * its underlying byte stream, so keep new streams in this explicit queue and
  * transfer ownership only in response to an application read. The peer's
- * MAX_STREAMS credit is replenished by `onAccept`, which bounds this pending
- * queue to the stream count we advertised.
+ * MAX_STREAMS credit waits on `onAccept`, which bounds this pending queue to the
+ * stream count we advertised.
  */
 class IncomingStreamQueue<T> {
 	readonly readable: ReadableStream<T>;
@@ -285,22 +307,13 @@ export interface SessionOptions extends WebTransportOptions {
 	 *    knows about (currently qmux-02, qmux-01, then qmux-00). Useful when the
 	 *    app doesn't care which draft and wants forward compatibility.
 	 *
-	 * The legacy `webtransport.{alpn}` pair form was used briefly during the
-	 * web-transport-ws -> qmux transition; no production client depended on
-	 * it, so this polyfill never emits it.
 	 */
 	versions?: Record<string, Version | Version[] | null>;
 
 	/** Require the peer to negotiate one of the app protocols in `protocols`.
 	 *
-	 * When `false` (the default), the bare version ALPNs `qmux-01`,
-	 * `qmux-00`, and `webtransport` (no application protocol attached) are
-	 * also offered, so a peer that only knows a wire-format version can still
-	 * connect. That covers a relay speaking the legacy `webtransport` format,
-	 * or one that negotiates the app protocol at a higher layer (e.g. moq's
-	 * SETUP message). Set to `true` to advertise only the configured prefixed
-	 * pairs, which makes the handshake fail unless the peer speaks one of your
-	 * app protocols.
+	 * When false (the default), bare QMux version ALPNs are also offered.
+	 * Set true to require a version-prefixed application protocol.
 	 */
 	requireProtocol?: boolean;
 
@@ -331,15 +344,18 @@ export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBuff
 	 *
 	 *  [[Session.accept]] reads `socket.protocol` by default, which is where the
 	 *  wire-format version comes from. Set this when the socket reports an empty
-	 *  protocol despite one having been negotiated — otherwise the session falls
-	 *  back to the legacy `webtransport` wire format and the peer's QMux frames
-	 *  are misread. Pass the full wire value (e.g. `"qmux-02.moq-lite-04"`), not
+	 *  protocol despite one having been negotiated — otherwise the session refuses the socket. Pass the full wire value (e.g. `"qmux-02.moq-lite-04"`), not
 	 *  the bare app protocol. */
 	protocol?: string;
 }
 
 /** Default send-buffer high-water mark (bytes) for the WebSocketStream ponyfill. */
 const DEFAULT_SEND_BUFFER_SIZE = 64 * 1024;
+
+/** How long a closing session waits for a backed-up socket to take its close
+ *  frame, matching Rust's `CLOSE_TIMEOUT`. A peer that stopped reading can't
+ *  hold the socket open past it. */
+const CLOSE_TIMEOUT = Nano.fromSecond(Second(3));
 
 /** Present the caller's socket as a `WebSocketStreamLike`, whichever they passed.
  *
@@ -358,6 +374,8 @@ function versionPrefix(version: Version): string {
 			return "qmux-01.";
 		case "qmux-00":
 			return "qmux-00.";
+		default:
+			throw new Error(`Unsupported QMux version: ${JSON.stringify(version)}`);
 	}
 }
 
@@ -384,7 +402,7 @@ function toWebSocketUrl(url: string | URL): string {
 }
 
 /** Bare version ALPNs appended unless `requireProtocol` is set. Newest first. */
-const BARE_ALPNS = ["qmux-02", "qmux-01", "qmux-00", "webtransport"] as const;
+const BARE_ALPNS = ["qmux-02", "qmux-01", "qmux-00"] as const;
 
 /** Resolve a `protocols` + `versions` pair to the wire subprotocol list.
  *
@@ -392,7 +410,7 @@ const BARE_ALPNS = ["qmux-02", "qmux-01", "qmux-00", "webtransport"] as const;
  * emits one pair; an array emits one pair per element; `null` emits one
  * pair per [[QMUX_VERSIONS]] entry. Entries already in `{qmux-VV}.{alpn}`
  * pair form pass through. Unless `requireProtocol` is true, the bare version
- * ALPNs (`qmux-01`, `qmux-00`, `webtransport`) are appended after the
+ * ALPNs (`qmux-02`, `qmux-01`, `qmux-00`) are appended after the
  * prefixed pairs so a peer that doesn't pin an app protocol can still
  * negotiate a wire format.
  *
@@ -440,8 +458,7 @@ export function resolveSubprotocols(
  * `offered` accepts the raw `Sec-WebSocket-Protocol` header (comma-separated) or
  * an already-split list. Returns `undefined` when nothing matches, which the
  * caller should turn into a failed upgrade rather than accepting the socket:
- * completing the handshake with no subprotocol negotiates the legacy
- * `webtransport` wire format, which is unlikely to be what the client wanted.
+ * completing the handshake with no supported subprotocol is refused.
  *
  * Preference is ours, not the client's — the first entry in `protocols` that the
  * client also offered wins, matching the Rust `qmux::ws::Server`.
@@ -479,18 +496,15 @@ function detectVersion(negotiated: string): WireFormat {
 			return v;
 		}
 	}
-	// Empty or unrecognized: fall back to the pre-QMux wire format.
-	return "webtransport";
+	throw new Error(`Unsupported QMux subprotocol: ${JSON.stringify(negotiated)}`);
 }
 
 /** Strip the version prefix from a negotiated `Sec-WebSocket-Protocol` value.
  *
  * Returns the application protocol name, or `""` if only the bare version
- * ALPN was negotiated (or the value was empty/unknown). `webtransport` is
- * always bare on the wire, so it never yields an application protocol.
+ * ALPN was negotiated. Unsupported subprotocols are refused before parsing.
  */
 function parseProtocol(raw: string, version: WireFormat): string {
-	if (raw === "" || version === "webtransport") return "";
 	if (raw === version) return "";
 	const prefix = versionPrefix(version);
 	return raw.startsWith(prefix) ? raw.slice(prefix.length) : "";
@@ -504,6 +518,8 @@ interface StreamFlowState {
 	recvMax: bigint;
 	recvOffset: bigint;
 	recvConsumed: bigint;
+	/** Runs once when the send half ends, for a peer stream whose credit waits on it. */
+	onSendEnd?: () => void;
 }
 
 /** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
@@ -526,6 +542,8 @@ export default class Session implements WebTransport {
 	#requireProtocol = false;
 	#closed?: Error;
 	#closeReason?: Error;
+	// The APPLICATION_CLOSE or CONNECTION_CLOSE that #teardown sends, if any.
+	#closeFrame?: Uint8Array;
 
 	#sendStreams = new Map<bigint, WritableStreamDefaultController>();
 	#recvStreams = new Map<bigint, RecvStream>();
@@ -533,10 +551,8 @@ export default class Session implements WebTransport {
 	#nextUniStreamId = 0n;
 	#nextBiStreamId = 0n;
 
-	// Default to the legacy wire format until the WebSocket opens and the
-	// negotiated subprotocol tells us otherwise. #handleOpen overrides this
-	// with the actual version derived from `ws.protocol`.
-	#version: WireFormat = "webtransport";
+	// Used only after the negotiated subprotocol has been validated.
+	#version: WireFormat = "qmux-02";
 
 	#protocol = "";
 	/** The negotiated application-level subprotocol, or empty string if none.
@@ -575,11 +591,8 @@ export default class Session implements WebTransport {
 	// create that refuses to wait judges the peer's real limit, not the zero placeholder.
 	#paramsSettled = Promise.withResolvers<void>();
 
-	// Send credits start at the legacy wire format's "unlimited" values to
-	// match the default #version. #handleOpen replaces them with QMux-shaped
-	// zero-credits (waiting for TRANSPORT_PARAMETERS) when the negotiated
-	// version turns out to be a QMux draft.
-	#connCredit = new Credit(BigInt(Number.MAX_SAFE_INTEGER));
+	// Peer credit is unavailable until its transport parameters arrive.
+	#connCredit = new Credit(0n);
 
 	// Connection-level recv flow control
 	#recvDataOffset = 0n;
@@ -591,11 +604,9 @@ export default class Session implements WebTransport {
 	#recvOpenBi = new RecvOpen();
 	#recvOpenUni = new RecvOpen();
 
-	// Stream count tracking via Credit (for sending — peer's limits).
-	// Initialized to "unlimited" matching the default webtransport version;
-	// #handleOpen replaces them when a QMux draft is negotiated.
-	#bidiStreamCredit = new Credit(BigInt(Number.MAX_SAFE_INTEGER));
-	#uniStreamCredit = new Credit(BigInt(Number.MAX_SAFE_INTEGER));
+	// Stream counts start at zero until the peer grants credit.
+	#bidiStreamCredit = new Credit(0n);
+	#uniStreamCredit = new Credit(0n);
 
 	// Stream count tracking via Credit (for receiving — our limits)
 	#recvBiCredit: Credit;
@@ -649,15 +660,7 @@ export default class Session implements WebTransport {
 			? resolveSubprotocols(options?.protocols ?? [], options?.versions ?? {}, options?.requireProtocol ?? false)
 			: [];
 
-		// Merge user config with defaults
-		this.#config = { ...DEFAULT_CONFIG, ...options?.config };
-		// Every value goes on the wire as a varint; refuse one that can't, here
-		// rather than as a handshake that never completes.
-		for (const value of Object.values(this.#config)) VarInt.from(value);
-		// Record-framed peers reject a max_record_size below the default minimum.
-		if (this.#config.maxRecordSize < Frame.DEFAULT_MAX_RECORD_SIZE) {
-			throw new Error(`maxRecordSize must be at least ${Frame.DEFAULT_MAX_RECORD_SIZE}`);
-		}
+		this.#config = resolveConfig(options?.config);
 		this.#requireProtocol = dial && (options?.requireProtocol ?? false);
 		this.#ourParams = configToTransportParams(this.#config);
 		this.#sendBufferSize = options?.sendBufferSize ?? DEFAULT_SEND_BUFFER_SIZE;
@@ -740,19 +743,24 @@ export default class Session implements WebTransport {
 			(conn) => {
 				// The session may have been closed before the socket finished opening.
 				if (this.#closed) return;
-				const protocol = this.#protocolOverride ?? conn.protocol;
-				// A server may complete the handshake without picking any offered
-				// subprotocol, which would otherwise fall back to the legacy format.
-				if (this.#requireProtocol && parseProtocol(protocol, detectVersion(protocol)) === "") {
-					this.#closeReason ??= new Error(
-						`server negotiated no application protocol (${JSON.stringify(protocol)})`,
-					);
-					this.#abort(1002, "no application protocol");
+				try {
+					const protocol = this.#protocolOverride ?? conn.protocol;
+					// Strict application negotiation also refuses a bare QMux version.
+					if (this.#requireProtocol && parseProtocol(protocol, detectVersion(protocol)) === "") {
+						this.#closeReason ??= new Error(
+							`server negotiated no application protocol (${JSON.stringify(protocol)})`,
+						);
+						this.#abort(1002, "no application protocol");
+						this.#transportClose();
+						return;
+					}
+					this.#startSession(protocol, new WritableStreamSink(conn.writable));
+					void this.#readLoop(conn.readable.getReader());
+				} catch (error) {
+					this.#closeReason ??= error instanceof Error ? error : new Error("Invalid QMux subprotocol");
+					this.#abort(1002, "Invalid QMux subprotocol");
 					this.#transportClose();
-					return;
 				}
-				this.#startSession(protocol, new WritableStreamSink(conn.writable));
-				void this.#readLoop(conn.readable.getReader());
 			},
 			(err: unknown) => {
 				this.#closeReason ??= err instanceof Error ? err : new Error("WebSocketStream failed to open");
@@ -785,7 +793,7 @@ export default class Session implements WebTransport {
 				// QMux is binary-only; a text frame is a protocol error, not something
 				// to silently drop (which would desync the session).
 				if (typeof value === "string") {
-					this.#sendConnectionClose(1003, "text frames are not valid for QMux");
+					this.#sendClose("connection_close", 1003, "text frames are not valid for QMux");
 					this.#abort(1003, "text frames are not valid for QMux");
 					return;
 				}
@@ -820,7 +828,12 @@ export default class Session implements WebTransport {
 			resetStreamAt: version === "qmux-02",
 		};
 
+		// QMux01 over WebSocket uses the WS message boundary as the implicit record
+		// boundary; no extra size prefix is required.
+		const params = Frame.encode({ type: "transport_parameters", params: this.#ourParams }, this.#version);
+		this.#validateRecordSize(params);
 		this.#scheduler = new SendScheduler(sink, {
+			first: params,
 			onActivity: () => {
 				this.#lastSendAt = now();
 			},
@@ -833,21 +846,18 @@ export default class Session implements WebTransport {
 			},
 		});
 
-		// QMux drafts wait for the peer's TRANSPORT_PARAMETERS before sending,
-		// so reset the unlimited (webtransport-shaped) defaults to zero credits.
-		if (isQmux(version)) {
-			this.#connCredit.close();
-			this.#bidiStreamCredit.close();
-			this.#uniStreamCredit.close();
-			this.#connCredit = new Credit(0n);
-			this.#bidiStreamCredit = new Credit(0n);
-			this.#uniStreamCredit = new Credit(0n);
-			this.#recvDataMax = this.#ourParams.initialMaxData;
-			this.#sendTransportParameters();
-			// Our own deadline applies until the peer's parameters arrive, so a peer
-			// that never sends them can't hold the session open.
-			this.#startIdleTimerIfEnabled();
-		}
+		// Exchange transport parameters before granting send credit.
+
+		this.#connCredit.close();
+		this.#bidiStreamCredit.close();
+		this.#uniStreamCredit.close();
+		this.#connCredit = new Credit(0n);
+		this.#bidiStreamCredit = new Credit(0n);
+		this.#uniStreamCredit = new Credit(0n);
+		this.#recvDataMax = this.#ourParams.initialMaxData;
+		// Our own deadline applies until the peer's parameters arrive, so a peer
+		// that never sends them can't hold the session open.
+		this.#startIdleTimerIfEnabled();
 
 		this.#readyResolve();
 	}
@@ -870,8 +880,7 @@ export default class Session implements WebTransport {
 				// draft-00 §5.2: `max_frame_size` bounds the whole frame, header
 				// included, and may only be raised from its initial value — which we
 				// never do, so the initial value is what a peer may send. Each message
-				// is one frame here. The legacy binding predates the parameter and
-				// negotiates nothing, so nothing bounds it.
+				// is one frame here.
 				if (this.#version === "qmux-00" && data.byteLength > Frame.MAX_FRAME_SIZE) {
 					throw new Error(`frame exceeds max_frame_size (${data.byteLength} > ${Frame.MAX_FRAME_SIZE})`);
 				}
@@ -883,7 +892,7 @@ export default class Session implements WebTransport {
 		} catch (error) {
 			// A decode failure or a frame that violates a negotiated limit is fatal.
 			console.error("Protocol violation:", error);
-			this.#sendConnectionClose(1002, "Protocol violation");
+			this.#sendClose("connection_close", 1002, "Protocol violation");
 			this.#abort(1002, "Protocol violation", error);
 		}
 	}
@@ -1130,7 +1139,7 @@ export default class Session implements WebTransport {
 		}
 	}
 
-	async #claimSendCredit(streamId: bigint, desired: bigint): Promise<bigint> {
+	async #claimSendCredit(streamId: bigint, desired: bigint, signal: AbortSignal): Promise<bigint> {
 		const flow = this.#streamFlow.get(streamId);
 		if (!flow) return desired;
 
@@ -1140,7 +1149,7 @@ export default class Session implements WebTransport {
 			if (streamClaimed === 0n) {
 				if (this.#closed) throw this.#closed;
 				// Wait for stream credit, then release and retry to coordinate with conn credit
-				const claimed = await flow.sendCredit.claim(desired);
+				const claimed = await flow.sendCredit.claim(desired, signal);
 				flow.sendCredit.release(claimed);
 				continue;
 			}
@@ -1150,7 +1159,7 @@ export default class Session implements WebTransport {
 			if (connClaimed === 0n) {
 				flow.sendCredit.release(streamClaimed);
 				if (this.#closed) throw this.#closed;
-				const claimed = await this.#connCredit.claim(1n);
+				const claimed = await this.#connCredit.claim(1n, signal);
 				this.#connCredit.release(claimed);
 				continue;
 			}
@@ -1168,8 +1177,6 @@ export default class Session implements WebTransport {
 	 *  control. Throws on a gap, overlap, or duplicate; returns false when the
 	 *  frame exceeds a receive window. */
 	#accountRecv(frame: Frame.Data): boolean {
-		if (!isQmux(this.#version)) return true;
-
 		const flow = this.#streamFlow.get(frame.id.value.value);
 		// The transport is ordered, so a frame must start exactly where the last one
 		// ended (draft-02 §4.1): there is nothing to reassemble, and anything else
@@ -1204,7 +1211,7 @@ export default class Session implements WebTransport {
 	 *  completed-but-unread streams inside the aggregate receive-memory window.
 	 *  `recvDataConsumed` is cumulative. */
 	#accountConnConsumed(bytes: number | bigint) {
-		if (!isQmux(this.#version) || bytes === 0 || bytes === 0n) return;
+		if (bytes === 0 || bytes === 0n) return;
 		this.#recvDataConsumed += BigInt(bytes);
 		this.#maybeSendMaxData();
 	}
@@ -1214,7 +1221,7 @@ export default class Session implements WebTransport {
 	 *  can't buffer more than one window ahead of a slow reader. `recvConsumed`
 	 *  is cumulative. */
 	#accountStreamConsumed(streamId: bigint, bytes: number) {
-		if (!isQmux(this.#version) || bytes === 0) return;
+		if (bytes === 0) return;
 		const flow = this.#streamFlow.get(streamId);
 		if (flow) {
 			flow.recvConsumed += BigInt(bytes);
@@ -1255,8 +1262,6 @@ export default class Session implements WebTransport {
 
 	/** Replenish stream count credit for a peer-initiated stream and send MAX_STREAMS if needed. */
 	#replenishStreamCredit(dir: Stream.DirType) {
-		if (!isQmux(this.#version)) return;
-
 		const credit = dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
 		const newMax = credit.consume(1n);
 		if (newMax !== null) {
@@ -1279,8 +1284,6 @@ export default class Session implements WebTransport {
 	 * stricter FINAL_SIZE_ERROR check starts with draft-03; meanwhile the larger
 	 * of the two values still prevents a reset from undoing flow-control usage. */
 	#accountReset(frame: Frame.ResetStream): bigint | null {
-		if (!isQmux(this.#version)) return 0n;
-
 		const streamId = frame.id.value.value;
 		const flow = this.#streamFlow.get(streamId);
 		const received = flow?.recvOffset ?? 0n;
@@ -1329,7 +1332,6 @@ export default class Session implements WebTransport {
 
 		let recv = this.#recvStreams.get(streamId);
 		if (
-			isQmux(this.#version) &&
 			frame.id.serverInitiated !== this.#isServer &&
 			!recv &&
 			this.#recvOpen(frame.id.dir).isClosed(frame.id.index)
@@ -1353,58 +1355,47 @@ export default class Session implements WebTransport {
 			// Validate stream count limits (QMux only)
 			// Per QUIC RFC 9000 §4.6, the limit applies to the stream index.
 			// A peer opening stream index N implicitly opens all streams 0..N.
-			if (isQmux(this.#version)) {
-				const credit = frame.id.dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
-				if (!credit.receiveUpTo(frame.id.index + 1n)) {
-					this.#sendConnectionClose(1002, "stream limit exceeded");
-					this.#abort(1002, "stream limit exceeded");
-					return;
-				}
-				this.#recvOpen(frame.id.dir).record(frame.id.index);
+
+			const credit = frame.id.dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
+			if (!credit.receiveUpTo(frame.id.index + 1n)) {
+				this.#sendClose("connection_close", 1002, "stream limit exceeded");
+				this.#abort(1002, "stream limit exceeded");
+				return;
 			}
+			this.#recvOpen(frame.id.dir).record(frame.id.index);
 
 			// Initialize flow control state for new stream
-			if (isQmux(this.#version)) {
-				const recvMax =
-					frame.id.dir === Stream.Dir.Bi
-						? this.#ourParams.initialMaxStreamDataBidiRemote
-						: this.#ourParams.initialMaxStreamDataUni;
 
-				// For send side on bidi: peer's bidi_local is our send limit
-				const sendMax = frame.id.dir === Stream.Dir.Bi ? this.#peerParams.initialMaxStreamDataBidiLocal : 0n;
+			const recvMax =
+				frame.id.dir === Stream.Dir.Bi
+					? this.#ourParams.initialMaxStreamDataBidiRemote
+					: this.#ourParams.initialMaxStreamDataUni;
 
-				this.#streamFlow.set(streamId, {
-					sendCredit: new Credit(sendMax),
-					sendOffset: 0n,
-					recvMax,
-					recvOffset: 0n,
-					recvConsumed: 0n,
-				});
-			}
+			// For send side on bidi: peer's bidi_local is our send limit
+			const sendMax = frame.id.dir === Stream.Dir.Bi ? this.#peerParams.initialMaxStreamDataBidiLocal : 0n;
+
+			// Stream credit returns once the application has the stream and both halves have
+			// ended, as in QUIC, so it bounds the streams a peer holds open.
+			let holds = frame.id.dir === Stream.Dir.Bi ? 3 : 2;
+			const release = () => {
+				if (--holds === 0) this.#replenishStreamCredit(frame.id.dir);
+			};
+
+			this.#streamFlow.set(streamId, {
+				sendCredit: new Credit(sendMax),
+				sendOffset: 0n,
+				recvMax,
+				recvOffset: 0n,
+				recvConsumed: 0n,
+				onSendEnd: frame.id.dir === Stream.Dir.Bi ? release : undefined,
+			});
 
 			// Validate recv flow control before accepting
 			if (!this.#accountRecv(frame)) {
-				this.#sendConnectionClose(1002, "flow control error");
+				this.#sendClose("connection_close", 1002, "flow control error");
 				this.#abort(1002, "flow control error");
 				return;
 			}
-
-			let accepted = false;
-			let terminal = false;
-			let streamCreditReplenished = false;
-			const maybeReplenishStreamCredit = () => {
-				if (!accepted || !terminal || streamCreditReplenished) return;
-				streamCreditReplenished = true;
-				this.#replenishStreamCredit(frame.id.dir);
-			};
-			const onAccept = () => {
-				accepted = true;
-				maybeReplenishStreamCredit();
-			};
-			const onTerminal = () => {
-				terminal = true;
-				maybeReplenishStreamCredit();
-			};
 
 			const recvStream = new RecvStream(
 				(bytes) => {
@@ -1422,7 +1413,7 @@ export default class Session implements WebTransport {
 					this.#recvStreams.delete(streamId);
 					this.#maybeDeleteStreamFlow(streamId);
 				},
-				onTerminal,
+				release,
 			);
 			this.#recvStreams.set(streamId, recvStream);
 			recv = recvStream;
@@ -1434,50 +1425,23 @@ export default class Session implements WebTransport {
 
 			if (frame.id.dir === Stream.Dir.Bi) {
 				// Incoming bidirectional stream
-				const writer = new WritableStream<Uint8Array>({
-					start: (controller) => {
-						this.#sendStreams.set(streamId, controller);
-					},
-					write: async (chunk) => {
-						await this.#sendStreamData(frame.id, chunk);
-					},
-					abort: (e) => {
-						this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
-						this.#sendPriorityFrame({
-							type: "reset_stream",
-							id: frame.id,
-							code: VarInt.from(resetCode(e)),
-							finalSize: this.#sendFinalSize(streamId),
-						});
+				const writer = this.#sendWritable(frame.id, DEFAULT_SEND_ORDER);
 
-						this.#sendStreams.delete(streamId);
-						this.#maybeDeleteStreamFlow(streamId);
-					},
-					close: async () => {
-						await this.#sendStreamFin(frame.id);
-
-						this.#sendStreams.delete(streamId);
-						this.#scheduler?.forget(streamId);
-						this.#maybeDeleteStreamFlow(streamId);
-					},
-				});
-				this.#attachSendOrder(writer, streamId, DEFAULT_SEND_ORDER);
-
-				if (!this.#incomingBidirectionalQueue.push({ readable: reader, writable: writer }, onAccept, onDrop)) {
+				if (!this.#incomingBidirectionalQueue.push({ readable: reader, writable: writer }, release, onDrop)) {
 					// Keep the refused stream registered until FIN/RESET so in-flight frames
 					// cannot repeatedly reopen it. RecvStream rejects subsequent pushes,
 					// letting the receive path account them as deliberately discarded.
 					onDrop(new Error("incoming stream acceptor cancelled"));
 				}
 			} else {
-				if (!this.#incomingUnidirectionalQueue.push(reader, onAccept, onDrop)) {
+				if (!this.#incomingUnidirectionalQueue.push(reader, release, onDrop)) {
 					onDrop(new Error("incoming stream acceptor cancelled"));
 				}
 			}
 		} else {
 			// Existing stream — validate recv flow control
 			if (!this.#accountRecv(frame)) {
-				this.#sendConnectionClose(1002, "flow control error");
+				this.#sendClose("connection_close", 1002, "flow control error");
 				this.#abort(1002, "flow control error");
 				return;
 			}
@@ -1516,7 +1480,7 @@ export default class Session implements WebTransport {
 		if (!recv) {
 			// A terminal peer-initiated stream stays terminal. In particular, a
 			// duplicate RESET must not consume its final size twice.
-			if (isQmux(this.#version) && peerInitiated && this.#recvOpen(frame.id.dir).isClosed(frame.id.index)) {
+			if (peerInitiated && this.#recvOpen(frame.id.dir).isClosed(frame.id.index)) {
 				return;
 			}
 			// A locally-created receive half that is no longer live is already closed,
@@ -1527,13 +1491,11 @@ export default class Session implements WebTransport {
 				return;
 			}
 
-			if (isQmux(this.#version)) {
-				const credit = frame.id.dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
-				if (!credit.receiveUpTo(frame.id.index + 1n)) {
-					this.#sendConnectionClose(1002, "stream limit exceeded");
-					this.#abort(1002, "stream limit exceeded");
-					return;
-				}
+			const credit = frame.id.dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
+			if (!credit.receiveUpTo(frame.id.index + 1n)) {
+				this.#sendClose("connection_close", 1002, "stream limit exceeded");
+				this.#abort(1002, "stream limit exceeded");
+				return;
 			}
 		}
 
@@ -1549,7 +1511,7 @@ export default class Session implements WebTransport {
 
 		const resetGap = this.#accountReset(frame);
 		if (resetGap === null) {
-			this.#sendConnectionClose(1002, "flow control error");
+			this.#sendClose("connection_close", 1002, "flow control error");
 			this.#abort(1002, "flow control error");
 			return;
 		}
@@ -1559,7 +1521,7 @@ export default class Session implements WebTransport {
 			// occupy receive memory, so it is immediately eligible to replenish the
 			// connection window.
 			this.#accountConnConsumed(resetGap);
-			if (isQmux(this.#version)) this.#recvOpen(frame.id.dir).record(frame.id.index);
+			this.#recvOpen(frame.id.dir).record(frame.id.index);
 			this.#replenishStreamCredit(frame.id.dir);
 			return;
 		}
@@ -1579,7 +1541,6 @@ export default class Session implements WebTransport {
 
 		const stopped = new StreamError(streamCode(frame.code.value), "STOP_SENDING");
 		stream.error(stopped);
-		this.#sendStreams.delete(streamId);
 		this.#scheduler?.dropStream(streamId, stopped);
 		// A write parked on stream credit isn't interrupted by error(); fail it here,
 		// even though a live receive half keeps the flow state around.
@@ -1592,6 +1553,13 @@ export default class Session implements WebTransport {
 			finalSize: this.#sendFinalSize(streamId),
 		});
 
+		this.#endSend(streamId);
+	}
+
+	/** End a stream's send half once its FIN or RESET_STREAM is sent. */
+	#endSend(streamId: bigint) {
+		if (!this.#sendStreams.delete(streamId)) return;
+		this.#streamFlow.get(streamId)?.onSendEnd?.();
 		this.#maybeDeleteStreamFlow(streamId);
 	}
 
@@ -1599,19 +1567,12 @@ export default class Session implements WebTransport {
 		return this.#streamFlow.get(streamId)?.sendOffset ?? 0n;
 	}
 
-	#sendTransportParameters() {
-		// QMux01 over WebSocket uses the WS message boundary as the implicit record
-		// boundary; no extra size prefix is required. This is the first frame on the
-		// wire, so it leads the control queue ahead of any stream data.
-		this.#sendPriorityFrame({ type: "transport_parameters", params: this.#ourParams });
-	}
-
 	/** The largest STREAM frame the peer accepts, in bytes.
 	 *
 	 * Record-framed drafts negotiate it: a frame rides in one record, so the
 	 * peer's `max_record_size` is the limit (the draft-01 default until its
 	 * TRANSPORT_PARAMETERS arrive, so we never send something it would reject).
-	 * draft-00 and the legacy binding have no record layer and negotiate nothing,
+	 * Draft-00 has no record layer,
 	 * so draft-00's whole-frame `max_frame_size` stands in. */
 	#sendFrameBudget(): bigint {
 		if (!usesRecords(this.#version)) return BigInt(Frame.MAX_FRAME_SIZE);
@@ -1647,8 +1608,10 @@ export default class Session implements WebTransport {
 		}
 	}
 
-	/** Encode and enqueue a stream-data/fin frame, resolving once it hits the wire. */
-	async #enqueueStreamFrame(streamId: bigint, frame: Frame.Data) {
+	/** Encode and enqueue a stream-data/fin frame, resolving once it hits the wire.
+	 *  Refuses once `signal` aborts: its listener drops only what is already queued. */
+	async #enqueueStreamFrame(streamId: bigint, frame: Frame.Data, signal?: AbortSignal) {
+		signal?.throwIfAborted();
 		const scheduler = this.#scheduler;
 		if (!scheduler) throw this.#closed ?? new Error("session not open");
 		const bytes = Frame.encode(frame, this.#version);
@@ -1656,7 +1619,7 @@ export default class Session implements WebTransport {
 		await scheduler.enqueueStream(streamId, bytes);
 	}
 
-	async #sendStreamDataWithFlowControl(id: Stream.Id, streamId: bigint, data: Uint8Array) {
+	async #sendStreamDataWithFlowControl(id: Stream.Id, streamId: bigint, data: Uint8Array, signal: AbortSignal) {
 		const flow = this.#streamFlow.get(streamId);
 		if (!flow) throw new Error(`missing flow state for stream ${streamId}`);
 
@@ -1668,20 +1631,18 @@ export default class Session implements WebTransport {
 			const chunkMax = Number(payloadMax < remaining ? payloadMax : remaining);
 
 			// Claim flow control credit (stream + connection)
-			const allowed = await this.#claimSendCredit(streamId, BigInt(chunkMax));
+			const allowed = await this.#claimSendCredit(streamId, BigInt(chunkMax), signal);
 			const sendable = Number(allowed);
 
 			const chunk = data.subarray(offset, offset + sendable);
 			const sendOffset = flow.sendOffset;
 
 			try {
-				await this.#enqueueStreamFrame(streamId, {
-					type: "stream",
-					id,
-					offset: sendOffset,
-					data: chunk,
-					fin: false,
-				});
+				await this.#enqueueStreamFrame(
+					streamId,
+					{ type: "stream", id, offset: sendOffset, data: chunk, fin: false },
+					signal,
+				);
 			} catch (e) {
 				// Return claimed credits on send failure
 				if (sendable > 0) {
@@ -1697,29 +1658,18 @@ export default class Session implements WebTransport {
 		}
 	}
 
-	async #sendStreamData(id: Stream.Id, data: Uint8Array) {
+	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal) {
 		const streamId = id.value.value;
-		if (isQmux(this.#version)) {
-			await this.#sendStreamDataWithFlowControl(id, streamId, data);
-		} else {
-			// The legacy binding carries no offset field, so every frame's header —
-			// and therefore its payload budget — is the same size. The budget is
-			// MAX_FRAME_SIZE there, so it always fits in a number.
-			const chunkMax = Number(this.#maxStreamPayload(id, 0n));
-			for (let offset = 0; offset < data.byteLength; offset += chunkMax) {
-				const end = Math.min(offset + chunkMax, data.byteLength);
-				const chunk = data.subarray(offset, end);
-				await this.#enqueueStreamFrame(streamId, { type: "stream", id, data: chunk, fin: false });
-			}
-		}
+
+		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal);
 	}
 
 	/** Send the FIN. Routed through the stream's own queue so it stays ordered
 	 *  after that stream's data (not via the control lane, which would jump ahead). */
 	async #sendStreamFin(id: Stream.Id) {
 		const streamId = id.value.value;
-		const offset = isQmux(this.#version) ? this.#streamFlow.get(streamId)?.sendOffset : undefined;
-		if (isQmux(this.#version) && offset === undefined) {
+		const offset = this.#streamFlow.get(streamId)?.sendOffset;
+		if (offset === undefined) {
 			throw new Error(`missing flow state for stream ${streamId}`);
 		}
 		await this.#enqueueStreamFrame(streamId, { type: "stream", id, offset, data: new Uint8Array(), fin: true });
@@ -1738,8 +1688,8 @@ export default class Session implements WebTransport {
 
 	#sendPriorityFrame(frame: Frame.Any) {
 		// Once closed, the scheduler rejects new control frames; a late reset/stop
-		// from a stream teardown callback must be a no-op, not a throw. (The
-		// graceful CONNECTION_CLOSE is enqueued before #close sets #closed.)
+		// from a stream teardown callback must be a no-op, not a throw. (The close
+		// frame goes through #sendClose instead.)
 		if (this.#closed) return;
 		const bytes = Frame.encode(frame, this.#version);
 		this.#validateRecordSize(bytes);
@@ -1765,7 +1715,7 @@ export default class Session implements WebTransport {
 		if (this.#closed) throw this.#closed;
 
 		if (options?.waitUntilAvailable === false) {
-			if (isQmux(this.#version)) await this.#paramsSettled.promise;
+			await this.#paramsSettled.promise;
 			if (this.#closed) throw this.#closed;
 			const credit = dir === Stream.Dir.Bi ? this.#bidiStreamCredit : this.#uniStreamCredit;
 			if (credit.tryClaim(1n) === 0n) throw new DOMException(refused, "NetworkError");
@@ -1805,44 +1755,16 @@ export default class Session implements WebTransport {
 		const streamIdVal = streamId.value.value;
 
 		// Initialize flow control for this stream
-		if (isQmux(this.#version)) {
-			this.#streamFlow.set(streamIdVal, {
-				sendCredit: new Credit(this.#peerParams.initialMaxStreamDataBidiRemote),
-				sendOffset: 0n,
-				recvMax: this.#ourParams.initialMaxStreamDataBidiLocal,
-				recvOffset: 0n,
-				recvConsumed: 0n,
-			});
-		}
 
-		const writer = new WritableStream<Uint8Array>({
-			start: (controller) => {
-				this.#sendStreams.set(streamIdVal, controller);
-			},
-			write: async (chunk) => {
-				await this.#sendStreamData(streamId, chunk);
-			},
-			abort: (e) => {
-				this.#scheduler?.dropStream(streamIdVal, e instanceof Error ? e : new Error("stream aborted"));
-				this.#sendPriorityFrame({
-					type: "reset_stream",
-					id: streamId,
-					code: VarInt.from(resetCode(e)),
-					finalSize: this.#sendFinalSize(streamIdVal),
-				});
-
-				this.#sendStreams.delete(streamIdVal);
-				this.#maybeDeleteStreamFlow(streamIdVal);
-			},
-			close: async () => {
-				await this.#sendStreamFin(streamId);
-
-				this.#sendStreams.delete(streamIdVal);
-				this.#scheduler?.forget(streamIdVal);
-				this.#maybeDeleteStreamFlow(streamIdVal);
-			},
+		this.#streamFlow.set(streamIdVal, {
+			sendCredit: new Credit(this.#peerParams.initialMaxStreamDataBidiRemote),
+			sendOffset: 0n,
+			recvMax: this.#ourParams.initialMaxStreamDataBidiLocal,
+			recvOffset: 0n,
+			recvConsumed: 0n,
 		});
-		this.#attachSendOrder(writer, streamIdVal, sendOrder);
+
+		const writer = this.#sendWritable(streamId, sendOrder);
 
 		const recvStream = new RecvStream(
 			(bytes) => {
@@ -1879,48 +1801,74 @@ export default class Session implements WebTransport {
 		const streamIdVal = streamId.value.value;
 
 		// Initialize flow control for this stream
-		if (isQmux(this.#version)) {
-			this.#streamFlow.set(streamIdVal, {
-				sendCredit: new Credit(this.#peerParams.initialMaxStreamDataUni),
-				sendOffset: 0n,
-				recvMax: 0n,
-				recvOffset: 0n,
-				recvConsumed: 0n,
+
+		this.#streamFlow.set(streamIdVal, {
+			sendCredit: new Credit(this.#peerParams.initialMaxStreamDataUni),
+			sendOffset: 0n,
+			recvMax: 0n,
+			recvOffset: 0n,
+			recvConsumed: 0n,
+		});
+
+		return this.#sendWritable(streamId, sendOrder);
+	}
+
+	/** The writable for a stream's send half. */
+	#sendWritable(id: Stream.Id, sendOrder: number): WritableStream<Uint8Array> {
+		const streamId = id.value.value;
+		let signal!: AbortSignal;
+		const reset = (e: unknown) => {
+			this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
+			this.#sendPriorityFrame({
+				type: "reset_stream",
+				id,
+				code: VarInt.from(resetCode(e)),
+				finalSize: this.#sendFinalSize(streamId),
 			});
-		}
 
-		const session = this;
-
-		const writer = new WritableStream<Uint8Array>({
+			this.#endSend(streamId);
+		};
+		const writable = new WritableStream<Uint8Array>({
 			start: (controller) => {
-				session.#sendStreams.set(streamIdVal, controller);
+				signal = controller.signal;
+				this.#sendStreams.set(streamId, controller);
+				// An abort fires the signal at once but runs `abort` below only after the
+				// in-flight write settles, so the signal has to end that write: here if
+				// it is queued behind other frames, in #claimSendCredit if it is parked
+				// on the peer's credit.
+				controller.signal.addEventListener(
+					"abort",
+					() => {
+						const reason = controller.signal.reason;
+						this.#scheduler?.dropStream(
+							streamId,
+							reason instanceof Error ? reason : new Error("stream aborted"),
+						);
+					},
+					{ once: true },
+				);
 			},
-			async write(chunk) {
-				await session.#sendStreamData(streamId, chunk);
+			write: async (chunk, controller) => {
+				await this.#sendStreamData(id, chunk, controller.signal);
 			},
-			abort(e) {
-				session.#scheduler?.dropStream(streamIdVal, e instanceof Error ? e : new Error("stream aborted"));
-				session.#sendPriorityFrame({
-					type: "reset_stream",
-					id: streamId,
-					code: VarInt.from(resetCode(e)),
-					finalSize: session.#sendFinalSize(streamIdVal),
-				});
+			abort: reset,
+			close: async () => {
+				try {
+					await this.#sendStreamFin(id);
+				} catch (e) {
+					// An abort during close drops the queued FIN, and WritableStream never
+					// runs `abort` once an in-flight close fails, so reset here instead.
+					if (!signal.aborted) throw e;
+					reset(signal.reason);
+					return;
+				}
 
-				session.#sendStreams.delete(streamIdVal);
-				session.#maybeDeleteStreamFlow(streamIdVal);
-			},
-			async close() {
-				await session.#sendStreamFin(streamId);
-
-				session.#sendStreams.delete(streamIdVal);
-				session.#scheduler?.forget(streamIdVal);
-				session.#maybeDeleteStreamFlow(streamIdVal);
+				this.#scheduler?.forget(streamId);
+				this.#endSend(streamId);
 			},
 		});
-		this.#attachSendOrder(writer, streamIdVal, sendOrder);
-
-		return writer;
+		this.#attachSendOrder(writable, streamId, sendOrder);
+		return writable;
 	}
 
 	/** Shared teardown for both terminal transitions: tears down streams,
@@ -1971,9 +1919,14 @@ export default class Session implements WebTransport {
 		this.#recvBiCredit.close(closeErr);
 		this.#recvUniCredit.close(closeErr);
 
-		// Reject pending stream writes; already-queued control (e.g. CONNECTION_CLOSE)
-		// still flushes before the socket is torn down.
-		this.#scheduler?.close(closeErr);
+		// Drop whatever is still queued so the close frame goes out next.
+		const flushed = this.#scheduler?.close(closeErr, this.#closeFrame) ?? Promise.resolve();
+		if (this.#closeFrame) {
+			// Close the socket once it has the close frame. A socket the peer stopped
+			// draining can't hold it open: past CLOSE_TIMEOUT it closes without it.
+			const close = () => this.#transportClose();
+			void timeout(CLOSE_TIMEOUT, flushed).then(close, close);
+		}
 	}
 
 	/** Graceful terminal transition: `closed` **fulfills** with the close code
@@ -2023,23 +1976,17 @@ export default class Session implements WebTransport {
 		} catch {}
 	}
 
-	/** APPLICATION_CLOSE (0x1d): a graceful, app-initiated close the peer surfaces
-	 *  by *fulfilling* its `closed`. Pairs with the {@link #close} transition. */
-	#sendApplicationClose(code: number, reason: string) {
-		this.#sendPriorityFrame({ type: "application_close", code: VarInt.from(code), reason });
-		// Give the queued frame a moment to flush before tearing down the socket.
-		// Must run *before* the terminal transition, which closes the scheduler to
-		// new control frames.
-		void sleep(Nano.fromMilli(Milli(100))).then(() => this.#transportClose());
-	}
-
-	/** CONNECTION_CLOSE (0x1c): a protocol violation or transport error we detected,
-	 *  which the peer surfaces by *rejecting* its `closed`. Pairs with the
-	 *  {@link #abort} transition. */
-	#sendConnectionClose(code: number, reason: string) {
-		this.#sendPriorityFrame({ type: "connection_close", code: VarInt.from(code), reason });
-		// Flush the queued frame before tearing down the socket (see above).
-		void sleep(Nano.fromMilli(Milli(100))).then(() => this.#transportClose());
+	/** Tell the peer why the session ends, then close the socket; call just before
+	 *  the terminal transition, whose teardown sends it. APPLICATION_CLOSE (0x1d)
+	 *  is a graceful close the peer surfaces by *fulfilling* its `closed`, pairing
+	 *  with {@link #close}. CONNECTION_CLOSE (0x1c) is a protocol violation or
+	 *  transport error we detected, which the peer surfaces by *rejecting* it,
+	 *  pairing with {@link #abort}. */
+	#sendClose(type: "application_close" | "connection_close", code: number, reason: string) {
+		if (this.#closed) return;
+		const bytes = Frame.encode({ type, code: VarInt.from(code), reason }, this.#version);
+		this.#validateRecordSize(bytes);
+		this.#closeFrame = bytes;
 	}
 
 	/** Close the session with an application code and reason; a no-op once closed. */
@@ -2047,7 +1994,7 @@ export default class Session implements WebTransport {
 		if (this.#closed) return;
 		const code = info?.closeCode ?? 0;
 		const reason = info?.reason ?? "";
-		this.#sendApplicationClose(code, reason);
+		this.#sendClose("application_close", code, reason);
 		this.#close(code, reason);
 	}
 

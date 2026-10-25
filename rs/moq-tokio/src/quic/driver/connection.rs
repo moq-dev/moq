@@ -32,9 +32,10 @@ use crate::quic::driver::{
     send_stream::SendStream,
     udp_transmit,
 };
+use moq_congestion::Controller;
 use moq_quic::{
     ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
-    StreamId, TransportError, TransportErrorCode, congestion::Controller,
+    StreamId, TransportError, TransportErrorCode,
 };
 
 /// In-progress connection attempt future
@@ -374,6 +375,23 @@ impl Connection {
         }
     }
 
+    /// Open a request stream using only the credit already granted by the peer.
+    pub(crate) fn open_request(&self) -> Result<Option<(SendStream, RecvStream)>, ConnectionError> {
+        let mut state = self.0.state.lock("open_request");
+        if let Some(err) = &state.error {
+            return Err(err.clone());
+        }
+        let Some(id) = state.inner.streams().open(Dir::Bi, Default::default()) else {
+            return Ok(None);
+        };
+        let is_0rtt = state.inner.side().is_client() && state.inner.is_handshaking();
+        drop(state);
+        Ok(Some((
+            SendStream::new(self.0.clone(), id, is_0rtt),
+            RecvStream::new(self.0.clone(), id, is_0rtt),
+        )))
+    }
+
     /// Accept the next incoming uni-directional stream
     ///
     /// # Cancel safety
@@ -542,13 +560,12 @@ impl Connection {
         data: Bytes,
         options: SendOptions<'_>,
     ) -> Result<(), SendDatagramError> {
+        let options = send_group::to_quic(options, &self.0.0);
         let conn = &mut *self.0.state.lock("send_datagram");
         if let Some(x) = &conn.error {
             return Err(SendDatagramError::ConnectionLost(x.clone()));
         }
-        conn.inner
-            .datagrams()
-            .send(data, send_group::to_quic(options))?;
+        conn.inner.datagrams().send(data, options)?;
         conn.wake();
         Ok(())
     }
@@ -880,14 +897,11 @@ fn poll_open<'a>(
     mut notify: Pin<&mut Notified<'a>>,
     dir: Dir,
 ) -> Poll<Result<(ConnectionRef, StreamId, bool), ConnectionError>> {
+    let options = send_group::to_quic(options, &conn.0);
     let mut state = conn.state.lock("poll_open");
     if let Some(e) = &state.error {
         return Poll::Ready(Err(e.clone()));
-    } else if let Some(id) = state
-        .inner
-        .streams()
-        .open(dir, send_group::to_quic(options))
-    {
+    } else if let Some(id) = state.inner.streams().open(dir, options) {
         let is_0rtt = state.inner.side().is_client() && state.inner.is_handshaking();
         drop(state); // Release the lock so clone can take it
         return Poll::Ready(Ok((conn.clone(), id, is_0rtt)));
@@ -1116,7 +1130,6 @@ pub(crate) struct State {
 }
 
 impl State {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         inner: moq_quic::Connection,
         handle: ConnectionHandle,

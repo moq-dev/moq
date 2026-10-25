@@ -73,8 +73,10 @@ pub struct Session {
 	header_bi: Vec<u8>,
 	header_datagram: Vec<u8>,
 
-	// Keep a reference to the settings and connect stream to avoid closing them until dropped.
-	#[allow(dead_code)]
+	#[allow(
+		dead_code,
+		reason = "keep a reference to the settings and connect stream to avoid closing them until dropped"
+	)]
 	settings: Option<Arc<Settings>>,
 
 	// The send side of the CONNECT stream, used to write the CloseWebTransportSession capsule.
@@ -312,6 +314,21 @@ impl Session {
 			SendStream::new(send, self.close.clone(), Some(header)),
 			RecvStream::new(recv, self.close.clone()),
 		))
+	}
+
+	/// Open a request without waiting for QUIC stream credit, then write its session header.
+	pub(crate) async fn open_request(&self) -> Result<Option<(SendStream, RecvStream)>, SessionError> {
+		let Some((mut send, recv)) = self.conn.open_request().map_err(|err| self.map_error(err))? else {
+			return Ok(None);
+		};
+		send.set_priority(i64::MAX).ok();
+		Self::write_full(&mut send, &self.header_bi)
+			.await
+			.map_err(|err| self.map_error(err))?;
+		Ok(Some((
+			SendStream::new(send, self.close.clone(), Some(self.header_bi.len() as u64)),
+			RecvStream::new(recv, self.close.clone()),
+		)))
 	}
 
 	/// Asynchronously receives an application datagram from the remote peer.
@@ -1037,14 +1054,17 @@ impl web_transport_trait::Session for Session {
 		Self::protocol(self)
 	}
 
-	#[allow(refining_impl_trait)]
+	#[expect(
+		refining_impl_trait,
+		reason = "returns the concrete stats type rather than the trait's opaque one"
+	)]
 	fn stats(&self) -> SessionStats {
 		Self::stats(self)
 	}
 }
 
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::{
 		io::{self, IoSliceMut},
@@ -1137,13 +1157,27 @@ mod tests {
 		[crate::quic::driver::Endpoint; 2],
 		Arc<Gate>,
 	) {
+		gated_pair_with_transport(Default::default(), Default::default()).await
+	}
+
+	async fn gated_pair_with_transport(
+		server_transport: crate::quic::driver::TransportConfig,
+		client_transport: crate::quic::driver::TransportConfig,
+	) -> (
+		crate::quic::driver::Connection,
+		crate::quic::driver::Connection,
+		[crate::quic::driver::Endpoint; 2],
+		Arc<Gate>,
+	) {
 		#[cfg(all(feature = "aws-lc-rs", feature = "ring"))]
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 		let CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
 		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KeyPair::serialize_der(&signing_key)));
 
-		let server_config = crate::quic::driver::ServerConfig::with_single_cert(vec![cert.der().clone()], key).unwrap();
+		let mut server_config =
+			crate::quic::driver::ServerConfig::with_single_cert(vec![cert.der().clone()], key).unwrap();
+		server_config.transport_config(Arc::new(server_transport));
 		let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
 		let gate = Arc::new(Gate::default());
 		let socket = Socket {
@@ -1159,7 +1193,8 @@ mod tests {
 
 		let mut roots = rustls::RootCertStore::empty();
 		roots.add(cert.der().clone()).unwrap();
-		let client_config = crate::quic::driver::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+		let mut client_config = crate::quic::driver::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+		client_config.transport_config(Arc::new(client_transport));
 		let client = crate::quic::driver::Endpoint::client((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
 
 		let connecting = client
@@ -1169,6 +1204,56 @@ mod tests {
 		let (client_conn, server_conn) = tokio::join!(async { connecting.await.unwrap() }, accept);
 
 		(client_conn, server_conn, [client, server], gate)
+	}
+
+	#[tokio::test]
+	async fn request_credit_refusal_does_not_leave_an_open() {
+		use moq_net::transport::poll::{SendStream as _, Session as _};
+		let mut transport = crate::quic::driver::TransportConfig::default();
+		transport.max_concurrent_bidi_streams(1_u32.into());
+		let (client, server, _endpoints, _) = gated_pair_with_transport(transport, Default::default()).await;
+		let mut client = crate::transport::Session::new(Session::raw(client), moq_net::transport::Binding::InBand);
+		let mut server = crate::transport::Session::new(Session::raw(server), moq_net::transport::Binding::InBand);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(&mut cx, Default::default()) else {
+			panic!("initial request has credit");
+		};
+		for _ in 0..2 {
+			assert!(matches!(
+				client.poll_open_request(&mut cx, Default::default()),
+				Poll::Ready(Ok(None))
+			));
+		}
+		send.finish().unwrap();
+		let (mut peer_send, mut peer_recv) = server.accept_bi().await.unwrap();
+		peer_send.finish().unwrap();
+		assert!(peer_recv.read_chunk(1).await.unwrap().is_none());
+		assert!(recv.read_chunk(1).await.unwrap().is_none());
+		drop((send, recv, peer_send, peer_recv));
+		let _fresh = client.open_bi(Default::default()).await.unwrap();
+		assert!(matches!(
+			client.poll_open_request(&mut cx, Default::default()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	#[tokio::test]
+	async fn request_header_send_pressure_keeps_its_admitted_stream() {
+		use moq_net::transport::poll::Session as _;
+		let mut server_transport = crate::quic::driver::TransportConfig::default();
+		server_transport.max_concurrent_bidi_streams(1_u32.into());
+		let mut client_transport = crate::quic::driver::TransportConfig::default();
+		client_transport.send_window(0);
+		let (client, _server, _endpoints, _) = gated_pair_with_transport(server_transport, client_transport).await;
+		let mut web = Session::raw(client.clone());
+		web.header_bi = vec![0x41, 0];
+		let mut session = crate::transport::Session::new(web, moq_net::transport::Binding::InBand);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		// The only stream credit is consumed, but the header cannot enter the send window.
+		assert!(session.poll_open_request(&mut cx, Default::default()).is_pending());
+		assert!(client.open_request().unwrap().is_none());
+		// Polling the admitted request never rechecks credit or starts another open.
+		assert!(session.poll_open_request(&mut cx, Default::default()).is_pending());
 	}
 
 	/// A queued capsule must survive a stalled socket beyond the teardown grace.
@@ -1390,6 +1475,45 @@ mod tests {
 		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap();
 		assert!(matches!(uni, Err(crate::quic::web::ReadError::Reset(0))), "{uni:?}");
 		assert!(matches!(bi, Err(crate::quic::web::ReadError::Reset(0))), "{bi:?}");
+	}
+
+	/// A stream dropped before its end is stopped with WebTransport code 0, not the driver's raw
+	/// 0, which falls outside the HTTP/3 range and reaches the writer as an invalid stop.
+	#[tokio::test]
+	async fn drop_stops_with_mapped_code() {
+		let (client_conn, server_conn, _endpoints) = pair().await;
+		let (client, server) = tokio::join!(
+			Session::connect(client_conn, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server_conn).await.unwrap().ok().await },
+		);
+		let (client, server) = (client.unwrap(), server.unwrap());
+
+		let mut uni = client.open_uni(Default::default()).await.unwrap();
+		uni.write_all(b"unread").await.unwrap();
+		let (mut bi, _client_recv) = client.open_bi(Default::default()).await.unwrap();
+		bi.write_all(b"unread").await.unwrap();
+
+		let mut recv = server.accept_uni().await.unwrap();
+		recv.read_chunk(usize::MAX).await.unwrap();
+		drop(recv);
+		let (_server_send, mut recv) = server.accept_bi().await.unwrap();
+		recv.read_chunk(usize::MAX).await.unwrap();
+		drop(recv);
+
+		let stopped = |mut send: SendStream| async move {
+			loop {
+				if let Err(err) = send.write(b"more").await {
+					return err;
+				}
+			}
+		};
+		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), async {
+			tokio::join!(stopped(uni), stopped(bi))
+		})
+		.await
+		.unwrap();
+		assert!(matches!(uni, crate::quic::web::WriteError::Stopped(0)), "{uni:?}");
+		assert!(matches!(bi, crate::quic::web::WriteError::Stopped(0)), "{bi:?}");
 	}
 
 	/// A stream that names another session is dropped, and the session's own stream after it

@@ -756,7 +756,7 @@ export class Subscriber {
 					// The peer's broadcast ended, whether or not its retraction has arrived: end the
 					// listing and let go of what it listed. FIN our half too, so the stream is done.
 					stream.writer.close();
-					lister.finish();
+					lister.end();
 					return;
 				}
 				if (event.kind === "added") {
@@ -766,11 +766,12 @@ export class Subscriber {
 					}
 					listed.add(event.name);
 					lister.add(event.name, this.#toModelInfo(event.info));
-				} else if (event.kind === "removed") {
+				} else if (event.kind === "removed" || event.kind === "finished") {
 					if (!listed.delete(event.name))
 						throw new ProtocolViolation(`unlisted track removed: ${event.name}`);
 					this.#announces.release();
-					lister.remove(event.name);
+					if (event.kind === "finished") lister.finish(event.name);
+					else lister.remove(event.name);
 				} else {
 					// This hop synced its readers when the listing began; only the order matters here.
 					if (synced) throw new ProtocolViolation("duplicate SYNCED");
@@ -1250,9 +1251,6 @@ export class Subscriber {
 			});
 			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
-			if (!hasTrackStream(this.version)) {
-				throw new Error("fetch group requires moq-lite-05 or newer");
-			}
 
 			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
 			// Subscriber.close() closing the group releases every caller at any stage, and resets
@@ -1594,6 +1592,12 @@ export class Subscriber {
 		const read = tail.open(group.sequence);
 
 		try {
+			// This side never asks for a group from a later frame, so a stream that skips the
+			// first ones is a peer bug. Read as a whole group, its frames would be misnumbered,
+			// and resumption and deduplication rely on those positions.
+			if (group.frameStart !== 0) {
+				throw new ProtocolViolation(`group ${group.sequence} starts at frame ${group.frameStart}`);
+			}
 			// The publisher contradicted its own end, which no later group can repair. lite-05
 			// specified an inclusive end, so its last group lands on it: the write below drops
 			// only that group there.
@@ -1620,14 +1624,17 @@ export class Subscriber {
 				scale = timescale.peek();
 			}
 
-			const compress = entry.compress;
-			if (compress && group.frameStart !== 0)
-				throw new StreamError(StreamCode.TooFarBehind, { message: "compressed group lacks its prefix" });
-			await readFrames(stream, producer, { scale, timed: hasMediaTime(this.version), compress });
+			await readFrames(stream, producer, { scale, timed: hasMediaTime(this.version), compress: entry.compress });
 
 			producer.close();
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
+			// A violation ends the session, which the connection does once it escapes; anything
+			// else ends only this group.
+			if (err instanceof ProtocolViolation) {
+				producer.close(err);
+				throw err;
+			}
 			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
 			stream.stop(e);
@@ -1866,7 +1873,10 @@ class ConsumeBroadcast extends broadcast.Consumer {
 					if (!hold) query.abort();
 				}
 			},
-			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options, consumed),
+			// FETCH streams start at lite-05; older sessions offer no fetch at all.
+			fetchGroup: hasTrackStream(subscriber.version)
+				? (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options, consumed)
+				: undefined,
 		});
 		this.#subscriber = subscriber;
 		this.#path = path;

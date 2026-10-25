@@ -15,14 +15,14 @@ categories = ["asynchronous", "network-programming", "os::linux-apis"]
 [features]
 default = ["quic"]
 # QUIC and WebTransport on moq-quic, with TLS through rustls.
-quic = ["dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
+quic = ["dep:moq-congestion", "dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
 # Capture qlog traces (`quic::Transport::qlog`). Off by default: it compiles the
 # qlog crate and its serde_json encoder into moq-quic, which a production build has
 # no use for.
 qlog = ["moq-quic?/qlog"]
 # Workers created inside a tokio runtime with a `moq_clock::Manual` clock installed
 # run on that clock, so a test decides when their time passes. For test builds.
-manual = ["moq-clock/manual"]
+_manual = ["moq-clock/manual"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bytes = "1"
@@ -32,8 +32,9 @@ kio = { workspace = true }
 libc = { workspace = true }
 # The worker is a moq-clock backend: its turn's instant is the ambient clock.
 moq-clock = { workspace = true }
+moq-congestion = { workspace = true, optional = true }
 moq-net = { workspace = true }
-moq-quic = { workspace = true, features = ["bloom", "rustls-aws-lc-rs"], optional = true }
+moq-quic = { workspace = true, features = ["rustls-aws-lc-rs"], optional = true }
 moq-sock = { workspace = true }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23", optional = true }
@@ -63,7 +64,7 @@ io-uring = { workspace = true }
 libc = { workspace = true }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs"] }
 # Tests run workers on a manual clock.
-moq-uring = { path = ".", features = ["manual"] }
+moq-uring = { path = ".", features = ["_manual"] }
 nix = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"
@@ -102,3 +103,6 @@ required-features = ["quic"]
 [[bench]]
 name = "timers"
 harness = false
+
+[lints]
+workspace = true

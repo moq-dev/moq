@@ -6,7 +6,10 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::Timestamp;
 
 #[path = "../src/jitter.rs"]
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 mod jitter;
 
 /// Every track sends a frame a second as it decodes, for as many two-second steering steps as
@@ -23,7 +26,7 @@ async fn steer(tracks: u16, floors: u64) -> u64 {
 			let arrival = jitter::Arrival {
 				arrived: at,
 				read: at,
-				decode: Timestamp::from_millis(second * 1_000).unwrap(),
+				decode: Timestamp::from_millis(second * 1_000).unwrap().into(),
 				restart: 0,
 				skip: 0,
 				cut: 0,
@@ -85,7 +88,7 @@ fn acquisition(c: &mut Criterion) {
 										jitter::Arrival {
 											arrived: start,
 											read: start,
-											decode: Timestamp::from_millis(frame * 20).unwrap(),
+											decode: Timestamp::from_millis(frame * 20).unwrap().into(),
 											restart: 0,
 											skip: 0,
 											cut: 0,

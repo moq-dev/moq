@@ -1,17 +1,17 @@
 import type { Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
-import { SharedRingBuffer } from "./shared-ring-buffer";
 
 // Samples to fade over when playback stops or resumes short of a full quantum. A shortfall
 // otherwise steps straight to silence and back, which is an audible click on every underrun.
 const RAMP = 64;
 
 class Render extends AudioWorkletProcessor {
-	// Set after init, depending on which path the main thread chose.
-	#backend?: SharedRingBuffer | AudioRingBuffer;
+	// Created by the main thread's init message.
+	#ring?: AudioRingBuffer;
 	#underflow = 0;
 	#stateCounter = 0;
 	#epoch = 0;
+	#playing = true;
 	// Whether the previous quantum ended short, so the next one fades back in.
 	#short = false;
 
@@ -20,38 +20,35 @@ class Render extends AudioWorkletProcessor {
 
 		this.port.onmessage = (event: MessageEvent<Message>) => {
 			const msg = event.data;
-			if (msg.type === "init-shared") {
-				console.log("[audio-worklet] init-shared: using SharedArrayBuffer path");
-				const previous = this.#backend instanceof SharedRingBuffer ? this.#backend : undefined;
-				this.#backend = new SharedRingBuffer(msg, previous);
-				this.#underflow = 0;
-				this.#short = false;
-			} else if (msg.type === "init-post") {
-				console.log("[audio-worklet] init-post: using postMessage path");
-				this.#backend = new AudioRingBuffer(msg);
+			if (msg.type === "init") {
+				this.#ring = new AudioRingBuffer(msg);
+				this.#playing = msg.playing ?? true;
 				this.#underflow = 0;
 				this.#short = false;
 			} else if (msg.type === "data") {
-				// Only meaningful in post mode.
-				if (this.#backend instanceof AudioRingBuffer) this.#backend.write(msg.timestamp, msg.data);
+				this.#ring?.write(msg.timestamp, msg.data);
 			} else if (msg.type === "latency") {
-				// Only meaningful in post mode.
-				if (this.#backend instanceof AudioRingBuffer) this.#backend.resize(msg.latency);
+				this.#ring?.setLatency(msg.latency);
+				if (msg.park !== undefined) {
+					this.#ring?.park();
+					this.#epoch = msg.park;
+				}
 			} else if (msg.type === "truncate") {
-				// Only meaningful in post mode; shared mode truncates via the control array.
-				if (this.#backend instanceof AudioRingBuffer) this.#backend.truncate(msg.timestamp);
+				this.#ring?.truncate(msg.timestamp);
 			} else if (msg.type === "reset") {
-				// Only meaningful in post mode; shared mode resets via the control array.
-				if (this.#backend instanceof AudioRingBuffer) this.#backend.reset();
+				this.#ring?.reset();
 				this.#epoch = msg.epoch;
+				this.#playing = msg.playing ?? true;
+			} else if (msg.type === "playing" && msg.epoch === this.#epoch) {
+				this.#playing = msg.playing;
 			}
 		};
 	}
 
 	process(_inputs: Float32Array[][], outputs: Float32Array[][], _parameters: Record<string, Float32Array>) {
 		const output = outputs[0];
-		const backend = this.#backend;
-		const samplesRead = backend?.read(output) ?? 0;
+		const ring = this.#ring;
+		const samplesRead = this.#playing ? (ring?.read(output) ?? 0) : 0;
 
 		if (samplesRead < output[0].length) {
 			// Fade the tail of what we did read down to the silence that follows it.
@@ -61,7 +58,7 @@ class Render extends AudioWorkletProcessor {
 					channel[samplesRead - ramp + i] *= 1 - (i + 1) / ramp;
 				}
 			}
-			this.#underflow += output[0].length - samplesRead;
+			if (this.#playing) this.#underflow += output[0].length - samplesRead;
 			this.#short = true;
 		} else {
 			if (this.#short) {
@@ -74,24 +71,23 @@ class Render extends AudioWorkletProcessor {
 				}
 				this.#short = false;
 			}
-			if (this.#underflow > 0 && backend) {
-				console.debug(`audio underflow: ${Math.round((1000 * this.#underflow) / backend.rate)}ms`);
+			if (this.#underflow > 0 && ring) {
+				console.debug(`audio underflow: ${Math.round((1000 * this.#underflow) / ring.rate)}ms`);
 				this.#underflow = 0;
 			}
 		}
 
-		// In post mode the main thread can't read worklet state directly, so we
-		// periodically ship it across via postMessage. In shared mode the main
-		// thread reads the shared control array directly.
-		if (backend instanceof AudioRingBuffer) {
+		// The main thread can't read worklet state directly, so ship it across periodically.
+		if (ring) {
 			this.#stateCounter++;
 			if (this.#stateCounter >= 5) {
 				this.#stateCounter = 0;
 				const state: State = {
 					type: "state",
-					timestamp: backend.timestamp,
-					stalled: backend.stalled,
-					underruns: backend.underruns,
+					timestamp: ring.timestamp,
+					stalled: ring.stalled,
+					anchored: ring.anchored,
+					underruns: ring.underruns,
 					epoch: this.#epoch,
 				};
 				this.port.postMessage(state);

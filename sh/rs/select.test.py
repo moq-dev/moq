@@ -8,11 +8,12 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
 
 
 class SelectTest(unittest.TestCase):
     # CI runs target lints before its test build.
-    def selected(self, *paths, action="lint"):
+    def selected(self, *paths, action="lint", github_actions=False):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
             calls = scratch / "calls"
@@ -22,16 +23,21 @@ class SelectTest(unittest.TestCase):
             changed = scratch / "changed"
             changed.write_text("\n".join(paths) + "\n")
             env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
-                       SELECT_CALLS=str(calls), BASH_ENV=os.devnull)
+                       SELECT_CALLS=str(calls), BASH_ENV=os.devnull,
+                       GITHUB_ACTIONS=str(github_actions).lower())
             subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
                            cwd=ROOT, env=env, check=True, capture_output=True, text=True)
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
-        for action in ("check", "check-test", "lint", "test"):
-            with self.subTest(action=action):
-                self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz",
-                              self.selected("sh/rs/nextest.sh", action=action))
+        for github_actions in (False, True):
+            for action in ("check", "check-test", "lint", "test"):
+                with self.subTest(action=action, github_actions=github_actions):
+                    suffix = f" --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
+                    suffix += " --timings" if github_actions and action == "test" else ""
+                    self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
+                                  self.selected("sh/rs/nextest.sh", action=action,
+                                                github_actions=github_actions))
         selected = self.selected("sh/rs/nextest.sh")
         for recipe in ("wasm", "uring-check"):
             self.assertIn(f"rs {recipe}", selected)
@@ -46,6 +52,21 @@ class SelectTest(unittest.TestCase):
                     self.assertFalse(any("-features" in call for call in calls), calls)
         for owner in ("tokio", "media", "net"):
             self.assertEqual(self.selected(f"sh/rs/{owner}-features.sh"), [])
+
+    def test_device_features_join_the_one_test_build(self):
+        for path, features in (("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
+                               ("rs/moq-cli/src/main.rs", "moq-cli/play moq-cli/openh264")):
+            with self.subTest(path=path):
+                calls = self.selected(path, action="test")
+                self.assertEqual(len(calls), 1, calls)
+                self.assertTrue(calls[0].endswith(f" --features {features}"), calls)
+        # moq-tokio's WebRTC module is off by default too.
+        calls = self.selected("rs/moq-tokio/src/webrtc.rs", action="test")
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn(" moq-tokio/webrtc", calls[0])
+        # A dependency of the media crates still runs both their device tests.
+        calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
+        self.assertIn("--package moq-video --package moq-audio", calls[0])
 
     def test_demo_crate_follows_its_dependencies(self):
         for path in ("demo/carla/bridge/src/lib.rs", "rs/moq-video/src/lib.rs"):

@@ -5,7 +5,10 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_quic::{Dir, VarInt};
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "a harness shared by several benches, each using only part of it"
+)]
 mod common;
 
 use common::{Pair, Setup, Sink, ThreadCpu, payload};
@@ -209,6 +212,60 @@ fn bench_evict(c: &mut Criterion<ThreadCpu>) {
     group.finish();
 }
 
+/// Repeated eviction: `streams` holders keep a stuck window full while the client spends each
+/// credit an eviction frees on one more incomplete unit, forcing one eviction per round trip.
+///
+/// One eviction is timed per iteration, so its cost must not grow with the holders.
+fn bench_evict_churn(c: &mut Criterion<ThreadCpu>) {
+    let mut group = c.benchmark_group("receive_evict_churn");
+    for streams in [16, 256, 2048] {
+        let window = streams * PACKET;
+        let mut pair = None;
+        group.throughput(Throughput::Elements(1));
+        group.bench_function(BenchmarkId::new("streams", streams), |b| {
+            let pair = pair.get_or_insert_with(|| {
+                let mut pair = Pair::new(Setup {
+                    server_receive_window: VarInt::from_u64(window as u64).unwrap(),
+                    ..Default::default()
+                });
+                pair.server.sink = Sink::Lease(window);
+                let data = payload(PACKET);
+                let conn = pair.client();
+                for _ in 0..streams {
+                    let id = conn
+                        .streams()
+                        .open(Dir::Uni, Default::default())
+                        .expect("stream limit");
+                    assert_eq!(conn.send_stream(id).write(&data).unwrap(), PACKET);
+                }
+                pair.drive_until(|pair| pair.server.received.evicted >= 1);
+                pair.settle();
+                pair
+            });
+            let data = payload(PACKET);
+            b.iter_custom(|iters| {
+                let mut busy = Duration::ZERO;
+                for _ in 0..iters {
+                    pair.server.busy = Duration::ZERO;
+                    let target = pair.server.received.evicted + 1;
+                    let conn = pair.client();
+                    let id = conn
+                        .streams()
+                        .open(Dir::Uni, Default::default())
+                        .expect("stream limit");
+                    assert_eq!(conn.send_stream(id).write(&data).unwrap(), PACKET);
+                    pair.drive_until(|pair| pair.server.received.evicted >= target);
+                    busy += pair.server.busy;
+                    // The evicted stream's stop and reset settle untimed.
+                    pair.settle();
+                }
+                busy
+            });
+        });
+    }
+    group.finish();
+}
+
 /// Receiver stops: the server sends STOP_SENDING for every stream as it opens, and the exchange
 /// runs until the client has reset and forgotten them all.
 fn bench_stop(c: &mut Criterion<ThreadCpu>) {
@@ -252,6 +309,6 @@ fn bench_stop(c: &mut Criterion<ThreadCpu>) {
 criterion_group! {
     name = benches;
     config = common::config();
-    targets = bench_loss, bench_lease, bench_evict, bench_reset, bench_stop
+    targets = bench_loss, bench_lease, bench_evict, bench_evict_churn, bench_reset, bench_stop
 }
 criterion_main!(benches);

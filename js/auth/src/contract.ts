@@ -105,7 +105,11 @@ const BaseRequestSchema = z.object({
 	remote: z.optional(z.string()),
 	/** The relay's socket address the session arrived on, absent likewise. */
 	local: z.optional(z.string()),
-	/** The SNI the client presented, when the transport carried TLS. */
+	/**
+	 * The SNI that selected the relay's certificate, absent without TLS or SNI.
+	 * The client picks it among the names the relay serves, so a hostname-scoped
+	 * server binds the tenant to the credential, not to this alone.
+	 */
 	server_name: z.optional(z.string()),
 	/** The negotiated application protocol, including the moq version. */
 	alpn: z.optional(z.string()),
@@ -117,6 +121,8 @@ const BaseRequestSchema = z.object({
 	token: z.optional(TokenSchema),
 	/** The direction the client declared at SETUP; absent means both. */
 	role: z.optional(RoleSchema),
+	/** What the client advertised in its SETUP, such as `moq-net-js/0.4.2`; peer-controlled, so never authorize on it. */
+	implementation: z.optional(z.string()),
 	/** The verified client certificate, when one was presented. */
 	tls: z.optional(PeerSchema),
 });
@@ -176,7 +182,11 @@ export const GrantSchema = z
 		tier: z.optional(z.string()),
 		/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
 		label: z.optional(PathSchema),
-		/** The session is a cluster peer (another relay): what it announces entered the cluster elsewhere. */
+		/**
+		 * The session is a cluster peer (another relay): what it announces entered the cluster elsewhere,
+		 * and it discovers hidden routes without asking, for peers that predate the opt-in.
+		 * A client certificate alone is not.
+		 */
 		peer: z.optional(z.boolean()),
 		/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */
 		upstream: z.optional(z.boolean()),

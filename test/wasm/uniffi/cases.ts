@@ -7,16 +7,19 @@
  * @module
  */
 import {
+	MoqAnnounceRoute,
 	MoqBroadcastProducer,
 	MoqClient,
 	MoqClientConfig,
 	MoqClientTls,
+	MoqConnectionPhase,
+	type MoqConnectionState,
 	type MoqGroupConsumer,
 	type MoqGroupConsumerLike,
-	MoqRoute,
 	type MoqSessionLike,
 	type MoqTrackConsumer,
 	MoqTrackInfo,
+	type MoqTrackProducer,
 	uniffiInitAsync,
 } from "./dist/index.ts";
 
@@ -109,33 +112,69 @@ async function pending(promise: Promise<unknown>): Promise<boolean> {
 	return !settled;
 }
 
-async function connect(relay: Relay): Promise<MoqSessionLike> {
-	const response = await fetch(new URL("/certificate.sha256", relay.url));
-	if (!response.ok) throw new Error(`certificate HTTP ${response.status}`);
+/** Start a dial to `relay`, trusting `fingerprint` (the relay's own by default). */
+async function dial(relay: Relay, fingerprint?: string): Promise<MoqSessionLike> {
+	if (fingerprint === undefined) {
+		const response = await fetch(new URL("/certificate.sha256", relay.url));
+		if (!response.ok) throw new Error(`certificate HTTP ${response.status}`);
+		fingerprint = (await response.text()).trim();
+	}
 	const url = new URL(relay.url);
 	url.protocol = "https:";
 	const client = new MoqClient(
 		MoqClientConfig.create({
-			// moq-ffi exposes no negotiated version, so offering only the expected one is the check.
+			// Offering only the expected version makes connecting the check.
 			versions: [relay.version],
-			tls: MoqClientTls.create({ fingerprints: [(await response.text()).trim()] }),
+			tls: MoqClientTls.create({ fingerprints: [fingerprint] }),
 		}),
 	);
 	return client.connect(url.toString());
 }
 
+/** Wait for the dial to settle, returning its state. */
+async function settled(session: MoqSessionLike): Promise<MoqConnectionState> {
+	let state = session.state();
+	while (state.phase === MoqConnectionPhase.Connecting) {
+		state = await within(session.stateChanged(state.revision), 10000, "dial");
+	}
+	return state;
+}
+
+/** Connect to `relay`, failing unless the session establishes. */
+async function connect(relay: Relay): Promise<MoqSessionLike> {
+	const session = await dial(relay);
+	const state = await settled(session);
+	if (state.phase !== MoqConnectionPhase.Connected) throw new Error(`dial ended: ${state.failure}`);
+	return session;
+}
+
 /** A standalone group with a consumer, no session. */
-function localGroup(sequence = 0n) {
+function localTrack() {
 	const broadcast = new MoqBroadcastProducer();
 	const track = broadcast.publishTrack("data", TIMED);
-	const group = track.createGroup(sequence);
-	return { broadcast, track, group, consumer: group.consume() };
+	return {
+		broadcast,
+		track,
+		// A child handle does not own its producer's lifetime. Retain both parents until
+		// the case completes, then release them even when an assertion throws.
+		[Symbol.dispose]() {
+			(track as MoqTrackProducer).uniffiDestroy();
+			broadcast.uniffiDestroy();
+		},
+	};
+}
+
+function localGroup(sequence = 0n) {
+	const fixture = localTrack();
+	const group = fixture.track.createGroup(sequence);
+	return { ...fixture, group, consumer: group.consume() };
 }
 
 const local: Record<string, () => Promise<string | undefined>> = {
 	"u64 above 2^53 round-trips locally": async () => {
 		for (const sequence of HIGH) {
-			const { group, consumer } = localGroup(sequence);
+			using fixture = localGroup(sequence);
+			const { group, consumer } = fixture;
 			if (consumer.sequence() !== sequence) throw new Error(`sequence ${consumer.sequence()} != ${sequence}`);
 			group.writeFrame({ payload: payload(1), timestampUs: stamp(sequence) });
 			const frame = await consumer.readFrame();
@@ -146,7 +185,8 @@ const local: Record<string, () => Promise<string | undefined>> = {
 	},
 
 	"writeFrame refuses a timestamp past 2^61 - 1": async () => {
-		const { group } = localGroup();
+		using fixture = localGroup();
+		const { group } = fixture;
 		try {
 			group.writeFrame({ payload: payload(1), timestampUs: MAX_TIMESTAMP + 1n });
 		} catch (err) {
@@ -156,7 +196,8 @@ const local: Record<string, () => Promise<string | undefined>> = {
 	},
 
 	"AbortSignal rejects a pending read without stealing the next frame": async () => {
-		const { group, consumer } = localGroup();
+		using fixture = localGroup();
+		const { group, consumer } = fixture;
 		const abort = new AbortController();
 		const first = consumer.readFrame({ signal: abort.signal });
 		if (!(await pending(first))) throw new Error("read settled with nothing written");
@@ -178,8 +219,8 @@ const local: Record<string, () => Promise<string | undefined>> = {
 	"aborting a pending call releases its handle": async () => {
 		// The pending future holds a clone of the consumer, so the track stays demanded until
 		// rust_future_free drops it. Destroying the JS handle alone must not be enough.
-		const broadcast = new MoqBroadcastProducer();
-		const track = broadcast.publishTrack("data", TIMED);
+		using fixture = localTrack();
+		const { track } = fixture;
 		const demand = track.demand();
 		const consumer = track.consume(undefined);
 		const wanted = async () => {
@@ -205,7 +246,8 @@ const local: Record<string, () => Promise<string | undefined>> = {
 	"freeing a handle mid-call leaves the call running": async () => {
 		// moq-wasm's free() rejects pending calls. Here every call clones the Arc, so the
 		// call outlives the handle and cancel() is the explicit way to end it.
-		const { group, consumer } = localGroup();
+		using fixture = localGroup();
+		const { group, consumer } = fixture;
 		const read = consumer.readFrame();
 		(consumer as MoqGroupConsumer).uniffiDestroy();
 		if (!(await pending(read))) throw new Error("free settled the pending read");
@@ -215,7 +257,8 @@ const local: Record<string, () => Promise<string | undefined>> = {
 	},
 
 	"cancel() rejects a pending call and every later one": async () => {
-		const { consumer } = localGroup();
+		using fixture = localGroup();
+		const { consumer } = fixture;
 		const read = consumer.readFrame();
 		if (!(await pending(read))) throw new Error("read settled with nothing written");
 		consumer.cancel();
@@ -239,7 +282,8 @@ const local: Record<string, () => Promise<string | undefined>> = {
 	},
 
 	"closing the producer ends a pending read": async () => {
-		const { group, consumer } = localGroup();
+		using fixture = localGroup();
+		const { group, consumer } = fixture;
 		const read = consumer.readFrame();
 		group.finish();
 		const frame = await within(read, 1000, "read after finish");
@@ -251,7 +295,55 @@ const local: Record<string, () => Promise<string | undefined>> = {
 const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 	"negotiates the relay's version": async (relay) => {
 		const session = await connect(relay);
+		const state = session.state();
 		session.cancel(0);
+		if (state.version !== relay.version) throw new Error(`negotiated ${state.version}`);
+		if (state.connects !== 1n) throw new Error(`connects ${state.connects}`);
+		return undefined;
+	},
+
+	"connect returns before a refused dial and reports it": async (relay) => {
+		// A certificate hash nothing matches, so the browser refuses the handshake.
+		const session = await dial(relay, "00".repeat(32));
+		const first = session.state();
+		if (first.phase !== MoqConnectionPhase.Connecting) throw new Error(`returned ${first.phase}`);
+		const state = await settled(session);
+		if (state.phase !== MoqConnectionPhase.Closed) throw new Error(`settled ${state.phase}`);
+		if (!state.failure) throw new Error("no failure reported");
+		const closed = await settle(
+			session.closed(),
+			5000,
+			"closed",
+			() => "resolved",
+			(err: unknown) => (err as Error).message,
+		);
+		if (closed === "resolved") throw new Error("closed resolved after a refused dial");
+		return closed;
+	},
+
+	"a token added while dialing ends with a refused dial": async (relay) => {
+		const session = await dial(relay, "00".repeat(32));
+		// Taken before the dial settles, so the token waits for a session that never comes.
+		const adding = session.auth().add("token");
+		const state = await settled(session);
+		if (state.phase !== MoqConnectionPhase.Closed) throw new Error(`settled ${state.phase}`);
+		const added = await settle(
+			adding,
+			5000,
+			"add",
+			() => "resolved",
+			(err: unknown) => (err as Error).message,
+		);
+		if (added === "resolved") throw new Error("add resolved after a refused dial");
+		return added;
+	},
+
+	"cancelling a dial closes it": async (relay) => {
+		const session = await dial(relay);
+		session.cancel(0);
+		const state = await settled(session);
+		if (state.phase !== MoqConnectionPhase.Closed) throw new Error(`settled ${state.phase}`);
+		await within(session.closed(), 5000, "closed");
 		return undefined;
 	},
 
@@ -262,7 +354,7 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			const path = `uniffi/u64/${crypto.randomUUID()}`;
 			const broadcast = publisher.publish().createBroadcast(path);
 			const track = broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqRoute.create({}));
+			broadcast.announce(MoqAnnounceRoute.create({}));
 			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const seen: string[] = [];
@@ -294,7 +386,7 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			const path = `uniffi/refuse/${crypto.randomUUID()}`;
 			const broadcast = publisher.publish().createBroadcast(path);
 			broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqRoute.create({}));
+			broadcast.announce(MoqAnnounceRoute.create({}));
 			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
 			const outcome = await settle(
 				consumer.subscribeTrack("missing", undefined).then((track) => track.recvGroup()),
@@ -318,7 +410,7 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			const path = `uniffi/close/${crypto.randomUUID()}`;
 			const broadcast = publisher.publish().createBroadcast(path);
 			const track = broadcast.publishTrack("data", TIMED);
-			broadcast.announce(MoqRoute.create({}));
+			broadcast.announce(MoqAnnounceRoute.create({}));
 			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const group = track.appendGroup();
@@ -357,7 +449,8 @@ async function bench(): Promise<Bench[]> {
 	};
 
 	await measure("sync getter: group.sequence()", 10, async () => {
-		const { consumer } = localGroup();
+		using fixture = localGroup();
+		const { consumer } = fixture;
 		const start = performance.now();
 		for (let i = 0; i < BATCH; i++) consumer.sequence();
 		return performance.now() - start;
@@ -368,7 +461,8 @@ async function bench(): Promise<Bench[]> {
 		BATCH = Math.min(1000, (16 << 20) / size);
 		const batches = size > 4096 ? 8 : 10;
 		await measure(`sync write_frame ${size}B`, batches, async () => {
-			const { group, broadcast } = localGroup();
+			using fixture = localGroup();
+			const { group, broadcast } = fixture;
 			const start = performance.now();
 			for (let i = 0; i < BATCH; i++) group.writeFrame({ payload: bytes, timestampUs: 0n });
 			const elapsed = performance.now() - start;
@@ -376,7 +470,8 @@ async function bench(): Promise<Bench[]> {
 			return elapsed;
 		});
 		await measure(`async read_frame, buffered ${size}B`, batches, async () => {
-			const { group, consumer, broadcast } = localGroup();
+			using fixture = localGroup();
+			const { group, consumer, broadcast } = fixture;
 			for (let i = 0; i < BATCH; i++) group.writeFrame({ payload: bytes, timestampUs: 0n });
 			const start = performance.now();
 			for (let i = 0; i < BATCH; i++) await consumer.readFrame();
@@ -390,7 +485,8 @@ async function bench(): Promise<Bench[]> {
 	// Each read parks first, so it pays the continuation: a poll, a JS Promise per wakeup, a re-poll.
 	const bytes = payload(160);
 	await measure("async read_frame, parked then woken 160B", 5, async () => {
-		const { group, consumer, broadcast } = localGroup();
+		using fixture = localGroup();
+		const { group, consumer, broadcast } = fixture;
 		const start = performance.now();
 		for (let i = 0; i < BATCH; i++) {
 			const read = consumer.readFrame();

@@ -38,7 +38,7 @@ pub use api::*;
 pub use audio::*;
 pub use bandwidth::*;
 pub use error::*;
-pub use ffi::moq_status_callback;
+pub use ffi::{moq_state_callback, moq_status_callback};
 pub use id::*;
 pub use video::*;
 
@@ -51,5 +51,9 @@ pub(crate) use session::*;
 pub(crate) use state::*;
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod test;

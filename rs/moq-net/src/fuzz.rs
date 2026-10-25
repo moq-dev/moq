@@ -73,11 +73,6 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
-/// Normalize a compressed wire request for the private requesting-model benchmark.
-pub fn widen_compressed(track: &track::Producer, subscription: &mut track::Subscription) {
-	track.widen_compressed(subscription);
-}
-
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),
@@ -305,7 +300,7 @@ pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::or
 
 /// A session's snapshot of its peer's initial announcements, for the synced bench.
 /// Drop it to land the snapshot.
-pub struct Snapshot(#[allow(dead_code)] crate::model::Snapshot);
+pub struct Snapshot(#[allow(dead_code, reason = "held for its drop, which lands the snapshot")] crate::model::Snapshot);
 
 /// Start a snapshot under `prefix`, as a session requesting announcements there does.
 pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
@@ -602,7 +597,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		24 => roundtrip::<ietf::SubscribeNamespaceLegacy<'static>, _>(rest, version),
 		25 => roundtrip::<ietf::SubscribeNamespaceOk, _>(rest, version),
 		26 => roundtrip::<ietf::SubscribeNamespaceError<'static>, _>(rest, version),
-		27 => roundtrip::<ietf::UnsubscribeNamespace, _>(rest, version),
+		27 => roundtrip::<ietf::UnsubscribeNamespace<'static>, _>(rest, version),
 		28 => roundtrip::<ietf::Namespace<'static>, _>(rest, version),
 		29 => roundtrip::<ietf::NamespaceDone<'static>, _>(rest, version),
 		30 => roundtrip::<ietf::MaxRequestId, _>(rest, version),

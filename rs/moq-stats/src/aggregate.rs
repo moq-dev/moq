@@ -1017,7 +1017,7 @@ mod tests {
 
 	/// Kept-alive handles from [`feed`]: dropping them closes the subscription and
 	/// announce, bumping the `_closed` counters.
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
 		announced: announce::Consumer,
 		source: broadcast::Producer,
@@ -1097,7 +1097,7 @@ mod tests {
 	/// can fail one node's reader alone (the registry-driven producer only
 	/// publishes whole broadcasts). Its route carries no epoch, so a new one at
 	/// the same path is that node returning. Dropping it unannounces the node.
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct NodeBroadcast {
 		source: broadcast::Producer,
 		traffic: moq_json::snapshot::Producer<TrafficFrame>,

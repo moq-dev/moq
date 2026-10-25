@@ -19,13 +19,13 @@ use super::{
 };
 use crate::{
 	AsPath, Epoch, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
-	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
+	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, varint},
 	path::Segment,
 	time::{Deadlines, Instant},
 	util::{Keepalive, SendCell, TaskSet, Tasks, TasksWeak},
 };
 
-/// One relay's identity in a broadcast's hop chain: a 62-bit varint on the wire.
+/// One relay's identity in a broadcast's hop chain: any 64-bit id.
 ///
 /// Names a *hop*, not an [`origin::Producer`](Producer): a relay's routing table is the
 /// origin, and this is the id it stamps into a route's hop chain as an announcement
@@ -36,7 +36,6 @@ use crate::{
 /// on the wire, names nobody, and marks the chain anonymous for route selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Hop {
-	/// 62-bit identifier, so it fits a varint on every wire version.
 	id: u64,
 }
 
@@ -51,11 +50,11 @@ impl Hop {
 
 	/// Build a hop from a stable id.
 	///
-	/// The id must be non-zero and fit in the 62-bit QUIC varint range. Wire
-	/// decode accepts remote id 0 ([`Self::UNKNOWN`]), but a local hop should
-	/// not use it because it cannot be excluded for loop detection.
+	/// The id must be non-zero. Wire decode accepts remote id 0
+	/// ([`Self::UNKNOWN`]), but a local hop should not use it because it cannot be
+	/// excluded for loop detection.
 	pub fn new(id: u64) -> Result<Self, InvalidHop> {
-		if id == 0 || id >= 1u64 << 62 {
+		if id == 0 {
 			return Err(InvalidHop::Range);
 		}
 		Ok(Self { id })
@@ -66,7 +65,7 @@ impl Hop {
 	///
 	/// Older `@moq/lite` clients decode the exclude hop as a JavaScript number
 	/// and reject values above 2^53-1. Keep generated IDs in that range while
-	/// [`Self::new`] accepts the full 62-bit wire range for explicit IDs.
+	/// [`Self::new`] accepts any non-zero 64-bit id.
 	pub fn random() -> Self {
 		let mut rng = rand::rng();
 		let id = rng.random_range(1..(1u64 << 53));
@@ -79,13 +78,20 @@ impl Hop {
 	}
 
 	/// Build a hop from an id read off the wire, where 0 is legal.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
-	pub(crate) fn from_wire(id: u64) -> Result<Self, DecodeError> {
-		if id >= 1u64 << 62 {
-			return Err(DecodeError::InvalidValue);
+	pub(crate) const fn from_wire(id: u64) -> Self {
+		Self { id }
+	}
+
+	/// The id this hop carries on a wire whose varints use `form`.
+	///
+	/// A QUIC varint stops at 2^62 - 1, so a larger id travels as [`Self::UNKNOWN`]:
+	/// the route still reaches the peer, losing loop detection through this hop on
+	/// that link only.
+	pub(crate) fn wire_id(self, form: Form) -> u64 {
+		match form {
+			Form::Quic if self.id > varint::MAX_QUIC => Self::UNKNOWN.id,
+			_ => self.id,
 		}
-		Ok(Self { id })
 	}
 }
 
@@ -100,6 +106,14 @@ pub struct Config {
 	/// The origin's wire identity, appended to broadcast hop chains for loop
 	/// detection and shortest-path routing.
 	pub hop: Hop,
+
+	/// Longest hop path a session using this origin accepts or forwards (default 32).
+	///
+	/// Applies to moq-lite-03+ hop paths and the negotiated MoQ Cluster extension on
+	/// moq-transport. A forwarded path counts this origin's own hop too, including
+	/// when the receiving peer reconstructs that hop from the announce handshake.
+	/// Protocols without a hop path cannot reveal or bound the depth they hide.
+	pub max_hops: HopLimit,
 
 	/// The cache pool broadcasts under this origin charge their groups into. It flows
 	/// down the ownership chain (origin -> broadcast -> track -> group): a track opens
@@ -126,8 +140,8 @@ pub struct Config {
 	/// relay that loses its best route but still holds routes derived from the
 	/// withdrawn one sends nothing while the withdrawal wave removes them, then one
 	/// retraction, instead of advertising each stale path in turn. It must outlast
-	/// the wave's spread across the mesh. Defaults to [`DEFAULT_UPDATE_HOLD`];
-	/// zero delivers updates at once.
+	/// the wave's spread across the mesh. Defaults to 300 ms, longer than a withdrawal
+	/// takes to cross a global mesh, with margin; zero delivers updates at once.
 	///
 	/// A broadcast resolved through a peer's route keeps serving new requests while
 	/// the peer's replacement of it is held, and refuses them with
@@ -142,9 +156,8 @@ pub struct Config {
 	pub update_hold: Duration,
 }
 
-/// The default [`Config::update_hold`]: longer than a withdrawal takes to cross a
-/// global mesh, with margin.
-pub const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
+/// The default [`Config::update_hold`].
+pub(super) const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
 
 /// How long a cursor holds back a stale path to a prefix it retracted; see
 /// [`Config::update_hold`]. Path hunting after a withdrawal settles within it on
@@ -157,6 +170,7 @@ impl Default for Config {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		Self {
 			hop: Hop::random(),
+			max_hops: HopLimit::default(),
 			pool,
 			cache_duration: Duration::MAX,
 			update_hold: DEFAULT_UPDATE_HOLD,
@@ -194,14 +208,13 @@ impl fmt::Display for Hop {
 
 impl<V> Encode<V> for Hop {
 	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
-		w.varint(self.id)?;
-		Ok(())
+		w.varint(self.wire_id(w.form()))
 	}
 }
 
 impl<V> Decode<V> for Hop {
 	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
-		Self::from_wire(r.varint()?)
+		Ok(Self::from_wire(r.varint()?))
 	}
 }
 
@@ -211,6 +224,32 @@ impl<V> Decode<V> for Hop {
 /// diameter; appending past this limit returns [`InvalidHop::TooMany`] rather than
 /// silently truncating.
 pub(super) const MAX_HOPS: usize = 32;
+
+/// The longest advertised hop path an origin accepts or forwards, from 1 to 32.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HopLimit(usize);
+
+impl HopLimit {
+	/// A hop-path cap from 1 to 32, or `None` outside that range.
+	pub const fn new(max: usize) -> Option<Self> {
+		if max == 0 || max > MAX_HOPS {
+			None
+		} else {
+			Some(Self(max))
+		}
+	}
+
+	/// The maximum number of hops in an advertised path.
+	pub const fn get(self) -> usize {
+		self.0
+	}
+}
+
+impl Default for HopLimit {
+	fn default() -> Self {
+		Self(MAX_HOPS)
+	}
+}
 
 /// Bounded, loop-free list of [`Hop`] entries: the hop chain of a broadcast.
 ///
@@ -226,8 +265,8 @@ pub struct Hops(Vec<Hop>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidHop {
-	/// The id is zero or outside the 62-bit wire range, so it cannot identify a local
-	/// hop. Only [`Hop::new`] returns this; a chain never holds one.
+	/// The id is zero, so it cannot identify a local hop. Only [`Hop::new`] returns
+	/// this; a chain may still hold the reserved [`Hop::UNKNOWN`].
 	Range,
 
 	/// The list is already at its hop-count cap, which a real path never reaches and a
@@ -243,7 +282,7 @@ pub enum InvalidHop {
 impl fmt::Display for InvalidHop {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::Range => write!(f, "local hop id must be non-zero and below 2^62"),
+			Self::Range => write!(f, "local hop id must be non-zero"),
 			Self::TooMany => write!(f, "too many hops (max {MAX_HOPS})"),
 			Self::Duplicate => write!(f, "hop already in the chain"),
 		}
@@ -387,13 +426,11 @@ impl Cost {
 
 	/// A peer without a wire cost: the same as [`Cost::default`], so only the
 	/// local link price counts.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) const UNKNOWN: Self = Self(0);
 
 	/// Add a link's static price without overflowing the wire ceiling.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn charged(self, link_cost: u64) -> Self {
 		Self::new(self.0.saturating_add(link_cost))
 	}
@@ -468,14 +505,14 @@ pub struct Route {
 	/// The credential the request advertising this route carries, from
 	/// [`auth::Handle`](crate::auth::Handle)'s `add`, or `None` for the session's scope.
 	///
-	/// Only a session the auth was presented on carries it, as the token on its
+	/// Only a session built on the handle that issued it carries it, as the token on its
 	/// moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE answering a
 	/// solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer with a
 	/// PUBLISH_NAMESPACE, which carries it), and moq-lite (which rides the session's scope)
 	/// advertise the route unnamed. Swapping it is an update that renews the request with
-	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. After a
-	/// reconnect, add the token on the new session and name that. Local, like
-	/// [`Self::source`]: a relay never forwards it.
+	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. A handle passed to
+	/// `Client::with_auth` presents it on every session it backs, so the route keeps it
+	/// across a reconnect. Local, like [`Self::source`]: a relay never forwards it.
 	pub auth: Option<crate::auth::Auth>,
 
 	/// The announcing session's declared or assigned identity.
@@ -483,11 +520,9 @@ pub struct Route {
 	/// Local selection state: split-horizon matches this as well as the chain, so a
 	/// route is never advertised back to the session it came from even when that
 	/// session withheld an identity (hop 0). Never forwarded.
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) via: Hop,
 
 	/// Where the route entered this origin; see [`Self::source`]. Never forwarded.
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) source: Source,
 }
 
@@ -508,7 +543,7 @@ impl Default for Route {
 ///
 /// Origin bookkeeping, not a chain fact: the hop chain cannot say it, since a
 /// client and a peer relay each append one hop. The origin records it from the
-/// handle that announced the route; see [`Producer::peer`].
+/// handle that announced the route; see [`Producer::with_link`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Source {
 	/// Announced on this origin: by an in-process producer or a client session.
@@ -548,8 +583,7 @@ impl Route {
 	///
 	/// Not part of the advertised route: an assigned identity is private selection
 	/// state and must not be forwarded.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_via(mut self, via: Hop) -> Self {
 		self.via = via;
 		self
@@ -630,7 +664,10 @@ fn fnv_key(name: &str, origins: impl IntoIterator<Item = Hop>) -> u64 {
 /// it, so convergence does not need the hash, and a restarted publisher announces
 /// under a new first hop, so a hash would keep its dead session winning half the
 /// time until the transport times out.
-#[allow(clippy::type_complexity)]
+#[expect(
+	clippy::type_complexity,
+	reason = "the tuple is the sort key; naming it would only move the type"
+)]
 fn route_order<'a>(
 	path: &Path,
 	entry: &'a RouteEntry,
@@ -711,13 +748,13 @@ enum Held {
 ///
 /// Anchored like [`Held`], on the first clock reading after the change.
 #[derive(Clone)]
-struct Release(Arc<std::sync::Mutex<ReleaseState>>);
+struct Release(Arc<crate::sync::Mutex<ReleaseState>>);
 
 struct ReleaseState {
 	held: Held,
 	hold: Duration,
 	clock: Deadlines,
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	deadline: crate::time::Deadline,
 }
 
@@ -729,7 +766,7 @@ impl Release {
 			return None;
 		}
 		let now = clock.now();
-		Some(Self(Arc::new(std::sync::Mutex::new(ReleaseState {
+		Some(Self(Arc::new(crate::sync::Mutex::new(ReleaseState {
 			held: Held::Anchoring(now),
 			hold,
 			clock: clock.clone(),
@@ -751,7 +788,7 @@ impl Release {
 	}
 
 	/// `Ready` once released, registering `waiter` until then.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut state = self.0.lock().unwrap();
 		let now = state.clock.now();
@@ -1304,6 +1341,15 @@ impl RouteEntry {
 	}
 }
 
+// Published names are literal coordinates. Navigation belongs to Relative,
+// resolved before publication, so a name remains stable when carried by a URL.
+fn publish_path(path: &Path) -> Result<(), Error> {
+	if path.parts().any(|segment| matches!(segment, "." | "..")) {
+		return Err(Error::NavigationSegment);
+	}
+	Ok(())
+}
+
 /// What `scope` lets a route at `claim` serve: see [`RouteEntry::reach`].
 fn reach(scope: &Patterns, claim: &Pattern) -> Vec<Pattern> {
 	scope
@@ -1367,14 +1413,20 @@ struct Horizon {
 	/// Hide the routes that entered from a cluster peer ([`Consumer::local`]).
 	local: bool,
 	/// Hide the routes learned on an upstream link, because this reader is one
-	/// ([`Producer::upstream`]): a relay never transits between two upstreams.
+	/// ([`Link::Upstream`]): a relay never transits between two upstreams.
 	upstream: bool,
+	/// Hide the routes with no room for our hop under this cap, because this reader
+	/// forwards them ([`Consumer::forwardable`]). Selection then falls back to a
+	/// shorter route instead of withdrawing a prefix an in-cap path still reaches.
+	max_hops: Option<HopLimit>,
 }
 
 impl Horizon {
 	/// Whether `entry` may be observed or served through this horizon.
 	fn admits(&self, entry: &RouteEntry) -> bool {
-		self.admits_link(entry.link) && entry.visible_to(self.exclude)
+		self.admits_link(entry.link)
+			&& entry.visible_to(self.exclude)
+			&& self.max_hops.is_none_or(|max| entry.hops.len() < max.get())
 	}
 
 	/// Whether routes arriving on `link` may be observed through this horizon.
@@ -1391,24 +1443,34 @@ impl Horizon {
 	/// front on its next request, while what it already reads stays on the plain
 	/// front. That cannot loop, since the peer serves our requests through its own
 	/// split horizon, which never routes back through us.
+	///
+	/// The hop cap bounds what is advertised, not what serves a request, so it never
+	/// applies here.
 	fn effective(self, routes: &RouteTable, path: &Path) -> Self {
-		match self.exclude {
-			Some(peer) if routes.covering(path).any(|entry| !entry.visible_to(Some(peer))) => self,
-			_ => Self { exclude: None, ..self },
+		let horizon = Self { max_hops: None, ..self };
+		match horizon.exclude {
+			Some(peer) if routes.covering(path).any(|entry| !entry.visible_to(Some(peer))) => horizon,
+			_ => Self {
+				exclude: None,
+				..horizon
+			},
 		}
 	}
 }
 
-/// The link a handle's routes arrive on; see [`Producer::peer`] and
-/// [`Producer::upstream`].
+/// The link a handle's routes arrive on; see [`Producer::with_link`].
+///
+/// The hop chain cannot say it, since a client and a peer relay each append one hop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-enum Link {
+pub enum Link {
 	/// Here: an in-process producer or a client session.
 	#[default]
 	Local,
-	/// A cluster peer.
+	/// A cluster peer: every route it announces reports [`Source::Peer`], and
+	/// [`Consumer::local`] hides it.
 	Peer,
-	/// A cluster peer marked upstream.
+	/// An upstream peer: a [`Self::Peer`] whose routes are never offered to another
+	/// upstream, so this origin never carries traffic between two upstreams.
 	Upstream,
 }
 
@@ -1711,7 +1773,7 @@ impl Mount {
 
 impl OriginScope {
 	/// A view that reaches nothing.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn empty() -> Self {
 		Self {
 			allowed: Patterns::new(),
@@ -1774,7 +1836,6 @@ impl Default for OriginScope {
 
 /// The announce-interest prefixes that cover a pattern scope on a prefix-only
 /// wire: each member's literal head, minus heads another already covers.
-// pending: /quest/m1/public-model/answer.md
 pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
 	let mut heads: Vec<PathOwned> = allowed
 		.iter()
@@ -1883,6 +1944,7 @@ pub struct Producer {
 	// Identity for this origin. Appended to route hops when re-announcing so
 	// downstream relays can detect loops and prefer the shortest path.
 	hop: Hop,
+	max_hops: HopLimit,
 
 	// The absolute patterns this handle may publish under.
 	scope: OriginScope,
@@ -1908,7 +1970,7 @@ pub struct Producer {
 	stats: stats::Session,
 
 	// The link routes announced through this handle arrive on (see
-	// [`Self::peer`] and [`Self::upstream`]).
+	// [`Self::with_link`]).
 	link: Link,
 
 	// The rank of that link; see [`Self::with_preference`].
@@ -1942,6 +2004,7 @@ impl Producer {
 		let pool = config.pool.clone();
 		let producer = Self {
 			hop: config.hop,
+			max_hops: config.max_hops,
 			scope: scope.clone(),
 			root: PathOwned::default(),
 			shared: shared.clone(),
@@ -1968,16 +2031,14 @@ impl Producer {
 
 	/// Give this handle a frame budget of its own, so what one session allocates up front
 	/// never crowds out another's.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: tuning
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_own_frames(mut self) -> Self {
 		self.frames = Default::default();
 		self
 	}
 
 	/// The ingress stats context this handle was tagged with.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn stats(&self) -> &stats::Session {
 		&self.stats
 	}
@@ -1990,30 +2051,16 @@ impl Producer {
 		self
 	}
 
-	/// Mark this handle (and any handle derived from it) as a cluster peer's:
-	/// every route it announces reports [`Source::Peer`], and
-	/// [`Consumer::local`] hides it.
+	/// Set the link this handle (and any handle derived from it) is given to.
 	///
-	/// Hand it to a session with another relay, so this origin can tell what
-	/// entered here from what a peer forwarded. The hop chain cannot: a client
-	/// and a peer each append one hop.
-	pub fn peer(mut self) -> Self {
-		if self.link == Link::Local {
-			self.link = Link::Peer;
-		}
-		self
-	}
-
-	/// Mark this handle (and any handle derived from it) as an upstream peer's:
-	/// a [`Self::peer`] whose routes are never offered to another upstream.
-	/// A [`Consumer`] taken from it hides every route an upstream handle
-	/// announced, so this origin never carries traffic between two upstreams.
-	///
-	/// Hand it to a session with a peer that should reach everything here
-	/// without this relay carrying its traffic to other upstreams, such as an
-	/// edge's link to a core or a drone's link to its CDN.
-	pub fn upstream(mut self) -> Self {
-		self.link = Link::Upstream;
+	/// Hand a session with another relay a [`Link::Peer`] handle, so this origin can
+	/// tell what entered here from what a peer forwarded. Hand a [`Link::Upstream`]
+	/// handle to a session with a peer that should reach everything here without this
+	/// relay carrying its traffic to other upstreams, such as an edge's link to a core
+	/// or a drone's link to its CDN: a [`Consumer`] taken from it hides every route an
+	/// upstream handle announced.
+	pub fn with_link(mut self, link: Link) -> Self {
+		self.link = link;
 		self
 	}
 
@@ -2035,6 +2082,7 @@ impl Producer {
 	pub fn config(&self) -> Config {
 		Config {
 			hop: self.hop,
+			max_hops: self.max_hops,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			update_hold: self.shared.lock().update_hold,
@@ -2046,12 +2094,17 @@ impl Producer {
 		self.hop
 	}
 
+	// Sessions enforce the policy configured once on the origin.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn max_hops(&self) -> HopLimit {
+		self.max_hops
+	}
+
 	/// A producer with *no* allowed prefixes: it can't publish anything and
 	/// advertises no subscribe interest (its `allowed()` is empty, so the
 	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
 	/// so both the publisher and subscriber loops still run.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn empty(hop: Hop) -> Self {
 		// No allowed prefixes means no broadcast is ever created, so nothing will
 		// ever be queued on the detached submission handle.
@@ -2059,6 +2112,7 @@ impl Producer {
 		Self {
 			hop,
 			scope: OriginScope::empty(),
+			max_hops: HopLimit::default(),
 			root: PathOwned::default(),
 			shared: SendCell::new(kio::Shared::new(OriginState::new(
 				DEFAULT_UPDATE_HOLD,
@@ -2103,7 +2157,8 @@ impl Producer {
 	/// [`mount`](Self::mount),
 	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
 	/// [`Path::MAX_PARTS`], [`Error::InvalidPath`] if it holds a segment no
-	/// pattern can spell (`*` or `**`), or [`Error::Closed`] once the origin's
+	/// pattern can spell (`*` or `**`), [`Error::NavigationSegment`] for a literal `.` or `..`,
+	/// or [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
 		let full = self.root.join(path.as_path()).to_owned();
@@ -2114,6 +2169,7 @@ impl Producer {
 	/// A new broadcast at `full` with its announcer withheld, so it cannot announce
 	/// until the announcer is handed back.
 	fn create_withheld(&self, full: PathOwned) -> Result<(broadcast::Producer, Announcer), Error> {
+		publish_path(&full)?;
 		if !self.scope.permits(&full) || !self.scope.publishes(&full) {
 			return Err(Error::Unauthorized);
 		}
@@ -2181,8 +2237,7 @@ impl Producer {
 	/// is *not* entered into the route table. Sessions answer
 	/// [`Dynamic`] requests with one of these; the requester already holds
 	/// the request's result channel, so the table never needs to resolve it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn create_source(&self, path: impl AsPath) -> broadcast::Producer {
 		let path = path.as_path();
 		let full = self.root.join(&path).to_owned();
@@ -2207,7 +2262,6 @@ impl Producer {
 	/// advertises through a broadcast ([`broadcast::Producer::announce`]) or a
 	/// [`Dynamic`] handler, which serve what they claim.
 	#[cfg(test)]
-	// private: test
 	pub(crate) fn announce(&self, prefix: impl AsPath, route: Route) -> Result<AnnounceProducer, Error> {
 		Announcing::new(self, prefix)?.announce(
 			route,
@@ -2222,8 +2276,7 @@ impl Producer {
 	/// Start a [`Snapshot`] under `prefix`: the announce consumers it overlaps are not
 	/// synced until the returned guard drops. Taken before the request goes out, so
 	/// nothing reads as synced in between.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn snapshot(&self, prefix: impl AsPath) -> Snapshot {
 		let prefix = self.root.join(prefix.as_path()).to_owned();
 		self.shared.lock().snapshot(&self.shared, prefix, self.link)
@@ -2232,8 +2285,7 @@ impl Producer {
 	/// Hear what this handle's session should ask its peer about: the broadest
 	/// prefixes readers of the origin want discovered, mapped onto this handle's
 	/// scope, starting with the current ones.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn interests(&self) -> Interests {
 		let queue = kio::Queue::new();
 		let mut state = self.shared.lock();
@@ -2270,10 +2322,9 @@ impl Producer {
 		}
 	}
 
-	/// Whether routes arrive here on a link between relays ([`Self::peer`] or
-	/// [`Self::upstream`]), whose sessions discover everything they may.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	/// Whether routes arrive here on a link between relays ([`Link::Peer`] or
+	/// [`Link::Upstream`]), whose sessions discover everything they may.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn relays(&self) -> bool {
 		self.link != Link::Local
 	}
@@ -2343,6 +2394,7 @@ impl Producer {
 		let scope = self.scope.narrow(&rooted).ok_or(Error::Unauthorized)?;
 		Ok(Producer {
 			hop: self.hop,
+			max_hops: self.max_hops,
 			scope,
 			root,
 			shared: self.shared.clone(),
@@ -2474,6 +2526,7 @@ impl Announcing {
 	/// The requested prefix as-is, refused when its subtree does not overlap the scope.
 	fn new(producer: &Producer, prefix: impl AsPath) -> Result<Self, Error> {
 		let requested = producer.root.join(prefix.as_path()).to_owned();
+		publish_path(&requested)?;
 		if requested.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
@@ -2508,7 +2561,6 @@ impl Announcing {
 		}
 
 		let mut entries = Vec::with_capacity(self.prefixes.len());
-		let mut superseded = Vec::new();
 		for (prefix, claim) in &self.prefixes {
 			shared.reannounced(prefix, &route.hops);
 			let id = shared.next_route;
@@ -2535,14 +2587,9 @@ impl Announcing {
 				reach: reach(&self.scope, claim),
 			});
 			shared.sync_route(prefix, claim);
-			superseded.extend(shared.routes.superseded(prefix));
 			entries.push((prefix.clone(), id));
 		}
 		drop(shared);
-		// Outside the table lock, which never nests a broadcast's.
-		for broadcast in superseded {
-			broadcast.supersede();
-		}
 
 		// Ingress announce guard: held while the route is advertised.
 		let guard = serving
@@ -2607,11 +2654,6 @@ impl Announcer {
 	pub(super) fn route(&self) -> Option<Route> {
 		self.entry.route()
 	}
-
-	/// Whether a live route at the broadcast's path carries a newer epoch.
-	pub(super) fn superseded(&self) -> bool {
-		self.entry.superseded()
-	}
 }
 
 /// The write half of an advertisement: a live claim that paths under a
@@ -2621,7 +2663,6 @@ impl Announcer {
 /// retracts the route, which [`AnnounceConsumer`]s observe and sessions withdraw
 /// from their peers.
 #[must_use = "dropping an announcement retracts the route"]
-// private: test
 pub(crate) struct AnnounceProducer {
 	shared: SendCell<kio::Shared<OriginState>>,
 	/// The table entries this advertisement created, by prefix and id. A prefix
@@ -2662,8 +2703,6 @@ impl AnnounceProducer {
 		// The requests an epoch change released, refused once the table lock is gone: the
 		// refusal wakes their fronts, which read the table.
 		let mut released = Vec::new();
-		// The broadcasts a newer epoch now replaces, told outside the table lock too.
-		let mut superseded = Vec::new();
 		for (prefix, id) in &self.entries {
 			shared.reannounced(prefix, &route.hops);
 			let stale = shared.withdrawn_through(prefix, &route.hops);
@@ -2697,16 +2736,12 @@ impl AnnounceProducer {
 			}
 			shared.sync_route(prefix, &claim);
 			shared.prune_withdrawn(prefix);
-			superseded.extend(shared.routes.superseded(prefix));
 		}
 		drop(shared);
 		for producer in released {
 			if let Ok(mut request) = producer.write() {
 				request.resolved.get_or_insert(Err(Error::Unroutable));
 			}
-		}
-		for broadcast in superseded {
-			broadcast.supersede();
 		}
 		Ok(true)
 	}
@@ -2723,18 +2758,6 @@ impl AnnounceProducer {
 			auth: entry.auth.clone(),
 			via: entry.via,
 			source: entry.entered(),
-		})
-	}
-
-	/// Whether a live route at any of the entries' prefixes carries a newer epoch than theirs.
-	fn superseded(&self) -> bool {
-		let shared = self.shared.lock();
-		self.entries.iter().any(|(prefix, id)| {
-			shared
-				.routes
-				.entry(prefix, *id)
-				.and_then(|entry| entry.epoch.as_ref())
-				.is_some_and(|epoch| shared.routes.newest_epoch(prefix).is_some_and(|newest| epoch < newest))
 		})
 	}
 
@@ -2850,7 +2873,7 @@ impl Driver {
 		waiter.batch(|| {
 			self.timers.advance(now);
 			let result = self.state.poll(waiter);
-			let gc = self.pool.gc(now, waiter);
+			let gc = self.pool.poll(now, waiter);
 			if result.is_ready() {
 				return Err(Error::Closed);
 			}
@@ -3946,10 +3969,17 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							let _ = lister.add(name, info);
 						}
 					}
+					// Forwarded as the source reported it, finished or not.
 					Ok(Some(broadcast::TracksEvent::Removed { name })) => {
 						state.stale.remove(&name);
 						if state.listed.remove(&name) {
 							let _ = lister.remove(&name);
+						}
+					}
+					Ok(Some(broadcast::TracksEvent::Finished { name })) => {
+						state.stale.remove(&name);
+						if state.listed.remove(&name) {
+							let _ = lister.finish(&name);
 						}
 					}
 					Ok(Some(broadcast::TracksEvent::Synced)) => {
@@ -3972,7 +4002,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					// once its broadcast ended: so does the front's, and a later reader asks again.
 					Ok(None) => {
 						listing = None;
-						lister.finish();
+						lister.end();
 					}
 					Err(err) => {
 						// Its readers fail, and a later reader asks again.
@@ -4036,7 +4066,7 @@ struct Watched {
 
 enum WatchProducer {
 	Changes(kio::Producer<Watched>),
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Selection(kio::Producer<Selected>),
 }
 
@@ -4103,8 +4133,7 @@ impl Selected {
 }
 
 /// The lifetime of path requests while this peer still selects the held instance.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-// pending: /quest/m1/public-model/answer.md
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Selection {
 	shared: SendCell<kio::Shared<OriginState>>,
 	path: PathOwned,
@@ -4113,7 +4142,7 @@ pub(crate) struct Selection {
 }
 
 impl Selection {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn current(&self) -> kio::Consumer<()> {
 		self.signal
 			.read()
@@ -4125,7 +4154,7 @@ impl Selection {
 
 	/// `Ready` once the current period's replacement is released, registering
 	/// `waiter` until then.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn poll_retired(&self, waiter: &kio::Waiter) -> Poll<()> {
 		match self.signal.poll(waiter, |selected| match &selected.retiring {
 			Some(release) => release.poll(waiter),
@@ -4196,7 +4225,6 @@ struct SnapshotEntry {
 /// Every announce consumer whose scope the prefix overlaps is unsynced
 /// (see [`AnnounceConsumer::poll_synced`]) until this drops: once the session
 /// has inserted the announcements its peer counted, or it gave up on them.
-// pending: /quest/m1/public-model/answer.md
 pub(crate) struct Snapshot {
 	shared: Option<SendCell<kio::Shared<OriginState>>>,
 	prefix: PathOwned,
@@ -4205,8 +4233,7 @@ pub(crate) struct Snapshot {
 
 impl Snapshot {
 	/// A snapshot nothing waits on.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn landed() -> Self {
 		Self {
 			shared: None,
@@ -4292,7 +4319,6 @@ impl Listener {
 
 /// What a session asks its peer about, as it changes: the broadest prefixes
 /// readers of the origin want discovered, mapped onto the session's scope.
-// pending: /quest/m1/public-model/answer.md
 pub(crate) struct Interests {
 	shared: SendCell<kio::Shared<OriginState>>,
 	id: u64,
@@ -4301,8 +4327,7 @@ pub(crate) struct Interests {
 
 impl Interests {
 	/// The next change, or `None` once the origin closed.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<InterestChange>> {
 		Poll::Ready(ready!(self.queue.poll_pop(waiter)).ok())
 	}
@@ -4321,7 +4346,6 @@ impl Drop for Interests {
 	not(feature = "async"),
 	expect(dead_code, reason = "only async sessions consume discovery changes")
 )]
-// pending: /quest/m1/public-model/answer.md
 pub(crate) struct InterestChange {
 	/// The prefix, relative to the session's root.
 	pub prefix: PathOwned,
@@ -4439,16 +4463,10 @@ impl RouteNode {
 					if let Ok(mut selected) = watch.write() {
 						let change = match routes {
 							Some((routes, hold)) => {
-								let best = routes.best_route(
-									&selected.path,
-									Horizon {
-										exclude: None,
-										local: false,
-										upstream: false,
-									},
-									&HashSet::new(),
-									|entry| entry.via == selected.via,
-								);
+								let best =
+									routes.best_route(&selected.path, Horizon::default(), &HashSet::new(), |entry| {
+										entry.via == selected.via
+									});
 								selected.change(best, hold)
 							}
 							None => selected.current.is_some().then_some(Change::End),
@@ -4608,26 +4626,6 @@ impl RouteTable {
 		let mut nodes = Vec::new();
 		self.root.walk(&mut |node| nodes.push(node));
 		nodes.into_iter().flat_map(|node| node.entries.iter())
-	}
-
-	/// The newest epoch a live route at `prefix` carries.
-	fn newest_epoch(&self, prefix: &Path) -> Option<&Epoch> {
-		self.at(prefix)
-			.filter(|entry| entry.live())
-			.filter_map(|entry| entry.epoch.as_ref())
-			.max()
-	}
-
-	/// The broadcasts published exactly at `prefix` under an epoch older than the newest one
-	/// advertised there. See [`broadcast::Finish::poll_closed`].
-	fn superseded(&self, prefix: &Path) -> Vec<broadcast::Consumer> {
-		let Some(newest) = self.newest_epoch(prefix) else {
-			return Vec::new();
-		};
-		self.at(prefix)
-			.filter(|entry| entry.epoch.as_ref().is_some_and(|epoch| epoch < newest))
-			.filter_map(|entry| entry.source.clone())
-			.collect()
 	}
 
 	/// Add a route at its prefix, creating the nodes down to it.
@@ -5324,42 +5322,24 @@ pub struct Dynamic {
 }
 
 impl Dynamic {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn request_validity(&self, path: &Path) -> Option<Selection> {
 		let shared = &self.announcement.shared;
 		let mut table = shared.lock();
 		if table.closed {
 			return None;
 		}
-		let entry = table.best_route(
-			path,
-			Horizon {
-				exclude: None,
-				local: false,
-				upstream: false,
-			},
-			&HashSet::new(),
-			|entry| {
-				entry
-					.server
-					.as_ref()
-					.is_some_and(|server| server.same_channel(&self.state))
-			},
-		)?;
+		let entry = table.best_route(path, Horizon::default(), &HashSet::new(), |entry| {
+			entry
+				.server
+				.as_ref()
+				.is_some_and(|server| server.same_channel(&self.state))
+		})?;
 		let via = entry.via;
 		let instance = entry.instance();
 		let prefix = entry.prefix.clone();
 		let active = table
-			.best_route(
-				path,
-				Horizon {
-					exclude: None,
-					local: false,
-					upstream: false,
-				},
-				&HashSet::new(),
-				|entry| entry.via == via,
-			)
+			.best_route(path, Horizon::default(), &HashSet::new(), |entry| entry.via == via)
 			.is_some_and(|entry| entry.instance() == instance);
 		let producer = kio::Producer::new(Selected {
 			path: path.to_owned(),
@@ -5388,8 +5368,7 @@ impl Dynamic {
 
 	/// Retire an explicit peer withdrawal, hiding derived paths only once its
 	/// last live advertisement at the prefix is gone. A lost session just drops.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn withdrawn(self) {
 		self.announcement.retract(true);
 	}
@@ -5935,6 +5914,7 @@ impl Consume<track::Consumer> for track::Consumer {
 pub struct Consumer {
 	// Identity of the origin this consumer was derived from.
 	hop: Hop,
+	max_hops: HopLimit,
 	scope: OriginScope,
 
 	// A prefix that is automatically stripped from all paths.
@@ -5983,6 +5963,7 @@ impl Consumer {
 	fn from_producer(producer: &Producer, stats: stats::Session) -> Self {
 		Self {
 			hop: producer.hop,
+			max_hops: producer.max_hops,
 			scope: producer.scope.clone(),
 			root: producer.root.clone(),
 			shared: producer.shared.clone(),
@@ -6012,15 +5993,23 @@ impl Consumer {
 	/// nobody, so the announcing session's assigned identity is what keeps an
 	/// anonymous route from echoing back. Pass [`Hop::UNKNOWN`] for an anonymous
 	/// peer.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.horizon.exclude = Some(peer);
 		self
 	}
 
+	/// A clone whose announcements skip the routes this origin cannot forward: a
+	/// chain already at [`Config::max_hops`] has no room for our hop. Sessions whose
+	/// wire carries the hop path apply this to the routes they advertise.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn forwardable(mut self) -> Self {
+		self.horizon.max_hops = Some(self.max_hops);
+		self
+	}
+
 	/// A view of the routes that entered here: every route a handle marked
-	/// [`Producer::peer`] or [`Producer::upstream`] announced is hidden from [`Self::announced`] and never
+	/// [`Link::Peer`] or [`Link::Upstream`] handle announced is hidden from [`Self::announced`] and never
 	/// resolved by [`Self::request_broadcast`].
 	///
 	/// On a relay, this is what the relay ingests itself, from clients and
@@ -6032,8 +6021,7 @@ impl Consumer {
 
 	/// A clone for a session serving its peer: its reads are the peer's, not a
 	/// local reader's, so they never make a session ask its own peer about them.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn serving(mut self) -> Self {
 		self.interested = false;
 		self
@@ -6050,8 +6038,7 @@ impl Consumer {
 
 	/// A clone whose [`announced`](Self::announced) reports only the routes a feed
 	/// from `outer` hides, for a stream topping up that feed.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn beyond(mut self, outer: &Consumer) -> Self {
 		self.hidden.beyond = Some(
 			outer
@@ -6065,8 +6052,7 @@ impl Consumer {
 	}
 
 	/// Set wire discovery visibility relative to this consumer's requested root.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn discovery(mut self, hidden: bool) -> Self {
 		self.hidden.include = hidden;
 		self.hidden.from = Some(self.root.clone());
@@ -6074,15 +6060,13 @@ impl Consumer {
 	}
 
 	/// Whether [`announced`](Self::announced) reports hidden routes too.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn includes_hidden(&self) -> bool {
 		self.hidden.include
 	}
 
 	/// The egress stats context this handle was tagged with.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn stats(&self) -> &stats::Session {
 		&self.stats
 	}
@@ -6109,8 +6093,7 @@ impl Consumer {
 	/// [`announced`](Self::announced) yields nothing. Used to answer a peer's
 	/// announce-interest for a prefix outside our scope by announcing nothing,
 	/// rather than tearing the stream down.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn empty(&self) -> Self {
 		Self {
 			scope: OriginScope::empty(),
@@ -6125,8 +6108,8 @@ impl Consumer {
 	/// relative to this consumer's root; its patterns only filter visibility.
 	/// Routes with a segment starting with `.` below the literal head of those
 	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
-	/// The stream also watches its scope: a moq-lite client session fed by this
-	/// origin asks its peer about the scope while any stream watches it.
+	/// The stream also watches its scope: a client session fed by this origin asks
+	/// its peer about the scope while any stream watches it.
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -6240,7 +6223,6 @@ impl Consumer {
 	/// The newest broadcast published on this origin at exactly `path`, if any.
 	/// Test-only: a request goes through the table like any other.
 	#[cfg(test)]
-	// private: test
 	pub(crate) fn get_broadcast(&self, path: impl AsPath) -> Option<broadcast::Consumer> {
 		let full = self.root.join(path).to_owned();
 		if !self.scope.permits(&full) {
@@ -6418,7 +6400,7 @@ impl Consumer {
 	///
 	/// The returned future fails with [`Error::Unroutable`] at once when no
 	/// announced route covers the path, including a broadcast created on this
-	/// origin but not announced. A moq-lite client session only discovers what this
+	/// origin but not announced. A client session only discovers what this
 	/// origin's readers watch, so a path no [`Self::announced`],
 	/// [`Self::routed_broadcast`], or [`Self::announced_broadcast`] watches is
 	/// unroutable on it. A broadcast resolved through a discovered route keeps its
@@ -6438,7 +6420,6 @@ impl Consumer {
 	/// [`Self::request_broadcast`], refused with [`Error::Unroutable`] unless the
 	/// winning route serves `epoch`: a peer asking for one publisher instance must
 	/// not be handed another.
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn request(&self, path: Path<'_>, epoch: Option<&crate::Epoch>) -> kio::Pending<Requesting> {
 		// The path as this handle names it, absolute: what its scope authorizes and
 		// what its egress is counted under, so a read through a mount bills where
@@ -6633,14 +6614,12 @@ impl AnnounceConsumer {
 	}
 
 	#[cfg(test)]
-	// private: test
 	pub(crate) async fn expect_next_active(&mut self, expected: impl AsPath) -> Route {
 		let event = self.expect_next().await;
 		Self::active(event, &expected.as_path())
 	}
 
 	#[cfg(test)]
-	// private: test
 	pub(crate) async fn expect_next_restarted(&mut self, expected: impl AsPath) -> Route {
 		match self.expect_next().await {
 			AnnounceEvent::Restart(announce) => {
@@ -6652,7 +6631,6 @@ impl AnnounceConsumer {
 	}
 
 	#[cfg(test)]
-	// private: test
 	pub(crate) async fn expect_next_ended(&mut self, expected: impl AsPath) {
 		match self.expect_next().await {
 			AnnounceEvent::End(announce) => assert_eq!(announce.prefix, expected.as_path(), "wrong prefix"),
@@ -6927,14 +6905,12 @@ impl AnnounceConsumer {
 	}
 
 	// The wire sender uses this only to bound its initial replay.
-	// private: tuning
 	#[cfg(feature = "async")]
 	pub(crate) fn pending_len(&self) -> usize {
 		self.state.read().pending.len()
 	}
 
 	// A wider wire grant must reuse pending slots, rather than bypass the initial queue.
-	// private: tuning
 	#[cfg(feature = "async")]
 	pub(crate) fn replay<'a>(
 		&mut self,
@@ -7017,7 +6993,7 @@ impl Drop for AnnounceConsumer {
 use futures::FutureExt;
 
 #[cfg(test)]
-#[allow(missing_docs)] // test-only assertion helpers
+#[expect(missing_docs, reason = "test-only assertion helpers")]
 impl AnnounceConsumer {
 	/// The route of an active event at `expected`.
 	fn active(event: AnnounceEvent, expected: &Path) -> Route {
@@ -7083,7 +7059,6 @@ impl AnnounceConsumer {
 /// the test executor, mirroring what `moq_tokio::origin::spawn` does for
 /// applications.
 #[cfg(test)]
-// private: test
 pub(crate) trait ProduceTest {
 	fn produce(self) -> Producer;
 }
@@ -7123,6 +7098,25 @@ impl ProduceTest for Hop {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn hop_limit_refuses_values_outside_the_wire_bound() {
+		for invalid in [0, 33, usize::MAX] {
+			assert_eq!(HopLimit::new(invalid), None);
+		}
+		for valid in [1, 6, 32] {
+			assert_eq!(HopLimit::new(valid).unwrap().get(), valid);
+		}
+		assert_eq!(HopLimit::default().get(), 32);
+		let config = Config {
+			max_hops: HopLimit::new(6).unwrap(),
+			..Default::default()
+		};
+		let (producer, _driver) = Producer::new(config);
+		let scoped = producer.scope("room", &Patterns::from(Pattern::all())).unwrap();
+		assert_eq!(scoped.config().max_hops.get(), 6);
+		assert_eq!(scoped.consume().forwardable().horizon.max_hops, HopLimit::new(6));
+	}
 	#[cfg(feature = "async")]
 	use crate::model::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
@@ -7402,7 +7396,7 @@ mod tests {
 		drop(other);
 
 		// A local view never waits on a peer's routes.
-		let _peer = producer.clone().peer().snapshot("room");
+		let _peer = producer.clone().with_link(Link::Peer).snapshot("room");
 		assert!(producer.consume().local().announced().is_synced());
 		assert!(!producer.consume().announced().is_synced());
 	}
@@ -8116,7 +8110,7 @@ mod tests {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn an_auth_swap_is_an_update() {
-		let handle = crate::auth::Handle::ietf(false);
+		let handle = crate::auth::Link::ietf(false);
 		let first = handle.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 		let second = handle.present(bytes::Bytes::from_static(b"second"), false).unwrap();
 		let producer = origin(1).produce();
@@ -8149,7 +8143,7 @@ mod tests {
 		.produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.announced();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let old = peer
 			.dynamic_route("pool/job-0", Route::default().with_hops(hops(&[11])))
 			.unwrap();
@@ -8713,6 +8707,7 @@ mod tests {
 		match tracks.next().await {
 			Ok(Some(broadcast::TracksEvent::Added { name, .. })) => format!("+{name}"),
 			Ok(Some(broadcast::TracksEvent::Removed { name })) => format!("-{name}"),
+			Ok(Some(broadcast::TracksEvent::Finished { name })) => format!("~{name}"),
 			Ok(Some(broadcast::TracksEvent::Synced)) => "synced".into(),
 			Ok(None) => "end".into(),
 			Err(err) => format!("error: {err}"),
@@ -8759,7 +8754,7 @@ mod tests {
 		assert_eq!(listed(&mut tracks).await, "+video");
 		assert_eq!(listed(&mut tracks).await, "synced");
 
-		lister.finish();
+		lister.end();
 		assert_eq!(listed(&mut tracks).await, "end");
 		assert!(!front.is_closed(), "the listing's end is not the broadcast's");
 	}
@@ -9412,10 +9407,10 @@ mod tests {
 			.unwrap();
 		// The replacement serves the whole group to a fetch, frames still to come included.
 		let fetches = request.dynamic();
-		let fetched = Arc::new(std::sync::Mutex::new(Vec::<crate::group::Producer>::new()));
+		let fetched = Arc::new(crate::sync::Mutex::new(Vec::<crate::group::Producer>::new()));
 		let serving = fetched.clone();
 		let _fetching = moq_clock::sim::spawn(async move {
-			while let Ok(request) = fetches.requested_group().await {
+			while let Ok(request) = fetches.requested_fill_group().await {
 				let mut group = request.accept(crate::track::Info::timed()).unwrap();
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(crate::Timestamp::ZERO, frame.as_ref()).unwrap();
@@ -10002,7 +9997,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn routes_report_where_they_entered() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 
 		let _ingest = producer
@@ -10048,7 +10043,7 @@ mod tests {
 		}
 
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 		step(Duration::from_millis(1)).await;
 
@@ -10086,7 +10081,7 @@ mod tests {
 			driver
 				.poll(Instant::ZERO + Duration::from_secs(1), &kio::Waiter::noop())
 				.unwrap();
-			let peer = producer.clone().peer();
+			let peer = producer.clone().with_link(Link::Peer);
 			// One epoch, so the winner moving between routes is an update, not a restart.
 			let route = |chain: &[u64], via| {
 				Route::default()
@@ -10131,7 +10126,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	async fn a_changed_route_waits_out_the_hold() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 		// Holds count on the driver's clock, which starts at its first poll.
 		moq_clock::sleep(Duration::from_millis(1)).await;
@@ -10170,7 +10165,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	async fn a_retraction_quarantines_a_named_publisher() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 		moq_clock::sleep(Duration::from_millis(1)).await;
 
@@ -10227,7 +10222,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn withdrawn_peer_hides_routes_through_it() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 
 		// Publisher 9 ingests at relay 2; relay 3 relays 2's route.
@@ -10262,7 +10257,7 @@ mod tests {
 	async fn old_session_withdrawal_keeps_newer_route() {
 		for restart in [false, true] {
 			let producer = origin(1).produce();
-			let peer = producer.clone().peer();
+			let peer = producer.clone().with_link(Link::Peer);
 			let mut announced = producer.consume().announced();
 			let route = Route::default().with_hops(hops(&[9, 2]));
 			let first = peer.dynamic_route("room", route.clone()).unwrap();
@@ -10290,7 +10285,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn withdrawn_route_no_longer_covers_requests() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let direct = peer
 			.dynamic_route("room", Route::default().with_hops(hops(&[9, 2])))
 			.unwrap();
@@ -10318,7 +10313,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	async fn source_change_is_an_update() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().announced();
 
 		let route = Route::default()
@@ -10348,7 +10343,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn local_view_hides_peer_routes() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
+		let peer = producer.clone().with_link(Link::Peer);
 		let mut local = producer.consume().local().announced();
 
 		let _forwarded = peer
@@ -10398,8 +10393,8 @@ mod tests {
 	#[moq_clock::test]
 	async fn upstream_view_hides_upstream_routes() {
 		let producer = origin(1).produce();
-		let peer = producer.clone().peer();
-		let core = producer.clone().upstream();
+		let peer = producer.clone().with_link(Link::Peer);
+		let core = producer.clone().with_link(Link::Upstream);
 		let mut toward_core = core.consume().announced();
 		let mut everyone = producer.consume().announced();
 
@@ -10437,14 +10432,6 @@ mod tests {
 		);
 		drop(mesh);
 		toward_core.expect_next_ended("both").await;
-
-		// `peer` never demotes an upstream handle.
-		let _still = core
-			.clone()
-			.peer()
-			.dynamic_route("again", Route::default().with_hops(hops(&[7])).with_via(origin(7)))
-			.unwrap();
-		toward_core.assert_next_wait();
 
 		// Resolution agrees with the cursor: an upstream-only path is unroutable
 		// toward an upstream, while the full view queues it on the core's route.
@@ -11446,99 +11433,6 @@ mod tests {
 		assert!(!replaced.is_clone(&resolved), "rejoined the first instance's front");
 	}
 
-	/// A newer epoch at the path ends a finished broadcast's linger at once, so the finished
-	/// instance neither stands next to its replacement nor returns when the replacement ends.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn a_newer_epoch_ends_the_linger() {
-		let producer = origin(1).produce();
-		let old = producer
-			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
-			.unwrap();
-		let track = old
-			.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(30)))
-			.unwrap();
-		track.finish().unwrap();
-		let watch = old.consume();
-		let start = moq_clock::now();
-		let wait = moq_clock::sim::spawn(old.finish().wait());
-
-		moq_clock::sleep(Duration::from_secs(1)).await;
-		assert!(!watch.is_closed());
-		let _new = producer
-			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
-			.unwrap();
-		wait.await.unwrap();
-		assert_eq!(moq_clock::now() - start, Duration::from_secs(1));
-		assert!(watch.is_closed());
-	}
-
-	/// Only a newer epoch ends a linger: an older instance arriving late, or one at
-	/// another path, leaves it to run out.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn an_older_epoch_leaves_the_linger() {
-		let producer = origin(1).produce();
-		let (older, newer) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let finished = producer
-			.publish("room/alice", Route::default().with_epoch(newer))
-			.unwrap();
-		let track = finished
-			.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(5)))
-			.unwrap();
-		track.finish().unwrap();
-		let start = moq_clock::now();
-		let wait = moq_clock::sim::spawn(finished.finish().wait());
-
-		let _late = producer
-			.publish("room/alice", Route::default().with_epoch(older))
-			.unwrap();
-		let _elsewhere = producer
-			.publish("room/bob", Route::default().with_epoch(crate::Epoch::mint()))
-			.unwrap();
-		wait.await.unwrap();
-		assert_eq!(moq_clock::now() - start, Duration::from_secs(5));
-	}
-
-	/// Supersession is decided when the broadcast finishes: a newer epoch that came and went
-	/// while it was live leaves its linger, and one still live cuts it at once.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn a_live_newer_epoch_at_finish_ends_the_linger() {
-		let producer = origin(1).produce();
-		let (older, newer) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let publish = |epoch: &crate::Epoch| {
-			let broadcast = producer
-				.publish("room/alice", Route::default().with_epoch(epoch.clone()))
-				.unwrap();
-			let track = broadcast
-				.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(5)))
-				.unwrap();
-			track.finish().unwrap();
-			(broadcast, track)
-		};
-
-		let (restored, _track) = publish(&older);
-		drop(publish(&newer));
-		let start = moq_clock::now();
-		restored.finish().wait().await;
-		assert_eq!(
-			moq_clock::now() - start,
-			Duration::from_secs(5),
-			"the withdrawn epoch left it"
-		);
-
-		let (cut, _track) = publish(&older);
-		let _live = publish(&newer);
-		let start = moq_clock::now();
-		cut.finish().wait().await;
-		assert_eq!(
-			moq_clock::now() - start,
-			Duration::ZERO,
-			"the live epoch ends it at once"
-		);
-	}
-
 	/// Announce cursors follow the newest epoch over a cheaper one, and deliver a
 	/// change of epoch as a restart: a different broadcast.
 	#[moq_clock::test]
@@ -11708,13 +11602,13 @@ mod tests {
 		let mut handler = replacement.dynamic();
 		queued(&standby).await.accept(&replacement);
 		let request = handler.requested_track().await.unwrap();
-		assert_eq!(request.subscription().unwrap().start(), Some(track::Position::group(5)));
+		assert_eq!(request.subscription().unwrap().start(), Some(5));
 		let track = request.accept(crate::track::Info::timed());
 		let mut preferences = rig.subscription.subscription();
 		preferences.priority = 7;
 		rig.subscription.update(preferences).unwrap();
 		settle(|| track.subscription().is_some_and(|sub| sub.priority == 7)).await;
-		assert_eq!(track.subscription().unwrap().start(), Some(track::Position::group(5)));
+		assert_eq!(track.subscription().unwrap().start(), Some(5));
 	}
 
 	/// A route updated in place to a new first hop still serves the same broadcast:
@@ -13018,6 +12912,22 @@ mod tests {
 		// still be holding the table lock the watch unregisters under.
 		drop(producer);
 		let _pending = consumer.request_broadcast("room/a", None);
+	}
+
+	#[moq_clock::test]
+	async fn published_names_refuse_navigation_segments() {
+		let producer = origin(1).produce();
+		for path in ["room/./cam", "room/../cam", ".", ".."] {
+			assert!(producer.create_broadcast(path).is_err(), "created {path}");
+			assert!(producer.announce(path, Route::default()).is_err(), "announced {path}");
+		}
+		let scoped = producer
+			.scope("room/..", &Patterns::from_iter([Pattern::all()]))
+			.unwrap();
+		assert!(scoped.create_broadcast("cam").is_err());
+		for path in ["room/.pro/cam", "room/a..b", "room/cam"] {
+			producer.create_broadcast(path).unwrap();
+		}
 	}
 
 	#[moq_clock::test]

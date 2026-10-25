@@ -11,7 +11,8 @@
 //! (moq-lite before 05, or stream-only transports like WebSocket) never deliver them.
 //!
 //! A datagram is never cached or served by a fetch. Only the short per-track send buffer holds
-//! it, which a new subscription may still read.
+//! it, which a new subscription may still read. That buffer bills what it retains to the
+//! track's [`Pool`](crate::cache::Pool), like cached groups, so pressure drops the oldest.
 //!
 //! Wire counterparts: [`crate::lite::Datagram`], and on moq-transport an OBJECT_DATAGRAM at
 //! object 0 whose Group ID is the sequence ([`crate::ietf::ObjectDatagram`]).
@@ -19,6 +20,8 @@
 use bytes::Bytes;
 
 use crate::Timestamp;
+use crate::cache;
+use crate::sync::Mutex;
 
 /// Hard ceiling on a datagram payload, matching the QUIC DATAGRAM frame limit.
 ///
@@ -43,7 +46,6 @@ pub struct Datagram {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-// private: passthrough
 pub(crate) struct Wire {
 	pub object_id: Option<u64>,
 	pub priority: Option<u8>,
@@ -53,7 +55,6 @@ pub(crate) struct Wire {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-// private: passthrough
 pub(crate) struct Stored {
 	pub datagram: Datagram,
 	pub wire: Option<std::sync::Arc<Wire>>,
@@ -66,7 +67,7 @@ pub(crate) struct Stored {
 impl Stored {
 	/// The payload a session sends, with its inflated size when that is the DEFLATE slice:
 	/// only a session that carries `compression` takes a compressed track's stored form.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn sent(&self, compression: bool) -> (&Bytes, Option<u64>) {
 		match &self.deflated {
 			Some(deflated) if compression => (deflated, Some(self.datagram.payload.len() as u64)),
@@ -77,6 +78,73 @@ impl Stored {
 	/// The bytes the track stores and meters: the DEFLATE slice when it has one.
 	pub fn stored_len(&self) -> u64 {
 		self.deflated.as_ref().unwrap_or(&self.datagram.payload).len() as u64
+	}
+
+	/// What buffering it costs the pool: both payload forms, any wire metadata, and its slot.
+	fn cache_size(&self) -> u64 {
+		let wire = self.wire.as_ref().map_or(0, |wire| {
+			size_of::<Wire>() + wire.properties.block.as_ref().map_or(0, |block| block.bytes.len())
+		});
+		let deflated = self.deflated.as_ref().map_or(0, Bytes::len);
+		(self.datagram.payload.len() + deflated + wire + SLOT_OVERHEAD) as u64
+	}
+}
+
+/// Heap a buffered datagram's slot takes, doubled because a `VecDeque` holds up to twice
+/// its entries.
+const SLOT_OVERHEAD: usize = 2 * size_of::<Buffered>();
+
+/// A datagram in a track's send buffer, billed to the track's pool until it leaves.
+///
+/// Readers take clones of [`Self::stored`], which alias its payloads rather than copy them,
+/// so only the buffer is billed.
+pub(super) struct Buffered {
+	pub sequence: u64,
+	pub timestamp: Option<Timestamp>,
+	// Released in place once an ended track's datagram expires: the closed track state
+	// refuses the write that would pop it, and a stale reader would otherwise pin it.
+	held: Mutex<Option<(Stored, cache::Bill)>>,
+}
+
+impl Buffered {
+	/// Bill `stored` to `cache`, accruing eviction debt like a group's frames.
+	pub fn new(stored: Stored, cache: &std::sync::Arc<cache::Track>) -> Self {
+		let bill = cache.bill(stored.cache_size());
+		Self {
+			sequence: stored.sequence,
+			timestamp: stored.timestamp,
+			held: Mutex::new(Some((stored, bill))),
+		}
+	}
+
+	/// A reader's alias of it, `None` once released.
+	pub fn stored(&self) -> Option<Stored> {
+		self.held.lock().unwrap().as_ref().map(|(stored, _)| stored.clone())
+	}
+
+	/// What it bills the pool, zero once released.
+	pub fn bytes(&self) -> u64 {
+		self.held.lock().unwrap().as_ref().map_or(0, |(_, bill)| bill.bytes())
+	}
+
+	/// Whether nobody has written it for the pool's idle window, or it was released.
+	pub fn expired(&self) -> bool {
+		self.held
+			.lock()
+			.unwrap()
+			.as_ref()
+			.is_none_or(|(_, bill)| bill.expired())
+	}
+
+	/// Release its payloads and bill once expired, for an ended track that cannot pop it.
+	/// Returns whether it is released.
+	pub fn release_expired(&self) -> bool {
+		let mut held = self.held.lock().unwrap();
+		if held.as_ref().is_some_and(|(_, bill)| !bill.expired()) {
+			return false;
+		}
+		*held = None;
+		true
 	}
 }
 

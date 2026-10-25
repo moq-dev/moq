@@ -39,8 +39,8 @@ use super::encoder::Codec;
 const DEFAULT_FRAMERATE: Rate = Rate::integer(30);
 
 /// The [`track::Info::refresh`](moq_net::track::Info::refresh) ratio a capture advertises: a
-/// joiner forces a keyframe once a group's deltas outweigh twice its keyframe, so it downloads
-/// at most about three keyframes' worth before it can decode.
+/// joiner forces a keyframe once a group's deltas outweigh twice its keyframe, so later joiners
+/// start near one. The joiner that asks still reads the cached group meanwhile.
 ///
 /// Measured on realtime CBR encodes (two-second GOPs at 2 to 4 Mbps), where a GOP's deltas run
 /// three to five keyframes: one join a second halves the mean joiner download for 10 to 13%
@@ -59,6 +59,7 @@ fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::Vi
 	hint.display_aspect_height = rendition.display_aspect_height;
 	hint.color = rendition.color;
 	hint.framerate = rendition.framerate;
+	hint.reorder = rendition.reorder;
 	hint.bitrate = rendition.bitrate;
 	hint.optimize_for_latency = rendition.optimize_for_latency;
 	// Authoritative for both the catalog entry and the wire, so dropping it would silently
@@ -88,18 +89,17 @@ enum Codecs {
 /// registered) before the camera opens; this is what lets a subscriber
 /// trigger capture on demand. The `moq_mux::codec` importer for the codec
 /// handles catalog registration and framing.
-/// `E` is the catalog's application extension, defaulting to none. A host
-/// carrying its own catalog sections (the FFI bindings use `hang::Extra`)
-/// publishes into a catalog of the same shape.
-pub struct Producer<E: CatalogExt = ()> {
+pub struct Producer {
 	codecs: Codecs,
 	/// The published track, read for its largest group.
-	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "capture"),
+		allow(dead_code, reason = "only the `capture` feature uses it")
+	)]
 	track: moq_net::track::Producer,
-	_ext: std::marker::PhantomData<fn() -> E>,
 }
 
-impl<E: CatalogExt> Producer<E> {
+impl Producer {
 	/// Publish a track carrying `rendition` into `broadcast`, registering it under
 	/// `reserved`, a [`catalog::Producer::reserve`](moq_mux::catalog::Producer::reserve)
 	/// that carries any per-track hint such as the encoder's GOP duration
@@ -114,7 +114,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// discover a track an on-demand encoder has not run for yet; because it
 	/// already says what the first keyframe says, that keyframe confirms the
 	/// catalog instead of correcting it.
-	pub fn new(
+	pub fn new<E: CatalogExt>(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: moq_mux::catalog::Reserved<E>,
 		rendition: hang::catalog::VideoConfig,
@@ -136,7 +136,7 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// Use this when the caller owns the track name. [`new`](Self::new) derives a
 	/// unique name from the codec instead.
-	pub fn with_track(
+	pub fn with_track<E: CatalogExt>(
 		track: moq_net::track::Producer,
 		reserved: moq_mux::catalog::Reserved<E>,
 		rendition: hang::catalog::VideoConfig,
@@ -161,7 +161,6 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(Self {
 			codecs,
 			track: published,
-			_ext: std::marker::PhantomData,
 		})
 	}
 
@@ -195,13 +194,11 @@ impl<E: CatalogExt> Producer<E> {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
-					import.flush(frame.timestamp, moq_net::time::now())?;
 				}
 				Codecs::H265 { split, import } => {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
-					import.flush(frame.timestamp, moq_net::time::now())?;
 				}
 			}
 		}
@@ -228,9 +225,17 @@ impl<E: CatalogExt> Producer<E> {
 	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
 	/// run after a successful finish.
 	pub fn finish(&mut self) -> Result<(), Error> {
+		// Each publish flushed its access unit, so the splitter holds only input storage, which
+		// ends here. The import stays, keeping the finished track and its rendition published.
 		match &mut self.codecs {
-			Codecs::H264 { import, .. } => import.finish()?,
-			Codecs::H265 { import, .. } => import.finish()?,
+			Codecs::H264 { split, import } => {
+				*split = Default::default();
+				import.finish()?
+			}
+			Codecs::H265 { split, import } => {
+				*split = Default::default();
+				import.finish()?
+			}
 		}
 		Ok(())
 	}
@@ -247,17 +252,24 @@ impl<E: CatalogExt> Producer<E> {
 	}
 }
 
-/// Source-agnostic encode knobs for a capture publish, where the geometry
-/// (width / height / framerate) comes from the capture source, not the caller.
-/// For the bring-your-own-frames [`Encoder`](super::Encoder) path, where you
-/// must specify geometry, use [`Config`](super::Config) instead.
+/// Capture and encode settings for [`publish_capture`].
 ///
-/// `#[non_exhaustive]`: construct via [`Options::default`] and set fields, so
-/// new knobs can be added without breaking callers.
+/// The encoded geometry (width / height / framerate) comes from the capture
+/// source, not the caller. For the bring-your-own-frames
+/// [`Encoder`](super::Encoder) path, where you specify geometry, use
+/// [`Config`](super::Config) instead.
+///
+/// Frames are stamped on the catalog's [`clock`](moq_mux::catalog::Producer::clock), the one
+/// its consumers are told about, so a concurrent audio capture on the same catalog stays aligned.
+///
+/// `#[non_exhaustive]`: construct via [`Capture::default`] and set fields, so
+/// new settings can be added without breaking callers.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 #[cfg(feature = "capture")]
-pub struct Options {
+pub struct Capture {
+	/// The source to capture.
+	pub capture: capture::Config,
 	/// Target bitrate; `None` derives one from the resolution.
 	///
 	/// This is a ceiling, not a fixed rate: with [`bandwidth`](Self::bandwidth)
@@ -285,23 +297,6 @@ pub struct Options {
 	pub bandwidth: moq_net::bandwidth::Allocator,
 }
 
-/// Capture and encode settings for [`Control::new`] and [`publish_capture`].
-///
-/// Frames are stamped on the catalog's [`clock`](moq_mux::catalog::Producer::clock), the one
-/// its consumers are told about, so a concurrent audio capture on the same catalog stays aligned.
-///
-/// `#[non_exhaustive]`: construct via [`Capture::default`] and set
-/// fields, so new settings can be added without changing [`Control::new`].
-#[derive(Clone, Debug, Default)]
-#[non_exhaustive]
-#[cfg(feature = "capture")]
-pub struct Capture {
-	/// The source to capture.
-	pub capture: capture::Config,
-	/// The track's codec and encode settings.
-	pub encode: Options,
-}
-
 /// The keyframe requests shared between the [`Control`]s and the [`Driver`].
 ///
 /// One lock covers both fields, so a request is either counted before the driver
@@ -322,7 +317,7 @@ struct Requests {
 /// and ends the track, even while it is still opening the source or an encoder.
 #[derive(Clone, Debug)]
 #[cfg(feature = "capture")]
-pub struct Control {
+pub(crate) struct Control {
 	requests: kio::Producer<Requests>,
 }
 
@@ -336,18 +331,18 @@ impl Control {
 	/// and can be spawned; on macOS the capture session is `!Send`, so await
 	/// [`Driver::run`] on a local task there. [`Control`] itself is `Send + Sync`,
 	/// so it can live anywhere.
-	pub fn new<E: CatalogExt>(
+	pub(crate) fn new<E: CatalogExt>(
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		options: Capture,
 	) -> Result<(Self, Driver<E>), Error> {
-		let suffix = match options.encode.codec {
+		let suffix = match options.codec {
 			Codec::H264 => ".avc3",
 			Codec::H265 => ".hev1",
 		};
 		// Advertised only when every backend the encoder may open honors a cut, since the info
 		// is fixed before the driver learns which one it got.
-		let refresh = super::backend::always_cuts(options.encode.codec, &options.encode.kind).then_some(REFRESH);
+		let refresh = super::backend::always_cuts(options.codec, &options.kind).then_some(REFRESH);
 		let info = catalog.track_info(hang::catalog::PRIORITY.video).with_refresh(refresh);
 		let track = broadcast.unique_track(suffix, info)?;
 		let requests = kio::Producer::new(Requests::default());
@@ -377,7 +372,11 @@ impl Control {
 	/// reopens updates it, since a reopen can land on a different backend. Before the probe
 	/// finishes nothing is known, and the request is accepted because it is served anyway: no
 	/// frame has been published yet, and the first one out of any encoder is a keyframe.
-	pub fn cut(&self) -> Result<(), Error> {
+	#[cfg_attr(
+		not(all(test, feature = "openh264")),
+		allow(dead_code, reason = "only tests ask for a keyframe until a publisher needs to")
+	)]
+	pub(crate) fn cut(&self) -> Result<(), Error> {
 		// Only a `close` fails the write, and nothing closes it; the last handle dropping does.
 		let Ok(mut requests) = self.requests.write() else {
 			return Ok(());
@@ -394,7 +393,7 @@ impl Control {
 ///
 /// Runs until the track ends, the capture fails, or the final [`Control`] drops.
 #[cfg(feature = "capture")]
-pub struct Driver<E: CatalogExt = ()> {
+pub(crate) struct Driver<E: CatalogExt = ()> {
 	track: moq_net::track::Producer,
 	catalog: moq_mux::catalog::Producer<E>,
 	options: Capture,
@@ -420,7 +419,7 @@ impl<E: CatalogExt> Driver<E> {
 	///
 	/// Dropping the final [`Control`] ends it promptly wherever it is waiting, including a camera
 	/// open or permission prompt still in flight, which is abandoned rather than finished.
-	pub async fn run(self) -> Result<(), Error> {
+	pub(crate) async fn run(self) -> Result<(), Error> {
 		self.run_with(DeviceSource).await
 	}
 
@@ -431,7 +430,6 @@ impl<E: CatalogExt> Driver<E> {
 			options,
 			requests,
 		} = self;
-		let Capture { capture, encode } = options;
 		let clock = catalog.clock();
 		let controls = requests.consume();
 
@@ -441,18 +439,19 @@ impl<E: CatalogExt> Driver<E> {
 		// rendition that says exactly what the stream will carry, rather than one every consumer has
 		// to treat as provisional.
 		let rendition = async {
-			let camera = source.open(&capture).await?;
+			let camera = source.open(&options.capture).await?;
 			let mut probe_config = encoder::Config::new(
 				camera.width(),
 				camera.height(),
-				capture
+				options
+					.capture
 					.framerate
 					.or_else(|| camera.framerate())
 					.unwrap_or(DEFAULT_FRAMERATE),
 			);
-			probe_config.bitrate = encode.bitrate;
-			probe_config.codec = encode.codec;
-			probe_config.kind = encode.kind.clone();
+			probe_config.bitrate = options.bitrate;
+			probe_config.codec = options.codec;
+			probe_config.kind = options.kind.clone();
 			probe_config.color = camera.color();
 			let (rendition, mut sink) = probe_config.probe_sink().await?;
 			// Learned here so a caller finds out before the first viewer, not on its first cut.
@@ -486,7 +485,7 @@ impl<E: CatalogExt> Driver<E> {
 		let result = tokio::select! {
 			biased;
 			() = controls.closed() => Ok(()),
-			result = capture_loop(&mut producer, &demand, &mut source, &capture, &encode, &clock, &requests) => result,
+			result = capture_loop(&mut producer, &demand, &mut source, &options, &clock, &requests) => result,
 		};
 
 		// This runs only when the loop ends on its own (the track is usually already
@@ -508,8 +507,9 @@ impl<E: CatalogExt> Driver<E> {
 
 /// Capture a webcam and publish it as an on-demand video track.
 ///
-/// This convenience function runs a [`Control`] from `options` without handing
-/// back the handle. Use [`Control::new`] directly to retain controls.
+/// The source is opened once at startup to probe the mode it negotiates, so the
+/// catalog rendition is exact before a frame is published, then reopened only
+/// while a subscriber is watching. Drop the future to stop it.
 ///
 /// Returns when the broadcast is dropped (the track stops being announced) or
 /// the capture fails. Frames are stamped on the catalog's clock, so a
@@ -531,7 +531,7 @@ pub async fn publish_capture<E: CatalogExt>(
 /// the future ever regains a `!Send` component. Apple platforms are exempt (the inline encoder and objc
 /// capture session are `!Send`).
 #[cfg(all(feature = "capture", not(apple)))]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "a compile-time `Send` assertion, never called")]
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
@@ -558,47 +558,41 @@ impl CaptureSource for DeviceSource {
 	}
 }
 
-/// The live rate control state: the estimate source paired with the policy tracking
-/// it. `None` once it has *retired*, which is the only thing absence means now that
-/// every encoder has a share to read: an allocator with nothing to divide grants
-/// `None` rather than being absent. Retiring stops the `select!` arm from spinning on
-/// a channel that is permanently ready.
+/// The live rate control state. `None` once it has *retired*, which is the only
+/// thing absence means now that every encoder has a share to read: an allocator
+/// with nothing to divide grants `None` rather than being absent. Retiring stops
+/// the `select!` arm from spinning on a channel that is permanently ready.
 #[cfg(feature = "capture")]
-type RateControl = Option<(moq_net::bandwidth::Consumer, rate::Control)>;
+type RateControl = Option<rate::Follower>;
 
-/// Wait for the next bandwidth estimate, or forever when rate control is off or
-/// finished. Cancel-safe: [`Consumer::changed`](moq_net::bandwidth::Consumer::changed)
-/// only reads shared state, so losing this race to a frame drops no estimate,
-/// it just re-reads the latest one next time round.
+/// Wait for the next target bitrate, or forever when rate control is off or finished.
+///
+/// Cancel-safe: [`Follower::poll_next`](rate::Follower::poll_next) keeps its state in
+/// the follower, so losing this race to a frame drops no target.
 #[cfg(feature = "capture")]
-async fn next_estimate(rate: &mut RateControl) -> Option<Option<moq_net::bandwidth::Rate>> {
+async fn next_target(rate: &mut RateControl) -> Result<moq_net::bandwidth::Rate, moq_net::Error> {
 	match rate {
-		Some((bandwidth, _)) => bandwidth.changed().await.ok(),
+		Some(follower) => follower.next().await,
 		// Retired: park this arm forever so `select!` ignores it.
 		None => std::future::pending().await,
 	}
 }
 
-/// Feed an estimate through the policy and retune the encoder if it moved.
+/// Retune the encoder to the next target.
 ///
-/// `None` means the producer is gone (the session ended for good), so rate
-/// control retires; a `Some(None)` estimate means the value is merely
-/// unavailable right now, which the policy holds through.
+/// An error means the grant is gone (the session ended for good), so rate control
+/// retires and the encoder holds its current bitrate.
 #[cfg(feature = "capture")]
-async fn apply_estimate(
+async fn apply_target(
 	encoder: &mut Sink,
 	rate: &mut RateControl,
-	estimate: Option<Option<moq_net::bandwidth::Rate>>,
+	target: Result<moq_net::bandwidth::Rate, moq_net::Error>,
 ) {
-	let Some((_, control)) = rate.as_mut() else { return };
+	let Some(follower) = rate.as_mut() else { return };
 
-	let Some(estimate) = estimate else {
+	let Ok(bitrate) = target else {
 		tracing::debug!("bandwidth estimate ended; holding the current encoder bitrate");
 		*rate = None;
-		return;
-	};
-
-	let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
 		return;
 	};
 
@@ -611,10 +605,12 @@ async fn apply_estimate(
 			tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
 			*rate = None;
 		}
-		// A transient failure: keep the policy running so the next change retries.
-		// The policy already moved its target, so a persistent failure just means
-		// the encoder trails it; that's better than giving up on the first blip.
-		Err(err) => tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "failed to adjust encoder bitrate"),
+		// A transient failure: the follower takes the target back and retries it,
+		// so a quiet grant still recovers.
+		Err(err) => {
+			tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "failed to adjust encoder bitrate");
+			follower.failed();
+		}
 	}
 }
 
@@ -651,7 +647,7 @@ fn log_track_ended(err: moq_net::Error) {
 }
 
 #[cfg(any(feature = "capture", all(test, feature = "openh264")))]
-fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Error> {
+fn capture_stopped(producer: &mut Producer) -> Result<(), Error> {
 	// The shared clock keeps advancing while capture is stopped. Mark the break before waiting
 	// for demand again so the next timestamp does not stretch the previous frame across the gap.
 	producer.discontinuity()
@@ -695,12 +691,11 @@ async fn wait_capture<T>(
 /// so their joins return promptly unless the underlying device or encoder is
 /// itself wedged.
 #[cfg(feature = "capture")]
-async fn capture_loop<E: CatalogExt, S: CaptureSource>(
-	producer: &mut Producer<E>,
+async fn capture_loop<S: CaptureSource>(
+	producer: &mut Producer,
 	demand: &moq_net::track::Demand,
 	source: &mut S,
-	capture: &capture::Config,
-	encode: &Options,
+	options: &Capture,
 	clock: &moq_mux::Clock,
 	requests: &kio::ProducerWeak<Requests>,
 ) -> Result<(), Error> {
@@ -709,6 +704,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 	// held across reopens so the claim doesn't lapse while the camera is closed.
 	let mut reservation: Option<moq_net::bandwidth::Reservation> = None;
 	let counted = requests.consume();
+	let capture = &options.capture;
 
 	loop {
 		// Idle until a viewer subscribes; the track ending is a clean exit. The
@@ -735,9 +731,9 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 			.or_else(|| camera.framerate())
 			.unwrap_or(DEFAULT_FRAMERATE);
 		let mut encoder_config = encoder::Config::new(camera.width(), camera.height(), framerate);
-		encoder_config.bitrate = encode.bitrate;
-		encoder_config.codec = encode.codec;
-		encoder_config.kind = encode.kind.clone();
+		encoder_config.bitrate = options.bitrate;
+		encoder_config.codec = options.codec;
+		encoder_config.kind = options.kind.clone();
 		encoder_config.color = camera.color();
 		// Off macOS and iOS this opens the encoder on a dedicated thread; see `sink`.
 		// No cut on reopen: a fresh encoder opens with a keyframe on every backend,
@@ -757,14 +753,14 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		// larger mode below what it can send, or keep claiming room a smaller one no
 		// longer needs.
 		let ceiling = encoder_config.resolved_bitrate();
-		let reservation = reservation.get_or_insert_with(|| encode.bandwidth.reserve(demand, ceiling));
+		let reservation = reservation.get_or_insert_with(|| options.bandwidth.reserve(demand, ceiling));
 		reservation.update(ceiling);
 
 		// Rate control is per encoder: this one opened at the configured bitrate,
 		// so the policy's ceiling is that rate and the target starts there. A
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
-		let mut rate = Some((reservation.consumer(), rate::Control::new(rate::Policy::new(ceiling))));
+		let mut rate = Some(rate::Follower::new(reservation.consumer(), rate::Policy::new(ceiling)));
 		// Per encoder, since a fresh one opens with a keyframe that serves every earlier ask.
 		let mut forced = Cuts::new(served);
 
@@ -783,8 +779,8 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 				}
 				// Retune between frames rather than mid-encode, and only when
 				// the policy says the target actually moved.
-				estimate = next_estimate(&mut rate) => {
-					apply_estimate(&mut encoder, &mut rate, estimate).await;
+				target = next_target(&mut rate) => {
+					apply_target(&mut encoder, &mut rate, target).await;
 					continue;
 				}
 				// A read error is terminal for this selection (the source is gone
@@ -823,8 +819,18 @@ fn map_capture_timestamp(epoch_micros: u64, timestamp: Timestamp) -> Result<Time
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
-	#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
+	#![cfg_attr(
+		all(feature = "capture", feature = "openh264"),
+		expect(
+			clippy::disallowed_methods,
+			clippy::disallowed_types,
+			reason = "the capture tests read the host clock directly"
+		)
+	)]
 
 	use moq_mux::catalog::Stream as _;
 
@@ -1132,7 +1138,8 @@ mod tests {
 	/// published timestamp may land up to `SAMPLING` early, never late.
 	#[cfg(all(feature = "capture", feature = "openh264"))]
 	mod clock {
-		use std::time::{Duration, SystemTime};
+		use moq_clock::Wall;
+		use std::time::Duration;
 
 		use moq_clock::Instant;
 
@@ -1171,7 +1178,7 @@ mod tests {
 
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
-			async fn start(behind: Duration, wall: SystemTime) -> Self {
+			async fn start(behind: Duration, wall: Wall) -> Self {
 				let epoch = moq_clock::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
@@ -1206,11 +1213,10 @@ mod tests {
 				// Local: a capture stream is `!Send` on macOS, so each test runs on a `LocalSet`.
 				let task = tokio::task::spawn_local(async move {
 					let mut source = Opens(rx);
-					let options = Options {
+					let options = Capture {
 						kind: encoder::Kind::Software,
-						..Options::default()
+						..Capture::default()
 					};
-					let config = capture::Config::default();
 					// Held, so the loop has a channel to report each encoder's cut support into.
 					let controls = kio::Producer::new(Requests::default());
 					let requests = controls.weak();
@@ -1219,7 +1225,6 @@ mod tests {
 							&mut producer,
 							&demand,
 							&mut source,
-							&config,
 							&options,
 							&clock,
 							&requests,
@@ -1327,7 +1332,7 @@ mod tests {
 		async fn a_late_first_frame_publishes_its_acquisition() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(5), SystemTime::now()).await;
+					let fixture = Fixture::start(Duration::from_secs(5), moq_clock::wall()).await;
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 
@@ -1350,7 +1355,7 @@ mod tests {
 		async fn a_device_clock_restart_continues_forward() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(1), SystemTime::now()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 
@@ -1393,7 +1398,7 @@ mod tests {
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let idle = Duration::from_millis(300);
-					let fixture = Fixture::start(Duration::from_secs(1), SystemTime::now()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
 
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
@@ -1429,8 +1434,8 @@ mod tests {
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					// Whole seconds, so the advertised mapping holds it exactly.
-					let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-					let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
+					let now = moq_clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
+					let wall = Wall::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 					let fixture = Fixture::start(Duration::from_secs(1), wall).await;
 					let advertised = fixture.catalog.snapshot().clock;
 					assert_eq!(advertised, fixture.clock.wall());
@@ -1457,7 +1462,7 @@ mod tests {
 		async fn retained_archive_playback_keeps_the_live_timestamps() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(1), SystemTime::now()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
 					let section = fixture
 						.catalog
 						.snapshot()
@@ -1603,10 +1608,12 @@ mod tests {
 					let consumer = broadcast.consume();
 					let catalog =
 						moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-					let mut options = Capture::default();
-					options.encode.kind = encoder::Kind::Software;
-					// Room for noise, which rate control would otherwise skip frames of.
-					options.encode.bitrate = Some(moq_net::bandwidth::Rate::from_mbps(4));
+					let options = Capture {
+						kind: encoder::Kind::Software,
+						// Room for noise, which rate control would otherwise skip frames of.
+						bitrate: Some(moq_net::bandwidth::Rate::from_mbps(4)),
+						..Capture::default()
+					};
 					let (control, driver) = Control::new(broadcast.clone(), catalog, options).unwrap();
 
 					// Ten nominal fps makes the default two-second GOP twenty frames, which every
@@ -1736,8 +1743,10 @@ mod tests {
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let catalog =
 					moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-				let mut options = Capture::default();
-				options.encode.kind = kind;
+				let options = Capture {
+					kind,
+					..Capture::default()
+				};
 				let (_control, driver) = Control::new(broadcast.clone(), catalog, options).unwrap();
 				assert_eq!(driver.track.info().refresh, refresh);
 			}
@@ -1782,8 +1791,10 @@ mod tests {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let consumer = broadcast.consume();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-			let mut options = Capture::default();
-			options.encode.kind = encoder::Kind::Software;
+			let options = Capture {
+				kind: encoder::Kind::Software,
+				..Capture::default()
+			};
 			let (control, driver) = Control::new(broadcast.clone(), catalog.clone(), options).unwrap();
 
 			// The probe gets a camera; the subscriber's open after it never finishes.
@@ -1815,9 +1826,10 @@ mod tests {
 		/// A keyframe request the backend cannot force is refused to the caller, and the capture
 		/// carries on at its cadence rather than ending or dropping the request without a word.
 		#[tokio::test]
-		// The guard only keeps other tests out of the process-wide probe log, and this runtime has
-		// one thread, so holding it across an await blocks nothing.
-		#[allow(clippy::await_holding_lock)]
+		#[expect(
+			clippy::await_holding_lock,
+			reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+		)]
 		async fn a_cut_the_backend_cannot_force_is_refused() {
 			let _probe = probe::exclusive();
 
@@ -1841,21 +1853,19 @@ mod tests {
 
 			let (camera, stream) = camera();
 			let mut source = Streams::new([stream]);
-			let options = Options {
+			let options = Capture {
 				kind: encoder::Kind::Named(probe::NO_CUT.into()),
-				..Options::default()
+				..Capture::default()
 			};
 			let control = Control {
 				requests: kio::Producer::new(Requests::default()),
 			};
 			let requests = control.requests.weak();
 			let clock = catalog.clock();
-			let config = capture::Config::default();
 			let mut run = std::pin::pin!(capture_loop(
 				&mut producer,
 				&demand,
 				&mut source,
-				&config,
 				&options,
 				&clock,
 				&requests,
@@ -1879,6 +1889,180 @@ mod tests {
 				res = &mut run => panic!("the capture ended after a refused cut: {res:?}"),
 				() = until(|| probe::take().iter().any(|(event, _)| *event == "encode")) => {}
 			}
+		}
+	}
+
+	/// Rate control against the probe backend, which logs every bitrate it accepts.
+	#[cfg(feature = "capture")]
+	mod rate_control {
+		use std::time::Duration;
+
+		use moq_net::bandwidth::Rate;
+
+		use super::*;
+		use crate::encode::backend::probe;
+
+		/// After congestion clears, the encoder climbs back to its ceiling although the grant
+		/// never changes again, and a failed step is retried rather than waiting for one.
+		#[tokio::test(start_paused = true)]
+		#[expect(
+			clippy::await_holding_lock,
+			reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+		)]
+		async fn a_quiet_grant_still_recovers_the_ceiling() {
+			let _probe = probe::exclusive();
+			let ceiling = Rate::from_mbps(4);
+			let mut config = encoder::Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+			config.kind = encoder::Kind::Named(probe::NAME.into());
+			config.bitrate = Some(ceiling);
+			let mut sink = Sink::open(&config).await.unwrap();
+
+			let estimate = moq_net::bandwidth::Producer::new();
+			let mut rate = Some(rate::Follower::new(estimate.consume(), rate::Policy::new(ceiling)));
+
+			estimate.set(Some(Rate::from_mbps(1))).unwrap();
+			let next = next_target(&mut rate).await;
+			apply_target(&mut sink, &mut rate, next).await;
+
+			// The last grant change: the link recovers a second later.
+			tokio::time::advance(Duration::from_secs(1)).await;
+			estimate.set(Some(ceiling)).unwrap();
+			probe::refuse_once(ceiling.as_bps());
+
+			// A minute without a wake is far past anything the ramp still needs.
+			while let Ok(next) = moq_clock::timeout(Duration::from_secs(60), next_target(&mut rate)).await {
+				apply_target(&mut sink, &mut rate, next).await;
+			}
+			let bitrates = probe::bitrates();
+			assert_eq!(bitrates.first(), Some(&1_000_000), "{bitrates:?}");
+			assert_eq!(
+				bitrates.last(),
+				Some(&ceiling.as_bps()),
+				"the ramp stalled: {bitrates:?}"
+			);
+			assert!(
+				probe::take()
+					.iter()
+					.filter(|(event, _)| *event == "set_bitrate")
+					.count() > bitrates.len()
+			);
+			assert!(rate.is_some(), "a transient failure keeps rate control running");
+		}
+	}
+}
+
+/// A finished [`Producer`] keeps its track and rendition published, but not its splitter.
+///
+/// Bindings keep finished video producers until their broadcast ends, so a long-lived broadcast
+/// that retires many encoders would otherwise hold each one's largest access unit. The counting
+/// allocator serves this crate's whole unit-test binary, but it counts only on a thread inside
+/// [`released`], so other tests are unaffected.
+#[cfg(test)]
+mod finished {
+	use std::alloc::{GlobalAlloc, Layout, System};
+	use std::cell::Cell;
+
+	use super::*;
+
+	/// The access unit each source publishes, far above the bookkeeping a finished producer keeps.
+	const PAD: usize = 1 << 20;
+
+	thread_local! {
+		/// Bytes this thread freed minus those it allocated while measuring. Per thread so concurrent
+		/// tests don't mix, and `const` so the allocator can read it without allocating.
+		static RELEASED: Cell<Option<isize>> = const { Cell::new(None) };
+	}
+
+	fn count(bytes: isize) {
+		// `try_with` because TLS is unavailable while a thread is being torn down.
+		let _ = RELEASED.try_with(|released| released.set(released.get().map(|n| n + bytes)));
+	}
+
+	/// Counts on the measuring thread; every call forwards to the system allocator unchanged.
+	struct Counting;
+
+	unsafe impl GlobalAlloc for Counting {
+		unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+			count(-(layout.size() as isize));
+			unsafe { System.alloc(layout) }
+		}
+
+		unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+			count(layout.size() as isize);
+			unsafe { System.dealloc(ptr, layout) }
+		}
+
+		unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+			count(layout.size() as isize - new_size as isize);
+			unsafe { System.realloc(ptr, layout, new_size) }
+		}
+	}
+
+	#[global_allocator]
+	static ALLOCATOR: Counting = Counting;
+
+	/// The heap `f` gives back, net of what it allocates on the way.
+	fn released(f: impl FnOnce()) -> isize {
+		RELEASED.with(|released| released.set(Some(0)));
+		f();
+		RELEASED.with(|released| released.replace(None).unwrap())
+	}
+
+	/// An H.264 IDR access unit carrying its SPS and PPS, padded to [`PAD`] with filler data.
+	fn keyframe() -> bytes::Bytes {
+		let mut au = vec![0, 0, 0, 1];
+		au.extend_from_slice(&[
+			0x67, 0x64, 0x00, 0x1f, 0xac, 0x24, 0x84, 0x01, 0x40, 0x16, 0xec, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40,
+			0x00, 0x00, 0x0c, 0x23, 0xc6, 0x0c, 0x92,
+		]);
+		au.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xee, 0x32, 0xc8, 0xb0]);
+		au.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21]);
+		au.extend_from_slice(&[0, 0, 0, 1, 0x0c]);
+		au.resize(au.len() + PAD, 0xff);
+		au.push(0x80);
+		au.into()
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn finished_producer_releases_its_splitter() {
+		for sources in [1, 4] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let consumer = broadcast.consume();
+
+			let rendition = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::H264(hang::catalog::H264 {
+				inline: true,
+				profile: 0x64,
+				constraints: 0,
+				level: 0x1f,
+			}));
+			let finished: Vec<_> = (0..sources)
+				.map(|_| {
+					let mut producer = Producer::new(broadcast.clone(), catalog.reserve(), rendition.clone()).unwrap();
+					for pts in [0, 33_333] {
+						let pts = moq_net::Timestamp::from_micros(pts).unwrap();
+						producer.publish(&[Encoded::new(keyframe(), pts, true)]).unwrap();
+					}
+					producer.finish().unwrap();
+					producer
+				})
+				.collect();
+
+			// Late readers keep the published media, so only what the producers own is measured.
+			let snapshot = catalog.snapshot();
+			assert_eq!(snapshot.video.renditions.len(), sources);
+			let _tracks: Vec<_> = snapshot
+				.video
+				.renditions
+				.keys()
+				.map(|name| consumer.track(name).unwrap())
+				.collect();
+
+			let released = released(|| drop(finished));
+			assert!(
+				released < (sources * PAD / 4) as isize,
+				"{sources} finished producers still owned {released} bytes"
+			);
 		}
 	}
 }

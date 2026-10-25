@@ -1,4 +1,3 @@
-#![cfg_attr(test, allow(clippy::disallowed_methods))]
 #![warn(missing_docs)]
 
 //! Publish and consume MoQ traffic stats.
@@ -46,7 +45,7 @@ use std::collections::BTreeMap;
 
 /// Counter collection, re-exported from [`moq_net::stats`] so stats consumers
 /// can depend on this crate alone.
-pub use moq_net::stats::{Failure, Failures, Handle, Presence, Refusal, Refusals, Registry, Role, Tier, Traffic};
+pub use moq_net::stats::{Failure, Failures, Handle, Presence, RefusalKind, Refusals, Registry, Role, Tier, Traffic};
 
 use moq_net::{AsPath, Path, PathOwned};
 

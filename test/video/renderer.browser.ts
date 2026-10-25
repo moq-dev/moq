@@ -1,6 +1,6 @@
 /**
  * The `@moq/video` renderer in headless Chromium: paint through WebGPU, lose the device with no
- * adapter to replace it, check the renderer reports `"surface-lost"`, then check a fresh canvas
+ * adapter to replace it, check the renderer reports an `InvalidStateError`, then check a fresh canvas
  * paints through Canvas2D. Once against the renderer directly and once through `<moq-publish>`,
  * which swaps its own canvas.
  *
@@ -100,7 +100,7 @@ test("the renderer reports a lost surface and recovers on a fresh canvas through
 
 		// Both paths show the same rotation: the frame's left (red) half on top.
 		expect(report.before).toEqual({ context: "webgpu", colors: ["red", "blue"] });
-		expect(report.error).toBe("surface-lost");
+		expect(report.error).toBe("InvalidStateError");
 		expect(report.after).toEqual({ context: "2d", colors: ["red", "blue"] });
 		expect(report.recovered).toBeUndefined();
 	} finally {
@@ -221,3 +221,88 @@ test("closing while the caption chunk loads installs no stale overlay", async ()
 		await page.close();
 	}
 });
+
+for (const audio of [false, true]) {
+	test(`buffered ${audio ? "A/V" : "video"} paints a poster before the common floor`, async () => {
+		const page = await open();
+		try {
+			await page.evaluate((audio) => window.startPoster(audio, true), audio);
+			if (audio) {
+				await page.locator("body").click();
+				await page.waitForFunction(() => window.poster.state().audioState === "running");
+			}
+			await page.evaluate(() => {
+				window.poster.push(0);
+				window.poster.push(40_000);
+			});
+			await page.waitForFunction(() => window.poster.state().color === "red");
+			// Browser paint observation spans several floor intervals, so a time-only gate fails.
+			await page.waitForTimeout(300);
+			expect(await page.evaluate(() => window.poster.state())).toMatchObject({
+				timestamp: 0,
+				color: "red",
+				playing: false,
+			});
+			await page.evaluate(() => window.poster.push(100_000));
+			if (audio) {
+				await page.waitForTimeout(300);
+				expect(await page.evaluate(() => window.poster.state())).toMatchObject({
+					timestamp: 0,
+					color: "red",
+					playing: false,
+				});
+				await page.evaluate(() => window.poster.audio());
+			}
+			await page.waitForFunction(() => window.poster.state().color === "blue");
+			expect(await page.evaluate(() => window.poster.state().playing)).toBe(true);
+		} finally {
+			await page.evaluate(() => window.poster?.close());
+			await page.close();
+		}
+	}, 30_000);
+}
+
+test("live video does not wait to fill the buffered startup floor", async () => {
+	const page = await open();
+	try {
+		await page.evaluate(() => window.startPoster(false, false));
+		await page.evaluate(() => {
+			window.poster.push(0);
+			window.poster.push(40_000);
+		});
+		await page.waitForFunction(() => window.poster.state().color === "blue");
+		expect(await page.evaluate(() => window.poster.state().timestamp)).toBe(40_000);
+	} finally {
+		await page.evaluate(() => window.poster?.close());
+		await page.close();
+	}
+}, 30_000);
+
+test("buffered audio keeps its opening while video fills, with a running audio context", async () => {
+	const page = await open();
+	try {
+		await page.evaluate(() => window.startPoster(true, true));
+		await page.locator("body").click();
+		await page.waitForFunction(() => window.poster.state().audioState === "running");
+		await page.evaluate(() => window.poster.audio());
+		const initial = await page.evaluate(() => window.poster.state().audioTimestamp);
+		await page.waitForTimeout(300);
+		expect(await page.evaluate(() => window.poster.state())).toMatchObject({
+			audioTimestamp: initial,
+			playing: false,
+		});
+		await page.evaluate(() => {
+			window.poster.push(0);
+			window.poster.push(40_000);
+		});
+		await page.waitForFunction(() => window.poster.state().color === "red");
+		expect(await page.evaluate(() => window.poster.state().playing)).toBe(false);
+		await page.evaluate(() => window.poster.push(100_000));
+		await page.waitForFunction(
+			() => window.poster.state().color === "blue" && (window.poster.state().audioTimestamp ?? 0) > 0,
+		);
+	} finally {
+		await page.evaluate(() => window.poster?.close());
+		await page.close();
+	}
+}, 30_000);

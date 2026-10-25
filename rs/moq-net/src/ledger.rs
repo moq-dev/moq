@@ -159,6 +159,21 @@ impl Ledger {
 			.map(|(_, run)| run.end)
 	}
 
+	/// The accounted runs overlapping `groups`, clipped to it, lowest first.
+	pub fn accounted(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
+		// From the run holding the first group, if one does.
+		let lower = self
+			.runs
+			.range(..=groups.start)
+			.next_back()
+			.filter(|(_, run)| groups.start < run.end)
+			.map_or(groups.start, |(&start, _)| start);
+		self.runs
+			.range(lower..)
+			.take_while(move |(start, _)| **start < groups.end)
+			.map(move |(&start, run)| start.max(groups.start)..run.end.min(groups.end))
+	}
+
 	/// Whether every group in `groups` is accounted for.
 	pub fn covers(&self, groups: Range<u64>) -> bool {
 		groups.is_empty() || self.run_end(groups.start).is_some_and(|end| groups.end <= end)
@@ -166,7 +181,7 @@ impl Ledger {
 }
 
 // Gap timing shared by a subscription tail and its track's live arrivals.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl Ledger {
 	/// How long a gap is waited for once a later group opened it.
 	pub fn grace(&self) -> Duration {

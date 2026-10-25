@@ -711,7 +711,7 @@ impl Connection {
             frame::Frame::Close(Close::Connection(close)) => {
                 self.lost(ConnectionError::ConnectionClosed(close));
             }
-            frame::Frame::Datagram(mut datagram) => {
+            frame::Frame::Datagram(datagram) => {
                 let Some(max) = self.config.max_datagram_frame_size else {
                     return Err(TransportError::PROTOCOL_VIOLATION(
                         "unexpected DATAGRAM frame",
@@ -720,11 +720,6 @@ impl Connection {
                 // The limit is on the frame as encoded, with or without its Length field
                 if frame_len as u64 > max.into_inner() {
                     return Err(TransportError::PROTOCOL_VIOLATION("oversized datagram"));
-                }
-                // The receive buffer charges only the payload, so a small one must not pin
-                // its whole record
-                if datagram.data.len() < payload_len / 2 {
-                    datagram.data = Bytes::copy_from_slice(&datagram.data);
                 }
                 if self
                     .datagrams

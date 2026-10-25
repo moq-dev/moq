@@ -29,11 +29,11 @@ import * as Path from "../path.ts";
 import { Priority } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Groups, Info, Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
+import type { Groups, Info, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
-import { LIMITS, type Limits, Slots } from "../util/limits.ts";
+import { untilGivenUp } from "../util/given_up.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -48,7 +48,7 @@ import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
-import { fromWire, toWire } from "./priority.ts";
+import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { Publish, PublishDone, PublishDoneStatus } from "./publish.ts";
 import {
@@ -265,9 +265,27 @@ type StreamCount = { opened: number; terminalSent?: boolean };
 /** A PUBLISH's state across every pause and resume. */
 interface Published {
 	streams: StreamCount;
-	unlisted: Once<true>;
+	unlisted: Once<Unlisted>;
 	answer: boolean;
 }
+
+/** How a listed track left the listing: it finished, or it left unfinished. */
+type Unlisted = "finished" | "removed";
+
+/** The next listed track to PUBLISH, ready but for its stream. */
+interface Staged {
+	name: string;
+	info: Info;
+	/** On draft-18, claims the track's one subscription from now on. */
+	claim?: string;
+}
+
+/** What a broadcast's listing woke for. */
+type Woken =
+	| { kind: "track"; event: broadcast.TracksEvent | undefined }
+	| { kind: "opened"; stream: Stream }
+	| { kind: "failed"; err: unknown }
+	| { kind: "changed" };
 
 /** Stop forwarding without ending the subscription. */
 class Paused extends Error {
@@ -328,9 +346,6 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
-	// Subscriptions the peer holds live on this session.
-	#subscriptions: Slots;
-	#fetches: Slots;
 	#listings = new Set<Path.Valid>();
 	#trackClaims = new Map<string, "publish" | number>();
 
@@ -393,7 +408,6 @@ export class Publisher {
 		grant = new Signal<Grant | undefined>(undefined),
 		auth,
 		ready = Promise.resolve(),
-		limits = LIMITS,
 	}: {
 		/** The WebTransport session, for uni streams. */
 		quic: WebTransport;
@@ -417,12 +431,8 @@ export class Publisher {
 		auth?: Carrier;
 		/** Resolves once the setup tokens are answered (MoQ Auth). */
 		ready?: Promise<void>;
-		/** How many live requests the peer may hold. */
-		limits?: Limits;
 	}) {
 		this.#quic = quic;
-		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
-		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = grant;
 		this.#gate = new Gate(grant);
 		this.#auth = auth;
@@ -478,15 +488,10 @@ export class Publisher {
 			);
 			return;
 		}
-		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
-		// once. A peer past the cap loses the session.
-		const charged = !msg.rangeFilters && this.#gate.allows(msg.trackNamespace);
-		if (charged) this.#subscriptions.acquire();
 		if (claimed) this.#trackClaims.set(key, ((this.#trackClaims.get(key) as number | undefined) ?? 0) + 1);
 		try {
 			await this.#serveSubscribe(msg, request);
 		} finally {
-			if (charged) this.#subscriptions.release();
 			if (claimed) {
 				const count = (this.#trackClaims.get(key) as number) - 1;
 				if (count) this.#trackClaims.set(key, count);
@@ -543,7 +548,7 @@ export class Publisher {
 			// A range that resolves without the live edge has a fixed start, which is no join:
 			// bound the subscription before subscribing so the refresh ratio never judges it.
 			const fixed = subscribeRange(msg, {}, version);
-			return wireOf(source).subscribe(msg.trackName, {
+			return source.track(msg.trackName).subscribe({
 				priority: fromWire(msg.subscriberPriority),
 				order: msg.groupOrder,
 				// An absent budget preserves everything retained by the producer.
@@ -558,6 +563,10 @@ export class Publisher {
 			try {
 				info = await untilAborted(track.info(), left.signal);
 			} catch (err) {
+				if (left.signal.aborted) {
+					request.abort(cancel);
+					return;
+				}
 				const failed = error(err);
 				if (
 					!(failed instanceof StreamError) ||
@@ -769,7 +778,7 @@ export class Publisher {
 				groups: rangeGroups(range),
 			});
 			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
-			if (startGroup !== undefined) track.setGroups({ ...rangeGroups(range), start: { included: startGroup } });
+			if (startGroup !== undefined) track.withRange({ ...rangeGroups(range), start: { included: startGroup } });
 
 			// A fill reads the group cache through its own consumer, independent of the
 			// subscription's cursor. Forked from this subscriber rather than resolved through
@@ -955,13 +964,14 @@ export class Publisher {
 					revoked,
 					...(published ? [published.unlisted] : []),
 				]);
-				if (end === true) throw new NotFound("track no longer listed");
+				if (end === "removed") throw new NotFound("track no longer listed");
 				if (end === "revoked") {
 					console.info(`subscription no longer authorized: broadcast=${name} track=${track.name}`);
 					unauthorized = true;
 					unsubscribe();
 				}
-				ended = end === served;
+				// A track that finished leaves the listing with TRACK_ENDED, like one served to its end.
+				ended = end === served || end === "finished";
 			} catch (err: unknown) {
 				publishError = error(err);
 				// Stop forwarding at once: a pause answers only after every data stream closed.
@@ -1080,11 +1090,9 @@ export class Publisher {
 			// once the open settles. tryOpen owns resetting a slot that arrives too late.
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
-			const abandoned = hooks
-				.guardGroup(group, () => opened.promise)
-				.catch((err: unknown) => {
-					failure = error(err);
-				});
+			const abandoned = untilGivenUp(group, () => opened.promise).then((stop) => {
+				failure = stop;
+			});
 			let stream: Writer | undefined;
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
@@ -1132,10 +1140,20 @@ export class Publisher {
 				left = true;
 				return undefined;
 			});
+			// The subscription's budget, or an eviction of what is left to read, may give up on the
+			// group mid-write, which abandons the stream. A group already given up never starts the write.
+			const write = async (op: () => Promise<unknown>) => {
+				const stop = await untilGivenUp(group, op);
+				if (stop) throw stop;
+			};
+			// Writing the group stops for the pause too; the drain below answers it without a reset.
+			const send = async (op: () => Promise<unknown>) => {
+				await race([write(op), cancelled]);
+				if (left) throw new Error("unsubscribed while serving the group");
+			};
 
 			try {
-				await race([hooks.guardGroup(group, () => header.encode(stream, this.#session.version)), cancelled]);
-				if (left) throw new Error("unsubscribed while serving the group");
+				await send(() => header.encode(stream, this.#session.version));
 				// The first written object goes on the wire as its absolute id, so a trimmed
 				// head shows the true numbering rather than a silently renumbered group.
 				let first = true;
@@ -1152,32 +1170,16 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await race([hooks.readGroupFrame(group, slice.skip), stream.closed, cancelled]);
-					if (left) {
-						read?.complete();
-						throw new Error("unsubscribed while serving the group");
-					}
+					const read = await race([group.readFrameSequence({ from: slice.skip }), stream.closed, cancelled]);
+					if (left) throw new Error("unsubscribed while serving the group");
 					if (!read) break;
 					next = read.sequence + 1;
-					if (slice.until !== undefined && read.sequence >= slice.until) {
-						read.complete();
-						break;
-					}
+					if (slice.until !== undefined && read.sequence >= slice.until) break;
 
-					try {
-						const obj = new Frame({ payload: read.frame.payload, timestamp: read.frame.timestamp });
-						const delta = first ? read.sequence : 0;
-						first = false;
-						await race([
-							hooks.guardGroup(group, () =>
-								obj.encode(stream, header.flags, timescale, this.#session.version, delta),
-							),
-							cancelled,
-						]);
-						if (left) throw new Error("unsubscribed while serving the group");
-					} finally {
-						read.complete();
-					}
+					const obj = new Frame({ payload: read.payload, timestamp: read.timestamp });
+					const delta = first ? read.sequence : 0;
+					first = false;
+					await send(() => obj.encode(stream, header.flags, timescale, this.#session.version, delta));
 				}
 
 				// The track ends right after this group's last object, so the marker rides this
@@ -1195,12 +1197,15 @@ export class Publisher {
 				}
 
 				stream.close();
+				// The stream holds every byte it owes, so frames past a range's end failing upstream
+				// can no longer give it up: release the read, leaving the budget.
+				group.close();
 				// Its bytes still hold the connection until acknowledged, so a group gone stale
 				// meanwhile is reset like one still serving, as the Rust `GroupServe` does. Awaited
 				// even without a marker: PUBLISH_DONE waits on this group, so the track, whose
 				// timeline judges the budget, stays open until the stream settles.
 				const delivered = await race([
-					hooks.guardGroup(group, () => stream.closed).then(() => true),
+					write(() => stream.closed).then(() => true),
 					unsubscribed.then(() => false),
 				]);
 				// Only a stream that closed cleanly delivered the marker: one reset after its FIN
@@ -1269,7 +1274,7 @@ export class Publisher {
 	/** Preserve the original terminal on a separate stream when its group already sent FIN. */
 	async #runEndOfTrack(options: {
 		requestId: bigint;
-		final: TrackLocation;
+		final: TrackPosition;
 		publisherPriority: number;
 		unsubscribed: Promise<void>;
 		streams: StreamCount;
@@ -1336,7 +1341,6 @@ export class Publisher {
 			streams.opened += 1;
 			if (sequence !== undefined) ranking.add(stream, sequence, object);
 
-			await stream.u53(FetchHeader.type);
 			await new FetchHeader({ requestId }).encode(stream, version);
 
 			if (fill.kind !== "group") {
@@ -2369,6 +2373,8 @@ export class Publisher {
 						continue;
 					}
 					skips.delete(first[0]);
+					// A FORWARD=1 listing waits for this to read its next track.
+					changed.update((n) => n + 1);
 					await Message.write(request.writer, PublishSkipped.id, first[1], version);
 				}
 				if (refusal) await request.refuse("subscribe_namespace", refusal);
@@ -2435,6 +2441,16 @@ export class Publisher {
 		}
 	}
 
+	/**
+	 * List one broadcast under a SUBSCRIBE_TRACKS: PUBLISH or skip each of its tracks until its
+	 * route goes or the broadcast ends, then let its PUBLISHes run to their end.
+	 *
+	 * A PUBLISH starts only once the peer's stream credit opens its stream, one staged at a time,
+	 * so the PUBLISHes a peer holds are bounded by the credit it grants. The listing is still read
+	 * meanwhile, since an unlisted track's PUBLISH_DONE is what returns that credit; the tracks
+	 * read but not yet PUBLISHed wait in `pending`. A FORWARD=1 listing has nothing to unlist, so
+	 * it reads its next track only once the request stream has taken the last skip.
+	 */
 	async #listBroadcast({
 		msg,
 		suffix,
@@ -2452,12 +2468,38 @@ export class Publisher {
 		skips: Map<symbol, PublishSkipped>;
 		changed: Signal<number>;
 	}) {
+		const forward = msg.parameters.forward !== false;
 		const namespace = Path.join(msg.prefix, suffix);
-		const listed = new Map<string, Once<true>>();
+		// The tracks waiting their turn for a PUBLISH, in listing order.
+		const pending = new Map<string, Info>();
+		// The next track to PUBLISH, waiting on the peer's stream credit.
+		let staged: Staged | undefined;
+		// The stream the next PUBLISH goes out on, once the peer's credit admits it.
+		let opening: Promise<Woken> | undefined;
+		// The listing's next event, read while anything else is awaited.
+		let reading: Promise<Woken> | undefined;
+		// Each sent PUBLISH's entry: setting it says the track is no longer listed.
+		const listed = new Map<string, Once<Unlisted>>();
+		// The tracks with a skip queued, so the broadcast's end cancels only its own.
 		const skipped = new Map<string, symbol>();
 		const tasks = new Set<Promise<void>>();
+		const skip = (name: string) => {
+			const key = Symbol();
+			skipped.set(name, key);
+			skips.set(key, new PublishSkipped(suffix, name));
+			changed.update((n) => n + 1);
+		};
+		const unstage = () => {
+			if (staged?.claim) this.#trackClaims.delete(staged.claim);
+			staged = undefined;
+		};
+		// The PUBLISHes already sent still end when their track is unlisted, so the listing is
+		// still read once cancelled, adding nothing.
 		const cancel = adding.subscribe((active) => {
-			if (!active && !tasks.size) hold.abort();
+			if (active) return;
+			pending.clear();
+			unstage();
+			if (!tasks.size) hold.abort();
 		});
 		let listing: broadcast.Tracks | undefined;
 		try {
@@ -2465,11 +2507,85 @@ export class Publisher {
 			const source = await this.#resolve(namespace, hold.signal, epoch);
 			listing = source.tracks();
 			for (;;) {
-				const event = await untilAborted(listing.next(), hold.signal);
+				// Stage the next pending track that will be PUBLISHed, skipping those that will
+				// not, so a stream is opened only for a PUBLISH that goes out.
+				for (const [name, info] of pending) {
+					if (staged || !adding.peek()) break;
+					pending.delete(name);
+					// Draft-18 allows one subscription per track (section 5.1), so a track the peer
+					// is subscribed to, by its SUBSCRIBE or a PUBLISH still alive, is skipped.
+					// Claimed from now, so a SUBSCRIBE cannot slip in before the PUBLISH goes out.
+					const claim =
+						this.#session.version === Version.DRAFT_18 ? JSON.stringify([namespace, name]) : undefined;
+					if (claim !== undefined) {
+						if (this.#trackClaims.has(claim)) {
+							skip(name);
+							continue;
+						}
+						this.#trackClaims.set(claim, "publish");
+					}
+					staged = { name, info, claim };
+				}
+				if (staged && !opening)
+					opening = Promise.resolve(this.#session.openBi({ timeout: null })).then(
+						(stream): Woken => ({ kind: "opened", stream }),
+						(err: unknown): Woken => ({ kind: "failed", err }),
+					);
+				const waits: PromiseLike<Woken>[] = [];
+				if (opening) waits.push(opening);
+				// A FORWARD=1 listing has nothing to unlist, so it reads its next track only once
+				// the request stream has taken the last skip.
+				if (forward && skips.size) waits.push(Signal.race(changed).then((): Woken => ({ kind: "changed" })));
+				else {
+					reading ??= listing.next().then((event): Woken => ({ kind: "track", event }));
+					waits.push(reading);
+				}
+				const woken = await untilAborted(race(waits), hold.signal);
+				if (woken.kind === "changed") continue;
+				if (woken.kind === "failed") {
+					console.debug(`listed broadcast=${namespace}: PUBLISH stream did not open`, woken.err);
+					break;
+				}
+				if (woken.kind === "opened") {
+					opening = undefined;
+					const next = staged;
+					if (!next || !adding.peek()) {
+						woken.stream.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
+						continue;
+					}
+					staged = undefined;
+					const unlisted = new Once<Unlisted>();
+					listed.set(next.name, unlisted);
+					const task = this.#runPublish({
+						msg,
+						namespace,
+						source,
+						stream: woken.stream,
+						name: next.name,
+						info: next.info,
+						unlisted,
+						adding,
+					})
+						.catch((err) => {
+							if (err instanceof ProtocolViolation) throw err;
+						})
+						.finally(() => {
+							if (next.claim) this.#trackClaims.delete(next.claim);
+							tasks.delete(task);
+							if (!adding.peek() && !tasks.size) hold.abort();
+						});
+					tasks.add(task);
+					void task.catch(() => hold.abort());
+					continue;
+				}
+				reading = undefined;
+				const event = woken.event;
 				if (!event) break;
 				if (event.kind === "synced") continue;
-				if (event.kind === "removed") {
-					listed.get(event.name)?.set(true);
+				if (event.kind === "removed" || event.kind === "finished") {
+					if (staged?.name === event.name) unstage();
+					pending.delete(event.name);
+					listed.get(event.name)?.set(event.kind);
 					listed.delete(event.name);
 					const key = skipped.get(event.name);
 					if (key) skips.delete(key);
@@ -2477,45 +2593,20 @@ export class Publisher {
 					continue;
 				}
 				if (!adding.peek()) continue;
-				const duplicate =
-					this.#session.version === Version.DRAFT_18 &&
-					this.#trackClaims.has(JSON.stringify([namespace, event.name]));
-				if (msg.parameters.forward !== false || duplicate || !this.#subscriptions.tryAcquire()) {
-					const key = Symbol();
-					skipped.set(event.name, key);
-					skips.set(key, new PublishSkipped(suffix, event.name));
-					changed.update((n) => n + 1);
-					continue;
-				}
-				const unlisted = new Once<true>();
-				listed.set(event.name, unlisted);
-				const key = JSON.stringify([namespace, event.name]);
-				if (this.#session.version === Version.DRAFT_18) this.#trackClaims.set(key, "publish");
-				const task = this.#runPublish({
-					msg,
-					namespace,
-					source,
-					name: event.name,
-					info: event.info,
-					unlisted,
-					adding,
-				})
-					.catch((err) => {
-						if (err instanceof ProtocolViolation) throw err;
-					})
-					.finally(() => {
-						this.#subscriptions.release();
-						if (this.#session.version === Version.DRAFT_18) this.#trackClaims.delete(key);
-						tasks.delete(task);
-						if (!adding.peek() && !tasks.size) hold.abort();
-					});
-				tasks.add(task);
-				void task.catch(() => hold.abort());
+				if (forward) skip(event.name);
+				else pending.set(event.name, event.info);
 			}
 		} finally {
 			cancel();
 			listing?.close();
-			for (const entry of listed.values()) entry.set(true);
+			pending.clear();
+			unstage();
+			// A stream that opens from now on carries nothing.
+			void opening?.then((woken) => {
+				if (woken.kind === "opened")
+					woken.stream.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
+			});
+			for (const entry of listed.values()) entry.set("removed");
 			for (const key of skipped.values()) skips.delete(key);
 			await Promise.all(tasks);
 		}
@@ -2525,6 +2616,7 @@ export class Publisher {
 		msg,
 		namespace,
 		source,
+		stream,
 		name,
 		info,
 		unlisted,
@@ -2533,9 +2625,11 @@ export class Publisher {
 		msg: SubscribeTracks;
 		namespace: Path.Valid;
 		source: broadcast.Consumer;
+		/** The PUBLISH's stream, opened once the peer's credit admitted it. */
+		stream: Stream;
 		name: string;
 		info: Info;
-		unlisted: Once<true>;
+		unlisted: Once<Unlisted>;
 		adding: Signal<boolean>;
 	}) {
 		const version = this.#session.version;
@@ -2543,22 +2637,17 @@ export class Publisher {
 		const stop = adding.subscribe((active) => {
 			if (!active) hold.abort();
 		});
-		const removed = unlisted.subscribe(() => hold.abort());
-		const cancelled = () => request?.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
+		// The peer lists the track once its PUBLISH arrives, which may be before the write
+		// returns, so a track that finishes from then on sees the PUBLISH through to its answer
+		// and ends with TRACK_ENDED; a reset would fail the peer's listing.
+		let publishing = false;
+		const removed = unlisted.subscribe((how) => {
+			if (how === "removed" || (how === "finished" && !publishing)) hold.abort();
+		});
+		const request = new RequestStream(stream, this.#session, this.#quic);
+		const cancelled = () => request.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
 		hold.signal.addEventListener("abort", cancelled);
-		let request: RequestStream | undefined;
 		try {
-			if (!adding.peek() || unlisted.peek() !== undefined) return;
-			const opening = Promise.resolve(this.#session.openBi({ timeout: null }));
-			void opening.then(
-				(stream) => {
-					if (hold.signal.aborted)
-						stream.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
-				},
-				() => undefined,
-			);
-			const stream = await untilAborted(opening, hold.signal);
-			request = new RequestStream(stream, this.#session, this.#quic);
 			let peerEnded = false;
 			const ended = request.ended.then(() => {
 				peerEnded = true;
@@ -2572,7 +2661,7 @@ export class Publisher {
 				requestId: id,
 				trackNamespace: namespace,
 				trackName: name,
-				subscriberPriority: defaults.subscriberPriority ?? 127,
+				subscriberPriority: defaults.subscriberPriority ?? DEFAULT_WIRE,
 				groupOrder: defaults.groupOrder === GroupOrder.Ascending ? "ascending" : "descending",
 				filter: defaults.subscriptionFilter,
 				propertiesWanted: defaults.includeProperties ?? true,
@@ -2585,6 +2674,7 @@ export class Publisher {
 				parameters.subscriptionFilter = subscription.filter;
 			}
 			const largest = wireOf(source).largest(name);
+			publishing = true;
 			await Message.write(
 				request.writer,
 				Publish.id,
@@ -2614,6 +2704,7 @@ export class Publisher {
 			// Once sent, the PUBLISH survives cancellation of its listing.
 			const state: Published = { streams: { opened: 0 }, unlisted, answer: false };
 			const answer = await untilAborted(request.next(), hold.signal);
+			publishing = false;
 			if (!answer) throw new ProtocolViolation("PUBLISH ended without an answer");
 			if (answer.type === RequestError.id) {
 				await RequestError.decode(answer.reader, version).catch((err) => {
@@ -2640,9 +2731,11 @@ export class Publisher {
 						request.writer,
 						PublishDone.id,
 						new PublishDone({
-							statusCode: this.#gate.allows(namespace)
-								? PublishDoneStatus.INTERNAL_ERROR
-								: PublishDoneStatus.UNAUTHORIZED,
+							statusCode: !this.#gate.allows(namespace)
+								? PublishDoneStatus.UNAUTHORIZED
+								: unlisted.peek() === "finished"
+									? PublishDoneStatus.TRACK_ENDED
+									: PublishDoneStatus.INTERNAL_ERROR,
 							streamCount: BigInt(state.streams.opened),
 							reasonPhrase: "track no longer listed or granted",
 						}),
@@ -2694,20 +2787,22 @@ export class Publisher {
 				}
 				const revoked = new Once<true>();
 				const gate = this.#gate.watch(namespace, () => revoked.set(true));
-				let next: Framed | undefined | true;
+				let next: Framed | undefined | true | Unlisted;
 				try {
 					next = await race([request.next(), unlisted, revoked, ended]);
 				} finally {
 					gate.dispose();
 				}
-				if (next === true) {
+				if (next === true || next === "finished" || next === "removed") {
 					await Message.write(
 						request.writer,
 						PublishDone.id,
 						new PublishDone({
 							statusCode: revoked.peek()
 								? PublishDoneStatus.UNAUTHORIZED
-								: PublishDoneStatus.INTERNAL_ERROR,
+								: next === "finished"
+									? PublishDoneStatus.TRACK_ENDED
+									: PublishDoneStatus.INTERNAL_ERROR,
 							streamCount: BigInt(state.streams.opened),
 							reasonPhrase: "track no longer listed or granted",
 						}),
@@ -2749,14 +2844,14 @@ export class Publisher {
 				}
 			}
 		} catch (err) {
-			request?.abort(err);
+			request.abort(err);
 			throw err;
 		} finally {
 			stop();
 			removed();
 			hold.signal.removeEventListener("abort", cancelled);
 			hold.abort();
-			request?.close();
+			request.close();
 		}
 	}
 
@@ -2821,20 +2916,15 @@ export class Publisher {
 
 	async #runFetch(msg: Fetch, request: RequestStream) {
 		this.#pinned(msg.epoch);
-		this.#fetches.acquire();
-		try {
-			if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
-				await refuseReserved(request);
-				return;
-			}
-			await request.refuse("fetch", {
-				requestId: msg.requestId,
-				condition: msg.rangeFilters ? "invalid_filter" : "not_supported",
-				reasonPhrase: msg.rangeFilters ? "Range Filters exceed MAX_FILTER_RANGES=0" : "FETCH is not supported",
-			});
-		} finally {
-			this.#fetches.release();
+		if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(request);
+			return;
 		}
+		await request.refuse("fetch", {
+			requestId: msg.requestId,
+			condition: msg.rangeFilters ? "invalid_filter" : "not_supported",
+			reasonPhrase: msg.rangeFilters ? "Range Filters exceed MAX_FILTER_RANGES=0" : "FETCH is not supported",
+		});
 	}
 
 	/** What a request that failed to resolve is refused with. */

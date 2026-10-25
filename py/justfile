@@ -3,8 +3,8 @@
 # Language-specific recipes for the Python packages under py/. Invoked
 # from the repo root as `just py <recipe>` via the `mod py` import.
 #
-# Two workspace members:
-#   moq-ffi/  maturin project: rs/moq-ffi cdylib + uniffi bindings (dist `moq-ffi`)
+# Two workspace packages:
+#   ../      maturin project, sources in moq-ffi/: rs/moq-ffi cdylib + uniffi bindings (dist `moq-ffi`)
 #   moq-rs/   pure-python ergonomic wrapper depending on moq-ffi (dist `moq-rs`,
 #             import `moq`)
 
@@ -22,7 +22,7 @@ default:
 
 # keeps uv from fetching moq-ffi off PyPI; maturin just installed it locally.
 _develop *args:
-    cd moq-ffi && uv run --no-sync maturin develop --locked --uv {{ args }}
+    cd .. && uv run --no-sync maturin develop --locked --uv {{ args }}
     uv pip install --no-deps -e moq-rs
 
 # Lint + format + editable build + pyright + doc samples + docs. `--no-install-workspace`
@@ -72,12 +72,12 @@ build:
 # Run the binding benchmark's Python runner (see bench/README.md) on a release build.
 bench:
     uv sync --locked --no-install-workspace
-    cd moq-ffi && uv run --no-sync maturin develop --locked --uv --release
+    cd .. && uv run --no-sync maturin develop --locked --uv --release
     uv pip install --no-deps -e moq-rs
     uv run --no-sync python moq-rs/benches/ffi.py
 
 # Build the pure-python moq-rs wrapper sdist + wheel into py/dist (for release).
-# moq-ffi is built separately by maturin (see release-py.yml); the wrapper is
+# moq-ffi is built separately by maturin (see release-py-ffi.yml); the wrapper is
 
 # pure python so it needs no compilation, just a metadata-correct wheel.
 package:
@@ -93,6 +93,6 @@ package:
 # native moq_ffi is mocked (autodoc_mock_imports in docs/conf.py), so this needs
 # no Rust build.
 docs:
-    rm -rf dist/docs
+    rm -rf dist/docs moq-rs/docs/api
     uv run --isolated --locked --only-group docs \
         sphinx-build -b html -W --keep-going moq-rs/docs dist/docs

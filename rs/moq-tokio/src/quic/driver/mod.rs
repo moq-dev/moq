@@ -66,7 +66,7 @@ pub use moq_quic::{
     InvalidCid, MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore, PathStats, ServerConfig, Side,
     StdSystemTime, StreamId, TimeSource, TokenLog, TokenMemoryCache, TokenReuseError, TokenStore,
     Transmit, TransportConfig, TransportErrorCode, UdpStats, ValidationTokenConfig, VarInt,
-    VarIntBoundsExceeded, Written, congestion, crypto,
+    VarIntBoundsExceeded, Written, crypto,
 };
 #[cfg(feature = "qlog")]
 pub use moq_quic::{QlogConfig, QlogStream};
@@ -89,7 +89,11 @@ pub use crate::quic::driver::send_group::{SendGroup, SendOptions};
 pub use crate::quic::driver::send_stream::{SendStream, StoppedError, WriteError};
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "tests read the host clock directly"
+)]
 mod tests;
 
 #[derive(Debug)]

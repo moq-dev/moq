@@ -60,8 +60,9 @@ pub struct CaptureArgs {
 	pub camera: Option<Option<String>>,
 
 	/// Capture a whole display, by the id `moq devices` reports. Bare
-	/// `--display` captures the main display. On Wayland the desktop portal opens
-	/// a picker dialog; X11 accepts the listed monitor id.
+	/// `--display` captures the main display, or on Wayland opens the system
+	/// portal picker (requires the `pipewire` feature). Wayland accepts only
+	/// the XWayland `x11:` ids it lists.
 	#[usage(long, group = "video-source", alias = "screen")]
 	pub display: Option<Option<String>>,
 
@@ -184,9 +185,9 @@ impl PublishDecoder {
 	/// The avc3 split holds the final access unit until the next start code, so
 	/// stdin EOF must flush it explicitly.
 	///
-	/// `import ts --program all` owns its broadcasts, so it returns their
-	/// [`Finish`](moq_net::broadcast::Finish) handles; see [`ts::Programs::finish`].
-	fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Finish>> {
+	/// `import ts --program all` owns its broadcasts, so it returns them; see
+	/// [`ts::Programs::finish`].
+	fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Producer>> {
 		match self {
 			Self::Avc3 { split, import } => {
 				let tail = split.flush(None)?;
@@ -272,9 +273,13 @@ fn ts_import(
 	Ok((import, catalog))
 }
 
-// Exactly one Source exists per process, so the size gap between the small
-// Stream variant and the larger Capture config is irrelevant.
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+	feature = "capture",
+	expect(
+		clippy::large_enum_variant,
+		reason = "exactly one Source exists per process, so the gap between Stream and the larger Capture config is irrelevant"
+	)
+)]
 enum Source {
 	/// Decode a container read from stdin.
 	Stream {
@@ -289,7 +294,7 @@ enum Source {
 	Capture {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
-		video: Option<(moq_video::capture::Config, moq_video::encode::Options)>,
+		video: Option<moq_video::encode::Capture>,
 		audio: Option<(moq_audio::capture::Config, moq_audio::encode::Options)>,
 	},
 }
@@ -306,6 +311,8 @@ pub struct Publish {
 	route: Option<moq_net::origin::Route>,
 	// The `--report` track, written beside the decode loop; see [`Self::with_report`].
 	report: Option<crate::report::Stats>,
+	// How long a stdin import keeps its broadcast up after EOF; see [`Self::with_linger`].
+	linger: std::time::Duration,
 }
 
 /// A broadcast's announcement, held until its catalog first goes out.
@@ -367,6 +374,7 @@ impl Publish {
 				broadcast: Some(broadcast),
 				route: None,
 				report: None,
+				linger: moq_mux::Linger::DEFAULT,
 			});
 		}
 
@@ -414,6 +422,7 @@ impl Publish {
 			broadcast: Some(broadcast),
 			route: None,
 			report: None,
+			linger: moq_mux::Linger::DEFAULT,
 		})
 	}
 
@@ -432,6 +441,7 @@ impl Publish {
 			broadcast: None,
 			route: None,
 			report: None,
+			linger: moq_mux::Linger::DEFAULT,
 		}
 	}
 
@@ -457,7 +467,7 @@ impl Publish {
 		let video = if args.no_video {
 			None
 		} else {
-			Some((args.video_config()?, args.video_encode(bandwidth.clone())))
+			Some(args.video_capture(bandwidth.clone())?)
 		};
 		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode(bandwidth)));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
@@ -472,6 +482,7 @@ impl Publish {
 			broadcast: Some(broadcast),
 			route: None,
 			report: None,
+			linger: moq_mux::Linger::DEFAULT,
 		})
 	}
 
@@ -510,6 +521,13 @@ impl Publish {
 		Ok(self)
 	}
 
+	/// Keep a stdin import's broadcast up for `linger` after EOF, so a subscriber that read the
+	/// final catalog late still gets the tail. Zero closes it at EOF.
+	pub fn with_linger(mut self, linger: std::time::Duration) -> Self {
+		self.linger = linger;
+		self
+	}
+
 	/// Advertise the broadcast's path under `epoch`.
 	///
 	/// A capture announces now. A stdin import announces from [`run`](Self::run), once the input
@@ -533,15 +551,13 @@ impl Publish {
 					(Some(broadcast), Some(route)) => Some(Pending::new(broadcast.clone(), route)?),
 					_ => None,
 				};
-				decode(
-					decoder,
-					catalog,
-					tokio::io::stdin(),
-					self.broadcast,
+				let publication = Publication {
+					broadcast: self.broadcast,
 					pending,
-					self.report,
-				)
-				.await
+					report: self.report,
+					linger: self.linger,
+				};
+				decode(decoder, catalog, tokio::io::stdin(), publication).await
 			}
 			#[cfg(feature = "capture")]
 			Source::Capture {
@@ -562,14 +578,9 @@ impl Publish {
 					let catalog = catalog.clone();
 					async move {
 						match video {
-							Some((config, encode)) => {
-								let mut options = moq_video::encode::Capture::default();
-								options.capture = config;
-								options.encode = encode;
-								moq_video::encode::publish_capture(broadcast, catalog, options)
-									.await
-									.map_err(anyhow::Error::from)
-							}
+							Some(options) => moq_video::encode::publish_capture(broadcast, catalog, options)
+								.await
+								.map_err(anyhow::Error::from),
 							None => Ok(()),
 						}
 					}
@@ -595,24 +606,39 @@ impl Publish {
 	}
 }
 
+/// What a stdin import does around its media: announce, report, and retain the end.
+#[derive(Default)]
+struct Publication {
+	/// The broadcast to keep up after EOF, or `None` when the decoder owns its broadcasts.
+	broadcast: Option<moq_net::broadcast::Producer>,
+	/// The announcement held until the catalog first goes out.
+	pending: Option<Pending>,
+	/// `--report`, written beside the read loop, so a stalled input keeps reporting, and ended
+	/// with its final counts when the media tracks are.
+	report: Option<crate::report::Stats>,
+	/// How long the finished broadcasts stay up after EOF.
+	linger: std::time::Duration,
+}
+
 /// Decode `input` into the broadcast until EOF.
 ///
 /// At EOF the media tracks finish, then the catalog does, while it still lists them: the
 /// renditions retire from the catalog as the decoder drops, which a subscriber would read
 /// as removed tracks, and a catalog dropped unfinished reads as a publisher that vanished.
-/// The finished `broadcast` then stays servable until its media is stale, so a subscriber
-/// that saw the final catalog only at EOF can still request it.
-///
-/// `report` writes `--report` beside the read loop, so a stalled input keeps reporting, and ends
-/// with its final counts when the media tracks do.
+/// The finished broadcasts then stay servable for the linger, so a subscriber that saw the
+/// final catalog only at EOF can still request them.
 async fn decode(
 	mut decoder: PublishDecoder,
 	mut catalog: PublishCatalog,
 	mut input: impl tokio::io::AsyncRead + Unpin,
-	broadcast: Option<moq_net::broadcast::Producer>,
-	mut pending: Option<Pending>,
-	mut report: Option<crate::report::Stats>,
+	publication: Publication,
 ) -> anyhow::Result<()> {
+	let Publication {
+		broadcast,
+		mut pending,
+		mut report,
+		linger,
+	} = publication;
 	// An empty BytesMut grows to only 64 bytes and clearing it keeps that capacity.
 	// Stdin dispatches every read to a blocking thread, so those tiny reads can
 	// backpressure a live feed. Reserve a full IO chunk; read_buf still returns
@@ -691,13 +717,12 @@ async fn decode(
 				report.finish();
 			}
 			catalog.finish()?;
-			finished.extend(broadcast.map(moq_net::broadcast::Producer::finish));
-			drop((decoder, catalog, report));
-			if !finished.is_empty() {
-				tracing::info!("input ended; serving the finished broadcast until its media is stale");
-				// Polled together, so each broadcast closes at its own expiry.
-				futures::future::join_all(finished.into_iter().map(moq_net::broadcast::Finish::wait)).await;
-			}
+			finished.extend(broadcast);
+			tracing::info!(?linger, "input ended; serving the finished broadcast");
+			// The decoder and catalog hold the finished tracks, so they go only once it closes.
+			moq_mux::Linger::new(finished, (decoder, catalog, report), linger)
+				.wait()
+				.await;
 			Ok(())
 		}
 		Err(err) => {
@@ -737,8 +762,17 @@ impl CaptureArgs {
 			}
 		} else if let Some(id) = &self.app {
 			Source::App(id.clone())
-		} else if let Some(index) = &self.display {
-			Source::Display(index.clone())
+		} else if let Some(id) = &self.display {
+			match id {
+				Some(id) => Source::Display(Some(id.clone())),
+				// Wayland has no main display to name, so the system picker chooses the screen.
+				#[cfg(all(target_os = "linux", feature = "pipewire"))]
+				None if std::env::var_os("WAYLAND_DISPLAY").is_some() => {
+					use moq_video::capture::portal::{Kind, Selection};
+					Source::Portal(Selection::new(Kind::Screen))
+				}
+				None => Source::Display(None),
+			}
 		} else {
 			Source::Camera(self.camera.clone().flatten())
 		})
@@ -758,8 +792,9 @@ impl CaptureArgs {
 		Ok(config)
 	}
 
-	fn video_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_video::encode::Options {
-		let mut options = moq_video::encode::Options::default();
+	fn video_capture(&self, bandwidth: moq_net::bandwidth::Allocator) -> anyhow::Result<moq_video::encode::Capture> {
+		let mut options = moq_video::encode::Capture::default();
+		options.capture = self.video_config()?;
 		options.bitrate = self.bitrate.map(moq_net::bandwidth::Rate::from_bps);
 		options.codec = self.codec.into();
 		options.kind = if self.software {
@@ -770,7 +805,7 @@ impl CaptureArgs {
 			moq_video::encode::Kind::Auto
 		};
 		options.bandwidth = bandwidth;
-		options
+		Ok(options)
 	}
 
 	/// The audio source named by the flags, defaulting to the default
@@ -796,7 +831,7 @@ impl CaptureArgs {
 	/// names its track; consumers find it through the catalog either way.
 	fn audio_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_audio::encode::Options {
 		let mut options = moq_audio::encode::Options::default();
-		options.settings.bitrate = self
+		options.config.bitrate = self
 			.audio_bitrate
 			.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		options.bandwidth = bandwidth;
@@ -805,7 +840,11 @@ impl CaptureArgs {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 pub(crate) mod tests {
 	use std::time::Duration;
 
@@ -1055,7 +1094,13 @@ pub(crate) mod tests {
 		broadcast.announce(Default::default()).unwrap();
 		settle().await;
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1132,7 +1177,13 @@ pub(crate) mod tests {
 			Default::default(),
 		)
 		.unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1242,7 +1293,13 @@ pub(crate) mod tests {
 				Default::default(),
 			)
 			.unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, .. } = &mut publish.source else {
 				panic!("expected a stream source");
 			};
@@ -1392,13 +1449,19 @@ pub(crate) mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
-		let before = std::time::SystemTime::now();
+		let before = moq_clock::wall();
 		decoder.decode_chunk(BBB).unwrap();
-		let after = std::time::SystemTime::now();
+		let after = moq_clock::wall();
 		decoder.finish().unwrap();
 
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
@@ -1488,7 +1551,13 @@ pub(crate) mod tests {
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1496,7 +1565,9 @@ pub(crate) mod tests {
 			remaining: BBB,
 			reads: 0,
 		};
-		decode(decoder, catalog, &mut input, None, None, None).await.unwrap();
+		decode(decoder, catalog, &mut input, Publication::default())
+			.await
+			.unwrap();
 		assert_eq!(
 			input.reads,
 			BBB.len().div_ceil(188) + 1,
@@ -1524,12 +1595,18 @@ pub(crate) mod tests {
 			let input = tokio::fs::File::open(file.path()).await.unwrap();
 			let broadcast = moq_net::broadcast::Info::new().produce();
 			let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
 			let start = std::time::Instant::now();
-			decode(decoder, catalog, input, None, None, None).await.unwrap();
+			decode(decoder, catalog, input, Publication::default()).await.unwrap();
 			let elapsed = start.elapsed();
 			let bytes = INPUT.len() * copies;
 			println!(
@@ -1548,11 +1625,17 @@ pub(crate) mod tests {
 		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
-		decode(decoder, catalog, BBB, None, None, None).await.unwrap();
+		decode(decoder, catalog, BBB, Publication::default()).await.unwrap();
 		drop(publish.broadcast);
 
 		let mut last = None;
@@ -1570,22 +1653,33 @@ pub(crate) mod tests {
 		assert_eq!(last.audio.renditions.len(), 1, "the audio rendition is still listed");
 	}
 
-	/// After EOF the finished tracks stay servable for their max-age, so a subscriber that reads
+	/// After EOF the finished tracks stay servable for the linger, so a subscriber that reads
 	/// the final catalog only then still gets the media, and the import returns once it passes.
 	#[tokio::test(start_paused = true)]
 	async fn a_finished_import_serves_its_tracks_for_the_linger() {
-		const LINGER: Duration = hang::container::MAX_AGE;
+		const LINGER: Duration = Duration::from_secs(30);
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
 		let started = tokio::time::Instant::now();
-		let mut import = std::pin::pin!(decode(decoder, catalog, BBB, publish.broadcast.clone(), None, None));
+		let publication = Publication {
+			broadcast: publish.broadcast.clone(),
+			linger: LINGER,
+			..Default::default()
+		};
+		let mut import = std::pin::pin!(decode(decoder, catalog, BBB, publication));
 		let name = tokio::select! {
 			res = &mut import => panic!("the import returned before its linger: {res:?}"),
 			name = async {
@@ -1633,14 +1727,24 @@ pub(crate) mod tests {
 			let mut announced = consumer.announced();
 			let broadcast = origin.create_broadcast("demo").unwrap();
 			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
 			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
 			let pending = Pending::new(broadcast, route).unwrap();
 			let (mut stdin, input_end) = tokio::io::duplex(input.len());
-			let mut import = std::pin::pin!(decode(decoder, catalog, input_end, None, Some(pending), None));
+			let publication = Publication {
+				pending: Some(pending),
+				..Default::default()
+			};
+			let mut import = std::pin::pin!(decode(decoder, catalog, input_end, publication));
 
 			tokio::select! {
 				res = &mut import => panic!("the import returned before its input ended: {res:?}"),
@@ -1700,11 +1804,19 @@ pub(crate) mod tests {
 			.subscribe(None)
 			.await
 			.unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("stream source");
 		};
-		let err = decode(decoder, catalog, Broken, None, None, None).await.unwrap_err();
+		let err = decode(decoder, catalog, Broken, Publication::default())
+			.await
+			.unwrap_err();
 		assert_eq!(err.to_string(), "stdin failed");
 		assert!(
 			matches!(catalog_reader.recv_group().await, Err(moq_net::Error::Transport(ref reason)) if reason == "stdin failed")
@@ -1729,14 +1841,22 @@ pub(crate) mod tests {
 			let mut announced = origin.consume().announced();
 			let broadcast = origin.create_broadcast("demo").unwrap();
 			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
 			let pending = Pending::new(broadcast, Default::default()).unwrap();
-			let err = decode(decoder, catalog, &input[..], None, Some(pending), None)
-				.await
-				.unwrap_err();
+			let publication = Publication {
+				pending: Some(pending),
+				..Default::default()
+			};
+			let err = decode(decoder, catalog, &input[..], publication).await.unwrap_err();
 			assert!(err.to_string().contains("declared"), "{err:#}");
 			let event = tokio::time::timeout(Duration::from_secs(1), announced.next()).await;
 			assert!(event.is_err(), "announced an empty broadcast: {event:?}");
@@ -1842,7 +1962,13 @@ pub(crate) mod tests {
 	fn a_multiplex_is_refused_with_the_programs_and_the_flag() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};

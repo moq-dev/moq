@@ -88,7 +88,7 @@ export class Subscriber {
 		this.#track = track;
 		this.#consumer = new Json.Window.Consumer({ track });
 		this.#positioned = track.largest().then((largest) => {
-			if (largest) track.setGroups({ start: { included: largest.group } });
+			if (largest) track.withRange({ start: { included: largest.group } });
 		});
 	}
 

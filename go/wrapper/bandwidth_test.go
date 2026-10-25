@@ -16,16 +16,18 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 	defer cancel()
 	relay := startRelay(t, ctx, "127.0.0.1:0")
 	defer relay.server.Close()
-	client, err := moq.Dial(ctx, "https://"+relay.addr,
-		moq.WithTLSVerify(false), moq.WithReconnect(false))
+	client, err := moq.Dial(ctx, "https://"+relay.addr, moq.ClientConfig{
+		TLS:  moq.ClientTLS{Insecure: true},
+		Once: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	bandwidth := client.Session().Bandwidth()
+	// Dial returns while connecting; the grants need the live session's estimate.
+	waitConnects(t, ctx, client.Session(), 1)
 	// Grant assertions use a live QUIC estimate, but need no traffic or probing.
-	off := uint64(0)
-	bandwidth.SetTarget(&off)
+	bandwidth := client.Session().Bandwidth()
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
 		t.Fatal(err)

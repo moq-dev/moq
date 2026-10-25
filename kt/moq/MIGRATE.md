@@ -4,10 +4,47 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Connection state
+
+`Moq.connect` returns a connecting native session. Replace `status()`, `connects()`, and failure polls with `session.state()` and `session.stateChanged(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate(30000u, 1001u)` and construct producers with `(catalog, ProducerOptions(input, output, track, bandwidth))` under the matching audio/video namespace.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
+### Video rendition preference
+
+`dev.moq.media.Video` gains `preference: Int`, defaulting to `0`. Update positional constructors and use the matching moq-ffi package. Higher values are preferred; compatibility transcodes use `-1`.
+
+### `announce` takes an `AnnounceRoute`
+
+`BroadcastProducer.announce` takes `AnnounceRoute(cost, epoch)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
+`Route` is only what announcements report. To re-announce an observed route, copy its `cost` and `epoch`.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel the coroutine or wrap it in `withTimeout`.
+
+### Shutdown drains
+
+`session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling.
+Await the suspending `session.closed()` to wait for the drain and catch delivery failures.
+`Moq.close()` now cancels at once; to drain a `Moq`, call `moq.shutdown()`, await `moq.session.closed()`, then close it.
+If you adopted the release line's async `drain()`, call `shutdown()` and then await `closed()` instead.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast `finish` is removed
+
+`BroadcastProducer.finish()`, a deprecated alias for `end()`, is removed.
+Call `BroadcastProducer.end()` where you called `finish()`.
+To end the content first, call `CatalogProducer.finish()`; the broadcast stays up until `end()`.
 
 ### JSON snapshot `deltaRatio` is `deltas`
 
@@ -36,7 +73,7 @@ Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.
 ### Catalog references carry their epoch
 
 `Video` and `Audio` gain `epoch`, the publisher instance their `broadcast` reference names; it defaults to `null`, so only positional construction changes.
-`BroadcastConsumer.resolve(reference)` becomes `resolve(reference, epoch)`; pass the rendition's `epoch` alongside its `broadcast`, or `null` to resolve whichever instance answers.
+`BroadcastConsumer.resolve(reference)` becomes `resolve(rendition)`, taking the catalog `Rendition` and reading its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, throw `MoqException.Mux` for a rendition whose broadcast is proven to serve another epoch.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
@@ -47,7 +84,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends or the new `BroadcastProducer.finish()` lets go.
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
 ### A claim answers by publishing (#5678)
@@ -82,7 +119,7 @@ A subscription now reads only the groups its own `ranges` cover.
 `TrackDemand.isUsed()`, `used()`, and `unused()` are gone.
 `wanted()` returns null while nobody subscribes, otherwise the group subscribers want next, and `wantedChanged()` waits for it to change (the first call returns at once).
 Loop on `wantedChanged()` until it returns non-null where you called `used()`, and null where you called `unused()`.
-`TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
+`TrackInfo` gains `refresh`.
 
 ### `CongestionControl` gained `NONE` (#5926)
 
@@ -102,8 +139,8 @@ To start at group `n`, pass one range starting at the absolute anchor for group 
 ### Receive estimates come from `Session.recvBandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and `cancel()` it to stop.
-Replace `stats().estimatedRecvRateBps` with `recvBandwidth()?.peek()`.
+Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `rate()` or wait with `rateChanged()`, and `cancel()` it to stop.
+Replace `stats().estimatedRecvRateBps` with `recvBandwidth()?.rate()`.
 
 ### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
 
@@ -130,13 +167,13 @@ val config = TrackConfig(rendition = VideoRendition(id, video))
 ### Native codecs have `audio` and `video` packages (#5694)
 
 `BroadcastProducer.encodeAudio` / `encodeVideo` are the `dev.moq.audio.Producer` / `dev.moq.video.Producer` constructors, which take a `CatalogProducer`.
-The audio track name moves into the encoder output's `track`, and a zero `frameDurationUs` takes the codec's own frame.
+The audio track name belongs to the producer's publication options, and a zero `frameDurationUs` takes the codec's own frame.
 `BroadcastConsumer.decodeAudio` / `decodeVideo` are `dev.moq.audio.Consumer.subscribe(broadcast, ...)` / `dev.moq.video.Consumer.subscribe(broadcast, ...)`.
 Producers expose subscriber state only through `demand()`, and a video `gop` is `MoqVideoGop.Keyframe(interval)`.
 `dev.moq.audio.Encoder` / `dev.moq.video.Encoder` encode without publishing.
 
 ```kotlin
-val video = dev.moq.video.Producer(CatalogProducer(broadcast), input, output)
+val video = dev.moq.video.Producer(CatalogProducer(broadcast), dev.moq.video.ProducerOptions(input, output))
 val frames = dev.moq.video.Consumer.subscribe(consumer, name, rendition, decoder)
 ```
 
@@ -206,6 +243,8 @@ val stream = ContainerProducer(broadcast, ContainerInit(ContainerFormat.FMP4, by
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 `Frame.timestamp` and `Datagram.timestamp` are `Duration?`, null on a frame read from an untimed track.
 A raw write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `CatalogProducer.now()` samples the broadcast clock for local-event stamps.
@@ -240,10 +279,6 @@ Replace `!video.stalled` with `video.enabled`.
 `VideoDecodedFrame` is a closeable handle with `width()`, `height()`, `pixels(format)`, and `surface()`.
 `VideoDecoderOutput.format` is gone; set `surface = true` to keep the decoder's native surface.
 Replace `frame.data` with `frame.use { it.pixels(VideoPixelFormat.RGBA) }`.
-
-### `BroadcastProducer.finish()` is removed (#4152)
-
-Call `end()` to finish the broadcast and keep the handle, or `close()` to release it.
 
 ## 0.4 -> 0.5
 

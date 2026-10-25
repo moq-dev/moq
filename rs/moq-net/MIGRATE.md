@@ -4,6 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
+
+Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
+Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
+
+### Published names refuse navigation segments
+
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Rust reports `Error::NavigationSegment`; the existing protocol error codes carry the refusal to a peer.
+Path normalization, relative references, and subscription paths retain their semantics.
+
+### A listing says whether a removed track finished (#6399)
+
+`broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
+`broadcast::Lister::finish()`, which ended every reader as if the broadcast ended, is `Lister::end()`. `Lister::finish(name)` now unlists a track as finished, beside `remove(name)` for one that left unfinished.
+
 ### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
 Match the version yourself: lite-01, lite-02, and moq-transport draft 14 negotiate the version in SETUP; every other version negotiates it through ALPN.
@@ -21,6 +38,17 @@ A `!Send` transport wraps itself in a type that checks the thread on use, such a
 `track::Producer::largest(&self)` returns the track's largest location now, `None` before any, instead of streaming each newer one; `track::Producer::poll_largest` is gone.
 Replace `poll_largest(&kio::Waiter::noop())` and `largest().await` on a producer with `largest()`.
 To wait for each newer one, keep a reader and follow its stream: `let mut reader = producer.consume();`, then `reader.largest().await`.
+
+### Transport failures keep their meaning
+
+Handle `Error::IdleTimeout` separately from `Error::Transport`. A local transport close is session cancellation, not clean end-of-content.
+Converting a transport failure to `StreamError` now gives `Unroutable` rather than `Internal`, so retry or re-resolve that route where you classified stream errors.
+
+### Track ends use positions
+
+`track::Producer::finish_at` takes a `track::Position` instead of an exclusive group sequence.
+Pass `Position::group(n)` where you passed `n`, or a position within the last group to end after a frame.
+`Producer::final_sequence()` is `end()` and returns `Option<Position>`; `Subscriber::finished()` and the ordered reader return `Position` instead of `u64`.
 
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
@@ -98,7 +126,7 @@ A group followed by a frameless one is judged against the next group that has a 
 ### Ending a track aborts its open groups (#6111)
 
 Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
-Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::SessionClosed`.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::Stream(StreamError::Session(SessionError::Cancel))`.
 `track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
 
 ### Priorities are signed, with 0 unset (#6142)
@@ -253,17 +281,11 @@ A track received over moq-lite-05/06 arrives untimed, since its timestamps may b
 One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
 
-### `broadcast::Producer::finish` is back, and lingers (#5795)
+### Broadcast `finish` is gone
 
-`finish()` ends the broadcast cleanly and returns a `Finish` that keeps its finished tracks servable until their media is stale.
-Dropping the `Finish` closes the broadcast, so `close()` still ends it now.
-
-```rust
-// Close now
-producer.close();
-// Serve late subscribers until the media is stale
-producer.finish().wait().await;
-```
+`broadcast::Producer::finish()`, a deprecated alias for `close()`, is removed: a broadcast has no finished state.
+Call `close()` where you called `finish()`.
+To end content cleanly, finish each track, keep the producer for as long as late readers should find it, then close it; `moq_mux::Linger` does this for a hang broadcast.
 
 ### `auth::Token` is `auth::Auth` (#5695)
 
@@ -422,11 +444,14 @@ Treat both like `NotFound` if you match on errors.
 
 ### Sessions cap peer requests (#4820)
 
-A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+A peer past the session's announce bound loses the session with `TooManyRequests`.
+Stream credit bounds its subscriptions and FETCHes, except on moq-transport drafts 14 to 16, where the request window sized by `announces` and `requests` does.
 Raise the defaults for a large relay mesh.
 
 ```rust
-let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+let mut limits = session::Limits::default();
+limits.announces = 1_000_000;
+let client = Client::new().with_limits(limits);
 ```
 
 ### A path is one broadcast (#4741)
@@ -434,10 +459,10 @@ let client = Client::new().with_limits(session::Limits { subscriptions: 100_000,
 Broadcast identity is the path, whatever the publisher or first hop.
 A publisher that restarts its group numbering must publish under a new broadcast name.
 
-### Broadcast `finish` and `abort` are removed (#4152)
+### Broadcast `abort` is removed (#4152)
 
-Close a broadcast with `close()`; its end carries no cause.
-`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`.
+`broadcast::Producer::abort` is removed; use `close()` for an immediate end without a cause.
+`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`; the broadcast end carries no cause.
 
 ### No `VarInt`
 

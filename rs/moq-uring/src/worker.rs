@@ -650,9 +650,9 @@ pub(crate) struct Owner {
 	/// Held directly: a timer on a dropped worker still has to exist, since
 	/// the driver that owns it is torn down by the same drop that would need
 	/// it.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	deadlines: moq_clock::Deadlines,
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	metrics: std::sync::Arc<crate::metrics::Counters>,
 }
 
@@ -666,7 +666,7 @@ impl Owner {
 	}
 
 	/// The worker's time: the current turn's instant, or the clock's between turns.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub fn now(&self) -> Instant {
 		self.shared
 			.upgrade()
@@ -685,7 +685,7 @@ impl Owner {
 	}
 
 	/// Run a `!Send` future on the worker, or drop it if the worker is gone.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
 		if let Some(handle) = self.handle() {
 			handle.spawn(future);
@@ -693,13 +693,13 @@ impl Owner {
 	}
 
 	/// A disarmed timer on the worker.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub fn timer(&self) -> crate::Timer {
 		crate::Timer::from_queue(&self.deadlines, self.metrics.clone())
 	}
 
 	/// A timer that expires after `duration`.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub fn after(&self, duration: Duration) -> crate::Timer {
 		let mut timer = self.timer();
 		timer.set(self.now().checked_add(duration));
@@ -1025,12 +1025,12 @@ mod tests {
 	fn the_worker_reads_its_manual_clocks_wall_time() {
 		let Some((mut worker, clock)) = manual() else { return };
 		clock.advance(Duration::from_secs(5));
-		let (wall, anchor) = worker
-			.block_on(async { (moq_clock::wall(), moq_clock::anchor()) })
+		let (wall, origin) = worker
+			.block_on(async { (moq_clock::wall(), moq_clock::origin()) })
 			.unwrap();
 		assert_eq!(wall, clock.wall(), "the worker read the host's wall time");
-		assert_eq!(anchor.0, clock.now());
-		assert_eq!(anchor.1, clock.wall());
+		assert_eq!(origin.0, clock.now());
+		assert_eq!(origin.1, clock.wall());
 	}
 
 	/// A timer made between turns counts from the clock, not from the last turn's

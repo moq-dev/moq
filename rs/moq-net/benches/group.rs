@@ -14,8 +14,10 @@
 //!
 //! Run with `cargo bench -p moq-net`.
 
-// `iter_custom` timings measure the host clock on purpose.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "`iter_custom` timings measure the host clock on purpose"
+)]
 
 use std::{
 	hint::black_box,
@@ -223,7 +225,7 @@ fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
 fn replay() -> track::Subscription {
 	track::Subscription::default()
 		.with_max_delay(Duration::MAX)
-		.with_groups(0..)
+		.with_range(0..)
 }
 
 /// Drain N cached groups from a track, in arrival order and in sequence order.

@@ -42,7 +42,7 @@ Use this checkout's source and docs for repository work; published API reference
 - Do not bump package versions unless asked. Releases are cut separately.
 - Comments should explain the non-obvious why, and never the history.
 - Inline simple helpers.
-- Every change needs a consumer that uses it now and is worth its cost; name it in the PR.
+- Every change needs a consumer that uses it now or is planned, and is worth its cost.
 - Deleting code is better than adding code.
 - Record out-of-scope follow-ups as quests, never GitHub issues, and prompt the user about starting them when finished.
 - Prefer the net simpler result: reuse what exists, or narrow the scope, when that makes the implementation or API simpler overall. Say what was dropped.
@@ -58,8 +58,8 @@ The API is the most important thing to get right.
 A bad shape costs a breaking change in every language, and the surface is huge.
 
 - Report the public API and wire impact of every change, in the PR description and whenever asked.
-- A breaking change adds an entry under `## Unreleased` in each affected package's `MIGRATE.md` saying how to migrate.
-- Keep things private until a consumer needs them. Scrutinize every new exported item.
+- A breaking change marks its title with `!` and its Impact bullet says how to migrate.
+- Keep things private until a current or planned consumer needs them. Scrutinize every new exported item.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
 - Let the type system make misuse unrepresentable
 - A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.

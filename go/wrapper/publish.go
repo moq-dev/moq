@@ -3,7 +3,6 @@ package moq
 import (
 	"context"
 	"iter"
-	"math"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
@@ -41,7 +40,7 @@ func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 //
 // Announcing again re-prices the route in place. Until announced, the
 // broadcast is invisible and unroutable for local consumers and peers alike.
-func (b *BroadcastProducer) Announce(route Route) error {
+func (b *BroadcastProducer) Announce(route AnnounceRoute) error {
 	return b.inner.Announce(route)
 }
 
@@ -79,52 +78,6 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 // Tracks already subscribed carry on to their own end. Closing again is a no-op.
 func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
-}
-
-// Finish ends the broadcast cleanly, keeping it servable until its media goes stale.
-//
-// Finish every track first: the returned handle holds the tracks finished by now
-// and keeps the broadcast announced, so a subscriber still catching up can drain
-// them. A track still live is not held. Every later call on this producer fails,
-// as after [BroadcastProducer.Close].
-func (b *BroadcastProducer) Finish() (*BroadcastFinish, error) {
-	inner, err := b.inner.Finish()
-	if err != nil {
-		return nil, err
-	}
-	return &BroadcastFinish{inner: inner}, nil
-}
-
-// BroadcastFinish is a cleanly ended broadcast, still announced and serving its
-// finished tracks. Closing it, or cancelling a [BroadcastFinish.Wait], closes
-// the broadcast at once.
-type BroadcastFinish struct {
-	inner *ffi.MoqBroadcastFinish
-}
-
-// Linger is how long to keep the broadcast: the longest max age of the held tracks.
-func (f *BroadcastFinish) Linger() time.Duration {
-	us := f.inner.LingerUs()
-	if us > math.MaxInt64/uint64(time.Microsecond) {
-		return math.MaxInt64
-	}
-	return time.Duration(us) * time.Microsecond
-}
-
-// Wait keeps the broadcast up for its linger, or until [BroadcastFinish.Close],
-// then closes it. Cancelling ctx closes the broadcast at once.
-func (f *BroadcastFinish) Wait(ctx context.Context) error {
-	// The bridge starts no call on a done ctx, so it would never reach the close.
-	if err := ctx.Err(); err != nil {
-		f.inner.Close()
-		return err
-	}
-	return bridge.CallErr(ctx, f.inner.Close, f.inner.Wait)
-}
-
-// Close closes the broadcast now, ending the linger and any wait. Closing again is a no-op.
-func (f *BroadcastFinish) Close() {
-	f.inner.Close()
 }
 
 // BroadcastDynamic is a stream of subscriber-requested tracks.
@@ -350,94 +303,110 @@ func (g *GroupProducer) Abort(errorCode uint16) error {
 	return g.inner.Abort(errorCode)
 }
 
-// TrackDynamic yields uncached groups requested by fetch consumers.
+// TrackDynamic yields the fills readers of one track need: runs of groups the cache lacks.
 type TrackDynamic struct {
 	inner *ffi.MoqTrackDynamic
 }
 
-// RequestedGroup waits for the next uncached group request.
-func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error) {
-	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedGroup)
+// RequestedFill waits for the next fill.
+func (d *TrackDynamic) RequestedFill(ctx context.Context) (*Fill, error) {
+	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedFill)
 	if err != nil {
 		return nil, err
 	}
-	return &GroupRequest{inner: inner}, nil
+	return &Fill{inner: inner}, nil
 }
 
-// All ranges over uncached group requests until the dynamic source ends.
-func (d *TrackDynamic) All(ctx context.Context) iter.Seq2[*GroupRequest, error] {
-	return bridge.Seq(ctx, d.RequestedGroup)
+// All ranges over fills until the dynamic source ends.
+func (d *TrackDynamic) All(ctx context.Context) iter.Seq2[*Fill, error] {
+	return bridge.Seq(ctx, d.RequestedFill)
 }
 
-// Cancel stops current and future requested-group waits.
+// Cancel stops current and future requested-fill waits.
 func (d *TrackDynamic) Cancel() {
 	d.inner.Cancel()
 }
 
-// GroupRequest requests one uncached group from a track producer.
-type GroupRequest struct {
-	inner *ffi.MoqGroupRequest
+// Fill is a run of groups readers miss, for a TrackDynamic to serve.
+//
+// Accept each group you have and DropGroups the rest; Next names what is still
+// owed, in the fill's order. Releasing the fill names whatever is left as dropped
+// while a reader still wants it; once nobody does, it is withdrawn, so stop
+// serving it when Unused returns. Stop serving a single group when Unwanted
+// returns for it, and move on to Next.
+type Fill struct {
+	inner *ffi.MoqFill
 }
 
-// Sequence is the requested group sequence within the track.
-func (r *GroupRequest) Sequence() uint64 {
-	return r.inner.Sequence()
+// StartGroup is the first group to fill.
+func (f *Fill) StartGroup() uint64 {
+	return f.inner.StartGroup()
 }
 
-// Priority is the consumer's delivery priority for this fetch.
-func (r *GroupRequest) Priority() int8 {
-	return r.inner.Priority()
+// StartFrame is the frame within the first group to start from.
+func (f *Fill) StartFrame() uint64 {
+	return f.inner.StartFrame()
 }
 
-// Demand returns a watch-only handle to whether any caller still wants the group.
-func (r *GroupRequest) Demand() (*GroupDemand, error) {
-	inner, err := r.inner.Demand()
-	if err != nil {
-		return nil, err
-	}
-	return &GroupDemand{inner: inner}, nil
+// EndGroup is the exclusive end group.
+func (f *Fill) EndGroup() uint64 {
+	return f.inner.EndGroup()
 }
 
-// Accept accepts the request and returns a producer for the group.
-func (r *GroupRequest) Accept() (*GroupProducer, error) {
-	inner, err := r.inner.Accept()
+// Priority is the most urgent delivery priority among the readers waiting on it.
+func (f *Fill) Priority() int8 {
+	return f.inner.Priority()
+}
+
+// MaxDelay is the most tolerant age budget among its readers, or nil for the
+// publisher's max age alone.
+func (f *Fill) MaxDelay() *time.Duration {
+	return optFromMicros(f.inner.MaxDelayUs())
+}
+
+// Order is which end to fill first.
+func (f *Fill) Order() Order {
+	return f.inner.Order()
+}
+
+// Next is the next group still owed in the fill's order, or nil once every group is answered.
+func (f *Fill) Next() *uint64 {
+	return f.inner.Next()
+}
+
+// Accept inserts group sequence and returns a producer for it. The first group
+// starts at StartFrame, so its frames keep their indices.
+func (f *Fill) Accept(sequence uint64) (*GroupProducer, error) {
+	inner, err := f.inner.Accept(sequence)
 	if err != nil {
 		return nil, err
 	}
 	return &GroupProducer{inner: inner}, nil
 }
 
-// Abort rejects the fetch with an application error code.
-func (r *GroupRequest) Abort(errorCode uint16) error {
-	return r.inner.Abort(errorCode)
+// DropGroups names groups start up to the exclusive end as never to be delivered.
+func (f *Fill) DropGroups(start, end uint64) {
+	f.inner.DropGroups(start, end)
 }
 
-// GroupDemand watches the callers waiting on a requested group.
-//
-// It is weak: holding it does not keep the request alive. The last caller to
-// leave withdraws the request, so once unused, demand never returns: drop the
-// request. Waits fail with ErrClosed after the request is accepted or dropped,
-// and keep the rejection reason after it is rejected.
-type GroupDemand struct {
-	inner *ffi.MoqGroupDemand
+// IsUsed reports whether a reader still waits on this fill.
+func (f *Fill) IsUsed() bool {
+	return f.inner.IsUsed()
 }
 
-// Sequence is the sequence of the group this watches.
-func (d *GroupDemand) Sequence() uint64 {
-	return d.inner.Sequence()
+// Unused blocks until no reader waits on this fill.
+func (f *Fill) Unused(ctx context.Context) error {
+	return f.inner.Unused(ctx)
 }
 
-// IsUsed reports whether the group has at least one waiting caller right now.
-func (d *GroupDemand) IsUsed() bool {
-	return d.inner.IsUsed()
+// IsWanted reports whether a reader still waits for group sequence from this fill:
+// false once every reader took it or narrowed past it, or nobody waits on the fill.
+func (f *Fill) IsWanted(sequence uint64) bool {
+	return f.inner.IsWanted(sequence)
 }
 
-// Used blocks until the group has at least one waiting caller.
-func (d *GroupDemand) Used(ctx context.Context) error {
-	return d.inner.Used(ctx)
-}
-
-// Unused blocks until the group has no waiting callers.
-func (d *GroupDemand) Unused(ctx context.Context) error {
-	return d.inner.Unused(ctx)
+// Unwanted blocks until no reader waits for group sequence from this fill, so stop
+// serving it.
+func (f *Fill) Unwanted(ctx context.Context, sequence uint64) error {
+	return f.inner.Unwanted(ctx, sequence)
 }

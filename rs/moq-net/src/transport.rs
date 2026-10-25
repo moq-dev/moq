@@ -273,6 +273,18 @@ pub mod poll {
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<BiStreams<Self>, Self::Error>>;
 
+		/// Open a request stream without waiting for stream credit.
+		///
+		/// `None` refuses the request before opening a stream. `Pending` means the stream
+		/// already has credit but its transport header is waiting for send capacity.
+		/// Native QUIC and qmux implement this admission check. Iroh retains its waiting
+		/// open behavior, and browser-backed sessions retain their browser's behavior.
+		fn poll_open_request(
+			&mut self,
+			cx: &mut Context<'_>,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>>;
+
 		/// Open a send group at `priority`, or `None` when the transport orders streams by
 		/// their own priority alone.
 		///
@@ -451,7 +463,7 @@ pub mod poll {
 		/// A pending [`SendStream::closed`].
 		SendClosed, SendStream, poll_closed, Result<(), S::Error>);
 
-	/// A transport that [`Client`](crate::Client) and [`Server`](crate::Server) can box:
+	/// A transport that the async client and server can box:
 	/// the session, its streams, send groups, and errors are thread-safe on native.
 	/// Implemented automatically.
 	///

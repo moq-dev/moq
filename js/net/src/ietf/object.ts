@@ -2,7 +2,7 @@ import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.t
 import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
-import { ABSENT_WIRE } from "./priority.ts";
+import { DEFAULT_WIRE } from "./priority.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // Implementation limit for object extension blocks, independent of the IETF draft.
@@ -161,7 +161,15 @@ export class Group {
 		this.publisherPriority = publisherPriority;
 	}
 
+	/**
+	 * Write the header, stream type first, in one write: a peer that classifies a stream from
+	 * its first read (imquic) drops a header split across several.
+	 */
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		await w.write(await Writer.collect(version, (h) => this.#encode(h, version)));
+	}
+
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		if (!this.flags.hasSubgroup && this.subGroupId !== 0) {
 			throw new Error(`Subgroup ID must be 0 if hasSubgroup is false: ${this.subGroupId}`);
 		}
@@ -227,7 +235,7 @@ export class Group {
 		const trackAlias = await r.u62();
 		const groupId = await r.u53();
 		const subGroupId = flags.hasSubgroup ? await r.u53() : 0;
-		const publisherPriority = hasPriority ? await r.u8() : ABSENT_WIRE;
+		const publisherPriority = hasPriority ? await r.u8() : DEFAULT_WIRE;
 
 		return new Group({ trackAlias, groupId, subGroupId, publisherPriority, flags });
 	}

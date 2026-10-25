@@ -10,7 +10,7 @@ use fastbloom::BloomFilter;
 use rustc_hash::FxBuildHasher;
 use tracing::{trace, warn};
 
-use crate::{Duration, SystemTime, TokenLog, TokenReuseError, UNIX_EPOCH};
+use crate::{Duration, TokenLog, TokenReuseError, UNIX_EPOCH, Wall};
 
 /// Bloom filter-based [`TokenLog`]
 ///
@@ -57,7 +57,7 @@ impl TokenLog for BloomTokenLog {
     fn check_and_insert(
         &self,
         nonce: u128,
-        issued: SystemTime,
+        issued: Wall,
         lifetime: Duration,
     ) -> Result<(), TokenReuseError> {
         trace!(%nonce, "check_and_insert");
@@ -71,9 +71,9 @@ impl TokenLog for BloomTokenLog {
         let state = &mut *guard;
 
         // calculate how many periods past period 1 the token expires
-        let expires_at = issued + lifetime;
-        let Ok(periods_forward) = expires_at
-            .duration_since(state.period_1_start)
+        let expires_at = issued.checked_add(lifetime).ok_or(TokenReuseError)?;
+        let Some(periods_forward) = expires_at
+            .checked_duration_since(state.period_1_start)
             .map(|duration| duration.as_nanos() / lifetime.as_nanos())
         else {
             // shouldn't happen unless time travels backwards or lifetime changes or the current
@@ -89,7 +89,7 @@ impl TokenLog for BloomTokenLog {
             2 => {
                 // turn over filter 1
                 state.filter_1 = take(&mut state.filter_2);
-                state.period_1_start += lifetime;
+                state.period_1_start = state.period_1_start + lifetime;
                 &mut state.filter_2
             }
             _ => {
@@ -134,7 +134,7 @@ struct State {
     config: FilterConfig,
     // filter_1 covers tokens that expire in the period starting at period_1_start and extending
     // lifetime after. filter_2 covers tokens for the next lifetime after that.
-    period_1_start: SystemTime,
+    period_1_start: Wall,
     filter_1: Filter,
     filter_2: Filter,
 }
@@ -253,7 +253,6 @@ const DEFAULT_MAX_BYTES: usize = 10 << 20;
 const DEFAULT_EXPECTED_HITS: u64 = 1_000_000;
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod test {
     use super::*;
     use rand::prelude::*;
@@ -288,7 +287,7 @@ mod test {
         let mut rng = new_rng();
         let mut log = BloomTokenLog::new_expected_items(800, 200);
 
-        let issued = SystemTime::now();
+        let issued = Wall::now();
         let lifetime = Duration::from_secs(1_000_000);
 
         for i in 0..200 {
@@ -343,7 +342,7 @@ mod test {
     fn test_doesnt_panic(log: BloomTokenLog) {
         let mut rng = new_rng();
 
-        let issued = SystemTime::now();
+        let issued = Wall::now();
         let lifetime = Duration::from_secs(1_000_000);
 
         for _ in 0..200 {

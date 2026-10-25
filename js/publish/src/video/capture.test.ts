@@ -2,7 +2,7 @@ import { expect, mock, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import { Baseline } from "../jitter";
+import { Order } from "../order";
 import type { StreamTrack } from "./types";
 
 mock.module("./capture-worker.ts?worklet", () => ({ default: async () => "blob:fake-worker" }));
@@ -297,7 +297,7 @@ test("a reader attaching to a frame held late still starts at now", async () => 
 test("a replay never starts below an earlier replay", async () => {
 	using input = frameSource();
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const advance = (ms: number) => clock.jump(Nano.fromMilli(Milli(ms)));
 	const capture = new Capture({ source: input.source });
 	const watch = new Effect();
@@ -336,7 +336,7 @@ test("a replay never starts below an earlier replay", async () => {
 		watch.close();
 		second.close();
 		capture.close();
-		restore();
+		installed.close();
 	}
 
 	expect(open()).toEqual([]);
@@ -437,7 +437,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture,
 	});
 
@@ -543,7 +543,7 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		broadcast: { video: () => rendition, order: new Order() } as never,
 		capture,
 	});
 

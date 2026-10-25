@@ -9,12 +9,12 @@ import {
 	type Getter,
 	getter,
 	type Inputs,
+	Once,
 	type Readonlys,
 	readonlys,
 	Signal,
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
-import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync } from "../sync";
@@ -61,6 +61,9 @@ type DecoderOutput = {
 	// The current frame to render.
 	frame: Signal<VideoFrame | undefined>;
 
+	// Whether the current frame weaves two fields, per the rendition that decoded it.
+	interlaced: Signal<boolean>;
+
 	// The timestamp of the current frame.
 	timestamp: Signal<Milli | undefined>;
 
@@ -89,6 +92,7 @@ export class Decoder {
 	readonly #out: DecoderOutput = {
 		error: new Signal<Error | undefined>(undefined),
 		frame: new Signal<VideoFrame | undefined>(undefined),
+		interlaced: new Signal<boolean>(false),
 		timestamp: new Signal<Milli | undefined>(undefined),
 		display: new Signal<{ width: number; height: number } | undefined>(undefined),
 		stalled: new Signal<boolean>(false),
@@ -111,9 +115,6 @@ export class Decoder {
 	// shares `closed`, so it identifies the instance where the handle itself does not.
 	#instance?: { path: Moq.Path.Valid; closed: unknown };
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
-
-	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
-	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
 	#selected?: DecoderTrack;
@@ -146,7 +147,19 @@ export class Decoder {
 			const delay = active && effect.get(active.catalog)?.video?.renditions?.[active.track]?.delay;
 			return Milli(Math.max(spread + (delay ?? 0), jitter ?? Milli.zero));
 		});
-		this.#signals.cleanup(this.sync.register(target));
+		const startup = this.#signals.computed((effect) => {
+			if (!effect.get(this.in.enabled)) return undefined;
+			if (effect.get(this.source.pending)) return null;
+			if (!effect.get(this.source.out.config)) return undefined;
+			const active = effect.get(this.#active);
+			if (!active) return null;
+			const timestamp = effect.get(active.first);
+			if (timestamp === undefined) return null;
+			const ranges = effect.get(active.buffered);
+			const span = ranges.find((range) => range.start <= timestamp && range.end >= timestamp);
+			return span ? { ...span } : { start: timestamp, end: timestamp };
+		});
+		this.#signals.cleanup(this.sync.register(target, startup));
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
@@ -285,8 +298,6 @@ export class Decoder {
 
 			// Upgrade the pending track to active.
 			// #runActive will be in charge of it now.
-			if (current) current.arrivals = undefined;
-			pending.arrivals = this.#arrivals;
 			this.#active.set(pending);
 			this.#pending.set(undefined);
 			pending = undefined;
@@ -326,6 +337,7 @@ export class Decoder {
 				this.#out.error.set(undefined);
 			}
 			this.#out.timestamp.set(Milli.fromMicro(frame.timestamp as Micro));
+			this.#out.interlaced.set(active.config.interlaced);
 			this.#out.frame.update((prev) => {
 				prev?.close();
 				return frame.clone();
@@ -383,15 +395,9 @@ export class Decoder {
 		}, Nano.fromMilli(BUFFERING));
 	}
 
-	/** Observe every frame and gap the displayed rendition receives until the handle or this decoder closes. */
-	arrivals(): Arrivals {
-		return this.#arrivals.consume();
-	}
-
 	/** Stop and release everything this holds. */
 	close() {
 		this.#clearCurrentFrame();
-		this.#arrivals.close();
 
 		this.#signals.close();
 	}
@@ -428,14 +434,13 @@ class DecoderTrack {
 	identity: string;
 	catalog: Getter<Catalog.Root | undefined>;
 	stats: Signal<Stats | undefined>;
-	// Set once promoted, so only the rendition feeding the picture reports arrivals.
-	arrivals?: ArrivalProducer;
-
 	timestamp = new Signal<Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
 	// Network jitter + decode buffer.
 	buffered = new Signal<Container.BufferedRanges>([]);
+	// First decoded picture on this timeline, independent of the previously held poster.
+	readonly first = new Signal<Milli | undefined>(undefined);
 
 	// How late frames arrive relative to the earliest one, from the container consumer.
 	spread = new Signal<Milli | undefined>(undefined);
@@ -502,6 +507,8 @@ class DecoderTrack {
 						return;
 					}
 
+					if (this.first.peek() === undefined) this.first.set(timestamp);
+
 					// Render something while we wait for the sync to catch up, unless the frame is
 					// already off the timeline: WebCodecs can hold a picture past a reset or a skip.
 					if (this.frame.peek() === undefined && this.sync.presentable(timestamp)) {
@@ -543,19 +550,24 @@ class DecoderTrack {
 		});
 
 		// Input processing - depends on container type
-		if (this.config.container.kind === "cmaf") {
-			effect.spawn(async () => {
-				try {
-					await this.#runCmaf(effect, sub, decoder);
-				} catch (err) {
-					if (effect.abort.aborted) return;
-					this.error.set(err instanceof Error ? err : new Error(String(err)));
-					effect.close();
-				}
-			});
-		} else {
-			this.#runLegacy(effect, sub, decoder);
-		}
+		this.#spawn(effect, async () => {
+			if (this.config.container.kind === "cmaf") await this.#runCmaf(effect, sub, decoder);
+			else this.#runLegacy(effect, sub, decoder);
+		});
+	}
+
+	// Run `task` for this track. A setup, read, or decode failure that is not its cancellation is
+	// fatal: reported through `error`, which the decoder latches, with the track's effect closed.
+	#spawn(effect: Effect, task: () => Promise<void>): void {
+		effect.spawn(async () => {
+			try {
+				await task();
+			} catch (err) {
+				if (effect.abort.aborted) return;
+				this.error.set(err instanceof Error ? err : new Error(String(err)));
+				effect.close();
+			}
+		});
 	}
 
 	#runLegacy(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
@@ -582,7 +594,7 @@ class DecoderTrack {
 		let latest: number | undefined;
 		const recovery = new Recovery();
 
-		effect.spawn(async () => {
+		this.#spawn(effect, async () => {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
@@ -590,10 +602,7 @@ class DecoderTrack {
 				// A gap or a declared end breaks the timeline: re-anchor before decoding further, and
 				// never bridge the buffer across it.
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") {
-						recovery.gap();
-						this.arrivals?.write(gap(next));
-					}
+					if (next.kind === "gap") recovery.gap();
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -612,9 +621,7 @@ class DecoderTrack {
 				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
-				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
-				const late = this.sync.received(timestamp, frame.arrival);
-				this.arrivals?.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
+				this.sync.received(Milli.fromMicro(frame.timestamp as Micro), frame.arrival);
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -636,6 +643,7 @@ class DecoderTrack {
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
 				decoder.decode(chunk);
+				if (!this.sync.playing.peek()) await this.#waitStartup(effect);
 			}
 		});
 	}
@@ -672,17 +680,14 @@ class DecoderTrack {
 		let latest: number | undefined;
 		const recovery = new Recovery();
 
-		effect.spawn(async () => {
+		this.#spawn(effect, async () => {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 
 				// A gap or a declared end breaks the timeline (see #runLegacy).
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") {
-						recovery.gap();
-						this.arrivals?.write(gap(next));
-					}
+					if (next.kind === "gap") recovery.gap();
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -701,9 +706,7 @@ class DecoderTrack {
 				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
-				const timestamp = Milli.fromMicro(frame.timestamp);
-				const late = this.sync.received(timestamp, frame.arrival);
-				this.arrivals?.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
+				this.sync.received(Milli.fromMicro(frame.timestamp), frame.arrival);
 
 				// Track decode buffer (see #runLegacy: bridge only when no gap or end came between,
 				// never on group adjacency, which proves nothing about the timeline).
@@ -723,8 +726,33 @@ class DecoderTrack {
 						timestamp: frame.timestamp,
 					}),
 				);
+				if (!this.sync.playing.peek()) await this.#waitStartup(effect);
 			}
 		});
+	}
+
+	// Once this track has filled its floor, leave further media encoded upstream while the other
+	// track fills. Otherwise a missing audio track could retain unbounded decoded GPU frames.
+	async #waitStartup(effect: Effect): Promise<void> {
+		// Some codecs need more input before their first output. Do not park that input
+		// behind a gate that needs the very picture the decoder has not produced yet.
+		if (this.first.peek() === undefined) return;
+		const span = this.#buffered.peek()[0];
+		if (!span || span.end - span.start < this.sync.out.delay.peek()) return;
+		const waiting = new Effect();
+		const refill = new Once<true>();
+		waiting.run((inner) => {
+			// An adaptive floor can rise while another track fills. Resume decoding to reach it,
+			// rather than waiting on a clock whose startup now needs more video.
+			if (span.end - span.start < inner.get(this.sync.out.delay)) refill.set(true);
+		});
+		try {
+			// Wait on the span's first picture, which is due the moment startup releases, so decoding
+			// resumes with the whole floor still ahead instead of once it has played out.
+			await effect.race(refill, this.sync.wait(span.start, waiting.abort));
+		} finally {
+			waiting.close();
+		}
 	}
 
 	// The container read a gap or a declared end after media. Re-anchor and let the next decoded
@@ -732,6 +760,7 @@ class DecoderTrack {
 	// high value from late-rejecting the following frames, which may overlap the previous group's
 	// tail. The held picture stays until the new keyframe renders.
 	#onBreak(): void {
+		this.first.set(undefined);
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
 		this.sync.reset();
@@ -760,6 +789,7 @@ class DecoderTrack {
 			displayAspectWidth: this.config.displayAspectWidth,
 			displayAspectHeight: this.config.displayAspectHeight,
 			optimizeForLatency: this.config.optimizeForLatency,
+			hardwareAcceleration: hardwareAcceleration(this.config),
 			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
 			flip: false,
 		});
@@ -807,6 +837,12 @@ class DecoderTrack {
 	}
 }
 
+// Chrome configures a hardware H.264 decoder that then fails the first interlaced picture: field
+// coding only shows in the SPS, and Chrome falls back to software only when configure() fails.
+function hardwareAcceleration(config: { interlaced?: boolean }): HardwareAcceleration | undefined {
+	return config.interlaced ? "prefer-software" : undefined;
+}
+
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	if (!Catalog.containerSupported(config.container)) {
 		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.
@@ -837,6 +873,7 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 		displayAspectWidth: config.displayAspectWidth,
 		displayAspectHeight: config.displayAspectHeight,
 		optimizeForLatency: config.optimizeForLatency ?? true,
+		hardwareAcceleration: hardwareAcceleration(config),
 	});
 
 	if (supported) return true;
@@ -852,6 +889,7 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 			displayAspectWidth: config.displayAspectWidth,
 			displayAspectHeight: config.displayAspectHeight,
 			optimizeForLatency: config.optimizeForLatency ?? true,
+			hardwareAcceleration: hardwareAcceleration(config),
 		});
 		if (retry.supported) {
 			config.codec = avc1;
