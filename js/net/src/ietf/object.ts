@@ -213,7 +213,7 @@ export class Group {
 		const id = legacy ? raw : raw & ~FIRST_OBJECT_BIT;
 
 		// An invalid type MUST close the session, including the reserved SUBGROUP_ID_MODE
-		// 0b11 (draft-21 section 11.3.1).
+		// 0b11 (draft-22 section 11.3.1).
 		const known = (id >= 0x10 && id <= 0x1f) || (id >= 0x30 && id <= 0x3f);
 		if (!known || (id & 0x06) === 0x06) {
 			throw new ProtocolViolation(`Unsupported group type: ${raw}`);

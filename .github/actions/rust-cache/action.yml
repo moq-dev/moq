@@ -109,6 +109,23 @@ runs:
           printf '%s\n' "$VERSION" > "$stamp"
         fi
 
+    # After a build, mbx sweeps in the background, and on a disk short of
+    # gc.min_free_size it removes whatever no compiler has open at that moment,
+    # including generated source trees the job's next build reads. That build
+    # then recompiles, which sh/dart/check.sh refuses. Most of this runner's
+    # disk holds data mbx does not own, so those sweeps empty the cache without
+    # closing the gap. Sweep once here, before anything builds, and never during
+    # the job. The global config carries the setting because generate.sh and
+    # Dart's build hooks drop MBX_* variables.
+    - name: Sweep the cache before building
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        config="$HOME/.config/mbx/config.toml"
+        mkdir -p "${config%/*}"
+        printf '[gc]\nauto = false\n' > "$config"
+        mbx gc
+
     # The action only warns when it cannot reach the remote, which is how a
     # revoked or mistyped key would look. A cache that silently never hits
     # costs every job its full build, so refuse instead. A writer also has to
