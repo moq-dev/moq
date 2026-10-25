@@ -35,5 +35,4 @@ than measure first or drop py's test features.
 
 ## Related
 
-- [Share Python check and test preparation](/quest/m0/ci/python-setup.md) - py's repeated preparation, inside its own lane
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - bounds the fanout these lanes add
