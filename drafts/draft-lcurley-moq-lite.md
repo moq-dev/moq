@@ -108,6 +108,10 @@ The identifier for this draft is `moq-lite-07-wip` while it is a work in progres
 For bare QUIC, this is negotiated as an ALPN token during the QUIC handshake.
 For WebTransport over HTTP/3, the QUIC ALPN remains `h3` and the moq-lite version is advertised via the `WT-Available-Protocols` and `WT-Protocol` CONNECT headers.
 
+A session that negotiates no version this way, such as WebTransport with an endpoint that cannot offer subprotocols, negotiates it in SETUP as in [moqt] draft 14.
+The client opens a bidirectional stream and sends CLIENT_SETUP (0x20) listing the versions it supports, each numbered 0xff0dad00 plus the draft number, and the server replies with SERVER_SETUP (0x21) selecting one or closes the session with VERSION_NEGOTIATION_FAILED.
+For this draft, the server then ends the stream, neither endpoint sends anything further on it, both ignore its parameters, and the session proceeds as if the version had been negotiated by subprotocol.
+
 When UDP is unavailable, moq-lite MAY also run over reliable byte-stream transports via Qmux [qmux]; see [Transports](#transports) for the specific bindings.
 
 The session is active immediately after the connection is established.
@@ -1802,6 +1806,8 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-07
+
+- A session without a negotiated subprotocol negotiates the version in a draft-14 CLIENT_SETUP and SERVER_SETUP exchange. Implementations apply this to moq-lite-03 through moq-lite-06 too.
 
 - Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens. Earlier versions with a Setup Stream ignore it as an unknown parameter.
 

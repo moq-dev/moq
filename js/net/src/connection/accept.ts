@@ -209,13 +209,14 @@ async function acceptNegotiated(
 
 	const client = await Ietf.ClientSetup.decode(stream.reader, setupVersion);
 
-	// Pick the requested version, or first matching version from client's list
-	const allVersions = [...Object.values(Lite.Version), ...Object.values(Ietf.Version)] as number[];
+	// Pick the requested version, or the first from the client's list that SETUP can negotiate:
+	// every moq-lite version and moq-transport-14, since later drafts carry no version list.
+	const negotiable = [...Object.values(Lite.Version), Ietf.Version.DRAFT_14] as number[];
 	let selectedVersion: number;
 	if (version !== undefined) {
 		selectedVersion = version;
 	} else {
-		const match = client.versions.find((v) => allVersions.includes(v));
+		const match = client.versions.find((v) => negotiable.includes(v));
 		if (match === undefined) {
 			throw new Error(
 				`no common version found; client offered: ${client.versions.map((v) => v.toString(16)).join(", ")}`,
@@ -234,6 +235,17 @@ async function acceptNegotiated(
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });
 	await Message.write(stream.writer, Lite.StreamId.ServerCompat, server, setupVersion);
+
+	// A moq-lite version newer than 02 has no session on this stream: end it and continue as
+	// that version's ALPN would.
+	if (
+		selectedVersion !== Lite.Version.DRAFT_01 &&
+		selectedVersion !== Lite.Version.DRAFT_02 &&
+		Object.values(Lite.Version).includes(selectedVersion as Lite.Version)
+	) {
+		stream.close();
+		return new Lite.Connection({ url, quic: transport, version: selectedVersion as Lite.Version, ...wiring });
+	}
 
 	if (Object.values(Lite.Version).includes(selectedVersion as Lite.Version)) {
 		return new Lite.Connection({

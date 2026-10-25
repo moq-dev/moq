@@ -503,6 +503,17 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
+		// Lite03 and newer have no session on this stream: the server ends it after its SETUP,
+		// and the session continues as that version's ALPN would. Reading to the end first
+		// keeps the drop from stopping a reply the server is still waiting to have acknowledged.
+		if let Version::Lite(v) = version
+			&& !matches!(v, lite::Version::Lite01 | lite::Version::Lite02)
+		{
+			std::future::poll_fn(|cx| stream.reader.poll_closed(cx)).await?;
+			drop(stream);
+			return self.start_lite(runtime, session, v, peer_hop);
+		}
+
 		let (recv_bw, protocol, goaway, auth, estimate, peer_implementation) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
@@ -517,8 +528,7 @@ impl Client {
 					subscribe: subscribe.clone(),
 					peer_hop: Some(peer_hop),
 					version: v,
-					// This path only handles versions negotiated via the bidi SETUP exchange
-					// (pre-lite-05), which have no Setup Stream.
+					// Lite 01/02 continue on the bidi SETUP stream and have no Setup Stream.
 					our_setup: lite::Setup::default(),
 					peer_setup: None,
 					// Negotiated over the bidi SETUP: lite 01/02, which carry no AUTH.
@@ -940,6 +950,7 @@ mod tests {
 		assert_eq!(
 			advertised,
 			vec![
+				Version::Lite(lite::Version::Lite03),
 				Version::Lite(lite::Version::Lite02),
 				Version::Lite(lite::Version::Lite01),
 				Version::Ietf(ietf::Version::Draft14),

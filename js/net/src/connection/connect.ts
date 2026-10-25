@@ -89,14 +89,15 @@ export interface WebTransportProps extends Omit<WebTransportOptions, "serverCert
 
 type SetupVersion = Lite.Version | Ietf.Version;
 
-// Each version name, most preferred first, with the ALPN that negotiates it. Names sharing
-// `moql` then negotiate in SETUP, where `setup` is the version code offered.
+// Each version name, most preferred first, with the ALPN that negotiates it. `setup` is the
+// version code offered in SETUP, used when the transport negotiated `moql` or no ALPN at all;
+// moq-transport 15 and newer have no version list in SETUP.
 const VERSIONS: Record<string, { alpn: string; setup?: SetupVersion }> = {
-	"moq-lite-07-wip": { alpn: Lite.ALPN_07_WIP },
-	"moq-lite-06": { alpn: Lite.ALPN_06 },
-	"moq-lite-05": { alpn: Lite.ALPN_05 },
-	"moq-lite-04": { alpn: Lite.ALPN_04 },
-	"moq-lite-03": { alpn: Lite.ALPN_03 },
+	"moq-lite-07-wip": { alpn: Lite.ALPN_07_WIP, setup: Lite.Version.DRAFT_07 },
+	"moq-lite-06": { alpn: Lite.ALPN_06, setup: Lite.Version.DRAFT_06 },
+	"moq-lite-05": { alpn: Lite.ALPN_05, setup: Lite.Version.DRAFT_05 },
+	"moq-lite-04": { alpn: Lite.ALPN_04, setup: Lite.Version.DRAFT_04 },
+	"moq-lite-03": { alpn: Lite.ALPN_03, setup: Lite.Version.DRAFT_03 },
 	"moq-lite-02": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_02 },
 	"moq-lite-01": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_01 },
 	"moq-transport-22": { alpn: Ietf.ALPN.DRAFT_22 },
@@ -118,7 +119,7 @@ const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
 	[Ietf.ALPN.DRAFT_18]: "qmux-01",
 };
 
-/** What one version list offers: the ALPNs in preference order, and the SETUP versions behind `moql`. */
+/** What one version list offers: the ALPNs in preference order, and the versions offered in SETUP. */
 interface Offer {
 	alpns: string[];
 	setup: SetupVersion[];
@@ -169,9 +170,9 @@ export interface ConnectProps {
 	/**
 	 * Protocol versions to offer on every transport, most preferred first, spelled like
 	 * `moq-lite-06`. Defaults to every supported version except the work-in-progress
-	 * `moq-lite-07-wip`; list every fallback you still want. A peer that negotiates no
-	 * subprotocol (such as WebTransport in Firefox before 155) is refused unless the list
-	 * includes `moq-lite-02`, `moq-lite-01` or `moq-transport-14`, which negotiate in SETUP.
+	 * `moq-lite-07-wip`; list every fallback you still want. With a peer that negotiates no
+	 * subprotocol (such as WebTransport in Firefox before 155), the version is negotiated in
+	 * SETUP instead, which moq-transport 15 and newer cannot do.
 	 */
 	versions?: readonly string[];
 
@@ -450,6 +451,7 @@ async function connectTransport(
 // Negotiate the MoQ protocol over an established transport. The caller races this against
 // the session closing so a close code is not lost behind a failed or stalled SETUP stream.
 // `setup` lists the versions a `moql` or ALPN-less session offers in SETUP.
+// A moq-lite version newer than 02 selected there continues as its ALPN would.
 async function negotiate(
 	url: URL,
 	session: WebTransport,
@@ -520,12 +522,26 @@ async function negotiate(
 	}
 
 	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
+	if (!client.versions.includes(server.version)) {
+		throw new Error(`server selected an unoffered version: 0x${server.version.toString(16)}`);
+	}
 
-	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
+	if (
+		server.version !== Lite.Version.DRAFT_01 &&
+		server.version !== Lite.Version.DRAFT_02 &&
+		isLite(server.version)
+	) {
+		// The server ends the stream after its SETUP; nothing else may follow.
+		if (!(await stream.reader.done())) throw new Error("unexpected data after SERVER_SETUP");
+		stream.close();
+		return new Lite.Connection({ url, quic: session, version: server.version, ...wiring });
+	}
+
+	if (isLite(server.version)) {
 		return new Lite.Connection({
 			url,
 			quic: session,
-			version: server.version as Lite.Version,
+			version: server.version,
 			session: stream,
 			...wiring,
 		});
@@ -804,4 +820,8 @@ async function connectWebSocket(
 			disarm.abort();
 		}
 	}
+}
+
+function isLite(version: number): version is Lite.Version {
+	return Object.values(Lite.Version).includes(version as Lite.Version);
 }

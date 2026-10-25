@@ -3,13 +3,19 @@ use std::str::FromStr;
 
 use crate::{coding, ietf, lite};
 
-/// The versions of MoQ that are negotiated via SETUP.
+/// The versions of MoQ that a session without a version ALPN (`moql`, or WebTransport
+/// with no subprotocol) can negotiate in the bidi SETUP.
 ///
-/// Ordered by preference, with the client's preference taking priority.
-/// This intentionally includes only SETUP-negotiated versions (Lite02, Lite01, Draft14);
-/// Lite03 and newer IETF drafts negotiate via dedicated ALPNs instead.
+/// Ordered by preference, with the client's preference taking priority. Lite03 and newer
+/// hand off: once SETUP selects one, the session continues as that version's ALPN would.
+/// Draft15 and newer have no version list in SETUP, so they negotiate only by ALPN.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-pub(crate) const NEGOTIATED: [Version; 3] = [
+pub(crate) const NEGOTIATED: [Version; 8] = [
+	Version::Lite(lite::Version::Lite07),
+	Version::Lite(lite::Version::Lite06),
+	Version::Lite(lite::Version::Lite05),
+	Version::Lite(lite::Version::Lite04),
+	Version::Lite(lite::Version::Lite03),
 	Version::Lite(lite::Version::Lite02),
 	Version::Lite(lite::Version::Lite01),
 	Version::Ietf(ietf::Version::Draft14),
