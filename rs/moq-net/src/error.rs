@@ -70,7 +70,7 @@ pub enum SessionError {
 	UnknownAuthTokenAlias,
 
 	/// The peer left more unacknowledged REQUEST_UPDATEs outstanding on one request stream
-	/// than the MAX_REQUEST_UPDATES it was advertised (draft-19 section 10.3.1.7).
+	/// than the MAX_REQUEST_UPDATES it was advertised (draft-22 section 9.1.7).
 	#[error("too many request updates")]
 	TooManyRequestUpdates,
 
