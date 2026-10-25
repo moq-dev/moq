@@ -50,8 +50,17 @@ What that means for you:
 - **URLs name the publisher instance.** Every URL the multivariant playlist and DASH manifest list sits under `@<instance>`, the publisher's epoch, so every edge and every reload derive the same URLs and a CDN in front of export caches them. A restarted publisher gets URLs of its own, whose numbering starts over. The multivariant playlist and manifest switch to it at once, while a player already on the old instance keeps playing until that publisher leaves; the player then has to reload the multivariant playlist. An instance without an epoch (one that reached export over moq-lite-06 or older) gets an id each export mints, so only that export serves its URLs.
 - **Only a clean finish ends a playlist.** `EXT-X-ENDLIST` and a `static` DASH manifest mean the timeline finished. If the segment-boundary rendition's timeline fails instead, such as a publisher dropping its session, every media playlist and the DASH manifest answer HTTP 500 with `Cache-Control: no-store`, so a truncated recording never looks complete. A rendition whose own timeline fails answers the error alone and leaves the multivariant playlist and DASH manifest, so players switch to a sibling.
 
-A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
-`Reader` is served the same way, with no second stored copy, and lists the
+A [`moq-archive`](https://docs.rs/moq-archive) recording is served the same
+way, with no second stored copy: record a broadcast, republish it, and export
+the republished broadcast.
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast event export archive s3://recordings
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<epoch>
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang export hls --listen '[::]:8089'
+```
+
+The archived catalog and timelines replay as recorded, so the export lists the
 same window as a live broadcast.
 
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,

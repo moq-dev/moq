@@ -484,7 +484,7 @@ and any claim about physical playback.
 The relay's port is reserved for the run rather than fixed, so two checkouts can
 run the interop test at once; `INTEROP_PORT` pins one instead. A failing run keeps its
 directory, including a Playwright trace of the failing page, and CI uploads it;
-`MOQ_TEST_KEEP=1` keeps a passing run's too. See [the harness
+`HARNESS_KEEP=1` keeps a passing run's too. See [the harness
 contract](../README.md).
 
 ## Layout
@@ -530,7 +530,7 @@ table of publisher by subscriber for each suite, case, transport, and version, p
 workflow step's outcome. A red cell links to its run and to the failure artifact, and
 its tooltip names the log inside that artifact.
 
-The report reads records, never logs. With `MOQ_TEST_RESULTS` set, `interop.sh` and
+The report reads records, never logs. With `HARNESS_RESULTS` set, `interop.sh` and
 `compat.sh` append one JSON line per case through `harness_result` (`test/lib/harness.sh`):
 suite, case, publisher, subscriber, transport, version, outcome, seconds, detail, and
 log. A run first records every case it will reach as `not run`, before building
@@ -539,7 +539,7 @@ rather than missing ones. Transport and version are `auto` where each client neg
 its own; a pinned pass, the drop lanes, and wire-compat record their version. `report.py` renders the page:
 
 ```bash
-MOQ_TEST_RESULTS=/tmp/results.jsonl just test interop
+HARNESS_RESULTS=/tmp/results.jsonl just test interop
 just test interop-report /tmp/results.jsonl /tmp/interop-report
 ```
 

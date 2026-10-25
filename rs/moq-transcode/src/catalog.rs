@@ -35,12 +35,9 @@ impl Resolved {
 
 /// The track names a ladder has handed out, so it never hands one out twice.
 ///
-/// A retired rung ends its track for good, and a clean end is terminal: a relay
-/// keeps the finished logical track (`broadcast::Consumer::track_inner` only
-/// drops an *aborted* one) and serves its EOF to every later subscriber, so a
-/// request for that name never reaches the transcoder again. A rung re-resolved
-/// under a new picture is therefore published under a name the ladder has never
-/// used, rather than reusing the one it just finished.
+/// A name always means the same content, so a rung re-resolved under a new
+/// picture is published under a name the ladder has never used, rather than
+/// reusing the one it just retired: a relay may still cache that name's groups.
 #[derive(Default)]
 pub(crate) struct Names {
 	/// The revision last issued per configured short side. The first is the bare
@@ -750,9 +747,9 @@ mod tests {
 		assert_eq!(entry.framerate, None);
 	}
 
-	/// A name is handed out once and never again: a retired rung's track ends for
-	/// good, so its replacement has to be a name no subscriber can already hold a
-	/// finished copy of.
+	/// A name is handed out once and never again: a retired rung's replacement
+	/// carries different content, so it needs a name no cache already holds groups
+	/// of.
 	#[test]
 	fn names_are_never_reused() {
 		let mut names = Names::default();

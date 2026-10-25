@@ -2,7 +2,7 @@
 # Pinned upstream conformance under the relay profile, subgroup zero, one relay.
 set -euo pipefail
 
-if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
 fi
 
@@ -19,7 +19,7 @@ relay="$WORKSPACE/${CARGO_TARGET_DIR:-target}/debug/moq-relay"
 # Cargo accepts an absolute target directory too.
 [[ "${CARGO_TARGET_DIR:-}" != /* ]] || relay="$CARGO_TARGET_DIR/debug/moq-relay"
 
-harness_begin ietf-conformance "$(harness_env MOQ_TEST_RESULTS)just test ietf-conformance"
+harness_begin ietf-conformance "$(harness_env HARNESS_RESULTS)just test ietf-conformance"
 python3 "$CONFORMANCE_DIR/prepare.py" "$package/share/moxygen/conformance_test.sh" "$HARNESS_RUN/conformance.sh"
 # LibreSSL in the dev shell has no system-wide openssl.cnf.
 cat >"$HARNESS_RUN/openssl.cnf" <<'EOF'

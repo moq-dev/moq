@@ -31,6 +31,8 @@ struct State {
 	fail_puts: Vec<String>,
 	/// GETs whose path contains any of these return Not Found.
 	hide_gets: Vec<String>,
+	/// GETs whose path contains any of these fail, as a store outage would.
+	fail_gets: Vec<String>,
 	/// GETs whose path contains the pattern wait for a permit before reading.
 	stall_gets: Vec<(String, Arc<tokio::sync::Semaphore>)>,
 	/// Deletes whose path contains any of these fail.
@@ -99,6 +101,17 @@ impl Mock {
 		self
 	}
 
+	pub fn fail_gets(&self, pattern: &str) -> &Self {
+		self.state().fail_gets.push(pattern.to_string());
+		self
+	}
+
+	/// End every [`fail_gets`](Self::fail_gets) outage.
+	pub fn heal_gets(&self) -> &Self {
+		self.state().fail_gets.clear();
+		self
+	}
+
 	/// Hold every GET whose path contains `pattern` until the returned semaphore gets a permit.
 	pub fn stall_gets(&self, pattern: &str) -> Arc<tokio::sync::Semaphore> {
 		let gate = Arc::new(tokio::sync::Semaphore::new(0));
@@ -130,19 +143,6 @@ impl Mock {
 	/// Unblock every PUT [`hold_puts`](Self::hold_puts) is waiting on.
 	pub fn release(&self) {
 		self.state().holds.clear();
-		self.hold.notify_waiters();
-	}
-
-	/// Clear every injected failure.
-	pub fn heal(&self) {
-		let mut state = self.state();
-		state.fail_puts.clear();
-		state.hide_gets.clear();
-		state.stall_gets.clear();
-		state.fail_deletes.clear();
-		state.fail_lists = false;
-		state.holds.clear();
-		drop(state);
 		self.hold.notify_waiters();
 	}
 
@@ -248,6 +248,12 @@ impl ObjectStore for Mock {
 			return Err(object_store::Error::NotFound {
 				path: location.to_string(),
 				source: "hidden".into(),
+			});
+		}
+		if self.state().fail_gets.iter().any(|p| location.as_ref().contains(p)) {
+			return Err(object_store::Error::Generic {
+				store: "mock",
+				source: "outage".into(),
 			});
 		}
 		let stall = self

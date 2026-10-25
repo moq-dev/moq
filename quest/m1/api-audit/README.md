@@ -41,11 +41,9 @@ Rules every child follows:
 - Each child lists its public API and wire impact in its PR, and its Impact
   bullet says how to migrate.
 
-Already gated elsewhere, so not children: the archive `Producer` and `Reader`
-disagree on layout while both claim version 2
-([archive consumer](/quest/m1/archive/consumer.md)), and the binary-to-flate
-fold is followed by flate's removal ([compress migrate](/quest/m1/compress/migrate.md)).
-Both are in m1, so the cut waits for them. hang's
+Already gated elsewhere, so not a child: the binary-to-flate fold is followed
+by flate's removal ([compress migrate](/quest/m1/compress/migrate.md)), in m1,
+so the cut waits for it. hang's
 `Archive::replay_epoch` goes with the root `archive` section in
 [catalog HLS](/quest/m1/archive/catalog-hls.md).
 
@@ -78,5 +76,4 @@ Rejected in planning:
 
 ## Related
 
-- [API-diff check on release PRs](/quest/m1/api-diff.md) - the backstop that catches breaks this epic misses
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - the other release-readiness check

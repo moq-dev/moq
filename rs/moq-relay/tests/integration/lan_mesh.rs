@@ -22,7 +22,7 @@ use moq_relay::cluster;
 
 /// Two clusters that can advertise (fingerprint + node) start without a secret.
 /// Binding mDNS is the recipe's gate; skip when the host cannot announce,
-/// unless MOQ_STRICT makes that a failure.
+/// unless CI_STRICT makes that a failure.
 #[tokio::test]
 #[ignore = "needs multicast on the host network; run by just rs multicast"]
 async fn moq_import_cluster_lan_beside_a_relay() {
@@ -57,7 +57,7 @@ async fn moq_import_cluster_lan_beside_a_relay() {
 	match tokio::time::timeout(Duration::from_secs(10), cluster.start()).await {
 		Ok(Ok(_)) => {}
 		Ok(Err(err))
-			if format!("{err:#}").contains("no network interface") && std::env::var_os("MOQ_STRICT").is_none() =>
+			if format!("{err:#}").contains("no network interface") && std::env::var_os("CI_STRICT").is_none() =>
 		{
 			eprintln!("skipping: {err:#}");
 		}
