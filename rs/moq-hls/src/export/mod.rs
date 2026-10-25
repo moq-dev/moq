@@ -3830,8 +3830,8 @@ mod tests {
 			.unwrap()
 			.expect("a segment, not end");
 		assert_eq!(first.segment, 0);
-		let media = first.media.expect("media, not a gap");
-		assert_eq!(&media[4..8], b"moof", "the segment carries its transmuxed media");
+		let fragment = first.media.expect("media, not a gap");
+		assert_eq!(&fragment[4..8], b"moof", "the segment carries its transmuxed media");
 		assert_eq!(first.duration, Duration::from_secs(2));
 		assert_eq!(first.discontinuity, 0, "a clean start is not a discontinuity");
 
