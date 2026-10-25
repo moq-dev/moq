@@ -17117,7 +17117,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_reader_update_reaches_its_fill() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
 		producer.start_at(4).unwrap();
 		write_group(&producer, 4);
