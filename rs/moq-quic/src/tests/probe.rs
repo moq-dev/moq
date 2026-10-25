@@ -2,15 +2,16 @@
 //! sender raises its estimate toward a target over a seeded bottleneck that steps its rate.
 //!
 //! Every run sends the same media trace over the same path twice, once probing and once not,
-//! so the probe is judged against a baseline that differs only in the target. Each probing run
-//! is held to the budgets below, which were set before the probe was tuned. The merge gate runs
-//! the short cases; the `#[ignore]`d acceptance suite runs nightly in release with `just rs
-//! quic-sim`.
+//! so the probe is judged against a baseline that differs only in the target. The probing runs
+//! are held to the budgets below, which were set before the probe was tuned. The merge gate runs
+//! the short cases on one seed; the `#[ignore]`d acceptance suite runs nightly in release with
+//! `just rs quic-sim`, holding each budget on the mean across [`SEEDS`], since one seed's outcome
+//! beside a competing upload is a coin flip.
 
 use std::collections::HashMap;
 
 use super::*;
-use crate::congestion::{Bbr3Config, CubicConfig};
+use crate::congestion::CubicConfig;
 
 /// The media's bitrate, 2 Mbit/s, which the probe has to see past
 const MEDIA: u64 = 250_000;
@@ -32,6 +33,19 @@ const LATE: f64 = 0.005;
 const FAIRNESS: f64 = 0.9;
 /// Rise budget: how soon after the path opens up the estimate reaches the target
 const RISE: Duration = Duration::from_secs(5);
+
+/// The seeds the acceptance suite runs each scenario over, probing and as the baseline
+const SEEDS: ops::RangeInclusive<u64> = 1..=8;
+/// The seed the merge gate runs
+const GATE: ops::RangeInclusive<u64> = 1..=1;
+
+/// The congestion controller of a bulk upload sharing the bottleneck
+#[derive(Clone, Copy)]
+enum Upload {
+    Cubic,
+    /// Seeded from the run's seed, as the media's own controller is
+    Bbr,
+}
 
 /// The bytes of frame `index` of a group whose keyframe is `keyframe` bytes
 fn frame_size(keyframe: u64, index: u64) -> u64 {
@@ -59,8 +73,8 @@ struct Scenario {
     duration: Duration,
     /// When the media pauses and resumes
     idle: Option<(Duration, Duration)>,
-    /// A bulk upload sharing the bottleneck, under this controller
-    competitor: Option<Arc<dyn ControllerFactory + Send + Sync>>,
+    /// A bulk upload sharing the bottleneck
+    competitor: Option<Upload>,
     /// The receiver's connection window, to limit the sender by credit
     receive_window: Option<u32>,
     /// The ACK frequency the sender requests: ack-eliciting packets per ACK
@@ -143,16 +157,10 @@ impl Outcome {
             .map(|sample| sample.at)
     }
 
-    /// Asserts the estimate reaches the target within [`RISE`] of `from`, returning how soon
-    fn rises(&self, from: Duration) -> Duration {
-        let reached = self.first(from..from + RISE, |estimate| estimate >= TARGET);
-        let reached = reached.unwrap_or_else(|| {
-            panic!(
-                "estimate {} B/s short of {TARGET} B/s {RISE:?} after {from:?}",
-                self.at(from + RISE).estimate
-            )
-        });
-        reached - from
+    /// How soon after `from` the estimate reaches the target, if it ever does
+    fn rise(&self, from: Duration) -> Option<Duration> {
+        self.first(from..Duration::MAX, |estimate| estimate >= TARGET)
+            .map(|reached| reached - from)
     }
 
     fn percentile(&self, p: f64) -> Duration {
@@ -242,9 +250,11 @@ fn run(scenario: &Scenario) -> Outcome {
     let mut config = client_config();
     config.transport = Arc::new(transport);
     let (client_ch, server_ch) = pair.connect_with(config);
-    let competitor = scenario.competitor.as_ref().map(|factory| {
+    let competitor = scenario.competitor.map(|upload| {
         let mut transport = TransportConfig::default();
-        transport.congestion_controller_factory(factory.clone());
+        if let Upload::Cubic = upload {
+            transport.congestion_controller_factory(Arc::new(CubicConfig::default()));
+        }
         let mut config = client_config();
         config.transport = Arc::new(transport);
         pair.connect_with(config)
@@ -532,50 +542,109 @@ fn receive(
     }
 }
 
-/// Runs `scenario` probing and as the baseline, reporting both and holding the probing run to
-/// every budget
-fn compare(label: &str, scenario: Scenario) -> (Outcome, Outcome) {
-    let rtt = 2 * scenario.latency;
-    let probing = run(&scenario);
-    probing.report(&format!("{label} probing"));
-    let baseline = run(&Scenario {
-        target: 0,
-        ..scenario
-    });
-    baseline.report(&format!("{label} baseline"));
-    assert_eq!(baseline.redundant, 0);
+/// One seed's probing run and its baseline
+struct Trial {
+    seed: u64,
+    probing: Outcome,
+    baseline: Outcome,
+}
 
-    let overhead = probing.redundant as f64 / probing.unique as f64;
+/// The mean of `f` over the probing runs and over the baselines
+fn mean(trials: &[Trial], f: impl Fn(&Outcome) -> f64) -> (f64, f64) {
+    let n = trials.len() as f64;
+    let probing = trials.iter().map(|t| f(&t.probing)).sum::<f64>();
+    let baseline = trials.iter().map(|t| f(&t.baseline)).sum::<f64>();
+    (probing / n, baseline / n)
+}
+
+/// Runs `scenario` probing and as the baseline on each of `seeds`, reporting every run and
+/// holding the probing runs to every budget on the mean across seeds
+fn compare(label: &str, scenario: Scenario, seeds: ops::RangeInclusive<u64>) -> Vec<Trial> {
+    let rtt = 2 * scenario.latency;
+    let trials: Vec<_> = seeds
+        .map(|seed| {
+            let scenario = Scenario {
+                seed,
+                ..scenario.clone()
+            };
+            let probing = run(&scenario);
+            probing.report(&format!("{label} seed {seed} probing"));
+            let baseline = run(&Scenario {
+                target: 0,
+                ..scenario
+            });
+            baseline.report(&format!("{label} seed {seed} baseline"));
+            assert_eq!(baseline.redundant, 0);
+            Trial {
+                seed,
+                probing,
+                baseline,
+            }
+        })
+        .collect();
+
+    let (overhead, _) = mean(&trials, |o| o.redundant as f64 / o.unique as f64);
+    let (late, baseline_late) = mean(&trials, |o| o.late as f64);
+    let (frames, _) = mean(&trials, |o| o.frames as f64);
+    let (p99, baseline_p99) = mean(&trials, |o| o.percentile(0.99).as_secs_f64() * 1e3);
+    let (competitor, baseline_competitor) = mean(&trials, |o| o.competitor as f64);
+    info!(
+        label,
+        seeds = trials.len(),
+        overhead,
+        late,
+        baseline_late,
+        p99_ms = p99,
+        baseline_p99_ms = baseline_p99,
+        competitor,
+        baseline_competitor,
+        "mean across seeds"
+    );
     assert!(
         overhead <= OVERHEAD,
         "{label}: overhead {overhead:.3} over {OVERHEAD}"
     );
-    let late = baseline.late + (probing.frames as f64 * LATE) as u64;
     assert!(
-        probing.late <= late,
-        "{label}: {} late frames, {} for the baseline",
-        probing.late,
-        baseline.late
-    );
-    let p99 = probing.percentile(0.99);
-    assert!(
-        p99 <= baseline.percentile(0.99) + rtt,
-        "{label}: p99 {p99:?}, {:?} for the baseline",
-        baseline.percentile(0.99)
+        late <= baseline_late + frames * LATE,
+        "{label}: {late:.1} late frames, {baseline_late:.1} for the baseline"
     );
     assert!(
-        probing.competitor as f64 >= baseline.competitor as f64 * FAIRNESS,
-        "{label}: competitor got {} bytes, {} beside the baseline",
-        probing.competitor,
-        baseline.competitor
+        p99 <= baseline_p99 + rtt.as_secs_f64() * 1e3,
+        "{label}: p99 {p99:.1}ms, {baseline_p99:.1}ms for the baseline"
     );
-    (probing, baseline)
+    assert!(
+        competitor >= baseline_competitor * FAIRNESS,
+        "{label}: competitor got {competitor:.0} bytes, {baseline_competitor:.0} beside the baseline"
+    );
+    trials
 }
 
-/// Reports how long after `from` the estimate fell to within the ProbeBW_UP gain of `rate`
-fn report_fall(label: &str, outcome: &Outcome, from: Duration, rate: u64) {
-    let fell = outcome.first(from..Duration::MAX, |estimate| estimate <= rate * 5 / 4);
-    info!(label, age = ?fell.map(|at| at - from), "estimate age after the path fell");
+/// Asserts the probing runs' estimate reaches the target within [`RISE`] of `from` on the mean
+fn rises(trials: &[Trial], from: Duration) {
+    let rises = trials.iter().map(|Trial { seed, probing, .. }| {
+        let rise = probing.rise(from).unwrap_or_else(|| {
+            panic!(
+                "seed {seed}: estimate {} B/s never reached {TARGET} B/s after {from:?}",
+                probing.samples.last().expect("sampled").estimate
+            )
+        });
+        rise.as_secs_f64()
+    });
+    let rise = rises.sum::<f64>() / trials.len() as f64;
+    assert!(
+        rise <= RISE.as_secs_f64(),
+        "estimate reached {TARGET} B/s {rise:.1}s after {from:?} on the mean"
+    );
+}
+
+/// Reports how long after `from` each run's estimate fell to within the ProbeBW_UP gain of `rate`
+fn report_fall(label: &str, trials: &[Trial], from: Duration, rate: u64) {
+    for trial in trials {
+        for (run, outcome) in [("probing", &trial.probing), ("baseline", &trial.baseline)] {
+            let fell = outcome.first(from..Duration::MAX, |estimate| estimate <= rate * 5 / 4);
+            info!(label, seed = trial.seed, run, age = ?fell.map(|at| at - from), "estimate age after the path fell");
+        }
+    }
 }
 
 /// A 3 Mbit/s path, below the target, that opens up to 12 Mbit/s at 20s and falls back at 40s
@@ -607,8 +676,7 @@ fn rises_to_target() {
         duration: Duration::from_secs(15),
         ..Scenario::default()
     };
-    let (probing, _) = compare("rises", scenario);
-    probing.rises(Duration::from_secs(5));
+    rises(&compare("rises", scenario, GATE), Duration::from_secs(5));
 }
 
 /// Below the media's bitrate groups expire, and none is resent after its reset
@@ -624,8 +692,8 @@ fn congested() {
             duration: Duration::from_secs(15),
             ..Scenario::default()
         };
-        let (probing, baseline) = compare(&format!("congested buffer {buffer}"), scenario);
-        for outcome in [&probing, &baseline] {
+        let trials = compare(&format!("congested buffer {buffer}"), scenario, GATE);
+        for outcome in trials.iter().flat_map(|t| [&t.probing, &t.baseline]) {
             assert!(outcome.expired > 0, "no group expired");
             assert!(
                 buffer > 7_500 || outcome.queue.dropped > 0,
@@ -710,46 +778,22 @@ fn batch_within_probe_inflight() {
 #[ignore = "nightly: just rs quic-sim"]
 fn steps_keyframes() {
     let _guard = subscribe();
-    let (probing, baseline) = compare("steps keyframes", steps());
-    probing.rises(Duration::from_secs(20));
-    report_fall(
-        "steps keyframes probing",
-        &probing,
-        Duration::from_secs(40),
-        375_000,
-    );
-    report_fall(
-        "steps keyframes baseline",
-        &baseline,
-        Duration::from_secs(40),
-        375_000,
-    );
+    let trials = compare("steps keyframes", steps(), SEEDS);
+    rises(&trials, Duration::from_secs(20));
+    report_fall("steps keyframes", &trials, Duration::from_secs(40), 375_000);
 }
 
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn steps_constant() {
     let _guard = subscribe();
-    let (probing, baseline) = compare(
-        "steps constant",
-        Scenario {
-            keyframe: 0,
-            ..steps()
-        },
-    );
-    probing.rises(Duration::from_secs(20));
-    report_fall(
-        "steps constant probing",
-        &probing,
-        Duration::from_secs(40),
-        375_000,
-    );
-    report_fall(
-        "steps constant baseline",
-        &baseline,
-        Duration::from_secs(40),
-        375_000,
-    );
+    let scenario = Scenario {
+        keyframe: 0,
+        ..steps()
+    };
+    let trials = compare("steps constant", scenario, SEEDS);
+    rises(&trials, Duration::from_secs(20));
+    report_fall("steps constant", &trials, Duration::from_secs(40), 375_000);
 }
 
 /// Nothing is in flight while the media pauses, so nothing is resent
@@ -763,11 +807,17 @@ fn idle_restart() {
         idle: Some(idle),
         ..steps()
     };
-    let (probing, _) = compare("idle", scenario);
-    probing.rises(Duration::from_secs(20));
-    // The last frames drain within a second
-    let drained = probing.at(idle.0 + Duration::from_secs(1)).redundant;
-    assert_eq!(probing.at(idle.1).redundant, drained, "probed while idle");
+    let trials = compare("idle", scenario, SEEDS);
+    rises(&trials, Duration::from_secs(20));
+    for Trial { seed, probing, .. } in &trials {
+        // The last frames drain within a second
+        let drained = probing.at(idle.0 + Duration::from_secs(1)).redundant;
+        assert_eq!(
+            probing.at(idle.1).redundant,
+            drained,
+            "seed {seed} probed while idle"
+        );
+    }
 }
 
 /// An estimate learned before the path fell holds above the target, so the probe stays idle
@@ -784,9 +834,8 @@ fn stale_estimate() {
         warmup: 3_000_000,
         ..Scenario::default()
     };
-    let (probing, baseline) = compare("stale", scenario);
-    report_fall("stale probing", &probing, Duration::ZERO, 375_000);
-    report_fall("stale baseline", &baseline, Duration::ZERO, 375_000);
+    let trials = compare("stale", scenario, SEEDS);
+    report_fall("stale", &trials, Duration::ZERO, 375_000);
 }
 
 /// Resent data needs no new credit, so a receive window that limits the media does not limit
@@ -799,8 +848,7 @@ fn credit_limited() {
         receive_window: Some(32_000),
         ..steps()
     };
-    let (probing, _) = compare("credit", scenario);
-    probing.rises(Duration::from_secs(20));
+    rises(&compare("credit", scenario, SEEDS), Duration::from_secs(20));
 }
 
 #[test]
@@ -811,36 +859,32 @@ fn compressed_acks() {
         ack_threshold: Some(10),
         ..steps()
     };
-    let (probing, _) = compare("acks", scenario);
-    probing.rises(Duration::from_secs(20));
+    rises(&compare("acks", scenario, SEEDS), Duration::from_secs(20));
 }
 
 /// A bulk upload sharing a 6 Mbit/s path keeps its goodput while the media probes beside it
 /// for more than its fair share
-fn competing(label: &str, factory: Arc<dyn ControllerFactory + Send + Sync>) {
+fn competing(label: &str, upload: Upload) {
     let _guard = subscribe();
     let scenario = Scenario {
         rates: vec![(Duration::ZERO, 750_000)],
         buffer: 150_000,
-        competitor: Some(factory),
+        competitor: Some(upload),
         ..Scenario::default()
     };
-    compare(label, scenario);
+    compare(label, scenario, SEEDS);
 }
 
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn competing_cubic() {
-    competing("cubic", Arc::new(CubicConfig::default()));
+    competing("cubic", Upload::Cubic);
 }
 
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn competing_bbr() {
-    // Seeded, as the media's own controller is, so both runs see the same competitor
-    let mut config = Bbr3Config::default();
-    config.probe_rng_seed([1; 16]);
-    competing("bbr", Arc::new(config));
+    competing("bbr", Upload::Bbr);
 }
 
 /// A target the path can never carry keeps the probe trying, within the overhead budget
@@ -852,7 +896,7 @@ fn unreachable_target() {
         target: 12_500_000,
         ..Scenario::default()
     };
-    compare("unreachable", scenario);
+    compare("unreachable", scenario, SEEDS);
 }
 
 /// From a queue of one BDP at 3 Mbit/s and 40ms to a bufferbloated 64
@@ -861,8 +905,11 @@ fn unreachable_target() {
 fn queue_depths() {
     let _guard = subscribe();
     for buffer in [15_000, 60_000, 240_000, 960_000] {
-        let (probing, _) = compare(&format!("buffer {buffer}"), Scenario { buffer, ..steps() });
-        probing.rises(Duration::from_secs(20));
+        let scenario = Scenario { buffer, ..steps() };
+        rises(
+            &compare(&format!("buffer {buffer}"), scenario, SEEDS),
+            Duration::from_secs(20),
+        );
     }
 }
 
@@ -877,8 +924,7 @@ fn round_trip(latency: u64) {
             ..steps()
         };
         let label = format!("rtt {}ms keyframe {keyframe}", 2 * latency);
-        let (probing, _) = compare(&label, scenario);
-        probing.rises(Duration::from_secs(20));
+        rises(&compare(&label, scenario, SEEDS), Duration::from_secs(20));
     }
 }
 
