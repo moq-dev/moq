@@ -24,7 +24,7 @@ type AacConfig = {
     bitrate?: number;
 };
 
-export type AnnounceMode = "always" | "source" | "never";
+export type AnnounceMode = "always" | "source";
 
 declare namespace Audio_2 {
     export {
