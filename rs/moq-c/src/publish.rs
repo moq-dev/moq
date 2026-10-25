@@ -1021,10 +1021,16 @@ impl Publish {
 	/// With deltas on, the track carries a refresh ratio of 8: a join after more than eight
 	/// snapshots' worth of deltas asks for the value restated in a fresh group, which a task
 	/// answers until the track is finished.
-	pub fn json_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::json::Config) -> Result<Id, Error> {
-		let refresh = config.deltas.then_some(8);
+	pub fn json_snapshot(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		config: moq_mux::json::Config,
+		options: moq_mux::json::Options,
+	) -> Result<Id, Error> {
+		let refresh = options.deltas.then_some(8);
 		let data = self.data_track(broadcast, name, refresh, |catalog, track| {
-			catalog.json_snapshot(track, config)
+			catalog.json_snapshot(track, config, options)
 		})?;
 		let alive = kio::Producer::new(());
 		let closed = alive.consume();
