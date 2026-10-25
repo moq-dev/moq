@@ -3853,6 +3853,58 @@ mod tests {
 		}
 	}
 
+	#[moq_clock::test]
+	async fn a_claimed_fetch_waits_only_while_wanted() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for end in ["credit", "unused", "retired"] {
+				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
+				let subscriber = Subscriber::new(SubscriberConfig {
+					runtime: crate::time::sim(),
+					session: crate::driver::Transport::new(session.clone()),
+					origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+					recv_bandwidth: None,
+					version,
+					peer_setup: lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+					peer_hop: None,
+					cost: None,
+					going_away: Default::default(),
+					auth: crate::auth::Link::new(false),
+				});
+				let route = kio::Producer::new(());
+				let serve = TrackServe {
+					validity: crate::model::broadcast::RequestValidity::token(Some(route.consume())),
+					route: None,
+					subscriber,
+					path: Path::new("room").to_owned(),
+					epoch: None,
+					name: "video".into(),
+				};
+				let info = track::Info::default().with_timescale(None);
+				let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info.clone());
+				let dynamic = track.dynamic();
+				let fetch = track.consume().fetch_group(4, None);
+				let request = dynamic.requested_fill_group().await.unwrap();
+				let mut run = FetchServeRun::new(serve, request, info);
+				let waiter = kio::Waiter::noop();
+				assert!(kio::Task::poll(&mut run, &waiter).is_pending(), "{version}: {end}");
+				assert_eq!(session.log.bi_opens(), 0);
+				if end == "credit" {
+					session.grant_credit();
+					assert!(kio::Task::poll(&mut run, &waiter).is_pending());
+					assert_eq!(session.log.bi_opens(), 1, "credit releases the FETCH");
+				}
+				if end == "retired" {
+					drop(route);
+					assert!(kio::Task::poll(&mut run, &waiter).is_ready());
+					assert!(matches!(fetch.await, Err(Error::Unroutable)));
+				} else {
+					drop(fetch);
+					assert!(kio::Task::poll(&mut run, &waiter).is_ready(), "{version}: {end}");
+				}
+			}
+		}
+	}
+
 	/// A track still waiting on TRACK_INFO ends once nobody wants it, whether its TRACK
 	/// transport header never finished, its request is stuck in
 	/// send, or its peer never answers.
@@ -7643,7 +7695,9 @@ impl kio::Task for FetchServeRun {
 			match &mut self.state {
 				FetchRunState::Open { request } => {
 					ready!(self.gate.poll_ready(waiter));
-					let mut stream = match ready!(Stream::poll_open_request(
+					// The fill already has readers holding its demand. Backpressure keeps their
+					// owned request alive; abandoning it above releases this wait too.
+					let mut stream = match ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,
 						&mut cx
@@ -7657,7 +7711,7 @@ impl kio::Task for FetchServeRun {
 						}
 					};
 
-					// Only once the stream opens: its header can wait for send capacity and
+					// Only once the stream opens: credit and its header can wait, and
 					// re-polls this state, so logging before it repeats per poll.
 					tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
 

@@ -1572,9 +1572,9 @@ mod tests {
 		for version in [Version::Draft16, Version::Draft17, Version::Draft19] {
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let interest = origin.consume().announced();
-			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
-			let log = session.log.clone();
-			let mut session = crate::driver::Transport::new(session);
+			let scripted = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let log = scripted.log.clone();
+			let mut session = crate::driver::Transport::new(scripted.clone());
 			let setup = if version == Version::Draft16 {
 				Some(
 					Stream::open(&mut session, version)
@@ -1584,6 +1584,8 @@ mod tests {
 			} else {
 				None
 			};
+			// SETUP already owns its stream; subsequent requests have no credit.
+			let _ = scripted.without_credit();
 			let (driver, _goaway) = start(Config {
 				runtime: crate::time::sim(),
 				stats: Default::default(),
