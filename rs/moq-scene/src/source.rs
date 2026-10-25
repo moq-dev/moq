@@ -231,10 +231,8 @@ impl Driver {
 			}
 		};
 
-		let config = moq_video::capture::Config {
-			source: video,
-			..Default::default()
-		};
+		let mut config = moq_video::capture::Config::default();
+		config.source = video;
 		let mut stream = moq_video::capture::open(&config).await?;
 		while let Some(frame) = stream.read().await? {
 			self.show(Picture::Frame(frame));

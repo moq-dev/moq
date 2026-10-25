@@ -5829,10 +5829,10 @@ name = "moq-studio"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "eframe",
  "egui",
  "egui_dock",
- "hang",
  "moq-audio",
  "moq-clock",
  "moq-mux",
@@ -5845,6 +5845,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "url",
  "usage-rs",
 ]
 

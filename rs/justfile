@@ -148,14 +148,14 @@ macos-test:
 # Compile and lint the capture and playback features, which the default check skips.
 [positional-arguments]
 capture *args:
-    bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio -p moq-scene -p moq-studio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback,moq-scene/capture,moq-studio/capture "$@" -- -D warnings
 
 # The capture and playback tests drive synthetic devices, so they need no hardware.
 
 # Test the capture and playback features, which the default test pass skips.
 [positional-arguments]
 capture-test *args:
-    just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@"
+    just rs test -p moq-video -p moq-audio -p moq-scene -p moq-studio --features moq-video/capture,moq-audio/capture,moq-audio/playback,moq-scene/capture,moq-studio/capture "$@"
 
 # Compare SHM and GetImage through production capture on the current X11 display.
 x11-bench:
@@ -346,7 +346,8 @@ cli-export *args:
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
 
-# Render CPU frames and composite scenes through wgpu on Mesa's software Vulkan driver, so no GPU is needed.
+# Render CPU frames, composite scenes, and publish a studio program through wgpu on
+# Mesa's software Vulkan driver, so no GPU is needed.
 render-sw:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -358,6 +359,8 @@ render-sw:
         -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size)$/)'
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
         just rs test -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-studio --features openh264 --run-ignored only -E 'test(=engine::tests::the_program_reaches_a_relay)'
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:

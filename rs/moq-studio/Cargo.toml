@@ -35,13 +35,13 @@ pipewire = ["capture", "moq-video/pipewire", "moq-audio/pipewire"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
+bytes = { workspace = true }
 # The window, its event loop, and the egui integration. `wgpu` is the renderer
 # the compositor shares a device with; no glow, no system font discovery.
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wayland", "wgpu", "x11"] }
 egui = "0.36"
 # Docked, rearrangeable panels. 0.21 is the newest release and pins egui 0.36.
 egui_dock = "0.21"
-hang = { workspace = true }
 moq-audio = { workspace = true, features = ["bus"] }
 moq-clock = { workspace = true }
 moq-mux = { workspace = true }
@@ -52,6 +52,7 @@ moq-video = { workspace = true }
 pollster = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
+url = { workspace = true }
 usage-rs = { workspace = true, features = ["completions", "config"] }
 
 [dev-dependencies]
