@@ -44,8 +44,11 @@ struct Slot {
 	dir: PathBuf,
 	/// The playlist's URI relative to the master playlist.
 	uri: String,
-	/// The newest instance, whose catalog metadata the master playlist lists.
-	rendition: Arc<Rendition>,
+	/// The newest instance while one is recording or queued. Released once every instance has
+	/// drained, so a removed rendition holds no subscriptions for the rest of the recording.
+	rendition: Option<Arc<Rendition>>,
+	/// What the master playlist lists, as the newest instance last described it.
+	variant: Variant,
 	playlist: Playlist,
 	/// The instance being recorded, if its cursor is in flight.
 	recording: Option<Instance>,
@@ -55,6 +58,25 @@ struct Slot {
 	instances: u64,
 	/// The last segment recorded, by any instance.
 	last: Option<Last>,
+}
+
+/// A rendition's master playlist attributes.
+struct Variant {
+	bandwidth: u64,
+	width: Option<u32>,
+	height: Option<u32>,
+	codec: String,
+}
+
+impl Variant {
+	fn of(rendition: &Rendition) -> Self {
+		Self {
+			bandwidth: rendition.bandwidth(),
+			width: rendition.width,
+			height: rendition.height,
+			codec: rendition.codec.clone(),
+		}
+	}
 }
 
 /// The progress of one instance's cursor.
@@ -201,7 +223,8 @@ impl Recording {
 					rendition.kind.as_str(),
 					utf8_percent_encode(&name, PATH_SEGMENT)
 				),
-				rendition: rendition.clone(),
+				rendition: None,
+				variant: Variant::of(&rendition),
 				playlist: Playlist::default(),
 				recording: None,
 				queued: VecDeque::new(),
@@ -209,7 +232,7 @@ impl Recording {
 				last: None,
 			}
 		});
-		slot.rendition = rendition;
+		slot.rendition = Some(rendition);
 		slot.queued.push_back(cursor);
 		match slot.recording {
 			Some(_) => None,
@@ -228,7 +251,13 @@ impl Recording {
 		let Some((segment, init)) = read else {
 			// This instance drained: its replacement, if any, continues the playlist.
 			slot.recording = None;
-			return Ok(slot.begin(key));
+			let next = slot.begin(key);
+			if next.is_none()
+				&& let Some(rendition) = slot.rendition.take()
+			{
+				slot.variant = Variant::of(&rendition);
+			}
+			return Ok(next);
 		};
 
 		let instance = slot.recording.as_mut().expect("a cursor in flight is recording");
@@ -296,21 +325,22 @@ impl Recording {
 	fn render_master(&self) -> String {
 		let mut video = Vec::new();
 		let mut audio = Vec::new();
-		for slot in self.slots.values().filter(|slot| slot.playlist.written.is_some()) {
-			let rendition = &slot.rendition;
-			match rendition.kind {
+		for ((kind, name), slot) in self.slots.iter().filter(|(_, slot)| slot.playlist.written.is_some()) {
+			let refreshed = slot.rendition.as_deref().map(Variant::of);
+			let variant = refreshed.as_ref().unwrap_or(&slot.variant);
+			match kind {
 				Kind::Video => video.push(master::VideoVariant {
 					uri: slot.uri.clone(),
-					bandwidth: rendition.bandwidth(),
-					width: rendition.width,
-					height: rendition.height,
-					codec: rendition.codec.clone(),
+					bandwidth: variant.bandwidth,
+					width: variant.width,
+					height: variant.height,
+					codec: variant.codec.clone(),
 				}),
 				Kind::Audio => audio.push(master::AudioVariant {
-					name: rendition.name.clone(),
+					name: name.clone(),
 					uri: slot.uri.clone(),
-					bandwidth: rendition.bandwidth(),
-					codec: rendition.codec.clone(),
+					bandwidth: variant.bandwidth,
+					codec: variant.codec.clone(),
 				}),
 			}
 		}
@@ -744,6 +774,48 @@ mod tests {
 		assert!(dir.path().join("video/video1/init.1.mp4").exists());
 		let master = read(dir.path().join("master.m3u8"));
 		assert!(master.contains("RESOLUTION=640x240"), "{master}");
+	}
+
+	/// A rendition removed mid-recording is released once its cursor drains, while the master
+	/// playlist keeps listing what it recorded.
+	#[tokio::test]
+	async fn a_removed_rendition_is_released_once_drained() {
+		let mut publisher = Publisher::new(&["video0", "video1"]);
+		let broadcaster = publisher.broadcaster();
+		let dir = tempfile::tempdir().unwrap();
+		let recording = spawn(dir.path(), &broadcaster);
+		// A sibling resolves a segment once its own timeline passes the segment's end.
+		for n in 0..5 {
+			publisher.gop(n);
+		}
+		recorded(dir.path(), "video1").await;
+		let removed = Arc::downgrade(&broadcaster.rendition(Kind::Video, "video1").unwrap());
+		// Finishing bounds its last segment, so the removed instance's cursor drains.
+		publisher.video.remove(1).finish().unwrap();
+		publisher
+			.catalog
+			.mutate(|catalog| {
+				catalog.video.renditions.remove("video1");
+			})
+			.unwrap();
+		publisher.gop(5);
+		moq_clock::timeout(TIMEOUT, async {
+			while removed.strong_count() > 0 {
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("the drained rendition was released");
+
+		publisher.gop(6);
+		publisher.finish();
+		moq_clock::timeout(TIMEOUT, recording)
+			.await
+			.expect("the recording ends")
+			.unwrap()
+			.unwrap();
+		let master = read(dir.path().join("master.m3u8"));
+		assert!(master.contains("\nvideo/video1/media.m3u8\n"), "{master}");
 	}
 
 	/// A publisher that drops its session fails the recording, leaving playlists unended.
