@@ -3657,6 +3657,30 @@ test("a widened maxDelay re-offers nothing below a raised floor", () => {
 	producer.close();
 });
 
+// A stale skip a drop-reading cursor has not reported yet is withdrawn when a widening re-offers
+// its group, so the reader never gets both the group and its drop.
+test("a widened maxDelay withdraws an unreported stale drop", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe({ maxDelay: Milli(1500) });
+	expect(hooks.tryDrop(subscriber)).toBeUndefined();
+	stampGroup(producer, 0, 0);
+	expect(drainGroups(subscriber)).toEqual([0]);
+	for (const [sequence, ms] of [
+		[1, 1000],
+		[2, 2000],
+		[3, 6000],
+	]) {
+		stampGroup(producer, sequence, ms);
+	}
+	// Group 1 reaches 2s, 4s behind the 6s edge.
+	expect(drainGroups(subscriber)).toEqual([2, 3]);
+
+	subscriber.update({ maxDelay: Milli(10_000) });
+	expect(drainGroups(subscriber)).toEqual([1]);
+	expect(hooks.tryDrop(subscriber)).toBeUndefined();
+	producer.close();
+});
+
 // A widening that covers only the newer of two skipped groups hands it out without folding the
 // older one into the delivered floor: a further widening still re-offers it.
 test("a partial maxDelay widening keeps the older skip owed", () => {
