@@ -317,6 +317,9 @@ pub struct Rendition {
 	building: Arc<tokio::sync::Mutex<()>>,
 	/// The background init build; aborted when the rendition drops.
 	build: Mutex<Option<tokio::task::JoinHandle<()>>>,
+	/// The runtime the rendition was built on, which runs the background init build even when a
+	/// synchronous render calls from another thread.
+	runtime: tokio::runtime::Handle,
 }
 
 impl Rendition {
@@ -406,6 +409,7 @@ impl Rendition {
 			run: kio::Producer::default(),
 			building: Arc::new(tokio::sync::Mutex::new(())),
 			build: Mutex::new(None),
+			runtime: tokio::runtime::Handle::current(),
 		})
 	}
 
@@ -439,6 +443,7 @@ impl Rendition {
 			run: kio::Producer::default(),
 			building: Arc::new(tokio::sync::Mutex::new(())),
 			build: Mutex::new(None),
+			runtime: tokio::runtime::Handle::current(),
 		})
 	}
 
@@ -1060,7 +1065,7 @@ impl Rendition {
 		let media = self.media.clone();
 		let rendition = Arc::downgrade(self);
 		let name = self.name.clone();
-		let build = tokio::spawn(async move {
+		let build = self.runtime.spawn(async move {
 			let _building = building;
 			match read.read(&media, &binding).await {
 				Ok(Some(bytes)) => {

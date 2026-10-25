@@ -1791,6 +1791,29 @@ mod tests {
 		drop(open);
 	}
 
+	// A synchronous render may run on a thread outside the runtime, and still starts the
+	// background init build there.
+	#[tokio::test(start_paused = true)]
+	async fn a_manifest_renders_off_the_runtime() {
+		let (origin, broadcast, _catalog, _timelines) = inline_sibling().await;
+		let media = broadcast.create_track("video1", timed()).unwrap();
+		let mut open = media.create_group(3u64.into()).unwrap();
+		write_keyframe(&mut open, 3);
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&broadcaster.rendition(Kind::Video, "video0").unwrap(), &tag, 3).await;
+		let render = broadcaster.clone();
+		std::thread::spawn(move || render.manifest(None).map(|_| ()))
+			.join()
+			.expect("the render panicked")
+			.unwrap();
+		let video1 = broadcaster.rendition(Kind::Video, "video1").unwrap();
+		assert!(video1.init_pending(), "the render started no init build");
+		drop(open);
+	}
+
 	// A new generation releases a build parked on the old run's open group, so the new run can
 	// build its own init.
 	#[tokio::test(start_paused = true)]
