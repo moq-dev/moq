@@ -143,7 +143,6 @@ Catalog HLS field.
 - [JS resume reports drops](/quest/m1/resume-drops.md) - a routed JS subscriber reports its copies' dropped groups, so publishers forward SUBSCRIBE_DROP
 - [Lowered resume floor](/quest/m1/resume-floor.md) - lowering a resumed reader's floor re-offers groups only a released copy cached
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
-- [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Drop announce="never"](/quest/m1/publish-announce-never.md) - `@moq/publish` offers only announce modes a watcher can reach
