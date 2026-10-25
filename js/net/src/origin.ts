@@ -1274,7 +1274,7 @@ export class Producer implements Table {
 		return this.#insertRoute(prefix, Route.default, true, true);
 	}
 
-	/** Insert an originated claim with route metadata that answers through `accept`, for tests and benches. @internal */
+	/** Insert an originated claim with route metadata that answers through `hooks.acceptRequest`, for tests and benches. @internal */
 	dynamicRoute(
 		prefix: Path.Valid,
 		route:
@@ -2300,10 +2300,9 @@ export class Dynamic {
 /**
  * A pending request for a broadcast to be served on demand.
  *
- * Yielded by {@link Dynamic.requested}. {@link prepare} transfers it to a prepared
- * answer; {@link accept} resolves a forwarded request with a live broadcast;
- * {@link reject} refuses it. Advancing or closing the iterator without transferring
- * or answering rejects the request.
+ * Yielded by {@link Dynamic.requested}. {@link prepare} then {@link Prepared.publish}
+ * resolves it with a new exact-path broadcast; {@link reject} resolves it with an error.
+ * Advancing the iterator or closing it without either rejects the request.
  *
  * @public
  */
@@ -2341,6 +2340,7 @@ export class Request {
 			request.#withdrawn = true;
 			void err;
 		};
+		hooks.acceptRequest = (request, source) => request.#accept(source);
 	}
 
 	/** Start answering as a new publisher instance, hidden until published. */
@@ -2359,20 +2359,12 @@ export class Request {
 		return makePrepared(this, answer, announcer, epoch);
 	}
 
-	/**
-	 * Resolve a session-forwarded request with its peer's routed broadcast.
-	 *
-	 * The caller keeps producing into `broadcast`; repeat requests for the path share
-	 * it for as long as it stays live.
-	 *
-	 * A JS app does not proxy: a broadcast a session delivered would go out labeled with
-	 * this origin's hop. To serve upstream content, copy its tracks into a prepared answer
-	 * and publish it.
-	 *
-	 * @throws Error when handed a broadcast a session delivered. The request stays open.
-	 * @internal
-	 */
-	accept(source: broadcast.Producer | broadcast.Consumer): void {
+	// Resolve a session-forwarded request with its peer's routed broadcast, through
+	// `hooks.acceptRequest`. The caller keeps producing into `source`; repeat requests for
+	// the path share it for as long as it stays live. Throws when handed a broadcast a
+	// session delivered to an originated claim, leaving the request open: it would go out
+	// labeled with this origin's hop.
+	#accept(source: broadcast.Producer | broadcast.Consumer): void {
 		if (this.#done) {
 			// A withdrawn request takes no answer. Only the handed-off consumer is ours;
 			// the application still owns its producer and any other consumers.
