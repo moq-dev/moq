@@ -235,7 +235,7 @@ export class Reload {
 	#draining: Draining | undefined;
 
 	// Sessions this loop ended that are still draining, each until its close settles.
-	#ending = new Set<Promise<void>>();
+	#ending = new Map<Established, Promise<void>>();
 
 	// The current run of migrations. A redirect back to an endpoint that already sent us away is
 	// a loop, however healthy each session looked. Reset when a session ends without a GOAWAY,
@@ -312,6 +312,12 @@ export class Reload {
 			this.#signals.event(win, "unload", () => this.#suspended.set(true));
 			this.#signals.event(doc, "visibilitychange", () => {
 				if (!doc.hidden) this.#suspended.set(false);
+			});
+			// Nothing would run to finish a drain begun before the page went away either.
+			this.#signals.run((effect) => {
+				if (!effect.get(this.#suspended)) return;
+				for (const connection of this.#ending.keys()) connection.abort();
+				this.#ending.clear();
 			});
 		}
 
@@ -581,8 +587,8 @@ export class Reload {
 		}
 		// A served live track never finishes, so the deadline aborting the rest is the usual end.
 		const ending = connection.close().catch(() => {});
-		this.#ending.add(ending);
-		void ending.then(() => this.#ending.delete(ending));
+		this.#ending.set(connection, ending);
+		void ending.then(() => this.#ending.delete(connection));
 	}
 
 	/** Stop serving from a drained predecessor, ending it if still open. */
@@ -730,7 +736,7 @@ export class Reload {
 		// still draining no longer need their grants to finish.
 		const err = abort ?? new Error("connection closed");
 		if (this.#ending.size === 0) this.auth.abort(err);
-		else void Promise.all(this.#ending).then(() => this.auth.abort(err));
+		else void Promise.all(this.#ending.values()).then(() => this.auth.abort(err));
 		if (this.#closed.peek() === undefined) this.#closed.set(abort ?? null);
 	}
 }
