@@ -12,8 +12,8 @@ import { Milli } from "@moq/clock";
  * a caller computing a rate wants to choose its own sampling instants. Snapshot twice
  * and divide by the interval you measured.
  *
- * Every field is optional. The qmux/WebSocket fallback implements no `getStats()` at
- * all and reports nothing; see {@link Probe} for what the peer measures.
+ * Every field is optional. The qmux/WebSocket fallback reports nothing; see
+ * {@link Probe} for what the peer measures.
  *
  * The field names match Rust's `moq_net::session::Stats` but the counters keep each
  * stack's own semantics rather than being normalized. Notably W3C excludes
@@ -96,7 +96,7 @@ export interface TransportStats {
 
 /**
  * Snapshot `quic` via `getStats()`, or an empty snapshot when the transport doesn't
- * implement it (the qmux/WebSocket fallback, older browsers) or the call fails.
+ * implement it (older browsers) or the call fails.
  *
  * @internal
  */

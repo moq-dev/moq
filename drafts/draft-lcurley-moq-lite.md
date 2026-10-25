@@ -211,15 +211,15 @@ The resolved start is therefore always either exactly the requested Position or 
 
 The asymmetry with Groups is deliberate.
 A Group is the unit of decodability: dropping leading *Groups* leaves a stream the application can still decode, whereas dropping leading *Frames* often does not, whether because the Group opens with a keyframe the rest depends on or because its compression state lives in the frames that went missing.
-Only the subscriber knows whether a partial Group is any use to it, so only the subscriber may ask for one.
+A subscription therefore starts at a Group's first frame, and a subscriber asks for a partial Group only to finish one whose earlier frames it already holds, from this publisher or another.
 
 Frame indices are only meaningful relative to a Group the subscriber has already begun receiving, so:
 
 - A `Frame Start` qualifies the group `Group Start` names, group 0 included.
-  A subscriber that has seen no such group MUST send `Frame Start` = 0, since it cannot number the frames of a group it has not received.
+  A subscriber MUST send `Frame Start` = 0 unless it already holds every frame of that group below it.
 - A `Frame End` is meaningless without a `Group End`; an unbounded subscription (`Group End` = 0) MUST send `Frame End` = 0.
 
-A publisher MUST close the session with a PROTOCOL_VIOLATION if either rule is violated.
+A publisher MUST close the session with a PROTOCOL_VIOLATION on a non-zero `Frame End` without a `Group End`.
 
 # Flow
 This section outlines the flow of messages within a moq-lite session.
@@ -470,6 +470,7 @@ A receiver MUST discard an announcement whose reconstructed path contains its ow
 This is the only loop defense moq-lite requires, and it catches loops of any length.
 A conforming sender never sends one (see below), so a receiver MAY instead close the session with a protocol violation; discarding is what keeps a mesh working when one member does not conform.
 A Hop ID of 0 means unknown and never matches anything; withholding an ID trades loop detection for privacy.
+A Hop ID spans 64 bits; a relay sends 0 in place of one that a peer's [Variable-Length Integer](#varint) cannot carry.
 A receiver MAY assign an identity of its own to a peer that declared 0, as local selection state for filtering that session; it MUST NOT forward that identity as a Hop ID.
 
 A publisher MUST NOT advertise a path whose entries contain the Hop ID the subscriber declared in its SETUP (see [Hop Parameter](#hop-parameter)).
@@ -1270,7 +1271,7 @@ A non-zero value is the absolute group sequence + 1.
 The index of the first frame to deliver within the `Group Start` group (see [Positions](#positions)).
 A value of 0 means from the start of that group (default), so the group is delivered whole.
 Frames before this index are not delivered, even when delivery begins at that exact group; a start resolved at a later group is always delivered from frame 0.
-A subscriber that has received no group MUST send 0, since it cannot number the frames of a group it has not seen.
+A subscriber MUST send 0 unless it already holds every frame below this index, from this publisher or another, since a Group is the unit of decodability (see [Positions](#positions)).
 
 **Frame End**:
 The last frame to deliver (inclusive) within the end group (see [Positions](#positions)).
@@ -1799,6 +1800,8 @@ The `Message Length` describes the payload size on the wire.
 
 - Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens. Earlier versions with a Setup Stream ignore it as an unknown parameter.
 
+- Hop IDs span 64 bits; a relay sends 0 in place of one an earlier version's varint cannot carry.
+
 - Allow a negotiated extension to preserve timestamps with explicitly unchecked provenance.
 
 - Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
@@ -1808,6 +1811,7 @@ The `Message Length` describes the payload size on the wire.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none. Earlier versions receive the Track inflated.
+- A subscription starts at a Group's first frame: SUBSCRIBE carries a non-zero `Frame Start` only when the subscriber holds every frame below it, compressed Track or not.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 

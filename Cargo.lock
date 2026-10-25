@@ -639,27 +639,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "aws-lc-fips-sys"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03367707e92796b190a4207d4d39b0a4271d574503d2969c2b0cfbf5c87658ee"
-dependencies = [
- "bindgen 0.72.1",
- "cc",
- "cmake",
- "dunce",
- "fs_extra",
- "pkg-config",
- "regex",
-]
-
-[[package]]
 name = "aws-lc-rs"
 version = "1.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
 dependencies = [
- "aws-lc-fips-sys",
  "aws-lc-sys",
  "untrusted 0.7.1",
  "zeroize",
@@ -861,8 +845,6 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
- "log",
- "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
@@ -4846,6 +4828,17 @@ name = "moq-clock-macros"
 version = "0.1.0"
 
 [[package]]
+name = "moq-congestion"
+version = "0.1.0"
+dependencies = [
+ "cpu-time",
+ "moq-clock",
+ "rand 0.10.3",
+ "rand_pcg",
+ "stats_alloc",
+]
+
+[[package]]
 name = "moq-e2ee"
 version = "0.0.11"
 dependencies = [
@@ -4932,7 +4925,6 @@ dependencies = [
 name = "moq-hls"
 version = "0.5.11"
 dependencies = [
- "async-trait",
  "axum",
  "bytes",
  "futures",
@@ -4940,7 +4932,6 @@ dependencies = [
  "humantime",
  "kio 0.6.2",
  "m3u8-rs",
- "moq-archive",
  "moq-clock",
  "moq-json",
  "moq-mux",
@@ -5129,6 +5120,7 @@ dependencies = [
  "indexmap 2.14.2",
  "lru-slab",
  "moq-clock",
+ "moq-congestion",
  "moq-quic",
  "proptest",
  "qlog",
@@ -5139,9 +5131,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "rustls",
  "rustls-pki-types",
- "rustls-platform-verifier",
  "slab",
- "stats_alloc",
  "thiserror 2.0.21",
  "tinyvec",
  "tracing",
@@ -5175,11 +5165,11 @@ dependencies = [
  "http-body",
  "http-cache-reqwest",
  "humantime",
- "humantime-serde",
  "hyper-util",
  "libc",
  "moq-auth 0.2.1",
  "moq-clock",
+ "moq-congestion",
  "moq-net",
  "moq-quic",
  "moq-shaper",
@@ -5404,6 +5394,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "moq-clock",
+ "moq-congestion",
  "moq-ice",
  "moq-net",
  "moq-quic",
@@ -5429,7 +5420,6 @@ dependencies = [
  "stun-types",
  "subtle",
  "tempfile",
- "test-env",
  "thiserror 2.0.21",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
@@ -5482,6 +5472,7 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "moq-clock",
+ "moq-congestion",
  "moq-net",
  "moq-quic",
  "moq-sock",

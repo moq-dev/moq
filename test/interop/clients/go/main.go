@@ -44,6 +44,9 @@ const readChunk = 64 * 1024
 // media.TrackConsumer max delay: how much reordering the jitter buffer tolerates.
 const maxDelay = time.Second
 
+// finishLinger is how long a finished publisher stays up for the late readers.
+const finishLinger = 10 * time.Second
+
 // durationPtr is d as the optional duration the wrapper's options take.
 func durationPtr(d time.Duration) *time.Duration { return &d }
 
@@ -218,23 +221,19 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if finishAck == "" {
 		return nil
 	}
-	// Finish also finalizes the catalog. ACK never controls the real linger.
-	started := time.Now()
-	finished, err := producer.Finish()
-	if err != nil {
+	// Finishing the catalog ends the content; the broadcast stays up for the late readers
+	// until Close takes it offline. ACK never controls the linger.
+	if err := catalog.Finish(); err != nil {
 		return err
 	}
-	defer finished.Close()
-	linger := finished.Linger()
-	if linger <= 0 {
-		return errors.New("finished media has no linger")
+	fmt.Printf("finish ready linger_us=%d\n", finishLinger.Microseconds())
+	select {
+	case <-time.After(finishLinger):
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	fmt.Printf("finish ready linger_us=%d\n", linger.Microseconds())
-	if err := finished.Wait(ctx); err != nil {
+	if err := producer.Close(); err != nil {
 		return err
-	}
-	if time.Since(started) < linger {
-		return errors.New("finish wait ended before its linger")
 	}
 	health, err := client.CreateBroadcast(broadcast + ".health")
 	if err != nil {

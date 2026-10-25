@@ -54,5 +54,4 @@ side by side and fix any name or signature that still differs, and check
 
 ## Related
 
-- [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - audit fix ranked ahead
 - [poll_acked](/quest/m2/quic-ack-hook.md) - the m2 consumer that keeps `send::Stream::acked` in the API

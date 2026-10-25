@@ -16,13 +16,17 @@ import { fileURLToPath } from "node:url";
 export const PROFILE = "moq-e2ee-00";
 export const SALT = utf8("moq-e2ee-00");
 export const PATH_LABEL = utf8("moq-e2ee-00 path");
-export const NAME_LABEL = utf8("moq-e2ee-00 name");
+export const NAME_MAC_LABEL = utf8("moq-e2ee-00 name-mac");
+export const NAME_KEY_LABEL = utf8("moq-e2ee-00 name-key");
 export const KEY_LABEL = utf8("moq-e2ee-00 key");
 export const DOMAIN_GROUP = 0x00;
 export const DOMAIN_DATAGRAM = 0x01;
 export const TAG_LEN = 16;
 export const KEY_LEN = 16;
-export const NAME_LEN = 16;
+export const PATH_LEN = 16;
+export const NAME_MAC_LEN = 32;
+export const NAME_NONCE_LEN = 12;
+export const NAME_BLOCK = 16;
 export const HASH_LEN = 32;
 export const MAX_U53 = Number.MAX_SAFE_INTEGER;
 export const MAX_U32 = 2 ** 32 - 1;
@@ -141,10 +145,46 @@ function checkU53(value: bigint, label: string): void {
 	}
 }
 
-export function checkPhysicalName(name: string): void {
-	if (name.length !== 22 || !/^[A-Za-z0-9_-]{22}$/.test(name)) {
+export function unbase64url(text: string): Uint8Array<ArrayBuffer> {
+	if (!/^[A-Za-z0-9_-]*$/.test(text)) throw new ProfileError("identity", `not base64url: ${text}`);
+	let bytes: Uint8Array<ArrayBuffer>;
+	try {
+		bytes = Uint8Array.from(atob(text.replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0));
+	} catch {
+		throw new ProfileError("identity", `not base64url: ${text}`);
+	}
+	// Refuses nonzero trailing bits, so each name has one spelling.
+	if (base64url(bytes) !== text) throw new ProfileError("identity", `noncanonical base64url: ${text}`);
+	return bytes;
+}
+
+/** Decode a physical name: a 12-byte nonce, a whole number of padded blocks, and the tag. */
+export function checkPhysicalName(name: string): Uint8Array<ArrayBuffer> {
+	const material = unbase64url(name);
+	const padded = material.length - NAME_NONCE_LEN - TAG_LEN;
+	if (padded < NAME_BLOCK || padded % NAME_BLOCK !== 0) {
 		throw new ProfileError("identity", `malformed physical name: ${name}`);
 	}
+	return material;
+}
+
+/** `semantic || 0x80 || 0x00...`, the fewest zeros that reach a multiple of 16 bytes. */
+export function pad(semanticName: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+	if (semanticName.length > 0xffff) throw new ProfileError("identity", "semantic name exceeds 65535 bytes");
+	const out = new Uint8Array((Math.floor(semanticName.length / NAME_BLOCK) + 1) * NAME_BLOCK);
+	out.set(semanticName);
+	out[semanticName.length] = 0x80;
+	return out;
+}
+
+/** Strip canonical padding, refusing any other. */
+export function unpad(padded: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+	let end = padded.length - 1;
+	while (end >= 0 && padded[end] === 0) end--;
+	if (end < 0 || padded[end] !== 0x80 || padded.length - end > NAME_BLOCK) {
+		throw new ProfileError("authentication", "noncanonical name padding");
+	}
+	return padded.slice(0, end);
 }
 
 export function checkIdentity(group: bigint, frame: number): void {
@@ -187,14 +227,17 @@ async function hkdfExpand(
 	return out.slice(0, length);
 }
 
-export function nameInfo(generation: Generation, semanticName: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-	return concat(
-		NAME_LABEL,
-		encodeBytes(generation.context),
-		encodeBytes(generation.epoch),
-		encodeU64(generation.kid),
-		encodeBytes(semanticName),
-	);
+/** `bytes(context) || bytes(epoch) || u64(kid)`, bound by every epoch-scoped derivation. */
+export function scope(generation: Generation): Uint8Array<ArrayBuffer> {
+	return concat(encodeBytes(generation.context), encodeBytes(generation.epoch), encodeU64(generation.kid));
+}
+
+export function nameMacInfo(generation: Generation): Uint8Array<ArrayBuffer> {
+	return concat(NAME_MAC_LABEL, scope(generation));
+}
+
+export function nameKeyInfo(generation: Generation): Uint8Array<ArrayBuffer> {
+	return concat(NAME_KEY_LABEL, scope(generation));
 }
 
 /** Canonical path bytes for a credential and semantic name, excluding the epoch. */
@@ -202,32 +245,100 @@ export function pathInfo(credential: Credential, semanticName: Uint8Array<ArrayB
 	return concat(PATH_LABEL, encodeBytes(credential.context), encodeU64(credential.kid), encodeBytes(semanticName));
 }
 
-export function keyInfo(generation: Generation, physicalName: string, domain: Domain): Uint8Array<ArrayBuffer> {
-	return concat(
-		KEY_LABEL,
-		encodeBytes(generation.context),
-		encodeBytes(generation.epoch),
-		encodeU64(generation.kid),
-		encodeBytes(utf8(physicalName)),
-		new Uint8Array([domain]),
-	);
+export function keyInfo(
+	generation: Generation,
+	semanticName: Uint8Array<ArrayBuffer>,
+	domain: Domain,
+): Uint8Array<ArrayBuffer> {
+	return concat(KEY_LABEL, scope(generation), encodeBytes(semanticName), new Uint8Array([domain]));
+}
+
+export type NameKeys = {
+	prk: Uint8Array<ArrayBuffer>;
+	macInfo: Uint8Array<ArrayBuffer>;
+	keyInfo: Uint8Array<ArrayBuffer>;
+	mac: Uint8Array<ArrayBuffer>;
+	key: Uint8Array<ArrayBuffer>;
+};
+
+export async function deriveNameKeys(generation: Generation, prk?: Uint8Array<ArrayBuffer>): Promise<NameKeys> {
+	checkGeneration(generation);
+	const extracted = prk ?? (await extract(generation));
+	const macInfo = nameMacInfo(generation);
+	const keyInfo = nameKeyInfo(generation);
+	return {
+		prk: extracted,
+		macInfo,
+		keyInfo,
+		mac: await hkdfExpand(extracted, macInfo, NAME_MAC_LEN),
+		key: await hkdfExpand(extracted, keyInfo, KEY_LEN),
+	};
+}
+
+async function nameNonce(keys: NameKeys, padded: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+	return (await hmacSha256(keys.mac, padded)).slice(0, NAME_NONCE_LEN);
+}
+
+async function aesGcm(
+	mode: "encrypt" | "decrypt",
+	key: Uint8Array<ArrayBuffer>,
+	iv: Uint8Array<ArrayBuffer>,
+	data: Uint8Array<ArrayBuffer>,
+): Promise<Uint8Array<ArrayBuffer>> {
+	const cryptoKey = await crypto.subtle.importKey("raw", key, "AES-GCM", false, [mode]);
+	const params = { name: "AES-GCM", iv, tagLength: TAG_LEN * 8, additionalData: new Uint8Array() };
+	return new Uint8Array(await crypto.subtle[mode](params, cryptoKey, data));
+}
+
+/** Seal `padded` under `nonce`; only {@link deriveName} and forged vectors choose their own. */
+export async function sealName(
+	keys: NameKeys,
+	padded: Uint8Array<ArrayBuffer>,
+	nonce?: Uint8Array<ArrayBuffer>,
+): Promise<string> {
+	const iv = nonce ?? (await nameNonce(keys, padded));
+	return base64url(concat(iv, await aesGcm("encrypt", keys.key, iv, padded)));
 }
 
 export async function deriveName(
-	credential: Generation,
+	generation: Generation,
 	semanticName: Uint8Array<ArrayBuffer>,
 	prk?: Uint8Array<ArrayBuffer>,
-): Promise<{
-	prk: Uint8Array<ArrayBuffer>;
-	info: Uint8Array<ArrayBuffer>;
-	material: Uint8Array<ArrayBuffer>;
-	physicalName: string;
-}> {
-	checkGeneration(credential);
-	const extracted = prk ?? (await extract(credential));
-	const info = nameInfo(credential, semanticName);
-	const material = await hkdfExpand(extracted, info, NAME_LEN);
-	return { prk: extracted, info, material, physicalName: base64url(material) };
+): Promise<
+	NameKeys & {
+		padded: Uint8Array<ArrayBuffer>;
+		nonce: Uint8Array<ArrayBuffer>;
+		physicalName: string;
+	}
+> {
+	const keys = await deriveNameKeys(generation, prk);
+	const padded = pad(semanticName);
+	const nonce = await nameNonce(keys, padded);
+	return { ...keys, padded, nonce, physicalName: await sealName(keys, padded, nonce) };
+}
+
+/** Recover the semantic name of a physical name issued under `generation`. */
+export async function openName(generation: Generation, physicalName: string): Promise<Uint8Array<ArrayBuffer>> {
+	const material = checkPhysicalName(physicalName);
+	const keys = await deriveNameKeys(generation);
+	const nonce = material.slice(0, NAME_NONCE_LEN);
+	let padded: Uint8Array<ArrayBuffer>;
+	try {
+		padded = await aesGcm("decrypt", keys.key, nonce, material.slice(NAME_NONCE_LEN));
+	} catch {
+		throw new ProfileError("authentication", "physical name does not open");
+	}
+	// One physical name per semantic name, so two tracks never share its payload keys.
+	if (hex(await nameNonce(keys, padded)) !== hex(nonce)) {
+		throw new ProfileError("authentication", "physical name nonce mismatch");
+	}
+	const semantic = unpad(padded);
+	try {
+		new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(semantic);
+	} catch {
+		throw new ProfileError("authentication", "semantic name is not UTF-8");
+	}
+	return semantic;
 }
 
 /** Derive the opaque broadcast prefix for a semantic name, independent of epoch. */
@@ -244,23 +355,22 @@ export async function derivePath(
 	checkCredential(credential);
 	const extracted = prk ?? (await extract(credential));
 	const info = pathInfo(credential, semanticName);
-	const material = await hkdfExpand(extracted, info, NAME_LEN);
+	const material = await hkdfExpand(extracted, info, PATH_LEN);
 	return { prk: extracted, info, material, opaque: base64url(material) };
 }
 
 export async function deriveKey(
 	credential: Generation,
-	physicalName: string,
+	semanticName: Uint8Array<ArrayBuffer>,
 	domain: Domain,
 	prk?: Uint8Array<ArrayBuffer>,
 ): Promise<{ prk: Uint8Array<ArrayBuffer>; info: Uint8Array<ArrayBuffer>; key: Uint8Array<ArrayBuffer> }> {
 	checkGeneration(credential);
-	checkPhysicalName(physicalName);
 	if (domain !== DOMAIN_GROUP && domain !== DOMAIN_DATAGRAM) {
 		throw new ProfileError("identity", `unknown domain ${domain}`);
 	}
 	const extracted = prk ?? (await extract(credential));
-	const info = keyInfo(credential, physicalName, domain);
+	const info = keyInfo(credential, semanticName, domain);
 	const key = await hkdfExpand(extracted, info, KEY_LEN);
 	return { prk: extracted, info, key };
 }
@@ -349,20 +459,37 @@ async function pathVector(id: string, credential: Credential, semanticName: stri
 }
 
 async function derivationVector(id: string, generation: Generation, semanticName: string, domain: Domain) {
-	const named = await deriveName(generation, utf8(semanticName));
-	const keyed = await deriveKey(generation, named.physicalName, domain, named.prk);
+	const semantic = utf8(semanticName);
+	const named = await deriveName(generation, semantic);
+	const keyed = await deriveKey(generation, semantic, domain, named.prk);
 	return {
 		id,
 		...generationJson(generation),
 		semantic_name: semanticName,
-		semantic_name_bytes: hex(utf8(semanticName)),
+		semantic_name_bytes: hex(semantic),
 		domain,
 		prk: hex(named.prk),
-		name_info: hex(named.info),
-		name_material: hex(named.material),
+		name_mac_info: hex(named.macInfo),
+		name_mac: hex(named.mac),
+		name_key_info: hex(named.keyInfo),
+		name_key: hex(named.key),
+		padded: hex(named.padded),
+		name_nonce: hex(named.nonce),
 		physical_name: named.physicalName,
 		key_info: hex(keyed.info),
 		key: hex(keyed.key),
+	};
+}
+
+async function namingVector(id: string, generation: Generation, semantic: Uint8Array<ArrayBuffer>) {
+	const named = await deriveName(generation, semantic);
+	return {
+		id,
+		epoch: generationJson(generation).epoch,
+		semantic_name: new TextDecoder().decode(semantic),
+		semantic_name_bytes: hex(semantic),
+		padded: hex(named.padded),
+		physical_name: named.physicalName,
 	};
 }
 
@@ -377,7 +504,7 @@ async function payloadVector(
 	payloadLimit: number,
 ) {
 	const named = await deriveName(generation, utf8(semanticName));
-	const keyed = await deriveKey(generation, named.physicalName, domain, named.prk);
+	const keyed = await deriveKey(generation, utf8(semanticName), domain, named.prk);
 	const iv = nonce(group, frame);
 	const payload = await protect(keyed.key, group, frame, plaintext, payloadLimit);
 	return {
@@ -396,6 +523,11 @@ async function payloadVector(
 	};
 }
 
+/** `length` bytes of `0123456789abcdef` repeated, to land on each side of a padding boundary. */
+function sized(length: number): Uint8Array<ArrayBuffer> {
+	return utf8("0123456789abcdef".repeat(Math.ceil(length / 16)).slice(0, length));
+}
+
 async function generate() {
 	const base = gen();
 	const video = await deriveName(base, utf8("video"));
@@ -408,13 +540,22 @@ async function generate() {
 		await derivationVector("other-epoch", gen(OTHER_EPOCH), "video", DOMAIN_GROUP),
 	];
 
-	const naming = derivation.map((row) => ({
-		id: row.id,
-		epoch: row.epoch,
-		semantic_name: row.semantic_name,
-		physical_name: row.physical_name,
-		name_material: row.name_material,
-	}));
+	const naming = [
+		...derivation.map((row) => ({
+			id: row.id,
+			epoch: row.epoch,
+			semantic_name: row.semantic_name,
+			semantic_name_bytes: row.semantic_name_bytes,
+			padded: row.padded,
+			physical_name: row.physical_name,
+		})),
+		await namingVector("length-0", base, new Uint8Array()),
+		// 15 and 31 bytes fill a block with the marker; 16 and 32 bytes spill into another.
+		await namingVector("length-15", base, sized(15)),
+		await namingVector("length-16", base, sized(16)),
+		await namingVector("length-31", base, sized(31)),
+		await namingVector("length-32", base, sized(32)),
+	];
 
 	const groups = [
 		await payloadVector("group-0", base, "video", DOMAIN_GROUP, 42n, 0, utf8("frame-zero"), MAX_GROUPED_PAYLOAD),
@@ -438,13 +579,13 @@ async function generate() {
 		await payloadVector("datagram-0", base, "audio", DOMAIN_DATAGRAM, 99n, 0, utf8("opus"), MAX_DATAGRAM_PAYLOAD),
 	];
 
-	const videoKey = await deriveKey(base, video.physicalName, DOMAIN_GROUP, video.prk);
+	const videoKey = await deriveKey(base, utf8("video"), DOMAIN_GROUP, video.prk);
 	const good = groups[0];
 	const flipped = unhex(String(good.payload));
 	flipped[0] ^= 0x01;
 
 	const negative: NegativeVector[] = [];
-	for (const [id, generation, name, domain, group, frame] of [
+	for (const [id, generation, semantic, domain, group, frame] of [
 		["tag-failure", base, "video", DOMAIN_GROUP, 42, 0],
 		["relocation-context", { ...base, context: utf8("other-broadcast") }, "video", DOMAIN_GROUP, 42, 0],
 		["relocation-epoch", gen(OTHER_EPOCH), "video", DOMAIN_GROUP, 42, 0],
@@ -454,15 +595,13 @@ async function generate() {
 		["relocation-group", base, "video", DOMAIN_GROUP, 43, 0],
 		["relocation-frame", base, "video", DOMAIN_GROUP, 42, 1],
 	] as const) {
-		// Hold the physical name fixed while relocating each generation field.
-		const named = await deriveName(base, utf8(name));
-		const keyed = await deriveKey(generation, named.physicalName, domain);
+		const keyed = await deriveKey(generation, utf8(semantic), domain);
 		negative.push({
 			id,
 			operation: "open",
 			error: "authentication",
 			generation: generationJson(generation),
-			physical_name: named.physicalName,
+			semantic_name: semantic,
 			domain,
 			group,
 			frame,
@@ -488,24 +627,40 @@ async function generate() {
 		["kid-exhausted", { ...base, kid: BigInt(MAX_U53) + 1n }, "identity"],
 		["epoch-empty", { ...base, epoch: new Uint8Array() }, "identity"],
 		["epoch-slash", { ...base, epoch: utf8("2026/09") }, "identity"],
-		["epoch-bom", { ...base, epoch: utf8(`\ufeff${EPOCH}`) }, "identity"],
+		["epoch-bom", { ...base, epoch: utf8(`﻿${EPOCH}`) }, "identity"],
 	] as const) {
 		negative.push({ id, operation: "generation", error, generation: generationJson(generation) });
 	}
-	for (const [id, physicalName] of [
-		["physical-name-short", "abc"],
-		["physical-name-long", "a".repeat(23)],
-		["physical-name-charset", "!!!!!!!!!!!!!!!!!!!!!!"],
-		["physical-name-padded", "abcdefghijklmnopqrstu="],
+
+	// Physical names a relay could request: malformed ones fail to parse, the rest fail to open.
+	const forged = checkPhysicalName(video.physicalName);
+	forged[NAME_NONCE_LEN] ^= 0x01;
+	const otherNonce = video.nonce.slice();
+	otherNonce[0] ^= 0x01;
+	const overlong = new Uint8Array(2 * NAME_BLOCK);
+	overlong.set(pad(utf8("video")));
+	const unmarked = new Uint8Array(NAME_BLOCK);
+	unmarked.set(utf8("video"));
+	// A 44-byte name leaves two zero bits in its last character.
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+	const last = alphabet.indexOf(video.physicalName.slice(-1));
+	const trailing = video.physicalName.slice(0, -1) + alphabet[last | 0x01];
+	for (const [id, physicalName, error] of [
+		["physical-name-short", "abc", "identity"],
+		["physical-name-charset", "!".repeat(video.physicalName.length), "identity"],
+		["physical-name-padded", `${video.physicalName}=`, "identity"],
+		["physical-name-trailing-bits", trailing, "identity"],
+		["physical-name-no-block", base64url(new Uint8Array(NAME_NONCE_LEN + TAG_LEN)), "identity"],
+		["physical-name-unaligned", base64url(new Uint8Array(NAME_NONCE_LEN + NAME_BLOCK + 1 + TAG_LEN)), "identity"],
+		["name-forged", base64url(forged), "authentication"],
+		["name-other-epoch", (await deriveName(gen(OTHER_EPOCH), utf8("video"))).physicalName, "authentication"],
+		// Sealed under the name key but not its HMAC nonce: a second physical name for "video".
+		["name-nonce-mismatch", await sealName(video, video.padded, otherNonce), "authentication"],
+		["name-padding-overlong", await sealName(video, overlong), "authentication"],
+		["name-padding-unmarked", await sealName(video, unmarked), "authentication"],
+		["name-not-utf8", await sealName(video, pad(new Uint8Array([0xff]))), "authentication"],
 	] as const) {
-		negative.push({
-			id,
-			operation: "key",
-			error: "identity",
-			generation: generationJson(base),
-			physical_name: physicalName,
-			domain: DOMAIN_GROUP,
-		});
+		negative.push({ id, operation: "name", error, generation: generationJson(base), physical_name: physicalName });
 	}
 	for (const field of ["context", "epoch", "semantic_name"] as const) {
 		negative.push({
@@ -541,7 +696,7 @@ async function generate() {
 		operation: "open",
 		error: "oversize",
 		generation: generationJson(base),
-		physical_name: video.physicalName,
+		semantic_name: "video",
 		domain: DOMAIN_GROUP,
 		group: 0,
 		frame: 0,
@@ -555,13 +710,17 @@ async function generate() {
 		constants: {
 			salt: hex(SALT),
 			path_label: hex(PATH_LABEL),
-			name_label: hex(NAME_LABEL),
+			name_mac_label: hex(NAME_MAC_LABEL),
+			name_key_label: hex(NAME_KEY_LABEL),
 			key_label: hex(KEY_LABEL),
 			domain_group: DOMAIN_GROUP,
 			domain_datagram: DOMAIN_DATAGRAM,
 			tag_len: TAG_LEN,
 			key_len: KEY_LEN,
-			name_len: NAME_LEN,
+			path_len: PATH_LEN,
+			name_mac_len: NAME_MAC_LEN,
+			name_nonce_len: NAME_NONCE_LEN,
+			name_block: NAME_BLOCK,
 			max_u53: MAX_U53,
 			max_u32: MAX_U32,
 			max_invocations: MAX_INVOCATIONS,
@@ -587,7 +746,7 @@ type NegativeVector = { id: string; error: string } & (
 	| {
 			operation: "open";
 			generation: ReturnType<typeof generationJson>;
-			physical_name: string;
+			semantic_name: string;
 			domain: Domain;
 			group: number;
 			frame: number;
@@ -603,12 +762,7 @@ type NegativeVector = { id: string; error: string } & (
 			plaintext_len: number;
 			payload_limit: number;
 	  }
-	| {
-			operation: "key";
-			generation: ReturnType<typeof generationJson>;
-			physical_name: string;
-			domain: Domain;
-	  }
+	| { operation: "name"; generation: ReturnType<typeof generationJson>; physical_name: string }
 	| { operation: "identity"; group: string; frame: number | "NaN" | "Infinity" | "-Infinity" }
 	| { operation: "generation"; generation: ReturnType<typeof generationJson> }
 	| { operation: "bytes"; field: "context" | "epoch" | "semantic_name"; length: number }
@@ -645,27 +799,34 @@ async function verify(doc: Awaited<ReturnType<typeof generate>>): Promise<void> 
 
 	for (const row of doc.derivation) {
 		const generation = parseGeneration(row);
-		const named = await deriveName(generation, utf8(String(row.semantic_name)));
-		const keyed = await deriveKey(generation, named.physicalName, Number(row.domain) as Domain, named.prk);
-		assertEqual("prk", hex(named.prk), String(row.prk));
-		assertEqual("name_info", hex(named.info), String(row.name_info));
-		assertEqual("name_material", hex(named.material), String(row.name_material));
-		assertEqual("physical_name", named.physicalName, String(row.physical_name));
-		assertEqual("key_info", hex(keyed.info), String(row.key_info));
-		assertEqual("key", hex(keyed.key), String(row.key));
+		const semantic = unhex(row.semantic_name_bytes);
+		const named = await deriveName(generation, semantic);
+		const keyed = await deriveKey(generation, semantic, Number(row.domain) as Domain, named.prk);
+		assertEqual("prk", hex(named.prk), row.prk);
+		assertEqual("name_mac_info", hex(named.macInfo), row.name_mac_info);
+		assertEqual("name_mac", hex(named.mac), row.name_mac);
+		assertEqual("name_key_info", hex(named.keyInfo), row.name_key_info);
+		assertEqual("name_key", hex(named.key), row.name_key);
+		assertEqual("padded", hex(named.padded), row.padded);
+		assertEqual("name_nonce", hex(named.nonce), row.name_nonce);
+		assertEqual("physical_name", named.physicalName, row.physical_name);
+		assertEqual("key_info", hex(keyed.info), row.key_info);
+		assertEqual("key", hex(keyed.key), row.key);
 	}
 
 	for (const row of doc.naming) {
 		const generation = { ...parseGeneration(doc.generation), epoch: utf8(row.epoch) };
-		const named = await deriveName(generation, utf8(row.semantic_name));
+		const named = await deriveName(generation, unhex(row.semantic_name_bytes));
+		assertEqual(`${row.id} padded`, hex(named.padded), row.padded);
 		assertEqual(`${row.id} naming`, named.physicalName, row.physical_name);
-		assertEqual(`${row.id} name material`, hex(named.material), row.name_material);
+		assertEqual(`${row.id} recovery`, hex(await openName(generation, row.physical_name)), row.semantic_name_bytes);
 	}
 
 	for (const row of [...doc.groups, ...doc.datagrams]) {
 		const generation = parseGeneration(row);
-		const named = await deriveName(generation, utf8(String(row.semantic_name)));
-		const keyed = await deriveKey(generation, named.physicalName, Number(row.domain) as Domain, named.prk);
+		const semantic = utf8(String(row.semantic_name));
+		const named = await deriveName(generation, semantic);
+		const keyed = await deriveKey(generation, semantic, Number(row.domain) as Domain, named.prk);
 		assertEqual(`${row.id} name`, named.physicalName, row.physical_name);
 		assertEqual(`${row.id} key`, hex(keyed.key), row.key);
 		assertEqual(`${row.id} nonce`, hex(nonce(BigInt(row.group), row.frame)), row.nonce);
@@ -700,7 +861,7 @@ async function verify(doc: Awaited<ReturnType<typeof generate>>): Promise<void> 
 		await expectError(row.error, async () => {
 			switch (row.operation) {
 				case "open": {
-					const keyed = await deriveKey(parseGeneration(row.generation), row.physical_name, row.domain);
+					const keyed = await deriveKey(parseGeneration(row.generation), utf8(row.semantic_name), row.domain);
 					assertEqual(`${row.id} key`, hex(keyed.key), row.key);
 					await unprotect(keyed.key, BigInt(row.group), row.frame, unhex(row.payload), row.payload_limit);
 					break;
@@ -714,8 +875,8 @@ async function verify(doc: Awaited<ReturnType<typeof generate>>): Promise<void> 
 						row.payload_limit,
 					);
 					break;
-				case "key":
-					await deriveKey(parseGeneration(row.generation), row.physical_name, row.domain);
+				case "name":
+					await openName(parseGeneration(row.generation), row.physical_name);
 					break;
 				case "identity":
 					nonce(BigInt(row.group), Number(row.frame));

@@ -181,8 +181,9 @@ pub struct SubscribeArgs {
 	/// this far behind the source (`--delay`).
 	pub max_delay: Duration,
 
-	/// How long to wait for the broadcast to come back after it ends (TS only).
-	pub linger: Duration,
+	/// How long to wait for the broadcast, or with `stitch` a replacement, to come back after
+	/// it ends (TS only).
+	pub follow: Duration,
 
 	/// Follow another publisher instance replacing the broadcast, as a program switch (TS only).
 	pub stitch: bool,
@@ -421,7 +422,7 @@ impl Subscribe {
 		// written as it comes. The path's announcements carry it across the broadcast's
 		// returns, as they drive a player.
 		let mut ts = moq_mux::container::ts::Follower::new(ts)?
-			.with_linger(self.args.linger)
+			.with_follow(self.args.follow)
 			.with_stitch(self.args.stitch);
 		// Reports a track that stops reaching the output while the rest keeps flowing,
 		// the way `publish` reports one that stops arriving.
