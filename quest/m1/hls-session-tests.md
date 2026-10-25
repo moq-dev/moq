@@ -51,6 +51,16 @@ Decided 2026-10-25 (maintainer interview):
 - Each scenario must fail on a tree that reintroduces the bug it guards. For
   the disconnect race, revert [#6694](https://github.com/moq-dev/moq/pull/6694)'s wrapping and confirm the suite fails.
 
+Found 2026-10-25 (implementation): the suite's takeover scenario fails on
+`main`. After a takeover, the replaced run's cursor yields its final segment
+(the GOP still open at the takeover) with the new run's media. Instrumented,
+the fetch goes through the old instance's pinned track query on its closed
+broadcast, yet returns the replacement's group of the same sequence; it
+happens on moq-lite-06 and 07-wip alike. A bare moq-net reproduction (held
+query, retired instance) did not leak, so the cause sits between the
+export's media binding and moq-net. If nothing else lists that group (the
+new run never completes it), the old cursor stalls instead.
+
 ## Related
 
 - [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - the cursors' first consumer outside moq-hls, and the end-to-end path with a relay hop
